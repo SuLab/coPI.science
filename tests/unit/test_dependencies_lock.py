@@ -162,3 +162,35 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert "requirements.lock is stale" in proc.stdout + proc.stderr
     assert "==> mypy" not in proc.stdout, "gate must stop at the lockfile check, not reach mypy"
+
+
+def test_lock_smoke_step_is_documented_and_opt_in():
+    # #27 I6: the freshness gate above proves the lock MATCHES pyproject.toml;
+    # nothing proves it actually WORKS on the Python 3.11 the Dockerfile installs
+    # it on. Static pin that the opt-in smoke step exists, is off by default, and
+    # names the three entry points it imports.
+    text = _ci_sh()
+    assert "LOCK_SMOKE" in text
+    assert re.search(r'LOCK_SMOKE:-\}"\s*!=\s*"1"', text) or '"${LOCK_SMOKE:-}" != "1"' in text
+    for module in ("src.main", "src.worker.main", "src.agent.main"):
+        assert module in text, f"lock smoke step does not mention {module!r}"
+    assert "--require-hashes" in text
+
+
+def test_lock_smoke_step_defaults_to_a_visible_skip():
+    # Behavioural: with LOCK_SMOKE unset (the default), the step must print its
+    # one-line skip note rather than silently doing nothing — cheap to check since
+    # the step's own default path costs nothing (it's an early bash `if`, no venv
+    # created). Piggybacks on MYPY_MAX=0 to stop the gate quickly afterwards,
+    # same shape as test_ci_gate.py's mypy behavioural tests.
+    proc = subprocess.run(
+        ["./scripts/ci.sh"],
+        cwd=REPO_ROOT,
+        env={**os.environ, "CI_MIGRATION_DB": "none", "LOCKCHECK": "none", "MYPY_MAX": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert "==> lock smoke test" in proc.stdout
+    assert "skipped (opt-in" in proc.stdout
+    assert proc.returncode != 0, proc.stdout + proc.stderr

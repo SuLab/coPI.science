@@ -21,9 +21,14 @@
 #      committed lock (pins only — pip-compile's own header would never match
 #      otherwise), so a pyproject.toml edit can't silently drift from what
 #      actually gets installed (#27 I4). Set LOCKCHECK=none to skip.
-#   6. mypy lint of src/ against a CEILING (MYPY_MAX), same ratchet shape as the ruff
+#   6. Lock smoke test — OPT-IN, OFF BY DEFAULT. Step 5 proves the lock MATCHES
+#      pyproject.toml; this proves it actually INSTALLS and IMPORTS on the same
+#      Python 3.11 requirements.lock was cut against (#27 I6). Set LOCK_SMOKE=1 to
+#      run it; it costs minutes (a full throwaway-venv dependency install), which is
+#      why it does not run on every push.
+#   7. mypy lint of src/ against a CEILING (MYPY_MAX), same ratchet shape as the ruff
 #      ceiling above (#27 I1).
-#   7. Full pytest run — unit + integration + characterization + contract — with
+#   8. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
 #
@@ -36,7 +41,8 @@
 # MIGRATION_FLOOR (the revision the round trip downgrades to), LOCKCHECK (set to
 # `none` to skip the requirements.lock freshness check — offline, or no Python 3.11
 # interpreter available), LOCKCHECK_PYTHON (pin the interpreter/uv Python spec the
-# check resolves with, instead of auto-detecting one).
+# check resolves with, instead of auto-detecting one), LOCK_SMOKE (set to `1` to run
+# step 6's opt-in requirements.lock install-and-import smoke test — off by default).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -375,6 +381,18 @@ echo "==> lockfile freshness (requirements.lock matches pyproject.toml)"
 # above; only a successful compile that then DIFFERS from the committed lock
 # is treated as drift and fails the gate, exactly as before. Set LOCKCHECK=none
 # to skip entirely (offline, or you deliberately don't want this).
+# Shared by this check and the opt-in LOCK_SMOKE step below: both need the same
+# Python-3.11 interpreter (requirements.lock was cut against 3.11, Task 27.4), found
+# the same way — an explicit LOCKCHECK_PYTHON pin, else `uv python find 3.11` (no
+# downloads), else empty (the caller SKIPs).
+find_lock_python() {
+  local spec="${LOCKCHECK_PYTHON:-}"
+  if [ -z "$spec" ]; then
+    spec="$(uv python find 3.11 --no-python-downloads --no-project 2>/dev/null || true)"
+  fi
+  printf '%s' "$spec"
+}
+
 if [ "${LOCKCHECK:-}" = "none" ]; then
   echo "    lockfile check skipped (LOCKCHECK=none)"
 elif ! command -v uv >/dev/null 2>&1; then
@@ -382,10 +400,7 @@ elif ! command -v uv >/dev/null 2>&1; then
   echo "    Python 3.11 interpreter — see Task 27.4's report). Install uv, or set"
   echo "    LOCKCHECK=none to silence this."
 else
-  LOCK_PYSPEC="${LOCKCHECK_PYTHON:-}"
-  if [ -z "$LOCK_PYSPEC" ]; then
-    LOCK_PYSPEC="$(uv python find 3.11 --no-python-downloads --no-project 2>/dev/null || true)"
-  fi
+  LOCK_PYSPEC="$(find_lock_python)"
   if [ -z "$LOCK_PYSPEC" ]; then
     echo "    SKIP: no Python 3.11 interpreter found (requirements.lock was cut against"
     echo "    3.11 to match the Dockerfile base — see Task 27.4's report). Install one"
@@ -415,6 +430,64 @@ else
       rm -f "$LOCK_TMP"
       echo "    requirements.lock is current (resolved with $LOCK_PYSPEC)"
     fi
+  fi
+fi
+
+echo "==> lock smoke test (opt-in: LOCK_SMOKE=1)"
+# The freshness check above proves requirements.lock MATCHES pyproject.toml; it
+# proves nothing about whether the lock actually WORKS. .venv-test (this whole
+# script's $VENV_PY) is Python 3.12 resolved fresh from pyproject.toml, while the
+# Dockerfile installs requirements.lock on Python 3.11 — measured drift on
+# 2026-09-04: anthropic 0.117.0 vs 0.125.0, fastapi 0.139.2 vs 0.141.1, alembic
+# 1.18.5 vs 1.19.1, sqlalchemy 2.0.51 vs 2.0.52, slack-sdk 3.43.0 vs 3.44.1,
+# uvicorn 0.51.0 vs 0.52.4, boto3 1.43.51 vs 1.43.88 (#27 I6). With no server-side
+# CI (D17) the prod image is the first thing that ever executes those exact pins.
+#
+# OFF BY DEFAULT — set LOCK_SMOKE=1 to run it. This installs requirements.lock
+# (with --require-hashes, the same as the Dockerfile) into a throwaway Python 3.11
+# venv and imports src.main, src.worker.main and src.agent.main, then discards the
+# venv. It is not on by default because a cold `uv` cache means downloading and
+# verifying the hashes of every one of the ~80 pinned wheels, which is real network
+# time this gate should not add to every push (measured 2026-09-04 with a WARM uv
+# cache: 5.9s wall, all three modules imported cleanly with exit 0 — see this
+# task's report for the cold-cache caveat). Reuses find_lock_python() (defined
+# above, for the freshness check) rather than duplicating the interpreter-discovery
+# order.
+if [ "${LOCK_SMOKE:-}" != "1" ]; then
+  echo "    skipped (opt-in — set LOCK_SMOKE=1 to prove requirements.lock actually installs and imports)"
+elif ! command -v uv >/dev/null 2>&1; then
+  echo "    SKIP: uv not found on PATH (needed for the throwaway 3.11 venv). Install uv."
+else
+  SMOKE_PYSPEC="$(find_lock_python)"
+  if [ -z "$SMOKE_PYSPEC" ]; then
+    echo "    SKIP: no Python 3.11 interpreter found (same requirement as the lockfile"
+    echo "    freshness check above). Install one with 'uv python install 3.11', or set"
+    echo "    LOCKCHECK_PYTHON=/path/to/python3.11."
+  else
+    SMOKE_VENV="$(mktemp -d)"
+    SMOKE_LOG="$(mktemp)"
+    if ! uv venv --python "$SMOKE_PYSPEC" "$SMOKE_VENV" >"$SMOKE_LOG" 2>&1 \
+        || ! uv pip install --python "$SMOKE_VENV/bin/python" --require-hashes \
+             -r requirements.lock >>"$SMOKE_LOG" 2>&1; then
+      echo "ERROR: LOCK_SMOKE could not install requirements.lock into a throwaway" >&2
+      echo "3.11 venv:" >&2
+      cat "$SMOKE_LOG" >&2
+      rm -rf "$SMOKE_VENV"
+      rm -f "$SMOKE_LOG"
+      exit 1
+    fi
+    if ! "$SMOKE_VENV/bin/python" -c \
+        'import src.main, src.worker.main, src.agent.main' >>"$SMOKE_LOG" 2>&1; then
+      echo "ERROR: LOCK_SMOKE installed requirements.lock but importing src.main," >&2
+      echo "src.worker.main or src.agent.main failed:" >&2
+      cat "$SMOKE_LOG" >&2
+      rm -rf "$SMOKE_VENV"
+      rm -f "$SMOKE_LOG"
+      exit 1
+    fi
+    rm -rf "$SMOKE_VENV"
+    rm -f "$SMOKE_LOG"
+    echo "    PASS  requirements.lock installs on Python 3.11 and src.main/src.worker.main/src.agent.main import cleanly"
   fi
 fi
 
