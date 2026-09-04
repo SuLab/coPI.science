@@ -700,6 +700,20 @@ def _validate_profile(profile: dict[str, Any] | None) -> bool:
     return True
 
 
+def _as_list(v: Any) -> list[Any]:
+    """Coerce a synthesized field to a list, or drop it (issue #22 I1).
+
+    `apply_synthesis` used to type-guard only `techniques`; a model returning
+    a bare string for `disease_areas`/`keywords`/`key_targets`/
+    `experimental_models` iterated character-by-character onto the column
+    (`"cancer"` -> `['c','a','n','c','e','r']`), and a non-iterable (e.g. an
+    int) raised `StatementError` at flush, failing the whole job. Only an
+    actual `list` is trustworthy here; anything else (string, int, dict,
+    None) becomes an empty list rather than being stored or raising.
+    """
+    return v if isinstance(v, list) else []
+
+
 def apply_synthesis(
     profile: ResearcherProfile, synthesized: dict[str, Any] | None, *, validated: bool
 ) -> bool:
@@ -734,13 +748,12 @@ def apply_synthesis(
     if _stored_is_worth_keeping(profile) and not validated:
         return False
 
-    techniques = synthesized.get("techniques", [])
     profile.research_summary = synthesized.get("research_summary", "")
-    profile.techniques = techniques if isinstance(techniques, list) else []
-    profile.experimental_models = synthesized.get("experimental_models", [])
-    profile.disease_areas = synthesized.get("disease_areas", [])
-    profile.key_targets = synthesized.get("key_targets", [])
-    profile.keywords = synthesized.get("keywords", [])
+    profile.techniques = _as_list(synthesized.get("techniques"))
+    profile.experimental_models = _as_list(synthesized.get("experimental_models"))
+    profile.disease_areas = _as_list(synthesized.get("disease_areas"))
+    profile.key_targets = _as_list(synthesized.get("key_targets"))
+    profile.keywords = _as_list(synthesized.get("keywords"))
     profile.synthesis_validated = validated
     profile.profile_generated_at = datetime.now(UTC)
     return True

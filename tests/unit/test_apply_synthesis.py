@@ -54,6 +54,67 @@ def test_non_list_techniques_is_coerced_to_empty_list_not_stored_as_a_string():
     assert p.techniques == []
 
 
+def test_non_iterable_techniques_does_not_raise_and_is_coerced_to_empty_list():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "techniques": 5}, validated=False)
+    assert p.techniques == []
+
+
+def test_non_list_disease_areas_is_coerced_to_empty_list_not_stored_as_a_string():
+    """issue #22 I1: apply_synthesis used to type-guard only `techniques`; a
+    string for `disease_areas` iterated character-by-character onto the
+    column (`"cancer"` -> `['c','a','n','c','e','r']`)."""
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "disease_areas": "cancer"}, validated=False)
+    assert p.disease_areas == []
+
+
+def test_non_iterable_disease_areas_does_not_raise_and_is_coerced_to_empty_list():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "disease_areas": 5}, validated=False)
+    assert p.disease_areas == []
+
+
+def test_non_list_keywords_is_coerced_to_empty_list_not_stored_as_a_string():
+    p = _profile()
+    apply_synthesis(
+        p, {"research_summary": "x", "keywords": "ferroptosis"}, validated=False
+    )
+    assert p.keywords == []
+
+
+def test_non_iterable_keywords_does_not_raise_and_is_coerced_to_empty_list():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "keywords": 5}, validated=False)
+    assert p.keywords == []
+
+
+def test_non_list_key_targets_is_coerced_to_empty_list_not_stored_as_a_string():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "key_targets": "TP53"}, validated=False)
+    assert p.key_targets == []
+
+
+def test_non_iterable_key_targets_does_not_raise_and_is_coerced_to_empty_list():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "key_targets": 5}, validated=False)
+    assert p.key_targets == []
+
+
+def test_non_list_experimental_models_is_coerced_to_empty_list_not_stored_as_a_string():
+    p = _profile()
+    apply_synthesis(
+        p, {"research_summary": "x", "experimental_models": "mouse"}, validated=False
+    )
+    assert p.experimental_models == []
+
+
+def test_non_iterable_experimental_models_does_not_raise_and_is_coerced_to_empty_list():
+    p = _profile()
+    apply_synthesis(p, {"research_summary": "x", "experimental_models": 5}, validated=False)
+    assert p.experimental_models == []
+
+
 def test_sets_profile_generated_at_when_applied():
     p = _profile()
     apply_synthesis(p, {"research_summary": "x"}, validated=True)
