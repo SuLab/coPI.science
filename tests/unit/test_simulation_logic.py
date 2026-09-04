@@ -2815,6 +2815,61 @@ class TestRebuildOneAgentState:
 
         assert "300.0" not in su.state.active_threads
 
+    @pytest.mark.asyncio
+    async def test_a_reopened_threads_pi_context_rejects_a_non_pi_unattributed_row(self):
+        # #20 I2: mirrors _rebuild_agent_state's fail-closed pi_context check.
+        # A row with sender_agent_id None is not automatically the PI's — it
+        # must also be non-bot and carry one of the thread's PI-name forms.
+        # Positive control: "Andrew Su" (su's own pi_name) IS accepted.
+        # Negative control: "randomlurker" is not.
+        import uuid as uuid_mod
+        from datetime import UTC, datetime
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        now = datetime.now(UTC)
+
+        class _Row:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        def _responses():
+            return [
+                [],  # decisions (outcome == proposal)
+                [],  # reviewed_ids
+                [_Row(thread_id="100.0", reopened_at=now)],  # reopened rows
+                0,   # call_count
+                [],  # window_rows
+            ]
+
+        for sender_name, expected in (("Andrew Su", "please revisit"), ("randomlurker", None)):
+            FakeDB = self._ordered_fake_db(_responses())
+            su = Agent("su", "SuBot", "Andrew Su")
+            engine = SimulationEngine(agents=[su], slack_clients={})
+            engine.session_factory = FakeDB
+            engine.simulation_run_id = uuid_mod.uuid4()
+            engine.message_log.append(LogEntry(
+                ts="100.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+                content="root post", posted_at=100.0, is_bot=True,
+            ))
+            engine.message_log.append(LogEntry(
+                ts="150.0", channel="general", sender_agent_id="wiseman", sender_name="WisemanBot",
+                content="a reply", thread_ts="100.0", posted_at=150.0, is_bot=True,
+            ))
+            engine.message_log.append(LogEntry(
+                ts="200.0", channel="general", sender_agent_id=None, sender_name=sender_name,
+                content="please revisit", thread_ts="100.0", posted_at=200.0, is_bot=False,
+            ))
+
+            await engine._rebuild_one_agent_state("su")
+
+            thread = su.state.active_threads["100.0"]
+            assert thread.pi_context == expected, (
+                f"sender_name={sender_name!r} expected pi_context={expected!r}, "
+                f"got {thread.pi_context!r}"
+            )
+
 
 # ---------------------------------------------------------------
 # The daily post cap must not block a PI-priority, funding, or

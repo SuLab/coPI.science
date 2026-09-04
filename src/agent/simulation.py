@@ -4719,6 +4719,31 @@ class SimulationEngine:
             total_messages, len(polled_ids), total_threads,
         )
 
+    def _pi_name_forms(self, *agent_ids: str | None) -> set[str]:
+        """Sender-name forms that mean "this row is really the PI's".
+
+        Verified against the real writers rather than invented: the plain
+        ``"PI"`` DM/legacy fallback (``_poll_slack_for_pi_messages`` inbound-DB
+        branch and ``record_pi_dm``), the guidance-reopen synthetic row's
+        ``"PI (via web)"`` (``already_minted`` block below), the web reply/DM
+        writer's ``f"{current_user.name} (PI)"`` (``src/routers/agent_page.py``),
+        and a Slack-native PI reply's own resolved display name — which is the
+        PI's plain name, i.e. ``Agent.pi_name`` for one of the thread's two
+        participants. Used to fail closed on an unattributed row (#20 I2):
+        without this, ANY sender_agent_id-None row — an arbitrary workspace
+        human, or an unattributed bot post — was accepted as authoritative PI
+        guidance on rebuild.
+        """
+        names = {"PI (via web)", "PI"}
+        for a in agent_ids:
+            if a is None:
+                continue
+            agent = self.agents.get(a)
+            if agent is not None:
+                names.add(agent.pi_name)
+                names.add(f"{agent.pi_name} (PI)")
+        return names
+
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
@@ -4848,8 +4873,9 @@ class SimulationEngine:
                 pi_context = None
                 if thread_id in reopened_thread_ids:
                     offset = msg_count
+                    pi_names = self._pi_name_forms(aid, other_id)
                     for h in reversed(history):
-                        if h.sender_agent_id is None:
+                        if h.sender_agent_id is None and not h.is_bot and h.sender_name in pi_names:
                             pi_context = h.content
                             break
                 agent.state.active_threads[thread_id] = ThreadState(
@@ -5186,8 +5212,9 @@ class SimulationEngine:
                     # Task 20.10's restoration: a reopened thread gets a fresh reply
                     # budget from the reopen point and carries the PI's guidance.
                     offset = msg_count
+                    pi_names = self._pi_name_forms(agent_id, other_id)
                     for h in history:
-                        if h.sender_agent_id is None:
+                        if h.sender_agent_id is None and not h.is_bot and h.sender_name in pi_names:
                             pi_context = h.content
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
