@@ -686,6 +686,16 @@ def apply_synthesis(
     Returns True if the fields were applied (and `profile.synthesis_validated`
     updated), False if the existing stored profile was kept unchanged.
     """
+    # extract_json's return type is annotated dict[str, Any] but is a bare
+    # json.loads under the hood — a fenced JSON *array* (or any other non-object
+    # top-level value) parses fine and comes back as a non-dict. The pipeline's
+    # own two synthesize_profile call sites normalize for this before this
+    # function ever sees `synthesized`, but the four scripts/ callers pass their
+    # own extract_json result straight through, so this guard has to be here too
+    # (issue #22 COR-22/COR-23 residual).
+    if not isinstance(synthesized, dict):
+        return False
+
     if not synthesized:
         return False
 

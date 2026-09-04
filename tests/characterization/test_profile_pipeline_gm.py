@@ -220,9 +220,14 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
 
 
 async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monkeypatch, snapshot):
-    """Pin the resilience path: when the public-synthesis LLM call raises, the
-    pipeline swallows it, stores no synthesized fields, and leaves version at 0 —
-    but still records grant titles and the abstracts hash and attempts the seed.
+    """Pin the resilience path: when the LLM call raises, the pipeline swallows
+    it, stores no synthesized fields, and leaves version at 0 — but still
+    records grant titles and the abstracts hash. `onboarding_complete=False`
+    keeps Step 9b's seed generation gated "in" (it is gated on "still
+    onboarding" since the COR-23 fix round), and the same raising client backs
+    that call too, so this also exercises Step 9b's own except branch — not
+    just the public-synthesis one — which is why `private_profile_seed` below
+    still comes back None.
 
     The provenance columns stay NULL here, which is the third state they need: no
     synthesis was stored, so there is nothing to say about its validation or its
@@ -243,6 +248,7 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
 
     user = await factories.make_user(
         db_session, name="Grace Hopper", orcid="0000-0002-1825-0098",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
     profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
 

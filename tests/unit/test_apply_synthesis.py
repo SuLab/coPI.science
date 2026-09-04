@@ -82,6 +82,26 @@ def test_a_versioned_profile_with_no_summary_is_not_worth_protecting():
     assert p.research_summary == "new"
 
 
+def test_a_non_dict_synthesized_result_is_never_applied():
+    """extract_json's type hint promises dict[str, Any], but it is a bare
+    `json.loads` under the hood: a fenced ```json block containing a JSON
+    *array* (or any other non-object top-level value) parses fine and comes
+    back as, e.g., a `list` — not a dict. `run_profile_pipeline` normalizes
+    both its own synthesize_profile call sites for exactly this, but the four
+    scripts/ callers (regen_profile_from_cv.py, vet_publications.py,
+    resynth_from_current_pubs.py, regen_profiles_from_web.py) hand
+    apply_synthesis their own extract_json result directly with no such
+    guard — so apply_synthesis itself must reject a non-dict `synthesized`
+    before ever calling a dict method on it (issue #22 COR-22/COR-23 residual).
+    """
+    p = _profile(profile_version=0, research_summary=None, synthesis_validated=None)
+    applied = apply_synthesis(p, [1, 2, 3], validated=True)
+    assert applied is False
+    assert p.research_summary is None
+    assert p.synthesis_validated is None
+    assert not hasattr(p, "profile_generated_at")
+
+
 def test_missing_keywords_key_defaults_to_empty_list():
     """A validated synthesis dict that simply omits the `keywords` key (as
     opposed to supplying a non-list value, already covered for `techniques`)
