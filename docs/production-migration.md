@@ -630,10 +630,10 @@ unset PW PW_ENC
 ./scripts/migrate/run_migration.sh --via-run --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
 # Expect: the masked DSN line shows host `postgres`, db `copi`; exit 0 (or 2 with only WARN lines you can explain).
 # Exit 1 = BLOCKED: read the check name, fix, re-run. Check 7 (blocking sessions) => something is still connected: stop the writers again.
-ls -l backups/preflight_snapshot.json          # written by the rehearsal on the HOST (bind-mounted by --via-run)
+ls -l data/preflight_snapshot.json             # written by the rehearsal on the HOST (bind-mounted by --via-run)
 ./scripts/migrate/run_migration.sh --via-run --apply --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
 # Expect: "alembic_version = 0028" read back, postflight 0 FAIL, exit 0.
-ls -l backups/preflight_snapshot.json          # newer than the rehearsal's
+ls -l data/preflight_snapshot.json             # newer than the rehearsal's
 unset DATABASE_URL
 docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0028
 ```
@@ -668,7 +668,9 @@ checking the stamped revision against head and finding nothing to do.
 `--via-run` bind-mounts a host directory into each one-off container so that the ephemeral
 preflight, alembic and postflight containers — which do not share filesystem state with
 each other the way a single long-running container would — can still hand off the
-preflight row-count snapshot. That snapshot is written to `backups/preflight_snapshot.json`
+preflight row-count snapshot. Point `MIGRATE_SNAPSHOT` at a directory the container's UID 10001 can write —
+`data/preflight_snapshot.json` — because the one-off container runs as 10001 while `backups/` stays owned by the
+invoking host user. With the default it lands in `backups/preflight_snapshot.json`
 on the host (the default `MIGRATE_BACKUP_DIR`, gitignored); postflight reads it back from
 the same path to verify counts after the migration applies. A fresh, newer timestamp on
 that file after `--apply` (as in the commands above) is confirmation postflight had the
