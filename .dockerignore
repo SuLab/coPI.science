@@ -34,6 +34,9 @@ build
 .ruff_cache
 .coverage
 .mutmut-cache
+# 58 MB, 34 files, created by ci.sh's mypy stage — measured at 88% of the
+# built image's /app tree before this line existed (#27 I5).
+.mypy_cache
 .playwright-mcp
 copi.egg-info
 .superpowers
