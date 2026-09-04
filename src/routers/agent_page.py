@@ -1393,7 +1393,13 @@ async def edit_private_profile(
 async def save_private_profile(
     agent_id: str,
     request: Request,
-    content: str = Form(...),
+    # Form("") not Form(...): an emptied textarea submits `content=`, which Starlette's
+    # form parser hands to FastAPI as a MISSING field, so a required parameter 422s and the
+    # PI cannot clear their instructions at all — the clear path below (and the seed/file
+    # clearing in #22 COR-23 / #29) only ran if they happened to leave whitespace behind.
+    # Verified against a copy of production: `content=` -> 422 with nothing cleared.
+    # The onboarding twin (onboarding.py::save_private_profile) has always used Form("").
+    content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

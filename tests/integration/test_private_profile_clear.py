@@ -101,14 +101,7 @@ async def test_saving_then_blanking_the_private_profile_deletes_the_exported_fil
 async def test_blanking_a_private_profile_that_was_never_written_does_not_raise(
     client, profiles_dir, pi_and_agent
 ):
-    """Tolerate absence: clearing with nothing on disk yet must 302, not 500.
-
-    (A truly empty ``content=`` form value round-trips through Starlette's
-    form parser as a missing field, which FastAPI's required ``Form(...)``
-    then 422s on — unrelated to the fix under test — so whitespace-only
-    content, which the route treats identically via ``content.strip()``, is
-    used here instead.)
-    """
+    """Tolerate absence: clearing with nothing on disk yet must 302, not 500."""
     pi, agent = pi_and_agent
     r = await client.post(
         f"/agent/{agent.agent_id}/profile/save",
@@ -117,3 +110,42 @@ async def test_blanking_a_private_profile_that_was_never_written_does_not_raise(
     )
     assert r.status_code == 302
     assert not (profiles_dir / "private" / f"{agent.agent_id}.md").exists()
+
+
+async def test_a_truly_empty_content_field_clears_the_private_profile(
+    client, db_session, profiles_dir, pi_and_agent
+):
+    """An emptied textarea submits ``content=``, and that must clear.
+
+    Starlette's form parser hands an empty value to FastAPI as a MISSING field, so this
+    route's original ``content: str = Form(...)`` returned a raw
+    ``422 {"type":"missing","loc":["body","content"]}`` and cleared nothing — meaning the
+    clear path (and with it the seed-clearing of #22 COR-23 / #29) was unreachable from a
+    browser unless the PI happened to leave whitespace in the box. Found by driving the
+    real route against a copy of production. The onboarding twin has always used
+    ``Form("")``; this is that parity, pinned.
+    """
+    pi, agent = pi_and_agent
+    path = profiles_dir / "private" / f"{agent.agent_id}.md"
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": "Always cite the 2019 paper."},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302
+    assert path.exists()
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": ""},          # exactly what an emptied textarea sends
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302, r.text
+    assert not path.exists(), "the private instructions file must be gone"
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None

@@ -27,6 +27,47 @@ logger = logging.getLogger(__name__)
 # connections against the pool instead of failing fast.
 HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
 
+# `asyncio.wait_for` alone does NOT deliver that bound. SQLAlchemy's asyncpg adapter
+# runs the query inside a greenlet, and cancelling the awaiting task cannot interrupt a
+# socket read the greenlet is already parked on. Measured against a FROZEN Postgres
+# (`docker pause`, i.e. the "TCP open, no response" case the comment above names):
+# wait_for returned only after 142s — when the server was thawed — while the same probe
+# with asyncpg's own `command_timeout` armed returned in 5.00s. asyncpg's timer lives
+# inside the driver and tears the transport down, which is what lets the cancellation
+# land. So the probe gets its own engine: `command_timeout` set just under the outer
+# bound, and NullPool so a hung probe cannot consume (or leak) a connection from the
+# pool the application serves requests from.
+HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS = 4.0
+# ...and `command_timeout` alone is not enough either, because a NullPool probe opens a
+# fresh connection every time: against a frozen server the TCP handshake completes into
+# the kernel's accept backlog and then the startup/authentication exchange hangs, which
+# is asyncpg's CONNECT timeout, not its command timeout. Measured: with only
+# command_timeout set, three consecutive probes each ran past 30s. With both, the probe
+# fails fast. Keep both under HEALTH_PROBE_TIMEOUT_SECONDS so the driver, not the outer
+# wait_for, is what gives up first.
+HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS = 3.0
+_health_engine = None
+
+
+def get_health_engine():
+    """Lazily-built, NullPool engine used only by /api/health. See the note above."""
+    global _health_engine
+    if _health_engine is None:
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from src.config import get_settings
+
+        _health_engine = create_async_engine(
+            get_settings().database_url,
+            poolclass=NullPool,
+            connect_args={
+                "command_timeout": HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS,
+                "timeout": HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS,
+            },
+        )
+    return _health_engine
+
 
 class AgentBadgeMiddleware(BaseHTTPMiddleware):
     """Inject unreviewed proposal count into request.state for nav badge."""
@@ -165,10 +206,9 @@ def create_app() -> FastAPI:
         raised UndefinedColumnError, and nginx's depends_on: service_healthy
         let traffic through regardless)."""
         try:
-            session_factory = get_session_factory()
-            async with session_factory() as db:
+            async with get_health_engine().connect() as conn:
                 await asyncio.wait_for(
-                    db.execute(text("SELECT 1")), timeout=HEALTH_PROBE_TIMEOUT_SECONDS
+                    conn.execute(text("SELECT 1")), timeout=HEALTH_PROBE_TIMEOUT_SECONDS
                 )
         except Exception as exc:
             logger.warning("Health check DB probe failed: %s", exc)
