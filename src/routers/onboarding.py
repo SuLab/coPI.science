@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -262,11 +262,25 @@ async def private_profile(
 @router.post("/private-profile")
 async def save_private_profile(
     request: Request,
+    # Form(""), not Form(...): an omitted field must still be distinguished
+    # from a present-but-empty one, but FastAPI's Form() dependency collapses
+    # both to the SAME default no matter what that default is (verified: this
+    # is not fixable via Form(None) either) -- see the agent_page.py twin for
+    # the full investigation (#22 COR-23 residual). `form` below is the raw
+    # Starlette FormData, which does distinguish them. The browser's textarea
+    # always submits the field, so this is not reachable from the UI; it
+    # protects any other client.
     content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save the private profile from onboarding step 4."""
+    form = await request.form()
+    if "content" not in form:
+        raise HTTPException(
+            status_code=400,
+            detail="content is required (send an empty string to clear the private profile)",
+        )
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
     )

@@ -149,3 +149,79 @@ async def test_a_truly_empty_content_field_clears_the_private_profile(
     )).scalar_one()
     assert profile.private_profile_md is None
     assert profile.private_profile_seed is None
+
+
+async def test_omitting_content_entirely_is_rejected_and_survives(
+    client, db_session, profiles_dir, pi_and_agent
+):
+    """#22 COR-23 residual (item 44): a request that OMITS `content` entirely
+    (as opposed to submitting it present-but-empty) must not blank anything.
+    Not reachable from the browser (templates/agent/profile.html's textarea is
+    always submitted), so this only matters for a hand-crafted or scripted
+    POST — but before this fix the `Form("")` shape treated "absent" and
+    "present and empty" identically, so an omitted field 302'd and destroyed
+    both private columns and the disk file, where the ORIGINAL
+    `Form(...)` shape 422'd and destroyed nothing.
+    """
+    pi, agent = pi_and_agent
+    path = profiles_dir / "private" / f"{agent.agent_id}.md"
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": "Always cite the 2019 paper."},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302
+    assert path.exists()
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"unrelated": "1"},  # `content` omitted entirely
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 400, r.text
+
+    assert path.exists(), "an omitted content field deleted the exported file"
+    assert "Always cite the 2019 paper." in path.read_text(encoding="utf-8")
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md == "Always cite the 2019 paper."
+    assert profile.private_profile_seed == "Model-authored seed from admin onboarding.", (
+        "an omitted content field must not touch private_profile_seed either"
+    )
+
+
+async def test_onboarding_twin_also_rejects_an_omitted_content_field(
+    client, db_session, monkeypatch, tmp_path, pi_and_agent
+):
+    """onboarding.py's save_private_profile has always had the same
+    `Form("")` shape as the agent_page.py route above (#22 COR-23 residual);
+    it gets the same `content: str | None = Form(None)` fix."""
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    pi, agent = pi_and_agent
+    path = tmp_path / "private" / f"{agent.agent_id}.md"
+
+    r = await client.post(
+        "/onboarding/private-profile",
+        data={"content": "Real onboarding instructions."},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302
+    assert path.exists()
+
+    r = await client.post(
+        "/onboarding/private-profile",
+        data={"unrelated": "1"},  # `content` omitted entirely
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 400, r.text
+
+    assert path.exists(), "an omitted content field deleted the exported file"
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md == "Real onboarding instructions."

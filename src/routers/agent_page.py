@@ -623,13 +623,20 @@ async def review_proposal(
         # insert/update above would have set -- and commit (mirrors the vote endpoint,
         # src/routers/public.py:1083-1099). Only a REAL winning review (rating != -1)
         # is actually "already reviewed".
+        # N2 (#24 closure audit): scalar_one_or_none(), not scalar_one() -- an
+        # IntegrityError that was NOT the review-uniqueness conflict (e.g. an FK or
+        # NOT-NULL violation from a concurrently deleted ThreadDecision/User) finds no
+        # winning row here, and scalar_one() would raise NoResultFound -- a 500 out of
+        # the very handler that exists to avoid one. Mirrors reopen_proposal's sibling
+        # recovery (:942-969: scalar_one_or_none() + an else that logs and continues
+        # rather than crashing).
         winner = (await db.execute(
             select(ProposalReview).where(
                 ProposalReview.thread_decision_id == thread_decision_id,
                 ProposalReview.agent_id == agent_agent_id,
             )
-        )).scalar_one()
-        if winner.rating == -1:
+        )).scalar_one_or_none()
+        if winner is not None and winner.rating == -1:
             winner.user_id = pi_user_id  # Always the PI
             winner.delegate_user_id = current_user_id if not is_owner else None
             winner.reviewed_by_user_id = current_user_id
@@ -640,6 +647,22 @@ async def review_proposal(
             # A real review WAS just filed by this request -- it only lost the INSERT
             # race to the engine's own marker -- so retire the notification exactly as
             # the happy path above does for every successful review, insert or upgrade.
+            await record_engagement(current_user_id, db)
+            await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+            await db.commit()
+            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+        if winner is None:
+            # Like reopen_proposal's else arm: no winning row means this
+            # IntegrityError was not the uniqueness conflict at all, so there is
+            # nothing to reject as "already reviewed" -- log it for investigation and
+            # fall through to the same clean redirect a successful review gets,
+            # rather than asserting a rejection that never happened.
+            logger.error(
+                "IntegrityError on proposal %s review write but no winning row was "
+                "found on re-select -- unexpected",
+                thread_decision_id,
+            )
             await record_engagement(current_user_id, db)
             await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
             await db.commit()
@@ -1398,12 +1421,30 @@ async def save_private_profile(
     # PI cannot clear their instructions at all — the clear path below (and the seed/file
     # clearing in #22 COR-23 / #29) only ran if they happened to leave whitespace behind.
     # Verified against a copy of production: `content=` -> 422 with nothing cleared.
-    # The onboarding twin (onboarding.py::save_private_profile) has always used Form("").
+    # But FastAPI's Form() dependency resolution collapses "submitted empty" and "field
+    # omitted entirely" to the SAME default regardless of what that default is (verified:
+    # Form(None) returns None for both cases too, not just Form("")) -- so distinguishing
+    # them cannot be done via the Form() parameter at all. `form` below is the raw
+    # Starlette FormData, which DOES tell them apart (a genuinely missing key is not `in`
+    # it), matching the `"<field>" in form` presence-gating pattern save_public_profile
+    # already uses for its six profile fields, just above.
+    # The onboarding twin (onboarding.py::save_private_profile) has the same shape.
     content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save private profile to disk and database."""
+    form = await request.form()
+    if "content" not in form:
+        # #22 COR-23 residual (item 44): a request that OMITS `content`
+        # entirely must not be treated the same as one that submits it empty
+        # (which is a deliberate clear). Not reachable from the browser
+        # (templates/agent/profile.html's textarea is always submitted), but a
+        # data-destroying default for any other client.
+        raise HTTPException(
+            status_code=400,
+            detail="content is required (send an empty string to clear the private profile)",
+        )
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
