@@ -161,7 +161,16 @@ async def record_pi_message(
     The engine's inbound poller picks it up on its next tick, appends it to the
     live MessageLog, and routes it through PI handling (proposal-review clear,
     thread reopen, pi_context, @bot tags). Does not commit — the caller owns the
-    transaction.
+    transaction, and owns the durability of this row with it: it is the only copy
+    of what the PI wrote, so a caller that rolls back after calling this loses the
+    guidance silently and must re-create the row in its recovery arm. Measured
+    open on one caller (``reopen_proposal``'s legacy Slack-off branch, whose lost-
+    race arm re-binds ``refined_in_channel`` but not this row — #24 V5 iii).
+
+    Committing here instead would be wrong: the e-mail twin
+    (``email_inbound._handle_instruction``) depends on this row riding the same
+    commit that retires the notification, so an early commit would let a retried
+    S3 delivery write a second guidance row (the #21 COR-19.6 shape).
     """
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
     ts = mint_local_ts()

@@ -395,6 +395,25 @@ async def _migrate_offline(
     )
 
     thread_decision.refined_in_channel = new_channel_id
+
+    # Commit here, not at the caller's convenience — the same durability boundary the
+    # Slack-on path draws at the end of migrate_public_thread_to_private, placed for the
+    # mirror-image reason. Nothing above this line is irreversible on Slack, because
+    # there is no Slack; instead these rows ARE the channel. With Slack off the DB is
+    # the whole conversation store, so the handover (which carries the PI's guidance
+    # verbatim) and the AgentChannel the engine discovers private channels from
+    # (src/agent/simulation.py:2113-2126) exist nowhere else. Leaving them merely
+    # flushed made them hostage to whatever the caller did next, and a caller that
+    # rolled back (the web reopen route losing a race on
+    # uq_proposal_reviews_decision_agent, the e-mail handler's terminal-failure path)
+    # discarded all of them while its recovery arm re-bound refined_in_channel to this
+    # `local:` id — leaving a pointer to rows that no longer existed, which the reopen
+    # route's `rating != -1` guard then stopped any retry from repairing. Committing as
+    # soon as the migration's own work is complete keeps the pointer and its target in
+    # step; a caller's later failure then costs only that caller's own rows (e.g. the
+    # review row), which is recoverable. Found by the issue #24 closure audit (N1-a).
+    await db.commit()
+
     logger.info("Slack-off migration: created private channel %s (DB-only)", new_channel_name)
     return MigrationResult(
         channel_id=new_channel_id,
