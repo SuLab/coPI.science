@@ -62,18 +62,27 @@ MUST_EXCLUDE = [
     "docs/specs/2026-08-05-hub-bot-customization-design.md",
     ".env.local",
     "backups/x/.env",  # nested dotfile — belt-and-suspenders via **/.env*
+    # profiles/ holds PI private profiles (profiles/private/*) — COPY . . was
+    # baking them into every image layer even though prod always bind-mounts
+    # the real tree over it and `migrate` (the only service without the
+    # mount) never reads profiles at all (#27 I3 fix round 1).
+    "profiles/public/x.md",
+    "profiles/private/su.md",
+    "profiles/memory/x.md",
 ]
 
 # Paths the running app/worker/agent/grantbot reads from the tree at runtime —
 # must stay reachable in the image (deploy_dossier.md §1 "Image contents").
-# NOTE: data/ and logs/ are deliberately NOT in this list — both are excluded
-# from the image (pre-existing .dockerignore lines) and bind-mounted at runtime
-# (docker-compose.prod.yml:95-98,124-127). The image never needs their contents,
-# so "excluded from the image" is correct behaviour for them, not a bug.
+# NOTE: data/, logs/ and profiles/ are deliberately NOT in this list — all
+# three are excluded from the image (.dockerignore) and bind-mounted at
+# runtime (docker-compose.prod.yml:95-98,124-127 for data/logs; profiles/ is
+# bind-mounted on app/worker/agent/grantbot). The image never needs their
+# contents, so "excluded from the image" is correct behaviour for them, not a
+# bug — the Dockerfile mkdir -p's empty placeholders for the services that
+# do bind-mount over them.
 MUST_NOT_EXCLUDE = [
     "src/main.py",
     "prompts/profile-synthesis.md",
-    "profiles/public/x.md",
     "static/app.css",
     "templates/base.html",
     "alembic/env.py",

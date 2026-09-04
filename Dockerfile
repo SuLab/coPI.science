@@ -14,17 +14,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY src/ src/
-RUN pip install --no-cache-dir --no-deps .
+# --no-build-isolation: build isolation would otherwise fetch a fresh,
+# unhashed setuptools/wheel from PyPI at build time just to satisfy
+# pyproject.toml's [build-system] requires; the base image's preinstalled
+# setuptools/wheel already satisfy it. Follow-up: pin hashed setuptools/wheel
+# into requirements.lock (Task 27.5's owner) so this local install is fully
+# hash-verified too.
+RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# libpq5 only: the runtime client library a compiled wheel may dlopen. No
-# compiler, no -dev headers, no build toolchain of any kind in this stage
-# (#27 I3). Deliberately avoids naming the builder-stage packages here — the
-# structural test in tests/unit/test_dockerfile_build.py asserts their names
-# are absent from this section.
+# libpq5 only: the runtime client library a compiled wheel may dlopen. Nothing
+# currently links it — asyncpg is pure-protocol — this is insurance for a
+# future psycopg dependency. No compiler, no -dev headers, no build toolchain
+# of any kind in this stage (#27 I3). Deliberately avoids naming the
+# builder-stage packages here — the structural test in
+# tests/unit/test_dockerfile_build.py asserts their names are absent from
+# this section.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
@@ -35,10 +43,15 @@ COPY . .
 
 # Fixed UID so it matches whatever the prod host chowns the bind-mounted
 # profiles/data trees to (see this task's Deploy note) — a plain chown
-# target on the host, not a real host account.
-RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin copi \
-    && mkdir -p profiles/public profiles/private prompts logs static \
-    && chown -R 10001:10001 /app
+# target on the host, not a real host account. Ownership is scoped to the
+# directories the runtime user actually writes to (profiles/data/logs/static);
+# src/, templates/, alembic/ and scripts/ stay root-owned and read-only to
+# this user, so a compromised process cannot rewrite its own code (#27 I3).
+RUN groupadd --gid 10001 copi \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin copi \
+    && mkdir -p profiles/public profiles/private profiles/memory data logs static \
+    && chown -R 10001:10001 profiles data logs static
+ENV HOME=/app
 
 USER 10001
 
