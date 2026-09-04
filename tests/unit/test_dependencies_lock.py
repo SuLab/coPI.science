@@ -4,7 +4,10 @@ migration downgrades, and a lockfile that exists and names every runtime
 dependency. Does not attempt to re-validate pip-compile's own hash pinning —
 that's pip's job at install time (--require-hashes, wired in Task 27.6)."""
 
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -116,3 +119,46 @@ def test_lockfile_comparison_ignores_pip_composes_own_header_but_not_real_pin_dr
     assert _strip_comment_lines(committed) == _strip_comment_lines(regenerated_same_pins)
     # ...and still catches a real pin drift.
     assert _strip_comment_lines(committed) != _strip_comment_lines(regenerated_drifted)
+
+
+def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
+    # Behavioural mutation check on ci.sh:376 (the stale-lock `exit 1`) — the static
+    # test above only pins the substring; this actually runs scripts/ci.sh (same
+    # shape test_run_migration_sh.py uses for bash) and proves it fails closed on a
+    # REAL pip-compile resolution that disagrees with the committed lock.
+    #
+    # A symlink farm mirrors every top-level entry of the real repo except
+    # pyproject.toml, which is a real copy with one dependency's cap lowered enough
+    # that pip-compile must resolve an older pin than what is already committed in
+    # (the symlinked, untouched) requirements.lock — never touches the real
+    # pyproject.toml. ci.sh derives REPO_ROOT from its own invoked path
+    # (`cd "$(dirname "${BASH_SOURCE[0]}")/.."`), so invoking the farm's symlinked
+    # scripts/ci.sh makes REPO_ROOT resolve to tmp_path, and every relative
+    # reference the script makes (alembic/, tests/, .venv-test/, requirements.lock,
+    # pyproject.toml) resolves through the farm.
+    if not shutil.which("uv"):
+        import pytest
+
+        pytest.skip("uv not on PATH — same skip valve ci.sh itself uses for this step")
+
+    for entry in os.listdir(REPO_ROOT):
+        if entry in (".git", "pyproject.toml"):
+            continue
+        (tmp_path / entry).symlink_to(REPO_ROOT / entry)
+
+    original = (REPO_ROOT / "pyproject.toml").read_text()
+    mutated = original.replace('"anthropic>=0.26.0,<1.0.0"', '"anthropic>=0.26.0,<0.100.0"')
+    assert mutated != original, "mutation target line not found — pyproject.toml moved"
+    (tmp_path / "pyproject.toml").write_text(mutated)
+
+    proc = subprocess.run(
+        ["./scripts/ci.sh"],
+        cwd=tmp_path,
+        env={**os.environ, "CI_MIGRATION_DB": "none"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "requirements.lock is stale" in proc.stdout + proc.stderr
+    assert "==> mypy" not in proc.stdout, "gate must stop at the lockfile check, not reach mypy"
