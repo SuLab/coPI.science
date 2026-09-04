@@ -10,6 +10,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from tests.unit.test_ci_gate import SMOKE_STEP_RAN, SMOKE_STEP_SKIPPED, nested_gate_env
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -188,7 +190,8 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
     proc = subprocess.run(
         ["./scripts/ci.sh"],
         cwd=tmp_path,
-        env={**os.environ, "CI_MIGRATION_DB": "none"},
+        # No LOCKCHECK override: this test needs the lockfile step to actually run.
+        env=nested_gate_env(),
         capture_output=True,
         text=True,
         timeout=180,
@@ -198,6 +201,11 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
     assert "requirements.lock does not match pyproject.toml" in combined
     assert "anthropic" in combined, "the failure must name the package that drifted"
     assert "==> mypy" not in proc.stdout, "gate must stop at the lockfile check, not reach mypy"
+    # The lock-consistency failure is fatal before step 6 even announces itself, so this
+    # site cannot pay for the smoke step's install however the environment is built —
+    # pin that ordering, since it is the reason an inherited LOCK_SMOKE=1 is invisible here.
+    assert "==> lock smoke test" not in combined, combined
+    assert SMOKE_STEP_RAN not in combined, combined
 
 
 def test_lock_smoke_step_is_documented_and_opt_in():
@@ -222,17 +230,17 @@ def test_lock_smoke_step_defaults_to_a_visible_skip():
     proc = subprocess.run(
         ["./scripts/ci.sh"],
         cwd=REPO_ROOT,
-        # LOCK_SMOKE must be scrubbed, not merely left unset: this test asserts the
-        # DEFAULT behaviour, and inheriting an ambient LOCK_SMOKE=1 from the operator's
-        # own shell would make the step run for real and fail this assertion (which is
-        # exactly what happened on a `LOCK_SMOKE=1 ./scripts/ci.sh` gate run).
-        env={
-            k: v for k, v in os.environ.items() if k != "LOCK_SMOKE"
-        } | {"CI_MIGRATION_DB": "none", "LOCKCHECK": "none", "MYPY_MAX": "0"},
+        # LOCK_SMOKE must not reach the child: this test asserts the step's DEFAULT
+        # behaviour, and an ambient LOCK_SMOKE=1 from the operator's own shell would make
+        # it run for real and fail the assertion below (which is exactly what happened on
+        # a `LOCK_SMOKE=1 ./scripts/ci.sh` gate run). nested_gate_env() handles that by
+        # construction — it never copies a variable it was not asked for.
+        env=nested_gate_env(LOCKCHECK="none", MYPY_MAX="0"),
         capture_output=True,
         text=True,
         timeout=180,
     )
     assert "==> lock smoke test" in proc.stdout
-    assert "skipped (opt-in" in proc.stdout
+    assert SMOKE_STEP_SKIPPED in proc.stdout
+    assert SMOKE_STEP_RAN not in proc.stdout, proc.stdout
     assert proc.returncode != 0, proc.stdout + proc.stderr

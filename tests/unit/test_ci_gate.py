@@ -68,8 +68,47 @@ def test_mypy_ceiling_ratchet_has_the_same_shape_as_the_ruff_ratchet():
 # reach the assertion. mypy over src/ takes ~2-3s here, so this stays fast.
 
 
-def _ci_env(**overrides) -> dict:
-    env = {**os.environ, "CI_MIGRATION_DB": "none", "LOCKCHECK": "none"}
+# Markers for ci.sh's opt-in lock smoke step (step 6), which is the expensive one:
+# it installs requirements.lock with --require-hashes into a throwaway Python 3.11
+# venv. SMOKE_STEP_RAN is the step's own success output; a nested gate run must never
+# print it, because every nested run in this suite wants the step's default skip.
+SMOKE_STEP_RAN = "PASS  requirements.lock installs"
+SMOKE_STEP_SKIPPED = "skipped (opt-in"
+
+
+# ci.sh reads ten knobs from the environment (LOCK_SMOKE, LOCKCHECK, LOCKCHECK_PYTHON,
+# CI_MIGRATION_DB, MIGCHECK_PORT, MIGRATION_FLOOR, MYPY_MAX, SRC_LINT_MAX, COV_MIN,
+# VENV_PY), so a nested run whose env is built as `{**os.environ, ...}` silently adopts
+# whichever of them the operator happened to export. Measured 2026-09-04 with
+# LOCK_SMOKE=1 in the parent shell: the child ran the real `uv pip install
+# --require-hashes -r requirements.lock` — ~2 s on a warm uv cache, and long enough on a
+# cold one to trip this file's own `timeout=180`.
+#
+# Hence an ALLOW-LIST and not a denylist of the knob names known today: a denylist is the
+# same defect again the next time ci.sh grows a knob. The child gets what it needs to find
+# its tools and nothing else. PATH and HOME alone are in fact sufficient here (verified:
+# alembic, both ruff passes, the lockfile check, mypy and `docker info` all succeed under
+# `env -i PATH=... HOME=... ./scripts/ci.sh`); the rest cover machines where they are not.
+_NESTED_GATE_ENV_ALLOWLIST = (
+    "PATH",  # bash, docker, uv, and the coreutils the gate shells out to
+    "HOME",  # ~/.docker/config.json, uv's download cache, ruff/mypy caches
+    "TMPDIR",  # ci.sh's own `mktemp -d` scratch dirs
+    "DOCKER_HOST",  # ci.sh exits early unless `docker info` succeeds
+    "XDG_RUNTIME_DIR",  # rootless Docker derives its default socket path from it
+    "LANG",  # keep the operator's text encoding for the child's diagnostics
+)
+
+
+def nested_gate_env(**overrides) -> dict[str, str]:
+    """Build the environment for a nested `./scripts/ci.sh` run from the allow-list.
+
+    Any knob the nested run depends on is passed here explicitly, so what a test
+    exercises cannot change with what the operator exported. `CI_MIGRATION_DB=none` is
+    unconditional: no nested run in this suite wants the alembic round trip, which costs
+    a throwaway Postgres container and a free host port.
+    """
+    env = {k: os.environ[k] for k in _NESTED_GATE_ENV_ALLOWLIST if k in os.environ}
+    env["CI_MIGRATION_DB"] = "none"
     env.update(overrides)
     return env
 
@@ -80,7 +119,7 @@ def test_ci_sh_fails_when_mypy_findings_exceed_the_ceiling():
     proc = subprocess.run(
         ["./scripts/ci.sh"],
         cwd=REPO_ROOT,
-        env=_ci_env(MYPY_MAX="0"),
+        env=nested_gate_env(LOCKCHECK="none", MYPY_MAX="0"),
         capture_output=True,
         text=True,
         timeout=180,
@@ -88,6 +127,11 @@ def test_ci_sh_fails_when_mypy_findings_exceed_the_ceiling():
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert "rose to" in proc.stdout + proc.stderr
     assert "-m pytest" not in proc.stdout, "gate must stop at the mypy ceiling, not reach pytest"
+    assert SMOKE_STEP_RAN not in proc.stdout, (
+        "the nested gate ran the opt-in lock smoke step: it inherited LOCK_SMOKE=1 from "
+        "the operator's shell instead of building its environment from the allow-list"
+    )
+    assert SMOKE_STEP_SKIPPED in proc.stdout
 
 
 def test_ci_sh_mypy_ceiling_positive_control_lets_the_gate_proceed():
@@ -98,7 +142,7 @@ def test_ci_sh_mypy_ceiling_positive_control_lets_the_gate_proceed():
     proc = subprocess.Popen(
         ["./scripts/ci.sh"],
         cwd=REPO_ROOT,
-        env=_ci_env(MYPY_MAX="99999"),
+        env=nested_gate_env(LOCKCHECK="none", MYPY_MAX="99999"),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -124,3 +168,8 @@ def test_ci_sh_mypy_ceiling_positive_control_lets_the_gate_proceed():
     output = "".join(seen)
     assert reached_pytest, f"gate never reached the pytest step:\n{output}"
     assert "rose to" not in output, f"mypy ceiling tripped when it should not have:\n{output}"
+    assert SMOKE_STEP_RAN not in output, (
+        "the nested gate ran the opt-in lock smoke step: it inherited LOCK_SMOKE=1 from "
+        f"the operator's shell instead of building its environment from the allow-list:\n{output}"
+    )
+    assert SMOKE_STEP_SKIPPED in output, output
