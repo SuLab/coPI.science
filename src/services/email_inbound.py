@@ -59,10 +59,15 @@ _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 _HELP_EMAILS_SENT: dict[str, int] = {}
 
 # notification id -> instruction-failure emails sent (in-memory, like the help-email rate
-# limiter above). Caps the PI-facing email at one per notification: the raise below keeps
-# the S3 object, so this site is re-entered on every poll until the object is quarantined
-# (COR-32) and migrate_public_thread_to_private is not idempotent — see the refined_in_channel
-# guard added to _handle_instruction below.
+# limiter above). Caps the PI-facing email at one per notification. _handle_instruction's
+# failure sites split into two shapes (COR-32 fix round A): a failure INSIDE
+# migrate_public_thread_to_private is terminal — it already created a real Slack channel,
+# so retrying would mint a second orphan one — _handle_instruction notifies the PI and
+# returns False, the caller retires the notification, and the S3 object is CONSUMED
+# (deleted after this one attempt). The three pre-Slack-mutation failures (no active
+# simulation run, no bot token, channel not found) happen before anything irreversible, so
+# they notify the PI and RAISE InstructionApplyFailed instead — the S3 object is kept and
+# RETRIED on every poll until either a retry succeeds or MAX_S3_PROCESS_ATTEMPTS quarantines it.
 _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
@@ -407,22 +412,36 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             db=db,
         )
         await record_engagement(user.id, db)
-        await mark_notification_responded(notification.agent_registry_id, td.id, "instruction", db)
-        # Minor 3 (fix round A): the notification is retired as of the line above (every
-        # _handle_instruction return-False path and the True/success path both reach
-        # here), so the one-email cap can never be checked again for it — drop the
-        # entry, mirroring _S3_FAILURE_COUNTS.pop(key, None) on successful processing.
-        _INSTRUCTION_FAILURE_EMAILS_SENT.pop(str(notification.id), None)
-        # Commit before the final confirmation send (COR-19.6), same reasoning as the
-        # review branch above. NOTE — residual, out of scope for this task (see the
-        # Design decision note above): _handle_instruction's OWN internal side effects
-        # (the migration, the legacy Slack post, its inactive/private-origin emails) still
-        # run before this commit, shared with the web /reopen route's identical shape.
-        await db.commit()
-        # Inactive agents can't reopen; _handle_instruction already emailed the
-        # PI an explanation, so skip the "will refine" confirmation.
-        if reopened:
-            await _send_instruction_confirmation(user, notification, td, db)
+        # Item 2/3 (COR-32 fix round A tidy): `resolved` only flips True once the commit
+        # below — the one that actually retires the notification — has succeeded. The
+        # cap pop() must happen AFTER that commit, never before: a failed commit means
+        # nothing was persisted (the S3 object is retried, per COR-32), and a still-set
+        # cap is what stops that retry's own failure from re-emailing the PI a second
+        # time for what looks, from their side, like the same failure. Once `resolved`
+        # is True the notification IS durably retired, so ANY fault after that point
+        # (not just an InstructionApplyFailed carrying a notification_id, which is all
+        # the poller's own quarantine-time clearing covers) must still clear the cap —
+        # a poisoned-session/commit-adjacent failure here must not stick a future
+        # re-processing of this notification with a stale, silently-suppressing cap.
+        resolved = False
+        try:
+            await mark_notification_responded(notification.agent_registry_id, td.id, "instruction", db)
+            # Commit before the final confirmation send (COR-19.6), same reasoning as the
+            # review branch above. NOTE — residual, out of scope for this task (see the
+            # Design decision note above): _handle_instruction's OWN internal side effects
+            # (the migration, the legacy Slack post, its inactive/private-origin emails) still
+            # run before this commit, shared with the web /reopen route's identical shape.
+            await db.commit()
+            resolved = True
+            _INSTRUCTION_FAILURE_EMAILS_SENT.pop(str(notification.id), None)
+            # Inactive agents can't reopen; _handle_instruction already emailed the
+            # PI an explanation, so skip the "will refine" confirmation.
+            if reopened:
+                await _send_instruction_confirmation(user, notification, td, db)
+        except Exception:
+            if resolved:
+                _INSTRUCTION_FAILURE_EMAILS_SENT.pop(str(notification.id), None)
+            raise
         return
 
     # Unparseable
@@ -859,7 +878,23 @@ async def _handle_instruction(
                     "Failed to migrate proposal %s to a private channel via email "
                     "reopen: %s", td.thread_id, exc, exc_info=True,
                 )
-                _notify_instruction_failure(user, agent, notification, will_retry=False)
+                # Item 4 (COR-32 fix round A tidy): _notify_instruction_failure's own
+                # send can fault too (SES down, an unexpected exception from
+                # _send_simple_email). Left uncaught, that would escape this inner
+                # except into the outer blanket `except Exception` below, which treats
+                # ANY escaping fault as retryable — raising InstructionApplyFailed(
+                # will_retry=True) and turning this terminal, at-most-one-orphan-channel
+                # failure back into a retried one that can mint a SECOND orphan private
+                # channel. Log and swallow instead; the PI simply doesn't get the
+                # explanation email this one time, but the notification still gets
+                # retired below with no further Slack mutation.
+                try:
+                    _notify_instruction_failure(user, agent, notification, will_retry=False)
+                except Exception:
+                    logger.exception(
+                        "Failed to send the terminal-failure notification for "
+                        "proposal %s; returning False (no retry) anyway", td.thread_id,
+                    )
                 return False
         elif td.origin_visibility != VISIBILITY_PUBLIC:
             # Origin already private — in-place refinement isn't implemented yet

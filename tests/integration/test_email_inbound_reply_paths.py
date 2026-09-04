@@ -480,6 +480,80 @@ async def test_a_failed_failure_notification_send_does_not_consume_the_cap(
     assert len(sent) == 2, "the cap must not have been consumed by the earlier failed send"
 
 
+async def test_a_commit_failure_after_retiring_the_notification_keeps_the_cap_set(
+    db_session, monkeypatch, sent_emails,
+):
+    """Item 2 (COR-32 fix round A tidy): the cap pop() moved to AFTER the commit that
+    retires the notification, and only fires when that commit actually succeeds. Reuses
+    the terminal-migration-failure setup (which sets the cap via one successful failure
+    email), then makes the RETIRING commit itself raise: process_inbound_email must
+    propagate the failure (the S3 object is retried, per COR-32) and the cap must stay
+    set — clearing it here would let a subsequent retry's own migration failure (another
+    orphan channel) re-notify the PI a second time for what looks, from their side, like
+    the exact same failure."""
+    token = "commitboom" + "k" * 39
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.instr5@scripps.edu", token=token
+    )
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
+
+    async def _boom_migrate(*a, **k):
+        raise RuntimeError("Slack outage")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _boom_migrate
+    )
+
+    async def _boom_commit(*a, **kw):
+        raise RuntimeError("db gone away")
+
+    monkeypatch.setattr(db_session, "commit", _boom_commit)
+
+    with pytest.raises(RuntimeError, match="db gone away"):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr5@scripps.edu", "please focus on X"), db_session,
+        )
+
+    assert len(sent_emails) == 1, "the terminal-failure email must still have been sent"
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT.get(str(notification.id)) == 1, (
+        "a failed commit must not clear the cap"
+    )
+
+
+async def test_a_fault_inside_the_terminal_notify_still_returns_false(
+    db_session, monkeypatch,
+):
+    """Item 4 (COR-32 fix round A tidy): the terminal-migration-failure handler's own
+    call to _notify_instruction_failure(will_retry=False) must not let a fault from
+    THAT call fall through to _handle_instruction's outer blanket `except Exception` —
+    that handler re-raises as InstructionApplyFailed(will_retry=True), which would turn
+    a terminal (at-most-one-orphan-channel) failure back into a retried one and risk
+    minting a SECOND orphan private channel on the retry."""
+    token = "notifyboom" + "m" * 39
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.instr6@scripps.edu", token=token
+    )
+
+    async def _boom_migrate(*a, **k):
+        raise RuntimeError("Slack outage")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _boom_migrate
+    )
+
+    def _boom_notify(*a, **k):
+        raise RuntimeError("SES is down too")
+
+    monkeypatch.setattr(inbound, "_notify_instruction_failure", _boom_notify)
+
+    reopened = await inbound._handle_instruction(
+        user=recipient, notification=notification, td=td,
+        instruction="focus on X", db=db_session,
+    )
+
+    assert reopened is False
+
+
 # --- 2d. D6: an implicit rating=-1 marker is upgraded, not "already acted on" --
 
 
