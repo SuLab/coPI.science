@@ -464,11 +464,31 @@ async def test_admin_delete_user_returns_409_on_integrity_error(
     client, db_session, admin, monkeypatch
 ):
     target = await factories.make_user(db_session)
+    target_id = target.id
+    # factories.make_user only flushes, it never commits — this session's savepoint
+    # scope otherwise still covers target's own INSERT. Commit it for real here so the
+    # ROLLBACK TO SAVEPOINT the route issues below (a real db.rollback(), only its
+    # commit() is mocked) can't unwind past the fixture setup and take target's row
+    # with it; that would make the assertion below pass for the wrong reason (target
+    # never existed at all by that point) regardless of what the route does.
+    await db_session.commit()
 
     async def _boom(*a, **kw):
         raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
 
     monkeypatch.setattr(db_session, "commit", _boom)
 
-    r = await client.post(f"/admin/users/{target.id}/delete", headers=_auth(admin.id))
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
     assert r.status_code == 409
+
+    # The route rolls back on IntegrityError before returning 409 — a mutant that
+    # dropped the rollback (or the whole except block) could still return 409 from a
+    # stale response while the delete had actually gone through in a separate
+    # connection. Confirm the row genuinely survives the failed commit. (Read by
+    # target_id, not target.id: the route's real rollback() expires target's
+    # attributes, and re-loading an expired attribute outside an awaited ORM call is
+    # not greenlet-safe.)
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is not None, "user row was deleted despite the simulated commit failure"

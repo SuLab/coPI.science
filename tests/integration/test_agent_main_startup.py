@@ -45,3 +45,39 @@ async def test_reconcile_stops_every_other_running_run(db_session):
     assert already_stopped.status == "stopped"  # untouched, was already stopped
     assert current.status == "running"
     assert current.ended_at is None
+
+
+async def test_reconcile_is_idempotent_on_a_second_call(db_session):
+    """D2 idempotency: a second call must change nothing.
+
+    The first call already proves a stale 'running' row is stopped. This test proves
+    a *repeat* call does not re-stamp it: a mutant that drops the
+    `SimulationRun.status == "running"` half of the WHERE clause (updating every row
+    with `id != current_run_id` regardless of its current status) would still pass
+    the single-call test above — the row ends up 'stopped' either way — but on a
+    second call it would move `ended_at` forward again, because the row still
+    matches `id != current_run_id`. Calling twice and diffing `ended_at` is the only
+    way to see that.
+    """
+    stale = await factories.make_simulation_run(db_session, status="running")
+    current = await factories.make_simulation_run(db_session, status="running")
+
+    await _reconcile_stale_runs(_FixtureSessionFactory(db_session), current.id)
+    await db_session.refresh(stale)
+    await db_session.refresh(current)
+    assert stale.status == "stopped"
+    first_ended_at = stale.ended_at
+    assert first_ended_at is not None
+
+    await _reconcile_stale_runs(_FixtureSessionFactory(db_session), current.id)
+    await db_session.refresh(stale)
+    await db_session.refresh(current)
+
+    assert stale.status == "stopped"
+    assert stale.ended_at == first_ended_at, (
+        "a second reconcile call moved ended_at forward — the status == 'running' "
+        "guard in the WHERE clause was dropped, so an already-stopped row keeps "
+        "getting re-stamped on every call"
+    )
+    assert current.status == "running"
+    assert current.ended_at is None

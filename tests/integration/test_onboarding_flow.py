@@ -1127,7 +1127,15 @@ async def test_delete_account_needs_the_confirmation_word(client, db_session):
 
 async def test_delete_account_returns_409_on_integrity_error(client, db_session, monkeypatch):
     u = await factories.make_user(db_session)
-    h = _auth(u.id)
+    uid = u.id
+    h = _auth(uid)
+    # factories.make_user only flushes, it never commits — this session's savepoint
+    # scope otherwise still covers u's own INSERT. Commit it for real here so the
+    # ROLLBACK TO SAVEPOINT the route issues below (a real db.rollback(), only its
+    # commit() is mocked) can't unwind past the fixture setup and take u's row with
+    # it; that would make the assertion below pass for the wrong reason (u never
+    # existed at all by that point) regardless of what the route does.
+    await db_session.commit()
 
     async def _boom(*a, **kw):
         raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
@@ -1136,6 +1144,14 @@ async def test_delete_account_returns_409_on_integrity_error(client, db_session,
 
     r = await client.post("/profile/delete-account", headers=h, data={"confirm": "delete"})
     assert r.status_code == 409
+
+    # The route rolls back on IntegrityError before returning 409 — a mutant that
+    # dropped the rollback (or the whole except block) could still return 409 from a
+    # stale response while the delete had actually gone through. Confirm the row
+    # genuinely survives the failed commit.
+    assert await _user_row(db_session, uid) is not None, (
+        "user row was deleted despite the simulated commit failure"
+    )
 
 
 # ---------------------------------------------------------------------------
