@@ -354,6 +354,51 @@ class TestSyncRosterFromDb:
         assert engine.message_log._bot_name_to_id.get("newsubot") == "su"
         assert "subot" not in engine.message_log._bot_name_to_id
 
+    async def test_name_map_self_heals_on_the_next_tick_after_a_later_step_raises(
+        self, monkeypatch,
+    ):
+        """#26 I2: unlike set_bot_uid_map (already unconditional in this same
+        no-add/no-remove fast path), the name-map flush only ran `if
+        bot_name_changed`. bot_name_changed is only True on the SAME tick as
+        the rename, so if a LATER step in that tick (_recompute_allowed_sender_ids)
+        raises before the flush, the flush is skipped — and a conditional flush
+        can never retry on a later tick, because by then the rename is already
+        applied and bot_name_changed is False again. Two ticks: the first
+        applies the rename to the Agent object (that part runs before the
+        raise) but raises before reaching the flush; the second is healthy
+        and must flush regardless of bot_name_changed.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        calls = {"n": 0}
+
+        async def _flaky_recompute():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated failure after the rename diff")
+
+        engine._recompute_allowed_sender_ids = _flaky_recompute
+
+        await engine._sync_roster_from_db()  # tick 1: renames, then raises
+
+        assert engine.agents["su"].bot_name == "NewSuBot", "the rename itself must still land"
+        assert engine._bot_name_to_id.get("newsubot") == "su", (
+            "sanity: the engine's own map already picked up the rename"
+        )
+        assert engine.message_log._bot_name_to_id.get("newsubot") != "su", (
+            "sanity: the flush really was skipped on the failing tick"
+        )
+
+        engine._last_roster_poll = 0.0  # bypass the 30s throttle for tick 2
+        await engine._sync_roster_from_db()  # tick 2: healthy, no further rename
+
+        assert engine.message_log._bot_name_to_id.get("newsubot") == "su", (
+            "a rename lost to an earlier exception never self-healed on the next healthy tick"
+        )
+
     async def test_message_log_uid_map_flushed_after_token_rotation(self, monkeypatch):
         """A rotated client gets a NEW bot_user_id (re-provisioned Slack app).
         message_log._bot_uid_to_agent is a copy taken by set_bot_uid_map — the

@@ -5591,8 +5591,16 @@ class SimulationEngine:
                 # *contents* (pi_name headings, bot_name lookups) without moving
                 # the gate at all.
                 await self._recompute_allowed_sender_ids()
+                # Unconditional, exactly like set_bot_uid_map below (#26 I2): a
+                # flush skipped this tick by a later exception (e.g.
+                # _recompute_allowed_sender_ids raising) has no other way to
+                # self-heal — bot_name_changed is only True on the SAME tick as
+                # the rename, so a conditional flush here would never retry on
+                # a later, healthy tick. bot_name_changed is kept only as a
+                # debug-log discriminator, mirroring clients_changed below.
+                self.message_log.set_bot_name_map(self._bot_name_to_id)
                 if bot_name_changed:
-                    self.message_log.set_bot_name_map(self._bot_name_to_id)
+                    logger.debug("[roster] name map flushed after a rename")
                 # Unconditional: a small dict copy every ROSTER_POLL_INTERVAL is
                 # cheap, and it means a flush skipped this tick by some earlier
                 # exception (e.g. an isolated grantbot-probe failure above) still
