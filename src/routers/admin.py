@@ -839,6 +839,7 @@ async def admin_agents(
         rev_result = await db.execute(
             select(func.count(ProposalReview.id)).where(
                 ProposalReview.agent_id == aid,
+                ProposalReview.rating != -1,
             )
         )
         review_counts[aid] = rev_result.scalar() or 0
