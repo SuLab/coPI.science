@@ -5356,20 +5356,38 @@ class SimulationEngine:
             # mid-run, tokens all in AgentRegistry, and `Connected as` never rose
             # above the 7 that had tokens at boot. Adopt them here, before the
             # early return, so the docstring's promise is actually true.
+            #
+            # clients_changed tracks whether any Slack client was (re)built this
+            # tick. Every exit path that flushes the bot_name-map snapshot also
+            # flushes the uid-map snapshot when this is set; skipping that left
+            # <@Unew> mentions of a rotated bot unresolved and its posts
+            # mis-attributed until a restart (message_log holds a COPY of
+            # _bot_uid_map(), taken by set_bot_uid_map).
+            clients_changed = False
             if self.slack_enabled:
                 for aid in self.agents:
                     r = desired.get(aid)
                     if r is None:
                         continue
-                    token = (
-                        r.slack_bot_token
-                        if is_valid_token(r.slack_bot_token)
-                        else env_token(aid)
-                    )
+                    existing = self.slack_clients.get(aid)
+                    # DB is authoritative for rotation: an existing client is
+                    # only ever rebuilt off a valid DB token. A cleared/absent
+                    # DB token must not fall back to .env for an agent that
+                    # already has a live, DB-provisioned client — the fallback
+                    # would silently downgrade it, and a dead env token would
+                    # otherwise retry a reconnect attempt every tick forever.
+                    # getattr, not attribute access, on `existing`: it is
+                    # outside the Transport protocol, so a partial double
+                    # missing it must not raise (an AttributeError here is
+                    # swallowed by the outer except and silently disables
+                    # EVERY roster diff for the rest of the run).
+                    db_token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else None
+                    if existing is not None and db_token is None:
+                        continue
+                    token = db_token if db_token is not None else env_token(aid)
                     if not is_valid_token(token):
                         continue  # still tokenless — retry on a later tick
-                    existing = self.slack_clients.get(aid)
-                    if existing is not None and existing.bot_token == token:
+                    if existing is not None and getattr(existing, "bot_token", None) == token:
                         continue  # already connected with the current token
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
                     if not client.connect():
@@ -5380,6 +5398,7 @@ class SimulationEngine:
                         )
                         continue
                     self.slack_clients[aid] = client
+                    clients_changed = True
                     logger.info(
                         "[roster] %s Slack client for %s (token %s)",
                         "Rebuilt" if existing is not None else "Adopted",
@@ -5400,6 +5419,8 @@ class SimulationEngine:
                 await self._recompute_allowed_sender_ids()
                 if bot_name_changed:
                     self.message_log.set_bot_name_map(self._bot_name_to_id)
+                if clients_changed:
+                    self.message_log.set_bot_uid_map(self._bot_uid_map())
                 if roster_changed:
                     self.refresh_lab_directories()
                 return

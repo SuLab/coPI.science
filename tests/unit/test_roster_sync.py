@@ -96,13 +96,20 @@ def _factory_for(rows):
 
 
 class _FakeSlackClient:
-    """Stand-in for AgentSlackClient — connect() always succeeds."""
-    def __init__(self, agent_id, bot_token):
+    """Stand-in for AgentSlackClient.
+
+    bot_user_id is derived from the token so a rotation (a new token) yields a
+    distinct uid, the way a re-provisioned Slack app would — needed to tell
+    apart the uid map before/after a rebuild.
+    """
+    def __init__(self, agent_id, bot_token, connect_result=True):
         self.agent_id = agent_id
         self.bot_token = bot_token
+        self.bot_user_id = f"U_{bot_token}"
+        self._connect_result = connect_result
 
     def connect(self):
-        return True
+        return self._connect_result
 
 
 def _make_engine(active_rows, existing_agents=()):
@@ -245,6 +252,79 @@ class TestSyncRosterFromDb:
         after = engine.slack_clients["su"]
         assert after is not before
         assert after.bot_token == "xoxb-rotated"
+
+    async def test_message_log_name_map_flushed_after_rename(self, monkeypatch):
+        """#26 DOC-B fix round 1: the engine's own _bot_name_to_id already
+        picked up a rename (test_surviving_agent_bot_name_and_pi_name_edits_go_live
+        above), but message_log holds a COPY taken by set_bot_name_map — the
+        early-return path must flush that copy too, or the poller (which reads
+        message_log's map) keeps resolving the OLD name.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        assert engine.message_log._bot_name_to_id.get("newsubot") == "su"
+        assert "subot" not in engine.message_log._bot_name_to_id
+
+    async def test_message_log_uid_map_flushed_after_token_rotation(self, monkeypatch):
+        """A rotated client gets a NEW bot_user_id (re-provisioned Slack app).
+        message_log._bot_uid_to_agent is a copy taken by set_bot_uid_map — the
+        early-return path (no add/remove) must flush it too, or <@Unew>
+        mentions of the rotated bot never resolve until a restart.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        after = engine.slack_clients["su"]
+        assert engine.message_log._bot_uid_to_agent.get(after.bot_user_id) == "su"
+
+    async def test_rotation_with_failed_connect_keeps_old_client(self, monkeypatch):
+        """connect() failing on the rebuild attempt must not discard the still-
+        working client — the engine keeps posting on the old (soon-to-expire)
+        token and retries the rebuild on a later tick."""
+        def _factory(agent_id, bot_token):
+            return _FakeSlackClient(agent_id, bot_token, connect_result=False)
+        monkeypatch.setattr("src.agent.slack_client.AgentSlackClient", _factory)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["su"] is before
+
+    async def test_rotation_does_not_touch_other_agents_client(self, monkeypatch):
+        _patch_client(monkeypatch)
+        engine = _make_engine(
+            [_row("su", token="xoxb-rotated"), _row("wiseman")],
+            existing_agents=["su", "wiseman"],
+        )
+        before = engine.slack_clients["wiseman"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["wiseman"] is before
+
+    async def test_db_token_cleared_does_not_fall_back_to_env(self, monkeypatch):
+        """DB is authoritative: clearing an agent's DB token must not downgrade
+        an already-connected agent to a (possibly stale) .env token, and must
+        not retry a reconnect every tick against a dead env token."""
+        _patch_client(monkeypatch)
+        monkeypatch.setattr(
+            slack_tokens, "get_settings",
+            lambda: types.SimpleNamespace(get_slack_tokens=lambda: {"su": "xoxb-env-old"}),
+        )
+        engine = _make_engine([_row("su", token=None)], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["su"] is before
 
     async def test_throttle_skips_within_interval(self, monkeypatch):
         _patch_client(monkeypatch)
