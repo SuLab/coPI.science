@@ -4,6 +4,7 @@
 import httpx
 import pytest
 
+from src.services import http_retry
 from src.services.http_retry import get_with_retry, post_with_retry
 
 
@@ -70,6 +71,70 @@ async def test_transport_error_is_retried():
         resp = await get_with_retry(client, "https://x.test/a", retries=3, backoff=0)
         assert resp.status_code == 200
         assert calls["n"] == 2
+
+
+async def test_before_request_hook_runs_before_every_attempt_including_the_first():
+    """I1: a retry must re-enter the caller's pacing gate. `before_request` is that gate's hook
+    — it must fire once per attempt, including the very first, or a paced caller's first request
+    would be unpaced."""
+    hook_calls = {"n": 0}
+
+    async def hook():
+        hook_calls["n"] += 1
+
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resp = await get_with_retry(
+            client, "https://x.test/a", retries=3, backoff=0, before_request=hook
+        )
+        assert resp.status_code == 200
+    assert hook_calls["n"] == 3
+
+
+async def test_no_hook_default_path_is_unchanged():
+    """The default (no `before_request`) path must behave exactly as before — no attribute
+    error, no extra call, nothing paced."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resp = await get_with_retry(client, "https://x.test/a", retries=3, backoff=0)
+        assert resp.status_code == 200
+        assert calls["n"] == 1
+
+
+async def test_retry_after_header_extends_the_planned_delay(monkeypatch):
+    """I1: `get_with_retry` ignored `Retry-After` entirely — the header is how NCBI/ORCID/
+    Grants.gov tell you the backoff that would keep you unblocked. A `Retry-After: 5` on a 429
+    must plan a delay of at least 5s even though `backoff=0` would otherwise plan 0."""
+    delays: list[float] = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(http_retry.asyncio, "sleep", fake_sleep)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"}, text="slow down")
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resp = await get_with_retry(client, "https://x.test/a", retries=3, backoff=0)
+        assert resp.status_code == 200
+    assert delays and delays[0] >= 5.0
 
 
 async def test_post_retries_on_503_then_succeeds():

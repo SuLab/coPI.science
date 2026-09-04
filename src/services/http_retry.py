@@ -8,8 +8,11 @@ absorb. One pair of helpers, used by all three, instead of three near-identical 
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 import httpx
+
+from src.agent.retry_after import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +28,27 @@ async def get_with_retry(
     retries: int = 3,
     backoff: float = 0.5,
     retry_on: tuple[int, ...] = DEFAULT_RETRY_ON,
+    before_request: Callable[[], Awaitable[None]] | None = None,
 ) -> httpx.Response:
     """GET ``url`` through ``client``, retrying a transient failure.
 
     Retries on any status in ``retry_on`` (defaults to 429 plus the 5xx family) and on
     ``httpx.TransportError`` (connection reset, timeout — the failure modes retrying can actually fix).
-    Backoff is exponential: ``backoff * 2 ** attempt``. On the final attempt, ``raise_for_status()`` is
+    Backoff is exponential: ``backoff * 2 ** attempt``, and is raised to honour a ``Retry-After``
+    header on the retryable-status branch, if present. On the final attempt, ``raise_for_status()`` is
     allowed to raise (or the transport error propagates), so a caller's existing ``except Exception``
     still sees a failure — this only buys the retries in between.
+
+    ``before_request``, if given, is awaited at the top of EVERY loop iteration — including the
+    first — before the request is sent. This lets a caller re-enter its own pacing gate on a retry
+    (issue #23 I1): without it, a caller that paces its first attempt (e.g. ``pubmed._pace_ncbi``)
+    had no way to pace the retries this loop issues on its behalf, letting a burst of 429s escape
+    the rate ceiling the caller thought it was enforcing.
     """
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
+        if before_request is not None:
+            await before_request()
         try:
             resp = await client.get(url, params=params, headers=headers)
         except httpx.TransportError as exc:
@@ -51,6 +64,7 @@ async def get_with_retry(
             continue
         if resp.status_code in retry_on and attempt < retries:
             delay = backoff * (2 ** attempt)
+            delay = max(delay, parse_retry_after(resp.headers.get("Retry-After"), default=delay, cap=60.0))
             logger.warning(
                 "GET %s got %d; retrying in %.1fs (attempt %d/%d)",
                 url, resp.status_code, delay, attempt + 1, retries,
@@ -71,10 +85,14 @@ async def post_with_retry(
     retries: int = 3,
     backoff: float = 0.5,
     retry_on: tuple[int, ...] = DEFAULT_RETRY_ON,
+    before_request: Callable[[], Awaitable[None]] | None = None,
 ) -> httpx.Response:
-    """POST ``url`` through ``client``, retrying a transient failure. Same shape as ``get_with_retry``."""
+    """POST ``url`` through ``client``, retrying a transient failure. Same shape as ``get_with_retry``,
+    including the ``before_request`` pacing hook and ``Retry-After`` handling."""
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
+        if before_request is not None:
+            await before_request()
         try:
             resp = await client.post(url, json=json, headers=headers)
         except httpx.TransportError as exc:
@@ -90,6 +108,7 @@ async def post_with_retry(
             continue
         if resp.status_code in retry_on and attempt < retries:
             delay = backoff * (2 ** attempt)
+            delay = max(delay, parse_retry_after(resp.headers.get("Retry-After"), default=delay, cap=60.0))
             logger.warning(
                 "POST %s got %d; retrying in %.1fs (attempt %d/%d)",
                 url, resp.status_code, delay, attempt + 1, retries,

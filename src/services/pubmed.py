@@ -144,11 +144,15 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     """Make a rate-limited, identified, retried GET request to NCBI.
 
     Retries a transient failure (COR-29a) through the shared ``get_with_retry`` helper. Pacing
-    (COR-29b) happens via ``_pace_ncbi`` immediately before the request is sent, inside the
-    semaphore slot, so it gates every call's start regardless of outcome. Retried attempts inside
-    ``get_with_retry`` are not paced again here — its own exponential backoff (>=0.5s) already
-    exceeds the pacing interval (<=0.34s), so it never presses harder on the ceiling than a single
-    paced call would.
+    (COR-29b) happens via ``_pace_ncbi``, passed in as ``get_with_retry``'s ``before_request`` hook
+    rather than called once here directly (issue #23 I1) — the hook fires at the top of EVERY loop
+    iteration, including the first, so every attempt (not just the initial request) reserves a
+    pacing slot. This replaces, rather than supplements, the old single pre-call
+    ``await _pace_ncbi(...)``: keeping both would reserve twice for the first attempt. A retry's own
+    exponential backoff no longer has to out-run the pacing interval on its own — the gate now
+    applies uniformly, so a burst of 429s can't re-fire faster than NCBI's ceiling the way it could
+    when only the first attempt was paced (measured: 16-25 req/s against a 10 req/s ceiling under
+    concurrency).
     """
     settings = get_settings()
     has_key = bool(settings.ncbi_api_key)
@@ -157,9 +161,14 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _NCBI_SEMAPHORES[has_key]:
-        await _pace_ncbi(_NCBI_PACING_SECONDS[has_key])
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            return await get_with_retry(client, url, params=params, backoff=_RETRY_BACKOFF)
+            return await get_with_retry(
+                client,
+                url,
+                params=params,
+                backoff=_RETRY_BACKOFF,
+                before_request=lambda: _pace_ncbi(_NCBI_PACING_SECONDS[has_key]),
+            )
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:

@@ -26,6 +26,7 @@ IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
 _UNPACED_TESTS = {
     "test_semaphores_are_sized_by_api_key_presence",
     "test_ncbi_pacing_spaces_concurrent_starts",
+    "test_a_429_retry_still_respects_the_ncbi_pacing_gate",
 }
 
 
@@ -103,6 +104,34 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     gaps = [b - a for a, b in itertools.pairwise(starts)]
     assert all(gap >= interval * 0.5 for gap in gaps), gaps
     assert starts[-1] - starts[0] >= 3 * interval * 0.85
+
+
+@respx.mock
+async def test_a_429_retry_still_respects_the_ncbi_pacing_gate(monkeypatch):
+    """I1: `get_with_retry`'s retry attempts issued no request to `_pace_ncbi`, so a burst of
+    429s let every retry re-fire immediately once its (small) exponential backoff elapsed —
+    restoring exactly the over-rate `_pace_ncbi` exists to prevent. `_RETRY_BACKOFF` is zeroed by
+    the autouse fixture above so any spacing observed here can only come from the pacing gate
+    being re-entered on each attempt, not from the retry loop's own backoff."""
+    interval = 0.1
+    monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: interval, False: interval})
+    monkeypatch.setattr(pubmed, "_ncbi_next_start", 0.0)
+    starts: list[float] = []
+    calls = {"n": 0}
+
+    def _handler(request):
+        starts.append(time.monotonic())
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, text=EFETCH_XML)
+
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(side_effect=_handler)
+    await pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {})
+
+    assert calls["n"] == 3
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert all(gap >= interval * 0.5 for gap in gaps), gaps
 
 
 def test_pace_ncbi_survives_two_separate_event_loops():
