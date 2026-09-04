@@ -73,7 +73,16 @@ async def get_with_retry(
             continue
         resp.raise_for_status()
         return resp
-    raise last_exc  # pragma: no cover — loop above always returns or raises
+    # Unreachable: every iteration of the loop above either `return`s (success or the final
+    # attempt's `raise_for_status()` raising) or `raise`s (a `TransportError` on the final
+    # attempt), so `last_exc` is only ever still `None` here if the loop body never ran at all
+    # (`retries < 0`) — a caller misuse, not a runtime failure this function retries. `raise
+    # last_exc` with `last_exc: Exception | None` is a mypy error (`Exception must be derived
+    # from BaseException [misc]`); it also degraded to `TypeError: exceptions must derive from
+    # BaseException` at runtime for that same misuse, a worse diagnostic than this (#23 I3).
+    raise AssertionError(  # pragma: no cover
+        f"unreachable: get_with_retry's loop always returns or raises (last_exc={last_exc!r})"
+    )
 
 
 async def post_with_retry(
@@ -117,4 +126,7 @@ async def post_with_retry(
             continue
         resp.raise_for_status()
         return resp
-    raise last_exc  # pragma: no cover
+    # Unreachable — same reasoning as get_with_retry's identical tail (#23 I3).
+    raise AssertionError(  # pragma: no cover
+        f"unreachable: post_with_retry's loop always returns or raises (last_exc={last_exc!r})"
+    )
