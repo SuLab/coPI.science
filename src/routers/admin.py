@@ -651,7 +651,9 @@ async def admin_discussions(
 
     # Get proposal reviews
     from src.models import ProposalReview as PR
-    reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
+    reviews_query = select(PR).join(
+        ThreadDecision, PR.thread_decision_id == ThreadDecision.id
+    ).where(PR.rating != -1)
     if not show_all_runs:
         reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
     reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))

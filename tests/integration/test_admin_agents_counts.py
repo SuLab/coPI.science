@@ -72,3 +72,34 @@ async def test_implicit_minus_one_review_does_not_count_as_reviewed(
     assert "1 to review" in row
     assert "(1 total)" in row
     assert "1 reviewed" not in row
+
+
+async def test_explicit_review_counts_as_reviewed(client, db_session, admin):
+    """Positive control: a real PI rating must still show as "1 reviewed"."""
+    pi = await factories.make_user(db_session, email="pi2@example.org")
+    agent = await factories.make_agent(
+        session=db_session, user=pi, agent_id="agenty", bot_name="AgentYBot", status="active"
+    )
+    td = await factories.make_thread_decision(
+        db_session, agent_a=agent.agent_id, agent_b="beta", outcome="proposal"
+    )
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=td.id,
+            agent_id=agent.agent_id,
+            user_id=pi.id,
+            rating=3,
+            submitted_via="web",
+        )
+    )
+    await db_session.flush()
+
+    resp = await client.get("/admin/agents", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    row_start = html.index(agent.agent_id)
+    row = html[row_start : row_start + 1500]
+
+    assert "1 reviewed" in row
+    assert "1 to review" not in row
