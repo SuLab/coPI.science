@@ -733,14 +733,24 @@ async def bump_profile_version(db: AsyncSession, profile_id: uuid.UUID) -> int:
 
     The row must already exist (flushed) — callers creating a brand-new
     ResearcherProfile must `await db.flush()` after `db.add(profile)` before
-    calling this.
+    calling this. `scalar_one()` raises `NoResultFound` if the row has since
+    vanished (e.g. the user was deleted mid-pipeline) — this call does not
+    catch that; the worker's failure path around `run_profile_pipeline`
+    already handles a raised exception there.
 
-    Callers assign the return value back to `profile.profile_version` (see the
-    call sites below) — that re-dirties the ORM attribute, so the same integer
-    this call already wrote gets written again at the next flush. Harmless (the
-    row lock serializes concurrent bumps and each session writes the value it
-    atomically obtained), but don't "optimize" it away: the assignment is what
-    keeps the in-memory `profile` object's `profile_version` in sync with the DB
-    for the rest of the request.
+    Callers MUST assign the return value back to `profile.profile_version`
+    (see the call sites below) — this is not merely to keep a cached value
+    from going stale. `SET profile_version = COALESCE(...)` is a SQL
+    expression, not something SQLAlchemy's ORM-enabled UPDATE can evaluate in
+    Python, so `synchronize_session` EXPIRES `profile_version` on the
+    in-session `profile` instance rather than guessing its new value. An
+    unassigned read of `profile.profile_version` after this call therefore
+    triggers a lazy-load refresh from the DB — which on an `AsyncSession`
+    raises `MissingGreenlet` (implicit IO outside an `await`), not merely a
+    stale value. The explicit write-back re-dirties the ORM attribute with the
+    integer this call already obtained atomically; re-flushing that value is
+    harmless (the row lock serialized the increment, so it is the same value
+    already committed) and it keeps the in-memory object usable for the rest
+    of the request.
     """
     return (await db.execute(bump_profile_version_stmt(profile_id))).scalar_one()

@@ -46,6 +46,15 @@ _ATOMIC_BUMP_CALL_SITES = [
     _REPO_ROOT / "src" / "routers" / "onboarding.py",
     _REPO_ROOT / "src" / "routers" / "agent_page.py",
     _REPO_ROOT / "src" / "services" / "profile_pipeline.py",
+    # Fix round 1 (Minor 5): the six operator scripts previously did the same
+    # Python read-modify-write and several sweep every user while the web app
+    # is up.
+    _REPO_ROOT / "scripts" / "import_profile_from_md.py",
+    _REPO_ROOT / "scripts" / "regen_profiles_from_web.py",
+    _REPO_ROOT / "scripts" / "resynth_from_current_pubs.py",
+    _REPO_ROOT / "scripts" / "vet_publications.py",
+    _REPO_ROOT / "scripts" / "generate_sparsedata_user.py",
+    _REPO_ROOT / "scripts" / "regen_profile_from_cv.py",
 ]
 
 

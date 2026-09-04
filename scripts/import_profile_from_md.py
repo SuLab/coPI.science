@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from src.database import get_session_factory
 from src.models import AgentRegistry, ResearcherProfile, User
+from src.services.profile_pipeline import bump_profile_version
 
 # Export section header -> ResearcherProfile field + kind ("para" | "bullets" | "csv")
 SECTION_MAP = {
@@ -74,7 +75,7 @@ async def main(agent_id: str) -> None:
             if old != new:
                 changed.append((field, old, new))
             setattr(row, field, new)
-        row.profile_version = (row.profile_version or 0) + 1
+        row.profile_version = await bump_profile_version(db, row.id)
         row.profile_generated_at = datetime.now(timezone.utc)
         await db.commit()
     if not changed:

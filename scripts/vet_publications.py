@@ -35,7 +35,7 @@ from src.services.llm import (
     synthesize_profile,
 )
 from src.services.profile_export import export_profile_to_markdown
-from src.services.profile_pipeline import _validate_profile, apply_synthesis
+from src.services.profile_pipeline import _validate_profile, apply_synthesis, bump_profile_version
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("vet_pubs")
@@ -176,7 +176,7 @@ async def _process(orcid: str, db: AsyncSession, dry_run: bool) -> dict:
             synthesized = await synthesize_profile(ctx, user.name)
             validated = _validate_profile(synthesized)
             if apply_synthesis(profile, synthesized, validated=validated):
-                profile.profile_version = (profile.profile_version or 0) + 1
+                profile.profile_version = await bump_profile_version(db, profile.id)
                 abstracts_str = "\n".join(p.abstract or "" for p in kept)
                 profile.raw_abstracts_hash = hashlib.sha256(abstracts_str.encode()).hexdigest()
                 logger.info("%s: research_summary re-synthesized (version=%d)",

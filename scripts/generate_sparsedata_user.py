@@ -57,6 +57,7 @@ from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.llm import extract_json, get_anthropic_client
 from src.services.orcid import fetch_orcid_profile, fetch_orcid_works
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import bump_profile_version
 from src.services.pubmed import convert_dois_to_pmids, fetch_pubmed_records, normalize_doi
 
 PRIVATE_DIR = Path("profiles/private")
@@ -601,9 +602,9 @@ async def _persist(
     profile.disease_areas = synthesized.get("disease_areas", [])
     profile.key_targets = synthesized.get("key_targets", [])
     profile.keywords = synthesized.get("keywords", [])
-    profile.profile_version = (profile.profile_version or 0) + 1
     profile.profile_generated_at = datetime.now(timezone.utc)
     await db.flush()
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     # AgentRegistry (upsert)
     agent_result = await db.execute(

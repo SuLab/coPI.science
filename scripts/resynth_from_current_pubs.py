@@ -24,7 +24,7 @@ from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.llm import synthesize_profile
 from src.services.profile_export import export_profile_to_markdown
-from src.services.profile_pipeline import _validate_profile, apply_synthesis
+from src.services.profile_pipeline import _validate_profile, apply_synthesis, bump_profile_version
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("resynth")
@@ -78,7 +78,7 @@ async def _process(orcid: str, db: AsyncSession) -> str:
     if not applied:
         return f"{user.name}: kept existing profile (validation gate); synthesis discarded"
 
-    profile.profile_version = (profile.profile_version or 0) + 1
+    profile.profile_version = await bump_profile_version(db, profile.id)
     abstracts = "\n".join(p.abstract or "" for p in pubs)
     profile.raw_abstracts_hash = hashlib.sha256(abstracts.encode()).hexdigest()
     await db.flush()

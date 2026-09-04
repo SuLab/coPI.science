@@ -32,7 +32,7 @@ from src.database import get_session_factory
 from src.models import AgentRegistry, ResearcherProfile, User
 from src.services.llm import synthesize_profile
 from src.services.profile_export import export_profile_to_markdown
-from src.services.profile_pipeline import _validate_profile, apply_synthesis
+from src.services.profile_pipeline import _validate_profile, apply_synthesis, bump_profile_version
 from src.services.profile_versioning import create_revision
 
 DEFAULT_CONTEXT_DIR = Path("data/profile_context")
@@ -110,7 +110,7 @@ async def regen_one(agent_id: str, context_path: Path) -> bool:
             print("  SKIPPED: validation gate kept the existing stored profile", flush=True)
             return False
 
-        profile.profile_version = (profile.profile_version or 0) + 1
+        profile.profile_version = await bump_profile_version(db, profile.id)
         profile.raw_abstracts_hash = hashlib.sha256(context.encode()).hexdigest()
 
         await db.flush()
