@@ -5,6 +5,7 @@ access token until it is about to expire and only rotate when necessary.
 """
 
 import asyncio
+import inspect
 import time
 import types
 import uuid
@@ -194,16 +195,16 @@ async def test_start_provisioning_releases_the_connection_before_create_app(monk
     )
     await ap.start_provisioning(_EventDB(), agent)
 
-    ordered = [
-        e for e in events
-        if e in ("db.commit", "create_app_async", "lookup_team_id_async")
-    ]
-    assert ordered[0] == "db.commit", (
+    # (#24 Minor 5) Check adjacency in the *raw* event list, not a filtered one: the
+    # filtered form only proves a commit happened somewhere earlier, not that no
+    # db.execute/db.add ran between the commit and the blocking call.
+    create_idx = events.index("create_app_async")
+    assert events[create_idx - 1] == "db.commit", (
         f"event order was {events} -- the config-token SELECTs must be committed "
         "(releasing the pooled connection) before the blocking create_app call"
     )
-    lookup_idx = ordered.index("lookup_team_id_async")
-    assert ordered[lookup_idx - 1] == "db.commit", (
+    lookup_idx = events.index("lookup_team_id_async")
+    assert events[lookup_idx - 1] == "db.commit", (
         f"event order was {events} -- get_any_bot_token's SELECT must be committed "
         "(releasing the pooled connection) before the blocking lookup_team_id_async call"
     )
@@ -248,8 +249,71 @@ async def test_complete_provisioning_releases_the_connection_before_exchange_cod
     result = await ap.complete_provisioning(_EventDB(), state="s", code="c")
 
     assert result.slack_bot_token == "xoxb-good"
-    ordered = [e for e in events if e in ("db.commit", "exchange_code_async")]
-    assert ordered[0] == "db.commit", (
+    # (#24 Minor 5) Adjacency in the raw event list, not merely "a commit happened
+    # somewhere before" -- see the comment in the create_app test above.
+    exchange_idx = events.index("exchange_code_async")
+    assert events[exchange_idx - 1] == "db.commit", (
         f"event order was {events} -- the state/agent SELECTs must be committed "
         "before the blocking exchange_code call"
+    )
+
+
+# --- issue #24 Minors 3-4: pin the async config-token twin + connection release ------
+
+
+def test_config_token_calls_the_async_rotate_twin():
+    """(#24 Minor 3) The four rotation tests in test_slack_provisioning.py
+    (test_rotation_persists_the_whole_triple and its three siblings) patch the
+    SYNC `rotate_config_token`, which BOTH the sync and async variants reach
+    (`rotate_config_token_async` runs it via `asyncio.to_thread`) -- so none of
+    them can tell whether the rotate call actually reaches the async twin
+    (C2-6) or regressed to the old blocking call. Pin the call site directly.
+    The actual call lives in `_rotate_and_persist` (extracted from
+    `_config_token` in #24 I1 so the caller can `asyncio.shield` it) -- inspect
+    that, not just `_config_token`, whose body only names it in a comment."""
+    source = inspect.getsource(ap._rotate_and_persist)
+    assert "await rotate_config_token_async(" in source
+
+
+@pytest.mark.asyncio
+async def test_config_token_releases_the_connection_before_the_real_rotate(monkeypatch):
+    """(#24 Minor 4) Both ordering tests above replace `_config_token` wholesale
+    with a fake, so neither exercises the release-before-rotate property inside
+    the real function. Drive the real `_config_token` with a recording session
+    and a stubbed async rotate, and assert the last event before the rotate call
+    is `db.commit` (Minor 5 form: adjacency in the raw event list)."""
+    events: list[str] = []
+
+    class _EventDB:
+        async def execute(self, _stmt):
+            events.append("db.execute")
+            return _EventResult(None)
+
+        def add(self, _obj):
+            events.append("db.add")
+
+        async def commit(self):
+            events.append("db.commit")
+
+    async def _fake_rotate_async(refresh):
+        events.append("rotate_config_token_async")
+        return ("access1", "refresh1", int(time.time()) + 3600)
+
+    monkeypatch.setattr(
+        ap, "get_settings",
+        lambda: types.SimpleNamespace(
+            slack_config_refresh_token="seed_refresh", slack_config_token=""
+        ),
+    )
+    monkeypatch.setattr(
+        "src.services.slack_provisioning.rotate_config_token_async", _fake_rotate_async
+    )
+
+    token = await ap._config_token(_EventDB())
+
+    assert token == "access1"
+    rotate_idx = events.index("rotate_config_token_async")
+    assert events[rotate_idx - 1] == "db.commit", (
+        f"event order was {events} -- the config-token SELECTs must be committed "
+        "(releasing the pooled connection) before the blocking rotate call"
     )
