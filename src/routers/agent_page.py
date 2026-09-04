@@ -810,49 +810,135 @@ async def reopen_proposal(
         )
     )
     existing_row = existing.scalar_one_or_none()
-    if existing_row is None:
-        review = ProposalReview(
-            thread_decision_id=thread_decision_id,
-            agent_id=agent.agent_id,
-            user_id=agent.user_id,  # Always the PI
-            delegate_user_id=current_user.id if not is_owner else None,
-            reviewed_by_user_id=current_user.id,
-            rating=0,  # 0 = reopened with guidance, not a rating
-            comment=f"[Reopened] {guidance[:500]}",
-            submitted_via="web",
-        )
-        db.add(review)
-    elif existing_row.rating == -1:
-        # D6/COR-13: this SELECT happens AFTER migrate_public_thread_to_private (a
-        # multi-call Slack round-trip), so -- unlike the first SELECT above, whose
-        # != -1 case returns early -- the invariant is re-checked here rather than
-        # assumed: a real review can be filed by the PI, a delegate, or an e-mail
-        # reply while that round-trip is in flight. Only the engine's implicit
-        # marker (rating == -1) is safe to upgrade in place; id is left untouched,
-        # reviewed_at is bumped to record when the explicit action happened.
-        existing_row.user_id = agent.user_id  # Always the PI
-        existing_row.delegate_user_id = current_user.id if not is_owner else None
-        existing_row.reviewed_by_user_id = current_user.id
-        existing_row.rating = 0  # 0 = reopened with guidance, not a rating
-        existing_row.comment = f"[Reopened] {guidance[:500]}"
-        existing_row.submitted_via = "web"
-        existing_row.reviewed_at = datetime.now(UTC)
-    else:
-        # A real review was filed for this (thread_decision, agent) while the
-        # migration ran -- leave it alone rather than overwrite it with the
-        # reopen marker (D6/COR-13).
+
+    # Captured BEFORE the try for the same reason as review_proposal's V4-4b guard
+    # (:544-554 above): a lost race's IntegrityError expires every attribute of every
+    # object this session is tracking, including agent's and current_user's primary
+    # keys, and this async session has no implicit re-fetch on attribute access after
+    # rollback() -- bare agent.user_id / current_user.id in the except arm below would
+    # raise sqlalchemy.exc.MissingGreenlet.
+    current_user_id = current_user.id
+    agent_registry_id = agent.id
+    agent_agent_id = agent.agent_id
+    pi_user_id = agent.user_id
+
+    # migrate_public_thread_to_private only FLUSHES refined_in_channel -- it never
+    # commits (src/services/private_channels.py:610) -- so a rollback() below would
+    # silently undo that flush along with the losing insert, orphaning the Slack
+    # channel it already created for real (I2, #24 V5). Capture the value now so the
+    # except arm can re-bind it to a freshly reloaded ThreadDecision without
+    # re-running the migration.
+    refined_channel_id = td.refined_in_channel
+
+    # Import hoisted ABOVE the try (mirrors review_proposal, :556-563): the except arm
+    # below also needs record_engagement/mark_notification_responded, and a local
+    # import inside the try body is not in scope in the except.
+    from src.services.email_notifications import (
+        mark_notification_responded,
+        record_engagement,
+    )
+
+    # I2 (#24 V5): mirrors review_proposal's guard exactly. The `existing_row is None`
+    # branch's db.add() can lose a race against a concurrent insert for the same
+    # (thread_decision_id, agent_id) -- the engine's implicit marker, an e-mail reply,
+    # a delegate's /review -- surfaced by autoflush at record_engagement, same as
+    # review_proposal three hundred lines above. The two update branches (rating == -1
+    # upgrade; real review left alone) touch no new row, so they cannot raise
+    # IntegrityError -- the guard is inert there.
+    try:
+        if existing_row is None:
+            review = ProposalReview(
+                thread_decision_id=thread_decision_id,
+                agent_id=agent_agent_id,
+                user_id=pi_user_id,  # Always the PI
+                delegate_user_id=current_user_id if not is_owner else None,
+                reviewed_by_user_id=current_user_id,
+                rating=0,  # 0 = reopened with guidance, not a rating
+                comment=f"[Reopened] {guidance[:500]}",
+                submitted_via="web",
+            )
+            db.add(review)
+        elif existing_row.rating == -1:
+            # D6/COR-13: this SELECT happens AFTER migrate_public_thread_to_private (a
+            # multi-call Slack round-trip), so -- unlike the first SELECT above, whose
+            # != -1 case returns early -- the invariant is re-checked here rather than
+            # assumed: a real review can be filed by the PI, a delegate, or an e-mail
+            # reply while that round-trip is in flight. Only the engine's implicit
+            # marker (rating == -1) is safe to upgrade in place; id is left untouched,
+            # reviewed_at is bumped to record when the explicit action happened.
+            existing_row.user_id = pi_user_id  # Always the PI
+            existing_row.delegate_user_id = current_user_id if not is_owner else None
+            existing_row.reviewed_by_user_id = current_user_id
+            existing_row.rating = 0  # 0 = reopened with guidance, not a rating
+            existing_row.comment = f"[Reopened] {guidance[:500]}"
+            existing_row.submitted_via = "web"
+            existing_row.reviewed_at = datetime.now(UTC)
+        else:
+            # A real review was filed for this (thread_decision, agent) while the
+            # migration ran -- leave it alone rather than overwrite it with the
+            # reopen marker (D6/COR-13).
+            logger.warning(
+                "Proposal %s gained a review (rating=%s) while the reopen migration "
+                "ran -- leaving it alone",
+                td.thread_id, existing_row.rating,
+            )
+
+        # Record engagement and mark any outstanding email notification as responded
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "instruction", db)
+
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Someone else (the engine's implicit marker, an e-mail reply, a delegate's
+        # /review) won the race on uq_proposal_reviews_decision_agent. The Slack
+        # channel migrate_public_thread_to_private created already exists for real,
+        # but rollback() just undid its flush-only refined_in_channel write -- re-bind
+        # it to the decision in a fresh transaction so a retry cannot pass the :695
+        # `!= -1` guard and re-migrate. Do NOT re-run the migration and do NOT re-raise.
+        td_reload = (await db.execute(
+            select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
+        )).scalar_one()
+        if refined_channel_id is not None:
+            td_reload.refined_in_channel = refined_channel_id
+
+        winner = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision_id,
+                ProposalReview.agent_id == agent_agent_id,
+            )
+        )).scalar_one_or_none()
+        if winner is not None and winner.rating == -1:
+            # Same D6/COR-13 upgrade as the try body above -- the winning row is the
+            # engine's implicit marker, not a real decision.
+            winner.user_id = pi_user_id
+            winner.delegate_user_id = current_user_id if not is_owner else None
+            winner.reviewed_by_user_id = current_user_id
+            winner.rating = 0
+            winner.comment = f"[Reopened] {guidance[:500]}"
+            winner.submitted_via = "web"
+            winner.reviewed_at = datetime.now(UTC)
+        elif winner is not None:
+            logger.warning(
+                "Proposal %s gained a review (rating=%s) while the reopen write "
+                "raced -- leaving it alone",
+                td_reload.thread_id, winner.rating,
+            )
+        else:
+            logger.error(
+                "IntegrityError on proposal %s reopen write but no winning row was "
+                "found on re-select -- unexpected",
+                td_reload.thread_id,
+            )
+
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "instruction", db)
+        await db.commit()
         logger.warning(
-            "Proposal %s gained a review (rating=%s) while the reopen migration "
-            "ran -- leaving it alone",
-            td.thread_id, existing_row.rating,
+            "Proposal %s reopen write lost a race after the Slack migration ran; "
+            "recovered by re-binding refined_in_channel=%s instead of re-migrating",
+            td_reload.thread_id, refined_channel_id,
         )
-
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
-
-    await db.commit()
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 

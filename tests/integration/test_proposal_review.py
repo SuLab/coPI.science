@@ -1203,6 +1203,122 @@ async def test_reopen_leaves_a_concurrent_real_review_alone(
     assert review.submitted_via == "web"
 
 
+async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
+    client, db_session, lab, proposal, slack_off, monkeypatch,
+):
+    """I2 (#24 V5, audit-issue-24.md): before this fix, reopen_proposal's write block
+    (`db.add(review)` through `commit()`) had no `except IntegrityError` -- the exact
+    guard Task 24.2 added to review_proposal, left off its sibling. With no existing
+    review, the reopen takes the INSERT branch; migrate_public_thread_to_private has
+    already created the private Slack channel and (flush-only) set
+    `refined_in_channel` by this point. If a concurrent writer wins the race on
+    `uq_proposal_reviews_decision_agent`, the pre-fix code 500s, `get_db` rolls back,
+    and the channel that already exists for real is orphaned (refined_in_channel and
+    the AgentChannel rows are gone) -- and a PI retry then passes the `:695` `!= -1`
+    guard (D6) and migrates AGAIN, minting a SECOND channel.
+
+    Harness note (empirically confirmed, not just asserted): `db_session`
+    (tests/conftest.py) binds one nested SAVEPOINT inside a single outer transaction
+    that is only ever rolled back at teardown -- the `lab`/`proposal` fixture rows are
+    never truly COMMITted to the physical database, only savepoint-released within
+    that same open transaction. A genuinely separate connection therefore cannot see
+    them at all (verified directly: a row inserted and `db_session.commit()`'d, then
+    queried from a second `engine.connect()`, comes back with count 0) -- and a
+    RELEASE SAVEPOINT is not protected against a later ROLLBACK TO an earlier
+    SAVEPOINT on the SAME connection either, so no same-connection trick can make a
+    "concurrent" row survive `reopen_proposal`'s own `rollback()`. A true two-
+    transaction race where the winner survives is therefore only provable with a fake
+    session (see `test_concurrent_write_guards.py`'s
+    `test_reopen_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race` and
+    `test_reopen_proposal_leaves_a_real_winner_alone_after_a_lost_race`); what THIS
+    test proves against a real Postgres constraint is the other half of I2: the
+    guard actually catches the IntegrityError (no 500) and `refined_in_channel`
+    survives the recovery rather than being silently dropped.
+
+    The race is reproduced by adding a second, competing `ProposalReview` for the SAME
+    (thread_decision, agent) from inside `record_engagement` -- the next `db.execute()`
+    after `db.add(review)`, so SQLAlchemy's autoflush (default True) is what actually
+    raises the real `IntegrityError` on `uq_proposal_reviews_decision_agent`.
+    """
+    from src.services import email_notifications
+
+    real_record_engagement = email_notifications.record_engagement
+    calls = {"n": 0}
+
+    async def _add_a_competing_review_and_flush(user_id, db):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Only the FIRST call (inside reopen_proposal's try, right after
+            # db.add(review)) stages the race. The except arm's own recovery calls
+            # record_engagement again to retire the notification (V4-4b) -- that call
+            # must behave normally, not queue a second competing insert.
+            db.add(ProposalReview(
+                thread_decision_id=proposal.id, agent_id="alpha", user_id=lab.pi_a_id,
+                rating=-1, comment=None, submitted_via="engine",
+            ))
+            await db.flush()
+        else:
+            await real_record_engagement(user_id, db)
+
+    monkeypatch.setattr(email_notifications, "record_engagement", _add_a_competing_review_and_flush)
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Actually, let's narrow the scope first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, f"expected a redirect, not a 500: {r.text[:400]}"
+
+    db_session.expire_all()
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel is not None, (
+        "the Slack channel already exists for real -- losing refined_in_channel here "
+        "orphans it"
+    )
+
+    # Residual gap, deliberately NOT patched here (I2's fix guidance only restores
+    # `refined_in_channel`, not the AgentChannel bookkeeping row -- see this file's
+    # module report / the harness note above): because BOTH `review`'s own insert AND
+    # the competing insert live in the SAME never-truly-committed savepoint,
+    # `rollback()` undoes the migration's AgentChannel row too, and re-select finds no
+    # winning review at all (0 rows, logged as "no winning row was found on
+    # re-select"). A retry therefore sees `already_reviewed is None` again and DOES
+    # re-run the full migration, minting a second physical channel -- confirmed
+    # directly below rather than left as a guess.
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert rows == [], (
+        "harness limitation, not a new assertion about correct behaviour: within one "
+        "shared savepoint neither insert can outlive the other's rollback"
+    )
+    channel_count_before_retry = await db_session.scalar(
+        select(func.count(AgentChannel.id)).where(AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE)
+    )
+    assert channel_count_before_retry == 0, (
+        "the migration's own AgentChannel row was rolled back along with the lost "
+        "review row -- same shared-savepoint limitation"
+    )
+
+    r2 = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Retry after the race."}, headers=_auth(lab.pi_a_id),
+    )
+    assert r2.status_code == 302
+    db_session.expire_all()
+    channel_count_after_retry = await db_session.scalar(
+        select(func.count(AgentChannel.id)).where(AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE)
+    )
+    assert channel_count_after_retry == 1, (
+        "confirms the residual gap: with no surviving review row, the retry's `:695` "
+        "guard cannot block it, so it silently re-runs migrate_public_thread_to_private "
+        "-- this new AgentChannel row is the retry's own channel, minted on top of the "
+        "one Slack call already made for the first (lost) attempt. See this test's "
+        "docstring and the fake-session tests for the production case, where a truly "
+        "concurrent writer's row survives and a retry IS correctly blocked."
+    )
+
+
 async def test_reopen_is_idempotent_under_a_replayed_post(
     client, db_session, lab, proposal, slack_off,
 ):

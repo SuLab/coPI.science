@@ -27,6 +27,13 @@ class _FakeResult:
     def scalar_one_or_none(self):
         return self._value
 
+    def scalar_one(self):
+        # I2/I3 (#24 V5, V5-2): both reopen_proposal's and review_proposal's
+        # post-rollback re-selects use scalar_one() -- a winner row (or the
+        # reloaded ThreadDecision) must exist once IntegrityError has fired.
+        assert self._value is not None, "scalar_one() called with no row queued"
+        return self._value
+
     def scalars(self):
         return self
 
@@ -204,3 +211,141 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
         "the except arm's own retire-then-commit for the race loser's notification "
         "never ran"
     )
+
+
+def _reopen_fixture(pi_id, td_id, agent_registry_id):
+    agent = types.SimpleNamespace(
+        id=agent_registry_id, agent_id="alpha", user_id=pi_id, status="active",
+    )
+    td = types.SimpleNamespace(
+        id=td_id, agent_a="alpha", agent_b="beta", thread_id="1700000000.000100",
+        channel="degrader-chem", origin_visibility="public", refined_in_channel=None,
+    )
+    current_user = types.SimpleNamespace(id=pi_id, name="PI Alpha")
+    return agent, td, current_user
+
+
+async def test_reopen_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race(monkeypatch):
+    """I2 (#24 V5, audit-issue-24.md): `reopen_proposal`'s write block (`db.add(review)`
+    through `commit()`) had NO `except IntegrityError` at all -- the exact guard Task
+    24.2 added to review_proposal, left off its sibling three hundred lines below. With
+    no existing review, the reopen takes the INSERT branch after
+    `migrate_public_thread_to_private` has already created the private Slack channel
+    and (flush-only) set `refined_in_channel`. If a concurrent writer -- the engine's
+    implicit marker here -- wins the race on `uq_proposal_reviews_decision_agent`, the
+    except arm must re-select, find the winning row, upgrade it in place (the same D6
+    upgrade the `elif existing_row.rating == -1` branch performs), re-bind
+    `refined_in_channel` on a freshly reloaded `ThreadDecision`, and redirect --
+    NOT re-run the migration and NOT 500.
+
+    A real-Postgres integration test cannot make a genuinely concurrent writer's row
+    survive `reopen_proposal`'s own `rollback()` in this repo's single-savepoint test
+    harness (empirically confirmed in
+    `tests/integration/test_proposal_review.py::
+    test_reopen_write_race_does_not_500_and_recovers_refined_in_channel`, which covers
+    the real-Postgres half of I2: the guard actually catches a real IntegrityError and
+    `refined_in_channel` survives). This fake-session test is the other half: it proves
+    the upgrade-in-place recovery LOGIC itself is correct once a winning row is found --
+    mirroring `test_review_proposal_upgrades_the_engines_implicit_marker_after_a_lost_
+    race` above, and reusing the same `_ReviewRaceSession` harness (the call-then-raise
+    shape is identical; only the SELECT sequence differs).
+
+    Control: `test_reopen_proposal_leaves_a_real_winner_alone_after_a_lost_race` below
+    pins that a REAL winning review (rating != -1) is left untouched instead.
+    """
+    pi_id = uuid.uuid4()
+    td_id = uuid.uuid4()
+    agent_registry_id = uuid.uuid4()
+    agent, td, current_user = _reopen_fixture(pi_id, td_id, agent_registry_id)
+
+    async def _fake_migrate(db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text):
+        thread_decision.refined_in_channel = "fake-priv-channel"
+        return types.SimpleNamespace(channel_name="fake-priv-channel")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _fake_migrate,
+    )
+
+    implicit_winner = types.SimpleNamespace(
+        id=uuid.uuid4(), rating=-1, comment=None, submitted_via="engine",
+        user_id=None, delegate_user_id=None, reviewed_by_user_id=None, reviewed_at=None,
+    )
+
+    db = _ReviewRaceSession(
+        # 1 agent, 2 td, 3 pre-migration :695 guard (None -> proceed), 4 post-migration
+        # :806 guard (None -> INSERT branch chosen), raise at #5 (record_engagement's
+        # autoflush). #6/#7 are the except arm's own re-selects: ThreadDecision, then
+        # the winning ProposalReview.
+        select_results=[agent, td, None, None, td, implicit_winner],
+        raise_at=5,
+        raise_exc=IntegrityError(
+            "INSERT INTO proposal_reviews ...", {}, Exception("dup")
+        ),
+    )
+
+    resp = await agent_page.reopen_proposal(
+        agent_id="alpha", thread_decision_id=td_id, request=_FakeRequest(),
+        guidance="Actually, let's narrow the scope first.", db=db,
+        current_user=current_user,
+    )
+
+    assert resp.status_code == 302, "the winning implicit marker must be upgraded, not rejected"
+    assert db.rolled_back is True
+    assert implicit_winner.rating == 0
+    assert implicit_winner.comment == "[Reopened] Actually, let's narrow the scope first."
+    assert implicit_winner.submitted_via == "web"
+    assert implicit_winner.reviewed_by_user_id == pi_id
+    assert implicit_winner.delegate_user_id is None, "the PI themself reopened (is_owner=True)"
+    assert implicit_winner.reviewed_at is not None, (
+        "reviewed_at must be bumped to when the explicit action happened"
+    )
+    assert td.refined_in_channel == "fake-priv-channel", (
+        "refined_in_channel must survive the recovery instead of being silently lost, "
+        "orphaning the Slack channel already created for real"
+    )
+    assert db.commits == 1, "exactly one recovery commit"
+
+
+async def test_reopen_proposal_leaves_a_real_winner_alone_after_a_lost_race(monkeypatch):
+    """I2 (#24 V5) sibling case: the concurrent winner is a REAL decision (a delegate's
+    /review, or an e-mail reply), not the engine's implicit marker. The except arm must
+    leave it untouched -- the existing WARNING path, same as the `elif` -> `else`
+    branch structure in the happy-path guard above -- while still recovering
+    `refined_in_channel` and still redirecting rather than 500ing.
+    """
+    pi_id = uuid.uuid4()
+    td_id = uuid.uuid4()
+    agent_registry_id = uuid.uuid4()
+    agent, td, current_user = _reopen_fixture(pi_id, td_id, agent_registry_id)
+
+    async def _fake_migrate(db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text):
+        thread_decision.refined_in_channel = "fake-priv-channel"
+        return types.SimpleNamespace(channel_name="fake-priv-channel")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _fake_migrate,
+    )
+
+    real_winner = types.SimpleNamespace(rating=3)
+
+    db = _ReviewRaceSession(
+        select_results=[agent, td, None, None, td, real_winner],
+        raise_at=5,
+        raise_exc=IntegrityError(
+            "INSERT INTO proposal_reviews ...", {}, Exception("dup")
+        ),
+    )
+
+    resp = await agent_page.reopen_proposal(
+        agent_id="alpha", thread_decision_id=td_id, request=_FakeRequest(),
+        guidance="Actually, let's narrow the scope first.", db=db,
+        current_user=current_user,
+    )
+
+    assert resp.status_code == 302, "a real winning review must still redirect, not 500"
+    assert db.rolled_back is True
+    assert real_winner.rating == 3, "a real winning review must be left alone, not overwritten"
+    assert td.refined_in_channel == "fake-priv-channel", (
+        "refined_in_channel must survive the recovery instead of being silently lost"
+    )
+    assert db.commits == 1, "exactly one recovery commit"
