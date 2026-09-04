@@ -3,6 +3,8 @@
 # Local CI gate. Run manually, or automatically before every push once you have
 # installed the hook (scripts/install-hooks.sh). There is NO server-side CI and no
 # GitHub-side hooks by design — this script is the whole gate, and it runs on push.
+# This is a deliberate stance, not an oversight — revisit only if the team decides it
+# wants a redundant/remote runner (see issue #27 I1).
 #
 # Steps:
 #   1. Alembic sanity: exactly one head, no duplicate revision ids. Cheap, offline,
@@ -19,7 +21,9 @@
 #      committed lock (pins only — pip-compile's own header would never match
 #      otherwise), so a pyproject.toml edit can't silently drift from what
 #      actually gets installed (#27 I4). Set LOCKCHECK=none to skip.
-#   6. Full pytest run — unit + integration + characterization + contract — with
+#   6. mypy lint of src/ against a CEILING (MYPY_MAX), same ratchet shape as the ruff
+#      ceiling above (#27 I1).
+#   7. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
 #
@@ -61,6 +65,15 @@ COV_MIN="${COV_MIN:-60}"
 # moves up to meet the code is not a gate, it is a logbook.
 SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 
+# Ceiling on mypy findings (`: error:` lines) in src/, same ratchet shape as
+# SRC_LINT_MAX above: lower it as debt is paid, never raise it to force a push
+# through (#27 I1). Measured 2026-09-04 with the exact command the ratchet below
+# runs (`mypy src --ignore-missing-imports`, counting `: error:` lines): 143,
+# against 27,618 LOC of largely un-annotated FastAPI/SQLAlchemy code — most of the
+# debt is Optional/`| None` narrowing (SQLAlchemy relationship attributes, dict
+# `.get()` results) rather than missing annotations outright.
+MYPY_MAX="${MYPY_MAX:-143}"
+
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
 # published on 127.0.0.1 only. MIGRATION_FLOOR is how far down the round trip goes;
 # lowering it widens the round trip, which is always safe on a throwaway database.
@@ -98,6 +111,12 @@ if [ ! -x "$VENV_PY" ]; then
   echo "ERROR: test venv python not found at $VENV_PY" >&2
   echo "Create it with:" >&2
   echo "  uv venv .venv-test && uv pip install --python .venv-test/bin/python -e '.[dev]'" >&2
+  exit 1
+fi
+
+if ! "$VENV_PY" -c 'import mypy' >/dev/null 2>&1; then
+  echo "ERROR: mypy not installed in ${VENV_PY}'s environment (#27 I1)." >&2
+  echo "Install it with: uv pip install --python $VENV_PY mypy" >&2
   exit 1
 fi
 
@@ -360,6 +379,30 @@ else
     echo "    requirements.lock is current (resolved with $LOCK_PYSPEC)"
   fi
 fi
+
+echo "==> mypy (src/ ratchet, ceiling ${MYPY_MAX})"
+# Same shape as the ruff src/ ratchet above: a ceiling, not zero — src/ is largely
+# un-annotated FastAPI/SQLAlchemy code, so demanding it all be fixed before the next
+# push would just get this stage deleted. rc>1 means mypy itself failed to run (a
+# malformed config, an internal error), which is a gate failure, never "zero
+# findings" — mirrors the ruff step's E902 handling.
+set +e
+mypy_out="$("$VENV_PY" -m mypy src --ignore-missing-imports 2>&1)"
+mypy_rc=$?
+set -e
+if [ "$mypy_rc" -gt 1 ]; then
+  echo "ERROR: mypy failed to run over src/ (exit ${mypy_rc}):" >&2
+  printf '%s\n' "$mypy_out" >&2
+  exit 1
+fi
+mypy_findings="$(printf '%s' "$mypy_out" | grep -c ': error:' || true)"
+if [ "$mypy_findings" -gt "$MYPY_MAX" ]; then
+  echo "ERROR: mypy findings in src/ rose to ${mypy_findings}; the ceiling is ${MYPY_MAX}." >&2
+  echo "Fix what you added. Do not raise MYPY_MAX in scripts/ci.sh to make this pass." >&2
+  printf '%s\n' "$mypy_out" >&2
+  exit 1
+fi
+echo "    ${mypy_findings} findings (ceiling ${MYPY_MAX})"
 
 echo "==> pytest (full suite + branch coverage, fail-under=${COV_MIN}%)"
 "$VENV_PY" -m pytest tests/ \
