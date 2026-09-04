@@ -384,13 +384,14 @@ class SimulationEngine:
         # _finalize_private_proposal / _check_private_channel_outcome.
         self._finalized_private_channels: set[str] = set()
 
-        # Last-seen mtime of each agent's on-disk profile files (private +
-        # public), keyed by agent_id. The web editor runs in a separate process
-        # and writes profiles/{private,public}/{id}.md on a shared volume; this
-        # process caches profile content per Agent, so a per-turn mtime check
-        # tells us when an external edit happened and the cache must be
-        # invalidated. See _sync_profiles_from_disk.
-        self._profile_mtimes: dict[str, float] = {}
+        # Last-seen (exists, mtime) signature of each agent's on-disk profile
+        # files (private + public), keyed by agent_id. The web editor runs in
+        # a separate process and writes profiles/{private,public}/{id}.md on a
+        # shared volume; this process caches profile content per Agent, so a
+        # per-turn signature check tells us when an external edit — including
+        # a deletion — happened and the cache must be invalidated. See
+        # _sync_profiles_from_disk.
+        self._profile_mtimes: dict[str, tuple[tuple[str, bool, float | None], ...]] = {}
 
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
@@ -5270,27 +5271,34 @@ class SimulationEngine:
         Slack-DM path via Agent.update_private_profile). Without this check, a
         web edit would not reach the running simulation until a restart.
 
-        Detection is by file mtime: cheap (two stat() calls per agent, no DB
-        round-trip) and tied to exactly what the agent reads. Re-reading the
-        same content after an in-process Slack-DM edit is harmless.
+        Detection is by a per-file (exists, mtime) signature rather than a
+        scalar mtime maximum: a max can only go up, so it cannot represent a
+        deletion — clearing profiles/private/{id}.md (the web UI's
+        clear-after-write behaviour) would otherwise never register as a
+        change and the agent would keep serving its cached private
+        instructions until restart. Comparing the whole (exists, mtime) pair
+        per file, cheap (two stat() calls per agent, no DB round-trip) and
+        tied to exactly what the agent reads, catches deletions too.
         """
         for agent in self.agents.values():
-            mtime = 0.0
+            signature: list[tuple[str, bool, float | None]] = []
             for sub in ("private", "public"):
                 path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
                 try:
-                    mtime = max(mtime, path.stat().st_mtime)
+                    mtime: float | None = path.stat().st_mtime
                 except OSError:
-                    continue  # file may not exist yet — agent falls back to default
+                    mtime = None  # file may not exist yet (or a race) — treat as absent
+                signature.append((sub, mtime is not None, mtime))
 
             prev = self._profile_mtimes.get(agent.agent_id)
+            new_signature = tuple(signature)
             if prev is None:
                 # First observation — record the baseline without reloading.
-                self._profile_mtimes[agent.agent_id] = mtime
+                self._profile_mtimes[agent.agent_id] = new_signature
                 continue
-            if mtime > prev:
+            if new_signature != prev:
                 agent.reload_profiles()
-                self._profile_mtimes[agent.agent_id] = mtime
+                self._profile_mtimes[agent.agent_id] = new_signature
                 logger.info(
                     "[%s] Reloaded profiles from disk (external edit detected)",
                     agent.agent_id,

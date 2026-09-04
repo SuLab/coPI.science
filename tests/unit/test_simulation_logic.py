@@ -261,7 +261,12 @@ The actual message.
 # ---------------------------------------------------------------
 
 class TestSyncProfilesFromDisk:
-    """Per-turn reload of profiles edited from the web app (separate process)."""
+    """Per-turn reload of profiles edited from the web app (separate process).
+
+    _profile_mtimes stores a per-agent (sub, exists, mtime) signature rather
+    than a scalar mtime max — a max can only stay the same or grow, so it
+    cannot represent a deletion (#22 COR-23 / #29).
+    """
 
     @pytest.fixture
     def setup(self, tmp_path, monkeypatch):
@@ -308,12 +313,12 @@ class TestSyncProfilesFromDisk:
         # Simulate the web app rewriting the file. Bump mtime explicitly so the
         # test is robust to sub-second filesystem timestamp resolution.
         priv.write_text("Switch focus to immunology.")
-        future = engine._profile_mtimes["su"] + 10
+        future = priv.stat().st_mtime + 10
         os.utime(priv, (future, future))
 
         engine._sync_profiles_from_disk()
         assert calls == [1]                                 # reloaded exactly once
-        assert engine._profile_mtimes["su"] == future       # watermark advanced
+        assert engine._profile_mtimes["su"][0] == ("private", True, future)  # signature advanced
 
         # A subsequent pass with no further change must not reload again.
         engine._sync_profiles_from_disk()
@@ -325,6 +330,63 @@ class TestSyncProfilesFromDisk:
         engine._sync_profiles_from_disk()  # must not raise
         engine._sync_profiles_from_disk()
         assert calls == []
+
+    def test_created_private_file_triggers_reload(self, setup):
+        """Mirror of the deletion case below: a file appearing for the first
+        time after a baseline of "absent" is also a signature change."""
+        engine, agent, priv, calls = setup
+        priv.unlink()  # start from a baseline where the private file is absent
+        engine._sync_profiles_from_disk()  # baseline: private absent, public absent
+        assert calls == []
+
+        priv.write_text("Focus on aging.")
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
+
+        # A subsequent pass with no further change must not reload again.
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
+
+    def test_deleted_private_file_triggers_reload(self, setup):
+        """Task H3's clear-after-write behaviour (commit a080900) unlinks
+        profiles/private/{id}.md when a PI blanks their private instructions.
+        The pre-fix scalar-mtime-max algorithm missed this: deleting the file
+        drops the observed max back to the public file's mtime (or 0.0 if
+        that's absent too), which is never greater than the previously
+        recorded max, so `mtime > prev` stayed False and reload_profiles()
+        was never called — the live agent kept serving the cached private
+        instructions until restart (#22 COR-23, #29)."""
+        engine, agent, priv, calls = setup
+        engine._sync_profiles_from_disk()  # baseline: private present
+
+        priv.unlink()  # the web UI's clear-after-write behaviour
+
+        engine._sync_profiles_from_disk()
+        assert calls == [1]                 # reloaded despite mtime "decreasing" to absent
+
+        # A subsequent pass with no further change must not reload again.
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
+
+    def test_public_mtime_bump_still_triggers_reload(self, setup, tmp_path):
+        """Unchanged behaviour: an edit to the public profile alone (no
+        change to private) still reloads."""
+        import os
+        engine, agent, _priv, calls = setup
+        pub = tmp_path / "public" / "su.md"
+        pub.write_text("Public profile body.")
+        engine._sync_profiles_from_disk()  # baseline: private + public present
+
+        pub.write_text("Updated public profile body.")
+        future = pub.stat().st_mtime + 10
+        os.utime(pub, (future, future))
+
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
+
+        # A subsequent pass with no further change must not reload again.
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
 
 
 # ---------------------------------------------------------------
