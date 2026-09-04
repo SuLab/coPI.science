@@ -3,6 +3,8 @@ Postgres — get_session_factory is monkeypatched on src.main, mirroring the
 badge_factory override tests/conftest.py's `client` fixture already does
 (tests/conftest.py:120-121: monkeypatch.setattr("src.main.get_session_factory", ...))."""
 
+import asyncio
+
 import httpx
 from httpx import ASGITransport
 
@@ -43,4 +45,30 @@ async def test_health_ok_when_db_probe_succeeds(monkeypatch):
 
 async def test_health_503_when_db_probe_fails(monkeypatch):
     r = await _get_health(monkeypatch, fail=True)
+    assert r.status_code == 503
+
+
+class _StalledSession:
+    """Async-context-manager stand-in whose `execute` never returns — mimics a
+    stalled Postgres, where the TCP connection is open but no query response
+    ever arrives (#27 I2 review: an unbounded probe would pile orphaned
+    coroutines/connections against the pool)."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def execute(self, *args, **kwargs):
+        await asyncio.Event().wait()  # never set: hangs forever unless bounded
+
+
+async def test_health_503_when_db_probe_times_out(monkeypatch):
+    monkeypatch.setattr("src.main.get_session_factory", lambda: (lambda: _StalledSession()))
+    monkeypatch.setattr("src.main.HEALTH_PROBE_TIMEOUT_SECONDS", 0.05)
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/api/health")
     assert r.status_code == 503

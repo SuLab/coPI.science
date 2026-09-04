@@ -1,5 +1,6 @@
 """FastAPI application factory for CoPI/LabAgent."""
 
+import asyncio
 import logging
 import uuid
 
@@ -20,6 +21,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Bounds the /api/health DB probe (#27 I2 review): without this, a stalled
+# Postgres (TCP open, no query response) piles orphaned probe coroutines and
+# connections against the pool instead of failing fast.
+HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 class AgentBadgeMiddleware(BaseHTTPMiddleware):
@@ -161,7 +167,9 @@ def create_app() -> FastAPI:
         try:
             session_factory = get_session_factory()
             async with session_factory() as db:
-                await db.execute(text("SELECT 1"))
+                await asyncio.wait_for(
+                    db.execute(text("SELECT 1")), timeout=HEALTH_PROBE_TIMEOUT_SECONDS
+                )
         except Exception as exc:
             logger.warning("Health check DB probe failed: %s", exc)
             raise HTTPException(status_code=503, detail="database unavailable") from exc
