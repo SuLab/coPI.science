@@ -355,8 +355,9 @@ async def test_review_confirmation_failure_does_not_roll_back_the_already_commit
 # --- 2c. A failed instruction post notifies the PI (COR-32 fix round) ----------
 
 
+@pytest.mark.parametrize("kind", ["plain_exception", "db_flavored"])
 async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_notification(
-    db_session, monkeypatch, sent_emails,
+    db_session, monkeypatch, sent_emails, kind,
 ):
     """COR-32 fix round, Critical #1: migrate_public_thread_to_private creates a real
     Slack channel (and DB rows) before most of its work — it is NOT idempotent. Letting
@@ -368,18 +369,53 @@ async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_noti
     out. Forces the failure on the DEFAULT-config path (enable_private_refinement=True,
     td.origin_visibility='public', both factory defaults) — reachable in production
     today, not just the legacy flag-off path.
+
+    Parametrised (fix round B, audit #21 C1) over TWO failure shapes:
+    - "plain_exception": the original RuntimeError, which leaves the session clean.
+    - "db_flavored": a genuine flush-time IntegrityError (a duplicate reply_token,
+      mirroring migrate_public_thread_to_private's own db.flush() in
+      private_channels.py failing mid-write), which poisons the session — every
+      subsequent attribute read, even of an already-loaded value, raises
+      PendingRollbackError until the session is rolled back. This sub-case was
+      previously untested; pre-fix it escaped _handle_instruction's own
+      `logger.error(..., td.thread_id, ...)` as a raw PendingRollbackError before the
+      PI could be notified, minting up to MAX_S3_PROCESS_ATTEMPTS orphan channels.
+
+    The fixture data is committed (not just flushed) before the failure is forced so
+    that the DB-flavored sub-case's `db.rollback()` — which rolls back to the most
+    recent savepoint under this session's `join_transaction_mode="create_savepoint"`
+    — discards only the failing migration's own writes, not `_world`'s, matching how
+    production reaches this code (the notification row was committed by an entirely
+    separate, earlier request).
     """
-    token = "instrfail" + "e" * 40
+    token = "instrfail" + kind[:1] + "e" * 30
     recipient, agent, td, notification = await _world(
-        db_session, recipient_email="pi.instr@scripps.edu", token=token
+        db_session, recipient_email=f"pi.instr.{kind}@scripps.edu", token=token
     )
+    await db_session.commit()
     _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
 
     calls: list[bool] = []
 
-    async def _boom(*a, **k):
-        calls.append(True)
-        raise RuntimeError("Slack outage")
+    if kind == "plain_exception":
+
+        async def _boom(*a, **k):
+            calls.append(True)
+            raise RuntimeError("Slack outage")
+    else:
+
+        async def _boom(db, **k):
+            calls.append(True)
+            dupe = EmailNotification(
+                user_id=recipient.id,
+                thread_decision_id=td.id,
+                agent_registry_id=agent.id,
+                reply_token=notification.reply_token,  # UNIQUE collision -> IntegrityError
+                category="proposal_review",
+                status="sent",
+            )
+            db.add(dupe)
+            await db.flush()
 
     # migrate_public_thread_to_private is imported with a LOCAL `from ... import` inside
     # _handle_instruction, so it is looked up fresh at call time — patching the source
@@ -390,7 +426,7 @@ async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_noti
     )
 
     await process_inbound_email(
-        _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+        _raw_reply(token, f"pi.instr.{kind}@scripps.edu", "please focus on X"), db_session,
     )
 
     assert calls == [True]
@@ -405,7 +441,7 @@ async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_noti
     # process_inbound_email's own "already responded" early return and never reaches
     # _handle_instruction (let alone the migration) again.
     await process_inbound_email(
-        _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+        _raw_reply(token, f"pi.instr.{kind}@scripps.edu", "please focus on X"), db_session,
     )
     assert calls == [True], "a second reply on an already-retired notification re-ran the migration"
     assert len(sent_emails) == 1, "a second reply sent a second failure email"
@@ -495,6 +531,12 @@ async def test_a_commit_failure_after_retiring_the_notification_keeps_the_cap_se
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.instr5@scripps.edu", token=token
     )
+    # C1 (fix round B): the migration-failure handler now unconditionally rolls back
+    # (a DB-flavored failure needs it; a plain one is a no-op rollback). Commit the
+    # fixture first so that rollback only discards the failing migration's own writes,
+    # not `_world`'s — matching production, where the notification row was committed
+    # by an entirely separate, earlier request.
+    await db_session.commit()
     _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
 
     async def _boom_migrate(*a, **k):

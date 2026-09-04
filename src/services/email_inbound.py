@@ -411,6 +411,18 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             instruction=instruction,
             db=db,
         )
+        # C1 (COR-32 fix round B): a terminal migration failure inside
+        # _handle_instruction rolls back this session, which expires every
+        # attribute of user/notification/td (worker/main.py:198-206's own
+        # rollback -> refresh pattern) — a bare attribute read below
+        # (record_engagement/mark_notification_responded both need plain
+        # column values) would raise MissingGreenlet on this AsyncSession.
+        # This call site cannot tell from `reopened` alone whether that
+        # rollback happened, so refresh unconditionally; it is a cheap no-op
+        # reload the rest of the time.
+        await db.refresh(user)
+        await db.refresh(notification)
+        await db.refresh(td)
         await record_engagement(user.id, db)
         # Item 2/3 (COR-32 fix round A tidy): `resolved` only flips True once the commit
         # below — the one that actually retires the notification — has succeeded. The
@@ -747,9 +759,17 @@ class InstructionApplyFailed(Exception):
 
 
 def _notify_instruction_failure(
-    user: User, agent: AgentRegistry, notification: EmailNotification, *, will_retry: bool
+    pi_email: str, bot_name: str, notification_id, *, will_retry: bool
 ) -> None:
     """PI-facing explanation for a _handle_instruction failure (COR-32).
+
+    Takes plain values, not ORM objects (C1, COR-32 fix round B): the
+    migration-failure call site must invoke this AFTER a `db.rollback()` that
+    expires every attribute of `user`/`agent`/`notification` — an ORM-object
+    signature would need exactly those now-expired attributes, and a bare
+    (unawaited) attribute read on an expired AsyncSession-bound instance
+    raises MissingGreenlet rather than transparently reloading. Every call
+    site passes values read before any such risk, so this stays uniform.
 
     Capped at one email per notification — but (Minor 3) only once a send actually
     succeeds: a failed send (SES throttled, allowlist suppression, ...) must not burn
@@ -759,7 +779,7 @@ def _notify_instruction_failure(
     the notification is retired right after this call, so there is no second chance to
     tell the PI, and the dashboard is the only way forward.
     """
-    key = str(notification.id)
+    key = str(notification_id)
     if _INSTRUCTION_FAILURE_EMAILS_SENT.get(key):
         return
     if will_retry:
@@ -774,8 +794,8 @@ def _notify_instruction_failure(
             "guidance there."
         )
     sent = _send_simple_email(
-        user.email,
-        f"Couldn't apply your {agent.bot_name} instruction",
+        pi_email,
+        f"Couldn't apply your {bot_name} instruction",
         f"We ran into a problem applying your instruction to this proposal. {outcome_sentence}",
     )
     if sent:
@@ -852,6 +872,17 @@ async def _handle_instruction(
             # Slack — the guidance never lands in the public thread.
             from src.services.private_channels import migrate_public_thread_to_private
 
+            # C1 (COR-32 fix round B): capture into plain locals BEFORE the call. A
+            # DB-flavored failure inside the migration (its own db.flush(), or a
+            # timeout while the transaction is held open across its blocking Slack
+            # calls) poisons the session — reproduced: even a bare read of an
+            # already-loaded ORM attribute then raises PendingRollbackError. These
+            # four values are everything the failure branch below needs, and they
+            # are read now, before any poisoning can happen.
+            thread_id_s, notif_id, pi_email, bot_name = (
+                td.thread_id, notification.id, user.email, agent.bot_name,
+            )
+
             try:
                 result = await migrate_public_thread_to_private(
                     db,
@@ -874,9 +905,24 @@ async def _handle_instruction(
                 # let the caller retire the notification and commit as usual — same
                 # shape as a pre-COR-32 silent failure (at most one orphan channel),
                 # except the PI is now told.
+                #
+                # C1 (fix round B): roll back FIRST, as the very first statement,
+                # before touching td/notification/user/agent at all — a DB-flavored
+                # failure above (e.g. the migration's own db.flush()) leaves this
+                # session needing a rollback, and every attribute read raises
+                # PendingRollbackError until it gets one. Guard the rollback itself:
+                # a rollback failure must not escape and turn this terminal path back
+                # into a retry. From here on use only the plain locals captured
+                # above the inner try — those were read before the poisoning.
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.exception(
+                        "Failed to roll back after migration failure for %s", thread_id_s,
+                    )
                 logger.error(
                     "Failed to migrate proposal %s to a private channel via email "
-                    "reopen: %s", td.thread_id, exc, exc_info=True,
+                    "reopen: %s", thread_id_s, exc, exc_info=True,
                 )
                 # Item 4 (COR-32 fix round A tidy): _notify_instruction_failure's own
                 # send can fault too (SES down, an unexpected exception from
@@ -889,11 +935,11 @@ async def _handle_instruction(
                 # explanation email this one time, but the notification still gets
                 # retired below with no further Slack mutation.
                 try:
-                    _notify_instruction_failure(user, agent, notification, will_retry=False)
+                    _notify_instruction_failure(pi_email, bot_name, notif_id, will_retry=False)
                 except Exception:
                     logger.exception(
                         "Failed to send the terminal-failure notification for "
-                        "proposal %s; returning False (no retry) anyway", td.thread_id,
+                        "proposal %s; returning False (no retry) anyway", thread_id_s,
                     )
                 return False
         elif td.origin_visibility != VISIBILITY_PUBLIC:
@@ -929,7 +975,7 @@ async def _handle_instruction(
                     logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
                     return True
                 logger.error("No simulation run to record email guidance for %s", td.thread_id)
-                _notify_instruction_failure(user, agent, notification, will_retry=True)
+                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"no active simulation run for {td.thread_id}",
                     notification_id=notification.id,
@@ -950,7 +996,7 @@ async def _handle_instruction(
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
-                _notify_instruction_failure(user, agent, notification, will_retry=True)
+                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"no bot token for agent {agent.agent_id}",
                     notification_id=notification.id,
@@ -959,7 +1005,7 @@ async def _handle_instruction(
             channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
-                _notify_instruction_failure(user, agent, notification, will_retry=True)
+                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"channel #{td.channel} not found", notification_id=notification.id
                 )
@@ -979,7 +1025,7 @@ async def _handle_instruction(
         raise  # already handled (emailed the PI) at the specific site above
     except Exception as exc:
         logger.error("Failed to reopen proposal from email: %s", exc, exc_info=True)
-        _notify_instruction_failure(user, agent, notification, will_retry=True)
+        _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
         raise InstructionApplyFailed(
             f"unexpected error reopening {td.thread_id}", notification_id=notification.id
         ) from exc
