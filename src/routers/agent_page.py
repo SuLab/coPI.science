@@ -1292,6 +1292,13 @@ async def save_private_profile(
         db.add(profile)
     stripped = content.strip()
     profile.private_profile_md = stripped or None
+    if not stripped:
+        # A blank save must also clear the model-authored seed (matches
+        # onboarding.py's save_private_profile) — otherwise a leftover seed
+        # from an admin-seeded PI who never completed onboarding is
+        # re-exported to disk by the next profile_pipeline run
+        # (`content = md or seed`), undoing the clear (#22 COR-23, #29).
+        profile.private_profile_seed = None
     await db.commit()
 
     # A blank/whitespace save deletes the exported file rather than writing

@@ -48,7 +48,12 @@ async def pi_and_agent(db_session):
     agent = await factories.make_agent(
         db_session, user=pi, agent_id="tstclear", bot_name="ClearBot", pi_name="Clear PI",
     )
-    await factories.make_profile(db_session, user=pi, private_profile_md=None)
+    await factories.make_profile(
+        db_session,
+        user=pi,
+        private_profile_md=None,
+        private_profile_seed="Model-authored seed from admin onboarding.",
+    )
     await db_session.flush()
     return pi, agent
 
@@ -86,6 +91,11 @@ async def test_saving_then_blanking_the_private_profile_deletes_the_exported_fil
         select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
     )).scalar_one()
     assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None, (
+        "a blank save must also clear private_profile_seed — otherwise the next "
+        "profile_pipeline export (`content = md or seed`) resurrects a "
+        "model-authored seed the PI never approved, undoing the clear"
+    )
 
 
 async def test_blanking_a_private_profile_that_was_never_written_does_not_raise(
