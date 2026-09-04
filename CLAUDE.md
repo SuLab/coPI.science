@@ -98,7 +98,15 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 docker stop -t 30 agent-run
 docker rm agent-run
 
-# 3. Rebuild app + worker (picks up code changes)
+# 3. Rebuild app + worker (picks up code changes). This now also builds the
+#    `migrate` one-shot image and re-runs `alembic upgrade head` first
+#    (idempotent — a deploy with no new revision just finds it's already at
+#    head and exits 0); app/worker wait on migrate's success before they
+#    start. The image runs as UID 10001, so profiles/ and data/ on the host
+#    must already be owned by 10001:10001 (never prompts/ — see
+#    docs/production-migration.md §10.8 and Part R.5 of
+#    docs/plans/2026-09-02-close-issues-20-27.md) or app/worker fail to
+#    write into their bind mounts.
 docker compose $C up -d --build app worker
 
 # 4. Rebuild the agent image too — prod bakes code into the image, so skipping

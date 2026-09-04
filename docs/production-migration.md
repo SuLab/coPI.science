@@ -674,6 +674,89 @@ the same path to verify counts after the migration applies. A fresh, newer times
 that file after `--apply` (as in the commands above) is confirmation postflight had the
 rehearsal's snapshot to compare against.
 
+### 10.5 Host-reboot semantics: a reboot does not re-run `migrate`
+
+`app`, `worker` and `grantbot` are `restart: unless-stopped` in `docker-compose.prod.yml`,
+so a host reboot brings the Docker daemon back up and it restarts each of those containers
+individually. `migrate` is `restart: "no"` — it is a one-shot container that already ran to
+completion (`Exited (0)`) before the reboot, and the daemon does not restart exited
+one-shots, so a reboot never re-runs `alembic upgrade head`. This is the expected, safe
+behaviour: the schema was already at head before the reboot, so there is nothing for
+`migrate` to apply, and app/worker/grantbot come back on the same image and the same schema
+they were running before. It does mean a reboot is not a substitute for `docker compose $C
+up -d --build app worker` after a real code-plus-migration deploy — if you deployed new code
+with a new revision and the host rebooted before anyone ran `up` again, the reboot restarts
+the OLD containers (pre-deploy image), not the new ones; `migrate` only runs as part of an
+explicit `up`, never as part of a restart.
+
+### 10.6 A non-zero `migrate` aborts the deploy, not the running services
+
+`app`, `worker` and `grantbot` each declare `depends_on: migrate: condition:
+service_completed_successfully`. If `migrate` exits non-zero — a bad revision file, an
+unresolved lock, a schema conflict the deploy introduced — `docker compose up` does not
+start or recreate any of the three: whatever was already running (the previous deploy's
+containers, on the previous image and the previous schema) keeps serving traffic. There is
+no partial-start window and no window where the new, unmigrated code is live. Fix the
+underlying schema problem first (correct or roll back the bad revision file, or apply the
+fix by hand with `docker compose $C run --rm --no-deps migrate python -m alembic ...`),
+confirm `docker compose $C run --rm --no-deps -T migrate python -m alembic current` prints
+`head`, and only then bring the new code up while bypassing the dependency gate:
+
+```bash
+docker compose $C up -d --no-deps app worker grantbot
+```
+
+`--no-deps` skips the `migrate` dependency check entirely — it does not re-verify the schema
+for you, so only use it once you have independently confirmed the database is at head.
+
+### 10.7 `certbot`/`nginx` OOM detection: `OOMKilled` stays `false`
+
+`certbot`'s and `nginx`'s entrypoints are shell loops (`certbot`: `trap exit TERM; while :;
+do certbot renew --quiet; sleep 12h & wait $!; done`; `nginx`: an `envsubst` + periodic
+`nginx -s reload` loop) — PID 1 inside each container is `/bin/sh`, not the process that
+actually does the work. When the kernel OOM-killer takes the child process (a `certbot`
+renewal, or an nginx worker), PID 1 survives and the container keeps reporting
+`Up`/`running`, so `docker inspect <container> -f '{{.State.OOMKilled}}'` stays `false` —
+the container itself was never killed, only a process inside it. Do not rely on `OOMKilled`
+for these two services; check the kernel and the daemon's own event log instead:
+
+```bash
+dmesg | grep -i oom
+docker events --since 1h --filter event=oom
+```
+
+A hit in either output for `certbot` or `nginx` means their `mem_limit` (128m each, per
+`docker-compose.prod.yml`) is being exceeded and the effective process — a renewal, or a
+burst of TLS connections — is silently dying; raise the limit rather than trusting the
+container's own health/restart signal to notice.
+
+### 10.8 UID 10001 precondition: `profiles/` and `data/`, never `prompts/`
+
+The image's runtime user is a fixed UID 10001 (Task 27.8), and `profiles/` and `data/` are
+bind-mounted from the host into every service that writes to them (`app`, `worker`, `agent`,
+`grantbot`). Before recreating any of those services on a host whose bind mounts are not
+already owned by 10001:
+
+```bash
+sudo mkdir -p data
+sudo chown -R 10001:10001 profiles/ data/
+```
+
+Never chown `prompts/` — it is git-tracked (13 files) and read-only at container runtime;
+chowning it to 10001 makes the next `git pull` on the host fail with "unable to unlink old
+'prompts/…'" because the host user (typically `ubuntu`) no longer owns those files. `migrate`
+has no bind mounts and writes nothing, so it needs no chown; `logs/` and `static/` are not
+bind-mounted in prod either. After recreating, confirm the UID actually took:
+
+```bash
+docker compose $C exec app id                                                  # uid=10001(copi) gid=10001(copi)
+docker compose $C exec app sh -c 'touch profiles/public/.w && rm profiles/public/.w'
+```
+
+See Part R.5/R.7 of `docs/plans/2026-09-02-close-issues-20-27.md` for this precondition in
+the context of a full deploy, and `CLAUDE.md`'s "Before restarting" step for the agent-only
+restart path.
+
 ---
 
 ## 11. Quick reference
