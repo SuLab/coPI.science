@@ -127,6 +127,20 @@ class Settings(BaseSettings):
     # explicitly with ALLOW_HTTP_SESSIONS=true.
     allow_http_sessions: bool = False
 
+    # Kill switch for public waitlist signups (POST /waitlist plus the landing
+    # page form). Set WAITLIST_ENABLED=false to pause intake without taking the
+    # landing page down; existing signups and the /admin/waitlist views are
+    # unaffected. Ships ON so deploying this flag cannot silently close intake.
+    #
+    # It has to gate the ENDPOINT, not just the form: /openapi.json is public,
+    # so the route is machine-discoverable with the form hidden. See
+    # src/routers/public.py::waitlist_submit.
+    #
+    # get_settings() is @lru_cache'd and env vars are fixed at container
+    # creation, so flipping this in .env needs `up -d app` (recreate) — a plain
+    # `restart` keeps the old value.
+    waitlist_enabled: bool = True
+
     # Slack app-configuration token (xoxe-...) used to create bot apps via the
     # Manifest API during provisioning. These seed the first rotation; the
     # rotated pair is persisted in the AppSetting KV table (Slack rotates the

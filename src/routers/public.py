@@ -20,6 +20,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.database import get_db
 from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
 from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
@@ -472,7 +473,11 @@ async def landing(request: Request):
     """Public landing page. Logged-in users redirect to their profile."""
     if request.session.get("user_id"):
         return RedirectResponse(url="/profile", status_code=302)
-    return templates.TemplateResponse(request, "landing.html", {"request": request})
+    return templates.TemplateResponse(
+        request,
+        "landing.html",
+        {"request": request, "waitlist_enabled": get_settings().waitlist_enabled},
+    )
 
 
 @router.post("/waitlist", response_class=HTMLResponse)
@@ -485,6 +490,20 @@ async def waitlist_submit(
     db: AsyncSession = Depends(get_db),
 ):
     """Accept a waitlist signup. Upserts on email."""
+    # Ahead of the rate limiter, the validation, and every DB touch: while
+    # signups are paused this endpoint must reveal nothing and consume nothing.
+    # Guarding only the INSERT would leave the upsert's UPDATE branch open, so
+    # anyone could still rewrite an existing signup's name/institution/note.
+    # The template drops the form too, so the 403 body cannot re-offer a form
+    # that has nowhere to post. See Settings.waitlist_enabled.
+    if not get_settings().waitlist_enabled:
+        return templates.TemplateResponse(
+            request,
+            "landing.html",
+            {"request": request, "waitlist_enabled": False},
+            status_code=403,
+        )
+
     if not _waitlist_limiter.allow(client_ip(request)):
         raise HTTPException(status_code=429, detail="too many requests")
 
@@ -495,6 +514,7 @@ async def waitlist_submit(
             "landing.html",
             {
                 "request": request,
+                "waitlist_enabled": True,
                 "waitlist_error": "Please enter a valid email address.",
                 "form_values": {
                     "email": email,
@@ -537,7 +557,7 @@ async def waitlist_submit(
     return templates.TemplateResponse(
         request,
         "landing.html",
-        {"request": request, "waitlist_success": True},
+        {"request": request, "waitlist_enabled": True, "waitlist_success": True},
     )
 
 
