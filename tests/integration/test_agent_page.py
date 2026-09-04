@@ -903,6 +903,26 @@ async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
 
 
+async def test_removing_a_delegate_also_removes_their_slack_id(
+    client, db_session, world, delegated, slack
+):
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    world.agent.delegate_slack_ids = ["U-OTHER", "U-DELEGATE"]
+    await db_session.flush()
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/{delegated.row.id}/remove",
+        headers=_auth(world.pi.id),
+    )
+    assert r.status_code == 302
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == ["U-OTHER"]
+
+
 # ===========================================================================
 # 5. The remaining read/write routes — enough behaviour to make the auth matrix
 #    mean something (an endpoint that 403s everyone would satisfy authorization

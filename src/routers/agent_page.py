@@ -1568,6 +1568,9 @@ async def delegate_connect_slack(
             status_code=302,
         )
 
+    user_email = current_user.email  # captured before the try: a failed guarded
+    agent_row_id = agent.id  # statement expires attributes the except arm reads
+
     error = None
     try:
         from src.services.slack_tokens import get_any_bot_token
@@ -1580,25 +1583,22 @@ async def delegate_connect_slack(
             # None means Slack has no such user (the boundary translates
             # users_not_found), so the "join the workspace first" message is
             # driven by a value rather than by a substring of an exception.
-            sid = await lookup_user_by_email_async(bot_token, current_user.email)
+            sid = await lookup_user_by_email_async(bot_token, user_email)
             if not sid:
                 error = (
-                    f"No Slack account found for {current_user.email}. "
+                    f"No Slack account found for {user_email}. "
                     "Please join the workspace first."
                 )
             else:
-                current_ids = list(agent.delegate_slack_ids or [])
-                if sid not in current_ids:
-                    current_ids.append(sid)
-                    agent.delegate_slack_ids = current_ids
-                    await db.commit()
+                from src.services.delegate_slack_ids import append_delegate_slack_id_stmt
+
+                await db.execute(append_delegate_slack_id_stmt(agent_row_id, sid))
+                await db.commit()
                 return RedirectResponse(
                     url=f"/agent/{agent_id}/dashboard", status_code=302
                 )
     except Exception as exc:
-        logger.warning(
-            "Delegate Slack lookup failed for %s: %s", current_user.email, exc
-        )
+        logger.warning("Delegate Slack lookup failed for %s: %s", user_email, exc)
         error = f"Slack lookup failed: {str(exc)[:100]}"
 
     return RedirectResponse(
@@ -1764,27 +1764,33 @@ async def remove_delegate(
     )
     delegate = result.scalar_one_or_none()
     if delegate:
-        # Remove Slack ID if present
-        if delegate.user.email and agent.delegate_slack_ids:
-            try:
+        delegate_user_id = delegate.user_id  # locals captured BEFORE any guarded
+        delegate_email = delegate.user.email  # db.execute() below
+        agent_slug, agent_row_id = agent.agent_id, agent.id
+        actor_name = current_user.name
+
+        sid = None
+        if delegate_email and agent.delegate_slack_ids:
+            try:  # LOOKUP only — no SQL inside the best-effort try
                 from src.services.slack_tokens import get_any_bot_token
                 from src.services.slack_web import lookup_user_by_email_async
 
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
-                    sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid and sid in current_ids:
-                        current_ids.remove(sid)
-                        agent.delegate_slack_ids = current_ids if current_ids else None
+                    sid = await lookup_user_by_email_async(bot_token, delegate_email)
             except Exception as exc:
                 logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
+
+        if sid:  # OUTSIDE the swallowing try — a failed UPDATE must not be hidden
+            from src.services.delegate_slack_ids import remove_delegate_slack_id_stmt
+
+            await db.execute(remove_delegate_slack_id_stmt(agent_row_id, sid))
 
         await db.delete(delegate)
         await db.commit()
         logger.info(
             "Delegate %s removed from agent %s by %s",
-            delegate.user_id, agent.agent_id, current_user.name,
+            delegate_user_id, agent_slug, actor_name,
         )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

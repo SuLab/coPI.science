@@ -229,33 +229,44 @@ async def _accept_invitation(
     )
     agent = agent_result.scalar_one()
 
+    agent_slug = agent.agent_id  # captured BEFORE any guarded db.execute(): a failed flush
+    agent_row_id = agent.id  # expires every attribute on agent/user (the 21.2/21.13 trap)
+    delegate_user_id = user.id
+    sid = None
     if user.email:
-        try:
+        try:  # LOOKUP only — no SQL inside the best-effort try
             from src.services.slack_tokens import token_for_agent_row
             from src.services.slack_web import lookup_user_by_email_async
 
             bot_token = token_for_agent_row(agent)
             if bot_token:
                 sid = await lookup_user_by_email_async(bot_token, user.email)
-                if sid:
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid not in current_ids:
-                        current_ids.append(sid)
-                        agent.delegate_slack_ids = current_ids
         except Exception as exc:
             # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
             # delegate is useful without a Slack id. But LOG it — a bare `pass`
             # here hid an ImportError for an unknown length of time, and the
             # whole sync was dead code with nothing to show for it.
             logger.warning(
-                "Delegate Slack-ID sync failed for agent %s: %s", agent.agent_id, exc
+                "Delegate Slack-ID sync failed for agent %s: %s", agent_slug, exc
             )
 
     await db.commit()
 
+    if sid:  # own unit of work, AFTER the delegation is durable: a failure here must
+        try:  # neither roll the delegation back nor poison the session
+            from src.services.delegate_slack_ids import append_delegate_slack_id_stmt
+
+            await db.execute(append_delegate_slack_id_stmt(agent_row_id, sid))
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.warning(
+                "Delegate Slack-ID append failed for agent %s: %s", agent_slug, exc
+            )
+
     logger.info(
         "Delegate %s accepted invitation for agent %s",
-        user.id, agent.agent_id,
+        delegate_user_id, agent_slug,
     )
 
-    return RedirectResponse(url=f"/agent/{agent.agent_id}/dashboard", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_slug}/dashboard", status_code=302)
