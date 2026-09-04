@@ -5,12 +5,27 @@ stuck at "running" forever: neither --fresh (inserts a new row) nor resume
 stale row.
 """
 
+import inspect
+
 import pytest
 
+from src.agent import main as _main_module
 from src.agent.main import _reconcile_stale_runs
 from tests import factories
 
 pytestmark = pytest.mark.integration
+
+
+def test_run_simulation_actually_calls_the_reconciler():
+    """#25 I2: measured — restoring _reconcile_stale_runs' body but deleting its call
+    site from _run_simulation leaves the entire suite (190 + 94 tests, everything)
+    green, because nothing exercises _run_simulation's `if not no_db:` block end to
+    end. A fake-session harness for that whole block is out of proportion; a source
+    pin is the honest instrument so a future refactor of this block cannot silently
+    drop the wiring without a single test noticing.
+    """
+    src = inspect.getsource(_main_module._run_simulation)
+    assert "_reconcile_stale_runs(session_factory, simulation_run_id)" in src
 
 
 class _FixtureSessionFactory:
