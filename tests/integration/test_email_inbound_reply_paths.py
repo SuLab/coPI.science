@@ -19,13 +19,15 @@ Two defects observed live during the P2 end-to-end test:
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import src.services.email_inbound as inbound
 from src.config import get_settings
-from src.models import EmailNotification, ProposalReview
+from src.models import AgentChannel, EmailNotification, ProposalReview
 from src.services.email_inbound import process_inbound_email
 from tests import factories
+from tests.fakes import FakeSlackClient
 
 
 def _raw_reply(token: str, from_addr: str, body: str) -> bytes:
@@ -350,6 +352,198 @@ async def test_review_confirmation_failure_does_not_roll_back_the_already_commit
             assert await check_db.scalar(
                 text("SELECT count(*) FROM simulation_runs WHERE id = :r"), {"r": td_run_id}
             ) == 0, "this test committed a simulation_runs row it did not clean up"
+
+
+# --- 2b2. A retried inbound e-mail and the private-channel migration (COR-19.6) --
+
+
+@pytest.fixture
+def slack_migration_stub(monkeypatch):
+    """Force the ONLINE Slack migration path in migrate_public_thread_to_private with
+    FakeSlackClient doubles, mirroring test_proposal_review.py's `slack_on` fixture
+    (kept local rather than imported across test files). Returns the list of fake
+    clients constructed -- `sum(len(c.created_channels) for c in made)` counts every
+    private channel the migration actually asked Slack to create, across as many
+    calls to process_inbound_email as the test drives."""
+    made: list[FakeSlackClient] = []
+
+    async def _on(*args, **kwargs):
+        return True
+
+    async def _token(db, agent_id):
+        return f"xoxb-fake-{agent_id}"
+
+    def _client(agent_id, bot_token):
+        c = FakeSlackClient(agent_id=agent_id, bot_token=bot_token)
+        # Offset each instance's ts counter so a SECOND migration attempt (this
+        # test's whole point) doesn't collide with the first's on
+        # uq_agent_messages_run_ts -- FakeSlackClient always starts a fresh
+        # instance's _ts at the same constant, which two real Slack API calls,
+        # minutes apart, never would.
+        c._ts += len(made) * 100_000
+        made.append(c)
+        return c
+
+    monkeypatch.setattr(
+        "src.services.private_channels._slack_enabled_for_migration", _on
+    )
+    monkeypatch.setattr(
+        "src.services.private_channels._get_or_fail_bot_token", _token
+    )
+    monkeypatch.setattr("src.services.private_channels._make_client", _client)
+    return made
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "COR-19.6 residual, disproved (closure-21.md Blocker 2 / final-C-races-brief.md "
+        "commit 2): commit 34d3c15 made migrate_public_thread_to_private commit its own "
+        "AgentChannel/member/handover rows and thread_decisions.refined_in_channel "
+        "(private_channels.py:625) as soon as its Slack side effects are irreversible, on "
+        "the theory that this alone makes a retried inbound e-mail idempotent. It does "
+        "not: _handle_instruction's ONLY idempotency guard (email_inbound.py:853-865) "
+        "checks for a ProposalReview row -- it never reads refined_in_channel or "
+        "origin_visibility, and origin_visibility is never flipped away from 'public' by "
+        "the migration (agent_page.py:775's own comment: 'no rows have "
+        "origin_visibility=collab_private yet'). If the OUTER process_inbound_email "
+        "commit (email_inbound.py:446) fails AFTER the migration's own commit has already "
+        "landed, the ProposalReview add and the notification-status flip are lost, so a "
+        "genuine retry over the same S3 object finds notification.status still 'sent' and "
+        "no ProposalReview row -- and re-runs migrate_public_thread_to_private end to end, "
+        "asking Slack for a second real private channel and leaving TWO AgentChannel rows "
+        "(reproduced below: two rows, same channel_name, after exactly this sequence)."
+    ),
+)
+async def test_a_retried_inbound_email_does_not_create_a_second_private_channel(
+    engine, monkeypatch, slack_migration_stub,
+):
+    """COR-19.6 / closure-21.md Blocker 2: commit 34d3c15 made
+    migrate_public_thread_to_private commit its own AgentChannel/member/handover rows
+    and thread_decisions.refined_in_channel (private_channels.py:625) as soon as its
+    Slack side effects are irreversible -- the claim under test is that this alone
+    makes a retried inbound e-mail idempotent on the Slack side. Needs a REAL
+    committing session (not the rollback-on-teardown db_session fixture): the whole
+    point is what a fresh session sees after an earlier session's commit fails.
+
+    Pass 1 simulates the exact hazard COR-19.6 describes: the migration's OWN
+    internal commit succeeds for real, but the caller's LATER commit
+    (email_inbound.py:446, which would have persisted the ProposalReview row and
+    flipped notification.status to "responded") is made to fail -- a Postgres hiccup
+    between the two. process_inbound_email must propagate that failure (so
+    poll_inbound_emails' except leaves the S3 object in place for a retry), and the
+    migration's own commit must have survived it.
+
+    Pass 2 drives process_inbound_email again over the "same S3 object" (a fresh
+    session, same raw e-mail/token, no induced failure) -- the actual retry. The claim
+    under test is that this must be a no-op on the Slack side. It is not -- see the
+    xfail reason above. This test therefore documents the disproof rather than a
+    passing regression pin; flip it back to a plain test (drop the xfail) once
+    COR-19.6's residual is actually fixed (e.g. _handle_instruction consulting
+    refined_in_channel/origin_visibility before re-migrating).
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = "retrychannel" + "z" * 38
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
+
+    async with factory() as db:
+        recipient, agent, td, notification = await _world(
+            db, recipient_email="pi.retry@scripps.edu", token=token
+        )
+        await db.commit()
+        notif_id, td_id, agent_id, recipient_id, owner_id, run_id = (
+            notification.id, td.id, agent.id, recipient.id, agent.user_id,
+            td.simulation_run_id,
+        )
+
+    try:
+        # --- Pass 1: the migration's own commit lands; the caller's later commit
+        # (the 2nd db.commit() this session makes) is forced to fail.
+        async with factory() as db1:
+            real_commit = db1.commit
+            calls = {"n": 0}
+
+            async def _commit_second_fails():
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise RuntimeError("db gone away between the migration commit and retire")
+                await real_commit()
+
+            monkeypatch.setattr(db1, "commit", _commit_second_fails)
+
+            with pytest.raises(RuntimeError, match="db gone away"):
+                await process_inbound_email(
+                    _raw_reply(token, "pi.retry@scripps.edu", "please focus on X"), db1,
+                )
+
+        async with factory() as verify1:
+            notif = await verify1.get(EmailNotification, notif_id)
+            assert notif.status == "sent", (
+                "the notification-status update must have been lost along with the "
+                "outer commit that raised"
+            )
+            reviews = (await verify1.execute(
+                select(ProposalReview).where(ProposalReview.thread_decision_id == td_id)
+            )).scalars().all()
+            assert reviews == [], "the review add must have been lost along with the outer commit"
+            channels = (await verify1.execute(
+                select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+            )).scalars().all()
+            assert len(channels) == 1, (
+                "the migration's OWN commit (private_channels.py:625) must survive the "
+                "later, unrelated commit failure"
+            )
+        assert sum(len(c.created_channels) for c in slack_migration_stub) == 1
+
+        # --- Pass 2: a genuine retry over the same S3 object.
+        async with factory() as db2:
+            await process_inbound_email(
+                _raw_reply(token, "pi.retry@scripps.edu", "please focus on X"), db2,
+            )
+            await db2.commit()
+
+        async with factory() as verify2:
+            channels = (await verify2.execute(
+                select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+            )).scalars().all()
+            assert len(channels) == 1, (
+                "a retried inbound e-mail must not mint a second private channel"
+            )
+        assert sum(len(c.created_channels) for c in slack_migration_stub) == 1, (
+            "the retry must not have asked Slack to create a second private channel"
+        )
+    finally:
+        async with factory() as cleanup_db:
+            await cleanup_db.execute(
+                text(
+                    "DELETE FROM private_channel_members WHERE agent_channel_id IN "
+                    "(SELECT id FROM agent_channels WHERE simulation_run_id = :r)"
+                ),
+                {"r": run_id},
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM agent_messages WHERE simulation_run_id = :r"), {"r": run_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM agent_channels WHERE simulation_run_id = :r"), {"r": run_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM proposal_reviews WHERE thread_decision_id = :t"), {"t": td_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM email_notifications WHERE id = :i"), {"i": notif_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM thread_decisions WHERE id = :t"), {"t": td_id}
+            )
+            await cleanup_db.execute(text("DELETE FROM agents WHERE id = :a"), {"a": agent_id})
+            await cleanup_db.execute(
+                text("DELETE FROM users WHERE id IN (:r, :o)"), {"r": recipient_id, "o": owner_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM simulation_runs WHERE id = :r"), {"r": run_id}
+            )
+            await cleanup_db.commit()
 
 
 # --- 2c. A failed instruction post notifies the PI (COR-32 fix round) ----------
