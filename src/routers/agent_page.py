@@ -549,9 +549,13 @@ async def review_proposal(
     # sqlalchemy.exc.MissingGreenlet on this async session (same class of bug as Task
     # 21.2/21.10's rollback fixes; there is no implicit re-fetch on an AsyncSession).
     # Names avoid colliding with the `agent_id` path parameter (the string slug, e.g.
-    # "alpha") already in scope.
+    # "alpha") already in scope. agent_agent_id / pi_user_id (I3, #24 V5-2) are the
+    # same story: the except arm's D6 upgrade needs agent.agent_id / agent.user_id
+    # again after the rollback that would otherwise expire them.
     current_user_id = current_user.id
     agent_registry_id = agent.id
+    agent_agent_id = agent.agent_id
+    pi_user_id = agent.user_id
 
     # Import hoisted ABOVE the try (V4-4b, Task 21.13): the except arm below also
     # needs record_engagement/mark_notification_responded to retire the race LOSER's
@@ -608,10 +612,43 @@ async def review_proposal(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        # Someone else (the PI or another delegate) won the race. Their review is the
-        # decision for this agent, so still retire THIS responder's outstanding
-        # notification (V4-4b) before bouncing them -- the rollback above threw away
-        # the retire that ran inside the try.
+        # I3 (#24 V5-2 / D6): the reachable race here is web-vs-engine, not
+        # web-vs-web -- _persist_implicit_proposal_review (a separate process, its own
+        # session) inserts rating=-1 between this request's guard SELECT (:526-532,
+        # which already treats -1 as not-yet-reviewed) and this request's flush.
+        # Unconditionally raising "Already reviewed" would be false under D6 (a -1 row
+        # is not a decision) and would throw away the PI's rating/comment for nothing.
+        # Re-select the winning row: if it is still the engine's implicit marker,
+        # upgrade it in place -- the same six fields + reviewed_at the happy-path
+        # insert/update above would have set -- and commit (mirrors the vote endpoint,
+        # src/routers/public.py:1083-1099). Only a REAL winning review (rating != -1)
+        # is actually "already reviewed".
+        winner = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision_id,
+                ProposalReview.agent_id == agent_agent_id,
+            )
+        )).scalar_one()
+        if winner.rating == -1:
+            winner.user_id = pi_user_id  # Always the PI
+            winner.delegate_user_id = current_user_id if not is_owner else None
+            winner.reviewed_by_user_id = current_user_id
+            winner.rating = rating
+            winner.comment = comment.strip() or None
+            winner.submitted_via = "web"
+            winner.reviewed_at = datetime.now(UTC)
+            # A real review WAS just filed by this request -- it only lost the INSERT
+            # race to the engine's own marker -- so retire the notification exactly as
+            # the happy path above does for every successful review, insert or upgrade.
+            await record_engagement(current_user_id, db)
+            await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+            await db.commit()
+            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+        # A real review won the race. Their review is the decision for this agent, so
+        # still retire THIS responder's outstanding notification (V4-4b) before
+        # bouncing them -- the rollback above threw away the retire that ran inside
+        # the try.
         await record_engagement(current_user_id, db)
         await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
         await db.commit()

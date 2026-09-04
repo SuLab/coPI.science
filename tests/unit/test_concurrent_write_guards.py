@@ -172,7 +172,14 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
     at src/database.py:39-43 do not disable it) fires the pending INSERT at the FIRST
     of those calls -- so the IntegrityError surfaces from record_engagement's SELECT,
     not from db.commit(). A guard that wraps only commit() (the vote endpoint's
-    pattern) would not catch it; the guard must span from db.add through commit."""
+    pattern) would not catch it; the guard must span from db.add through commit.
+
+    This is the REAL-review control for I3 (#24 V5-2 / D6): the winning row's
+    rating=3 is a genuine decision, so the except arm's post-rollback re-select must
+    still land on the "already reviewed" rejection -- see
+    `test_review_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race`
+    below for the sibling case where the winner is the engine's rating=-1 marker.
+    """
     pi_id = uuid.uuid4()
     td_id = uuid.uuid4()
     agent_registry_id = uuid.uuid4()
@@ -181,9 +188,12 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
     )
     td = types.SimpleNamespace(id=td_id, agent_a="alpha", agent_b="beta")
     current_user = types.SimpleNamespace(id=pi_id, name="PI Alpha")
+    real_winner = types.SimpleNamespace(rating=3)
 
     db = _ReviewRaceSession(
-        select_results=[agent, td, None],
+        # 4th item (real_winner) is I3's post-rollback re-select: a genuine rating=3
+        # decision won the insert race, so the except arm must still reject.
+        select_results=[agent, td, None, real_winner],
         raise_at=4,
         raise_exc=IntegrityError(
             "INSERT INTO proposal_reviews ...", {}, Exception("dup")
@@ -211,6 +221,64 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
         "the except arm's own retire-then-commit for the race loser's notification "
         "never ran"
     )
+
+
+async def test_review_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race():
+    """I3 (#24 V5-2 / D6, audit-issue-24.md): the reachable race is web-vs-engine, not
+    web-vs-web. The guard SELECT (2nd item below) finds no row yet, so this request
+    takes the INSERT branch -- but `_persist_implicit_proposal_review` (a separate
+    process, its own session) wins the race with its rating=-1 marker between that
+    guard and this request's own flush. Pre-fix the except arm unconditionally
+    rejected with 400 "Already reviewed", which is false under the D6 ruling (a -1
+    row is not a decision) and silently discarded the PI's rating/comment. Post-fix
+    the except arm re-selects, finds rating=-1, and upgrades that row in place instead
+    -- the same six fields + reviewed_at the happy-path insert/update would have set
+    -- returning a 302, not a 400.
+
+    Control: `test_review_proposal_survives_a_lost_race_via_autoflush` above pins that
+    a REAL winning review (rating != -1) still produces the 400 rejection.
+    """
+    pi_id = uuid.uuid4()
+    td_id = uuid.uuid4()
+    agent_registry_id = uuid.uuid4()
+    agent = types.SimpleNamespace(
+        id=agent_registry_id, agent_id="alpha", user_id=pi_id, status="active"
+    )
+    td = types.SimpleNamespace(id=td_id, agent_a="alpha", agent_b="beta")
+    current_user = types.SimpleNamespace(id=pi_id, name="PI Alpha")
+    implicit_winner = types.SimpleNamespace(
+        rating=-1, comment=None, submitted_via="engine",
+        user_id=None, delegate_user_id=None, reviewed_by_user_id=None,
+        reviewed_at=None,
+    )
+
+    db = _ReviewRaceSession(
+        # 4th item (implicit_winner) is I3's post-rollback re-select: the engine's
+        # own rating=-1 marker won the insert race.
+        select_results=[agent, td, None, implicit_winner],
+        raise_at=4,
+        raise_exc=IntegrityError(
+            "INSERT INTO proposal_reviews ...", {}, Exception("dup")
+        ),
+    )
+
+    resp = await agent_page.review_proposal(
+        agent_id="alpha", thread_decision_id=td_id, request=_FakeRequest(),
+        rating=3, comment="Looks good.", db=db, current_user=current_user,
+    )
+
+    assert resp.status_code == 302, "the winning implicit marker must be upgraded, not rejected"
+    assert db.rolled_back is True
+    assert implicit_winner.rating == 3
+    assert implicit_winner.comment == "Looks good."
+    assert implicit_winner.submitted_via == "web"
+    assert implicit_winner.user_id == pi_id
+    assert implicit_winner.reviewed_by_user_id == pi_id
+    assert implicit_winner.delegate_user_id is None, "the PI themself reviewed (is_owner=True)"
+    assert implicit_winner.reviewed_at is not None, (
+        "reviewed_at must be bumped to when the explicit action happened"
+    )
+    assert db.commits == 1, "exactly one recovery commit -- the upgrade's own commit"
 
 
 def _reopen_fixture(pi_id, td_id, agent_registry_id):
