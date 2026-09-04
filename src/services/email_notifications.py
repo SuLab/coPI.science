@@ -171,6 +171,7 @@ async def _get_unreviewed_proposals_for_user(
                 select(ProposalReview).where(
                     ProposalReview.thread_decision_id == td.id,
                     ProposalReview.agent_id == agent.agent_id,
+                    ProposalReview.rating != -1,
                 )
             )
             if not review_result.scalar_one_or_none():

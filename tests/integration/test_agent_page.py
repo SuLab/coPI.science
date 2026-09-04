@@ -951,6 +951,32 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     assert "A shared assay platform" in page2.text
 
 
+async def test_dashboard_still_shows_review_form_for_implicit_minus_one_review(
+    client, db_session, world
+):
+    """Issue #20 COR-5/COR-13 residual (Task 20.9c): the engine's implicit
+    `rating=-1` marker (written when a PI merely engages a proposal thread,
+    without giving an explicit verdict) must not move the proposal into the
+    "reviewed" bucket — the PI would then never see the review form again.
+    """
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=-1,
+        )
+    )
+    await db_session.flush()
+
+    page = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
+    assert page.status_code == 200
+    # The unreviewed-bucket banner and the review form's POST target for this
+    # exact proposal must both still be present.
+    assert "paused from initiating new posts" in page.text
+    assert f'/agent/{OWNER_AGENT}/proposals/{world.td.id}/review' in page.text
+
+
 async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     client, db_session, world
 ):

@@ -251,7 +251,8 @@ async def agent_dashboard(
     # Get existing reviews by this agent
     reviewed_ids_result = await db.execute(
         select(ProposalReview.thread_decision_id).where(
-            ProposalReview.agent_id == aid
+            ProposalReview.agent_id == aid,
+            ProposalReview.rating != -1,
         )
     )
     reviewed_ids = {r[0] for r in reviewed_ids_result}

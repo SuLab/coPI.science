@@ -90,7 +90,8 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                             total = total_result.scalar() or 0
                             reviewed_result = await db.execute(
                                 select(func.count(ProposalReview.id)).where(
-                                    ProposalReview.agent_id == aid
+                                    ProposalReview.agent_id == aid,
+                                    ProposalReview.rating != -1,
                                 )
                             )
                             reviewed = reviewed_result.scalar() or 0
