@@ -121,6 +121,17 @@ async def test_feedback_and_status_render_on_all_three_surfaces(
         assert "LOG-ONLY-COMMENT-MARKER" in html
 
 
+async def test_card_explains_the_score_rates_the_proposal(client, db_session, admin):
+    assessment = await _seed_assessment(db_session)
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    html = resp.text
+    assert "rate the proposal" in html.lower()
+    assert "Proposal merit" in html
+
+
 async def test_comment_is_escaped_not_rendered(client, db_session, admin, reviewer):
     assessment = await _seed_assessment(db_session)
     db_session.add(

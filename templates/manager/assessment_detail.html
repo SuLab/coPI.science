@@ -12,6 +12,17 @@
         integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
         crossorigin="anonymous"></script>
 <script src="/static/js/markdown.js"></script>
+<style>
+  .md-content ul { list-style: disc; margin: .5em 0; padding-left: 1.5em; }
+  .md-content ol { list-style: decimal; margin: .5em 0; padding-left: 1.5em; }
+  .md-content li { margin: .15em 0; }
+  .md-content p  { margin: .5em 0; }
+  .md-content p:first-child { margin-top: 0; }
+  .md-content p:last-child  { margin-bottom: 0; }
+  .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
+  .md-content strong { font-weight: 600; }
+  .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
 {% endblock %}
 
 {% block content %}

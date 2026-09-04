@@ -6,6 +6,15 @@
 // so it must never reach innerHTML unsanitized. Load this AFTER marked and
 // DOMPurify. Exposes window.copiRenderMarkdown(md) for ad-hoc use.
 (function () {
+  // Disable GFM strikethrough: the corpus uses single tildes for
+  // "approximately" (e.g. "~30-37%"), which marked otherwise pairs into a
+  // <del> span. No content uses intentional ~~strikethrough~~. Returning
+  // undefined from the del tokenizer makes marked treat every tilde as
+  // literal text. Guarded because marked may be absent (fail-closed path).
+  if (window.marked && typeof marked.use === "function") {
+    marked.use({ tokenizer: { del() { return undefined; } } });
+  }
+
   function renderMarkdown(md) {
     if (!md) return "";
     if (!window.marked || !window.DOMPurify) {

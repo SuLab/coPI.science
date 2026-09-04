@@ -340,7 +340,7 @@
        markdown pass would corrupt) or a future unknown value — falls back to
        the existing plain rendering, which is always safe. #}
     {% if a.prose_format == 'markdown' %}
-    <div class="assessment-rationale text-sm text-gray-700" data-markdown="{{ a.rationale | e }}"></div>
+    <div class="assessment-rationale md-content text-sm text-gray-700" data-markdown="{{ a.rationale | e }}"></div>
     {% else %}
     <p class="assessment-rationale text-sm text-gray-700 whitespace-pre-line">{{ a.rationale }}</p>
     {% endif %}
@@ -355,7 +355,7 @@
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">Recommended next experiment</h3>
     {# Same write-time stamp and same safe fallback as Rationale above. #}
     {% if a.prose_format == 'markdown' %}
-    <div class="assessment-next-experiment text-sm text-gray-700" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
+    <div class="assessment-next-experiment md-content text-sm text-gray-700" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
     {% else %}
     <p class="assessment-next-experiment text-sm text-gray-700 whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
     {% endif %}
@@ -436,6 +436,11 @@
 {% set can_write = not impersonation_banner %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
+    <p class="text-xs text-gray-500 mb-3">
+        Scores here rate the proposal's own scientific and strategic merit
+        (1 = weak, 5 = strong), not how well the bot performed. Use the comment
+        to explain the score and to flag anything the assessment got wrong.
+    </p>
 
     {# --- Status: explicit approved/disapproved branches, quiet "Unreviewed"
        for none-or-cleared, and an alarming terminal else for anything the
@@ -537,6 +542,7 @@
                         <summary class="cursor-pointer text-xs text-indigo-600">Edit</summary>
                         <form method="post" action="/reviews/feedback/{{ review.id }}/edit" class="mt-2 space-y-2">
                             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Proposal merit (1 = weak … 5 = strong)</label>
                             <select name="score" class="border rounded px-1 py-0.5 text-xs">
                                 {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
                             </select>
@@ -569,8 +575,9 @@
         <summary class="cursor-pointer text-xs text-indigo-600">Add feedback</summary>
         <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Proposal merit (1 = weak … 5 = strong)</label>
             <select name="score" required class="border rounded px-1 py-0.5 text-xs">
-                <option value="" disabled selected>Score</option>
+                <option value="" disabled selected>Proposal merit</option>
                 {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
             </select>
             <textarea name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
@@ -668,7 +675,7 @@
                        same as the discussions pages: if /static/js/markdown.js itself fails to load,
                        this div renders empty — accepted for parity with the existing data-markdown
                        surfaces rather than inventing a second rendering path here. #}
-                    <div class="text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
+                    <div class="md-content text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
 
                     {% if admin_view and entry.tool_turns %}
                     <div class="mt-2 pt-2 border-t border-gray-200">

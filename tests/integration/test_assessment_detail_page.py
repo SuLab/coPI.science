@@ -386,6 +386,37 @@ async def test_prose_format_markdown_renders_data_markdown_divs_on_both_surfaces
         )
 
 
+async def test_markdown_cards_carry_the_md_content_class(
+    client, db_session, admin, manager
+):
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        recommendation="advance",
+        rationale=RATIONALE_MARKDOWN_CONTENT,
+        recommended_next_experiment=NEXT_EXPERIMENT_MARKDOWN_CONTENT,
+        prose_format="markdown",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        # md-content must be on the same <div> that carries assessment-rationale
+        rationale_at = html.index('class="assessment-rationale')
+        tag_start = html.rindex("<div", 0, rationale_at)
+        tag_end = html.index(">", rationale_at)
+        assert "md-content" in html[tag_start:tag_end]
+
+
 async def test_pass_recommendation_and_band_render_as_decline_on_the_detail_page(
     client, db_session, admin, manager
 ):
