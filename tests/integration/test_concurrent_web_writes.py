@@ -8,53 +8,10 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.models import AgentRegistry, ProposalReview, SimulationRun, User, WaitlistSignup
+from src.models import AgentRegistry, ProposalReview, SimulationRun, User
 from tests import factories
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.mark.asyncio
-async def test_concurrent_waitlist_signups_do_not_500(engine, monkeypatch):
-    from src.routers.public import waitlist_submit
-
-    monkeypatch.setattr(
-        "src.routers.public._waitlist_limiter",
-        type("_L", (), {"allow": staticmethod(lambda ip: True)})(),
-    )
-    monkeypatch.setattr(
-        "src.routers.public.templates.TemplateResponse",
-        lambda *a, **k: "rendered",
-    )
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    class _Req:  # only what the handler reads
-        headers: dict = {}
-        client = None
-        session: dict = {}
-
-    async def submit():
-        async with factory() as db:
-            try:
-                return await waitlist_submit(
-                    _Req(), email="race@example.org", name="R",
-                    institution="X", note="", db=db,
-                )
-            finally:
-                await db.close()
-
-    r1, r2 = await asyncio.gather(submit(), submit(), return_exceptions=True)
-    for r in (r1, r2):
-        assert not isinstance(r, Exception), f"a racer raised: {r!r}"
-
-    async with factory() as db:
-        count = (await db.execute(
-            select(func.count(WaitlistSignup.id)).where(
-                WaitlistSignup.email == "race@example.org"
-            )
-        )).scalar_one()
-    assert count == 1
 
 
 class _ExistenceCheckGate:

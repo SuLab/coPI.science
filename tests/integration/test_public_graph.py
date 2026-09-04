@@ -82,7 +82,6 @@ GRAPH_ROUTES = [p for p, _ in ROUTE_WINDOWS]
 # classified here fails the suite rather than quietly escaping the privacy sweep.
 ALL_PUBLIC_ROUTES = [
     ("GET", "/"),
-    ("POST", "/waitlist"),
     ("GET", "/access-pending"),
     ("POST", "/access-pending/email"),
     ("GET", "/cabo-graph"),
@@ -526,9 +525,6 @@ async def _seed_every_window(db, run):
 
 async def _exercise(client, method, path, ctx):
     """Drive one public endpoint with a request it will actually accept."""
-    if path == "/waitlist":
-        return await client.post(path, data={"email": "sweep@example.edu"},
-                                 headers=_ip_headers())
     if path == "/access-pending/email":
         return await client.post(path, data={"email": "sweep@example.edu"},
                                  headers=_ip_headers())

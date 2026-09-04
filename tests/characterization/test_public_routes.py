@@ -13,46 +13,12 @@ from tests import factories
 pytestmark = pytest.mark.characterization
 
 
-# --- landing -----------------------------------------------------------------
+# --- root ----------------------------------------------------------------
 
-async def test_landing_anonymous_200_html(client):
-    r = await client.get("/")
-    assert r.status_code == 200
-    assert "text/html" in r.headers["content-type"]
-
-
-# --- waitlist (POST /waitlist) ----------------------------------------------
-
-async def test_waitlist_valid_email_succeeds(client):
-    r = await client.post("/waitlist", data={"email": "pin-valid@example.edu"})
-    assert r.status_code == 200
-    assert "text/html" in r.headers["content-type"]
-
-
-async def test_waitlist_invalid_email_400(client):
-    r = await client.post("/waitlist", data={"email": "not-an-email"})
-    assert r.status_code == 400
-
-
-async def test_waitlist_missing_email_422(client):
-    # email is Form(...) — required; FastAPI rejects the missing field.
-    r = await client.post("/waitlist", data={"name": "No Email"})
-    assert r.status_code == 422
-
-
-async def test_waitlist_oversized_fields_truncated_not_500(client):
-    # SEC-17: name/institution/note are truncated to column limits before the
-    # DB write, so oversized input returns 200 instead of a 500 DataError.
-    r = await client.post(
-        "/waitlist",
-        data={
-            "email": "pin-oversize@example.edu",
-            "name": "N" * 5000,
-            "institution": "I" * 5000,
-            "note": "X" * 50000,
-        },
-    )
-    assert r.status_code == 200
+async def test_root_anonymous_redirects_to_login(client):
+    r = await client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
 
 
 # --- access-pending ----------------------------------------------------------

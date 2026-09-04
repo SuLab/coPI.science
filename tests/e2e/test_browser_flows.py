@@ -77,10 +77,10 @@ def _origin_headers(url: str) -> dict:
 def _the_server_agrees_about_its_own_origin():
     """Fail loudly, once, if the target's BASE_URL is not E2E_BASE_URL.
 
-    One cheap probe: ``POST /waitlist`` with a deliberately invalid address,
-    which the app answers 400 and persists nothing. If the CSRF guard answers
-    403 instead, the two URLs disagree and every form post in this tier is
-    about to fail for a reason that has nothing to do with the app.
+    One cheap probe: ``POST /logout`` with no session, which the app answers
+    302 (to ``/login``) and mutates nothing of substance. If the CSRF guard
+    answers 403 instead, the two URLs disagree and every form post in this
+    tier is about to fail for a reason that has nothing to do with the app.
 
     A hard failure rather than a skip. Silently skipping the whole tier because
     of a config typo is indistinguishable from the tier having no tests, which
@@ -91,8 +91,7 @@ def _the_server_agrees_about_its_own_origin():
         return
     with httpx.Client(base_url=BASE_URL, timeout=30) as c:
         r = c.post(
-            "/waitlist",
-            data={"email": "e2e-origin-probe-not-an-email"},
+            "/logout",
             headers=_origin_headers(BASE_URL),
         )
     if r.status_code == 403 and "Cross-site request refused" in r.text:

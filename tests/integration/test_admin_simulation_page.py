@@ -87,7 +87,7 @@ async def test_post_start_creates_pending_command_with_payload_and_audit_row(
 
     resp = await client.post(
         "/admin/simulation/start",
-        data={"fresh": "true", "max_runtime": "30"},
+        data={"fresh": "true", "max_runtime": "30", "max_proposals": "4"},
         headers=auth_headers(admin.id),
     )
 
@@ -95,7 +95,7 @@ async def test_post_start_creates_pending_command_with_payload_and_audit_row(
     cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
     assert cmd.command == "start"
     assert cmd.status == "pending"
-    assert cmd.payload == {"fresh": True, "max_runtime": 30}
+    assert cmd.payload == {"fresh": True, "max_runtime": 30, "max_proposals": 4}
     assert cmd.requested_by_user_id == admin.id
 
     audit = (await db_session.execute(select(AdminAuditEvent))).scalar_one()
@@ -595,3 +595,14 @@ async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client
     )
     assert positive_resp.status_code == 200
     assert "could not be attributed to a" in positive_resp.text
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — the admin waitlist views are removed.
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_waitlist_route_is_gone(client, db_session):
+    admin = await _admin(db_session, "no-waitlist@example.org")
+    r = await client.get("/admin/waitlist", headers=auth_headers(admin.id), follow_redirects=False)
+    assert r.status_code == 404

@@ -51,7 +51,6 @@ from src.models import (
     SimulationRun,
     ThreadDecision,
     User,
-    WaitlistSignup,
 )
 from src.services.agent_activation import activation_blockers
 from src.services.assessment_detail import build_assessment_detail
@@ -105,7 +104,6 @@ from src.services.svg_charts import (
 )
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.user_deletion import delete_user_account
-from src.services.validators import csv_safe_cell
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1449,93 +1447,6 @@ async def admin_allowlist_remove(
 
 
 # ---------------------------------------------------------------------------
-# Waitlist
-# ---------------------------------------------------------------------------
-
-
-@router.get("/waitlist", response_class=HTMLResponse)
-async def admin_waitlist(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_admin_user),
-):
-    """List waitlist signups."""
-    result = await db.execute(
-        select(WaitlistSignup).order_by(WaitlistSignup.created_at.desc())
-    )
-    signups = result.scalars().all()
-
-    return templates.TemplateResponse(
-        request,
-        "admin/waitlist.html",
-        _template_context(
-            request,
-            current_user,
-            active_admin="waitlist",
-            signups=signups,
-        ),
-    )
-
-
-@router.get("/waitlist/export")
-async def admin_waitlist_export(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_admin_user),
-):
-    """CSV export of waitlist signups."""
-    import csv
-    import io
-
-    from fastapi.responses import Response
-
-    result = await db.execute(
-        select(WaitlistSignup).order_by(WaitlistSignup.created_at.desc())
-    )
-    signups = result.scalars().all()
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["email", "name", "institution", "note", "created_at", "contacted_at"])
-    for s in signups:
-        # All four text fields are attacker-controlled (public waitlist form),
-        # so neutralize CSV formula/DDE injection before export (SEC-20). The
-        # timestamps are app-generated ISO strings and safe as-is.
-        writer.writerow(
-            [
-                csv_safe_cell(s.email),
-                csv_safe_cell(s.name or ""),
-                csv_safe_cell(s.institution or ""),
-                csv_safe_cell((s.note or "").replace("\n", " ")),
-                s.created_at.isoformat() if s.created_at else "",
-                s.contacted_at.isoformat() if s.contacted_at else "",
-            ]
-        )
-
-    return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=waitlist.csv"},
-    )
-
-
-@router.post("/waitlist/{signup_id}/mark-contacted")
-async def admin_waitlist_mark_contacted(
-    signup_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_admin_user),
-):
-    """Mark a waitlist signup as contacted."""
-    result = await db.execute(
-        select(WaitlistSignup).where(WaitlistSignup.id == signup_id)
-    )
-    signup = result.scalar_one_or_none()
-    if signup:
-        signup.contacted_at = datetime.now(UTC)
-        await db.commit()
-    return RedirectResponse(url="/admin/waitlist", status_code=302)
-
-
-# ---------------------------------------------------------------------------
 # Cohorts — admin-managed groups gating which agents interact during simulation.
 #
 # The gate is an agent-BEHAVIOUR filter, never access control: it changes what an
@@ -2732,6 +2643,7 @@ async def admin_simulation_start(
     request: Request,
     fresh: bool = Form(False),
     max_runtime: int = Form(0),
+    max_proposals: int = Form(0),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -2765,7 +2677,7 @@ async def admin_simulation_start(
             url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
             status_code=302,
         )
-    payload = {"fresh": fresh, "max_runtime": max_runtime}
+    payload = {"fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals}
     try:
         await enqueue_command(
             db, command="start", payload=payload, requested_by_user_id=current_user.id
