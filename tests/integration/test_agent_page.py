@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import unquote
 
 import pytest
+from fastapi import HTTPException
 from itsdangerous import TimestampSigner
 from sqlalchemy import select, text
 
@@ -45,6 +46,7 @@ from src.models import (
     ProposalReview,
     ResearcherProfile,
 )
+from src.routers.agent_page import derive_agent_identity
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -375,6 +377,45 @@ async def test_signup_third_same_initial_collision_gets_a_numeric_suffix(
     third_agent = await _agent_of(db_session, third)
     assert third_agent.agent_id == "pwu2"
     assert third_agent.bot_name == "PWu2Bot"
+
+
+async def test_signup_fourth_same_initial_collision_extends_the_numeric_suffix(
+    client, db_session
+):
+    """A fourth same-initial namesake collides on 'pwu2' too; the suffix must
+    keep extending to 'pwu3', not restart or repeat (#26 audit-issue-26.md
+    Minor 4 — the fourth collision was previously unpinned)."""
+    first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
+    second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
+    third, _ = await _signup(client, db_session, "Pei Wu", "pei@example.org")
+    fourth, r4 = await _signup(client, db_session, "Ping Wu", "ping@example.org")
+
+    assert r4.status_code == 302, r4.text
+    assert (await _agent_of(db_session, first)).agent_id == "wu"
+    assert (await _agent_of(db_session, second)).agent_id == "pwu"
+    assert (await _agent_of(db_session, third)).agent_id == "pwu2"
+    fourth_agent = await _agent_of(db_session, fourth)
+    assert fourth_agent.agent_id == "pwu3"
+    assert fourth_agent.bot_name == "PWu3Bot"
+
+
+async def test_derive_agent_identity_raises_409_when_the_numeric_range_is_exhausted(
+    db_session,
+):
+    """derive_agent_identity's last-resort loop is range(2, 20); once every
+    candidate from 'wu' through 'pwu19' is taken it must raise a clean 409,
+    not fall through and return a colliding id (#26 Minor 4)."""
+    await factories.make_agent(db_session, agent_id="wu", bot_name="WuBot", pi_name="Wu")
+    await factories.make_agent(db_session, agent_id="pwu", bot_name="PWuBot", pi_name="Wu")
+    for i in range(2, 20):
+        await factories.make_agent(
+            db_session, agent_id=f"pwu{i}", bot_name=f"PWu{i}Bot", pi_name="Wu"
+        )
+    await db_session.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await derive_agent_identity(db_session, "Ping Wu")
+    assert exc_info.value.status_code == 409
 
 
 async def test_signup_returns_409_on_a_lost_identity_race(client, db_session, monkeypatch):

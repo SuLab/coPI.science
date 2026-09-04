@@ -52,6 +52,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from scripts.backfill_agents import _bot_name_for
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.llm import extract_json, get_anthropic_client
@@ -613,12 +614,12 @@ async def _persist(
     agent = agent_result.scalar_one_or_none()
     if agent is None:
         agent_id = await _resolve_agent_id(row.name, db)
-        last_name = row.name.strip().split()[-1]
-        last_alpha = "".join(c for c in last_name if c.isalpha())
-        if agent_id == _slugify_agent_id(row.name):
-            bot_name = f"{last_alpha.capitalize()}Bot"
-        else:
-            bot_name = f"{agent_id[0].upper()}{last_alpha.capitalize()}Bot"
+        # Digit-aware bot-name derivation (issue #26 I1): the inline version
+        # here mirrored agent_id[0] literally, so a third same-initial
+        # namesake ('pwu2') collided with the second Wu's 'PWuBot'. Reuse
+        # backfill_agents._bot_name_for, which already strips the numeric
+        # suffix before deriving the initial.
+        bot_name = _bot_name_for(agent_id, row.name)
         agent = AgentRegistry(
             agent_id=agent_id,
             user_id=user.id,

@@ -10,7 +10,7 @@ other is caught here rather than in production disambiguation.
 
 from types import SimpleNamespace
 
-from scripts.generate_sparsedata_user import _resolve_agent_id
+from scripts.generate_sparsedata_user import _bot_name_for, _resolve_agent_id
 
 
 class _FakeAgentRegistryDb:
@@ -36,3 +36,30 @@ async def test_resolve_agent_id_prefixes_on_first_collision():
 async def test_resolve_agent_id_numeric_suffix_extends_the_prefixed_candidate():
     db = _FakeAgentRegistryDb(taken=["wu", "pwu"])
     assert await _resolve_agent_id("Pei Wu", db) == "pwu2"
+
+
+async def test_resolve_agent_id_raises_when_the_numeric_range_is_exhausted():
+    taken = {"wu", "pwu"} | {f"pwu{i}" for i in range(2, 20)}
+    db = _FakeAgentRegistryDb(taken=taken)
+    try:
+        await _resolve_agent_id("Ping Wu", db)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError when range(2, 20) is exhausted")
+
+
+async def test_bot_name_matches_the_web_and_backfill_paths_on_the_third_collision():
+    """issue #26 I1: _persist's inline bot-name derivation was not digit-aware,
+    so a THIRD same-initial namesake ('pwu2') got 'PWuBot' — a duplicate of
+    the second Wu's bot name. It must match backfill_agents._bot_name_for.
+    """
+    db = _FakeAgentRegistryDb(taken=["wu", "pwu"])
+    agent_id = await _resolve_agent_id("Pei Wu", db)
+    assert (agent_id, _bot_name_for(agent_id, "Pei Wu")) == ("pwu2", "PWu2Bot")
+
+
+async def test_bot_name_matches_the_web_and_backfill_paths_on_the_fourth_collision():
+    db = _FakeAgentRegistryDb(taken=["wu", "pwu", "pwu2"])
+    agent_id = await _resolve_agent_id("Ping Wu", db)
+    assert (agent_id, _bot_name_for(agent_id, "Ping Wu")) == ("pwu3", "PWu3Bot")

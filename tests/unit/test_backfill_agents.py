@@ -9,6 +9,8 @@ red-team sharpening).
 
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.backfill_agents import _bot_name_for, _resolve_agent_id
 
 
@@ -47,3 +49,21 @@ def test_bot_name_for_prefixed():
 
 def test_bot_name_for_numeric_suffix_matches_the_web_path():
     assert _bot_name_for("pwu2", "Pei Wu") == "PWu2Bot"
+
+
+async def test_resolve_agent_id_numeric_suffix_extends_further_on_a_fourth_collision():
+    db = _FakeAgentRegistryDb(taken=["wu", "pwu", "pwu2"])
+    assert await _resolve_agent_id("Ping Wu", db) == "pwu3"
+
+
+def test_bot_name_for_second_numeric_suffix():
+    assert _bot_name_for("pwu3", "Ping Wu") == "PWu3Bot"
+
+
+async def test_resolve_agent_id_raises_when_the_numeric_range_is_exhausted():
+    """issue #26 Minor 4: exhausting range(2, 20) must raise cleanly, not
+    silently fall through and return a colliding id."""
+    taken = {"wu", "pwu"} | {f"pwu{i}" for i in range(2, 20)}
+    db = _FakeAgentRegistryDb(taken=taken)
+    with pytest.raises(RuntimeError):
+        await _resolve_agent_id("Ping Wu", db)
