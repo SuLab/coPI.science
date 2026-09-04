@@ -195,7 +195,10 @@ def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
         ]},
     )
     assert _client(fake).post_message("general", "hi") is not None
-    assert slept == [0.0]
+    # A past-dated HTTP-date is unusable, so parse_retry_after falls back to the caller's
+    # `default` (5.0 here) rather than the 0.0 it used to compute — a zero backoff is a hot
+    # retry against an API that just throttled us (#24 audit Minor 2, commit 35c59a9).
+    assert slept == [5.0]
 
 
 def test_a_huge_retry_after_is_capped(monkeypatch):
@@ -217,7 +220,9 @@ def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after="-5")]},
     )
     _client(fake).post_message("general", "hi")
-    assert slept == [0.0]
+    # Same as above: a negative header is not a valid backoff, so the caller's default wins.
+    # The point of this test is that nothing raises and `time.sleep` gets a sane float.
+    assert slept == [5.0]
 
 
 # --- what actually goes on the wire ------------------------------------------------
