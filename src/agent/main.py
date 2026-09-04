@@ -325,6 +325,20 @@ async def _run_simulation(
                     simulation_run_id = existing_run.id
                     existing_run.status = "running"
                     existing_run.ended_at = None
+                    if max_proposals == 0:
+                        inherited_max_proposals = int((existing_run.config or {}).get("max_proposals", 0))
+                        if inherited_max_proposals:
+                            logger.info(
+                                "Resume did not pass --max-proposals; inheriting %d from run %s's stored config",
+                                inherited_max_proposals,
+                                simulation_run_id,
+                            )
+                        max_proposals = inherited_max_proposals
+                    # Restamp so the persisted config matches what will actually
+                    # be enforced (the Live tab reads this column) — reassign
+                    # rather than mutate in place so SQLAlchemy's JSON
+                    # change-tracking picks it up.
+                    existing_run.config = {**(existing_run.config or {}), "max_proposals": max_proposals}
                     await db.commit()
                     logger.info("Resuming simulation run %s", simulation_run_id)
                 else:

@@ -173,6 +173,48 @@ async def test_start_enqueued_after_boot_runs_positionally_and_the_loop_exits(en
 
 
 @pytest.mark.asyncio
+async def test_start_enqueued_with_max_proposals_passes_it_positionally(engine):
+    """Same shape as (b), but the seeded start payload also carries a nonzero
+    `max_proposals` — this is the field a resumed run's proposal cap now
+    flows through when the supervisor (not the CLI) is what starts the run,
+    so it must reach run_fn as the 8th positional arg unchanged."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+
+    calls = []
+
+    async def stub(*args):
+        calls.append(args)
+
+    task = asyncio.create_task(
+        run_supervisor(session_factory=factory, run_fn=stub, poll_seconds=0.05)
+    )
+    cmd_id = None
+    try:
+        status = await _poll_until(factory, lambda db: read_status(db))
+        assert status.state == "idle"  # boot staling has committed
+
+        async with factory() as db:
+            cmd = SimulationCommand(command="start", payload={"fresh": True, "max_runtime": 60, "max_proposals": 5})
+            db.add(cmd)
+            await db.commit()
+            cmd_id = cmd.id
+
+        await asyncio.wait_for(task, timeout=10)
+
+        assert calls == [(60, 0, False, False, True, False, False, 5)]
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            assert row.status == "done"
+            final_status = await read_status(db)
+            assert final_status.state == "idle"
+    finally:
+        if not task.done():
+            task.cancel()
+        await _cleanup(factory, command_ids=[cmd_id])
+
+
+@pytest.mark.asyncio
 async def test_a_raising_run_fn_ends_the_command_failed_but_the_loop_still_exits(engine):
     """(c) Same shape as (b), but run_fn raises: the command is 'failed' with
     the exception text recorded, and the supervisor still exits cleanly

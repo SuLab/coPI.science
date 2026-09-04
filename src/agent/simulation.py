@@ -391,8 +391,13 @@ class SimulationEngine:
         # 0 = off. When >0, the engine stops opening NEW pitches once this many
         # top-level posts exist this run, then ends the run when every opened
         # interview has drained (see _proposal_target_drained). Rehydrated on
-        # resume from agent_messages (phase='new_post') so a restart cannot
-        # re-pitch past the cap.
+        # resume from agent_messages (phase='new_post', see
+        # _rehydrate_proposal_count) — but rehydration only restores the
+        # COUNT; the cap itself is whatever the caller passes in here. main.py's
+        # _run_simulation inherits max_proposals from the resumed run's stored
+        # config when the CLI value is 0, which is what actually keeps a resume
+        # from silently disabling the gate. The gate only enforces when
+        # max_proposals > 0.
         self.max_proposals = max_proposals
         self._proposals_posted = 0
         self._proposal_drain_streak = 0
@@ -5152,11 +5157,20 @@ class SimulationEngine:
         The ``is_bot``/``agent_id`` filters keep parity with the live counter,
         which only increments in ``_phase5_new_post``: they exclude the rare
         mirrored human top-level post (``agent_id`` NULL) the Slack poller can
-        record in a seeded channel. Without rehydration a resumed run restarts
-        the in-memory counter at 0 and could pitch a second full batch past the
-        cap.
+        record in a seeded channel, and collab_private posts are excluded the
+        same way ``_count_today_posts`` excludes them (they are flat
+        refinement replies/handovers, not spam-prevention-relevant pitches).
+
+        This restores the COUNT only. Whether that count can still gate
+        anything depends on ``self.max_proposals`` being the same nonzero
+        target the run opened under — main.py's ``_run_simulation`` is what
+        keeps that true across a resume, by inheriting ``max_proposals`` from
+        the run's stored config when the CLI value is 0. If ``max_proposals``
+        is 0 here, the query is skipped entirely: there is nothing to gate.
         """
         if not self.session_factory or self.simulation_run_id is None:
+            return
+        if self.max_proposals <= 0:
             return
         from sqlalchemy import func, select
 
@@ -5169,6 +5183,7 @@ class SimulationEngine:
                         AgentMessage.phase == "new_post",
                         AgentMessage.is_bot.is_(True),
                         AgentMessage.agent_id.isnot(None),
+                        AgentMessage.visibility != VISIBILITY_COLLAB_PRIVATE,
                     )
                 )
             ).scalar_one()
