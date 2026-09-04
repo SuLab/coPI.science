@@ -110,8 +110,20 @@ done
 # where it used to live): `compose_py`, defined next, is called as early as
 # Step 1, and under --via-run it needs the snapshot's host directory for the
 # bind mount before Step 1 runs.
-# --------------------------------------------------------------------------
-SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
+#
+# --via-run's snapshot is written INSIDE the one-off container by UID 10001 (the
+# image's runtime user, since the prod compose sets no `user:` override on `migrate`
+# or one-off `run`s). On the prod host $BACKUP_DIR (default `backups/`) is owned by
+# the operator, not 10001, so writing the default path there fails closed with
+# EACCES (#27 Critical 1) — R.5 already chowns data/ to 10001:10001 for the
+# profiles/data bind mounts, so default the snapshot there instead under --via-run.
+# An explicit MIGRATE_SNAPSHOT always wins, in either mode; the non---via-run default
+# (an `exec` into an already-running, non-10001-restricted container) is unchanged.
+if [[ "$VIA_RUN" == "1" ]]; then
+  SNAP="${MIGRATE_SNAPSHOT:-$REPO_ROOT/data/preflight_snapshot.json}"
+else
+  SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
+fi
 mkdir -p "$(dirname "$SNAP")"
 SNAP_HOST_DIR="$(cd "$(dirname "$SNAP")" && pwd)"
 # Under --via-run each step is a --rm container: the snapshot must be addressed through the
@@ -224,7 +236,7 @@ else
   # Caught by rehearsing this script end to end — it would have blocked every real
   # migration at the backup step.
   CTMP="/tmp/copi_migrate_$$.dump"
-  if ! docker compose exec -T "$PG_SVC" pg_dump -U copi -Fc -f "$CTMP" "$DBNAME"; then
+  if ! docker compose exec -T "$PG_SVC" pg_dump -U "${POSTGRES_USER:-copi}" -Fc -f "$CTMP" "$DBNAME"; then
     echo "BLOCKED: pg_dump failed. Not migrating without a backup." >&2
     docker compose exec -T "$PG_SVC" rm -f "$CTMP" >/dev/null 2>&1 || true
     exit "$EX_OPERATIONAL"
