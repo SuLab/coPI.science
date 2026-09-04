@@ -28,9 +28,17 @@ determined by the two files, so it is checked from the two files:
   1. every direct dependency in `[project].dependencies` appears in the lock, and
   2. the version the lock pins satisfies the specifier pyproject declares.
 
-Adding, removing, or re-constraining a dependency without regenerating therefore fails,
-immediately and for a reason that names the package. Upstream releasing something new
-does not.
+Adding or re-constraining a dependency without regenerating therefore fails, immediately
+and for a reason that names the package. Upstream releasing something new does not.
+
+Known limit, stated because the audit caught the docstring overclaiming it: REMOVING a
+dependency from pyproject.toml is not detected. The check walks what pyproject declares
+and asks whether the lock satisfies it, so a package deleted from pyproject is simply no
+longer asked about — the lock keeps installing it and this exits 0 (reproduced with
+boto3). Detecting that needs the direct/transitive split, which a pip-compile lock only
+records in its `# via` comments; `LOCKCHECK=strict` catches it as a diff. A dependency
+that is removed but still installed is a smaller problem than one that is declared and
+not installed, which is why this is a documented limit rather than a blocker.
 
 The freshness question — "could this lock be newer?" — is a maintenance task, not a
 merge blocker; `LOCK_SMOKE=1` proves the lock installs and imports, and regenerating is

@@ -538,6 +538,7 @@ async def run_profile_pipeline(
     # which passes remove_if_empty=True and so already deleted the file when
     # the PI cleared it.
     from src.services.profile_export import PRIVATE_PROFILES_DIR, export_private_profile
+    private_seed_generated = False
     if not profile.private_profile_md and not profile.private_profile_seed and agent_id:
         disk_private_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
         if disk_private_path.exists():
@@ -566,6 +567,7 @@ async def run_profile_pipeline(
         try:
             seed = await synthesize_private_profile(context_text, user.name)
             profile.private_profile_seed = seed
+            private_seed_generated = True
         except Exception as exc:
             logger.error("Private profile seed generation failed for %s: %s", user.name, exc)
 
@@ -584,13 +586,26 @@ async def run_profile_pipeline(
 
     await db.flush()
 
-    # Export private profile to disk (COR-23): export_private_profile falls back to
-    # private_profile_seed when there is no live private_profile_md yet, so an
-    # admin-seeded lab whose PI never logs in still gets agent instructions on disk
-    # instead of agent.py's "No private instructions yet." default. remove_if_empty
-    # is left at its default False (#22 C1): this call must never delete a
-    # disk-only private profile it did not itself create.
-    export_private_profile(user, profile, agent_id)
+    # Export private profile to disk (COR-23). The issue asks to "export the seed
+    # itself at generation time (or fall back to the seed in the exporter)" — both
+    # halves are done: the exporter falls back to private_profile_seed, and the call
+    # here fires when this run GENERATED one. It used to fire unconditionally, which
+    # reverted any hand-edit of profiles/private/{agent_id}.md that was ahead of the
+    # DB on every unrelated run — a PI clicking "regenerate my profile" silently
+    # rolled back operator-written agent instructions. Found by the
+    # over-implementation audit.
+    #
+    # The second condition keeps disaster recovery working: if the DB holds private
+    # content and the file is simply absent (a fresh container, an emptied bind
+    # mount), write it back. That cannot clobber anything, because there is nothing
+    # there. An existing file whose content differs is left alone — the PI-facing save
+    # routes export directly when they change it, so the pipeline does not need to.
+    #
+    # remove_if_empty stays at its default False (#22 C1): this call must never delete
+    # a disk-only private profile it did not itself create.
+    _private_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md" if agent_id else None
+    if private_seed_generated or (_private_path is not None and not _private_path.exists()):
+        export_private_profile(user, profile, agent_id)
 
     # Export to markdown for agent consumption (include publications)
     from src.services.profile_export import export_profile_to_markdown

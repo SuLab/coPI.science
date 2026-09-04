@@ -3,8 +3,8 @@ Postgres — the probe's engine is monkeypatched on src.main, mirroring the
 badge_factory override tests/conftest.py's `client` fixture already does
 (tests/conftest.py:120-121: monkeypatch.setattr("src.main.get_session_factory", ...)).
 
-The probe uses its own NullPool engine with asyncpg connect/command timeouts rather
-than the request pool, because `asyncio.wait_for` cannot interrupt a socket read a
+The probe uses its own one-connection engine with asyncpg connect/command timeouts
+rather than the request pool, because `asyncio.wait_for` cannot interrupt a socket read a
 SQLAlchemy greenlet is already parked on: measured against a frozen Postgres
 (`docker pause`), the wait_for-only probe returned after 142s, and with both driver
 timeouts armed it returns 503 in 3.0s. See the note in src/main.py."""
@@ -96,9 +96,9 @@ async def test_health_503_when_db_probe_times_out(monkeypatch):
 def test_the_probe_engine_bounds_both_connect_and_command():
     """Both asyncpg timeouts must be armed and must sit under the outer wait_for.
 
-    `command_timeout` alone does not help a NullPool probe, which opens a fresh
-    connection every time: against a frozen server the TCP handshake completes into the
-    accept backlog and the startup exchange hangs, which is the CONNECT timeout's job.
+    `command_timeout` alone does not help a probe that opens a fresh connection:
+    against a frozen server the TCP handshake completes into the accept backlog and the
+    startup exchange hangs, which is the CONNECT timeout's job.
     Measured with only command_timeout set: three consecutive probes each ran past 30s.
     """
     from src import main as m
@@ -106,5 +106,8 @@ def test_the_probe_engine_bounds_both_connect_and_command():
     assert m.HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS < m.HEALTH_PROBE_TIMEOUT_SECONDS
     assert m.HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS < m.HEALTH_PROBE_TIMEOUT_SECONDS
     src = inspect.getsource(m.get_health_engine)
-    assert "NullPool" in src, "the probe must not consume a request-pool connection"
+    assert "pool_size=1" in src and "max_overflow=0" in src, (
+        "the probe must have its own tiny pool: off the request pool (its purpose), and "
+        "capped at one connection so a public endpoint cannot amplify into Postgres"
+    )
     assert "command_timeout" in src and '"timeout"' in src

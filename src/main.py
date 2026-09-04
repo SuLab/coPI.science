@@ -54,13 +54,22 @@ def get_health_engine():
     global _health_engine
     if _health_engine is None:
         from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.pool import NullPool
 
         from src.config import get_settings
 
+        # A tiny dedicated pool, not NullPool. NullPool opens a fresh connection per
+        # probe, and /api/health is publicly reachable — one request to one Postgres
+        # connection is an amplifier a load generator can point at the database
+        # (over-implementation audit). pool_size=1/max_overflow=0 keeps the probe off
+        # the request pool (its whole purpose) while capping it at a single connection;
+        # concurrent probes queue behind it, and pool_timeout keeps that queue bounded
+        # well inside HEALTH_PROBE_TIMEOUT_SECONDS.
         _health_engine = create_async_engine(
             get_settings().database_url,
-            poolclass=NullPool,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS,
+            pool_pre_ping=False,
             connect_args={
                 "command_timeout": HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS,
                 "timeout": HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS,

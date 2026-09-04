@@ -336,6 +336,24 @@ if [ "$src_findings" -gt "$SRC_LINT_MAX" ]; then
 fi
 echo "    ${src_findings} findings (ceiling ${SRC_LINT_MAX})"
 
+# Locate a Python 3.11 interpreter for the steps that must resolve or install against
+# the same version requirements.lock was cut against (the Dockerfile's python:3.11-slim
+# base), never $VENV_PY's 3.12: an explicit LOCKCHECK_PYTHON pin, else
+# `uv python find 3.11` with no downloads, else empty so the caller SKIPs.
+#
+# Restored here after f9541ba deleted the definition while leaving BOTH call sites
+# (the LOCKCHECK=strict branch and the LOCK_SMOKE step). Under `set -euo pipefail` an
+# undefined function is exit 127, so `LOCK_SMOKE=1 ./scripts/ci.sh` died at the smoke
+# step -- before mypy and before the entire test suite -- while a default run passed.
+# Found by the over-implementation audit.
+find_lock_python() {
+  local spec="${LOCKCHECK_PYTHON:-}"
+  if [ -z "$spec" ]; then
+    spec="$(uv python find 3.11 --no-python-downloads --no-project 2>/dev/null || true)"
+  fi
+  printf '%s' "$spec"
+}
+
 echo "==> lockfile consistency (requirements.lock matches pyproject.toml)"
 # What this does NOT do: compare the lock against a fresh `pip-compile`. That was the
 # first implementation, and it cannot be a gate — it compares the committed lock against
@@ -371,10 +389,7 @@ else
     if ! command -v uv >/dev/null 2>&1; then
       echo "    SKIP: uv not found on PATH; strict mode needs it to re-resolve."
     else
-      LOCK_PYSPEC="${LOCKCHECK_PYTHON:-}"
-      if [ -z "$LOCK_PYSPEC" ]; then
-        LOCK_PYSPEC="$(uv python find 3.11 --no-python-downloads --no-project 2>/dev/null || true)"
-      fi
+      LOCK_PYSPEC="$(find_lock_python)"
       if [ -z "$LOCK_PYSPEC" ]; then
         echo "    SKIP: no Python 3.11 interpreter found (the lock is cut against 3.11 to"
         echo "    match the Dockerfile base). 'uv python install 3.11', or set LOCKCHECK_PYTHON."
