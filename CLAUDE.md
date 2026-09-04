@@ -157,7 +157,7 @@ Each agent needs an `AgentRegistry` row with a unique `agent_id` (lowercase last
 and `bot_name` (`{LastName}Bot`), created `status='pending'`. Self-service signups
 (`src/routers/agent_page.py`) and the backfill scripts both create these automatically.
 
-**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). The web UI applies this logic automatically.
+**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). If that prefixed id is *also* taken (a third same-initial namesake), append a numeric suffix to the prefixed candidate (e.g. `pwu2` / `PWu2Bot`). The web UI applies this logic automatically.
 
 ### 3. Provision the Slack bot + activate (admin UI)
 

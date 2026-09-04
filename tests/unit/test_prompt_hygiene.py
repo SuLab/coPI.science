@@ -1,9 +1,9 @@
 """Doc-accuracy check for specs/email-proposal-review.md's file table (issue
 #26 DOC-5). prompts/email-reply-classify.md has zero code readers —
-classify_reply (src/services/email_inbound.py:449-475) builds its prompt
-inline — but the spec's "New Files" table still describes it as a live,
-code-loaded prompt. No prompts/ file is touched by this PR; this only
-corrects the stale claim about it.
+classify_reply (src/services/email_inbound.py) builds its prompt inline —
+but the spec's "New Files" table still describes it as a live, code-loaded
+prompt. No prompts/ file is touched by this PR; this only corrects the
+stale claim about it.
 """
 
 from pathlib import Path
