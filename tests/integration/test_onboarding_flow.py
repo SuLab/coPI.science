@@ -1262,6 +1262,12 @@ async def test_the_private_export_deletes_the_file_once_content_is_cleared(
     private_profile property keeps reading — it only falls back to "No private
     instructions yet." when the file is ABSENT. Removing the file (not just
     skipping the write) is what makes that fallback correct again.
+
+    `remove_if_empty=True` is required here (#22 C1): the default is now False
+    so that a run_profile_pipeline call — which has no genuine "cleared"
+    case — can never delete a disk-only private profile it did not itself
+    create. Only a real clear path (onboarding.py's save_private_profile)
+    opts in.
     """
     user = await factories.make_user(db_session)
     prof = await factories.make_profile(
@@ -1275,7 +1281,10 @@ async def test_the_private_export_deletes_the_file_once_content_is_cleared(
     # Clear both columns, as the onboarding/agent-page blank-save paths do.
     prof.private_profile_md = None
     prof.private_profile_seed = None
-    assert profile_export.export_private_profile(user, prof, "clearpi") is None
+    assert (
+        profile_export.export_private_profile(user, prof, "clearpi", remove_if_empty=True)
+        is None
+    )
     assert not path.exists(), (
         "clearing a private profile must delete the exported file, not merely "
         "skip re-writing it"
@@ -1283,7 +1292,10 @@ async def test_the_private_export_deletes_the_file_once_content_is_cleared(
 
     # Tolerate absence: clearing an already-cleared (file-less) profile must
     # not raise.
-    assert profile_export.export_private_profile(user, prof, "clearpi") is None
+    assert (
+        profile_export.export_private_profile(user, prof, "clearpi", remove_if_empty=True)
+        is None
+    )
 
 
 async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):

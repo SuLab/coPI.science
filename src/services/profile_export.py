@@ -125,7 +125,11 @@ def export_profile_to_markdown(
 
 
 def export_private_profile(
-    user: User, profile: ResearcherProfile, agent_id: str | None
+    user: User,
+    profile: ResearcherProfile,
+    agent_id: str | None,
+    *,
+    remove_if_empty: bool = False,
 ) -> Path | None:
     """Export private_profile_md (or, absent that, private_profile_seed) to
     profiles/private/{agent_id}.md.
@@ -134,10 +138,16 @@ def export_private_profile(
     there is no private content of either kind (COR-23: a seed with nothing
     exported yet must not read to the agent as "no private instructions").
 
-    When there is no content, any previously exported file is removed rather
-    than left in place (#29): src/agent/agent.py's private_profile property
-    falls back to "No private instructions yet." only when the file is
-    ABSENT, so a cleared profile that left a stale file on disk would keep
+    `remove_if_empty` defaults to False: a run_profile_pipeline call has no
+    empty-content case to delete (#22 C1) — the pipeline adopts a disk-only
+    private profile into `profile.private_profile_md` before ever calling
+    this, so `content` is only empty here for a PI who has genuinely never
+    written one. Pass `remove_if_empty=True` only from a real "the PI just
+    cleared this" write path (onboarding.py's save_private_profile) so that,
+    and only that, path removes a previously exported file rather than
+    leaving a stale one in place (#29): src/agent/agent.py's private_profile
+    property falls back to "No private instructions yet." only when the file
+    is ABSENT, so a cleared profile that left a stale file on disk would keep
     the agent honouring instructions the PI deleted.
     """
     if not agent_id:
@@ -145,12 +155,13 @@ def export_private_profile(
     content = profile.private_profile_md or profile.private_profile_seed
     path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     if not content:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.error(
-                "Failed to remove cleared private profile for %s: %s", user.name, exc
-            )
+        if remove_if_empty:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove cleared private profile for %s: %s", user.name, exc
+                )
         return None
 
     try:

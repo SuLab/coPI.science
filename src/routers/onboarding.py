@@ -291,8 +291,13 @@ async def save_private_profile(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
-    # Export to disk
-    export_private_profile(current_user, profile, agent_id_for_export)
+    # Export to disk. remove_if_empty=True: this is a genuine PI-initiated
+    # clear (blank content.strip()), one of the two real clear paths (#22 C1)
+    # — unlike run_profile_pipeline, which must never delete a disk-only
+    # private profile it did not itself create.
+    export_private_profile(
+        current_user, profile, agent_id_for_export, remove_if_empty=True
+    )
 
     # Record revision
     from src.services.profile_versioning import create_revision

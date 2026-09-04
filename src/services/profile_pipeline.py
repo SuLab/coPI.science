@@ -479,6 +479,29 @@ async def run_profile_pipeline(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id = agent_reg.agent_id if agent_reg else None
 
+    # Adopt a disk-only private profile into the DB (#22 C1), BEFORE Step 9b's
+    # gate below is evaluated. A pilot lab admin-seeded with hand-authored
+    # instructions in profiles/private/{agent_id}.md and NULL
+    # private_profile_md/_seed is a state onboarding.py's GET
+    # /onboarding/private-profile already documents and reads with this same
+    # fallback order. Without adopting it here first, Step 9b would see "no
+    # private content" and synthesize a fresh LLM seed, which the unconditional
+    # export used to write straight over the hand-authored file. Reading the
+    # disk content into private_profile_md makes Step 9b's
+    # `not profile.private_profile_md` condition false, so no seed is
+    # generated, and the export call below simply re-writes the adopted
+    # content back unchanged. This cannot resurrect a deliberate clear:
+    # onboarding_complete only ever becomes True via save_private_profile,
+    # which passes remove_if_empty=True and so already deleted the file when
+    # the PI cleared it.
+    from src.services.profile_export import PRIVATE_PROFILES_DIR, export_private_profile
+    if not profile.private_profile_md and not profile.private_profile_seed and agent_id:
+        disk_private_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+        if disk_private_path.exists():
+            profile.private_profile_md = (
+                disk_private_path.read_text(encoding="utf-8").strip() or None
+            )
+
     # Step 9b: Generate private profile seed, but ONLY for a PI who has never
     # completed onboarding (issue #22 COR-23 fix round). `POST
     # /onboarding/private-profile` always sets onboarding_complete=True and,
@@ -508,8 +531,9 @@ async def run_profile_pipeline(
     # Export private profile to disk (COR-23): export_private_profile falls back to
     # private_profile_seed when there is no live private_profile_md yet, so an
     # admin-seeded lab whose PI never logs in still gets agent instructions on disk
-    # instead of agent.py's "No private instructions yet." default.
-    from src.services.profile_export import export_private_profile
+    # instead of agent.py's "No private instructions yet." default. remove_if_empty
+    # is left at its default False (#22 C1): this call must never delete a
+    # disk-only private profile it did not itself create.
     export_private_profile(user, profile, agent_id)
 
     # Export to markdown for agent consumption (include publications)

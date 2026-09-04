@@ -947,6 +947,51 @@ async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
     assert not (tmp_path / "private" / f"{agent.agent_id}.md").exists()
 
 
+async def test_disk_only_private_profile_survives_a_pipeline_run(
+    db_session, monkeypatch, tmp_path
+):
+    """#22 C1: an admin-seeded/pilot lab with a hand-authored
+    profiles/private/{agent_id}.md and NULL private_profile_md/_seed — the
+    state onboarding.py's GET /onboarding/private-profile documents and
+    reads — must not have that file deleted or overwritten by a pipeline
+    run. Before the fix, the export ran unconditionally and, since
+    onboarding_complete=False is exactly this pilot-lab case, Step 9b would
+    also synthesize a fresh LLM seed and export it straight over the
+    hand-authored file. The fix adopts the disk content into
+    private_profile_md before Step 9b's gate is evaluated, so no seed is
+    generated and the export call re-writes the same content back
+    unchanged.
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    fake_llm = _install_fakes(monkeypatch)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=False
+    )
+    agent = await factories.make_agent(
+        db_session, user=user, agent_id="gmadopt", bot_name="GmAdoptBot"
+    )
+    await db_session.flush()
+
+    private_dir = tmp_path / "private"
+    private_dir.mkdir(parents=True)
+    hand_authored = "# Hand-authored private profile\n\nNever contact this lab on Fridays."
+    (private_dir / f"{agent.agent_id}.md").write_text(hand_authored, encoding="utf-8")
+
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.private_profile_md == hand_authored
+    assert profile.private_profile_seed is None
+    # Only the public-profile synthesis call happened; Step 9b's seed
+    # generation must not fire once the disk content has been adopted.
+    assert len(fake_llm.calls) == 1
+    written = (private_dir / f"{agent.agent_id}.md").read_text(encoding="utf-8")
+    assert written.strip() == hand_authored.strip()
+
+
 async def test_a_json_array_synthesis_response_does_not_crash_the_pipeline(
     db_session, monkeypatch
 ):
