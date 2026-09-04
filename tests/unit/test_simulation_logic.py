@@ -2498,10 +2498,10 @@ class TestPhase5PostFailureBackoff:
     """Phase 5's reply branches (private-channel flat reply and threaded
     reply) have no ThreadState yet at the point a post can fail — one is
     only ever created on a SUCCESSFUL threaded reply, and never for a
-    private-channel reply. Failures are tracked per target_post_id on the
-    engine instead (_phase5_post_failure_counts), with the same two-strike
-    shape: drop target_post_id from interesting_posts after the 2nd
-    consecutive failure. #20 I1."""
+    private-channel reply. Failures are tracked per (agent_id,
+    target_post_id) on the engine instead (_phase5_post_failure_counts), with
+    the same two-strike shape: drop target_post_id from interesting_posts
+    after the 2nd consecutive failure. #20 I1."""
 
     def _engine_with_interesting_post(self, monkeypatch, *, private=False):
         from src.agent.agent import Agent
@@ -2559,7 +2559,7 @@ class TestPhase5PostFailureBackoff:
         assert not any(p.post_id == "100.0" for p in a.state.interesting_posts), (
             "the second consecutive failure must drop the target"
         )
-        assert "100.0" not in engine._phase5_post_failure_counts, (
+        assert ("a", "100.0") not in engine._phase5_post_failure_counts, (
             "the counter must be cleared once it has done its job"
         )
 
@@ -2575,11 +2575,11 @@ class TestPhase5PostFailureBackoff:
         engine._post_message = AsyncMock(return_value=False)
 
         await engine._phase5_new_post(a)
-        assert engine._phase5_post_failure_counts.get("100.0") == 1
+        assert engine._phase5_post_failure_counts.get(("a", "100.0")) == 1
 
         engine._post_message = AsyncMock(return_value=True)
         await engine._phase5_new_post(a)
-        assert "100.0" not in engine._phase5_post_failure_counts
+        assert ("a", "100.0") not in engine._phase5_post_failure_counts
 
     @pytest.mark.asyncio
     async def test_two_consecutive_failures_drop_the_target_in_a_private_channel(
@@ -2601,6 +2601,115 @@ class TestPhase5PostFailureBackoff:
         await engine._phase5_new_post(a)
 
         assert not any(p.post_id == "100.0" for p in a.state.interesting_posts)
+
+
+class TestPhase5StrikesAreKeyedPerAgent:
+    """The Phase 5 strike counter is engine-level, so keying it on
+    target_post_id alone shares one count across the whole roster: agent A's
+    refusals accumulate against agent B's next attempt on the same post, and
+    B's success clears A's. Both halves are wrong — the counter exists to stop
+    *one agent* re-costing an LLM call on a target it cannot post to. #20
+    COR-1b."""
+
+    def _engine_with_two_agents_eyeing_one_post(self, monkeypatch):
+        """Two roster agents, one third-party root post both may reply to.
+
+        The root is posted by "c" and tags nobody, so
+        ``get_thread_allowed_agents`` sees a single participant and returns
+        None ("thread still open"), leaving both a and b eligible.
+        """
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="general", sender_agent_id="c", sender_name="CBot",
+            content="original post", posted_at=100.0, is_bot=True,
+        ))
+        for agent in (a, b):
+            agent.state.interesting_posts.append(PostRef(
+                post_id="100.0", channel="general", sender_agent_id="c",
+                content_snippet="original post", posted_at=100.0,
+            ))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=(
+                "```json\n"
+                '{"action": "reply", "channel": "general", "target_post_id": "100.0"}\n'
+                "```\n"
+                "<slack_message>\n"
+                "Sounds interesting, let's collaborate.\n"
+                "</slack_message>\n"
+            )),
+        )
+        return engine, a, b
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_recorded_against_the_failing_agent_only(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_two_agents_eyeing_one_post(monkeypatch)
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._phase5_new_post(a)
+
+        assert engine._phase5_post_failure_counts == {("a", "100.0"): 1}, (
+            "a strike must be keyed on (agent_id, target_post_id); keyed on the "
+            "post alone it is credited to every agent eyeing that post"
+        )
+        assert engine._phase5_post_failure_counts.get(("b", "100.0"), 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_another_agents_success_does_not_reset_this_agents_strikes(
+        self, monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_two_agents_eyeing_one_post(monkeypatch)
+
+        engine._post_message = AsyncMock(return_value=False)
+        await engine._phase5_new_post(a)  # a: strike 1
+
+        engine._post_message = AsyncMock(return_value=True)
+        await engine._phase5_new_post(b)  # b posts fine — must not clear a's strike
+        assert engine._phase5_post_failure_counts.get(("a", "100.0")) == 1, (
+            "b's success cleared a's strike"
+        )
+
+        engine._post_message = AsyncMock(return_value=False)
+        await engine._phase5_new_post(a)  # a: strike 2 → back off
+
+        assert not any(p.post_id == "100.0" for p in a.state.interesting_posts), (
+            "a's second consecutive failure must drop the target; a shared "
+            "counter reset by b's success leaves a re-targeting it forever"
+        )
+
+    @pytest.mark.asyncio
+    async def test_another_agents_strike_does_not_count_towards_this_agents_two(
+        self, monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_two_agents_eyeing_one_post(monkeypatch)
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._phase5_new_post(a)  # a: strike 1
+        await engine._phase5_new_post(b)  # b: strike 1 — b's FIRST failure
+
+        assert engine._phase5_post_failure_counts == {
+            ("a", "100.0"): 1, ("b", "100.0"): 1,
+        }
+        assert any(p.post_id == "100.0" for p in b.state.interesting_posts), (
+            "b failed once; a shared counter makes a's earlier strike b's "
+            "second, backing b off after a single failure of its own"
+        )
 
 
 # ---------------------------------------------------------------

@@ -365,15 +365,21 @@ class SimulationEngine:
         self._prior_thread_accounted: set[str] = set()
 
         # #20 I1: consecutive Slack-post-failure count for a Phase 5 reply
-        # target, keyed by target_post_id. Phase 4's equivalent counter lives
-        # on ThreadState (post_failure_count) because a ThreadState always
-        # already exists there; Phase 5's two reply branches attempt to post
-        # to a target BEFORE any ThreadState exists for it (one is only ever
-        # created on a SUCCESSFUL threaded reply, and never for a flat
-        # private-channel reply), so there is nothing to hang a per-thread
-        # field on until a post actually lands. Popped on success or once
-        # the two-strike drop fires — never grows unbounded.
-        self._phase5_post_failure_counts: dict[str, int] = {}
+        # target, keyed by (agent_id, target_post_id). Phase 4's equivalent
+        # counter lives on ThreadState (post_failure_count) because a
+        # ThreadState always already exists there; Phase 5's two reply branches
+        # attempt to post to a target BEFORE any ThreadState exists for it (one
+        # is only ever created on a SUCCESSFUL threaded reply, and never for a
+        # flat private-channel reply), so there is nothing to hang a per-thread
+        # field on until a post actually lands. The agent_id is part of the key
+        # because this map is engine-level while the thing it counts is
+        # per-agent: several agents can hold the same post in
+        # interesting_posts, and on a post-id-only key one agent's refusals
+        # would back another agent off after a single failure of its own, while
+        # one agent's success would clear every other agent's strikes (#20
+        # COR-1b). Popped on that agent's success or once its two-strike drop
+        # fires — never grows unbounded.
+        self._phase5_post_failure_counts: dict[tuple[str, str], int] = {}
 
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
@@ -2293,14 +2299,16 @@ class SimulationEngine:
         """Two-strike backoff for a Slack-refused Phase 5 reply (#20 I1).
 
         Mirrors ThreadState.post_failure_count's shape, tracked per
-        target_post_id on the engine instead — see
-        ``self._phase5_post_failure_counts``'s docstring for why. After the
-        second consecutive failure, drops ``target_post_id`` from
+        (agent_id, target_post_id) on the engine instead — see
+        ``self._phase5_post_failure_counts``'s docstring for why. After this
+        agent's second consecutive failure, drops ``target_post_id`` from
         ``agent.state.interesting_posts`` so it stops being re-targeted (and
-        re-costing an LLM call) every turn.
+        re-costing an LLM call) every turn. Another agent's attempts on the
+        same post neither add to nor clear this count.
         """
-        count = self._phase5_post_failure_counts.get(target_post_id, 0) + 1
-        self._phase5_post_failure_counts[target_post_id] = count
+        key = (agent.agent_id, target_post_id)
+        count = self._phase5_post_failure_counts.get(key, 0) + 1
+        self._phase5_post_failure_counts[key] = count
         logger.info(
             "[%s] Suppressed reply to %s — not counted, nothing persisted "
             "(post_failure_count=%d)",
@@ -2310,7 +2318,7 @@ class SimulationEngine:
             agent.state.interesting_posts = [
                 p for p in agent.state.interesting_posts if p.post_id != target_post_id
             ]
-            self._phase5_post_failure_counts.pop(target_post_id, None)
+            self._phase5_post_failure_counts.pop(key, None)
             logger.info(
                 "[%s] Phase 5: Backing off post %s after %d consecutive failures",
                 agent.agent_id, target_post_id, count,
@@ -2731,7 +2739,9 @@ class SimulationEngine:
                     if not posted:
                         self._note_phase5_post_failure(agent, target_post_id)
                     else:
-                        self._phase5_post_failure_counts.pop(target_post_id, None)
+                        self._phase5_post_failure_counts.pop(
+                            (agent.agent_id, target_post_id), None,
+                        )
                         agent.message_count += 1
                         # Consume the interesting post (we acted on it) but do not
                         # create an active_thread — private channels don't thread.
@@ -2752,7 +2762,9 @@ class SimulationEngine:
                     if not posted:
                         self._note_phase5_post_failure(agent, target_post_id)
                     else:
-                        self._phase5_post_failure_counts.pop(target_post_id, None)
+                        self._phase5_post_failure_counts.pop(
+                            (agent.agent_id, target_post_id), None,
+                        )
                         agent.message_count += 1
 
                         # Move from interesting_posts to active_threads
