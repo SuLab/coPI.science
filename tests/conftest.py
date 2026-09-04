@@ -120,6 +120,17 @@ async def client(db_session, engine, monkeypatch):
     badge_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr("src.main.get_session_factory", lambda: badge_factory)
 
+    # Same reasoning, second app-level global: /api/health does not use the injected
+    # get_db either. It owns a dedicated engine (src/main.py::get_health_engine) so the
+    # probe can carry asyncpg connect/command timeouts -- `asyncio.wait_for` cannot
+    # interrupt a socket read a SQLAlchemy greenlet is parked on, measured at 142 s
+    # against a frozen Postgres -- and that engine is built from settings.database_url,
+    # which is unreachable in tests. Left unpatched it made every /api/health request
+    # answer 503: tests/integration/test_health_route.py::test_health_ok failed exactly
+    # that way, and tests/unit/test_agent_badge_middleware.py had to patch it
+    # separately. Repoint it here so no future test has to know it exists.
+    monkeypatch.setattr("src.main.get_health_engine", lambda: engine)
+
     app = create_app()
 
     async def _override_get_db():
