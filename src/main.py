@@ -361,9 +361,22 @@ def create_app() -> FastAPI:
     # structurally by test_origin_guard.py::test_the_guard_is_the_outermost_middleware.
     application.add_middleware(OriginGuardMiddleware)
 
-    # Static files
+    # Static files. Served with `Cache-Control: no-cache` so a browser revalidates
+    # against the ETag on every load and picks up a redeployed asset immediately.
+    # Without this, /static carried only ETag/Last-Modified and no Cache-Control,
+    # so browsers applied HEURISTIC freshness and kept serving a copy cached
+    # before a deploy — which is why a fixed static/js/markdown.js did not reach
+    # already-visited clients until a manual hard refresh.
+    class _NoCacheStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
+
     try:
-        application.mount("/static", StaticFiles(directory="static", html=True), name="static")
+        application.mount(
+            "/static", _NoCacheStaticFiles(directory="static", html=True), name="static"
+        )
     except RuntimeError:
         logger.warning("Static files directory not found, skipping mount")
 
