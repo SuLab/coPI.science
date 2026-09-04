@@ -632,6 +632,14 @@ def _validate_profile(profile: dict[str, Any] | None) -> bool:
     Validate synthesized profile fields.
     Returns True if valid.
     """
+    # extract_json's return type is annotated dict[str, Any] but is a bare
+    # json.loads under the hood — a fenced JSON array/scalar parses fine and
+    # comes back as a non-dict. vet_publications.py and
+    # resynth_from_current_pubs.py call this function directly on their own
+    # extract_json result before ever reaching apply_synthesis's own guard, so
+    # this has to reject non-dicts too (#22 COR-22 fix-round review).
+    if not isinstance(profile, dict):
+        return False
     if not profile:
         return False
 

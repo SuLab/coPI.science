@@ -23,6 +23,18 @@ def test_empty_profile_fails():
     assert _validate_profile({}) is False
 
 
+def test_non_dict_list_profile_does_not_raise():
+    # A fenced JSON array from extract_json used to reach `.get()` here and
+    # crash with AttributeError one frame before apply_synthesis's own guard
+    # (#22 COR-22 fix-round review: vet_publications.py and
+    # resynth_from_current_pubs.py call _validate_profile directly).
+    assert _validate_profile([1, 2, 3]) is False
+
+
+def test_non_dict_string_profile_does_not_raise():
+    assert _validate_profile("x") is False
+
+
 def test_null_research_summary_does_not_raise():
     assert _validate_profile({"research_summary": None}) is False
 

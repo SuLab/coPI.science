@@ -103,11 +103,16 @@ async def _run(
         print("  Calling synthesize_profile (Claude)...", flush=True)
         synthesized = await synthesize_profile(context, pi_name)
 
-        print(f"  research_summary: {len(synthesized.get('research_summary', '').split())} words", flush=True)
-        print(f"  techniques: {len(synthesized.get('techniques', []))}", flush=True)
-        print(f"  models: {len(synthesized.get('experimental_models', []))}", flush=True)
-        print(f"  diseases: {len(synthesized.get('disease_areas', []))}", flush=True)
-        print(f"  targets: {len(synthesized.get('key_targets', []))}", flush=True)
+        # synthesize_profile's result is only dict[str, Any] by annotation; a
+        # fenced JSON array/scalar parses fine and would crash these debug
+        # prints on .get() before _validate_profile ever runs (#22 COR-22
+        # fix-round review).
+        if isinstance(synthesized, dict):
+            print(f"  research_summary: {len(synthesized.get('research_summary', '').split())} words", flush=True)
+            print(f"  techniques: {len(synthesized.get('techniques', []))}", flush=True)
+            print(f"  models: {len(synthesized.get('experimental_models', []))}", flush=True)
+            print(f"  diseases: {len(synthesized.get('disease_areas', []))}", flush=True)
+            print(f"  targets: {len(synthesized.get('key_targets', []))}", flush=True)
 
         validated = _validate_profile(synthesized)
         applied = apply_synthesis(profile, synthesized, validated=validated)
