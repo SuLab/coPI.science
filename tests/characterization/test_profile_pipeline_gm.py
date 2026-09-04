@@ -1097,6 +1097,65 @@ async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
     assert not (tmp_path / "private" / f"{agent.agent_id}.md").exists()
 
 
+async def test_bump_profile_version_is_emitted_after_the_private_seed_synthesis_call(
+    db_session, monkeypatch, tmp_path
+):
+    """#22 I6: bump_profile_version's `UPDATE ... RETURNING` takes a row lock on
+    researcher_profiles that is only released when the worker commits this
+    transaction (src/worker/main.py). Emitting it right after apply_synthesis
+    used to hold that lock across Step 9b's synthesize_private_profile LLM call
+    (plus both disk exports and create_revision) -- blocking any concurrent PI
+    save (/profile/save, /onboarding/save-profile,
+    /agent/{id}/public-profile/save) on that row for the whole call. This pins
+    the ordering directly: the row-locking bump must be emitted AFTER the
+    private-seed LLM call returns, not before it starts.
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    _install_fakes(monkeypatch)
+
+    events: list[str] = []
+
+    real_synthesize_private_profile = profile_pipeline.synthesize_private_profile
+
+    async def recording_synthesize_private_profile(*args, **kwargs):
+        events.append("synthesize_private_profile:start")
+        result = await real_synthesize_private_profile(*args, **kwargs)
+        events.append("synthesize_private_profile:end")
+        return result
+
+    real_bump_profile_version = profile_pipeline.bump_profile_version
+
+    async def recording_bump_profile_version(*args, **kwargs):
+        events.append("bump_profile_version")
+        return await real_bump_profile_version(*args, **kwargs)
+
+    monkeypatch.setattr(
+        profile_pipeline, "synthesize_private_profile", recording_synthesize_private_profile
+    )
+    monkeypatch.setattr(
+        profile_pipeline, "bump_profile_version", recording_bump_profile_version
+    )
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=False
+    )
+    await factories.make_agent(
+        db_session, user=user, agent_id="gmorder", bot_name="GmOrderBot"
+    )
+    await db_session.flush()
+
+    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert events == [
+        "synthesize_private_profile:start",
+        "synthesize_private_profile:end",
+        "bump_profile_version",
+    ], events
+
+
 async def test_disk_only_private_profile_survives_a_pipeline_run(
     db_session, monkeypatch, tmp_path
 ):

@@ -429,6 +429,11 @@ async def run_profile_pipeline(
     evidence_pmid_count = None if works_lookup_failed else len(set(pmids))
     evidence_pub_count = len(pubs_for_synthesis)
 
+    # Tracks whether apply_synthesis actually applied new fields, so the version
+    # bump (issue #22 I6) can be deferred to just before the final flush below
+    # without losing track of whether it is owed.
+    synthesis_applied = False
+
     if synthesized:
         stored_is_worth_keeping = _stored_is_worth_keeping(profile)
         lost_evidence = evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0
@@ -448,10 +453,10 @@ async def run_profile_pipeline(
                 f"the new synthesis {reason}.",
             )
         else:
-            if apply_synthesis(profile, synthesized, validated=validated):
+            synthesis_applied = apply_synthesis(profile, synthesized, validated=validated)
+            if synthesis_applied:
                 profile.evidence_pmid_count = evidence_pmid_count
                 profile.evidence_pub_count = evidence_pub_count
-                profile.profile_version = await bump_profile_version(db, profile.id)
 
             if not validated:
                 logger.error(
@@ -544,6 +549,19 @@ async def run_profile_pipeline(
             profile.private_profile_seed = seed
         except Exception as exc:
             logger.error("Private profile seed generation failed for %s: %s", user.name, exc)
+
+    # Bump profile_version here, not at the point apply_synthesis was applied
+    # (issue #22 I6): bump_profile_version's `UPDATE ... RETURNING` takes a row
+    # lock on researcher_profiles that is only released when the worker commits
+    # this transaction (src/worker/main.py). Emitting it immediately after
+    # apply_synthesis held that lock across Step 9b's synthesize_private_profile
+    # LLM call, both disk exports and create_revision below -- blocking any
+    # concurrent PI save (/profile/save, /onboarding/save-profile,
+    # /agent/{id}/public-profile/save) on that row for the whole call, with no
+    # lock_timeout set on the app engines. The value is only read by log/progress
+    # text above, which already ran; nothing between there and here reads it.
+    if synthesis_applied:
+        profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.flush()
 
