@@ -344,6 +344,156 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     assert pub.doi == "10.1000/pubmed-authoritative"
 
 
+async def test_profile_pipeline_update_branch_repairs_a_previously_truncated_title(
+    db_session, monkeypatch
+):
+    """#22 I5: the insert loop's existing-row branch used to refresh only
+    `doi`, so a publication row stored before the itertext() parser fix kept
+    its title truncated at the first inline tag forever ("Role of " for
+    "Role of <i>TP53</i> in cancer") -- those stored DB rows, not the live
+    parser, are what profile_export.py and the synthesis context read. A
+    pipeline pass over an existing row must repair title/abstract/journal/year
+    from the fresh PubMed record."""
+
+    async def fake_fetch_orcid_profile(orcid_id):
+        return {"name": "Ada Lovelace", "orcid": orcid_id}
+
+    async def fake_fetch_orcid_grants(orcid_id):
+        return []
+
+    async def fake_fetch_orcid_works(orcid_id):
+        return [{"pmid": "3001", "doi": "10.1000/ccc", "title": "T", "year": 2020}]
+
+    async def fake_convert_dois_to_pmids(dois):
+        return {}
+
+    async def fake_fetch_pubmed_records(pmids):
+        return [
+            {
+                "pmid": "3001",
+                "doi": "10.1000/ccc",
+                "title": "Role of TP53 in cancer",
+                "abstract": "Full repaired abstract text.",
+                "journal": "Journal of Repair",
+                "year": 2020,
+                "pub_types": ["Journal Article"],
+                "pmcid": None,
+            }
+        ]
+
+    async def fake_convert_pmids_to_pmcids(pmids):
+        return {}
+
+    async def fake_fetch_pmc_methods(pmcid):
+        return ""
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", fake_fetch_orcid_works)
+    monkeypatch.setattr(profile_pipeline, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
+    monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0200"
+    )
+
+    # Simulate a row inserted before the itertext() fix: truncated title, and
+    # stale journal/year, for the same PMID the fake PubMed record returns.
+    stale = Publication(
+        user_id=user.id, pmid="3001", doi="10.1000/ccc",
+        title="Role of ", abstract="stale abstract", journal="Old Journal", year=1999,
+    )
+    db_session.add(stale)
+    await db_session.flush()
+
+    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    pub = (
+        await db_session.execute(select(Publication).where(Publication.user_id == user.id))
+    ).scalar_one()
+    assert pub.title == "Role of TP53 in cancer"
+    assert pub.abstract == "Full repaired abstract text."
+    assert pub.journal == "Journal of Repair"
+    assert pub.year == 2020
+
+
+async def test_profile_pipeline_update_branch_does_not_blank_an_existing_abstract(
+    db_session, monkeypatch
+):
+    """#22 I5: the refresh must be additive only -- a fresh PubMed record
+    missing an abstract (e.g. newly indexed metadata-only) must never blank a
+    value the stored row already has, even while title/journal/year DO
+    refresh from the same fresh, non-empty record."""
+
+    async def fake_fetch_orcid_profile(orcid_id):
+        return {"name": "Ada Lovelace", "orcid": orcid_id}
+
+    async def fake_fetch_orcid_grants(orcid_id):
+        return []
+
+    async def fake_fetch_orcid_works(orcid_id):
+        return [{"pmid": "3002", "doi": "10.1000/ddd", "title": "T", "year": 2020}]
+
+    async def fake_convert_dois_to_pmids(dois):
+        return {}
+
+    async def fake_fetch_pubmed_records(pmids):
+        return [
+            {
+                "pmid": "3002",
+                "doi": "10.1000/ddd",
+                "title": "Updated Title",
+                "abstract": "",
+                "journal": "Journal of Repair",
+                "year": 2020,
+                "pub_types": ["Journal Article"],
+                "pmcid": None,
+            }
+        ]
+
+    async def fake_convert_pmids_to_pmcids(pmids):
+        return {}
+
+    async def fake_fetch_pmc_methods(pmcid):
+        return ""
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", fake_fetch_orcid_works)
+    monkeypatch.setattr(profile_pipeline, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
+    monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0300"
+    )
+
+    stale = Publication(
+        user_id=user.id, pmid="3002", doi="10.1000/ddd",
+        title="Old Title", abstract="Stored abstract must survive.",
+        journal="Old Journal", year=1999,
+    )
+    db_session.add(stale)
+    await db_session.flush()
+
+    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    pub = (
+        await db_session.execute(select(Publication).where(Publication.user_id == user.id))
+    ).scalar_one()
+    assert pub.title == "Updated Title"  # non-empty fresh value DOES refresh
+    assert pub.abstract == "Stored abstract must survive."  # empty fresh value does NOT blank it
+    assert pub.journal == "Journal of Repair"
+    assert pub.year == 2020
+
+
 async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
     db_session, monkeypatch, snapshot
 ):

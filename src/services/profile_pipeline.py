@@ -223,6 +223,25 @@ async def run_profile_pipeline(
             # Apply the validated DOI if it changed.
             if doi and pub.doi != doi:
                 pub.doi = doi
+            # Refresh title/abstract/journal/year from the fresh PubMed record
+            # (issue #22 I5): rows stored before the itertext() parser fix keep
+            # a title truncated at the first inline tag ("Role of " for
+            # "Role of <i>TP53</i> in cancer") forever, because this branch
+            # used to touch only `doi` -- and it is these stored DB rows, not
+            # the live parser, that profile_export.py and the synthesis
+            # context read. Only overwrite when the fresh value is non-empty,
+            # so a PubMed hiccup (or a record genuinely missing an abstract)
+            # can never blank a value already on the row. None of these four
+            # columns is human-curated (scripts/vet_publications.py only
+            # reads and deletes rows; no admin route writes them).
+            if rec.get("title"):
+                pub.title = rec["title"]
+            if rec.get("abstract"):
+                pub.abstract = rec["abstract"]
+            if rec.get("journal"):
+                pub.journal = rec["journal"]
+            if rec.get("year"):
+                pub.year = rec["year"]
         else:
             pub = Publication(
                 user_id=user_id,
