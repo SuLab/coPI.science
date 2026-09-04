@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Update, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job, Publication, ResearcherProfile, User
@@ -243,9 +244,11 @@ async def run_profile_pipeline(
             if rec.get("year"):
                 pub.year = rec["year"]
         else:
-            pub = Publication(
-                user_id=user_id,
-                pmid=pmid,
+            # COR-16 Note: tolerates a concurrent writer that already committed
+            # this same (user_id, pmid) between our existing_pubs SELECT above
+            # and this INSERT -- see _insert_publication_tolerating_conflict.
+            pub, inserted = await _insert_publication_tolerating_conflict(
+                db, user_id, pmid,
                 pmcid=rec.get("pmcid"),
                 doi=doi,
                 title=rec.get("title", ""),
@@ -253,11 +256,11 @@ async def run_profile_pipeline(
                 journal=rec.get("journal"),
                 year=rec.get("year"),
             )
-            db.add(pub)
-            new_publications.append(pub)
+            if inserted:
+                new_publications.append(pub)
             # COR-16: a PMID repeated later in this same loop (e.g. two ORCID
             # works resolving to one PMID) must hit the update branch above,
-            # not db.add a second row that collides with
+            # not attempt a second insert that collides with
             # uq_publications_user_pmid (migration 0025).
             existing_pubs[pmid] = pub
 
@@ -682,6 +685,66 @@ def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]
             seen.add(pmid)
             pmids.append(pmid)
     return pmids, seen
+
+
+async def _insert_publication_tolerating_conflict(
+    db: AsyncSession, user_id: uuid.UUID, pmid: str, **fields: Any
+) -> tuple[Publication, bool]:
+    """INSERT a new Publication row, tolerating a concurrent writer that already
+    committed the same (user_id, pmid) (issue #22 COR-16 Note: the new
+    uq_publications_user_pmid constraint (migration 0025) makes two overlapping
+    pipeline runs for one user race on this INSERT -- without this, the SECOND
+    run's plain `await db.flush()` raises IntegrityError and fails the whole
+    job instead of double-inserting; it self-heals on the worker's retry, but
+    burns a full NCBI pass to get there).
+
+    Uses `INSERT ... ON CONFLICT DO NOTHING` (the pattern already established
+    for a different table by `_claim_foa` in src/agent/grantbot.py) rather than
+    a per-row SAVEPOINT: a savepoint's ROLLBACK TO SAVEPOINT on a real
+    IntegrityError proved to interact badly with this app's
+    `join_transaction_mode="create_savepoint"` test fixture (it left the
+    session needing an explicit top-level rollback), and ON CONFLICT DO
+    NOTHING never raises in the first place, so there is nothing to recover
+    from.
+
+    The in-run dedup from COR-16 (`_dedup_pmids` + the in-loop `existing_pubs`
+    update in the caller below) still applies FIRST and prevents THIS run from
+    ever attempting to insert the same PMID twice, so the conflict this
+    tolerates is specifically an *other* session's writer, not a duplicate
+    within this run.
+
+    Returns (row, True) when this call's own INSERT landed, or (row, False)
+    with the concurrent writer's row when it lost the race.
+    """
+    new_id = uuid.uuid4()
+    stmt = (
+        pg_insert(Publication)
+        .values(id=new_id, user_id=user_id, pmid=pmid, **fields)
+        .on_conflict_do_nothing(index_elements=["user_id", "pmid"])
+        .returning(Publication.id)
+    )
+    result = await db.execute(stmt)
+    inserted_id = result.scalar_one_or_none()
+    if inserted_id is not None:
+        # Load the row this statement just persisted into the session's
+        # identity map (Session.get checks the identity map before querying,
+        # so this is a no-op round trip once loaded) so a repeated PMID later
+        # in this same loop updates it in place instead of attempting a
+        # second insert.
+        pub = await db.get(Publication, inserted_id)
+        return pub, True
+
+    logger.warning(
+        "Publication (user_id=%s, pmid=%s) already inserted by a concurrent "
+        "writer; using its row instead of double-inserting (issue #22 COR-16 Note)",
+        user_id, pmid,
+    )
+    winner = await db.execute(
+        select(Publication)
+        .where(Publication.user_id == user_id, Publication.pmid == pmid)
+        .order_by(Publication.id)
+    )
+    return winner.scalars().first(), False
 
 
 def _stored_is_worth_keeping(profile: ResearcherProfile) -> bool:
