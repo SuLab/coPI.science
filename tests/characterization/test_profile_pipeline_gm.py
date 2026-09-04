@@ -13,6 +13,7 @@ A future change to how the pipeline assembles/stores a profile (field mapping,
 version bump, DOI handling, abstract hashing) breaks this snapshot loudly.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -756,6 +757,71 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
         "nothing; the version must track the stored content, not the attempt"
     )
     assert second.synthesis_validated is True
+
+
+async def test_profile_pipeline_discarded_synthesis_does_not_record_the_new_abstracts_hash(
+    db_session, monkeypatch
+):
+    """#22 COR-22 residual (c): raw_abstracts_hash is change-detection INPUT,
+    meant to describe the run whose OUTPUT was actually stored (see the model
+    comment on ResearcherProfile.evidence_pub_count, which distinguishes the
+    two). Before this fix it was written unconditionally at step 9, so a
+    refresh whose synthesis failed validation twice and was discarded —
+    exactly the scenario above — still recorded ITS abstracts as the last-seen
+    input. A later run over that same (still-failing) input would then look
+    unchanged by anything comparing hashes, and could skip regenerating a
+    profile whose good version-1 synthesis was never actually replaced. This
+    pins: the discard path leaves raw_abstracts_hash exactly as the last
+    APPLIED run left it, not the discarded run's own input.
+    """
+    _install_fakes(monkeypatch)
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0199",
+        onboarding_complete=False,
+    )
+    first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    first_hash = first.raw_abstracts_hash
+    assert first_hash == hashlib.sha256(
+        b"We describe the analytical engine and its operation on Bernoulli numbers.\n"
+        b"A method for computing Bernoulli numbers with the engine."
+    ).hexdigest(), "applied run must record the hash of ITS OWN synthesis input"
+
+    # Second run: DIFFERENT abstracts (so the hash WOULD change if this run's
+    # input were recorded), but validation fails twice -> the synthesis is
+    # discarded and the version-1 profile above is kept.
+    async def different_abstracts(pmids):
+        return [
+            {
+                "pmid": "1001", "doi": "10.1000/aaa", "title": "On the Analytical Engine",
+                "abstract": "Completely different abstract text for run two.",
+                "journal": "Taylor's Scientific Memoirs", "year": 1843,
+                "pub_types": ["Journal Article"], "pmcid": None,
+            },
+            {
+                "pmid": "1002", "doi": "10.1000/bbb", "title": "Notes on Bernoulli",
+                "abstract": "Another different abstract for run two.",
+                "journal": "Memoirs", "year": 1842,
+                "pub_types": ["Journal Article"], "pmcid": None,
+            },
+        ]
+
+    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", different_abstracts)
+    assert profile_pipeline._validate_profile(_INVALID_PROFILE) is False
+    fake_llm_2 = FakeAnthropic([json.dumps(_INVALID_PROFILE), json.dumps(_INVALID_PROFILE)])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm_2)
+
+    second = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert second.profile_version == 1, "the discarded run must not have been stored"
+    assert second.raw_abstracts_hash == first_hash, (
+        "raw_abstracts_hash was overwritten by a discarded run's input; a later "
+        "run over the same (still bad) abstracts would now see a matching hash "
+        "and could wrongly be treated as unchanged, even though the good "
+        "profile stored here was never replaced by it"
+    )
 
 
 async def test_profile_pipeline_pubmed_outage_stores_a_profile_marked_evidence_lost(

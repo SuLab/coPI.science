@@ -415,10 +415,6 @@ async def run_profile_pipeline(
     # down, keeps the profile that is already there.
     update_progress("step9", "Saving profile to database...")
     profile.grant_titles = grant_titles or profile.grant_titles
-    # Records this run's INPUT (change detection), so it is written even when the
-    # synthesized fields below are not. The evidence counts are the ones that
-    # describe the stored profile.
-    profile.raw_abstracts_hash = abstracts_hash
 
     # What the pipeline should have been able to fetch, and what actually reached
     # the prompt. Both zero means there was nothing to fetch; the first non-zero
@@ -433,11 +429,22 @@ async def run_profile_pipeline(
     # bump (issue #22 I6) can be deferred to just before the final flush below
     # without losing track of whether it is owed.
     synthesis_applied = False
+    # Whether this run produced a synthesis that was then explicitly thrown
+    # away to protect a better stored profile (issue #22 COR-22 residual (c)).
+    # raw_abstracts_hash is change-detection INPUT for the run whose output was
+    # actually kept -- a discarded run's abstracts must not be recorded, or a
+    # later run over that same (still-failing) input would look unchanged
+    # relative to a run whose good output was never replaced. A run that never
+    # produced a synthesis at all (synthesized falsy, e.g. an LLM outage) is a
+    # different case: there is nothing "better" it lost to, so its hash is
+    # still recorded below.
+    synthesis_discarded = False
 
     if synthesized:
         stored_is_worth_keeping = _stored_is_worth_keeping(profile)
         lost_evidence = evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0
         if stored_is_worth_keeping and (not validated or lost_evidence):
+            synthesis_discarded = True
             reason = (
                 "failed validation twice"
                 if not validated
@@ -494,6 +501,15 @@ async def run_profile_pipeline(
                     f"({found} publication IDs were found): "
                     f"{profile.evidence_state}.",
                 )
+
+    if not synthesis_discarded:
+        # Records this run's INPUT (change detection), so it is written even when
+        # the synthesized fields above are not (e.g. an LLM outage: nothing was
+        # produced, so there is nothing "better" this run's input could have lost
+        # to). It is skipped when a produced synthesis was explicitly discarded
+        # above, so change detection stays about the run whose output was kept.
+        # The evidence counts are the ones that describe the stored profile.
+        profile.raw_abstracts_hash = abstracts_hash
 
     # Look up agent_id (gates file export and revision)
     from src.models import AgentRegistry
