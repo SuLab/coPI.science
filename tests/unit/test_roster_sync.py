@@ -95,6 +95,33 @@ def _factory_for(rows):
     return lambda: _FakeDB(rows)
 
 
+class _FakeDBGrantbotTokenRaises:
+    """Serves the roster query and the publication join normally, but the
+    grantbot uid-reprobe's single-column token query (get_agent_bot_token)
+    raises — used to prove that failure is isolated to its own try/except
+    and cannot abort the add/remove diff sharing the same DB session.
+
+    Discriminated by column count (real SQLAlchemy Select objects), not call
+    order, since production issues all three queries on one open session:
+    the 5-column roster select, the 2-column publication join, and the
+    1-column grantbot token select.
+    """
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, stmt):
+        n = len(stmt.selected_columns)
+        if n == 1:
+            raise RuntimeError("grantbot token query failed")
+        return _FakeResult(self._rows if n > 2 else [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _FakeSlackClient:
     """Stand-in for AgentSlackClient.
 
@@ -260,6 +287,38 @@ class TestSyncRosterFromDb:
             "renaming a roster agent AWAY from a service-bot name must "
             "reseed the SERVICE_AGENT_IDS entry, not leave it missing"
         )
+        # A full rebuild must not lose the renamed agent's OWN new mapping...
+        assert engine._bot_name_to_id.get("subot") == "su"
+        # ...and the flush (bot_name_changed -> set_bot_name_map) must carry
+        # the reseeded "grantbot" entry into message_log's copy too, not just
+        # the engine's own _bot_name_to_id.
+        assert engine.message_log._bot_name_to_id.get("grantbot") == "grantbot"
+
+    async def test_removal_of_agent_holding_service_bot_name_reseeds_the_seed(self, monkeypatch):
+        """Mirrors test_rename_away_from_service_bot_name_reseeds_the_seed
+        above, for the REMOVAL path: afba7e8's removal loop searched-and-
+        popped the removed agent's OWN _bot_name_to_id key (`next(n for n, a
+        in ... if a == aid)`), which permanently deleted the SERVICE_AGENT_IDS
+        "grantbot" seed whenever the removed agent happened to be the one
+        holding that name — GrantBot's own :moneybag: posts become
+        unattributable for the rest of the run after that. ca72c8f's
+        _rebuild_bot_name_map() (now also used by the removal branch) reseeds
+        it instead, and both the engine's own map and message_log's flushed
+        copy must reflect it.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su")], existing_agents=["su", "grant"])
+        engine.agents["grant"].bot_name = "GrantBot"
+        engine._rebuild_bot_name_map()
+
+        await engine._sync_roster_from_db()
+
+        assert "grant" not in engine.agents  # removed (not in the DB rows)
+        assert engine._bot_name_to_id.get("grantbot") == "grantbot", (
+            "removing a roster agent that held a service-bot name must "
+            "reseed the SERVICE_AGENT_IDS entry, not leave it missing"
+        )
+        assert engine.message_log._bot_name_to_id.get("grantbot") == "grantbot"
 
     async def test_existing_client_is_rebuilt_when_its_token_rotates(self, monkeypatch):
         """Red-team residual: the old `continue` on 'aid in self.slack_clients'
@@ -391,6 +450,24 @@ class TestSyncRosterFromDb:
         assert "wiseman" in engine.slack_clients
         # Stale grounding data is preserved rather than cleared or replaced.
         assert engine._agent_publications == stale
+
+    async def test_grantbot_token_lookup_failure_does_not_abort_roster_sync(self, monkeypatch):
+        """The grantbot uid-reprobe token read shares the roster query's DB
+        session but must have its own try/except, same rationale as the
+        publication-record load just above it: before the fix it shared the
+        outer try/except, so a failure there silently no-op'd the whole
+        tick — a newly active agent was never added. See #29 review.
+        """
+        _patch_client(monkeypatch)
+        rows = [_row("su"), _row("wiseman")]
+        engine = _make_engine(rows, existing_agents=["su"])
+        engine.session_factory = lambda: _FakeDBGrantbotTokenRaises(rows)
+
+        await engine._sync_roster_from_db()
+
+        # Roster sync still completed its add/remove work despite the failure.
+        assert set(engine.agents) == {"su", "wiseman"}
+        assert "wiseman" in engine.slack_clients
 
 
 # ---------------------------------------------------------------

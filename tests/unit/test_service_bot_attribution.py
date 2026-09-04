@@ -370,7 +370,10 @@ class TestRosterSyncKeepsTheSeed:
         return eng
 
     async def test_removal_does_not_evict_grantbot(self, monkeypatch):
-        """The remove path pops by matching agent_id; "grantbot" is never one."""
+        """The remove path rebuilds _bot_name_to_id from self.agents and
+        re-applies the SERVICE_AGENT_IDS setdefault (_rebuild_bot_name_map),
+        so "grantbot" — never itself a roster agent_id — survives any
+        removal, including one of an agent that had claimed its name."""
         monkeypatch.setattr(
             "src.agent.slack_client.AgentSlackClient",
             lambda agent_id, bot_token: _FakeClient(agent_id),

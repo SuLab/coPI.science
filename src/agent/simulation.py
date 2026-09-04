@@ -297,7 +297,11 @@ class SimulationEngine:
         # manifest validator and admin UI while silently missing the engine.
         # See _rebuild_bot_name_map's docstring for why every later mutation
         # of self.agents also routes back through this same rebuild rather
-        # than an incremental edit.
+        # than an incremental edit. Declared (empty) here, not rebound inside
+        # _rebuild_bot_name_map, so the dict object's identity is stable —
+        # this class's docstrings elsewhere promise in-place mutation of the
+        # roster structures it shares by reference (e.g. with PIHandler).
+        self._bot_name_to_id: dict[str, str] = {}
         self._rebuild_bot_name_map()
         self.message_log.set_bot_name_map(self._bot_name_to_id)
 
@@ -4524,9 +4528,15 @@ class SimulationEngine:
             connected = probe.connect()
         except Exception as exc:
             # connect() only handles SlackApiError; DNS/SSL/socket errors escape it.
+            # Record the attempted token even on failure (see the dict's comment
+            # in __init__): otherwise a dead-but-valid-looking DB token never
+            # equals `_service_bot_tokens.get("grantbot")` and _sync_roster_from_db
+            # re-probes (and re-logs this warning) on every single tick forever.
+            self._service_bot_tokens["grantbot"] = token
             logger.warning("grantbot uid probe raised — continuing without it: %s", exc)
             return
         if not connected or not probe.bot_user_id:
+            self._service_bot_tokens["grantbot"] = token
             logger.warning(
                 "grantbot auth.test yielded no bot_user_id — its funding posts stay "
                 "unattributed this run",
@@ -5303,9 +5313,10 @@ class SimulationEngine:
         from the current source of truth (self.agents) rather than a
         sequence of incremental edits.
         """
-        self._bot_name_to_id: dict[str, str] = {
-            a.bot_name.lower(): a.agent_id for a in self.agents.values()
-        }
+        self._bot_name_to_id.clear()
+        self._bot_name_to_id.update(
+            (a.bot_name.lower(), a.agent_id) for a in self.agents.values()
+        )
         for service_id in SERVICE_AGENT_IDS:
             self._bot_name_to_id.setdefault(service_id, service_id)
 
@@ -5366,8 +5377,23 @@ class SimulationEngine:
                 # it never appears in `rows`/`desired`); read its token here,
                 # on the session already open, so a rotation can be noticed
                 # below without a second DB round trip. See #23 COR-26c/D10.
+                #
+                # Isolated from the roster query above, same rationale as the
+                # publication-record load just above: a failure here (this is
+                # its own single-column select, separate from the roster read
+                # that already succeeded) must never abort the add/remove/
+                # role-diff work still to come — that would silently no-op a
+                # newly active agent's admission for the whole tick. See #29
+                # review.
                 if self.slack_enabled:
-                    grantbot_db_token = await get_agent_bot_token(db, "grantbot")
+                    try:
+                        grantbot_db_token = await get_agent_bot_token(db, "grantbot")
+                    except Exception as exc:
+                        logger.warning(
+                            "[roster] grantbot token lookup failed (uid re-probe "
+                            "skipped this tick): %s", exc,
+                        )
+                        grantbot_db_token = None
 
             desired = {r.agent_id: r for r in rows}
 
@@ -5471,7 +5497,9 @@ class SimulationEngine:
             # status=='active' AgentRegistry row, so the role/name diff above
             # and `desired` never see it — a DB-side token rotation on its row
             # would otherwise go unnoticed until a restart. Compare against the
-            # token the last successful probe used (#23 COR-26c/D10).
+            # token the last probe ATTEMPTED (success or failure) — a dead
+            # token must be probed once, not on every tick forever (#23
+            # COR-26c/D10).
             if (
                 self.slack_enabled
                 and is_valid_token(grantbot_db_token)
@@ -5497,8 +5525,16 @@ class SimulationEngine:
                 await self._recompute_allowed_sender_ids()
                 if bot_name_changed:
                     self.message_log.set_bot_name_map(self._bot_name_to_id)
+                # Unconditional: a small dict copy every ROSTER_POLL_INTERVAL is
+                # cheap, and it means a flush skipped this tick by some earlier
+                # exception (e.g. an isolated grantbot-probe failure above) still
+                # self-heals on the very next tick instead of staying stale until
+                # a client is next (re)built. clients_changed is kept only so a
+                # debug log can distinguish "flushed because something changed"
+                # from "flushed as a no-op".
+                self.message_log.set_bot_uid_map(self._bot_uid_map())
                 if clients_changed:
-                    self.message_log.set_bot_uid_map(self._bot_uid_map())
+                    logger.debug("[roster] uid map flushed after a client (re)build")
                 if roster_changed:
                     self.refresh_lab_directories()
                 return

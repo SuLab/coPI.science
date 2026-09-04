@@ -93,8 +93,14 @@ class _ProbeClient:
     Also stands in for a roster client when built with agent_id != "grantbot"
     (test_rotation below rebuilds no roster clients, but shares the same
     patched import), so bot_user_id is derived from agent_id for that case.
+
+    ``dead_tokens`` simulates a valid-prefix-but-dead token (Slack rejects
+    auth.test, e.g. invalid_auth) — connect() returns False and no uid is
+    ever learned, the same shape AgentSlackClient.connect() itself returns
+    for that failure mode.
     """
     built: list["_ProbeClient"] = []
+    dead_tokens: set[str] = set()
 
     def __init__(self, agent_id, bot_token):
         self.agent_id = agent_id
@@ -103,6 +109,8 @@ class _ProbeClient:
         type(self).built.append(self)
 
     def connect(self):
+        if self.bot_token in type(self).dead_tokens:
+            return False
         self.bot_user_id = (
             "U_GRANTBOT_PROBE" if self.agent_id == "grantbot" else f"U_{self.agent_id}"
         )
@@ -111,6 +119,7 @@ class _ProbeClient:
 
 def _patch_probe(monkeypatch):
     _ProbeClient.built = []
+    _ProbeClient.dead_tokens = set()
     monkeypatch.setattr("src.agent.slack_client.AgentSlackClient", _ProbeClient)
     return _ProbeClient.built
 
@@ -236,3 +245,74 @@ class TestServiceBotReprobeOnRotation:
 
         assert built == []  # no probe (and no roster rebuild — su's token is unchanged)
         assert engine._service_bot_uids == {"U_OLD_GRANTBOT_PROBE": "grantbot"}
+
+
+# ---------------------------------------------------------------------------
+# A dead (valid-prefix, Slack-rejected) token must be probed once, not forever
+# ---------------------------------------------------------------------------
+
+
+class TestServiceBotDeadTokenSuppression:
+    async def test_dead_token_probed_once_across_three_ticks_one_warning(
+        self, monkeypatch, caplog,
+    ):
+        """Before the fix, a dead grantbot DB token was recorded in
+        _service_bot_tokens only on SUCCESS, so `grantbot_db_token !=
+        self._service_bot_tokens.get("grantbot")` stayed True forever and
+        _sync_roster_from_db re-probed (and re-logged the same warning) on
+        every single tick.
+        """
+        import logging
+
+        _patch_settings(monkeypatch, grantbot_field="")
+        _patch_probe(monkeypatch)
+        _ProbeClient.dead_tokens = {"xoxb-dead-grantbot"}
+        engine = _engine(
+            session_factory=lambda: _RosterAndGrantbotDB(
+                rows=[_row("su")], grantbot_token="xoxb-dead-grantbot",
+            ),
+        )
+        engine.slack_clients["su"] = _ProbeClient("su", "xoxb-real")
+        engine.slack_clients["su"].bot_user_id = "U_su"
+        engine._load_pi_mappings = AsyncMock()
+        engine._load_publication_records = AsyncMock()
+        engine._build_lab_directories = lambda: None
+
+        caplog.set_level(logging.WARNING, logger="src.agent.simulation")
+        for _ in range(3):
+            engine._last_roster_poll = 0.0  # bypass the 30s roster-poll throttle
+            await engine._sync_roster_from_db()
+
+        grantbot_attempts = [c for c in _ProbeClient.built if c.agent_id == "grantbot"]
+        assert len(grantbot_attempts) == 1
+        grantbot_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "grantbot" in r.getMessage().lower()
+        ]
+        assert len(grantbot_warnings) == 1
+        assert engine._service_bot_uids == {}
+        assert engine._service_bot_tokens["grantbot"] == "xoxb-dead-grantbot"
+
+    async def test_probe_retried_once_the_db_token_changes(self, monkeypatch):
+        """A previously recorded FAILED attempt on a different, now-stale
+        token must not suppress a probe of a genuinely new token."""
+        _patch_settings(monkeypatch, grantbot_field="")
+        _patch_probe(monkeypatch)
+        engine = _engine(
+            session_factory=lambda: _RosterAndGrantbotDB(
+                rows=[_row("su")], grantbot_token="xoxb-new-grantbot",
+            ),
+        )
+        engine.slack_clients["su"] = _ProbeClient("su", "xoxb-real")
+        engine.slack_clients["su"].bot_user_id = "U_su"
+        engine._load_pi_mappings = AsyncMock()
+        engine._load_publication_records = AsyncMock()
+        engine._build_lab_directories = lambda: None
+        engine._service_bot_tokens["grantbot"] = "xoxb-dead-grantbot"
+
+        await engine._sync_roster_from_db()
+
+        grantbot_attempts = [c for c in _ProbeClient.built if c.agent_id == "grantbot"]
+        assert len(grantbot_attempts) == 1
+        assert engine._service_bot_uids.get("U_GRANTBOT_PROBE") == "grantbot"
+        assert engine._service_bot_tokens["grantbot"] == "xoxb-new-grantbot"
