@@ -89,11 +89,18 @@ _NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}  # 8.3 req/s / 2.9 req/s aggreg
 # exponential backoff, not the pacing gate above.
 _RETRY_BACKOFF = 0.5
 
-# Shared clock state for `_pace_ncbi`. The lock is created lazily on first use
-# (rather than at import time) so construction never binds to an event loop
-# that isn't running yet.
-_ncbi_gate_lock: asyncio.Lock | None = None
-_ncbi_last_start = 0.0
+# Shared clock state for `_pace_ncbi`: a monotonic-clock reservation cursor, not a
+# lock. An `asyncio.Lock` does not bind to a loop at construction — lazy
+# construction was never the fix — it binds at its first *contended* acquire,
+# inside `await lock.acquire()`. A module-level singleton lock acquired from more
+# than one event loop over the process's life (a fresh loop per `asyncio.run()`
+# call, or per test with function-scoped event loops) eventually gets acquired
+# from a second loop and raises. The cursor below needs no lock: every caller
+# does one read-modify-write of `_ncbi_next_start` with no `await` between the
+# read and the write, which is atomic on a single-threaded event loop — nothing
+# else can run between two non-`await` statements — so concurrent callers can't
+# race it, and nothing here is bound to any loop at all.
+_ncbi_next_start = 0.0
 
 
 async def _pace_ncbi(interval: float) -> None:
@@ -101,19 +108,18 @@ async def _pace_ncbi(interval: float) -> None:
 
     Enforces the E-utilities ceiling (3 req/s anonymous, 10 req/s with an api_key)
     regardless of how many callers are in flight — the semaphore alone does not:
-    N slots each sleeping `interval` allow N/interval requests per second. (#23 COR-29b,
-    review fix round 1.)
+    N slots each sleeping `interval` allow N/interval requests per second. Reserves
+    the next start slot on `_ncbi_next_start` with a single atomic
+    read-modify-write (no lock, nothing loop-bound — see the module-level comment
+    above), then sleeps out whatever wait that reservation implies. (#23 COR-29b,
+    review fix round 2.)
     """
-    global _ncbi_gate_lock, _ncbi_last_start
-    if _ncbi_gate_lock is None:
-        _ncbi_gate_lock = asyncio.Lock()
-    async with _ncbi_gate_lock:
-        now = time.monotonic()
-        wait = _ncbi_last_start + interval - now
-        if wait > 0:
-            await asyncio.sleep(wait)
-            now = time.monotonic()
-        _ncbi_last_start = now
+    global _ncbi_next_start
+    now = time.monotonic()
+    start = max(now, _ncbi_next_start)
+    _ncbi_next_start = start + interval
+    if start > now:
+        await asyncio.sleep(start - now)
 
 
 # NCBI's E-utilities usage policy requires every request to identify the caller with

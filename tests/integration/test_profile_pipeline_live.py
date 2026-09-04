@@ -92,9 +92,9 @@ pytestmark = [
 #     test noticed, and the failure would be the *correct* signal rather than noise.
 #   * It is small and slow-growing — 12 work entries spanning 2002-2025 as of
 #     2026-07-30, roughly one paper a year. Small matters twice over: it bounds the token
-#     spend, and it bounds the number of unthrottled NCBI requests `run_profile_pipeline`
-#     fires (see `_ncbi_get`, which paces itself at ~8 req/s against a 3 req/s anonymous
-#     policy limit — a large corpus would be the thing that gets this IP blocked).
+#     spend, and it bounds the number of NCBI requests `run_profile_pipeline` fires (see
+#     `_ncbi_get`, which paces itself at ~2.9 req/s against a 3 req/s anonymous policy
+#     limit — a large corpus would be the thing that gets this IP blocked).
 #   * It exercises BOTH ORCID→PubMed resolution paths: as of 2026-07-30, 7 works carry a
 #     PMID directly and 5 are DOI-only, so `convert_dois_to_pmids` (ID converter, then
 #     the per-DOI ESearch fallback) really runs. One of the DOI-only entries is a bioRxiv

@@ -3,11 +3,13 @@
 Pins the efetch-XML parse path, the esummary/idconv JSON paths, and the
 swallow-and-continue error behavior. respx intercepts the internal httpx client;
 _ncbi_get retries a transient failure and paces every call — success or
-failure — at a rate keyed on whether NCBI_API_KEY is set; these tests zero the
-retry backoff to stay fast.
+failure — at a rate keyed on whether NCBI_API_KEY is set; these tests zero both
+the retry backoff and the NCBI pacing gate to stay fast (except the two tests
+below that need real values).
 """
 
 import asyncio
+import itertools
 import time
 
 import httpx
@@ -36,7 +38,7 @@ def _no_retry_backoff(monkeypatch, request):
     monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
     if request.node.name not in _UNPACED_TESTS:
         monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: 0.0, False: 0.0})
-        monkeypatch.setattr(pubmed, "_ncbi_last_start", 0.0)
+        monkeypatch.setattr(pubmed, "_ncbi_next_start", 0.0)
 
 
 def test_semaphores_are_sized_by_api_key_presence():
@@ -50,13 +52,16 @@ def test_semaphores_are_sized_by_api_key_presence():
 
 @respx.mock
 async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
-    """COR-29b, review fix round 1: the rate ceiling must hold under concurrency. With the old
-    in-slot sleep, N semaphore slots each sleeping `interval` allow N/interval requests per
-    second — on this pre-fix code, 2 keyless slots and instant mocked responses let two pairs of
-    the four concurrent starts land within ~1ms of each other (measured over 50 runs, max
-    observed min-gap 0.0009s), nowhere close to the thresholds below. The shared monotonic-clock
-    gate must instead space every call's START at least `interval` seconds apart, process-wide,
-    regardless of how many callers are in flight.
+    """COR-29b, review fix round 2: the rate ceiling must hold under concurrency, via a gate that
+    (unlike an `asyncio.Lock`) is never bound to whichever event loop happens to be running when
+    it is first used — see the module-level comment above `_pace_ncbi`. With the old per-slot
+    `finally: sleep(interval)`, N semaphore slots each sleeping `interval` allow N/interval
+    requests per second — on this pre-gate code, 2 keyless slots and instant mocked responses let
+    two pairs of the four concurrent starts land close together (measured over 50 runs of a
+    faithful reproduction of the pre-gate code: worst observed min-gap 0.026s, worst total span
+    0.154s), nowhere near a real `interval` apart. The lock-free reservation cursor below must
+    instead space every call's START at least `interval` seconds apart, process-wide, regardless
+    of how many callers are in flight.
 
     Thresholds are looser than `interval` itself because the recorded timestamp is the mocked
     HTTP call, one `await` past the gate release (through client construction and
@@ -64,11 +69,13 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     call's dispatch lands first without violating the gate. Measured over 300 runs at this
     interval, the worst observed adjacent gap was 78% of `interval` and the worst total span 96%
     of `3 * interval`; the 50%/85% thresholds below leave ample margin above that noise floor
-    while still failing hard (by ~50x) on the pre-fix behavior above.
+    while still failing every one of the 50 pre-gate-reproduction runs above — a ~1.9x margin on
+    the gap check and ~1.7x on the span check, not the "~50x" this docstring previously (and
+    wrongly) claimed.
     """
     interval = 0.1
     monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: interval, False: interval})
-    monkeypatch.setattr(pubmed, "_ncbi_last_start", 0.0)
+    monkeypatch.setattr(pubmed, "_ncbi_next_start", 0.0)
     starts: list[float] = []
 
     def _record_start(request):
@@ -81,8 +88,7 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     )
 
     starts.sort()
-    # starts[1:] is deliberately one element shorter (classic pairwise idiom) — strict=False.
-    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
     assert all(gap >= interval * 0.5 for gap in gaps), gaps
     assert starts[-1] - starts[0] >= 3 * interval * 0.85
 
