@@ -59,6 +59,24 @@ class _RecordingSession:
         return _EmptyResult()
 
 
+class _RecordingEngine:
+    """Stands in for the health probe's own engine (#27 I2).
+
+    The probe deliberately does NOT use the request session factory: it needs asyncpg
+    connect/command timeouts that `asyncio.wait_for` cannot supply (see src/main.py).
+    That means patching `get_session_factory` alone leaves this test talking to whatever
+    `settings.database_url` happens to point at — which is how it started returning 503
+    on any machine without a Postgres on the default DSN. Record through the same list
+    so the "no badge queries" assertion still sees everything the request ran.
+    """
+
+    def __init__(self, statements):
+        self._statements = statements
+
+    def connect(self):
+        return _RecordingSession(self._statements)
+
+
 @pytest.fixture
 def app_and_statements(monkeypatch):
     from src.main import create_app
@@ -67,6 +85,7 @@ def app_and_statements(monkeypatch):
     monkeypatch.setattr(
         "src.main.get_session_factory", lambda: (lambda: _RecordingSession(statements))
     )
+    monkeypatch.setattr("src.main.get_health_engine", lambda: _RecordingEngine(statements))
     return create_app(), statements
 
 
