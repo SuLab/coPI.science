@@ -35,6 +35,8 @@ from sqlalchemy.exc import IntegrityError
 
 from src.config import get_settings
 from src.models import (
+    AgentDelegate,
+    AgentRegistry,
     EmailEngagementTracker,
     EmailNotificationPreference,
     Job,
@@ -1152,6 +1154,141 @@ async def test_delete_account_returns_409_on_integrity_error(client, db_session,
     assert await _user_row(db_session, uid) is not None, (
         "user row was deleted despite the simulated commit failure"
     )
+
+
+# --- #25 D1 / phase8 I3: the delete must not orphan a live agent -------------
+#
+# "Owns an active agent" means: an ``agents`` row whose ``user_id`` is the
+# caller (the column is UNIQUE, so at most one) AND whose ``status`` is live or
+# one unconditional admin click from live:
+#
+#   active   — on the simulation roster (src/agent/main.py:110,
+#              src/agent/simulation.py:4221) and posting to Slack under the
+#              PI's name. Deleting the owner leaves status='active' with
+#              user_id NULL: a bot nobody owns.
+#   pending  — admin_update_agent (src/routers/admin.py:952-956) promotes a
+#              pending row straight to 'active' and never re-reads user_id, so
+#              an orphaned pending row becomes an orphaned *live* agent with no
+#              further owner-consented step in between.
+#
+# Parked rows do NOT block. 'inactive' is precisely the remedy the refusal page
+# tells the user to take, so blocking on it would make the remedy unreachable
+# and turn the refusal into a permanent one; 'suspended' is the same off-roster
+# state, reached by an admin rejection (admin.py admin_reject_agent).
+# A *delegation* (agent_delegates) is not ownership and never blocks — see
+# test_a_delegate_of_someone_elses_active_agent_can_still_delete below.
+
+
+async def _agent_row(db, agent_pk):
+    """(row exists?, user_id) — a bare scalar cannot tell a deleted agent row
+    apart from one whose user_id was nulled, which is the whole question here."""
+    exists = await db.scalar(
+        select(func.count()).select_from(AgentRegistry).where(AgentRegistry.id == agent_pk)
+    )
+    owner = await db.scalar(
+        select(AgentRegistry.user_id).where(AgentRegistry.id == agent_pk)
+    )
+    return bool(exists), owner
+
+
+@pytest.mark.parametrize(
+    "agent_status,refused",
+    [("active", True), ("pending", True), ("inactive", False), ("suspended", False)],
+    ids=["active", "pending", "inactive", "suspended"],
+)
+async def test_delete_account_is_refused_only_while_the_owned_agent_could_go_live(
+    client, db_session, agent_status, refused
+):
+    u = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=u, status=agent_status)
+    agent_pk, uid = agent.id, u.id
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"}
+    )
+
+    exists, owner = await _agent_row(db_session, agent_pk)
+    if refused:
+        assert r.status_code == 409, (
+            f"status={agent_status!r}: the delete was not refused ({r.status_code})"
+        )
+        assert await _user_row(db_session, uid) is not None, (
+            f"status={agent_status!r}: the account was deleted anyway"
+        )
+        assert (exists, owner) == (True, uid), (
+            f"status={agent_status!r}: agent orphaned (exists={exists}, user_id={owner})"
+        )
+    else:
+        # Control for the branch above: with a parked agent the very same
+        # request must still delete the account, so the 409s are about the
+        # agent's status and not about a route that refuses everybody.
+        assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1", (
+            f"status={agent_status!r}: a parked agent blocked self-service deletion"
+        )
+        assert await _user_row(db_session, uid) is None
+        assert (exists, owner) == (True, None), (
+            f"status={agent_status!r}: expected the parked agent row to survive "
+            f"with user_id NULL (exists={exists}, user_id={owner})"
+        )
+
+
+async def test_the_delete_confirm_page_explains_the_refusal_instead_of_offering_the_form(
+    client, db_session
+):
+    owner = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=owner, status="active", bot_name="GuardBot")
+    plain = await factories.make_user(db_session)
+    await db_session.flush()
+
+    blocked = await client.get("/profile/delete-account", headers=_auth(owner.id))
+    assert blocked.status_code == 200
+    assert "GuardBot" in blocked.text, "the page does not name the agent that blocks the delete"
+    assert "deactivate" in blocked.text.lower(), "the page does not state the remedy"
+    assert 'action="/profile/delete-account"' not in blocked.text, (
+        "the confirm form is still offered to a user whose POST would be refused"
+    )
+
+    # CONTROL — a user who owns no agent still gets the form, so the absence
+    # above is the guard and not a template that renders nothing for anybody.
+    ok = await client.get("/profile/delete-account", headers=_auth(plain.id))
+    assert ok.status_code == 200
+    assert 'action="/profile/delete-account"' in ok.text
+
+
+async def test_a_delegate_of_someone_elses_active_agent_can_still_delete(client, db_session):
+    """A delegation is not ownership.
+
+    Measured on the production copy (copi_verify @ 0028): William Dion is a
+    delegate of the active ``wiseman`` agent and owns none. Deleting him removes
+    one agent_delegates row (ondelete=CASCADE) and leaves wiseman.user_id intact.
+    """
+    owner = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=owner, status="active")
+    agent_pk, owner_id = agent.id, owner.id
+    delegate = await factories.make_user(db_session)
+    db_session.add(AgentDelegate(agent_registry_id=agent_pk, user_id=delegate.id))
+    await db_session.flush()
+    delegate_id = delegate.id
+
+    r = await client.post(
+        "/profile/delete-account", headers=_auth(delegate_id), data={"confirm": "delete"}
+    )
+    assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1"
+    assert await _user_row(db_session, delegate_id) is None
+    assert await _agent_row(db_session, agent_pk) == (True, owner_id), (
+        "deleting a delegate disturbed the agent's owner"
+    )
+    assert await db_session.scalar(
+        select(func.count()).select_from(AgentDelegate).where(AgentDelegate.user_id == delegate_id)
+    ) == 0
+
+    # CONTROL — the owner of that same agent is still refused, so the pass
+    # above is about delegation and not about a guard that never fires.
+    refused = await client.post(
+        "/profile/delete-account", headers=_auth(owner_id), data={"confirm": "delete"}
+    )
+    assert refused.status_code == 409
 
 
 # ---------------------------------------------------------------------------

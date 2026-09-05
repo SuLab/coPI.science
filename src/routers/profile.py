@@ -1,6 +1,7 @@
 """Profile view and edit router."""
 
 import logging
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
-from src.models import Job, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
 from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
@@ -243,16 +244,58 @@ async def profile_refresh(
     return RedirectResponse(url="/profile?refreshing=1", status_code=302)
 
 
+# AgentRegistry.status values that make an owned agent too live to orphan.
+# 'active' is on the simulation roster and posting to Slack as the PI;
+# 'pending' is one admin click from it, because admin_update_agent promotes a
+# pending row straight to 'active' without re-reading user_id. The parked
+# states ('inactive', 'suspended') are deliberately absent: "deactivate the
+# agent" is the remedy the refusal page offers, so it has to unblock the
+# delete. See docs/plans/2026-09-04-decisions/task-25.md.
+AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE = ("active", "pending")
+
+
+async def _agent_blocking_account_delete(
+    db: AsyncSession, user: User
+) -> AgentRegistry | None:
+    """The agent this user owns that account deletion would orphan, if any.
+
+    Ownership is ``agents.user_id`` (a UNIQUE column, so at most one row). A
+    delegation is not ownership: ``agent_delegates.user_id`` is
+    ``ondelete="CASCADE"``, so deleting a delegate removes the delegation and
+    leaves the agent's owner alone.
+    """
+    result = await db.execute(
+        select(AgentRegistry).where(
+            AgentRegistry.user_id == user.id,
+            AgentRegistry.status.in_(AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 @router.get("/delete-account", response_class=HTMLResponse)
 async def delete_account_confirm(
     request: Request,
-    current_user: User = Depends(get_current_user),
+    # Annotated rather than `= Depends(...)`: this handler needed a new `db`
+    # dependency for the guard below, and the `= Depends(...)` spelling costs a
+    # ruff B008 per parameter (11 of src/'s 251 findings are that rule in this
+    # file). Same behaviour, no new debt on the SRC_LINT_MAX ratchet.
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
-    """Account deletion confirmation page."""
+    """Account deletion confirmation page.
+
+    Renders the refusal instead of the confirm form when the caller owns an
+    agent the delete would orphan, so the POST's 409 is never a surprise.
+    """
     return templates.TemplateResponse(
         request,
         "profile/delete_account.html",
-        _template_context(request, current_user),
+        _template_context(
+            request,
+            current_user,
+            blocking_agent=await _agent_blocking_account_delete(db, current_user),
+        ),
     )
 
 
@@ -266,6 +309,20 @@ async def delete_account(
     """Delete user account after confirmation."""
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
+
+    # agents.user_id is ondelete="SET NULL", so deleting the owner of a live
+    # agent leaves status='active' with no owner — a bot on Slack in this PI's
+    # name that nobody can deactivate, edit or answer proposals for. Refuse,
+    # and say what to do about it, rather than silently deactivating an agent
+    # the user did not ask us to touch. (#25 D1 / phase8 I3.)
+    blocking_agent = await _agent_blocking_account_delete(db, current_user)
+    if blocking_agent is not None:
+        return templates.TemplateResponse(
+            request,
+            "profile/delete_account.html",
+            _template_context(request, current_user, blocking_agent=blocking_agent),
+            status_code=409,
+        )
 
     try:
         await db.delete(current_user)

@@ -8,9 +8,12 @@ a change here is a schema-contract change, not a test bug.
 """
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import configure_mappers
 
+from src.database import Base
 from src.models import (
     AgentChannel,
     AgentMessage,
@@ -18,6 +21,7 @@ from src.models import (
     LlmCallLog,
     PrivateChannelMember,
     ProposalReview,
+    Publication,
     ResearcherProfile,
     SimulationRun,
     ThreadDecision,
@@ -337,3 +341,114 @@ async def test_dat1_deleting_added_by_user_is_safe(db_session):
         select(PrivateChannelMember.added_by_user_id).where(PrivateChannelMember.id == m.id)
     )
     assert nulled is None
+
+
+# --------------------------------------------------------------------------
+# 7. P2 (issue #25) — passive_deletes=True on every delete-orphan cascade.
+#
+# `32c4ca3` added the flag to all 11 of them so a parent delete leans on the
+# DB's ON DELETE CASCADE instead of SELECTing every child row into memory and
+# deleting it one at a time (deleting one PI on the production copy cascades
+# 153 publications and 63 proposal reviews). Nothing in tests/ noticed the flag
+# — `grep -rn passive_deletes tests/` was 0 hits — so removing it again was
+# free. These two tests are the pin: one on the mapping, one on the SQL a real
+# delete actually emits.
+# --------------------------------------------------------------------------
+
+
+def _delete_orphan_relationships():
+    configure_mappers()
+    return {
+        f"{mapper.class_.__name__}.{rel.key}": rel
+        for mapper in Base.registry.mappers
+        for rel in mapper.relationships
+        if "delete-orphan" in rel.cascade
+    }
+
+
+def test_p2_every_delete_orphan_relationship_sets_passive_deletes():
+    rels = _delete_orphan_relationships()
+    # Control: a walk that found nothing would satisfy the assertion below
+    # vacuously. Issue #25 P2 counted 11; a new cascade must be added here
+    # deliberately, having first been given a DB-side ON DELETE CASCADE.
+    assert set(rels) == {
+        "AgentChannel.private_members",
+        "AgentRegistry.delegates",
+        "AgentRegistry.invitations",
+        "Cohort.memberships",
+        "SimulationRun.channels",
+        "SimulationRun.llm_call_logs",
+        "SimulationRun.messages",
+        "User.delegated_agents",
+        "User.jobs",
+        "User.profile",
+        "User.publications",
+    }
+    missing = sorted(name for name, rel in rels.items() if not rel.passive_deletes)
+    assert not missing, f"delete-orphan cascade without passive_deletes=True: {missing}"
+
+
+async def test_p2_each_passive_delete_child_fk_really_cascades_in_the_schema(db_session):
+    """The other half of P2's fix: passive_deletes hands the job to the DB.
+
+    If a child FK were anything but ON DELETE CASCADE, passive_deletes=True
+    would stop the ORM deleting the children and nothing would delete them —
+    silent orphans, or an FK violation. Asked of the real migrated schema.
+    """
+    wrong = []
+    for name, rel in _delete_orphan_relationships().items():
+        for _parent_col, child_col in rel.local_remote_pairs:
+            action = await db_session.scalar(
+                text(
+                    "SELECT CAST(c.confdeltype AS text) FROM pg_constraint c "
+                    "JOIN unnest(c.conkey) k(attnum) ON true "
+                    "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+                    "WHERE c.contype = 'f' AND c.conrelid = CAST(:child AS regclass) "
+                    "AND a.attname = :col"
+                ),
+                {"child": child_col.table.name, "col": child_col.name},
+            )
+            if action != "c":  # 'c' = CASCADE; None = no FK at all
+                wrong.append(f"{name} -> {child_col.table.name}.{child_col.name}={action!r}")
+    assert not wrong, f"passive_deletes with no DB-side CASCADE behind it: {wrong}"
+
+
+async def test_p2_a_user_delete_leaves_the_publications_to_the_database(db_session):
+    u = await factories.make_user(db_session)
+    pubs = [Publication(user_id=u.id, title=f"paper {i}") for i in range(3)]
+    db_session.add_all(pubs)
+    await db_session.flush()
+    pub_ids = [p.id for p in pubs]
+    # passive_deletes only spares children the session has not already loaded,
+    # and these were just inserted through it. Detach them so the flush below
+    # asks the mapping the question this test is about.
+    for p in pubs:
+        db_session.expunge(p)
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", _record)
+    try:
+        await db_session.delete(u)
+        await db_session.flush()
+    finally:
+        event.remove(Engine, "before_cursor_execute", _record)
+
+    touched = [s for s in statements if "publications" in s.lower()]
+    assert not touched, (
+        "the user delete read or wrote publications itself, so passive_deletes=True "
+        f"is no longer in force on User.publications: {touched}"
+    )
+    assert any(s.lstrip().upper().startswith("DELETE FROM USERS") for s in statements), (
+        f"no DELETE FROM users was emitted at all, so the assertion above is vacuous: {statements}"
+    )
+    # Control: the rows are gone anyway — the DB's ON DELETE CASCADE did the
+    # work the ORM declined to do. Without this, a mapping that simply stopped
+    # cascading would also pass.
+    left = await db_session.scalar(
+        select(func.count()).select_from(Publication).where(Publication.id.in_(pub_ids))
+    )
+    assert left == 0, f"{left} publications survived their owner's delete"

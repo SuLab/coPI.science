@@ -3,6 +3,41 @@
 
 {% block content %}
 <div class="max-w-lg mx-auto">
+    {% if blocking_agent %}
+    {# The account owns an agent the delete would orphan (agents.user_id is
+       ON DELETE SET NULL). Explain rather than offer a form whose POST the
+       route answers with 409. See docs/plans/2026-09-04-decisions/task-25.md. #}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 p-8">
+        <h1 class="text-2xl font-bold text-amber-700 mb-4">Delete Account</h1>
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-sm text-amber-800">
+            <p class="font-medium mb-2">
+                Your account cannot be deleted while it owns an agent.
+            </p>
+            <p>
+                <strong>{{ blocking_agent.bot_name }}</strong>
+                ({{ blocking_agent.agent_id }}) is registered to you and is currently
+                <strong>{{ blocking_agent.status }}</strong>. Deleting your account now
+                would leave that agent running in your name with nobody able to edit its
+                profile, review its proposals or take it off Slack.
+            </p>
+        </div>
+        <p class="text-sm text-gray-700 mb-6">
+            To go ahead, ask an administrator to <strong>deactivate</strong> the agent
+            (or transfer it to another owner) first, then return to this page — deletion
+            unblocks as soon as the agent is no longer yours or no longer live.
+        </p>
+        <div class="flex gap-3">
+            <a href="/agent"
+               class="bg-gray-800 text-white px-6 py-2 rounded-lg hover:bg-gray-900 font-medium">
+                View my agent
+            </a>
+            <a href="/profile/edit"
+               class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
+                Back to profile
+            </a>
+        </div>
+    </div>
+    {% else %}
     <div class="bg-white rounded-xl shadow-sm border border-red-200 p-8">
         <h1 class="text-2xl font-bold text-red-700 mb-4">Delete Account</h1>
         <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 text-sm text-red-700">
@@ -36,5 +71,6 @@
             </div>
         </form>
     </div>
+    {% endif %}
 </div>
 {% endblock %}
