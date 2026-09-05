@@ -1075,16 +1075,20 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
         "the PI's private guidance was echoed into the PUBLIC origin thread"
     )
 
-    # Observed behaviour, pinned because it is surprising rather than because it is
-    # right: the rating=0 sentinel puts the reopened proposal in the dashboard's
-    # "Reviewed Proposals" section labelled "Rating: 0/4" — on a scale the form only
-    # offers 1..4 on. The PI sees a rating they never gave, and the proposal is no
-    # longer rateable. Reported as a finding, not fixed here.
+    # Fixed deliberately in Task 16 (#20 blocker 5), as the previous version of this
+    # assertion instructed. The rating=0 reopen sentinel is no longer rendered as a
+    # score: the form only offers 1..4, `agent_page.py:509` rejects a submitted 0 and
+    # `email_inbound.py:383` rejects it too, so every one of the 233 zeros measured on
+    # the production copy is a sentinel and never a PI's answer. The dashboard now
+    # labels it "Reopened with guidance" instead of telling the PI they scored a
+    # proposal zero out of four (wiseman's own page showed that 89 times).
     page = (await client.get(
         "/agent/alpha/dashboard", headers=_auth(lab.pi_a_id))).text
-    assert "Rating: 0/4" in page, (
-        "reopen no longer renders the rating=0 sentinel as a rating — if this was "
-        "fixed deliberately, update this assertion; the finding is in the T11 report"
+    assert "Rating: 0/4" not in page, (
+        "the rating=0 reopen sentinel is being rendered as a score again"
+    )
+    assert "Reopened with guidance" in page, (
+        "the reopened proposal should be labelled as reopened, not scored"
     )
     assert f'action="/agent/alpha/proposals/{proposal.id}/review"' not in page, (
         "the proposal is still rateable after being reopened for refinement"
