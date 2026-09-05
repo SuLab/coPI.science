@@ -569,13 +569,39 @@ async def test_reopen_records_a_rating_zero_review_carrying_the_guidance(
     assert review.submitted_via == "web"
 
 
-async def test_reopen_rejects_empty_guidance(client, db_session, world, slack):
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"guidance": "   "}, id="whitespace"),
+        pytest.param({"guidance": ""}, id="empty-box"),
+        pytest.param({}, id="field-omitted"),
+    ],
+)
+async def test_reopen_rejects_empty_guidance(client, db_session, world, slack, body):
+    """phase8 M2: the handler's own coded 400 has to be the answer for an EMPTY box too.
+
+    `guidance` was `Form(...)`. Starlette's form parser hands an empty `guidance=` to
+    FastAPI as a MISSING field, so the two non-whitespace cases below never reached the
+    handler at all — they answered a raw
+    `{"detail":[{"type":"missing","loc":["body","guidance"],"msg":"Field required",...}]}`
+    422, which the reopen form has no rendering for, and the `Guidance text is required`
+    branch was unreachable from a browser. Only the whitespace case (a box with a space
+    in it) got that far. `Form("")` collapses all three onto the same coded rejection —
+    the same fix `7cc2ea3` made on `profile/save`'s `content`.
+
+    The other eight required-`str` Form fields the audit lists are follow-up F4; this
+    task deliberately fixes only this site.
+    """
     r = await client.post(
         f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/reopen",
-        data={"guidance": "   "},
+        data=body,
         headers=_auth(world.pi.id),
     )
-    assert r.status_code == 400
+    assert r.status_code == 400, (
+        f"empty guidance answered {r.status_code}, not the handler's coded 400: "
+        f"{r.text[:200]}"
+    )
+    assert r.json()["detail"] == "Guidance text is required"
     assert await _private_channels(db_session) == []
     assert slack.calls == []
 

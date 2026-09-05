@@ -685,7 +685,16 @@ async def reopen_proposal(
     agent_id: str,
     thread_decision_id: uuid.UUID,
     request: Request,
-    guidance: str = Form(...),
+    # Form("") not Form(...), for the same reason as save_private_profile's `content`
+    # below (phase8 M2): an empty textarea submits `guidance=`, which Starlette's form
+    # parser hands to FastAPI as a MISSING field, so a required parameter answers a raw
+    # 422 JSON body -- `{"detail":[{"type":"missing","loc":["body","guidance"],...}]}` --
+    # and the coded 400 six lines down was unreachable from the browser. Measured: both
+    # an empty box and an omitted field 422'd. With the default the handler sees "",
+    # strips it, and returns its own "Guidance text is required". (Unlike that route,
+    # nothing here needs to tell "submitted empty" from "field omitted": both are
+    # rejected, so no raw-FormData presence check is required.)
+    guidance: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -796,6 +805,11 @@ async def reopen_proposal(
 
     settings = get_settings()
 
+    # Set only by the legacy Slack-off branch below, and only there because that is the
+    # one branch whose PI text lives in a row this route itself must commit. Declared
+    # here so the `except IntegrityError` arm can read it whichever branch ran.
+    inbox_row: tuple[uuid.UUID, str, str, str, str] | None = None
+
     if already_migrated:
         # Nothing to do on Slack: the first attempt's migration posted this same
         # guidance into the private channel as part of its handover. Fall through so
@@ -850,10 +864,26 @@ async def reopen_proposal(
             from src.services.pi_inbox import get_latest_run_id, record_pi_message
             run_id = await get_latest_run_id(db)
             if run_id:
+                # Held for the recovery arm below (#24 V5 iii). record_pi_message does
+                # not commit -- deliberately, because the e-mail twin needs this row to
+                # ride the same commit that retires the notification, so committing it
+                # early would let a retried S3 delivery write a second one (the #21
+                # COR-19.6 shape). It is the ONLY copy of what the PI typed on this
+                # path: with Slack off the DB inbox is the whole conversation store and
+                # nothing was posted anywhere. A rollback() below therefore destroys the
+                # guidance outright unless the arm re-creates it, which is why the
+                # arguments are captured rather than rebuilt (`td`/`current_user` are
+                # expired by that rollback, and re-deriving the text would duplicate the
+                # two strings the engine reads).
+                inbox_content = f"PI guidance from {current_user.name}: {guidance}"
+                inbox_sender = f"{current_user.name} (PI)"
                 await record_pi_message(
                     db, run_id=run_id, channel_name=td.channel,
-                    content=f"PI guidance from {current_user.name}: {guidance}",
-                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+                    content=inbox_content, sender_name=inbox_sender,
+                    thread_ts=td.thread_id,
+                )
+                inbox_row = (
+                    run_id, td.channel, inbox_content, inbox_sender, td.thread_id,
                 )
             logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
         else:
@@ -915,14 +945,11 @@ async def reopen_proposal(
     agent_registry_id = agent.id
     agent_agent_id = agent.agent_id
     pi_user_id = agent.user_id
-
-    # migrate_public_thread_to_private commits refined_in_channel itself now, together
-    # with the AgentChannel row and the handover, as soon as its side effects are
-    # irreversible (34d3c15 for the Slack path, 391e545 for the Slack-off one), so a
-    # rollback() below no longer undoes it -- that is what lets the guard above read it
-    # on a retry. This capture is what the except arm re-binds from; keep it read
-    # BEFORE the try for the same MissingGreenlet reason as the four locals above.
-    refined_channel_id = td.refined_in_channel
+    # The human thread id, for the recovery arm's log lines. Read here for the same
+    # reason as the four above: `td` is expired by the rollback. The arm's own
+    # re-select cannot supply it -- the row may be gone by then, which is precisely the
+    # case that used to 500 (#24 V5 i).
+    td_thread_id = td.thread_id
 
     # Import hoisted ABOVE the try (mirrors review_proposal, :556-563): the except arm
     # below also needs record_engagement/mark_notification_responded, and a local
@@ -985,16 +1012,32 @@ async def reopen_proposal(
     except IntegrityError:
         await db.rollback()
         # Someone else (the engine's implicit marker, an e-mail reply, a delegate's
-        # /review) won the race on uq_proposal_reviews_decision_agent. The Slack
-        # channel migrate_public_thread_to_private created already exists for real,
-        # but rollback() just undid its flush-only refined_in_channel write -- re-bind
-        # it to the decision in a fresh transaction so a retry cannot pass the :695
-        # `!= -1` guard and re-migrate. Do NOT re-run the migration and do NOT re-raise.
-        td_reload = (await db.execute(
-            select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
-        )).scalar_one()
-        if refined_channel_id is not None:
-            td_reload.refined_in_channel = refined_channel_id
+        # /review) won the race on uq_proposal_reviews_decision_agent. Do NOT re-run
+        # the migration and do NOT re-raise.
+        #
+        # Does the decision itself still exist? This re-select used to exist to re-bind
+        # `refined_in_channel` from a value captured before the try, because
+        # migrate_public_thread_to_private only FLUSHED it and this rollback() undid
+        # the flush -- orphaning a Slack channel that existed for real. Both migration
+        # paths now COMMIT it themselves as soon as their side effects are irreversible
+        # (private_channels.py:415 and :644), so there is nothing left to restore and
+        # the re-bind is gone: it could only ever write back the value it had just
+        # read. Measured, not argued -- a before_cursor_execute recorder shows the SQL
+        # this arm emits after `ROLLBACK TO SAVEPOINT` contains no UPDATE of
+        # thread_decisions at all (verify-deploy finding 1a), and
+        # test_refined_in_channel_survives_the_lost_race_without_the_arm_re_binding_it
+        # pins the durability that replaced it. What the query is kept for is the
+        # diagnosis below: not every IntegrityError out of the block above is the
+        # review-uniqueness conflict, and a missing decision (an FK violation from a
+        # concurrent delete) is the one shape that explains an empty `winner`.
+        #
+        # scalar_one_or_none(), not scalar_one(): on exactly that shape scalar_one()
+        # raised NoResultFound -- a 500 out of the very arm that exists to avoid one
+        # (#24 V5 i). N2 fixed the identical line in review_proposal's arm (:626-638)
+        # and left this one, which is the handler its own comment points at.
+        decision_still_exists = (await db.execute(
+            select(ThreadDecision.id).where(ThreadDecision.id == thread_decision_id)
+        )).scalar_one_or_none() is not None
 
         winner = (await db.execute(
             select(ProposalReview).where(
@@ -1016,22 +1059,49 @@ async def reopen_proposal(
             logger.warning(
                 "Proposal %s gained a review (rating=%s) while the reopen write "
                 "raced -- leaving it alone",
-                td_reload.thread_id, winner.rating,
+                td_thread_id, winner.rating,
             )
-        else:
+        elif decision_still_exists:
             logger.error(
                 "IntegrityError on proposal %s reopen write but no winning row was "
-                "found on re-select -- unexpected",
-                td_reload.thread_id,
+                "found on re-select and the decision still exists -- unexpected",
+                td_thread_id,
+            )
+        else:
+            logger.warning(
+                "Proposal %s was deleted while its reopen was being written; the "
+                "IntegrityError was that foreign key, not a duplicate review",
+                td_thread_id,
+            )
+
+        if inbox_row is not None:
+            # #24 V5 (iii). On the legacy Slack-off path the rollback() above just
+            # destroyed the PI's guidance: record_pi_message adds the agent_messages
+            # row and leaves the commit to this route (pi_inbox.py:159-173 spells out
+            # why it must, and names this caller), and with Slack off that row is the
+            # only place the text exists -- nothing was posted anywhere else. Re-create
+            # it on the same commit as the recovery below, so the engine's inbound
+            # poller still sees the guidance it would have seen had the race not
+            # happened. Deliberately NOT committed inside record_pi_message: the e-mail
+            # twin (email_inbound.py) retires the notification on the same commit as
+            # this row, and an early commit there would let a retried S3 delivery mint
+            # a second guidance row (#21 COR-19.6).
+            from src.services.pi_inbox import record_pi_message
+            inbox_run, inbox_channel, inbox_text, inbox_from, inbox_thread = inbox_row
+            await record_pi_message(
+                db, run_id=inbox_run, channel_name=inbox_channel, content=inbox_text,
+                sender_name=inbox_from, thread_ts=inbox_thread,
             )
 
         await record_engagement(current_user_id, db)
         await mark_notification_responded(agent_registry_id, thread_decision_id, "instruction", db)
         await db.commit()
         logger.warning(
-            "Proposal %s reopen write lost a race after the Slack migration ran; "
-            "recovered by re-binding refined_in_channel=%s instead of re-migrating",
-            td_reload.thread_id, refined_channel_id,
+            "Proposal %s reopen write lost a race; the migration's own rows and "
+            "refined_in_channel are already committed, so the recovery is the review "
+            "row (and, on the Slack-off path, the PI's inbox guidance) -- not a "
+            "re-migration",
+            td_thread_id,
         )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
