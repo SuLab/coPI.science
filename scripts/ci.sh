@@ -84,15 +84,53 @@ SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 # in its OWN commit, with the old and new numbers in the message — do not just
 # raise it to make a red push pass; that is how ratchets rot.
 #
-# Measured 2026-09-04 via `git archive HEAD src` (commit 2170efb) + mypy 2.3.1
-# (the version the new cap resolves to): 145 findings, against ~30,656 LOC of
-# largely un-annotated FastAPI/SQLAlchemy code — most of the debt is
-# Optional/`| None` narrowing (SQLAlchemy relationship attributes, dict
-# `.get()` results) rather than missing annotations outright. 145 is itself
-# provisional: several other fix rounds were still landing on this branch at
-# measurement time (2 of the 145, in http_retry.py, are being fixed by a
-# concurrent round). 150 leaves 5 of slack, the same shape as SRC_LINT_MAX's
-# 6-of-260.
+# PROVENANCE. A bare ceiling with no record of what it was measured against is
+# not a ratchet, it is a number nobody can audit — so state what was measured,
+# at which commit, with which mypy, and what the ceiling costs on top; and
+# restate all of it whenever this default moves. tests/unit/test_ci_gate.py checks
+# that the three numbers below stay arithmetically consistent with the default,
+# so a raise that does not re-measure fails the gate rather than passing quietly.
+#   measured : 145 findings ("Found 145 errors in 25 files (checked 81 source files)")
+#   at commit: 9cbfc00 — measured on a CLEAN `git archive 9cbfc00 src pyproject.toml`
+#              export, NEVER the working tree (see the correction below)
+#   with     : mypy 2.3.1, python_version = "3.11" from pyproject's [tool.mypy]
+#   command  : mypy src --ignore-missing-imports  (identical to the step below)
+#   on       : 2026-09-04
+#   ceiling  : 150 findings (slack 5)
+#
+# The 145 are ~30,656 LOC of largely un-annotated FastAPI/SQLAlchemy code; most
+# of the debt is Optional/`| None` narrowing (SQLAlchemy relationship attributes,
+# dict `.get()` results) rather than missing annotations outright.
+#
+# WHY FIVE OF SLACK, and not one. (a) The mypy cap is a RANGE, so a rebuilt
+# .venv-test may resolve a 2.3.x patch that adds a check; requirements.lock is
+# runtime-only and does not pin dev extras, so `<2.4` is the whole bound — a
+# separate dev lockfile would be a much larger change than this ceiling needs.
+# (b) Roughly fifteen further fix rounds of this branch's backlog still have to
+# land against these 145. Five is 3.4 % of 145 — the same proportional headroom
+# SRC_LINT_MAX carries (260 over a measured 251, 3.6 %). Tighten it to 146 and
+# ordinary work goes red for a reason no reviewer can act on, which is how a
+# ratchet gets deleted instead of obeyed. Lower it when the debt is paid.
+#
+# MEASURE A CLEAN EXPORT, NOT THE WORKING TREE — the previous version of this
+# comment is the cautionary tale. It read "(commit 2170efb) ... 145 findings";
+# 2170efb re-measures at 147. Nothing drifted: the two extra findings there are
+# http_retry.py's `Exception must be derived from BaseException`, fixed three
+# minutes later by c1429e2. The 145 was read off a working tree that already
+# carried that uncommitted fix and was then labelled with the sha at HEAD.
+# Bisected 2026-09-04 on clean exports, one venv, the command above:
+#   2170efb 147 | f9541ba 145 | 42f03f4 147 | f29e295 147 | 5090322 147 |
+#   79cee44 145 | d7ce1a5 145 | 962aa6c 145 | 9cbfc00 145
+# The 145 -> 147 step is 42f03f4 adding two `tuple[Publication | None, bool]`
+# [return-value] findings in profile_pipeline.py; 79cee44 fixed that annotation
+# and the count returned to 145. Every move this ceiling has made was caused by
+# this repository's own code, never by mypy and never by PyPI.
+#
+# The test does NOT re-run mypy and demand equality with 145. That would be
+# #27 I4-e's mistake in a new place: a gate that goes red because a later commit
+# legitimately paid off two findings, or because a 2.3.x patch found one more,
+# is a gate that gets deleted. The ceiling is the gate; the block above is the
+# audit trail for it, and 145 is what it measured on the date it says.
 MYPY_MAX="${MYPY_MAX:-150}"
 
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
