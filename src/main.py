@@ -179,16 +179,15 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                                 )
                                 .where(
                                     ProposalReview.agent_id == aid,
-                                    # Both sentinels, not just -1. `proposal_reviews`
-                                    # carries the engine's implicit review (-1,
-                                    # simulation.py:3510) and the reopen-with-guidance
-                                    # marker (0) the same docstring names beside it.
-                                    # Neither is submittable — both writers reject
-                                    # anything outside 1-4 (agent_page.py:509,
-                                    # email_inbound.py:383) — so counting 0 as a review
+                                    # Both sentinels, not just -1: neither is
+                                    # submittable (agent_page.py:509,
+                                    # email_inbound.py:383), so counting 0 as a review
                                     # hid outstanding work from the badge for 12 of 53
                                     # active agents on the production copy (wiseman by
-                                    # 89). Same fix as admin.py:656/:865 in 9505554.
+                                    # 89). A reopened proposal IS outstanding -- the PI's
+                                    # attention is needed for the refinement, and their
+                                    # rating arrives by e-mail reply, not the web form
+                                    # (see task-D1-D2.md).
                                     ProposalReview.rating.notin_((-1, 0)),
                                     ThreadDecision.outcome == "proposal",
                                     (ThreadDecision.agent_a == aid)

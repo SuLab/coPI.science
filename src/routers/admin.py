@@ -25,6 +25,7 @@ from src.models import (
     COHORT_ACTION_CREATED,
     COHORT_ACTION_DELETED,
     COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+    REVIEW_MARKER_RATINGS,
     AccessAllowlist,
     AgentChannel,
     AgentMessage,
@@ -659,7 +660,7 @@ async def admin_discussions(
     from src.models import ProposalReview as PR
     reviews_query = select(PR).join(
         ThreadDecision, PR.thread_decision_id == ThreadDecision.id
-    ).where(PR.rating.notin_((-1, 0)))
+    ).where(PR.rating.notin_(REVIEW_MARKER_RATINGS))
     if not show_all_runs:
         reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
     reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
@@ -861,7 +862,7 @@ async def admin_agents(
             .join(ThreadDecision, ThreadDecision.id == ProposalReview.thread_decision_id)
             .where(
                 ProposalReview.agent_id == aid,
-                ProposalReview.rating.notin_((-1, 0)),
+                ProposalReview.rating.notin_(REVIEW_MARKER_RATINGS),
                 ThreadDecision.outcome == "proposal",
                 (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
             )

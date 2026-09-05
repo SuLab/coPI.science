@@ -251,15 +251,23 @@
                     <span class="text-sm text-gray-500">with {{ entry.other_agent | capitalize }}Bot</span>
                 </div>
                 <div class="flex items-center gap-3">
-                    {# rating=0 is the reopen-with-guidance marker, not a score: the form
-                       above offers 1-4 only and /review rejects anything else, so a 0 can
-                       only have come from the reopen route. The route that builds
-                       `reviewed` (src/routers/agent_page.py) still admits it, so this is
-                       where it stops being rendered as "Rating: 0/4" — 89 times on one
-                       PI's own dashboard on the production copy. #}
-                    {% if rev.rating == 0 %}
+                    {# rating=0 is a MARKER, never a score: the form above offers 1-4
+                       only and both writers reject anything else (agent_page.py:509,
+                       email_inbound.py:383). It has TWO populations on the production
+                       copy and they must not share a label -- of 233 rating=0 rows only
+                       6 carry a '[Reopened]' comment; the other 227 are a 2026-04-30/
+                       05-01 bulk backfill with no comment and no reviewer. Calling those
+                       "Reopened with guidance" asserts an event that never happened, and
+                       "Rating: 0/4" asserts a score the PI never gave (89 times on one
+                       PI's own dashboard). So: discriminate, and say only what is known.
+                       See docs/plans/2026-09-04-decisions/task-D1-D2.md. #}
+                    {% if rev.rating == 0 and rev.comment and rev.comment.startswith('[Reopened]') %}
                     <span class="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">
                         Reopened with guidance
+                    </span>
+                    {% elif rev.rating == 0 %}
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600">
+                        No score recorded
                     </span>
                     {% else %}
                     <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">

@@ -1087,6 +1087,11 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     assert "Rating: 0/4" not in page, (
         "the rating=0 reopen sentinel is being rendered as a score again"
     )
+    # This IS a genuine reopen -- the route writes comment="[Reopened] {guidance}" -- so
+    # it carries the reopen label. The discriminator matters because 227 of the 233
+    # rating=0 rows on the production copy are a bulk backfill with no comment and no
+    # reviewer, and those must NOT claim to be reopens (audit D1); they read
+    # "No score recorded" instead. See docs/plans/2026-09-04-decisions/task-D1-D2.md.
     assert "Reopened with guidance" in page, (
         "the reopened proposal should be labelled as reopened, not scored"
     )

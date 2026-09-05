@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import get_settings
 from src.models import (
+    REVIEW_MARKER_RATINGS,
     AgentRegistry,
     EmailNotification,
     ProposalReview,
@@ -698,7 +699,7 @@ async def _handle_review(
         )
     )
     existing_row = existing.scalar_one_or_none()
-    if existing_row is not None and existing_row.rating != -1:
+    if existing_row is not None and existing_row.rating not in REVIEW_MARKER_RATINGS:
         logger.info("Proposal %s already reviewed for agent %s", td.id, agent.agent_id)
         return
 
@@ -706,8 +707,14 @@ async def _handle_review(
     is_owner = agent.user_id == user.id
 
     if existing_row is not None:
-        # D6/COR-13: a rating=-1 row is the engine's implicit marker (Task 20.9), not a
-        # real review — upgrade it in place rather than inserting a second row
+        # D6/COR-13: a MARKER row is not a real review — rating=-1 is the engine's
+        # implicit marker (Task 20.9) and rating=0 is the reopen sentinel — so upgrade it
+        # in place rather than inserting a second row. The reopen case is load-bearing:
+        # the sweep chases a reopened proposal (it IS outstanding) and the web form is
+        # deliberately not re-offered, so THIS is the PI's path to rating it. Reading 0
+        # as "already reviewed" here is what put 11 of 26 notifiable users in an
+        # unbounded reminder loop -- reminded, answered "Got it - you rated it 4", and
+        # never recorded (audit D2). See task-D1-D2.md.
         # (proposal_reviews has a real UNIQUE (thread_decision_id, agent_id)). id is
         # left untouched; reviewed_at (amendment) is moved forward to record when the
         # explicit action happened, not when the engine wrote the implicit marker.

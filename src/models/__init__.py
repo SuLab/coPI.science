@@ -5,6 +5,8 @@ Import all models here so Alembic can detect them.
 
 from src.models.access import AccessAllowlist, WaitlistSignup
 from src.models.agent_activity import (
+    VISIBILITY_COLLAB_PRIVATE,
+    VISIBILITY_PUBLIC,
     AgentChannel,
     AgentMessage,
     LlmCallLog,
@@ -12,10 +14,12 @@ from src.models.agent_activity import (
     PrivateChannelMember,
     SimulationRun,
     ThreadDecision,
-    VISIBILITY_COLLAB_PRIVATE,
-    VISIBILITY_PUBLIC,
 )
-from src.models.agent_registry import AgentRegistry, ProposalReview
+from src.models.agent_registry import (
+    REVIEW_MARKER_RATINGS,
+    AgentRegistry,
+    ProposalReview,
+)
 from src.models.cohort import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
@@ -35,8 +39,8 @@ from src.models.email_notification import (
 )
 from src.models.grantbot_posted import GrantbotPostedFoa
 from src.models.job import Job
-from src.models.profile_revision import ProfileRevision
 from src.models.profile import ResearcherProfile
+from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
 from src.models.provisioning import AppSetting, SlackAppProvision
 from src.models.publication import Publication
@@ -58,6 +62,7 @@ __all__ = [
     "VISIBILITY_COLLAB_PRIVATE",
     "AgentRegistry",
     "ProposalReview",
+    "REVIEW_MARKER_RATINGS",
     "Cohort",
     "CohortAuditEvent",
     "CohortMembership",

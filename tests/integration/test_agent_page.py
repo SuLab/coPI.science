@@ -1159,6 +1159,66 @@ async def test_dashboard_still_shows_review_form_for_implicit_minus_one_review(
     assert f'/agent/{OWNER_AGENT}/proposals/{world.td.id}/review' in page.text
 
 
+async def test_a_legacy_rating_zero_marker_is_not_labelled_as_a_score_or_a_reopen(
+    client, db_session, world
+):
+    """#20 blocker 5 / audit D1. rating=0 is a MARKER with two populations.
+
+    Measured on the production copy: of 233 rating=0 rows only **6** carry a
+    '[Reopened]' comment; the other **227** are a 2026-04-30/05-01 bulk backfill with no
+    comment and no `reviewed_by_user_id`. Task 16 rendered every one of them "Reopened
+    with guidance", asserting an event that never happened for 227 rows; before that they
+    rendered as "Rating: 0/4", asserting a score the PI never gave (89 times on one PI's
+    own dashboard).
+
+    A marker stays HANDLED -- the PI engaged and the proposal is deliberately not
+    rateable again (pinned in test_proposal_review.py) -- so this test is about the LABEL
+    only: say what is known and nothing more.
+    """
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=0,
+            comment=None,          # the 227-row backfill shape
+        )
+    )
+    await db_session.flush()
+
+    page = (await client.get(f"/agent/{OWNER_AGENT}/dashboard",
+                             headers=_auth(world.pi.id))).text
+    assert "Rating: 0/4" not in page, "a marker was rendered as a score the PI never gave"
+    assert "Reopened with guidance" not in page, (
+        "a backfill row with no comment and no reviewer was labelled as a reopen"
+    )
+    assert "No score recorded" in page, "the marker should be described, not mislabelled"
+
+
+async def test_a_genuine_reopen_marker_is_labelled_as_a_reopen(
+    client, db_session, world
+):
+    """The 6-row twin of the test above: a real reopen DOES carry the label, so the
+    discriminator is not just suppressing every label."""
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=0,
+            comment="[Reopened] please broaden the target list",
+            reviewed_by_user_id=world.pi.id,
+        )
+    )
+    await db_session.flush()
+
+    page = (await client.get(f"/agent/{OWNER_AGENT}/dashboard",
+                             headers=_auth(world.pi.id))).text
+    assert "Reopened with guidance" in page
+    assert "Rating: 0/4" not in page
+    assert "No score recorded" not in page
+
+
 async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     client, db_session, world
 ):

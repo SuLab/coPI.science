@@ -1012,6 +1012,66 @@ async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker
     assert len(sent_emails) == 1, "_send_review_confirmation must still fire on the upgrade path"
 
 
+async def test_an_email_rating_upgrades_the_reopen_sentinel_instead_of_being_discarded(
+    db_session, monkeypatch, sent_emails,
+):
+    """The rating=0 twin of the -1 case above, and the fix for audit finding D2.
+
+    Three shipped behaviours have to fit together, and they do:
+      * the reminder sweep CHASES a reopened proposal -- it is outstanding, the PI's
+        attention is needed (`test_a_reopened_proposal_is_still_unreviewed_for_the
+        _reminder_sweep`);
+      * the WEB form is deliberately not re-offered while it is being refined
+        (`test_reopen_opens_the_private_channel_and_files_the_review_together`);
+      * so the e-mail reply is the PI's path to rating it -- and THIS path read the
+        rating=0 sentinel as "already reviewed" and returned without writing, while
+        `_send_review_confirmation` still replied "Got it - you rated it 4".
+
+    An audit measured 11 of 26 notifiable users in that loop: reminded, answered
+    politely, never recorded. A marker is not a review; it upgrades in place.
+    """
+    token = "d6reopen0" + "a" * 40
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.zero@scripps.edu", token=token
+    )
+    sentinel_reviewed_at = datetime.now(UTC) - timedelta(days=2)
+    sentinel = ProposalReview(
+        thread_decision_id=td.id,
+        agent_id=agent.agent_id,
+        user_id=agent.user_id,
+        rating=0,
+        comment="[Reopened] please broaden the target list",
+        submitted_via="web",
+        reviewed_at=sentinel_reviewed_at,
+    )
+    db_session.add(sentinel)
+    await db_session.flush()
+    sentinel_id = sentinel.id
+
+    _classifies_as(monkeypatch, {"category": "review", "rating": 4, "comment": "much better"})
+
+    await process_inbound_email(
+        _raw_reply(token, "pi.zero@scripps.edu", "4 much better"), db_session
+    )
+
+    reviews = await _reviews(db_session)
+    assert len(reviews) == 1, "the reopen sentinel must be upgraded in place, not duplicated"
+    (review,) = reviews
+    assert review.id == sentinel_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 4, (
+        "the PI's rating was discarded: the reopen sentinel was read as a completed "
+        "review, which is the reminder loop the audit measured"
+    )
+    assert review.comment == "much better"
+    assert review.submitted_via == "email"
+    assert review.reviewed_by_user_id == recipient.id
+    assert notification.status == "responded", (
+        "the notification must be retired, or the sweep keeps chasing and the loop stays open"
+    )
+    assert review.reviewed_at > sentinel_reviewed_at
+    assert len(sent_emails) == 1
+
+
 async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker(
     db_session, monkeypatch, sent_emails,
 ):

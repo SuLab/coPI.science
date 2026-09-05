@@ -67,6 +67,26 @@ class AgentRegistry(Base):
         return f"<AgentRegistry agent_id={self.agent_id} status={self.status}>"
 
 
+#: The two `ProposalReview.rating` values that are MARKERS, not a PI's answer.
+#:
+#: -1 is the engine's implicit marker: `simulation.py` writes it the first time a PI
+#: engages a proposal thread, so the rebuild does not re-block the proposal (#20 COR-5).
+#: 0 is the reopen-with-guidance sentinel the web route writes (#20 COR-13), and it is
+#: also what a 2026-04-30/05-01 bulk backfill left on 227 rows that carry no comment and
+#: no `reviewed_by_user_id`.
+#:
+#: A real review is 1..4 — the only range the form offers, the only range
+#: `agent_page.py` accepts, and the only range `email_inbound.py` accepts.
+#:
+#: EVERY predicate that asks either "has this been reviewed?" or "may I upgrade this row
+#: in place?" must use this tuple. An audit of this branch found the two questions had
+#: drifted apart: the notification sweep had learned to exclude 0 while the reply path
+#: still asked `rating != -1`, so 11 of 26 notifiable users were reminded forever,
+#: answered "Got it - you rated it 4", and never recorded. One constant, so the two
+#: agree by construction rather than by coincidence.
+REVIEW_MARKER_RATINGS = (-1, 0)
+
+
 class ProposalReview(Base):
     __tablename__ = "proposal_reviews"
 

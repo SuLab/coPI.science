@@ -252,6 +252,11 @@ async def agent_dashboard(
     reviewed_ids_result = await db.execute(
         select(ProposalReview.thread_decision_id).where(
             ProposalReview.agent_id == aid,
+            # `!= -1` deliberately, NOT notin_((-1, 0)): a reopened proposal belongs in
+            # this bucket so the web form is NOT re-offered while it is being refined
+            # (pinned by test_reopen_opens_the_private_channel_and_files_the_review
+            # _together). The PI's rating for it arrives by e-mail reply, which
+            # email_inbound.py accepts -- see task-D1-D2.md.
             ProposalReview.rating != -1,
         )
     )
