@@ -2280,6 +2280,121 @@ class TestFlushLlmLogsRequeuesOnFailure:
 
         assert engine._llm_log_buffer == [old_entry, new_entry]
 
+    class _UnavailableDB:
+        """A DB that is down at *connect* time (pool exhausted, refused, DNS).
+
+        The sibling `_FailingDB` fails at commit, which makes `_flush_llm_logs`
+        build one `LlmCallLog` per buffered row first; the overflow test below
+        replays hundreds of flushes over a growing batch, so that per-row cost
+        would dominate its runtime. Failing in `__aenter__` exercises exactly
+        the same `except Exception` re-queue path at O(1) per flush.
+        """
+
+        async def __aenter__(self):
+            raise RuntimeError("db is down")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    @pytest.mark.asyncio
+    async def test_a_repeatedly_failing_flush_cannot_grow_the_buffer_forever(
+        self, caplog,
+    ):
+        """COR-11 traded a bounded loss for unbounded retention.
+
+        Before the re-queue, a failed flush dropped at most `_llm_log_flush_size`
+        (10) rows. The re-queue prepends the whole failed batch back with no
+        ceiling, and every buffered row holds a FULL system prompt, the message
+        list and the response text — tens of KB each — inside the agent
+        container's `mem_limit: 768m`. A DB outage that spans a few hundred
+        flushes therefore turns an observability gap into an OOM.
+
+        The bound must drop the OLDEST rows: the reason COR-11 wanted the
+        re-queue at all is that `_rebuild_agent_state` step 4b rebuilds
+        `call_times` from `llm_call_logs` over the rate-limit *window*, so it is
+        the newest rows that still carry limiter signal.
+        """
+        import logging
+        import re
+        import uuid as uuid_mod
+
+        from src.agent import simulation as sim_mod
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.session_factory = lambda: self._UnavailableDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+
+        rounds, per_round = 250, engine._llm_log_flush_size
+        seq = 0
+        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+            for _ in range(rounds):
+                for _ in range(per_round):
+                    engine._llm_log_buffer.append(
+                        {"agent_id": "su", "phase": "phase4", "model": "x", "seq": seq}
+                    )
+                    seq += 1
+                await engine._flush_llm_logs()
+
+        buf = engine._llm_log_buffer
+        assert len(buf) < seq, (
+            f"the re-queue retained all {len(buf)} buffered rows after {rounds} "
+            "failed flushes — it has no ceiling, so a DB outage grows without bound"
+        )
+        ceiling = sim_mod.LLM_LOG_REQUEUE_MAX_ROWS
+        assert len(buf) == ceiling, (
+            f"expected the buffer pinned at the {ceiling}-row ceiling, got {len(buf)}"
+        )
+        assert [e["seq"] for e in buf] == list(range(seq - ceiling, seq)), (
+            "the ceiling must drop the OLDEST rows and keep the newest in order; "
+            f"kept seq {buf[0]['seq']}..{buf[-1]['seq']}"
+        )
+
+        drops = [
+            int(m.group(1))
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            for m in [re.search(r"dropped the (\d+) oldest", r.getMessage())]
+            if m
+        ]
+        assert drops, "no WARNING named the dropped rows — the loss would be silent"
+        assert sum(drops) == seq - ceiling, (
+            "exactly one WARNING per drop, naming that drop's count: the warnings "
+            f"account for {sum(drops)} rows but {seq - ceiling} were dropped"
+        )
+        assert len(drops) == rounds - ceiling // per_round, (
+            "a drop must log once, not once per row or once per surviving row: "
+            f"{len(drops)} warnings for {rounds - ceiling // per_round} overflowing flushes"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_flush_under_the_ceiling_drops_nothing_and_logs_no_drop(self, caplog):
+        """Control: the ceiling must not fire on the ordinary single-failure
+        re-queue the two tests above pin. Only overflow may lose rows."""
+        import logging
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.session_factory = lambda: self._UnavailableDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+        entries = [
+            {"agent_id": "su", "phase": "phase4", "model": "x", "seq": i}
+            for i in range(engine._llm_log_flush_size)
+        ]
+        engine._llm_log_buffer = list(entries)
+
+        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+            await engine._flush_llm_logs()
+
+        assert engine._llm_log_buffer == entries
+        assert not [
+            r for r in caplog.records if "oldest" in r.getMessage()
+        ], "the ceiling fired on a batch that was nowhere near it"
+
 
 # ---------------------------------------------------------------
 # _phase5_new_post — a reply's channel must come from the target post, not

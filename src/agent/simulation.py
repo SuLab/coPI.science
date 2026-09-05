@@ -206,6 +206,20 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 PERSIST_MAX_ROWS_PER_STMT = 500
 _PG_MAX_BIND_PARAMS = 32767
 
+# Ceiling on the LLM-call-log re-queue (COR-11). _flush_llm_logs prepends a
+# failed batch back onto self._llm_log_buffer rather than dropping it, because
+# the sliding-window rate limiter rebuilds call_times from llm_call_logs on
+# restart. Unbounded, that trades a bounded loss (<= _llm_log_flush_size rows
+# per failure) for unbounded retention: every buffered row carries a FULL
+# system prompt (prompts/agent-system.md alone is ~14 KB before substitution),
+# the message list and the response text, and the agent container runs under
+# `mem_limit: 768m`. At an order of ~30 KB per row this ceiling is ~30 MB —
+# and it is 100x _llm_log_flush_size, so a sustained outage spanning a hundred
+# consecutive flushes is needed before anything is dropped at all. Overflow
+# drops the OLDEST rows: what the re-queue exists to protect is the limiter's
+# in-window view, and the newest rows are the ones still inside that window.
+LLM_LOG_REQUEUE_MAX_ROWS = 1000
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -324,7 +338,8 @@ class SimulationEngine:
         # first-person authorship claim from it fails closed. See issue #29.
         self._agent_publications: dict[str, LabPublicationRecord] = {}
 
-        # LLM call log buffer
+        # LLM call log buffer. Bounded on the failure path by
+        # LLM_LOG_REQUEUE_MAX_ROWS — see _flush_llm_logs (COR-11).
         self._llm_log_buffer: list[dict] = []
         self._llm_log_flush_size = 10
 
@@ -5517,6 +5532,18 @@ class SimulationEngine:
                 "Failed to flush %d LLM call logs, re-queued for retry: %s",
                 len(batch), exc,
             )
+            # ...but bounded: a re-queue that never drains would otherwise hold
+            # every full prompt since the outage began in RAM. See
+            # LLM_LOG_REQUEUE_MAX_ROWS. One WARNING per overflowing flush, so
+            # the loss is never silent and never one line per lost row.
+            overflow = len(self._llm_log_buffer) - LLM_LOG_REQUEUE_MAX_ROWS
+            if overflow > 0:
+                del self._llm_log_buffer[:overflow]
+                logger.warning(
+                    "LLM call log re-queue is over its %d-row ceiling: dropped "
+                    "the %d oldest buffered call(s)",
+                    LLM_LOG_REQUEUE_MAX_ROWS, overflow,
+                )
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose profile files changed on disk since last turn.
