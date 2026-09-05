@@ -623,3 +623,205 @@ async def test_a_re_added_agent_still_resumes_from_the_high_water_mark(db_sessio
         f"history: cursor {readded.state.last_seen_cursor} vs high-water mark "
         f"{eng.message_log.latest_timestamp}"
     )
+
+
+# ---------------------------------------------------------------------------
+# COR-13, the rebuild half: the reply budget a reopen grants is CONSUMED, and
+# the consumption has to survive a restart.
+#
+# `message_count_offset` is the durable-looking half of the reopen: Phase 4
+# recomputes `message_count = len(history) - offset` (:1548) and closes the
+# thread as 'timeout' once that reaches `max_thread_messages`. Both rebuild
+# loops used to set `offset = msg_count`, i.e. "everything currently in the
+# thread predates the reopen" — which is true on the first tick after a reopen
+# and false on every restart after it, because the replies the reopen paid for
+# are in `msg_count` too. `reopened_at` is durable (migration 0028), so the
+# consumed count is derivable rather than stored: it is the number of messages
+# posted BEFORE the reopen instant.
+# ---------------------------------------------------------------------------
+
+
+async def _reopened_thread(session, run, *, before, after, base,
+                           channel="general", root="su", partner="wiseman"):
+    """A thread reopened between its `before`th and `before+1`th message.
+
+    `before` messages (the root plus `before - 1` replies) are posted at
+    `base + 0 .. base + before - 1`; `reopened_at` lands half a second later;
+    `after` more replies follow at `base + before .. base + before + after - 1`.
+
+    Timestamps are explicit rather than `_stored_thread`'s "now", because the
+    whole point is where each message falls relative to `reopened_at` — and
+    they stay inside REBUILD_WINDOW_S, which this thread needs: it carries a
+    ThreadDecision, so the window query's "has no decision" OR-arm will not
+    rescue rows that fall out of it.
+
+    Returns `(root_ts, reopened_at)`.
+    """
+    root_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        session, run=run, agent_id=root,
+        channel_id="C1", channel_name=channel,
+        message_ts=root_ts, thread_ts=None, posted_at=base,
+        content=f"root post by {root}", sender_name=f"{root.capitalize()}Bot",
+        is_bot=True,
+    )
+    senders = (partner, root)
+    for i in range(1, before + after):
+        who = senders[(i - 1) % 2]
+        ts = base + i
+        await factories.make_agent_message(
+            session, run=run, agent_id=who,
+            channel_id="C1", channel_name=channel,
+            message_ts=f"{ts:.6f}", thread_ts=root_ts, posted_at=ts,
+            content=f"reply {i} by {who}", sender_name=f"{who.capitalize()}Bot",
+            is_bot=True,
+        )
+    reopened_at = datetime.fromtimestamp(base + before - 0.5, UTC)
+    await factories.make_thread_decision(
+        session, run=run, thread_id=root_ts, channel=channel,
+        agent_a=root, agent_b=partner, outcome="proposal",
+        summary_text="a shared aim", reopened_at=reopened_at,
+    )
+    await session.flush()
+    return root_ts, reopened_at
+
+
+async def _extra_reply(session, run, root_ts, *, at, who, channel="general"):
+    """One more reply, as if an agent had posted it since the last restart."""
+    await factories.make_agent_message(
+        session, run=run, agent_id=who,
+        channel_id="C1", channel_name=channel,
+        message_ts=f"{at:.6f}", thread_ts=root_ts, posted_at=at,
+        content=f"reply at {at} by {who}", sender_name=f"{who.capitalize()}Bot",
+        is_bot=True,
+    )
+    await session.flush()
+
+
+def _budget_left(eng, agent_id, root_ts):
+    """Replies still available before Phase 4 closes the thread as 'timeout'.
+
+    Exactly `_reply_to_thread`'s arithmetic (`simulation.py:1548`,`:1562`):
+    `message_count = len(history) - offset`, closed at `max_thread_messages`.
+    """
+    thread = eng.agents[agent_id].state.active_threads[root_ts]
+    history = eng.message_log.get_thread_history(root_ts)
+    consumed = len(history) - thread.message_count_offset
+    return get_settings().max_thread_messages - consumed
+
+
+async def test_a_reopened_threads_reply_budget_is_not_regranted_by_a_restart(
+    db_session,
+):
+    """COR-13's "plus a fresh reply budget each time", rebuild half.
+
+    Four messages predate `reopened_at` and two follow it, so two of the
+    twelve replies the reopen granted are spent. A restart must see ten left,
+    not twelve — and after two more replies land, the NEXT restart must see
+    eight, not twelve again. The second restart is the assertion that pins the
+    defect: `offset = msg_count` is stable across two rebuilds of the *same*
+    engine (the loop skips a thread already in `active_threads`), so only a
+    genuine restart with new traffic in between distinguishes it.
+    """
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4) - 200
+    root_ts, _ = await _reopened_thread(db_session, run, before=4, after=2, base=base)
+
+    # --- restart 1 -------------------------------------------------------
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.message_count_offset == 4, (
+        "the rebuild credited the reopened thread for messages posted AFTER the "
+        f"reopen: offset {thread.message_count_offset}, expected 4 (the messages "
+        "that predate reopened_at)"
+    )
+    assert _budget_left(eng, "su", root_ts) == 10, (
+        "the two replies posted since the reopen were refunded by the restart: "
+        f"{_budget_left(eng, 'su', root_ts)} replies left, expected 10"
+    )
+    # Both participants, not just the proposer — they share one thread cap.
+    assert (
+        eng.agents["wiseman"].state.active_threads[root_ts].message_count_offset == 4
+    )
+
+    # --- two more replies, then restart 2 --------------------------------
+    await _extra_reply(db_session, run, root_ts, at=base + 6, who="wiseman")
+    await _extra_reply(db_session, run, root_ts, at=base + 7, who="su")
+
+    eng2 = _engine_for(db_session, run.id)
+    await eng2._rebuild_state_from_db()
+    await eng2._rebuild_agent_state()
+
+    thread2 = eng2.agents["su"].state.active_threads[root_ts]
+    assert thread2.message_count_offset == 4, (
+        "the second restart moved the reopen point forward again — this is the "
+        "'fresh reply budget each time' half of COR-13: offset "
+        f"{thread2.message_count_offset}, expected 4"
+    )
+    assert _budget_left(eng2, "su", root_ts) == 8, (
+        "a reopened thread got its whole budget back on the second restart, so it "
+        "can never reach the max_thread_messages close: "
+        f"{_budget_left(eng2, 'su', root_ts)} replies left, expected 8"
+    )
+
+
+async def test_an_unreopened_thread_keeps_a_zero_rebuild_offset(db_session):
+    """Control: nothing changes for a thread that was never reopened.
+
+    `offset` stays 0 there, so `message_count` is the whole history and the
+    thread closes at `max_thread_messages` exactly as it does today. Without
+    this pin, rolling the code back would change behaviour for every
+    non-reopened thread rather than only for the reopened ones.
+    """
+    run = await factories.make_simulation_run(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=3)
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.message_count_offset == 0, (
+        "a thread with no reopened_at was granted a reply budget it never "
+        f"earned: offset {thread.message_count_offset}"
+    )
+    assert _budget_left(eng, "su", root_ts) == get_settings().max_thread_messages - 4
+
+
+async def test_a_roster_flip_rebuilds_the_same_reopen_offset_as_a_restart(
+    db_session,
+):
+    """The two rebuild loops must agree on one thread's budget.
+
+    `_rebuild_one_agent_state` is the inactive->active roster-flip path and it
+    reconstructs `active_threads` with its own copy of the same code. If only
+    the restart loop is fixed, flipping an agent's status hands that agent a
+    fresh budget for a thread its partner considers nearly spent — the same
+    disagreement Task 5 fixed for parked-thread accounting.
+    """
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4) - 200
+    root_ts, _ = await _reopened_thread(db_session, run, before=4, after=2, base=base)
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+    restart_offset = eng.agents["su"].state.active_threads[root_ts].message_count_offset
+
+    # Exactly what _sync_roster_from_db's to_add branch does for a re-added
+    # agent: a fresh Agent() with an empty AgentState, then the single-agent
+    # rebuild.
+    readded = Agent(agent_id="su", bot_name="SuBot", pi_name="PI su")
+    eng.agents["su"] = readded
+    await eng._rebuild_one_agent_state("su")
+
+    flip_offset = readded.state.active_threads[root_ts].message_count_offset
+    assert flip_offset == restart_offset == 4, (
+        "a roster flip and a restart disagree about the same reopened thread's "
+        f"reply budget: flip offset {flip_offset}, restart offset "
+        f"{restart_offset}, expected 4 for both"
+    )
+    assert _budget_left(eng, "su", root_ts) == 10

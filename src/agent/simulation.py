@@ -5031,6 +5031,30 @@ class SimulationEngine:
                 names.add(f"{agent.pi_name} (PI)")
         return names
 
+    @staticmethod
+    def _reopen_offset(history: list[LogEntry], reopened_at: float) -> int:
+        """How much of a reopened thread predates the reopen — i.e. is free.
+
+        Phase 4 recomputes ``message_count = len(history) - offset`` (:1548)
+        and closes the thread once that reaches ``max_thread_messages``, so
+        ``message_count_offset`` answers "how much of this thread does not
+        count against the budget the reopen granted". At the reopen instant
+        the answer is "all of it", which is what the two LIVE reopen paths
+        record (``_reopen_thread``, the web-guidance block in
+        ``_sync_proposal_reviews_from_db``). On a REBUILD it is not: the
+        replies the reopen already paid for are in the log too, and counting
+        them as prior history refunds them — COR-13's "plus a fresh reply
+        budget each time", which the per-tick dedup set stopped and the
+        rebuild did not.
+
+        ``reopened_at`` is durable (``thread_decisions.reopened_at``,
+        migration 0028) and ``posted_at`` is on every log entry, so the spent
+        count is DERIVED here rather than stored: no column and no hot-path
+        write. Shared by both rebuild loops so a roster flip and a restart
+        cannot disagree about one thread's budget.
+        """
+        return sum(1 for h in history if h.posted_at < reopened_at)
+
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
@@ -5050,6 +5074,11 @@ class SimulationEngine:
         # _prior_thread_accounted marker below, instead of reusing
         # _closed_thread_ids for that purpose. See COR-13 / red-team B6.
         reopened_thread_ids: set[str] = set()
+        # thread_id -> the reopen instant, as a posted_at-comparable epoch
+        # float. The reply budget a reopen grants is SPENT by the replies that
+        # follow it, and that spending has to survive a restart: see the
+        # message_count_offset computation in the "2." loop below.
+        reopened_at_by_thread: dict[str, float] = {}
         if self.session_factory:
             try:
                 from sqlalchemy import select as sa_select
@@ -5072,6 +5101,9 @@ class SimulationEngine:
                         latest = latest_for_thread[td.thread_id]
                         if latest.reopened_at is not None:
                             reopened_thread_ids.add(td.thread_id)
+                            reopened_at_by_thread[td.thread_id] = (
+                                latest.reopened_at.timestamp()
+                            )
                         else:
                             closed_thread_ids.add(td.thread_id)
                         # _prior_threads is a list per pair, so appending here
@@ -5161,18 +5193,28 @@ class SimulationEngine:
                 history = self.message_log.get_thread_history(thread_id)
                 last_sender = history[-1].sender_agent_id if history else None
                 has_pending = last_sender is not None and last_sender != aid
-                # A reopened-but-not-since-re-closed thread (COR-13) needs a
-                # fresh reply budget and its PI guidance restored here, or the
-                # very next Phase 4 recompute (len(history) - offset, :1348)
-                # immediately hits max_thread_messages and closes it as
+                # A reopened-but-not-since-re-closed thread (COR-13) needs its
+                # remaining reply budget and its PI guidance restored here, or
+                # the very next Phase 4 recompute (len(history) - offset,
+                # :1348) immediately hits max_thread_messages and closes it as
                 # "timeout", and pi_context — never itself persisted — is
                 # simply gone. Mirrors what a LIVE (same-process) reopen
                 # already does in _reopen_thread / the web-guidance reopen
                 # block (Step 3i). See red-team B6.
+                #
+                # REMAINING, not fresh: the offset is the reopen point, not
+                # the current message count. Re-granting the full budget on
+                # every rebuild is the half of COR-13 that survived ac218fb —
+                # a reopened thread could then never reach the timeout close,
+                # because each restart refunded the replies since the reopen.
+                # See _reopen_offset. A thread with no reopened_at keeps
+                # offset 0, exactly as before.
                 offset = 0
                 pi_context = None
                 if thread_id in reopened_thread_ids:
-                    offset = msg_count
+                    offset = self._reopen_offset(
+                        history, reopened_at_by_thread[thread_id],
+                    )
                     pi_names = self._pi_name_forms(aid, other_id)
                     for h in reversed(history):
                         if h.sender_agent_id is None and not h.is_bot and h.sender_name in pi_names:
@@ -5455,6 +5497,22 @@ class SimulationEngine:
                 reopened_thread_ids = {
                     r.thread_id for r in reopened_rows if r.reopened_at is not None
                 }
+                # The reopen instant per thread, for the same derived reply
+                # budget _rebuild_agent_state computes — a roster flip and a
+                # restart must not disagree about one thread's remaining
+                # replies. MAX over the rows because a thread can carry
+                # several decision rows from repeated propose/reopen cycles
+                # and _mark_thread_decisions_reopened only stamps the ones
+                # still NULL, so the newest stamp is the reopen that granted
+                # the budget in force. That is the same row
+                # _rebuild_agent_state picks via latest_for_thread.
+                reopened_at_by_thread: dict[str, float] = {}
+                for r in reopened_rows:
+                    if r.reopened_at is None:
+                        continue
+                    stamp = r.reopened_at.timestamp()
+                    if stamp > reopened_at_by_thread.get(r.thread_id, 0.0):
+                        reopened_at_by_thread[r.thread_id] = stamp
                 # Mirrors _rebuild_agent_state's steps 4 and 4b exactly (red-team
                 # M3): an all-time COUNT scoped to THIS simulation_run_id for
                 # api_call_count, and a SEPARATE windowed query for the live
@@ -5555,9 +5613,16 @@ class SimulationEngine:
                 offset = 0
                 pi_context = None
                 if thread_id in reopened_thread_ids:
-                    # Task 20.10's restoration: a reopened thread gets a fresh reply
+                    # Task 20.10's restoration: a reopened thread gets its reply
                     # budget from the reopen point and carries the PI's guidance.
-                    offset = msg_count
+                    # From the reopen POINT, not from now: `offset = msg_count`
+                    # here would hand a re-added agent a full budget for a
+                    # thread the restart path counts as nearly spent, and the
+                    # two would drift further apart on every flip. Same
+                    # derivation, same helper — see _reopen_offset / COR-13.
+                    offset = self._reopen_offset(
+                        history, reopened_at_by_thread[thread_id],
+                    )
                     pi_names = self._pi_name_forms(agent_id, other_id)
                     for h in history:
                         if h.sender_agent_id is None and not h.is_bot and h.sender_name in pi_names:
