@@ -45,3 +45,15 @@ copi.egg-info
 .superpowers
 **/.env*
 docs/specs
+# The one-off implementation plans and their evidence subtrees. Measured in a
+# real build of this Dockerfile: docs/plans 2,846,970 bytes / 65 files and
+# docs/superpowers 392,423 bytes / 8 files — 41% of /app's 7,845,067 bytes,
+# for text no process reads. Nothing under src/, scripts/, templates/ or
+# alembic/ opens a path below docs/; every reference is a comment or a
+# docstring (`grep -rn 'docs/' src/ scripts/ templates/ alembic/`), which is
+# the same reasoning that already excludes docs/specs above. docs/ itself is
+# deliberately NOT excluded: docs/production-migration.md and
+# docs/inbound-email.md are operator runbooks worth having next to the code
+# in a shell inside the container (#27 I3).
+docs/plans
+docs/superpowers

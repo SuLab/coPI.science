@@ -71,6 +71,16 @@ MUST_EXCLUDE = [
     "profiles/public/x.md",
     "profiles/private/su.md",
     "profiles/memory/x.md",
+    # docs/plans + docs/superpowers are one-off implementation plans and their
+    # evidence subtrees — nothing in src/, scripts/, templates/ or alembic/
+    # opens a path under docs/ at runtime (they appear only in comments and
+    # docstrings), and docs/specs was already excluded on exactly that
+    # reasoning. Measured in a real build: they were 3,239,393 of /app's
+    # 7,845,067 bytes — 41% of the image tree (#27 I3 round 2).
+    "docs/plans/2026-09-02-close-issues-20-27.md",
+    "docs/plans/2026-09-02-close-issues-20-27-evidence/issues/issue_27.md",
+    "docs/plans/2026-09-04-decisions/task-8.md",
+    "docs/superpowers/plans/2026-08-04-cohort-branch-repairs.md",
 ]
 
 # Paths the running app/worker/agent/grantbot reads from the tree at runtime —
