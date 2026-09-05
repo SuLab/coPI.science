@@ -672,23 +672,16 @@ async def _send_paused_email(user: User) -> None:
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    try:
-        import boto3
-
-        client = boto3.client("ses", region_name=settings.aws_region)
-        client.send_email(
-            Source=settings.ses_sender_email,
-            Destination={"ToAddresses": [user.email]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Text": {"Data": text_body, "Charset": "UTF-8"},
-                    "Html": {"Data": html_body, "Charset": "UTF-8"},
-                },
-            },
-        )
-    except Exception as exc:
-        logger.error("Failed to send paused notification to %s: %s", user.email, exc)
+    # V4-4: this used to reach boto3 directly, and it was the one send in this module with no
+    # is_allowed_recipient() check — _process_user_notifications, send_proposal_notification and
+    # _send_html_email all have one. The allowlist is what keeps a staging or partially
+    # migrated deployment from mailing real PIs, so a single ungated path defeats it for
+    # whoever the downgrade ladder happens to auto-pause. Go through the shared helper instead
+    # of adding a second gate here: it applies the same check, logs the suppression (at info,
+    # with this subject) and logs a send failure (at error), so neither outcome is silent.
+    _send_html_email(
+        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url
+    )
 
 
 async def record_engagement(user_id, db: AsyncSession) -> None:
@@ -737,7 +730,7 @@ async def mark_notification_responded(
 
 
 def _send_html_email(
-    to_email: str,
+    to_email: str | None,
     subject: str,
     text_body: str,
     html_body: str,
@@ -748,6 +741,13 @@ def _send_html_email(
     settings = get_settings()
     from src.services.email import is_allowed_recipient
 
+    # `User.email` is nullable (a private-ORCID account has none) and all four call sites
+    # pass one straight through, so the parameter has to admit None -- and then say so
+    # rather than handing SES a None address, which it reports as an opaque client error.
+    # Same shape as _notify_instruction_failure (e700dac).
+    if not to_email:
+        logger.info("Email suppressed: no recipient address on record (subject=%r)", subject)
+        return False
     if not is_allowed_recipient(to_email):
         logger.info(
             "Email to %s suppressed by outbound allowlist (subject=%r)", to_email, subject

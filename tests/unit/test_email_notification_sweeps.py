@@ -12,9 +12,12 @@ turn -- a fake has no SQL to introspect, so it distinguishes purely by call orde
 safe here because both queries process items in the same fixed order this file provides.
 """
 
+import logging
+
 import pytest
 
 import src.services.email_notifications as en
+from src.config import get_settings
 
 
 class _FakeSessionFactory:
@@ -232,3 +235,100 @@ async def test_check_and_send_new_proposal_emails_commits_an_earlier_agents_send
         "agent alpha's new-proposal send was not committed before agent beta's failure rolled "
         f"back the shared session — alpha got an email with no durable record. events={events}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V4-4: every outbound send in this module goes through the recipient allowlist
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSES:
+    """Stands in for the boto3 SES client. Records BOTH send shapes, so the assertion is
+    "nothing left this module", not "nothing left via the API it happens to use today"."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def send_email(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"MessageId": "m-1"}
+
+    def send_raw_email(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"MessageId": "m-1"}
+
+
+class _U:
+    """Minimal stand-in for User: _send_paused_email reads only id and email."""
+
+    id = "6f1b9e1e-0000-4000-8000-000000000001"
+    email = "pi.paused@scripps.edu"
+
+
+@pytest.mark.asyncio
+async def test_the_paused_notification_email_honours_the_outbound_allowlist(monkeypatch, caplog):
+    """V4-4: `_send_paused_email` reached boto3 directly with no `is_allowed_recipient` check,
+    while every other send in this module has one (`_process_user_notifications`,
+    `send_proposal_notification`, `_send_html_email`). The allowlist exists so a staging or
+    partially-migrated deployment cannot mail real PIs; a single ungated path defeats it for
+    whoever the downgrade ladder happens to auto-pause. Suppression must also be LOGGED — a
+    silent one is its own defect.
+    """
+    caplog.set_level(logging.INFO, logger="src.services.email_notifications")
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "someone.else@scripps.edu")
+    recorder = _RecordingSES()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: recorder)
+
+    await en._send_paused_email(_U())
+
+    assert recorder.calls == [], (
+        "the paused-notification e-mail went to SES for a recipient the outbound allowlist "
+        f"excludes: {recorder.calls!r}"
+    )
+    assert any(
+        "suppressed by outbound allowlist" in r.getMessage() and _U.email in r.getMessage()
+        for r in caplog.records
+    ), f"the suppression was silent; records={[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_the_paused_notification_email_still_reaches_an_allowed_recipient(monkeypatch):
+    """Control for the test above: the gate must not be a blanket off-switch."""
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", _U.email)
+    recorder = _RecordingSES()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: recorder)
+
+    await en._send_paused_email(_U())
+
+    assert len(recorder.calls) == 1
+    sent = recorder.calls[0]
+    assert _U.email in repr(sent)
+    assert "CoPI proposal notifications paused" in repr(sent)
+
+
+@pytest.mark.asyncio
+async def test_send_proposal_notification_never_reaches_ses_for_a_blocked_recipient(
+    monkeypatch, caplog,
+):
+    """Step 8 of the same sweep: the module's third raw `boto3` site is inside
+    `send_proposal_notification`, and it has no gate of its own — it is gated by the check at
+    the top of the same function, ahead of every DB read and the whole body build. `db=None`
+    is the proof: any statement past that gate would raise AttributeError on it, so returning
+    False without touching SES can only mean the gate ran first.
+    """
+    caplog.set_level(logging.INFO, logger="src.services.email_notifications")
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "someone.else@scripps.edu")
+    recorder = _RecordingSES()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: recorder)
+
+    class _TD:
+        id = "td-1"
+
+    sent = await en.send_proposal_notification(
+        user=_U(), thread_decision=_TD(), agent=object(),
+        other_bot_name="OtherBot", total_unreviewed=1, db=None,
+    )
+
+    assert sent is False
+    assert recorder.calls == []
+    assert any("suppressed by outbound allowlist" in r.getMessage() for r in caplog.records)
