@@ -1876,8 +1876,13 @@ class TestPersistImplicitProposalReview:
             self._existing_review_id = existing_review_id
             self.added: list = []
             self.committed = False
+            # Every statement handed to execute(), in order — the no-linked-user
+            # branch no longer returns without writing, so a test has to be able
+            # to look at what it wrote.
+            self.statements: list = []
 
         async def execute(self, stmt):
+            self.statements.append(stmt)
             # First call resolves AgentRegistry.user_id, second resolves the
             # existing-review check — distinguished by call order, mirroring
             # the two selects in _persist_implicit_proposal_review.
@@ -1994,7 +1999,14 @@ class TestPersistImplicitProposalReview:
         assert fake_db.committed is False
 
     @pytest.mark.asyncio
-    async def test_no_registered_pi_user_skips_the_write(self):
+    async def test_no_registered_pi_user_records_pi_engaged_at_instead(self):
+        # #20 COR-5: a NULL AgentRegistry.user_id used to return before writing
+        # anything, so the cleared block was in-memory only. proposal_reviews
+        # still cannot carry it (user_id is NOT NULL, and making it nullable was
+        # rejected — it is ondelete="CASCADE" to users, so deleting a PI would
+        # erase the engine's own markers), so the carrier is
+        # thread_decisions.pi_engaged_at. Still no ProposalReview row; a real,
+        # committed UPDATE instead of a return.
         import uuid as uuid_mod
 
         decision_id = uuid_mod.uuid4()
@@ -2004,15 +2016,47 @@ class TestPersistImplicitProposalReview:
         await engine._persist_implicit_proposal_review("victim", decision_id)
 
         assert fake_db.added == []
-        assert fake_db.committed is False
+        assert fake_db.committed is True, (
+            "the implicit review was not persisted for an agent with no linked user"
+        )
+        assert len(fake_db.statements) == 2, (
+            "expected the user_id lookup and then the pi_engaged_at write"
+        )
+        written = str(fake_db.statements[1].compile(
+            compile_kwargs={"literal_binds": False}
+        ))
+        assert written.startswith("UPDATE thread_decisions"), written
+        assert "pi_engaged_at" in written, written
+        # Written once only: a later engagement must not move the timestamp off
+        # the engagement that actually cleared the block.
+        assert "IS NULL" in written, written
 
     @pytest.mark.asyncio
-    async def test_no_registered_pi_user_logs_a_warning_and_still_returns(self, caplog):
-        # #20 I3: a NULL AgentRegistry.user_id (backfilled/bulk-provisioned
-        # agents) used to no-op at DEBUG, so the block stayed in-memory only
-        # and re-blocked on restart with no visible trace. Raised to WARNING,
-        # naming the agent and the proposal, so the gap is visible; the
-        # function must still return cleanly rather than raise.
+    async def test_a_registered_pi_user_does_not_touch_pi_engaged_at(self):
+        # Control for the test above: the ordinary path is unchanged — a
+        # ProposalReview row, and no UPDATE against thread_decisions.
+        import uuid as uuid_mod
+
+        user_id = uuid_mod.uuid4()
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=user_id, existing_review_id=None)
+        engine = self._engine(fake_db)
+
+        await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        assert len(fake_db.added) == 1
+        assert all(
+            "UPDATE thread_decisions" not in str(s) for s in fake_db.statements
+        ), "the linked-PI path must not write the no-linked-PI carrier"
+
+    @pytest.mark.asyncio
+    async def test_no_registered_pi_user_logs_at_info_naming_the_agent(self, caplog):
+        # #20 I3 raised this to WARNING while the branch really was in-memory
+        # only. COR-5 now persists it, so a WARNING would be crying wolf on a
+        # path that works — but the operator still wants to know that this
+        # agent's review is carried on thread_decisions rather than in
+        # proposal_reviews (no dashboard, no review e-mail and no admin count
+        # reads that carrier). INFO, naming the agent and the decision.
         import logging
         import uuid as uuid_mod
 
@@ -2020,15 +2064,144 @@ class TestPersistImplicitProposalReview:
         fake_db = self._FakeDB(user_id=None)
         engine = self._engine(fake_db)
 
-        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
             await engine._persist_implicit_proposal_review("victim", decision_id)
 
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert len(warnings) == 1
-        message = warnings[0].getMessage()
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == [], (
+            "a persisted review must not be reported as a warning"
+        )
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(infos) == 1
+        message = infos[0].getMessage()
         assert "victim" in message
         assert str(decision_id) in message
-        assert "restart" in message.lower()
+        assert "pi_engaged_at" in message
+
+
+# ---------------------------------------------------------------
+# COR-5: the implicit review of an agent with no linked PI user, end to end
+# ---------------------------------------------------------------
+
+class _FixtureSessionFactory:
+    """Route the engine's self-opened sessions at the rolled-back test session.
+
+    Same shim tests/integration/test_state_rebuild.py uses, for the same
+    reason: the engine does ``async with self.session_factory() as db:`` and
+    must see rows this test wrote inside its own (rolled-back) transaction.
+    ``__aexit__`` must NOT close the fixture-owned session.
+    """
+
+    def __init__(self, session):
+        self._s = session
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self._s
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
+    """#20 COR-5, both halves, against a real database.
+
+    An agent whose ``AgentRegistry.user_id`` is NULL can never have a
+    ``proposal_reviews`` row — that column is NOT NULL, and making it nullable
+    was rejected because it is ``ondelete="CASCADE"`` to ``users``, so deleting
+    a PI would erase the engine's own block-clearing markers. The engine used
+    to log and return, leaving the cleared block in memory only; the issue's
+    own words for the consequence are "``_rebuild_agent_state`` re-blocks on
+    restart", which is the second assertion here and the one that matters.
+
+    ``wiseman`` is the control. ``pi_engaged_at`` lives on the shared
+    ``ThreadDecision``, so it is per-decision where a review row is per-agent:
+    reading it for an agent that DOES have a linked PI would let su's PI clear
+    wiseman's block, which is exactly the cross-lab unblock COR-5's *first*
+    half exists to stop.
+    """
+    from sqlalchemy import select as sa_select
+
+    from src.agent.agent import Agent
+    from src.agent.transport import NullTransport
+    from src.models import ProposalReview
+    from tests import factories
+
+    run = await factories.make_simulation_run(db_session)
+    pi = await factories.make_user(db_session)
+    # No `user=` — this is the population COR-5 is about.
+    await factories.make_agent(
+        db_session, agent_id="su", bot_name="SuBot", status="active",
+    )
+    await factories.make_agent(
+        db_session, user=pi, agent_id="wiseman", bot_name="WisemanBot", status="active",
+    )
+    td = await factories.make_thread_decision(
+        db_session, run=run, agent_a="su", agent_b="wiseman",
+        outcome="proposal", summary_text="a shared aim",
+    )
+    await db_session.flush()
+    assert td.pi_engaged_at is None
+
+    def _engine():
+        ids = ("su", "wiseman")
+        return SimulationEngine(
+            agents=[
+                Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}")
+                for a in ids
+            ],
+            slack_clients={a: NullTransport(a) for a in ids},
+            budget_cap=0,
+            session_factory=_FixtureSessionFactory(db_session),
+            simulation_run_id=run.id,
+            slack_enabled=False,
+        )
+
+    await _engine()._persist_implicit_proposal_review("su", td.id)
+
+    await db_session.refresh(td)
+    assert td.pi_engaged_at is not None, (
+        "the implicit review was not recorded at all for an agent with no linked user"
+    )
+    assert (await db_session.execute(
+        sa_select(ProposalReview).where(ProposalReview.thread_decision_id == td.id)
+    )).scalars().all() == [], (
+        "no proposal_reviews row can exist for an agent with no linked user"
+    )
+
+    # The restart: a brand-new engine reconstructing from the DB alone.
+    restarted = _engine()
+    await restarted._rebuild_agent_state()
+
+    su_refs = [p for p in restarted.agents["su"].state.pending_proposals
+               if p.thread_id == td.thread_id]
+    assert len(su_refs) == 1
+    assert su_refs[0].reviewed is True, (
+        "_rebuild_agent_state re-blocked the proposal on restart — the half COR-5 names"
+    )
+
+    wiseman_refs = [p for p in restarted.agents["wiseman"].state.pending_proposals
+                    if p.thread_id == td.thread_id]
+    assert len(wiseman_refs) == 1
+    assert wiseman_refs[0].reviewed is False, (
+        "su's PI engagement cleared wiseman's block too — wiseman has its own "
+        "linked PI and only its own review row may clear it (COR-5's first half)"
+    )
+
+    # The roster-flip rebuild reads the same carrier: an inactive->active flip
+    # rebuilds one agent's state from scratch (E6(2)) and must not re-block it
+    # either.
+    flipped = _engine()
+    await flipped._rebuild_one_agent_state("su")
+    su_after_flip = [p for p in flipped.agents["su"].state.pending_proposals
+                     if p.thread_id == td.thread_id]
+    assert len(su_after_flip) == 1
+    assert su_after_flip[0].reviewed is True, (
+        "a roster re-add re-blocked the proposal the PI had already cleared"
+    )
 
 
 # ---------------------------------------------------------------
@@ -3343,6 +3516,8 @@ class TestRebuildOneAgentState:
                         return self_inner.payload
                     def scalar(self_inner):
                         return self_inner.payload
+                    def scalar_one_or_none(self_inner):
+                        return self_inner.payload
                     def __iter__(self_inner):
                         return iter(self_inner.payload)
                 return _R(payload)
@@ -3370,11 +3545,14 @@ class TestRebuildOneAgentState:
             id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
             agent_a="su", agent_b="wiseman", outcome="proposal",
             summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
+            pi_engaged_at=None,   # COR-5's carrier; unset on an unreviewed proposal
         )
-        # 5 DB reads, in the order _rebuild_one_agent_state issues them (red-team
+        # 6 DB reads, in the order _rebuild_one_agent_state issues them (red-team
         # M3 — this task's original single unscoped/unwindowed LlmCallLog read
         # is corrected to the same shape _rebuild_agent_state's steps 4/4b use):
-        # ThreadDecision rows, ProposalReview rows (none yet — unreviewed), the
+        # ThreadDecision rows, ProposalReview rows (none yet — unreviewed),
+        # this agent's own AgentRegistry.user_id (a real uuid: su HAS a linked
+        # PI, so COR-5's pi_engaged_at carrier does not apply to it), the
         # (thread_id, reopened_at) rows for the B6 restoration (none reopened here),
         # an all-time-scoped-to-this-run COUNT(*) scalar, and a SEPARATE windowed
         # query — which a real DB would already have filtered to just the
@@ -3383,6 +3561,7 @@ class TestRebuildOneAgentState:
         responses = [
             [decision],
             [],
+            uuid_mod.uuid4(),
             [],
             2,
             [_LLM(created_at=now - timedelta(seconds=10))],
@@ -3439,10 +3618,12 @@ class TestRebuildOneAgentState:
             id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
             agent_a="su", agent_b="wiseman", outcome="proposal",
             summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
+            pi_engaged_at=None,   # COR-5's carrier; unset on an unreviewed proposal
         )
         responses = [
             [decision],
             [],
+            uuid_mod.uuid4(),
             [],
             2,
             [_LLM(created_at=now - timedelta(seconds=10))],
@@ -3491,7 +3672,9 @@ class TestRebuildOneAgentState:
         from src.agent.agent import Agent
         from src.agent.message_log import LogEntry
 
-        FakeDB = self._ordered_fake_db([[], [], [], 0, []])   # 5 reads: decisions, reviews, reopened, count, window
+        # 6 reads: decisions, reviews, this agent's AgentRegistry.user_id,
+        # reopened, count, window.
+        FakeDB = self._ordered_fake_db([[], [], uuid_mod.uuid4(), [], 0, []])
 
         su = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(agents=[su], slack_clients={})
@@ -3534,6 +3717,7 @@ class TestRebuildOneAgentState:
             return [
                 [],  # decisions (outcome == proposal)
                 [],  # reviewed_ids
+                uuid_mod.uuid4(),  # this agent's AgentRegistry.user_id (linked)
                 [_Row(thread_id="100.0", reopened_at=now)],  # reopened rows
                 0,   # call_count
                 [],  # window_rows

@@ -3584,6 +3584,10 @@ class SimulationEngine:
         pick the wrong (stale) decision. `None` (a proposal whose ThreadDecision
         write never landed) means in-memory-only — nothing to persist against.
 
+        An agent with no linked ``AgentRegistry.user_id`` gets the record on
+        ``thread_decisions.pi_engaged_at`` instead of a review row — see the
+        branch below and docs/plans/2026-09-04-decisions/task-8.md.
+
         rating=-1 is a dedicated sentinel — never confused with the explicit
         1-4 star rating or the reopen-with-guidance sentinel rating=0 (see
         _sync_proposal_reviews_from_db) — so this can never accidentally
@@ -3599,6 +3603,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import select as sa_select
+            from sqlalchemy import update as sa_update
             from sqlalchemy.exc import IntegrityError
 
             from src.models import AgentRegistry
@@ -3608,19 +3613,45 @@ class SimulationEngine:
                     sa_select(AgentRegistry.user_id).where(AgentRegistry.agent_id == agent_id)
                 )).scalar_one_or_none()
                 if not user_id:
-                    # #20 I3: ProposalReview.user_id is NOT NULL, so a
-                    # backfilled/bulk-provisioned agent with no linked
-                    # AgentRegistry.user_id can never get a durable row here —
-                    # the block stays in-memory only and _rebuild_agent_state
-                    # re-blocks this agent on the next restart. Raised from
-                    # DEBUG to WARNING so the gap is visible; the durable fix
-                    # (make proposal_reviews.user_id nullable and record
-                    # user_id=NULL, submitted_via='engine') is a follow-up
-                    # migration, not done here.
-                    logger.warning(
-                        "[%s] No registered PI user for thread_decision %s — "
-                        "implicit proposal review is in-memory only and will "
-                        "not survive a restart", agent_id, thread_decision_id,
+                    # #20 COR-5. ProposalReview.user_id is NOT NULL, so a
+                    # backfilled/bulk-provisioned agent — or one whose PI
+                    # deleted their account — can never get a review row here.
+                    # Making that column nullable was the obvious fix and was
+                    # rejected: it is ForeignKey("users.id",
+                    # ondelete="CASCADE") (models/agent_registry.py:82-84), so
+                    # deleting a PI would destroy the engine's own
+                    # block-clearing markers and every proposal that PI had
+                    # engaged with would re-block on the next restart. The
+                    # carrier is thread_decisions.pi_engaged_at instead — a
+                    # timestamp on the thread's own decision row, which
+                    # cascades from simulation_runs only. Ruling and rejected
+                    # alternatives: docs/plans/2026-09-04-decisions/task-8.md.
+                    #
+                    # The `IS NULL` predicate makes this write-once: a later
+                    # engagement must not move the timestamp off the one that
+                    # actually cleared the block, and a repeat call is then a
+                    # no-op rather than a rewrite. Read back by
+                    # _rebuild_agent_state and _rebuild_one_agent_state.
+                    await db.execute(
+                        sa_update(ThreadDecision)
+                        .where(
+                            ThreadDecision.id == thread_decision_id,
+                            ThreadDecision.pi_engaged_at.is_(None),
+                        )
+                        .values(pi_engaged_at=datetime.now(UTC))
+                    )
+                    await db.commit()
+                    # INFO, not WARNING: the review is persisted now, so a
+                    # warning would be crying wolf. The operator still wants
+                    # the line, because this carrier is invisible to every
+                    # proposal_reviews reader — the dashboard, the review
+                    # e-mail, the digest and the admin review count all key on
+                    # review rows, so this agent shows as unreviewed there.
+                    logger.info(
+                        "[%s] No linked PI user — implicit review for "
+                        "thread_decision %s recorded as "
+                        "thread_decisions.pi_engaged_at, not a proposal_reviews row",
+                        agent_id, thread_decision_id,
                     )
                     return
 
@@ -4830,9 +4861,9 @@ class SimulationEngine:
         """Slack bot_user_id -> agent_id for every bot whose posts we can attribute.
 
         Roster clients first; service bots merged in with setdefault so they can
-        never override a roster entry. The collision is real, not theoretical:
-        grantbot falls back to SuBot's token when its own is missing, and posts
-        made that way are su's — the roster answer is the true one.
+        never override a roster entry. The collision was real until `dd82c91`
+        (#23 COR-26c) stopped grantbot borrowing SuBot's token; posts already
+        made that way are still su's, so the roster answer stays the true one.
         """
         # getattr, not attribute access: this is now called from __init__ (see
         # set_bot_uid_map above), and `slack_clients` legitimately holds
@@ -5161,6 +5192,8 @@ class SimulationEngine:
         if self.session_factory:
             try:
                 from sqlalchemy import select as sa_select
+
+                from src.models import AgentRegistry
                 async with self.session_factory() as db:
                     proposals_result = await db.execute(
                         sa_select(ThreadDecision).where(
@@ -5178,6 +5211,25 @@ class SimulationEngine:
                     reviewed_set = {
                         (r.thread_decision_id, r.agent_id) for r in reviewed_result
                     }
+                    # thread_decisions.pi_engaged_at is COR-5's carrier for an
+                    # agent with no linked AgentRegistry.user_id, which can
+                    # never have a proposal_reviews row (that table's user_id
+                    # is NOT NULL — see _persist_implicit_proposal_review).
+                    # It sits on the DECISION, so it is per-decision where a
+                    # review row is per-agent, and a decision has two agents:
+                    # honouring it for an agent that DOES have a linked PI
+                    # would let one lab's PI clear the other lab's block, the
+                    # exact cross-lab unblock COR-5's first half exists to
+                    # stop. So scope the read to the population that produces
+                    # the write. Selecting the LINKED agents (rather than the
+                    # unlinked ones) keeps reader and writer symmetric for an
+                    # agent_id with no AgentRegistry row at all: the writer's
+                    # scalar_one_or_none() reads that as "no user" too.
+                    linked_pi_agent_ids = set((await db.execute(
+                        sa_select(AgentRegistry.agent_id).where(
+                            AgentRegistry.user_id.isnot(None)
+                        )
+                    )).scalars().all())
 
                 # Keep only the latest ThreadDecision per (agent_id, thread_id).
                 # Older rows represent prior propose/reopen cycles and their
@@ -5207,7 +5259,10 @@ class SimulationEngine:
 
                 for (aid, _tid), td in latest_by_key.items():
                     agent = self.agents[aid]
-                    is_reviewed = (td.id, aid) in reviewed_set
+                    is_reviewed = (td.id, aid) in reviewed_set or (
+                        td.pi_engaged_at is not None
+                        and aid not in linked_pi_agent_ids
+                    )
                     other = td.agent_b if aid == td.agent_a else td.agent_a
                     ref = ProposalRef(
                         thread_id=td.thread_id,
@@ -5353,6 +5408,8 @@ class SimulationEngine:
             from sqlalchemy import or_ as sa_or
             from sqlalchemy import select as sa_select
 
+            from src.models import AgentRegistry
+
             cutoff = datetime.now(UTC) - timedelta(
                 seconds=get_settings().llm_rate_window_seconds
             )
@@ -5372,6 +5429,17 @@ class SimulationEngine:
                     )
                 )
                 reviewed_ids = {r.thread_decision_id for r in reviewed_result}
+                # The same COR-5 carrier _rebuild_agent_state's step 3 reads
+                # (see the note there). Without it an inactive->active roster
+                # flip re-blocks exactly the proposal a restart no longer
+                # re-blocks — E6(2) rebuilt every other piece of this agent's
+                # state for that reason. Scoped to THIS agent's own link
+                # state, so a linked agent stays governed by its own review row.
+                has_linked_pi = (await db.execute(
+                    sa_select(AgentRegistry.user_id).where(
+                        AgentRegistry.agent_id == agent_id
+                    )
+                )).scalar_one_or_none() is not None
                 # Reopened-and-not-since-re-closed threads for this agent (COR-13 / B6):
                 # the same restoration _rebuild_agent_state's "2." loop does (Task 20.10),
                 # or a re-added agent's reopened thread comes back with no reply budget
@@ -5435,7 +5503,10 @@ class SimulationEngine:
                         other_agent_id=other,
                         summary_text=td.summary_text or "",
                         proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
-                        reviewed=td.id in reviewed_ids,
+                        reviewed=(
+                            td.id in reviewed_ids
+                            or (not has_linked_pi and td.pi_engaged_at is not None)
+                        ),
                         thread_decision_id=td.id,
                     ))
 
