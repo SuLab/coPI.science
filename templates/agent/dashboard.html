@@ -251,9 +251,21 @@
                     <span class="text-sm text-gray-500">with {{ entry.other_agent | capitalize }}Bot</span>
                 </div>
                 <div class="flex items-center gap-3">
+                    {# rating=0 is the reopen-with-guidance marker, not a score: the form
+                       above offers 1-4 only and /review rejects anything else, so a 0 can
+                       only have come from the reopen route. The route that builds
+                       `reviewed` (src/routers/agent_page.py) still admits it, so this is
+                       where it stops being rendered as "Rating: 0/4" — 89 times on one
+                       PI's own dashboard on the production copy. #}
+                    {% if rev.rating == 0 %}
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">
+                        Reopened with guidance
+                    </span>
+                    {% else %}
                     <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
                         Rating: {{ rev.rating }}/4
                     </span>
+                    {% endif %}
                     <span class="text-xs text-gray-400" data-utc="{{ rev.reviewed_at.isoformat() }}" data-utc-fmt="short">{{ rev.reviewed_at.strftime('%b %d') }}</span>
                 </div>
             </div>

@@ -649,11 +649,17 @@ async def admin_discussions(
     if status_filter:
         threads = [t for t in threads if t["status"] == status_filter]
 
-    # Get proposal reviews
+    # Get proposal reviews. `proposal_reviews` carries two sentinels that are not
+    # ratings: -1, the engine's implicit review (simulation.py:3510), and 0, the
+    # reopen-with-guidance marker the same docstring names next to it
+    # (agent_page.py:1013, email_inbound.py:1070). Neither is submittable — both
+    # writers reject anything outside 1-4 (agent_page.py:509, email_inbound.py:383)
+    # — so anything <= 0 here is a marker. Excluding only -1 printed every reopen
+    # as "0/4" under the "PI Reviews" heading: 130 times on the production copy.
     from src.models import ProposalReview as PR
     reviews_query = select(PR).join(
         ThreadDecision, PR.thread_decision_id == ThreadDecision.id
-    ).where(PR.rating != -1)
+    ).where(PR.rating.notin_((-1, 0)))
     if not show_all_runs:
         reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
     reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
@@ -844,12 +850,18 @@ async def admin_agents(
         # 'proposal', so total - reviewed went negative for 22 of 53 active agents on
         # production data and the template then rendered a green "N reviewed" for agents
         # whose own dashboards still listed outstanding proposals (issue #20 closure audit).
+        #
+        # rating <= 0 is a marker, not a review: -1 is the engine's implicit review and
+        # 0 is the reopen-with-guidance marker (see the note on the discussions query
+        # above). A reopened proposal is *awaiting* a rating, so counting its marker as
+        # a review was the second, larger half of the same mis-count — 233 such rows on
+        # the production copy against 0 at -1, wiseman alone 89 of 135 proposals.
         rev_result = await db.execute(
             select(func.count(ProposalReview.id))
             .join(ThreadDecision, ThreadDecision.id == ProposalReview.thread_decision_id)
             .where(
                 ProposalReview.agent_id == aid,
-                ProposalReview.rating != -1,
+                ProposalReview.rating.notin_((-1, 0)),
                 ThreadDecision.outcome == "proposal",
                 (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
             )
