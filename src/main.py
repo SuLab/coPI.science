@@ -7,6 +7,7 @@ import uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -35,22 +36,27 @@ HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
 # with asyncpg's own `command_timeout` armed returned in 5.00s. asyncpg's timer lives
 # inside the driver and tears the transport down, which is what lets the cancellation
 # land. So the probe gets its own engine: `command_timeout` set just under the outer
-# bound, and NullPool so a hung probe cannot consume (or leak) a connection from the
-# pool the application serves requests from.
+# bound, and its own one-connection pool (see get_health_engine) so a hung probe cannot
+# consume (or leak) a connection from the pool the application serves requests from.
 HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS = 4.0
-# ...and `command_timeout` alone is not enough either, because a NullPool probe opens a
-# fresh connection every time: against a frozen server the TCP handshake completes into
-# the kernel's accept backlog and then the startup/authentication exchange hangs, which
-# is asyncpg's CONNECT timeout, not its command timeout. Measured: with only
-# command_timeout set, three consecutive probes each ran past 30s. With both, the probe
-# fails fast. Keep both under HEALTH_PROBE_TIMEOUT_SECONDS so the driver, not the outer
-# wait_for, is what gives up first.
+# ...and `command_timeout` alone is not enough either, because the probe still has to
+# *open* connections — the first one, and every one that replaces a reaped connection:
+# against a frozen server the TCP handshake completes into the kernel's accept backlog
+# and then the startup/authentication exchange hangs, which is asyncpg's CONNECT
+# timeout, not its command timeout. Measured (on the NullPool probe this started as,
+# which opened one per request): with only command_timeout set, three consecutive probes
+# each ran past 30s. With both, the probe fails fast. Keep both under
+# HEALTH_PROBE_TIMEOUT_SECONDS so the driver, not the outer wait_for, gives up first.
+# (Against a *frozen* server — `docker pause`, as opposed to a slow one — it is in fact
+# the outer wait_for that delivers, measured at exactly 5.00s: asyncpg's command timer
+# fires at 4.0s but its cancel handshake needs a second connection to the same frozen
+# server. That is why nothing may be awaited outside that outer bound.)
 HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS = 3.0
 _health_engine = None
 
 
 def get_health_engine():
-    """Lazily-built, NullPool engine used only by /api/health. See the note above."""
+    """Lazily-built one-connection engine used only by /api/health. See the note above."""
     global _health_engine
     if _health_engine is None:
         from sqlalchemy.ext.asyncio import create_async_engine
@@ -69,6 +75,19 @@ def get_health_engine():
             pool_size=1,
             max_overflow=0,
             pool_timeout=HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS,
+            # Deliberately NOT pool_pre_ping, and this is measured, not assumed.
+            # The pooled connection really does go stale — a Postgres restart or an
+            # idle reaper leaves a dead socket in the pool and the next probe reports
+            # a healthy database unavailable — but SQLAlchemy runs the pre-ping inside
+            # engine.connect(), which is OUTSIDE the probe's asyncio bound below, and
+            # against a FROZEN server (`docker pause`) asyncpg's own command_timeout
+            # does not rescue it: the driver's cancel handshake needs a second
+            # connection to the same frozen server. Measured in one pause window
+            # against the disposable production copy: this engine answered 503 in
+            # 5.00s, the same engine with pool_pre_ping=True never answered at all
+            # (>15s and >25s in two runs) — i.e. pre-ping reopens phase-8 audit C2,
+            # the Critical this probe's timeouts exist to close. The stale connection
+            # is handled where it can be bounded instead: see the retry in /api/health.
             pool_pre_ping=False,
             connect_args={
                 "command_timeout": HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS,
@@ -160,7 +179,17 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                                 )
                                 .where(
                                     ProposalReview.agent_id == aid,
-                                    ProposalReview.rating != -1,
+                                    # Both sentinels, not just -1. `proposal_reviews`
+                                    # carries the engine's implicit review (-1,
+                                    # simulation.py:3510) and the reopen-with-guidance
+                                    # marker (0) the same docstring names beside it.
+                                    # Neither is submittable — both writers reject
+                                    # anything outside 1-4 (agent_page.py:509,
+                                    # email_inbound.py:383) — so counting 0 as a review
+                                    # hid outstanding work from the badge for 12 of 53
+                                    # active agents on the production copy (wiseman by
+                                    # 89). Same fix as admin.py:656/:865 in 9505554.
+                                    ProposalReview.rating.notin_((-1, 0)),
                                     ThreadDecision.outcome == "proposal",
                                     (ThreadDecision.agent_a == aid)
                                     | (ThreadDecision.agent_b == aid),
@@ -230,11 +259,30 @@ def create_app() -> FastAPI:
         this route returned 200 while every ORM read of agent_messages
         raised UndefinedColumnError, and nginx's depends_on: service_healthy
         let traffic through regardless)."""
-        try:
+
+        async def probe_once() -> None:
             async with get_health_engine().connect() as conn:
                 await asyncio.wait_for(
                     conn.execute(text("SELECT 1")), timeout=HEALTH_PROBE_TIMEOUT_SECONDS
                 )
+
+        try:
+            try:
+                await probe_once()
+            except DBAPIError as exc:
+                # The probe pools one connection, so between probes it sits idle and a
+                # Postgres restart, an idle-connection reaper or a pg_terminate_backend
+                # can reap it. Its next use fails on a socket the database already
+                # closed, which is not the database being unavailable. SQLAlchemy has
+                # already invalidated and discarded that connection by the time this
+                # runs (connection_invalidated), so one retry gets a fresh one.
+                # Bounded: a genuine outage raises TimeoutError or a connect failure
+                # instead, neither of which sets the flag, so it is never retried and
+                # the response still lands inside HEALTH_PROBE_TIMEOUT_SECONDS.
+                if not exc.connection_invalidated:
+                    raise
+                logger.info("Health probe reconnecting after a reaped connection: %s", exc)
+                await probe_once()
         except Exception as exc:
             logger.warning("Health check DB probe failed: %s", exc)
             raise HTTPException(status_code=503, detail="database unavailable") from exc
