@@ -172,3 +172,174 @@ def test_deploy_note_18_no_longer_defers_the_agent_measurement():
     assert "3.4× headroom" in text, (
         "deploy note 18 must carry the measured peak behind the agent's 768m cap"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The post-merge closure handoff (Task 33). Part R tells an operator how to
+# DEPLOY this branch; nothing told them how to CLOSE #20-#27 afterwards, so the
+# dispositions, carve-outs and follow-ups lived only in a plan nobody re-reads.
+# These pins are deliberately written to fail with a sentence rather than a
+# StopIteration or an IndexError: every read is a plain `in`, every slice is
+# guarded by an explicit `find() != -1`, and every assert carries a message.
+# --------------------------------------------------------------------------- #
+
+CLOSURE_HANDOFF = REPO_ROOT / "docs" / "plans" / "2026-09-04-issue-closure-handoff.md"
+
+ISSUE_DISPOSITIONS = {
+    "#20": "closes at merge",
+    "#21": "close by hand with a stated carve-out",
+    "#22": "closes at merge",
+    "#23": "closes at merge",
+    "#24": "closes at merge",
+    "#25": "closes at merge",
+    "#26": "closes after deploy verification",
+    "#27": "close by hand with a stated carve-out",
+}
+
+
+def _closure_handoff_text() -> str:
+    """Read the handoff, or fail with the path rather than a FileNotFoundError."""
+    assert CLOSURE_HANDOFF.is_file(), (
+        f"the post-merge closure handoff is missing: expected {CLOSURE_HANDOFF}. "
+        "Part R of docs/plans/2026-09-02-close-issues-20-27.md is the deploy runbook; "
+        "this is the closure layer on top of it (plan Task 33)."
+    )
+    return CLOSURE_HANDOFF.read_text()
+
+
+def _section(text: str, heading: str) -> str:
+    """The body under `heading`, up to the next heading of the same level.
+
+    Returns "" when the heading is absent so the caller's assert reports the missing
+    heading instead of raising.
+    """
+    start = text.find(heading)
+    if start == -1:
+        return ""
+    level = heading.split(" ", 1)[0]
+    rest = text[start + len(heading) :]
+    end = rest.find(f"\n{level} ")
+    return rest if end == -1 else rest[:end]
+
+
+def test_closure_handoff_exists_and_names_its_reader():
+    text = _closure_handoff_text()
+    assert "no context" in text, (
+        "the handoff must state that its reader is an independent agent with no context "
+        "and no one to ask; that constraint is why it repeats rather than cross-references"
+    )
+
+
+def test_closure_handoff_carries_the_per_issue_disposition_table():
+    """Task 32 graded every DoD clause in docs/plans/2026-09-04-decisions/README.md.
+
+    The handoff copies that verdict; a reader who has to re-derive it will re-derive it
+    differently.
+    """
+    text = _closure_handoff_text()
+    missing = [
+        f"{issue} -> {disposition!r}"
+        for issue, disposition in ISSUE_DISPOSITIONS.items()
+        if f"{issue}" not in text or disposition not in text
+    ]
+    assert not missing, (
+        "the handoff's per-issue table must carry every issue and its Task 32 disposition; "
+        f"not found: {', '.join(missing)}"
+    )
+    for issue in ("#20", "#26"):
+        assert f"| **{issue}**" in text, (
+            f"{issue} must appear as a row of the disposition table (a `| **{issue}**` cell), "
+            "not only as prose"
+        )
+
+
+def test_closure_handoff_gives_the_exact_closes_line_and_the_omissions():
+    """Plan Step 3: #21, #26 and #27 must NOT ride the merge's `Closes` line."""
+    text = _closure_handoff_text()
+    assert "Closes #20, #22, #23, #24, #25" in text, (
+        "the handoff must quote the exact `Closes` line the PR body carries "
+        "(`Closes #20, #22, #23, #24, #25`) so it cannot be reconstructed from memory"
+    )
+    for omitted in ("#21", "#26", "#27"):
+        assert f"Closes #20, #22, #23, #24, #25, {omitted}" not in text, (
+            f"{omitted} must never appear on the `Closes` line -- it is hand-closed"
+        )
+    assert "must not be on the `Closes` line" in text, (
+        "the handoff must say in so many words that the three omitted issues are kept off "
+        "the `Closes` line, and why"
+    )
+
+
+def test_closure_handoff_does_not_claim_the_backfill_script_was_tested_locally():
+    """#26 DoD clause 2 is the one clause no pre-merge work can satisfy.
+
+    `scripts/backfill_slack_ts.py` makes outbound Slack calls for every candidate row and
+    its CLI is `"--apply" in sys.argv`, so there is no offline mode and no `--help` probe.
+    """
+    text = _closure_handoff_text()
+    assert "Do not claim the script was tested locally" in text, (
+        "the DOC-7 procedure must carry the prohibition verbatim -- the script has never "
+        "been run against the local copy, because it would fire real requests at slack.com"
+    )
+    assert "no `--help`" in text, (
+        "the handoff must warn that `--help` is not a safe no-op probe: the CLI is "
+        '`"--apply" in sys.argv`, so any invocation goes straight to a DB connect'
+    )
+    assert "23" in text and "28" in text, (
+        "the handoff must state both NULL-slack_ts counts (23 on the copy, 28 in "
+        "audit-phase8-migration.md) and mark the live count authoritative"
+    )
+
+
+def test_closure_handoff_corrects_21s_zero_percent_coverage_premise():
+    """#21's clause was met by declaring its premise false, not by raising coverage from 0."""
+    text = _closure_handoff_text()
+    assert "71.83" in text, (
+        "#21's closing comment must quote the measured pre-fix coverage of worker/main.py "
+        "(71.83 %), because the issue's 'from 0 % coverage' premise is false"
+    )
+    assert "77.72" in text, "#21's comment must quote the post-fix figure (77.72 %) beside it"
+
+
+def test_closure_handoff_carries_the_three_overturned_rulings():
+    """A reader who sees only the outcome will assume the plan was followed. It was not,
+    three times, and each reversal has a measured reason that must travel with it."""
+    text = _closure_handoff_text()
+    for needle, why in (
+        ("carries no proposal identity", "Task 12's CL21-2 reversal (option (b))"),
+        ("re-opens phase-8 C2", "Task 29's rejection of pool_pre_ping on the probe engine"),
+        ("thread_outcome_enum", "Task 5's parked-thread ruling (option (c))"),
+    ):
+        assert needle in text, (
+            f"the handoff must record {why}; expected the phrase {needle!r} and did not "
+            "find it"
+        )
+
+
+def test_closure_handoff_turns_every_follow_up_into_a_runnable_command():
+    """Plan Step 8: a residual that is only prose is a residual nobody re-reads."""
+    text = _closure_handoff_text()
+    commands = text.count("gh issue create")
+    assert commands >= 26, (
+        "every named follow-up needs its own `gh issue create` line (F1-F22, F25-F26 and "
+        f"the five Task 32 named during execution); found only {commands}"
+    )
+    for fixed in ("F23", "F24"):
+        section = _section(text, "## Step 8")
+        assert section, "the handoff must have a `## Step 8` follow-up section"
+        assert f"**{fixed}**" not in section or "FIXED" in section, (
+            f"{fixed} was fixed by 71082fb and must not be listed as an open follow-up"
+        )
+
+
+def test_closure_handoff_says_what_to_do_when_verification_fails():
+    text = _closure_handoff_text()
+    section = _section(text, "## Step 7")
+    assert section, (
+        "the handoff must have a `## Step 7` telling the reader what to do when a "
+        "verification step fails"
+    )
+    assert "do not close" in section.lower(), (
+        "Step 7 must say plainly: do not close the issue -- a closed issue stops being "
+        "re-verified"
+    )
