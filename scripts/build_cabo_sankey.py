@@ -5,10 +5,19 @@ progresses. Parameterized by window start date so it serves any run window that
 shares the single resumed simulation_run_id (date is the only way to isolate a
 window — see the window constants in src/routers/public.py).
 
-Run inside the app container (scripts/ isn't mounted — docker cp it in first):
-  docker compose cp scripts/build_cabo_sankey.py app:/app/scripts/
+plotly is NOT installed anywhere the app runs. It is an optional extra
+(pyproject.toml's `scripts`), deliberately kept out of requirements.lock and so
+out of all four images (#27 I4) — this script is its only importer. Install it
+wherever you run this, or the run stops with a message saying so:
 
-  # Cabo run (defaults):
+  pip install '.[scripts]'
+
+scripts/ itself *is* in the image (the Dockerfile's `COPY . .`) and is
+bind-mounted by docker-compose.yml, so no `docker cp` is needed:
+
+  # Cabo run (defaults). Add plotly to that container first, e.g.
+  # `docker compose exec -u 0 app pip install '.[scripts]'` — prod runs as
+  # UID 10001 and cannot write site-packages.
   docker compose exec app python scripts/build_cabo_sankey.py
 
   # Schultz alumni reunion window:
@@ -25,8 +34,8 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
-import plotly.graph_objects as go
 from sqlalchemy import text
 
 from src.database import get_session_factory
@@ -37,6 +46,29 @@ from src.database import get_session_factory
 DEFAULT_START = "2026-05-01"
 DEFAULT_OUT = "/app/data/cabo_viz"
 DEFAULT_LABEL = "40-PI Cabo run"
+
+
+def _load_plotly() -> ModuleType:
+    """Import plotly, or exit naming the extra that supplies it.
+
+    Imported here rather than at module scope so that `--help` — the command
+    the header above documents — still works in an image that has no plotly,
+    and so that a real run stops with an actionable line before it opens a DB
+    connection instead of a bare ModuleNotFoundError (#27 I4).
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        raise SystemExit(
+            "plotly is not installed in this interpreter, and this script needs "
+            "it to draw the Sankey. It is an optional extra, kept out of the "
+            "runtime image on purpose (#27 I4):\n"
+            "    pip install '.[scripts]'\n"
+            "Inside a container, prod runs as UID 10001 and cannot write "
+            "site-packages, so use: "
+            "docker compose exec -u 0 app pip install '.[scripts]'"
+        ) from exc
+    return go
 
 
 def _hex_to_rgba(h: str, a: float) -> str:
@@ -89,6 +121,7 @@ async def fetch_counts(start: datetime) -> dict[str, int]:
 
 
 def build(c: dict[str, int], out: Path, label: str, start: datetime) -> None:
+    go = _load_plotly()
     out.mkdir(parents=True, exist_ok=True)
 
     labels = [
@@ -151,6 +184,8 @@ async def main() -> None:
     ap.add_argument("--label", default=DEFAULT_LABEL,
                     help=f'Run label for titles. Default "{DEFAULT_LABEL}".')
     args = ap.parse_args()
+    # Fail fast, before the DB round-trip, if the plotting extra is missing.
+    _load_plotly()
     start = _parse_start(args.start)
     counts = await fetch_counts(start)
     build(counts, Path(args.out), args.label, start)
