@@ -107,7 +107,13 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
     volumes:
       - ./profiles:/app/profiles
-      - ./prompts:/app/prompts
+      # No ./prompts bind mount (#27 I5-f). `3354904` added one here so an
+      # unrebuilt worker would not "run stale prompt text after a host-side
+      # prompt edit" -- but Decision D33 forbids that edit, prompts/ is baked
+      # into the image by the Dockerfile's `COPY . .`, and #27 I5 named the
+      # mount a defect ("silently shadowing the image's prompts") on the three
+      # services that already had it. Those three are a stated residual, not an
+      # endorsement: see docs/plans/2026-09-04-decisions/task-30.md.
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,6 +130,19 @@ services:
   agent:
     build:
       context: .
+    # 768m is MEASURED as of 2026-09-04 (#27 I5 / over-implementation R10 --
+    # D19 had shipped it "unmeasured, revisit after a week of docker stats").
+    # Against a copy of the production database (53 active agents, 8460
+    # agent_messages, 1448 hydrated into the log by the B2 rebuild window),
+    # with Slack off and the LLM faked: startup rebuild 110 MiB, peak
+    # 226 MiB over a full 53-agent --reset-cursors sweep, and 213 MiB peak /
+    # 185 MiB steady over 318 turns -- flat from the second sweep on, so the
+    # turn loop does not leak. That is 3.4x headroom. NOT raised (the host is
+    # ~3.7 GB and also runs the blackbird stack) and NOT removed the way D24
+    # removed postgres's: uncapping moves the choice of OOM victim to the
+    # kernel, which on this host can pick postgres -- the durable store D24
+    # deliberately left uncapped. Method and residuals:
+    # docs/plans/2026-09-04-decisions/task-30.md.
     mem_limit: 768m
     cpus: 1.0
     # An OOM kill is SIGKILL and skips the shutdown flush that persists the

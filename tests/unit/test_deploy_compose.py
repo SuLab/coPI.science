@@ -89,14 +89,39 @@ def test_the_copi_python_mem_limits_sum_comfortably_under_the_host_total():
     assert total_mib <= 3072, f"copi-python mem_limits sum to {total_mib}m, want <= 3072m"
 
 
-def test_worker_mounts_prompts_like_app_and_agent_do():
-    worker_volumes = _prod_compose()["services"]["worker"]["volumes"]
-    assert "./prompts:/app/prompts" in worker_volumes
-
-
 def test_agent_has_a_stop_grace_period_for_clean_shutdown_flush():
     # An OOM kill is SIGKILL and skips the shutdown flush that persists the
     # in-flight turn; the runbook's `docker stop -t 30` relies on this being
     # set (dev's docker-compose.yml already has it).
     agent = _prod_compose()["services"]["agent"]
     assert agent.get("stop_grace_period") == "30s"
+
+
+# `./prompts:/app/prompts` is a bind mount over prompt text the image already
+# bakes (`COPY . .`). #27 I5 named it a DEFECT -- "silently shadowing the
+# image's prompts" -- on app, agent and grantbot; `3354904` then added a
+# fourth, on worker, and pinned it, on the rationale that an unrebuilt worker
+# would otherwise "run stale prompt text after a host-side prompt edit".
+# Decision D33 forbids that edit: no file under prompts/ may change. So the
+# mount's whole purpose is a workflow that is not allowed to happen, and the
+# pin locked the widening in. Task 30c reverts the widening. The three
+# pre-existing mounts REMAIN, and remain a defect -- removing them changes
+# deployed behaviour and belongs with the runbook, not here. This set is
+# therefore a stated residual, not an endorsement; see
+# docs/plans/2026-09-04-decisions/task-30.md.
+PROMPTS_MOUNT = "./prompts:/app/prompts"
+SERVICES_THAT_STILL_SHADOW_PROMPTS = {"app", "agent", "grantbot"}
+
+
+def test_the_prompts_bind_mount_did_not_spread_to_a_fourth_service():
+    services = _prod_compose()["services"]
+    shadowing = {
+        name for name, svc in services.items()
+        if PROMPTS_MOUNT in (svc.get("volumes") or [])
+    }
+    assert shadowing == SERVICES_THAT_STILL_SHADOW_PROMPTS, (
+        f"services bind-mounting {PROMPTS_MOUNT} are {sorted(shadowing)}; "
+        f"expected {sorted(SERVICES_THAT_STILL_SHADOW_PROMPTS)}. Adding one is a new "
+        "un-gated write path into model-facing text (D33); removing one of the three "
+        "is progress, but update this set and task-30.md in the same commit."
+    )
