@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import weakref
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -72,26 +73,77 @@ def reconcile_pub_doi(
     return auth, "corrected"
 
 # Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
-# traffic at 10 req/s. Two long-lived semaphores (rather than one resized at
-# call time) because the key/no-key split is a per-process constant. Constructing
-# a Semaphore outside a running loop is safe in py3.10+, but that alone does not
-# make these loop-independent — like `asyncio.Lock` (see the comment above
-# `_ncbi_next_start`), a Semaphore binds to a loop at its first *contended*
-# acquire, not at construction. The semaphore only bounds how many NCBI requests
-# may be in flight at once — it does NOT bound the aggregate rate: N slots each
-# sleeping `interval` seconds in the old code allowed up to N/interval requests
-# per second, well past NCBI's ceiling (keyless peaked at ~5.9 req/s against a 3
-# req/s limit). The actual ceiling is enforced by `_pace_ncbi` below, a
-# module-level monotonic-clock gate that spaces request STARTS at least
-# `interval` seconds apart, process-wide, regardless of how many callers are in
-# flight.
-# HAZARD (review round 2, deferred): bound at its first contended acquire, so the
-# process must not call asyncio.run() twice with >= N concurrent NCBI calls at
-# the same has_key value (N = that semaphore's size) — a per-loop semaphore map
-# is the full fix; test_pubmed_contract.py mitigates this test-only by rebinding
-# fresh semaphores every test.
-_NCBI_SEMAPHORES = {True: asyncio.Semaphore(8), False: asyncio.Semaphore(2)}
-_NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}  # 8.3 req/s / 2.9 req/s aggregate ceilings
+# traffic at 10 req/s. TWO SEPARATE MECHANISMS enforce that, and conflating them
+# is how the original defect (COR-29c) arose:
+#   * the semaphore below bounds CONCURRENCY — how many NCBI requests may be in
+#     flight at once. It does NOT bound the aggregate rate: N slots each sleeping
+#     `interval` seconds allowed up to N/interval requests per second, well past
+#     the ceiling (keyless peaked at ~5.9 req/s against a 3 req/s limit).
+#   * `_pace_ncbi` below bounds RATE — a monotonic-clock gate that spaces request
+#     STARTS at least `interval` apart, process-wide, no matter how many callers
+#     are in flight or which event loop they run on.
+# The slot is now taken per ATTEMPT (via get_with_retry's `attempt_context`), not
+# once around the whole retry loop, so a caller backing off after a 429 no longer
+# occupies a slot while it is issuing no request at all (over-impl R4). That
+# cannot raise the in-flight count above the slot count: a retry has to
+# re-acquire before it may send anything.
+#
+# The semaphores are per EVENT LOOP, not per process (closure-23 R7). Like
+# `asyncio.Lock`, an `asyncio.Semaphore` binds to a loop not at construction but
+# at its first *contended* acquire — `Semaphore.acquire` only reaches
+# `self._get_loop()` on the branch where it has to wait (checked against CPython
+# 3.11's and 3.12's asyncio/locks.py). A module-level singleton therefore
+# survives any number of `asyncio.run()` calls right up until the day one of them
+# contends it, and then raises "bound to a different event loop" in every later
+# loop. Keying on the running loop removes the hazard instead of documenting it,
+# and lets the contract tests drop the per-test rebinding that used to paper over
+# it. The keys are weak, so a finished loop's entry goes away with the loop.
+_NCBI_SEMAPHORE_SIZES = {True: 8, False: 2}
+_ncbi_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[bool, asyncio.Semaphore]
+] = weakref.WeakKeyDictionary()
+
+
+def _ncbi_semaphore(has_key: bool) -> asyncio.Semaphore:
+    """Return the RUNNING loop's NCBI concurrency semaphore for `has_key`.
+
+    Created on first use per (loop, has_key) pair — see the comment above for why
+    a single process-wide Semaphore is a latent cross-loop failure.
+    """
+    loop = asyncio.get_running_loop()
+    per_loop = _ncbi_semaphores.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _ncbi_semaphores[loop] = per_loop
+    sem = per_loop.get(has_key)
+    if sem is None:
+        sem = asyncio.Semaphore(_NCBI_SEMAPHORE_SIZES[has_key])
+        per_loop[has_key] = sem
+    return sem
+
+
+# Seconds between request STARTS, i.e. the inverse of the aggregate rate ceiling
+# `_pace_ncbi` enforces. NCBI's policy is 10 req/s keyed, 3 req/s keyless:
+#   keyed   1/0.105 = 9.52 req/s = 95.2% of 10  (was 0.12 = 8.33 req/s = 83.3%;
+#           over-impl R4 — throttling ourselves 17% below the ceiling costs
+#           throughput on the profile pipeline and buys nothing)
+#   keyless 1/0.34  = 2.94 req/s = 98.0% of 3   (unchanged — already at ceiling)
+# The gate only ever DELAYS a start, never advances one, so the achieved rate is
+# always <= 1/interval: at or under the policy ceiling, never over it. The few
+# percent of margin is deliberate — NCBI counts arrivals and we can only space
+# departures, and an IP block costs far more than the throughput it buys back.
+_NCBI_PACING_SECONDS = {True: 0.105, False: 0.34}
+
+# Total retry budget for ONE logical `_ncbi_get`, in seconds (over-impl R3: the
+# retry loop shipped with four attempts and no total ceiling). 120 s = 2x the 60 s
+# client timeout below, so a fully hung NCBI spends two attempts (t=0 and t=60.5,
+# with the 0.5 s backoff) instead of four, and a `Retry-After: 60` storm two
+# instead of four. `get_with_retry` never cancels an attempt already in flight, so
+# the honest worst case for one logical call is deadline + one client timeout =
+# 180 s, down from 420 s — see `_out_of_budget` in http_retry.py. This bounds each
+# CALL, not the pipeline: `convert_dois_to_pmids` still issues one call per
+# unresolved DOI, so the aggregate is 180 s x DOI count in the worst case.
+_NCBI_RETRY_DEADLINE_SECONDS = 120.0
 
 # Overridable by tests (see test_pubmed_contract.py) — the retry loop's own
 # exponential backoff, not the pacing gate above.
@@ -107,9 +159,10 @@ _RETRY_BACKOFF = 0.5
 # does one read-modify-write of `_ncbi_next_start` with no `await` between the
 # read and the write, which is atomic on a single-threaded event loop — nothing
 # else can run between two non-`await` statements — so concurrent callers can't
-# race it, and the cursor itself is never bound to any loop (unlike the
-# semaphores above, which share the Lock's first-contended-acquire hazard — see
-# the HAZARD note above `_NCBI_SEMAPHORES`).
+# race it, and the cursor itself is never bound to any loop at all — which is why
+# it stays a single process-wide value while the semaphores above have to be
+# rebuilt per loop (closure-23 R7), and why the RATE ceiling still holds
+# process-wide even though the CONCURRENCY bound is now per loop.
 _ncbi_next_start = 0.0
 
 
@@ -153,6 +206,11 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     applies uniformly, so a burst of 429s can't re-fire faster than NCBI's ceiling the way it could
     when only the first attempt was paced (measured: 16-25 req/s against a 10 req/s ceiling under
     concurrency).
+
+    The concurrency slot is likewise passed in as ``attempt_context`` rather than wrapped around
+    the whole call, so it is held for one attempt and released across the backoff (over-impl R4),
+    and it is resolved per attempt through ``_ncbi_semaphore`` so it belongs to the loop actually
+    running (closure-23 R7). ``deadline`` caps the total retry budget (over-impl R3).
     """
     settings = get_settings()
     has_key = bool(settings.ncbi_api_key)
@@ -160,15 +218,16 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
         params["api_key"] = settings.ncbi_api_key
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
-    async with _NCBI_SEMAPHORES[has_key]:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            return await get_with_retry(
-                client,
-                url,
-                params=params,
-                backoff=_RETRY_BACKOFF,
-                before_request=lambda: _pace_ncbi(_NCBI_PACING_SECONDS[has_key]),
-            )
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        return await get_with_retry(
+            client,
+            url,
+            params=params,
+            backoff=_RETRY_BACKOFF,
+            before_request=lambda: _pace_ncbi(_NCBI_PACING_SECONDS[has_key]),
+            attempt_context=lambda: _ncbi_semaphore(has_key),
+            deadline=_NCBI_RETRY_DEADLINE_SECONDS,
+        )
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:

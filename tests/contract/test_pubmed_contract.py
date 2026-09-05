@@ -16,7 +16,7 @@ import httpx
 import pytest
 import respx
 
-from src.services import pubmed
+from src.services import http_retry, pubmed
 
 pytestmark = pytest.mark.contract
 
@@ -25,6 +25,8 @@ IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
 
 _UNPACED_TESTS = {
     "test_semaphores_are_sized_by_api_key_presence",
+    # Reads the shipped pacing constants; the fixture below would otherwise hand it zeroes.
+    "test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it",
     "test_ncbi_pacing_spaces_concurrent_starts",
     "test_a_429_retry_still_respects_the_ncbi_pacing_gate",
 }
@@ -37,30 +39,146 @@ def _no_retry_backoff(monkeypatch, request):
     NCBI pacing gate (COR-29b) and reset its shared clock, so the other ~10 tests that reach
     _ncbi_get don't each pay the pacing interval too.
 
-    Also rebinds `_NCBI_SEMAPHORES` to fresh, same-sized Semaphores for every test (Minor 2,
-    review round 2): like `asyncio.Lock`, an `asyncio.Semaphore` binds to a loop at its first
-    *contended* acquire (see the HAZARD comment above `_NCBI_SEMAPHORES` in pubmed.py), and each
-    test function runs its own event loop, so reusing the module-level singletons across tests
-    risks a later test contending a semaphore already bound to an earlier test's (closed) loop
-    and raising "bound to a different event loop"."""
+    This fixture used to also rebind `_NCBI_SEMAPHORES` to fresh Semaphores for every test,
+    because an `asyncio.Semaphore` binds to a loop at its first *contended* acquire and each test
+    runs its own event loop. That mitigation is gone: `pubmed._ncbi_semaphore` now keys the
+    semaphores on the RUNNING loop (closure-23 R7), so a per-test rebind has nothing left to fix —
+    and `test_the_ncbi_semaphore_is_not_shared_across_event_loops` below pins that directly instead
+    of a fixture papering over it."""
     monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
     if request.node.name not in _UNPACED_TESTS:
         monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: 0.0, False: 0.0})
         monkeypatch.setattr(pubmed, "_ncbi_next_start", 0.0)
-    monkeypatch.setattr(
-        pubmed,
-        "_NCBI_SEMAPHORES",
-        {key: asyncio.Semaphore(sem._value) for key, sem in pubmed._NCBI_SEMAPHORES.items()},
-    )
 
 
 def test_semaphores_are_sized_by_api_key_presence():
-    """COR-29c: a keyless deployment must use the smaller semaphore/slower pacing; a keyed one
-    the larger/faster pair. Both must exist regardless of the current settings' key."""
-    assert pubmed._NCBI_SEMAPHORES[False]._value == 2
-    assert pubmed._NCBI_SEMAPHORES[True]._value == 8
-    assert pubmed._NCBI_PACING_SECONDS[False] == 0.34
-    assert pubmed._NCBI_PACING_SECONDS[True] == 0.12
+    """COR-29c: a keyless deployment must use the smaller concurrency bound; a keyed one the
+    larger. Both must exist regardless of the current settings' key."""
+    assert pubmed._NCBI_SEMAPHORE_SIZES[False] == 2
+    assert pubmed._NCBI_SEMAPHORE_SIZES[True] == 8
+
+
+def test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it():
+    """over-impl R4 / closure-23 R2: the resized semaphore left the keyed path paced at
+    `1/0.12 = 8.33` req/s against NCBI's **10** req/s keyed ceiling — 83.3%, i.e. we throttled
+    ourselves 17% below the limit the policy actually grants, on the path the profile pipeline
+    spends all its time in. The keyless path was already at 98.0% of its 3 req/s ceiling.
+
+    `_pace_ncbi` only ever DELAYS a start, never advances one, so the achieved rate is at most
+    `1/interval`: the upper bounds below are the policy ceilings themselves, and going over them
+    risks a real NCBI IP block. This is an arithmetic pin, deliberately not a timed measurement —
+    a "we hit 9.5 req/s in a second of wall clock" assertion would flake the moment another agent's
+    pytest run loads the machine.
+    """
+    keyed_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[True]
+    keyless_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[False]
+    assert 9.5 <= keyed_rate <= 10.0, keyed_rate      # NCBI keyed ceiling: 10 req/s
+    assert 2.9 <= keyless_rate <= 3.0, keyless_rate   # NCBI keyless ceiling: 3 req/s
+
+
+# More than the largest semaphore (8 keyed, 2 keyless), so at least one acquire below MUST wait —
+# and it is the waiting branch of `Semaphore.acquire`, the only one that calls `self._get_loop()`,
+# that binds a semaphore to an event loop. A literal rather than a read of
+# `pubmed._NCBI_SEMAPHORE_SIZES` so this test body is identical against the pre-fix module, which
+# has no such attribute.
+_CONTENDING_CALLS = 12
+
+
+@respx.mock
+def test_the_ncbi_semaphore_is_not_shared_across_event_loops():
+    """closure-23 R7: `_NCBI_SEMAPHORES` was a module-level singleton, and the HAZARD comment in
+    `src/services/pubmed.py` documented rather than fixed it.
+
+    An `asyncio.Semaphore` does not bind to a loop at construction; it binds at its first
+    *contended* `acquire()` (checked against CPython 3.11's and 3.12's `asyncio/locks.py`: the
+    fast path returns before `self._get_loop()`). So a process-wide semaphore survives any number
+    of `asyncio.run()` calls until one of them contends it, and then raises
+    `RuntimeError: ... is bound to a different event loop` in every loop after that — permanently,
+    since nothing rebuilds it.
+
+    Two real `asyncio.run()` calls, the shape `e6a03f7` used for the pacing cursor
+    (`test_pace_ncbi_survives_two_separate_event_loops` above). The mocked handler yields once
+    while the slot is held, so the concurrent callers genuinely contend rather than each finishing
+    before the next starts.
+    """
+    async def _slow(request):
+        await asyncio.sleep(0)  # yield while holding the slot, so the rest really do contend
+        return httpx.Response(200, text=EFETCH_XML)
+
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(side_effect=_slow)
+
+    async def _contend():
+        await asyncio.gather(*(
+            pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {}) for _ in range(_CONTENDING_CALLS)
+        ))
+
+    asyncio.run(_contend())  # first event loop — this is where a singleton would bind
+    asyncio.run(_contend())  # second, separate loop — a singleton raises here
+
+
+def _hand_driven_clock(monkeypatch):
+    """Give `http_retry` a monotonic clock (and an `asyncio.sleep`) this test advances by hand.
+
+    Rebinding the module-global names means nothing outside `http_retry` sees a doctored clock, and
+    an attempt can "cost" 60 s without the test sleeping for 60 s — so no assertion below is a
+    wall-clock threshold, which matters because other agents run pytest concurrently here.
+    `raising=False` on purpose: `http_retry` grew its `import time` as part of the very change this
+    test covers, so without it the test would be red against the pre-fix module for a missing
+    module global instead of for the unbounded retry loop it is actually about.
+    """
+    class _Clock:
+        t = 0.0
+
+        def monotonic(self):
+            return self.t
+
+        async def sleep(self, seconds):
+            self.t += seconds
+
+    clock = _Clock()
+    monkeypatch.setattr(http_retry, "time", clock, raising=False)
+    monkeypatch.setattr(http_retry.asyncio, "sleep", clock.sleep)
+    return clock
+
+
+@respx.mock
+async def test_a_hung_ncbi_stops_retrying_once_its_call_budget_is_spent(monkeypatch):
+    """over-impl R3, through pubmed's own wiring: `_ncbi_get` shipped four attempts and no total
+    ceiling of any kind. With the 60 s timeout on pubmed's own `httpx.AsyncClient`, one logical
+    call could burn 4x60 s of request plus its backoff (420 s once a `Retry-After: 60` storm
+    replaces the backoff) — and `convert_dois_to_pmids` issues one such call per unresolved DOI,
+    sequentially, while `worker/main.py` awaits one job at a time, so a hung NCBI multiplied that
+    by the DOI count and head-of-line-blocked every other queued profile job.
+
+    Two cases, both counted rather than timed:
+      * a hung NCBI, every attempt burning the full 60 s timeout — the 120 s budget admits attempts
+        at t=0 and t=60.5 and stops the third, which would have started at t=121.5;
+      * an NCBI that fails FAST, spending no budget — all four attempts still run, i.e. the
+        deadline does not quietly shorten ordinary retrying.
+    """
+    clock = _hand_driven_clock(monkeypatch)
+    # The shipped backoff; the autouse fixture above zeroes it for speed, and speed is free here.
+    monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0.5)
+    cost = {"seconds": 60.0}
+    calls = {"n": 0}
+
+    def _handler(request):
+        calls["n"] += 1
+        clock.t += cost["seconds"]
+        return httpx.Response(503, text="down")
+
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(side_effect=_handler)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {})
+    assert calls["n"] == 2
+
+    cost["seconds"] = 0.0
+    calls["n"] = 0
+    clock.t = 0.0
+    with pytest.raises(httpx.HTTPStatusError):
+        await pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {})
+    assert calls["n"] == 4
 
 
 @respx.mock
