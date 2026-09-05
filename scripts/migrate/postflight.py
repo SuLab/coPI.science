@@ -129,6 +129,13 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("agents", "role", "character varying", False, "'pi_lab'::character varying"),
     # 0028 — nullable, no default; NULL means "never reopened".
     ("thread_decisions", "reopened_at", "timestamp with time zone", True, ""),
+    # 0029 — both nullable, both with no default and no backfill. NULL means
+    # "unknown" on each: "no PI engagement recorded" on thread_decisions, and "no
+    # inbound poller has claimed this row" on agent_messages. A server default here
+    # would invent a fact about every pre-0029 row (see 0023's columns for the same
+    # reasoning).
+    ("thread_decisions", "pi_engaged_at", "timestamp with time zone", True, ""),
+    ("agent_messages", "pi_inbound_state", "character varying", True, ""),
 )
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")

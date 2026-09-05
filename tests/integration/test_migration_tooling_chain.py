@@ -222,7 +222,7 @@ async def _seed_duplicate_group(engine, pmid: str = "12345"):
     return user_id, str(early), str(late)
 
 
-async def _preflight_snapshot(scratch_db, tmp_path, target="0028"):
+async def _preflight_snapshot(scratch_db, tmp_path, target=pre.DEFAULT_TARGET):
     snap = tmp_path / f"snap_{uuid.uuid4().hex[:8]}.json"
     proc = subprocess.run(
         [
@@ -237,7 +237,7 @@ async def _preflight_snapshot(scratch_db, tmp_path, target="0028"):
     return json.loads(snap.read_text()), snap
 
 
-def _postflight(scratch_db, snap, target="0028", extra=()):
+def _postflight(scratch_db, snap, target=pre.DEFAULT_TARGET, extra=()):
     return subprocess.run(
         [
             sys.executable, str(_REPO_ROOT / "scripts" / "migrate" / "postflight.py"),

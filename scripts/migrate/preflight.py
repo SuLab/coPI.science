@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0028"
+DEFAULT_TARGET = "0029"
 #: 0023 is supported because it is where a deployment that already took the cohort
 #: migration sits. org1 is at 0018 (see docs/production-migration.md); do not read
 #: this tuple as a statement about any one deployment's current stamp.
@@ -236,10 +236,18 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0027", "index", "ix_thread_decisions_agent_b_outcome", "thread_decisions"),
     # 0028_thread_reopen_state
     PlannedObject("0028", "column", "reopened_at", "thread_decisions"),
+    # 0029_pi_engagement_and_inbound_state
+    PlannedObject("0029", "column", "pi_engaged_at", "thread_decisions"),
+    PlannedObject("0029", "column", "pi_inbound_state", "agent_messages"),
 )
 
+#: Every revision in the chain, in order. A revision missing from here is invisible
+#: to pending_revisions()/planned_objects_between(): check_name_collisions would
+#: report green while checking nothing, and revision_status would BLOCK an upgrade
+#: whose target it cannot find in the list.
 REVISION_ORDER = (
-    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
+    "0028", "0029",
 )
 
 def pending_revisions(current: str | None, target: str) -> frozenset[str]:
@@ -1734,10 +1742,10 @@ async def check_sizing(conn, rev: str | None = None):
 
     The estimate is a function of the 0019 index build, so it only applies when 0019 is
     still pending. Starting from 0020/0021/0023/0024 that cost is already paid, but the
-    remaining chain to 0028 is not a no-op: 0025 adds a UNIQUE constraint on publications
+    remaining chain to 0029 is not a no-op: 0025 adds a UNIQUE constraint on publications
     (an ACCESS EXCLUSIVE index build scaled by that table's row count, not
     agent_messages'), 0026 drops/recreates one FK, 0027 runs 20 non-concurrent
-    CREATE INDEXes, and 0028 adds one nullable column. So this branch sizes
+    CREATE INDEXes, 0028 adds one nullable column and 0029 adds two. So this branch sizes
     publications instead of quoting the (already-paid) 0019 cost.
     """
     title = "Sizing and expected lock window"
@@ -1756,10 +1764,11 @@ async def check_sizing(conn, rev: str | None = None):
             title,
             status,
             f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — 0019 is behind you at {rev}. "
-            f"What remains for {rev}->0028: 0025 ADD CONSTRAINT UNIQUE on publications ({pubs:,} rows, "
+            f"What remains for {rev}->0029: 0025 ADD CONSTRAINT UNIQUE on publications ({pubs:,} rows, "
             f"ACCESS EXCLUSIVE for the whole index build); 0026 drop/recreate of one FK (ACCESS EXCLUSIVE "
             f"on private_channel_members, SHARE ROW EXCLUSIVE on users); 0027's 20 non-concurrent CREATE "
-            f"INDEXes (SHARE on 13 tables); 0028 one nullable ADD COLUMN. The chain is ONE transaction, so "
+            f"INDEXes (SHARE on 13 tables); 0028 one nullable ADD COLUMN; 0029 two more (catalogue-only, "
+            f"no rewrite). The chain is ONE transaction, so "
             f"every lock is held until the last statement commits. {tail}",
             ["Stop app, worker, grantbot and agent-run before --apply (runbook R.4)."],
             {"agent_messages_rows": rows, "publications_rows": pubs},

@@ -229,7 +229,7 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023", "0024")
-    assert pf.DEFAULT_TARGET == "0028"
+    assert pf.DEFAULT_TARGET == "0029"
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
@@ -905,6 +905,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
     }
     for revision in (
         "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+        "0029",
     ):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
@@ -1047,6 +1048,8 @@ def test_new_chain_objects_are_planned():
     assert "ix_thread_decisions_agent_a_outcome" in names  # 0027 badge composite
     assert "ix_agent_delegates_user_id" in names           # 0027 FK index
     assert "reopened_at" in names                          # 0028
+    assert "pi_engaged_at" in names                        # 0029
+    assert "pi_inbound_state" in names                     # 0029
 
 
 # --------------------------------------------------------------------------- #
@@ -1221,7 +1224,7 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0028"
+    assert args.target == "0029"
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1262,7 +1265,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0028"
+    assert args.target == "0029"
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False

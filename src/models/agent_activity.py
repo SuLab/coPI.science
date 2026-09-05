@@ -106,6 +106,16 @@ class AgentMessage(Base):
     slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     slack_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     slack_thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Inbound-poller handled-marker, written only by
+    # SimulationEngine._poll_inbound_from_db and only for is_bot=False rows:
+    # 'ingested' (text is in the MessageLog, side effects not yet confirmed) then
+    # 'handled' (_handle_pi_inbound_entry returned). NULL means "unknown — no
+    # inbound poller has claimed this row", which covers every pre-0029 row and
+    # every row another path (the Slack poller, the engine's own append) put in
+    # the log; readers must treat NULL as today's behaviour, i.e. dedup on
+    # MessageLog presence. See COR-10(3) / migration 0029 /
+    # docs/plans/2026-09-04-decisions/task-7.md.
+    pi_inbound_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -246,6 +256,16 @@ class ThreadDecision(Base):
     reopened_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )  # set when a PI reopens a decided thread (Slack-native or web rating=0 guidance) — COR-13
+    # Durable record that the owning PI engaged with this thread, i.e. that the
+    # pending-proposal block was cleared. NULL means "no engagement recorded" —
+    # exactly what every pre-0029 row has always meant, so the rebuild's re-block
+    # is unchanged for them. This carries the implicit review INSTEAD of a
+    # ProposalReview row because proposal_reviews.user_id is ondelete="CASCADE"
+    # to users, so deleting a PI would erase the engine's own block-clearing
+    # markers. See COR-5 / migration 0029 / docs/plans/2026-09-04-decisions/task-8.md.
+    pi_engaged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     def __repr__(self) -> str:
         return f"<ThreadDecision thread={self.thread_id} outcome={self.outcome}>"
