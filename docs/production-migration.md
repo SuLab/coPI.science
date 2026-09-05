@@ -1,20 +1,34 @@
-# Production migration runbook (0018 → 0024, and 0024 → 0028)
+# Production migration runbook (0018 → 0024, and 0024 → the current alembic head)
 
 **Audience: an operator or agent who has not done any of the analysis behind this.**
 You do not need to understand the branch to run this. You do need to follow the order,
 and you need to stop when something says STOP.
 
-Supported starting points: **0018** (`main` before PR19), **0019**, **0020** and **0021**.
-All four are tested end to end. **0024** — where a deployment sits after completing this
-runbook once — is also a supported starting point: the same tooling (`run_migration.sh`,
-`preflight.py`, `postflight.py`) covers the later 0024 → 0028 chain, and §10 below documents
-that path plus the routine, gate-free path for deploys that add no new revision.
+**The target is not a number you configure.** `run_migration.sh` derives that target from `alembic/versions/`
+— every `revision` id minus every `down_revision` id, which must leave exactly one — and refuses
+to run if it does not. That one id is the alembic tree's single head, **0029** at the time of writing.
+Pass `--target <rev>` only when you mean to stop somewhere short of the head, deliberately; the
+script's banner says which of the two happened. The pinned constant this replaced went stale
+twice, and the second time a bare `--apply` would have migrated to 0028, stamped it, verified it
+and reported success while the application code expected 0029.
+
+Supported starting points: every revision in the chain from **0018** (`main` before PR19) up to
+the revision below the head. **0018**, **0019**, **0020** and **0021** are tested end to end.
+**0024** — where a deployment sits after completing this runbook
+once — is also a supported starting point: the same tooling (`run_migration.sh`,
+`preflight.py`, `postflight.py`) covers the later 0024 → head chain, and §10 below documents that path plus the routine, gate-free path for
+deploys that add no new revision. `preflight.py` derives its own list the same way
+(`SUPPORTED_START_REVISIONS`), so the revision *this* deploy leaves you stamped at is already an
+accepted starting point for the next one — which the hand-maintained list it replaced was not,
+three times running.
 
 **If your deployment tracks `main`, you are at 0021** — that is `origin/main`'s own alembic
 head, since PR19 merged 0019, 0020 and 0021. Starting there is the *easiest* case: the
-expensive 0019 index build and the duplicate-row risk are both already behind you, and all
-that remains is 0022 (three empty tables) and 0023 (three columns on a small table), which
-takes ~2 s at any size. Starting from 0018 is the one that needs a real window.
+expensive 0019 index build and the duplicate-row risk are both already behind you. What remains
+is 0022 (three empty tables), 0023 (three columns on a small table) — about ~2 s at any size —
+and then the 0024 → head tail that §10 covers, whose measured lock windows are tabulated in R.6
+of `docs/plans/2026-09-02-close-issues-20-27.md`. Starting from 0018 is the one that needs a
+real window.
 
 The executable half of this runbook is `scripts/migrate/run_migration.sh`. This document
 explains *why* each step is where it is, which is what you need when a step fails.
@@ -550,7 +564,7 @@ Everything above this point covers the 0018 → 0024 chain and the gated tooling
 built for. Once a deployment is at 0024, most future deploys need no operator ceremony at
 all — a `migrate` one-shot compose service runs `alembic upgrade head` before `app`,
 `worker` or `grantbot` start, on every `docker compose up`. That service lands in the same
-pull request as this section, alongside the 0025–0028 revisions it exists to apply. Only a
+pull request as this section, alongside the 0025–0029 revisions it exists to apply. Only a
 migration big enough to need a window (ACCESS EXCLUSIVE locks, a long-running backfill,
 anything that would block writers for more than a few seconds) still goes through the
 gated path below.
@@ -632,10 +646,10 @@ unset PW PW_ENC
 # Exit 1 = BLOCKED: read the check name, fix, re-run. Check 7 (blocking sessions) => something is still connected: stop the writers again.
 ls -l data/preflight_snapshot.json             # written by the rehearsal on the HOST (bind-mounted by --via-run)
 ./scripts/migrate/run_migration.sh --via-run --apply --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
-# Expect: "alembic_version = 0028" read back, postflight 0 FAIL, exit 0.
+# Expect: "alembic_version = 0029" read back (the head the script derived and printed in its banner), postflight 0 FAIL, exit 0.
 ls -l data/preflight_snapshot.json             # newer than the rehearsal's
 unset DATABASE_URL
-docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0028
+docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0029
 ```
 
 If alembic reports `LockNotAvailableError`, something is still connected: `docker compose $C ps -a`,
@@ -650,7 +664,7 @@ path's `migrate` service agrees the database is now at head:
 
 ```bash
 cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
-docker compose $C run --rm --no-deps -T migrate python -m alembic current    # prints 0028 (head)
+docker compose $C run --rm --no-deps -T migrate python -m alembic current    # prints 0029 (head)
 ```
 
 ### 10.3 Both paths are idempotent

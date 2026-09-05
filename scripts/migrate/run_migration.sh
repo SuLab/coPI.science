@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 #
-# Guided production migration 0024 → 0028 (and any later head) (branch cohort-db-conversations).
-# Supported starting points: 0018 (main before PR19), 0019, 0020, 0021, 0023 and 0024.
-# 0021 is origin/main's own alembic head, so that is where a deployment tracking main is.
+# Guided production migration to the alembic tree's single head (branch cohort-db-conversations).
+#
+# THE TARGET IS DERIVED, NOT PINNED. With no --target this script reads
+# alembic/versions/*.py, subtracts every down_revision from every revision, and migrates
+# to the one id left over — and refuses to run if that is not exactly one id. There used
+# to be a `TARGET="00NN"` constant here; it went stale twice (0023->0024, then 0028 while
+# the tree's head was already 0029) and a bare --apply then migrated to the OLD head,
+# stamped it, verified it and reported success, leaving the application to start against
+# a schema it no longer matched. preflight only WARNs on a target that is not the head,
+# and --apply does not stop on a preflight warning, so nothing caught it. Pass --target to
+# migrate somewhere else deliberately; the banner says which of the two happened.
+#
+# Supported starting points: every revision in the chain from 0018 (main before PR19) up to
+# the revision below the head — see SUPPORTED_START_REVISIONS in scripts/migrate/preflight.py,
+# which derives the same range. 0021 is origin/main's own alembic head, so that is where a
+# deployment tracking main is; 0024 is where org1 sits after the 08-14 deploy.
 #
 # READ docs/production-migration.md BEFORE RUNNING THIS. This script is the
 # executable half of that runbook; the runbook explains *why* each step is where
@@ -70,7 +83,8 @@ cd "$REPO_ROOT"
 
 APPLY=0
 VIA_RUN=0
-TARGET="0028"
+TARGET=""            # empty = derive the alembic head below; --target overrides
+TARGET_SOURCE=""
 DSN="${DATABASE_URL:-}"
 BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
 SVC="${MIGRATE_SERVICE:-app}"
@@ -85,7 +99,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
     --via-run) VIA_RUN=1; shift ;;
-    --target) TARGET="${2:?--target needs a revision}"; shift 2 ;;
+    --target) TARGET="${2:?--target needs a revision}"; TARGET_SOURCE="--target"; shift 2 ;;
     --database-url) DSN="${2:?--database-url needs a DSN}"; shift 2 ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift 2 ;;
     --backup-verified-elsewhere)
@@ -104,6 +118,37 @@ while [ $# -gt 0 ]; do
     *) die_usage "unknown argument: $1" ;;
   esac
 done
+
+# --------------------------------------------------------------------------
+# Resolve the target: the alembic tree's single head, unless --target said otherwise.
+#
+# ids - parents, the same derivation preflight's check_alembic_scripts does inside the
+# container. Two independent implementations on purpose: if the host checkout and the
+# image disagree about the tree, preflight's own head check turns that into a visible
+# WARN instead of a silent migration to the wrong revision.
+# --------------------------------------------------------------------------
+alembic_heads() {
+  awk '
+    /^revision[: ]/      { if (match($0, /"[^"]+"/)) ids[substr($0, RSTART + 1, RLENGTH - 2)] = 1 }
+    /^down_revision[: ]/ { if (match($0, /"[^"]+"/)) par[substr($0, RSTART + 1, RLENGTH - 2)] = 1 }
+    END { for (i in ids) if (!(i in par)) print i }
+  ' "$REPO_ROOT"/alembic/versions/*.py | sort
+}
+
+if [ -z "$TARGET" ]; then
+  HEADS="$(alembic_heads)"
+  N_HEADS=0
+  [ -n "$HEADS" ] && N_HEADS="$(printf '%s\n' "$HEADS" | wc -l | tr -d ' ')"
+  if [ "$N_HEADS" -ne 1 ]; then
+    echo "BLOCKED: alembic/versions/ does not have exactly one head (found: ${HEADS:-none})." >&2
+    echo "  Refusing to guess which revision production should end up at." >&2
+    echo "    python -m alembic heads" >&2
+    echo "  Renumber the newer migration onto the current head, or pass --target." >&2
+    exit "$EX_BLOCKED"
+  fi
+  TARGET="$HEADS"
+  TARGET_SOURCE="derived from alembic/versions/"
+fi
 
 # --------------------------------------------------------------------------
 # Resolve the preflight/postflight snapshot path up front (not inside Step 4,
@@ -146,7 +191,7 @@ MODE="REHEARSAL (nothing will be written)"
 [ "$APPLY" -eq 1 ] && MODE="APPLY (this will back up and migrate)"
 
 echo "=============================================================="
-echo " coPI production migration -> $TARGET"
+echo " coPI production migration -> $TARGET ($TARGET_SOURCE)"
 echo " mode: $MODE"
 echo "=============================================================="
 

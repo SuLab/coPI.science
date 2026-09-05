@@ -72,27 +72,13 @@ EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
 DEFAULT_TARGET = "0029"
-#: 0023 is supported because it is where a deployment that already took the cohort
-#: migration sits. org1 is at 0018 (see docs/production-migration.md); do not read
-#: this tuple as a statement about any one deployment's current stamp.
-#:
-#: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
-#: deployment that tracks main is therefore stamped 0021, and the first version of this
-#: list — ("0018", "0019") — hard-BLOCKED exactly that state. The framing that produced
-#: it ("migrate from 0018 or 0019") described where production was at the time, not where
-#: main is.
-#:
-#: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
-#: already exists, so duplicates cannot be present and there is no 0019 index build to
-#: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
-#: small researcher_profiles).
-#:
-#: 0024 = where org1 sits after the 08-14 deploy.
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023", "0024")
 
-#: Start revisions at which migration 0019 has already run, so the expensive
-#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
-POST_0019_STARTS = ("0020", "0021", "0023", "0024")
+#: The oldest stamp this tooling will migrate from. Below it the chain has never been
+#: rehearsed end to end and the runbook does not describe it; 0018 is `main` before PR19
+#: and the oldest stamp any live deployment carries.
+OLDEST_SUPPORTED_START = "0018"
+
+#: SUPPORTED_START_REVISIONS and POST_0019_STARTS are derived from REVISION_ORDER, below.
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
 SNAPSHOT_SCHEMA = "public"
@@ -249,6 +235,67 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
     "0028", "0029",
 )
+
+#: Every revision an upgrade may legitimately START from: the whole chain from
+#: OLDEST_SUPPORTED_START up to the revision below the head.
+#:
+#: DERIVED, not hand-maintained, and that is the point. The hand-maintained version was
+#: assembled by naming deployments — ("0018", "0019"), then +0020/0021 for main's head,
+#: then +0023, then +0024 — and it was one release late every single time, because the
+#: revision a deploy leaves production at only becomes a *starting* point on the NEXT
+#: deploy. It stopped at 0024 while the head was 0029, which would have BLOCKed the
+#: migration after this one off the stamp this one writes.
+#:
+#: The earlier exclusion of 0022 ("no deployment reaches it") was a statement about
+#: deployments, not a hazard finding about 0022, and it was equally true of 0025-0028 —
+#: so it could not survive accepting those. What actually justifies the range: the chain
+#: is linear and alembic runs it in ONE transaction, `scripts/ci.sh` migrates all of it
+#: on every run, and starting later applies a strict suffix of that same chain. Data-state
+#: hazards that really are revision-specific (the ambiguous 0019 stamp, duplicate
+#: (simulation_run_id, message_ts), duplicate (user_id, pmid)) have their own checks; a
+#: stamp that no migration file defines is BLOCKed by check_alembic_scripts.
+SUPPORTED_START_REVISIONS = tuple(
+    r for r in REVISION_ORDER if r >= OLDEST_SUPPORTED_START and r != DEFAULT_TARGET
+)
+
+#: Start revisions at which migration 0019 has already run, so the expensive
+#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
+POST_0019_STARTS = tuple(REVISION_ORDER[REVISION_ORDER.index("0019") + 1 :])
+
+#: What each revision costs an operator who has not applied it yet, one clause each.
+#: check_sizing filters this by pending_revisions() so the sentence it prints describes
+#: the chain that will ACTUALLY run — a fixed list written when 0024 was the only
+#: post-0019 start told an operator at 0026 to expect 0025's index build and 0026's FK
+#: swap, both already behind them.
+REVISION_COST_NOTES: dict[str, str] = {
+    "0019": "0019's ACCESS EXCLUSIVE index build on agent_messages",
+    "0020": "0020 creates pi_dm_messages (empty)",
+    "0021": "0021 adds two indexes on agent_messages",
+    "0022": "0022 creates three empty cohort tables",
+    "0023": "0023 adds three columns to the small researcher_profiles",
+    "0024": "0024 adds one column to agents",
+    "0025": "0025 ADD CONSTRAINT UNIQUE on publications ({publications_rows:,} rows, "
+            "ACCESS EXCLUSIVE for the whole index build)",
+    "0026": "0026 drop/recreate of one FK (ACCESS EXCLUSIVE on private_channel_members, "
+            "SHARE ROW EXCLUSIVE on users)",
+    "0027": "0027's 20 non-concurrent CREATE INDEXes (SHARE on 13 tables)",
+    "0028": "0028 one nullable ADD COLUMN",
+    "0029": "0029 two more nullable ADD COLUMNs (catalogue-only, no rewrite)",
+}
+
+
+def remaining_chain_notes(current: str | None, target: str, publications_rows: int = 0) -> str:
+    """One clause per revision that an upgrade from ``current`` to ``target`` will run.
+
+    Only the pending ones: naming a revision the operator has already applied is how a
+    sizing note turns into a wrong instruction.
+    """
+    pending = pending_revisions(current, target)
+    return "; ".join(
+        REVISION_COST_NOTES[r].format(publications_rows=publications_rows)
+        for r in REVISION_ORDER
+        if r in pending and r in REVISION_COST_NOTES
+    )
 
 def pending_revisions(current: str | None, target: str) -> frozenset[str]:
     """The revisions an upgrade from ``current`` to ``target`` will actually run.
@@ -1207,7 +1254,7 @@ async def run_preflight(args) -> Report:
         # --- 9. sizing / expected lock window ------------------------------------
         rows = 0
         try:
-            sizing = await check_sizing(conn, rev)
+            sizing = await check_sizing(conn, rev, args.target)
             report.add(*sizing)
             rows = sizing[4].get("agent_messages_rows", 0)
         except Exception as exc:  # noqa: BLE001
@@ -1737,16 +1784,17 @@ def check_migration_harness():
     )
 
 
-async def check_sizing(conn, rev: str | None = None):
+async def check_sizing(conn, rev: str | None = None, target: str = DEFAULT_TARGET):
     """agent_messages row count, size, and the estimated lock window.
 
     The estimate is a function of the 0019 index build, so it only applies when 0019 is
-    still pending. Starting from 0020/0021/0023/0024 that cost is already paid, but the
-    remaining chain to 0029 is not a no-op: 0025 adds a UNIQUE constraint on publications
-    (an ACCESS EXCLUSIVE index build scaled by that table's row count, not
-    agent_messages'), 0026 drops/recreates one FK, 0027 runs 20 non-concurrent
-    CREATE INDEXes, 0028 adds one nullable column and 0029 adds two. So this branch sizes
-    publications instead of quoting the (already-paid) 0019 cost.
+    still pending. Starting anywhere after 0019 that cost is already paid, but the
+    remaining chain is not a no-op — so this branch names the revisions that are
+    genuinely still pending (``remaining_chain_notes``) and, while 0025 is one of them,
+    sizes ``publications`` instead of quoting the already-paid 0019 cost. Past 0025 there
+    is no calibrated model left to quote: both row-scaled models here cover index builds
+    that have already run, and inventing a number for what remains would be worse than
+    saying so.
     """
     title = "Sizing and expected lock window"
     if not await table_exists(conn, "agent_messages"):
@@ -1759,16 +1807,21 @@ async def check_sizing(conn, rev: str | None = None):
             if await table_exists(conn, "publications")
             else 0
         )
-        status, tail = sizing_status(pubs, estimate_lock_window_ms(pubs)[1])
+        if "0025" in pending_revisions(rev, target):
+            status, tail = sizing_status(pubs, estimate_lock_window_ms(pubs)[1])
+        else:
+            status, tail = (
+                PASS,
+                "No calibrated estimate for what remains: the two row-scaled models here "
+                "cover 0019's agent_messages index build and 0025's publications index "
+                f"build, both already applied at {rev}.",
+            )
         return (
             title,
             status,
             f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — 0019 is behind you at {rev}. "
-            f"What remains for {rev}->0029: 0025 ADD CONSTRAINT UNIQUE on publications ({pubs:,} rows, "
-            f"ACCESS EXCLUSIVE for the whole index build); 0026 drop/recreate of one FK (ACCESS EXCLUSIVE "
-            f"on private_channel_members, SHARE ROW EXCLUSIVE on users); 0027's 20 non-concurrent CREATE "
-            f"INDEXes (SHARE on 13 tables); 0028 one nullable ADD COLUMN; 0029 two more (catalogue-only, "
-            f"no rewrite). The chain is ONE transaction, so "
+            f"What remains for {rev}->{target}: "
+            f"{remaining_chain_notes(rev, target, pubs)}. The chain is ONE transaction, so "
             f"every lock is held until the last statement commits. {tail}",
             ["Stop app, worker, grantbot and agent-run before --apply (runbook R.4)."],
             {"agent_messages_rows": rows, "publications_rows": pubs},

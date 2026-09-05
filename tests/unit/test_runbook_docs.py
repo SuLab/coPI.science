@@ -50,3 +50,47 @@ def test_production_migration_doc_lists_0024_as_a_supported_starting_point():
     text = PROD_MIGRATION_DOC.read_text()
     assert "**0024**" in text
     assert "is also a supported starting point" in text
+
+
+def _alembic_head() -> str:
+    """The tree's single head, derived the same way preflight and run_migration.sh do."""
+    import re
+
+    versions = REPO_ROOT / "alembic" / "versions"
+    ids: set[str] = set()
+    parents: set[str] = set()
+    for path in sorted(versions.glob("*.py")):
+        src = path.read_text()
+        m = re.search(r'^revision(?::\s*str)?\s*=\s*"([^"]+)"', src, re.M)
+        d = re.search(r'^down_revision[^=]*=\s*"([^"]+)"', src, re.M)
+        if m:
+            ids.add(m.group(1))
+        if d:
+            parents.add(d.group(1))
+    heads = sorted(ids - parents)
+    assert len(heads) == 1, f"expected exactly one alembic head, found {heads}"
+    return heads[0]
+
+
+def test_production_migration_doc_states_the_current_alembic_head():
+    """#27 I2 / F23: the runbook named a target that the tree had moved past.
+
+    `run_migration.sh` now derives the target, so the number here is documentation
+    rather than configuration -- but a runbook that quotes a stale head still sends the
+    operator looking for a mismatch that is not there, so it is pinned to the tree.
+    """
+    head = _alembic_head()
+    text = PROD_MIGRATION_DOC.read_text()
+    marker = f"the alembic tree's single head, **{head}** at the time of writing"
+    assert marker in text, (
+        f"docs/production-migration.md must state the current head; expected the phrase "
+        f"{marker!r} and did not find it. The tree's head is {head}."
+    )
+
+
+def test_production_migration_doc_says_the_target_is_derived_not_pinned():
+    text = PROD_MIGRATION_DOC.read_text()
+    assert "derives that target from `alembic/versions/`" in text, (
+        "docs/production-migration.md must say run_migration.sh derives its target from "
+        "the alembic tree, so a reader does not go looking for a constant to bump"
+    )

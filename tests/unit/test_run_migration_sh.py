@@ -9,11 +9,23 @@ new source once `app` is stopped for the migration window).
 """
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
 
+from scripts.migrate import preflight as pf
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+RUN_MIGRATION_SH = REPO_ROOT / "scripts" / "migrate" / "run_migration.sh"
+
+#: The revision the script must migrate to when no --target is given. Read from
+#: preflight, which `test_revision_order_ends_at_the_repo_head` already pins to the
+#: alembic tree's own head -- so this file never restates a revision literal that can
+#: go stale independently of the tree (issue #27 I2: run_migration.sh shipped a pinned
+#: TARGET, and the two fake-psql shims below pinned the same number, so both went stale
+#: together when 0029 landed and neither test noticed).
+HEAD_REVISION = pf.DEFAULT_TARGET
 
 
 def test_via_run_uses_compose_run_not_exec_and_skips_the_running_check(tmp_path):
@@ -70,7 +82,7 @@ def test_via_run_apply_translates_the_backup_path_into_the_bind_mount(tmp_path):
         '  *"ps --status running --services"*) echo NOT-app ;;\n'
         '  *"import src; print(src.__file__)"*) echo /app/src/__init__.py ;;\n'
         '  *"compose cp "*) head -c 2048 /dev/zero > "$4" ;;\n'
-        '  *"alembic_version"*) echo 0028 ;;\n'
+        f'  *"alembic_version"*) echo {HEAD_REVISION} ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
@@ -192,7 +204,7 @@ def test_backup_dump_honours_postgres_user(tmp_path):
         '  *"ps --status running --services"*) echo app ;;\n'
         '  *"import src; print(src.__file__)"*) echo /app/src/__init__.py ;;\n'
         '  *"compose cp "*) head -c 2048 /dev/zero > "$4" ;;\n'
-        '  *"alembic_version"*) echo 0028 ;;\n'
+        f'  *"alembic_version"*) echo {HEAD_REVISION} ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
@@ -217,3 +229,92 @@ def test_backup_dump_honours_postgres_user(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "pg_dump -U custom_pg_user" in argv
     assert "pg_dump -U copi" not in argv
+
+
+def _shim(tmp_path, log):
+    """A fake `docker` that captures argv and answers the four probes the script makes."""
+    shim = tmp_path / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> {log}\n'
+        'case "$*" in\n'
+        '  *"ps --status running --services"*) echo app ;;\n'
+        '  *"import src; print(src.__file__)"*) echo /app/src/__init__.py ;;\n'
+        f'  *"alembic_version"*) echo {HEAD_REVISION} ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    return shim
+
+
+def _run(tmp_path, *args):
+    log = tmp_path / "argv.log"
+    _shim(tmp_path, log)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "DATABASE_URL": "postgresql+asyncpg://copi:x@postgres:5432/copi",
+        "MIGRATE_BACKUP_DIR": str(tmp_path / "backups"),
+    }
+    proc = subprocess.run(
+        ["./scripts/migrate/run_migration.sh", *args],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return proc, (log.read_text() if log.exists() else "")
+
+
+def test_the_default_target_is_derived_from_the_alembic_tree_not_a_pinned_literal(tmp_path):
+    """#27 I2 / F23: a bare `--apply` must migrate to the tree's head.
+
+    `TARGET="0028"` was pinned in the script while the tree's head moved to 0029, so a
+    bare `--apply` migrated to 0028, stamped it, verified it, and reported success --
+    leaving the app to start against a schema with no `thread_decisions.pi_engaged_at`.
+    preflight only WARNs on a target that is not the head, and run_migration.sh does not
+    stop on a preflight warning in --apply mode, so nothing blocked it.
+    """
+    proc, argv = _run(tmp_path, "--apply", "--backup-verified-elsewhere", "test")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f" coPI production migration -> {HEAD_REVISION}" in proc.stdout, proc.stdout
+    assert f"--target {HEAD_REVISION}" in argv, argv
+    assert f"upgrade {HEAD_REVISION}" in argv, argv
+
+
+def test_no_revision_literal_is_pinned_in_the_script():
+    """The defect was a constant, so the fix is pinned as 'there is no constant'.
+
+    Bumping 0028 to 0029 would have made the test above pass and left the next head
+    bump to fail exactly the same way -- this is the third stale-constant defect on
+    this branch.
+    """
+    source = RUN_MIGRATION_SH.read_text()
+    pinned = re.findall(r'^\s*TARGET=(["\']?)(\d{4})\1\s*$', source, re.M)
+    assert pinned == [], (
+        f"run_migration.sh assigns a hard-coded revision to TARGET ({pinned}); it must "
+        f"derive the head from alembic/versions/ instead"
+    )
+
+
+def test_an_explicit_target_still_overrides_the_derived_head(tmp_path):
+    """--target is how you migrate to something other than the head, deliberately."""
+    proc, argv = _run(
+        tmp_path, "--target", "0026", "--backup-verified-elsewhere", "test"
+    )
+    assert proc.returncode in (0, 2), proc.stdout + proc.stderr
+    assert " coPI production migration -> 0026" in proc.stdout, proc.stdout
+    assert "--target 0026" in argv, argv
+
+
+def test_the_banner_says_where_the_target_came_from(tmp_path):
+    """An operator reading the log must be able to tell a derived target from one they
+    typed -- otherwise a wrong `--target` and a wrong tree look identical afterwards."""
+    derived, _ = _run(tmp_path, "--backup-verified-elsewhere", "test")
+    typed, _ = _run(tmp_path, "--target", "0026", "--backup-verified-elsewhere", "test")
+    assert (
+        f" coPI production migration -> {HEAD_REVISION} (derived from alembic/versions/)"
+        in derived.stdout
+    ), derived.stdout
+    assert " coPI production migration -> 0026 (--target)" in typed.stdout, typed.stdout

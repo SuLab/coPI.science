@@ -220,16 +220,58 @@ def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
     assert rev in reason
 
 
-def test_supported_start_revisions_are_exactly_the_documented_set():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023", "0024")
-    assert pf.DEFAULT_TARGET == "0029"
+@pytest.mark.parametrize("rev", ["0022", "0025", "0026", "0027", "0028"])
+def test_revision_status_accepts_every_start_in_the_chain_below_the_head(rev):
+    """#27 I2 / F24: preflight BLOCKed a start it had no reason to refuse.
+
+    `SUPPORTED_START_REVISIONS` stopped at 0024 while the head moved to 0029, so a
+    database at 0025-0028 -- where a rolled-back-and-retried migration leaves one, and
+    where every future deployment sits the moment a new head lands -- was refused with
+    "not a supported starting point".
+    """
+    status, reason = pf.revision_status(rev, pf.DEFAULT_TARGET)
+    assert status == pf.PASS, reason
+
+
+def test_supported_start_revisions_are_the_whole_chain_below_the_head():
+    """#27 I2 / F24: the allowlist is derived, not hand-maintained.
+
+    It stopped at 0024 while the head moved to 0029, so a start at 0025-0028 -- which
+    is where a rolled-back-and-retried migration leaves a database -- was refused. The
+    same omission had to be repaired by hand twice before (c70b48b added 0023,
+    3a726bb added 0024), each time one release late.
+    """
+    expected = tuple(
+        r for r in pf.REVISION_ORDER if r >= pf.OLDEST_SUPPORTED_START and r != pf.DEFAULT_TARGET
+    )
+    assert pf.SUPPORTED_START_REVISIONS == expected
+    assert pf.OLDEST_SUPPORTED_START == "0018"
+    for rev in ("0025", "0026", "0027", "0028"):
+        assert rev in pf.SUPPORTED_START_REVISIONS, (
+            f"{rev} is in the chain below the head but is not an accepted starting point"
+        )
+
+
+def test_the_revision_below_the_head_is_always_an_accepted_start():
+    """The treadmill, stated as an invariant.
+
+    The moment a new head lands, production sits at the *previous* head. That revision
+    must already be accepted, or the next deploy's preflight BLOCKs on the state this
+    deploy created. This is the exact failure c70b48b and 3a726bb each fixed after the
+    fact.
+    """
+    previous_head = pf.REVISION_ORDER[-2]
+    assert previous_head in pf.SUPPORTED_START_REVISIONS, (
+        f"the revision below the head ({previous_head}) must be an accepted starting "
+        f"point, because that is where production sits when the head advances"
+    )
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
@@ -240,20 +282,53 @@ def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
     that state -- preflight refused the one starting point main itself produces, which
     was found by auditing the branch for a PR into main rather than by any test.
 
-    0022 is deliberately NOT here: no deployment reaches it (main stops at 0021, this
-    branch's head is 0023) and the path has not been exercised from there. An allowlist
-    for a safety gate should contain what was tested, not what seems plausible.
+    0022 used to be excluded here on the grounds that "no deployment reaches it". That
+    was a statement about deployments, not a hazard finding about 0022, and it is
+    equally true of 0025-0028, which F24 requires be accepted -- so the two rules could
+    not both stand. The chain is linear and runs in one transaction, and the gate
+    migrates all of it on every run, so starting at any revision at or after
+    OLDEST_SUPPORTED_START applies a suffix of a rehearsed chain.
     """
     assert "0021" in pf.SUPPORTED_START_REVISIONS
     assert "0020" in pf.SUPPORTED_START_REVISIONS
-    assert "0022" not in pf.SUPPORTED_START_REVISIONS
+    assert "0022" in pf.SUPPORTED_START_REVISIONS
+    assert "0017" not in pf.SUPPORTED_START_REVISIONS
 
 
 def test_sizing_does_not_quote_the_0019_index_build_once_0019_has_run():
     """The row-scaled lock estimate only applies while 0019 is still pending."""
-    assert pf.POST_0019_STARTS == ("0020", "0021", "0023", "0024")
+    assert pf.POST_0019_STARTS == tuple(pf.REVISION_ORDER[pf.REVISION_ORDER.index("0019") + 1 :])
     for rev in pf.POST_0019_STARTS:
-        assert rev in pf.SUPPORTED_START_REVISIONS
+        assert rev == pf.DEFAULT_TARGET or rev in pf.SUPPORTED_START_REVISIONS
+
+
+def test_the_remaining_chain_is_described_from_what_is_actually_pending():
+    """check_sizing's operator text must not name a revision that is already applied.
+
+    Widening the allowlist to 0025-0028 makes those branches reachable; the sentence was
+    a fixed list written when 0024 was the only post-0019 start, so from 0026 it told the
+    operator to expect 0025's publications index build and 0026's FK swap -- both behind
+    them.
+    """
+    from_0024 = pf.remaining_chain_notes("0024", "0029", publications_rows=4508)
+    assert "0025 ADD CONSTRAINT UNIQUE on publications (4,508 rows" in from_0024
+    assert "0027" in from_0024
+
+    from_0027 = pf.remaining_chain_notes("0027", "0029", publications_rows=4508)
+    assert "0025" not in from_0027, from_0027
+    assert "0026" not in from_0027, from_0027
+    assert "0028" in from_0027
+    assert "0029" in from_0027
+
+
+def test_the_remaining_chain_notes_cover_every_revision_they_can_be_asked_about():
+    """A revision with no note would silently vanish from the operator's list."""
+    missing = [
+        r
+        for r in pf.pending_revisions(pf.OLDEST_SUPPORTED_START, pf.DEFAULT_TARGET)
+        if r not in pf.REVISION_COST_NOTES
+    ]
+    assert missing == [], f"REVISION_COST_NOTES has no entry for {sorted(missing)}"
 
 
 # --------------------------------------------------------------------------- #
