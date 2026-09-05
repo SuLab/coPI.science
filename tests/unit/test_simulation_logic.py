@@ -3651,3 +3651,189 @@ class TestInterestingPostsRestoredOnException:
             await engine._phase5_new_post(agent)
 
         assert [p.post_id for p in agent.state.interesting_posts] == ["orig.0", "avail.0"]
+
+
+# ---------------------------------------------------------------
+# A thread parked by the two-strike post back-off must stop counting as a
+# live conversational obligation — #20 COR-1b (AH3)
+# ---------------------------------------------------------------
+
+class TestAParkedThreadDoesNotConsumeARegularSlot:
+    """The two-strike back-off (7647438) clears has_pending_reply but leaves the
+    ThreadState in active_threads with status='active'. Nothing else ever removes
+    it when the counterpart is silent (off-roster, at cap, or simply not posting):
+    _phase4_reply_threads re-enqueues only on `has_new or has_pending_reply`, and
+    has_new needs a row from somebody else, so message_count is frozen and the
+    12-message timeout close is unreachable.
+
+    Both functions that account for an agent's live conversational load kept
+    counting that parked thread. _non_funding_thread_count fed
+    `at_thread_threshold` (active_thread_threshold=3), so three parked threads put
+    the agent into blocked_for_regular for the rest of the run — and because Phase
+    5 then returns before the LLM call when nothing funding/PI-priority/private is
+    available, the agent stopped doing regular work entirely. _agent_load counted
+    it as `status == 'active'`, inflating the sliding-window rate allowance and the
+    scheduler's selection weight for threads that cost nothing.
+
+    Parking is kept (removing it restores one LLM call per turn, forever, on a
+    thread Slack will never accept) and the thread is NOT closed — a close would
+    write outcome='timeout' into a PI DM ("reached message limit without a
+    conclusion", pi_handler.py:380-384), into /admin/discussions and into both
+    agents' prompt-fed working memory, all of it false. See
+    docs/plans/2026-09-04-decisions/task-5.md."""
+
+    def _engine_with_threads(self, count=3, *, pending=True):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        threads = []
+        for i in range(count):
+            thread = ThreadState(
+                thread_id=f"10{i}.1",
+                channel="general",
+                # A counterpart that is not on the roster and never posts —
+                # the only case the wedge still survives in, since f29e295
+                # made a live counterpart's refused post trip has_new.
+                other_agent_id="nobody",
+                has_pending_reply=pending,
+            )
+            agent.state.active_threads[thread.thread_id] = thread
+            threads.append(thread)
+        return engine, agent, threads
+
+    async def _park(self, engine, agent, threads, monkeypatch):
+        """Drive each thread through two consecutive Slack refusals."""
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools",
+            AsyncMock(return_value="<slack_message>hi</slack_message>"),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+        for thread in threads:
+            await engine._reply_to_thread(agent, thread)
+            await engine._reply_to_thread(agent, thread)
+            # Precondition, not the assertion under test: this really is the
+            # parked state, and the thread really is still on the books.
+            assert thread.post_failure_count == 2
+            assert thread.has_pending_reply is False
+            assert agent.state.active_threads[thread.thread_id] is thread
+            assert thread.status == "active"
+
+    @pytest.mark.asyncio
+    async def test_parked_threads_do_not_count_towards_the_regular_thread_cap(
+        self, monkeypatch,
+    ):
+        engine, agent, threads = self._engine_with_threads(3)
+        await self._park(engine, agent, threads, monkeypatch)
+
+        assert engine._non_funding_thread_count(agent) == 0, (
+            "a parked thread still holds a regular discussion slot; three of them "
+            "trip blocked_for_regular for the rest of the run"
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_threads_alongside_parked_ones_still_count(self, monkeypatch):
+        # Control: the exclusion is keyed on the parked state, not on merely
+        # being in active_threads. Two live threads must still be counted by
+        # BOTH functions while three parked ones are not — two, not one, so
+        # _agent_load's answer is above its floor of 1 and the assertion
+        # cannot pass by accident.
+        engine, agent, threads = self._engine_with_threads(5)
+        live = [threads.pop(), threads.pop()]
+        await self._park(engine, agent, threads, monkeypatch)
+
+        assert engine._non_funding_thread_count(agent) == 2
+        assert engine._agent_load(agent) == 2
+        assert all(t.post_failure_count == 0 for t in live)
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_idle_thread_is_not_mistaken_for_a_parked_one(self):
+        # Control: has_pending_reply is False after EVERY successful reply
+        # (simulation.py:1664), so it cannot be the parked marker on its own.
+        # Three threads waiting on their partner still fill the agent's slots.
+        engine, agent, threads = self._engine_with_threads(3, pending=False)
+
+        assert all(t.post_failure_count == 0 for t in threads)
+        assert engine._non_funding_thread_count(agent) == 3
+        assert engine._agent_load(agent) == 3
+
+    @pytest.mark.asyncio
+    async def test_parked_threads_do_not_inflate_the_rate_allowance(self, monkeypatch):
+        engine, agent, threads = self._engine_with_threads(3)
+        await self._park(engine, agent, threads, monkeypatch)
+
+        assert engine._agent_load(agent) == 1, (
+            "_agent_load counts status=='active', which a parked thread still is — "
+            "so it multiplies the sliding-window LLM allowance and the scheduler's "
+            "selection weight by threads that cost nothing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_revived_parked_thread_counts_again(self, monkeypatch):
+        # The exclusion must be temporary. Phase 4 sets has_pending_reply=True
+        # again (simulation.py:1408) the moment has_new fires, which is the
+        # point the thread becomes a live obligation once more.
+        engine, agent, threads = self._engine_with_threads(3)
+        await self._park(engine, agent, threads, monkeypatch)
+        assert engine._non_funding_thread_count(agent) == 0
+        assert engine._agent_load(agent) == 1  # the floor, not a real load
+
+        threads[0].has_pending_reply = True
+        threads[1].has_pending_reply = True
+
+        # Both functions must agree on the revival, and two of them puts
+        # _agent_load above its floor so the assertion has something to say.
+        assert engine._non_funding_thread_count(agent) == 2
+        assert engine._agent_load(agent) == 2
+
+    @pytest.mark.asyncio
+    async def test_three_parked_threads_do_not_block_phase5_for_regular_posts(
+        self, monkeypatch,
+    ):
+        """The cascade, end to end.
+
+        With blocked_for_regular set, a plain non-funding candidate is dropped
+        from available_posts (simulation.py:2390) and _phase5_new_post then
+        returns at :2447 *before* the LLM call — so the agent does not merely go
+        funding-only, it does nothing at all for the rest of the run.
+        """
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+        from src.config import get_settings
+
+        engine, agent, threads = self._engine_with_threads(3)
+        await self._park(engine, agent, threads, monkeypatch)
+
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        engine.message_log.append(LogEntry(
+            ts="200.0", channel="general", sender_agent_id="other",
+            sender_name="OtherBot", content="an ordinary non-funding post",
+            posted_at=200.0, is_bot=True, slack_ts="200.0",
+        ))
+        agent.state.interesting_posts.append(PostRef(
+            post_id="200.0", channel="general", sender_agent_id="other",
+            content_snippet="an ordinary non-funding post", posted_at=200.0,
+        ))
+        llm = AsyncMock(return_value=(
+            "```json\n"
+            '{"action": "reply", "channel": "general", "target_post_id": "200.0"}\n'
+            "```\n"
+            "<slack_message>\n"
+            "Sounds interesting, let's collaborate.\n"
+            "</slack_message>\n"
+        ))
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", llm)
+        engine._update_agent_memory = AsyncMock()
+
+        await engine._phase5_new_post(agent)
+
+        assert llm.await_count == 1, (
+            "three parked threads pushed the agent over active_thread_threshold, "
+            "so Phase 5 filtered out its only regular candidate and returned "
+            "before reaching the LLM"
+        )

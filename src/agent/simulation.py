@@ -503,6 +503,31 @@ class SimulationEngine:
             return True  # unlimited
         return agent.api_call_count < self.budget_cap
 
+    @staticmethod
+    def _is_parked_thread(thread: ThreadState) -> bool:
+        """True while the two-strike post back-off has this thread benched.
+
+        The single definition of "parked", shared by ``_agent_load`` and
+        ``_non_funding_thread_count`` so the two views of an agent's live load
+        cannot drift apart. It is exactly the state the Phase 4 refusal branch
+        leaves a thread in: ``post_failure_count`` reached 2 and
+        ``has_pending_reply`` was cleared, so nothing re-enqueues the thread
+        until the counterpart posts again.
+
+        Both halves are load-bearing. ``has_pending_reply`` is False after every
+        SUCCESSFUL reply too, so on its own it would exclude perfectly healthy
+        threads waiting on their partner; ``post_failure_count`` stays at 2
+        after ``has_new`` revives a thread (it is only zeroed by a successful
+        post), so on its own it would keep excluding a thread that is a live
+        obligation again.
+
+        A parked thread is not closed. Closing it would write outcome="timeout"
+        into a PI DM, into ``/admin/discussions`` and into both agents'
+        prompt-fed working memory, none of which happened — see
+        docs/plans/2026-09-04-decisions/task-5.md (#20 COR-1b).
+        """
+        return thread.post_failure_count >= 2 and not thread.has_pending_reply
+
     def _agent_load(self, agent: Agent) -> int:
         """Concurrent conversational obligations for one agent.
 
@@ -518,9 +543,14 @@ class SimulationEngine:
         ``active_thread_threshold`` so nothing can inflate its own allowance past
         the thread cap it is already bound by — that clamp is what stops a
         thread-opening runaway from financing itself (§4.1).
+
+        Threads parked by the post back-off are not obligations: they generate no
+        LLM call until the counterpart speaks, so counting them handed the agent
+        allowance and selection weight for work it cannot do (#20 COR-1b).
         """
         live = sum(
-            1 for t in agent.state.active_threads.values() if t.status == "active"
+            1 for t in agent.state.active_threads.values()
+            if t.status == "active" and not self._is_parked_thread(t)
         )
         return max(1, min(live, get_settings().active_thread_threshold))
 
@@ -569,10 +599,22 @@ class SimulationEngine:
         return ok
 
     def _non_funding_thread_count(self, agent: Agent) -> int:
-        """Count active threads that are NOT funding-related."""
+        """Count active threads that are NOT funding-related.
+
+        Feeds ``at_thread_threshold`` in Phase 5, so every thread counted here
+        spends one of the agent's ``active_thread_threshold`` regular discussion
+        slots. Threads parked by the post back-off are excluded on the same
+        ``_is_parked_thread`` test ``_agent_load`` uses: with a silent
+        counterpart a parked thread never advances to the 12-message timeout
+        close and never leaves ``active_threads``, so counting it took the slot
+        permanently — three of them put the agent into ``blocked_for_regular``
+        for the rest of the run, after which Phase 5 returns before the LLM call
+        whenever nothing funding/PI-priority/private is available (#20 COR-1b).
+        """
         return sum(
             1 for t in agent.state.active_threads.values()
-            if not self.message_log.is_funding_thread(t.thread_id)
+            if not self._is_parked_thread(t)
+            and not self.message_log.is_funding_thread(t.thread_id)
         )
 
     def _count_today_posts(self, agent: Agent) -> int:
@@ -1648,12 +1690,21 @@ class SimulationEngine:
                 # per turn indefinitely. Mirrors authorship_reject_count's
                 # two-strike pattern.
                 thread.post_failure_count += 1
+                # "nothing persisted" until f29e295, which restored the
+                # DB-only row (slack_ts=None) a refused post writes — the text
+                # survives, only the Slack identity and the turn do not.
                 logger.info(
-                    "[%s] Suppressed post in #%s — not counted, nothing persisted "
-                    "(post_failure_count=%d)",
+                    "[%s] Suppressed post in #%s — turn not counted, kept as a "
+                    "DB-only row (post_failure_count=%d)",
                     agent.agent_id, thread.channel, thread.post_failure_count,
                 )
                 if thread.post_failure_count >= 2:
+                    # Park the thread: nothing re-enqueues it until the
+                    # counterpart posts (:1402). _is_parked_thread reads exactly
+                    # this state so the parked thread stops spending one of the
+                    # agent's regular discussion slots and stops inflating its
+                    # rate allowance — see #20 COR-1b and
+                    # docs/plans/2026-09-04-decisions/task-5.md.
                     thread.has_pending_reply = False
                     logger.info(
                         "[%s] Phase 4: Backing off thread %s after %d post failures",
@@ -2310,8 +2361,8 @@ class SimulationEngine:
         count = self._phase5_post_failure_counts.get(key, 0) + 1
         self._phase5_post_failure_counts[key] = count
         logger.info(
-            "[%s] Suppressed reply to %s — not counted, nothing persisted "
-            "(post_failure_count=%d)",
+            "[%s] Suppressed reply to %s — turn not counted, kept as a "
+            "DB-only row (post_failure_count=%d)",
             agent.agent_id, target_post_id, count,
         )
         if count >= 2:
@@ -2805,7 +2856,8 @@ class SimulationEngine:
                     # persistent object across turns to hang a two-strike
                     # counter on, so there is nothing to drop or back off.
                     logger.info(
-                        "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                        "[%s] Suppressed post in #%s — turn not counted, kept as "
+                        "a DB-only row",
                         agent.agent_id, channel,
                     )
                 else:
