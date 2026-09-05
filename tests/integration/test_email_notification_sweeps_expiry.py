@@ -2,6 +2,17 @@
 downgrade ladder can advance past its first rung. V4-3's third test also pins B3/M1: expiring then
 falling through to a re-send for the SAME proposal must reconcile the existing row, not violate
 uq_email_notification_user_thread_category.
+
+`expired` is only ever written once a REPLACEMENT has been accepted by SES -- the same ordering
+Task 21.11 established for row creation. The three tests named `..._leaves_the_notification_
+answerable` cover the three ways `_process_user_notifications` can reach the end of a sweep
+without sending anything after the reply window lapsed; on each of them the row must stay `sent`,
+because `email_inbound.process_inbound_email` drops any reply whose notification is not `sent`
+and that token is the only reply address the PI was ever given.
+
+Also here (same sweep, same file): the reopen sentinel. `reopen_proposal` files a ProposalReview
+with `rating=0`, which `_get_unreviewed_proposals_for_user` and the status_overview digest both
+counted as a completed review -- see Task 16's ruling, docs/plans/2026-09-04-decisions/task-16.md.
 """
 
 import uuid
@@ -44,7 +55,14 @@ async def _eager(db_session, user_id) -> User:
     ).scalar_one()
 
 
-async def test_an_outstanding_notification_past_the_expiry_window_is_marked_expired(db_session):
+async def test_a_sweep_with_nothing_to_send_leaves_the_notification_answerable(db_session):
+    """V4-3, no-send path 1 of 3: `_process_user_notifications` returns at its
+    `if not proposals` bail. The reply window lapsed, so the sweep falls through — but the
+    proposal has since been reviewed on the dashboard, so there is nothing to send. Retiring
+    the row here retires the only reply address this PI was ever given, and
+    `email_inbound.process_inbound_email` then drops their reply on its `status != "sent"`
+    gate. 'expired' may only be written once a replacement has been accepted by SES.
+    """
     user = await factories.make_user(db_session, email="pi.expiry@scripps.edu")
     agent = await factories.make_agent(db_session, user=user)
     td = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
@@ -58,8 +76,7 @@ async def test_an_outstanding_notification_past_the_expiry_window_is_marked_expi
     )
     db_session.add(notification)
     db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
-    # Already reviewed, so the fall-through finds nothing to send and never reaches SES —
-    # this test is about the expiry itself; the re-send is exercised by the third test below.
+    # Already reviewed, so the fall-through finds nothing to send and never reaches SES.
     # tests/factories.py has no make_proposal_review at 18ba52c — insert the row directly.
     db_session.add(ProposalReview(
         thread_decision_id=td.id, agent_id=agent.agent_id, user_id=user.id,
@@ -68,14 +85,254 @@ async def test_an_outstanding_notification_past_the_expiry_window_is_marked_expi
     await db_session.flush()
     notif_id = notification.id
 
-    await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
 
+    assert sent is False, "nothing was sendable, so the sweep must report no send"
     await db_session.refresh(notification)
-    assert notification.status == "expired", (
-        "an unanswered proposal_review notification past the expiry window is still 'sent' — "
-        "it is immortal, and it permanently blocks a new reminder from ever going out"
+    assert notification.status == "sent", (
+        f"notification {notif_id} was marked {notification.status!r} on a sweep that sent "
+        "NOTHING — the PI still holds an e-mail whose reply+<token> address is now dead, and "
+        "email_inbound drops the reply at its `status != 'sent'` gate. Expire a row only when "
+        "a replacement has actually gone out."
     )
-    assert notif_id  # keep the id referenced for the failure message
+
+
+async def test_an_allowlist_suppressed_sweep_leaves_the_notification_answerable(
+    db_session, monkeypatch,
+):
+    """V4-3, no-send path 2 of 3: the outbound allowlist bail in `_process_user_notifications`
+    (it advances the send clock and returns False without sending). Driven end to end — the
+    PI's reply to the still-outstanding reminder must file a review.
+    """
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "someone.else@scripps.edu")
+    monkeypatch.setattr(inbound, "_send_simple_email", lambda *a, **k: True)
+
+    async def _classify(body, proposal_summary):
+        return {"category": "review", "rating": 4, "comment": "yes", "instruction": ""}
+
+    monkeypatch.setattr(inbound, "classify_reply", _classify)
+
+    user = await factories.make_user(db_session, email="pi.blocked@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    token = f"tok-{uuid.uuid4().hex}"
+    notification = EmailNotification(
+        user_id=user.id, thread_decision_id=td.id, agent_registry_id=agent.id,
+        reply_token=token, category="proposal_review", status="sent",
+        sent_at=datetime.now(UTC) - timedelta(
+            days=get_settings().email_notification_expiry_days + 1
+        ),
+    )
+    db_session.add(notification)
+    db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
+    await db_session.flush()
+
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+    assert sent is False, "the allowlist should have suppressed the replacement"
+
+    raw = (
+        factories.SES_PASS_HEADER
+        + f"From: {user.email}\n"
+        + f"To: review+{token}@reply.copi.science\n"
+        + 'Content-Type: text/plain; charset="UTF-8"\n'
+        + "\n4 excellent\n"
+    ).encode()
+    await process_inbound_email(raw, db_session)
+
+    row = (
+        await db_session.execute(
+            select(EmailNotification).where(EmailNotification.reply_token == token)
+        )
+    ).scalar_one()
+    assert row.status == "responded", (
+        f"the reply was dropped: the row is {row.status!r}. The sweep suppressed the "
+        "replacement e-mail but retired the reply token anyway, so the PI's rating went "
+        "nowhere — no ProposalReview, no confirmation, no log the PI can see."
+    )
+    review = (
+        await db_session.execute(
+            select(ProposalReview).where(ProposalReview.thread_decision_id == td.id)
+        )
+    ).scalar_one_or_none()
+    assert review is not None and review.rating == 4
+
+
+async def test_a_failed_ses_send_leaves_the_notification_answerable(db_session, monkeypatch):
+    """V4-3, no-send path 3 of 3: `send_proposal_notification` returns False (SES refused).
+    Nothing replaced the outstanding reminder, so its token must keep working.
+    """
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+    user = await factories.make_user(db_session, email="pi.sesfail@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    notification = EmailNotification(
+        user_id=user.id, thread_decision_id=td.id, agent_registry_id=agent.id,
+        reply_token=f"tok-{uuid.uuid4().hex}", category="proposal_review", status="sent",
+        sent_at=datetime.now(UTC) - timedelta(
+            days=get_settings().email_notification_expiry_days + 1
+        ),
+    )
+    db_session.add(notification)
+    db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
+    await db_session.flush()
+
+    class _RefusingSES:
+        def send_raw_email(self, **kwargs):
+            raise RuntimeError("SES throttled this account")
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: _RefusingSES())
+
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+
+    assert sent is False
+    await db_session.refresh(notification)
+    assert notification.status == "sent", (
+        f"the row is {notification.status!r} after a send that SES REFUSED — the PI's only "
+        "live reminder was retired in exchange for an e-mail that never left."
+    )
+
+
+async def test_a_replacement_for_a_different_proposal_expires_the_old_row(
+    db_session, monkeypatch,
+):
+    """The other half of V4-3: once SES HAS accepted a replacement, the superseded row must be
+    retired — and not merely for tidiness. The outstanding-row lookup is `scalar_one_or_none()`
+    over (user, category, status='sent'), so leaving two live rows raises MultipleResultsFound
+    and the sweep's per-item `except` then starves that PI every cycle.
+    """
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+    user = await factories.make_user(db_session, email="pi.twoprops@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td_old = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    td_new = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    # td_old is reviewed, so the fall-through picks td_new and the replacement lands on a
+    # DIFFERENT row than the outstanding one.
+    db_session.add(ProposalReview(
+        thread_decision_id=td_old.id, agent_id=agent.agent_id, user_id=user.id,
+        reviewed_by_user_id=user.id, rating=3, submitted_via="web",
+    ))
+    old = EmailNotification(
+        user_id=user.id, thread_decision_id=td_old.id, agent_registry_id=agent.id,
+        reply_token=f"tok-{uuid.uuid4().hex}", category="proposal_review", status="sent",
+        sent_at=datetime.now(UTC) - timedelta(
+            days=get_settings().email_notification_expiry_days + 1
+        ),
+    )
+    db_session.add(old)
+    db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
+    await db_session.flush()
+
+    class _RecordingSES:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        def send_raw_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return {"MessageId": "m-1"}
+
+    recorder = _RecordingSES()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: recorder)
+
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+
+    assert sent is True
+    assert len(recorder.sent) == 1
+    await db_session.refresh(old)
+    assert old.status == "expired", (
+        f"the superseded row is still {old.status!r} after a replacement went out for a "
+        "DIFFERENT proposal — the next sweep's scalar_one_or_none() sees two 'sent' rows and "
+        "raises MultipleResultsFound"
+    )
+    new_row = (
+        await db_session.execute(
+            select(EmailNotification).where(
+                EmailNotification.user_id == user.id,
+                EmailNotification.thread_decision_id == td_new.id,
+            )
+        )
+    ).scalar_one()
+    assert new_row.status == "sent"
+
+
+async def test_a_reopened_proposal_is_still_unreviewed_for_the_reminder_sweep(
+    db_session, monkeypatch,
+):
+    """Task 16's rating predicate, in this file's sweep. `reopen_proposal` files a
+    ProposalReview with `rating=0` as its marker — the sentinel simulation.py:3510-3512 names
+    next to the engine's `-1`, and neither is submittable (agent_page.py:509 and
+    email_inbound.py:383 both reject anything outside 1-4).
+    `_get_unreviewed_proposals_for_user` excluded only `-1`, so a proposal the PI explicitly
+    reopened counted as reviewed and its reminder was never sent again.
+    """
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+    user = await factories.make_user(db_session, email="pi.reopened@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    db_session.add(ProposalReview(
+        thread_decision_id=td.id, agent_id=agent.agent_id, user_id=user.id,
+        reviewed_by_user_id=user.id, rating=0, comment="[Reopened] please refine the budget",
+        submitted_via="web",
+    ))
+    db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=0))
+    await db_session.flush()
+
+    class _RecordingSES:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        def send_raw_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return {"MessageId": "m-1"}
+
+    recorder = _RecordingSES()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: recorder)
+
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+
+    assert sent is True, (
+        "the reopen marker (rating=0) was counted as a completed review, so the sweep found "
+        "nothing outstanding and this PI never gets another reminder about the proposal they "
+        "themselves reopened"
+    )
+    assert len(recorder.sent) == 1
+
+
+async def test_the_digest_does_not_label_a_reopened_proposal_reviewed(db_session, monkeypatch):
+    """Task 16's rating predicate, in the status_overview digest. `_status_label`'s lookup has
+    no key for 0, so a reopened proposal fell through to its "reviewed" default and the PI was
+    told in writing that a proposal still awaiting their rating had been reviewed. Excluding
+    the marker leaves `ratings_by_td` empty for that proposal, which is the existing
+    "awaiting your review" branch — no wording changes (D33).
+    """
+    user = await factories.make_user(db_session, email="pi.digest@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(
+        db_session, agent_a=agent.agent_id, agent_b="somebot",
+        decided_at=datetime.now(UTC), summary_text="A joint proteomics screen.",
+    )
+    db_session.add(ProposalReview(
+        thread_decision_id=td.id, agent_id=agent.agent_id, user_id=user.id,
+        reviewed_by_user_id=user.id, rating=0, comment="[Reopened] please refine the budget",
+        submitted_via="web",
+    ))
+    await db_session.flush()
+
+    pref = await en.get_or_create_pref(user.id, "status_overview", db_session)
+    captured: dict = {}
+
+    def _fake_send(to_email, subject, text_body, html_body, **kwargs):
+        captured["text"] = text_body
+        return True
+
+    monkeypatch.setattr(en, "_send_html_email", _fake_send)
+
+    assert await en._send_status_overview(await _eager(db_session, user.id), pref, db_session)
+
+    assert "— reviewed" not in captured["text"], (
+        "the digest tells the PI a proposal they reopened was 'reviewed':\n"
+        + captured["text"]
+    )
+    assert "— awaiting your review" in captured["text"]
 
 
 async def test_a_recently_sent_outstanding_notification_is_not_expired(db_session):

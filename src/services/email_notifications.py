@@ -170,12 +170,18 @@ async def _get_unreviewed_proposals_for_user(
             )
         )
         for td in td_result.scalars().all():
-            # Check if reviewed by this agent
+            # Check if reviewed by this agent. rating <= 0 is a marker, not a review: -1 is
+            # the engine's implicit review and 0 is the reopen-with-guidance marker
+            # (simulation.py:3510-3512 names them together; neither is submittable —
+            # agent_page.py:509 and email_inbound.py:383 both reject anything outside 1-4).
+            # Excluding only -1 meant a proposal the PI had explicitly REOPENED counted as
+            # reviewed, so no further reminder about it was ever sent. Same predicate as
+            # admin.py:656/:865 (Task 16, docs/plans/2026-09-04-decisions/task-16.md).
             review_result = await db.execute(
                 select(ProposalReview).where(
                     ProposalReview.thread_decision_id == td.id,
                     ProposalReview.agent_id == agent.agent_id,
-                    ProposalReview.rating != -1,
+                    ProposalReview.rating.notin_((-1, 0)),
                 )
             )
             if not review_result.scalar_one_or_none():
@@ -279,16 +285,26 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
             # engagement and maybe downgrade, but don't pile on a second reminder.
             await _check_engagement_and_downgrade(user, tracker, db)
             return False
-        # V4-3/V4-4a: the PI never answered within the reply window. Retire the row (it was
-        # immortal before — 'expired' was declared on the model but nothing ever wrote it) and
-        # fall through: the slot is free again, so a new reminder below can go out and continue
-        # the missed-email tally (the pre-existing increment on a successful send, below) instead
-        # of being stuck here forever after the very first miss. The re-send below reconciles
-        # THIS SAME row rather than inserting a new one (Task 21.11's upsert) — a plain second
-        # INSERT would collide with uq_email_notification_user_thread_category.
-        outstanding_notification.status = "expired"
+        # V4-3/V4-4a: the PI never answered within the reply window, so the slot is free again
+        # and we fall through — a new reminder can go out and continue the missed-email tally
+        # (the increment on a successful send, below) instead of being stuck here forever after
+        # the very first miss. The re-send below reconciles THIS SAME row rather than inserting
+        # a new one (Task 21.11's upsert) — a plain second INSERT would collide with
+        # uq_email_notification_user_thread_category.
+        #
+        # What must NOT happen here is the status write itself. THREE of the paths below reach
+        # the end of this function without sending anything — nothing left to review (the
+        # `if not proposals` bail), the outbound allowlist, and an SES refusal inside
+        # send_proposal_notification — and on each of them 'expired' would kill the
+        # reply+<token> address of the e-mail the PI is still holding, since
+        # email_inbound.process_inbound_email drops any reply whose notification is not 'sent'.
+        # So the write is deferred to after the send (see the `if success:` block below),
+        # mirroring the ordering Task 21.11 established for row CREATION: persist only once SES
+        # has accepted. Reaching that block with a non-None outstanding_notification means
+        # exactly this branch ran, because the in-window branch above returns.
         logger.info(
-            "Expired unanswered proposal_review notification %s for user %s",
+            "Unanswered proposal_review notification %s for user %s is past the reply window; "
+            "keeping it answerable until a replacement reminder is accepted by SES",
             outstanding_notification.id, user.id,
         )
 
@@ -336,6 +352,25 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     if success:
         tracker.last_notification_sent_at = datetime.now(timezone.utc)
         tracker.consecutive_missed += 1  # Will be reset if they engage
+        # V4-3: only NOW is the lapsed reminder retired — SES has accepted a replacement, so
+        # the PI holds a live reply address again. Skip the row send_proposal_notification just
+        # reconciled: when the replacement is for the SAME proposal it IS this row, already
+        # flipped back to 'sent' with a fresh sent_at, and writing 'expired' over it would
+        # retire the e-mail that has just gone out. Only a replacement for a DIFFERENT proposal
+        # leaves this row behind — and that one must not stay 'sent', because the outstanding
+        # lookup above is scalar_one_or_none() and two live rows raise MultipleResultsFound
+        # into the sweep's per-item `except` every cycle from then on.
+        if (
+            outstanding_notification is not None
+            and outstanding_notification.thread_decision_id != td.id
+        ):
+            outstanding_notification.status = "expired"
+            await db.flush()  # same as the row write it mirrors: durable before we return
+            logger.info(
+                "Expired unanswered proposal_review notification %s for user %s "
+                "(superseded by a reminder for proposal %s)",
+                outstanding_notification.id, user.id, td.id,
+            )
 
     return success
 
@@ -845,13 +880,20 @@ async def _send_status_overview(
     proposals = [td for td in tds if td.outcome == "proposal"]
     no_proposal_count = sum(1 for td in tds if td.outcome == "no_proposal")
 
-    # Ratings for proposals (max rating per proposal decides successful vs no-go)
+    # Ratings for proposals (max rating per proposal decides successful vs no-go).
+    # Same marker exclusion as _get_unreviewed_proposals_for_user above: 0 is the
+    # reopen-with-guidance marker, and admitting it put a reopened proposal into
+    # ratings_by_td with a value _status_label has no key for, so it fell through to that
+    # dict's "reviewed" default — the digest told the PI in writing that a proposal still
+    # awaiting their rating had been reviewed. Excluding it leaves ratings_by_td empty for
+    # that proposal, which is the existing "awaiting your review" branch. The successful /
+    # no_go counts are unaffected either way (both default to 0 and test >= 3 / 1..2).
     ratings_by_td: dict = {}
     if proposals:
         rev_result = await db.execute(
             select(ProposalReview.thread_decision_id, ProposalReview.rating).where(
                 ProposalReview.thread_decision_id.in_([td.id for td in proposals]),
-                ProposalReview.rating != -1,
+                ProposalReview.rating.notin_((-1, 0)),
             )
         )
         for td_id, rating in rev_result.all():
