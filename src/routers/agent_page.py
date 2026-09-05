@@ -767,9 +767,43 @@ async def reopen_proposal(
         await db.commit()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
+    # Second idempotency guard, on the migration itself (#24 N1-b / #21 COR-19.6).
+    # The review-row check above is not sufficient, because the review row is exactly
+    # what a lost race destroys: migrate_public_thread_to_private commits its own
+    # AgentChannel/member/handover rows and `refined_in_channel` as soon as its side
+    # effects are irreversible (private_channels.py:644, and :415 on the Slack-off
+    # path), then the `except IntegrityError` arm below rolls back this route's own
+    # ProposalReview insert. A retry therefore finds no review row, and
+    # `origin_visibility` still 'public' -- the migration never flips it -- so without
+    # this it migrated a SECOND time. Slack does not refuse the second create:
+    # AgentSlackClient.create_private_channel (slack_client.py:933-936) appends a fresh
+    # per-call `%Y%m%d-%H%M%S` stamp to the otherwise-deterministic
+    # priv-{a}-{b}-{origin} slug, so the retry asks for a name that never existed. The
+    # first channel -- which already holds the handover and the PI's guidance -- is
+    # then orphaned, with both bots still in it and refined_in_channel repointed away.
+    # `refined_in_channel` is the durable record that the migration happened, so read
+    # it. `d1146a4` added this same guard to the e-mail twin
+    # (email_inbound.py:878-886) and stopped there; the two now read the same.
+    if td.refined_in_channel:
+        logger.info(
+            "Proposal %s was already migrated to %s on an earlier attempt -- not "
+            "migrating again; the guidance is already in that channel",
+            td.thread_id, td.refined_in_channel,
+        )
+        already_migrated = True
+    else:
+        already_migrated = False
+
     settings = get_settings()
 
-    if settings.enable_private_refinement and td.origin_visibility == "public":
+    if already_migrated:
+        # Nothing to do on Slack: the first attempt's migration posted this same
+        # guidance into the private channel as part of its handover. Fall through so
+        # the route still records the review row and retires the notification (again,
+        # matching the e-mail twin) -- skipping the whole request instead would leave
+        # the proposal looking unreviewed for ever.
+        pass
+    elif settings.enable_private_refinement and td.origin_visibility == "public":
         # New behavior: migrate to a collab_private channel before any PI
         # text touches Slack.
         from src.services.private_channels import migrate_public_thread_to_private
@@ -882,12 +916,12 @@ async def reopen_proposal(
     agent_agent_id = agent.agent_id
     pi_user_id = agent.user_id
 
-    # migrate_public_thread_to_private only FLUSHES refined_in_channel -- it never
-    # commits (src/services/private_channels.py:610) -- so a rollback() below would
-    # silently undo that flush along with the losing insert, orphaning the Slack
-    # channel it already created for real (I2, #24 V5). Capture the value now so the
-    # except arm can re-bind it to a freshly reloaded ThreadDecision without
-    # re-running the migration.
+    # migrate_public_thread_to_private commits refined_in_channel itself now, together
+    # with the AgentChannel row and the handover, as soon as its side effects are
+    # irreversible (34d3c15 for the Slack path, 391e545 for the Slack-off one), so a
+    # rollback() below no longer undoes it -- that is what lets the guard above read it
+    # on a retry. This capture is what the except arm re-binds from; keep it read
+    # BEFORE the try for the same MissingGreenlet reason as the four locals above.
     refined_channel_id = td.refined_in_channel
 
     # Import hoisted ABOVE the try (mirrors review_proposal, :556-563): the except arm
