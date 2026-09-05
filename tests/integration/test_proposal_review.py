@@ -49,6 +49,7 @@ from types import SimpleNamespace
 import boto3
 import pytest
 import slack_sdk
+from fastapi import HTTPException
 from itsdangerous import TimestampSigner
 from sqlalchemy import func, select, text
 
@@ -631,6 +632,25 @@ async def test_review_proposal_recovery_with_no_winning_row_returns_a_clean_resp
     already uses ``.scalar_one_or_none()`` (agent_page.py:942-969, logging and
     continuing instead of crashing); this pins that ``review_proposal`` now matches.
 
+    **R8 / #24 V5 (Task 14): why the 302 in this test became a 409.** N2's fix was
+    right that the arm must not raise ``NoResultFound``; it was wrong about what a
+    "clean response" is. ``winner is None`` means the rollback threw the PI's insert
+    away AND no other row took its place, so *nothing was persisted* -- and the arm
+    answered a redirect byte-identical to the success path while retiring the
+    outstanding ``EmailNotification``, so the PI saw the normal post-review page, lost
+    their rating and comment, and no reminder chased the proposal either. The arm now
+    raises ``HTTPException(409)``, copied from ``post_agent_message``'s own
+    rollback-then-409 (agent_page.py:1461-1466) -- the in-repo pattern issue #24's
+    ``Fix:`` clause names -- and leaves the notification ``sent``. The redirect
+    carriers this route also owns (``?slack_error=``/``?delegate_error=``) were
+    rejected because ``templates/agent/dashboard.html`` renders both only inside
+    ``{% if agent.status == 'active' %}`` (and ``delegate_error`` only inside
+    ``{% if is_owner %}``), while this handler deliberately serves inactive agents and
+    delegates; see docs/plans/2026-09-04-decisions/task-14.md.
+
+    What N2 pinned and this test still pins: no 500, no ``NoResultFound``, and no
+    partial ``ProposalReview`` row left behind.
+
     Reproduced with a genuine, non-uniqueness IntegrityError, not a scripted fake:
     a delegate reviews on "alpha"'s behalf while "alpha"'s PI (`lab.pi_a_id`) is
     deleted out from under the request. ``agents.user_id -> users.id`` is
@@ -643,27 +663,61 @@ async def test_review_proposal_recovery_with_no_winning_row_returns_a_clean_resp
     """
     delegate = await factories.make_user(db_session, name="Delegate Dee", email="dee@lab.test")
     db_session.add(AgentDelegate(agent_registry_id=lab.reg_a_id, user_id=delegate.id))
+    # The outstanding reminder this branch must NOT retire. Hung off the DELEGATE, not
+    # the PI: email_notifications.user_id is ON DELETE CASCADE (models/
+    # email_notification.py:19-23), so a PI-owned row would vanish with the DELETE
+    # below and "still sent" would be unfalsifiable. mark_notification_responded is
+    # scoped to agent_registry_id + thread_decision_id, not to the responder (V4-4b),
+    # so this row is exactly what the arm used to flip.
+    notification = EmailNotification(
+        user_id=delegate.id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_a_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    db_session.add(notification)
     # Release lab/proposal/delegate's setup as a savepoint boundary BEFORE the
     # destructive delete, so review_proposal's own rollback() (triggered by the
     # IntegrityError below) discards only the failed insert attempt, not the fixture.
     await db_session.commit()
+    notification_id = notification.id
     await db_session.execute(text("DELETE FROM users WHERE id = :u"), {"u": lab.pi_a_id})
     await db_session.commit()
 
     current_user = SimpleNamespace(id=delegate.id, name="Delegate Dee")
-    resp = await agent_page.review_proposal(
-        agent_id="alpha", thread_decision_id=proposal.id, request=SimpleNamespace(),
-        rating=3, comment="", db=db_session, current_user=current_user,
+    with pytest.raises(HTTPException) as raised:
+        await agent_page.review_proposal(
+            agent_id="alpha", thread_decision_id=proposal.id, request=SimpleNamespace(),
+            rating=3, comment="", db=db_session, current_user=current_user,
+        )
+
+    # Still N2's assertion, restated: HTTPException is a handled, coded response, so
+    # the arm is still not raising NoResultFound or any other 500 out of the handler.
+    assert raised.value.status_code == 409, (
+        "a non-uniqueness IntegrityError must answer a coded 4xx that tells the PI "
+        "nothing was saved, not a 302 indistinguishable from a successful review "
+        f"(got {raised.value.status_code})"
+    )
+    assert "retry" in str(raised.value.detail).lower(), (
+        f"the 409 must tell the PI what to do; detail was {raised.value.detail!r}"
     )
 
-    assert resp.status_code == 302, (
-        "a non-uniqueness IntegrityError must still return a clean response, not "
-        "raise NoResultFound out of the recovery path"
-    )
+    db_session.expire_all()
     reviews = (await db_session.execute(
         select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
     )).scalars().all()
     assert reviews == [], "the failed insert must not have left a partial row behind"
+
+    # The half of R8 the response code cannot cover: nothing was persisted, so the
+    # reminder loop must keep chasing this proposal. The positive control that this is
+    # not simply "mark_notification_responded never runs" is
+    # test_reviewing_on_the_web_retires_the_outstanding_email_notification, which
+    # requires a SUCCESSFUL review to flip the same row to 'responded'.
+    after = await db_session.get(EmailNotification, notification_id)
+    assert after.status == "sent", (
+        "the outstanding reminder was retired for a review that was never persisted "
+        f"(status={after.status!r}) -- no e-mail will ever chase this proposal again"
+    )
+    assert after.responded_at is None and after.response_type is None
 
 
 # ---------------------------------------------------------------------------

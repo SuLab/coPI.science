@@ -653,20 +653,56 @@ async def review_proposal(
             return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
         if winner is None:
-            # Like reopen_proposal's else arm: no winning row means this
-            # IntegrityError was not the uniqueness conflict at all, so there is
-            # nothing to reject as "already reviewed" -- log it for investigation and
-            # fall through to the same clean redirect a successful review gets,
-            # rather than asserting a rejection that never happened.
+            # No winning row means this IntegrityError was not the uniqueness conflict
+            # at all (N2), so there is nothing to reject as "already reviewed" -- but
+            # it also means the rollback above threw THIS request's insert away and
+            # nothing took its place, so the PI's rating and comment were persisted
+            # nowhere. R8 / #24 V5: this arm used to log, retire the notification, and
+            # return the same 302 the success path returns, byte for byte. The PI saw
+            # the normal post-review page with their text gone, and because
+            # mark_notification_responded had just flipped the outstanding
+            # EmailNotification to 'responded', no reminder chased the proposal
+            # either. Two changes, ruled in
+            # docs/plans/2026-09-04-decisions/task-14.md:
+            #
+            # 1. A coded 409 instead of the redirect, so the PI is told. The carrier
+            #    copied is post_agent_message's own rollback-then-409 (:1461-1466) --
+            #    the in-repo pattern issue #24's Fix clause names ("rollback + one
+            #    retry then 409"). Deliberately NOT the ?slack_error= /
+            #    ?delegate_error= redirect carriers this file also owns: dashboard.html
+            #    renders both only inside `{% if agent.status == 'active' %}` (:279),
+            #    and delegate_error only inside `{% if is_owner %}` (:330), while this
+            #    handler admits inactive agents (:514, on purpose -- see the docstring)
+            #    and delegates, so a query parameter would be silently dropped for
+            #    exactly the users this branch strands. `from None` matches the
+            #    "Already reviewed" raise below and keeps ruff's B904 quiet.
+            # 2. NO mark_notification_responded. Nothing was persisted, so the
+            #    reminder has to keep chasing the proposal. Leaving the row 'sent' is
+            #    the state that would have existed had the request never happened, and
+            #    every consumer already handles it: _process_user_notifications sends
+            #    nothing while the row is inside its reply window and then expires and
+            #    re-sends by RECONCILING that same row rather than inserting a second
+            #    one (email_notifications.py:274-289, :550-565), so there is neither a
+            #    duplicate send nor a stuck sweep; and a later successful review still
+            #    retires it, because mark_notification_responded filters on
+            #    status == 'sent'.
+            #
+            # record_engagement stays, and is still committed: the PI did act, and all
+            # that call does is reset consecutive_missed / last_engagement_at, so
+            # dropping it would count our own write failure against them and eventually
+            # downgrade their e-mail frequency (_check_engagement_and_downgrade).
             logger.error(
                 "IntegrityError on proposal %s review write but no winning row was "
-                "found on re-select -- unexpected",
+                "found on re-select -- nothing was persisted, so the reviewer gets a "
+                "409 and the outstanding reminder is left alone",
                 thread_decision_id,
             )
             await record_engagement(current_user_id, db)
-            await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
             await db.commit()
-            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+            raise HTTPException(
+                status_code=409,
+                detail="Your review could not be saved due to a conflict, please retry",
+            ) from None
 
         # A real review won the race. Their review is the decision for this agent, so
         # still retire THIS responder's outstanding notification (V4-4b) before
