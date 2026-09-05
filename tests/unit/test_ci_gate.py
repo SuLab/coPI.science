@@ -5,6 +5,7 @@ for the alembic gate: assert marker strings exist and precede pytest."""
 import os
 import re
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import NamedTuple
@@ -179,7 +180,11 @@ class GateRun(NamedTuple):
 
 
 def run_gate_until_pytest(
-    env: dict[str, str], *, cwd: Path = REPO_ROOT, timeout: float = 180.0
+    env: dict[str, str],
+    *,
+    cwd: Path = REPO_ROOT,
+    timeout: float = 180.0,
+    stop_marker: str | None = PYTEST_BANNER,
 ) -> GateRun:
     """Run the gate, streaming its output, and stop it the moment it announces pytest.
 
@@ -191,6 +196,11 @@ def run_gate_until_pytest(
     itself into the stop condition — a mutant is caught in seconds, by an assertion
     that names it. `timeout` stays as a watchdog for a gate that hangs before the
     banner, not as the mechanism.
+
+    `stop_marker=None` reads the child to EOF instead, for the one caller that needs
+    what the gate prints AFTER pytest. Use it only with a pytest step that has been
+    stubbed out (see the gated-tier test below) — on a real run it waits the full
+    ~8 minutes.
     """
     proc = subprocess.Popen(
         ["./scripts/ci.sh"],
@@ -206,14 +216,17 @@ def run_gate_until_pytest(
     watchdog.start()
     seen: list[str] = []
     reached_pytest = False
+    stopped_early = False
     returncode: int | None = None
     try:
         for line in proc.stdout:
             seen.append(line)
             if PYTEST_BANNER in line:
                 reached_pytest = True
+            if stop_marker is not None and stop_marker in line:
+                stopped_early = True
                 break
-        if not reached_pytest:
+        if not stopped_early:
             returncode = proc.wait(timeout=10)
     finally:
         watchdog.cancel()
@@ -264,3 +277,158 @@ def test_ci_sh_mypy_ceiling_positive_control_lets_the_gate_proceed():
         f"the operator's shell instead of building its environment from the allow-list:\n{run.output}"
     )
     assert SMOKE_STEP_SKIPPED in run.output, run.output
+
+
+# --- #27 Gap 1: the gate must say which tests it did not run. ---
+#
+# `ci.sh` runs `pytest tests/` with NO `-m` expression, so nothing is deselected:
+# tests/conftest.py's `pytest_collection_modifyitems` adds a `skip` marker to every
+# `live_slack` test when the workspace credentials are absent, and to every `live_api`
+# test when `LIVE_API_TESTS` is unset. Both tiers therefore land inside the gate's own
+# "N skipped" tally, indistinguishable from an ordinary skip. That silence is how the
+# #20 COR-1b data-loss regression reached HEAD: the test that catches it lives in the
+# live Slack tier and was green at 18ba52c because it never ran.
+
+GATED_TIER_BANNER = "==> gated tiers this gate did NOT run"
+
+# marker -> the string the notice must name as the way to run that tier. Not a
+# free-text hint: `scripts/run_live_slack.sh` is tracked (it refuses to start unless
+# its preflight proves the production credentials are blanked), and naming anything
+# else — a scratch path, a bare `pytest -m live_slack` — is how an operator ends up
+# pointing the tier at the production workspace.
+GATED_TIERS = {
+    "live_slack": "scripts/run_live_slack.sh",
+    "live_api": "LIVE_API_TESTS=1",
+}
+
+_TIER_COUNTS: dict[str, int] = {}
+
+
+def measure_tier(marker: str) -> int:
+    """Count a gated tier independently of how ci.sh counts it.
+
+    `--collect-only` imports the test modules and stops; no fixture runs, so this
+    needs no Slack workspace and no third-party API key, and it is safe in the
+    ordinary offline suite. Cached because it costs ~6 s (the whole suite is
+    collected either way) and three assertions below want the same two numbers.
+
+    Deliberately a DIFFERENT method from ci.sh's: the gate counts node-id lines
+    (`grep -c '::'`), this reads pytest's own "N/M tests collected" summary. Counting
+    the same way twice would agree with the gate on a shared systematic error — a
+    warnings-summary header repeating a node id, say — and prove nothing.
+    """
+    if marker not in _TIER_COUNTS:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "-m", marker,
+             "--collect-only", "-q", "-p", "no:cacheprovider"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, (
+            f"collecting `-m {marker}` failed (exit {proc.returncode}); the marker may "
+            f"have been renamed:\n{proc.stdout}{proc.stderr}"
+        )
+        summary = re.search(r"^(\d+)(?:/\d+)? tests? collected", proc.stdout, re.M)
+        assert summary, f"pytest printed no collection summary for `-m {marker}`:\n{proc.stdout}"
+        _TIER_COUNTS[marker] = int(summary.group(1))
+    return _TIER_COUNTS[marker]
+
+
+def _logical_lines(block: str) -> list[str]:
+    r"""Fold bash `\` continuations, so a wrapped command is scanned as one line."""
+    return re.sub(r"\\\n\s*", " ", block).splitlines()
+
+
+def _tier_notice_block(text: str) -> str:
+    assert GATED_TIER_BANNER in text, (
+        "ci.sh never says which tiers it did not run. Both live tiers are skipped at "
+        "collection and disappear into the gate's own skip count, so an operator "
+        "reading a green gate cannot tell that ~100 tests were not executed"
+    )
+    return text[text.index(GATED_TIER_BANNER) :]
+
+
+def test_ci_sh_names_every_gated_tier_and_how_to_run_it_after_pytest():
+    text = _ci_sh()
+    block = _tier_notice_block(text)
+    assert text.index(GATED_TIER_BANNER) > text.index(PYTEST_BANNER), (
+        "the notice must come AFTER the pytest step. Printed before it, ~8 minutes of "
+        "test output sits between the notice and the operator's prompt, which is the "
+        "same silence the notice exists to fix"
+    )
+    for marker, howto in GATED_TIERS.items():
+        assert marker in block, f"the notice does not name the {marker} tier:\n{block}"
+        assert howto in block, (
+            f"the notice names the {marker} tier but not how to run it ({howto!r}):\n{block}"
+        )
+
+
+def test_the_gate_does_not_run_either_gated_tier_while_reporting_it():
+    # The notice counts; it must not execute. `--collect-only` on both lines is the
+    # pin: drop it and the gate starts posting into a real Slack workspace and calling
+    # ORCID/NCBI/grants.gov on every push, from an environment that deliberately has no
+    # credentials for either.
+    block = _tier_notice_block(_ci_sh())
+    # Commands the notice RUNS, not the how-to strings it prints, so the two cannot be
+    # confused: an `echo` naming `pytest -m live_api` is the point of the step.
+    counting = [
+        line
+        for line in _logical_lines(block)
+        if "-m pytest" in line and not line.lstrip().startswith(("echo", "printf", "#"))
+    ]
+    assert counting, f"the notice does not count anything with pytest:\n{block}"
+    for line in counting:
+        assert "--collect-only" in line, (
+            f"the notice RUNS a gated tier instead of collecting it: {line.strip()!r}"
+        )
+        assert "LIVE_API_TESTS" not in line and "SLACK_TEST_" not in line, (
+            "the notice's counting command ungates the tier it is only supposed to "
+            f"count: {line.strip()!r}"
+        )
+
+
+def test_the_gated_tier_counts_are_measured_by_the_gate_not_written_into_it():
+    # A literal "61" in ci.sh is the same defect as the stale MYPY_MAX provenance
+    # comment two steps above it: correct on the day it was typed, silently wrong the
+    # first time somebody adds a test to the tier, and wrong in the direction that
+    # under-reports what the gate skipped. So assert the real count appears NOWHERE in
+    # the notice — the only way to pass is to measure it at run time.
+    block = _tier_notice_block(_ci_sh())
+    assert "--collect-only" in block, "the notice does not measure anything"
+    for marker in GATED_TIERS:
+        n = measure_tier(marker)
+        assert not re.search(rf"(?<!\d){n}(?!\d)", block), (
+            f"the {marker} count ({n}) is written into ci.sh. Count it at run time with "
+            f"`pytest tests/ -m {marker} --collect-only -q` instead. (If {n} is a "
+            f"coincidence — a date, an issue number — reword that text; do not leave a "
+            f"number a reader will take for the count.)"
+        )
+
+
+def test_the_printed_gated_tier_counts_are_the_real_ones():
+    # The end-to-end pin, and the only one that can catch a count that is measured but
+    # measured WRONG (the wrong marker, a path that misses tests/live_api, a `grep -c`
+    # that counts summary lines). It runs the real gate to completion with the pytest
+    # step stubbed to a collection: PYTEST_ADDOPTS is prepended to ci.sh's own pytest
+    # command line, so `--collect-only --no-cov` turns the ~8-minute step into a ~4 s
+    # one that still exits 0 (--no-cov also disables --cov-fail-under, verified). Every
+    # other step — alembic, both ruff passes, mypy, the notice itself — is the real one.
+    run = run_gate_until_pytest(
+        nested_gate_env(LOCKCHECK="none", PYTEST_ADDOPTS="--collect-only --no-cov -q"),
+        stop_marker=None,
+        timeout=600,
+    )
+    assert run.reached_pytest, f"the gate never reached the pytest step:\n{run.output}"
+    assert run.returncode == 0, f"the nested gate exited {run.returncode}:\n{run.output}"
+    assert GATED_TIER_BANNER in run.output, (
+        f"a completed gate run printed no gated-tier notice:\n{run.output}"
+    )
+    for marker in GATED_TIERS:
+        printed = re.search(rf"^\s*{marker}: (\d+) tests\b", run.output, re.M)
+        assert printed, f"the gate printed no count for the {marker} tier:\n{run.output}"
+        assert int(printed.group(1)) == measure_tier(marker), (
+            f"the gate says {printed.group(1)} {marker} tests were not run; there are "
+            f"actually {measure_tier(marker)}"
+        )

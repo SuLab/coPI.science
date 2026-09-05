@@ -34,6 +34,9 @@
 #   8. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
+#   9. A notice, printed last, naming every test tier this gate did NOT run — the
+#      live_slack and live_api tiers, which step 8 collects and conftest.py then skips.
+#      Counted with `--collect-only`, never executed; informational, never fatal.
 #
 # The integration/characterization/contract suites spin an ephemeral Postgres via
 # testcontainers, so a reachable Docker daemon is required.
@@ -545,5 +548,64 @@ echo "==> pytest (full suite + branch coverage, fail-under=${COV_MIN}%)"
 echo "==> reclaiming leaked testcontainers volumes"
 reclaim_test_volumes
 echo "    done"
+
+echo "==> gated tiers this gate did NOT run"
+# Said LAST, on purpose: it is the one line an operator reading a green gate needs and
+# would otherwise never see.
+#
+# The two live tiers are SKIPPED, not deselected. The pytest step above runs `pytest
+# tests/` with no `-m` expression at all; tests/conftest.py's
+# pytest_collection_modifyitems adds a `skip` marker to every `live_slack` test when the
+# workspace credentials are absent, and to every `live_api` test when LIVE_API_TESTS is
+# unset. That is deliberate — a skip reports "skipped" where a collection filter would
+# report the ambiguous "no tests ran" — but its cost is that both tiers land inside the
+# "N skipped" tally above, indistinguishable from an ordinary skip. What that silence
+# buys is measurable: the COR-1b data-loss regression (issue #20) reached HEAD while the
+# test that catches it sat green and unrun in the live Slack tier.
+#
+# The counts are MEASURED here, never written down. A literal count in this file would
+# be the same defect as a stale provenance comment: right on the day it is typed,
+# silently wrong the first time somebody adds a test to a tier, and wrong in the
+# direction that under-reports what was skipped. `--collect-only` imports the test
+# modules and stops — no credentials, no fixtures, no test body; nothing is posted to
+# any Slack workspace and no third-party API is called. Cost measured on 2026-09-04: a
+# few seconds per tier (the whole suite is collected either way) against an ~8-minute
+# gate. tests/unit/test_ci_gate.py runs the same two collections and fails if what this
+# step prints differs from what they find, so the notice cannot drift.
+#
+# INFORMATIONAL: this step never fails the gate, and it never runs either tier. The
+# gate's environment has no Slack credentials by design, and the tier writes to a real
+# workspace — scripts/run_live_slack.sh is the only supported way in, because it proves
+# the production credentials are blanked before pytest is reached.
+tier_pytest="${VENV_PY%/*}/pytest"
+for gated_tier in \
+    "live_slack|run them with: scripts/run_live_slack.sh" \
+    "live_api|run them with: LIVE_API_TESTS=1 ${tier_pytest} tests/ -m live_api"; do
+  tier_marker="${gated_tier%%|*}"
+  tier_howto="${gated_tier#*|}"
+  # PYTEST_ADDOPTS is emptied for this command alone (not unset globally — the pytest
+  # step above is entitled to the operator's options). It is prepended to pytest's
+  # argv, so an exported `-q` makes this run quiet LEVEL TWO, which prints one
+  # `path: n` line per file instead of node ids and no total at all — the count then
+  # reads 0 and the notice under-reports in exactly the silence it exists to break.
+  # Found by tests/unit/test_ci_gate.py, which sets PYTEST_ADDOPTS to stub the pytest
+  # step; a count that depends on what the caller exported is not a count.
+  set +e
+  tier_collect="$(PYTEST_ADDOPTS= "$VENV_PY" -m pytest tests/ -m "$tier_marker" \
+    --collect-only -q -p no:cacheprovider 2>&1)"
+  tier_rc=$?
+  set -e
+  if [ "$tier_rc" -ne 0 ]; then
+    # Not fatal, but not silent either: a marker that has been renamed or a tier that
+    # has been deleted must read as "we do not know", never as a count.
+    echo "    ${tier_marker}: COUNT UNAVAILABLE — \`pytest --collect-only\` exited ${tier_rc};"
+    echo "        the marker may have been renamed or the tier removed. Otherwise, ${tier_howto}"
+    continue
+  fi
+  # One node id per collected test, and only node ids carry `::` — the -q summary line
+  # and any warnings do not.
+  tier_n="$(printf '%s\n' "$tier_collect" | grep -c '::' || true)"
+  echo "    ${tier_marker}: ${tier_n} tests skipped at collection and NOT run here — ${tier_howto}"
+done
 
 echo "==> CI passed."
