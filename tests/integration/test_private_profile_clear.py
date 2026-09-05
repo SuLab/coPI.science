@@ -384,6 +384,80 @@ async def test_a_clear_through_the_agent_page_survives_the_next_pipeline_run(
     )
 
 
+# Audit D3. The guard asked Postgres `btrim(content, ' \t\n\r\f\v')` while the route
+# decided with Python's Unicode-aware `str.strip()` and then recorded the RAW body, so the
+# two disagreed on every whitespace code point outside that six-character class. Measured
+# against this Postgres 15: exactly seven disagree. NBSP is the realistic one -- it is what
+# any paste from Word, Outlook, Google Docs or a PDF leaves behind -- and U+3000 is what a
+# CJK input method leaves. For each, the route DID clear (nulled both columns, unlinked the
+# export) while the guard read the revision as non-empty and answered "never cleared", so
+# the next pipeline run synthesized a fresh model-authored seed straight back over it.
+_WHITESPACE_CLEARS = [
+    pytest.param("\u00a0", id="NBSP-U+00A0"),
+    pytest.param("\u0085", id="NEL-U+0085"),
+    pytest.param("\u001c", id="FILESEP-U+001C"),
+    pytest.param("\u2000", id="ENQUAD-U+2000"),
+    pytest.param("\u2028", id="LINESEP-U+2028"),
+    pytest.param("\u202f", id="NNBSP-U+202F"),
+    pytest.param("\u3000", id="IDEOGRAPHIC-U+3000"),
+    # Controls: these six the old SQL class already handled, so they must keep working.
+    pytest.param(" ", id="SPACE-control"),
+    pytest.param("\t", id="TAB-control"),
+    pytest.param("\n", id="NEWLINE-control"),
+]
+
+
+@pytest.mark.parametrize("blank", _WHITESPACE_CLEARS)
+async def test_a_whitespace_clear_survives_the_next_pipeline_run(
+    blank, client, db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
+):
+    """#22 COR-23 / audit D3: a clear is a clear whatever whitespace the PI left behind.
+
+    Same end-to-end shape as
+    ``test_a_clear_through_the_agent_page_survives_the_next_pipeline_run`` above -- real
+    route, then real pipeline -- but the PI leaves a single whitespace character in the
+    textarea instead of an empty string. A textarea can submit any Unicode whitespace,
+    which is why enumerating a SQL character class was the wrong mechanism.
+    """
+    pi, agent = never_onboarded_pi_and_agent
+    path = profiles_dir / "private" / f"{agent.agent_id}.md"
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": "Never contact this lab on Fridays."},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302, r.text
+    assert path.exists()
+
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": blank},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302, r.text
+    assert not path.exists(), f"the route did not clear for {blank!r}"
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None
+
+    fake_llm = _install_pipeline_fakes(monkeypatch, profiles_dir)
+    profile = await profile_pipeline.run_profile_pipeline(pi.id, db_session)
+
+    assert profile.private_profile_seed is None, (
+        f"the pipeline regenerated a private seed after a clear of {blank!r} -- the guard "
+        "read the recorded revision as non-empty"
+    )
+    assert profile.private_profile_md is None
+    assert not path.exists(), "a regenerated seed was exported over the cleared file"
+    assert len(fake_llm.calls) == 1, (
+        "a second LLM call is the private-seed synthesis this clear must have suppressed"
+    )
+
+
 async def test_an_admin_seeded_pi_who_never_cleared_still_gets_a_seed(
     db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
 ):

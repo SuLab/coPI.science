@@ -666,10 +666,25 @@ async def run_profile_pipeline(
     return profile
 
 
-# Whitespace a browser can actually submit in a textarea. Postgres `btrim` with no
-# second argument strips spaces ONLY, so the character set has to be spelled out or
-# a PI who left a newline behind reads as "never cleared".
-_SQL_WHITESPACE = " \t\n\r\f\v"
+# NOTE (audit D3): there is deliberately no SQL whitespace class here any more.
+#
+# This guard used to ask Postgres `btrim(content, ' \t\n\r\f\v') = ''`, on the premise
+# that those six were "whitespace a browser can actually submit in a textarea". That
+# premise is false -- a textarea can submit any Unicode whitespace -- and the route that
+# writes these rows decides "cleared" with Python's `str.strip()`, which is Unicode-aware.
+# The two disagreed on exactly seven code points, measured against Postgres 15: NBSP
+# U+00A0, NEL U+0085, FILESEP U+001C, ENQUAD U+2000, LINESEP U+2028, NNBSP U+202F and
+# IDEOGRAPHIC SPACE U+3000. NBSP is the realistic one: it is what a paste from Word,
+# Outlook, Google Docs or a PDF leaves behind. For each of the seven the route DID clear
+# -- nulled both private columns and unlinked the export -- while this guard read the
+# revision as non-empty, answered "never cleared", and let the next pipeline run put a
+# fresh model-authored seed back on disk.
+#
+# Enumerating code points is the wrong mechanism: `str.isspace()` is true for ~29 of them
+# and the set grows with Unicode. So the emptiness test is done in Python, where
+# `str.strip()` is the same call the writing route uses and cannot fall behind it. The cost
+# is reading a handful of rows instead of an EXISTS -- the whole production copy holds 35
+# private revisions across every agent.
 
 
 async def _private_profile_was_cleared(
@@ -696,15 +711,16 @@ async def _private_profile_was_cleared(
     if agent_registry_id is None:
         return False
     result = await db.execute(
-        select(ProfileRevision.id)
-        .where(
+        select(ProfileRevision.content).where(
             ProfileRevision.agent_registry_id == agent_registry_id,
             ProfileRevision.profile_type == "private",
-            func.btrim(ProfileRevision.content, _SQL_WHITESPACE) == "",
         )
-        .limit(1)
     )
-    return result.first() is not None
+    # `str.strip()`, the same call `POST /agent/{id}/profile/save` uses to decide that this
+    # was a clear. Any-empty rather than newest-empty: `created_at` defaults to Postgres's
+    # TRANSACTION timestamp, so two revisions written in one request tie and "newest" is
+    # arbitrary between them.
+    return any((content or "").strip() == "" for content in result.scalars())
 
 
 def _build_synthesis_context(
