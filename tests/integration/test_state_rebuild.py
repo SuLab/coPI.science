@@ -545,3 +545,81 @@ async def test_a_rebuild_does_not_seed_an_unreopened_threads_dedup_entry(db_sess
         f"expected the thread to be reopened exactly once, got {len(guidance_entries)}"
     )
     assert root_ts in eng._db_reopened_thread_ids
+
+
+async def test_a_first_time_activation_keeps_the_channel_backlog(db_session):
+    """#20 E6(2): a roster flip must restore prior state, not manufacture it.
+
+    ``_rebuild_one_agent_state`` fast-forwards ``last_seen_cursor`` to the
+    log's high-water mark so a RE-added agent resumes where it left off. An
+    agent going active for the very first time has no "where it left off":
+    fast-forwarding it there silently suppresses the whole REBUILD_WINDOW_S
+    backlog the startup hydration just loaded, so its first turn scans an
+    empty channel and it can only ever react to traffic posted after its
+    activation.
+
+    ``last_seen_cursor`` itself is persisted nowhere, so "this agent has prior
+    state" is derived from what IS durable: rows it authored in
+    ``agent_messages`` (hydrated into the log), ``thread_decisions`` naming
+    it, and its ``llm_call_logs`` rows for this run. A first-time activation
+    has none of the three.
+    """
+    run = await factories.make_simulation_run(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=2)
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    # Exactly what _sync_roster_from_db's to_add branch does: a fresh Agent()
+    # with an empty AgentState, then _rebuild_one_agent_state.
+    newbie = Agent(agent_id="newbie", bot_name="NewbieBot", pi_name="PI newbie")
+    newbie.state.subscribed_channels.add("general")
+    eng.agents["newbie"] = newbie
+    eng.slack_clients["newbie"] = NullTransport("newbie")
+
+    await eng._rebuild_one_agent_state("newbie")
+
+    # Assert the cursor VALUE, not the absence of an exception: the rebuild
+    # body is wrapped in a bare `except Exception` that logs and returns, so a
+    # test that only checked "no raise" would pass against the broken code.
+    assert newbie.state.last_seen_cursor == 0.0, (
+        "a first-time activation was fast-forwarded past the channel backlog: "
+        f"cursor {newbie.state.last_seen_cursor} (log high-water mark "
+        f"{eng.message_log.latest_timestamp})"
+    )
+    backlog = eng.message_log.get_new_top_level_posts(
+        since=newbie.state.last_seen_cursor,
+        channels=newbie.state.subscribed_channels,
+        exclude_agent_id="newbie",
+    )
+    assert [e.ts for e in backlog] == [root_ts], (
+        "the backlog never reaches the new agent's first Phase 2 scan: "
+        f"{[e.ts for e in backlog]}"
+    )
+
+
+async def test_a_re_added_agent_still_resumes_from_the_high_water_mark(db_session):
+    """Control for the test above — the fast-forward must survive for the case
+    it was written for. `su` authored a row in `agent_messages`, so its
+    inactive->active flip is a RESUME: re-scanning everything already in the
+    log would re-evaluate posts it has demonstrably already seen."""
+    run = await factories.make_simulation_run(db_session)
+    await _stored_thread(db_session, run, replies=2)
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    # Drop and re-add `su`, the way a status flip does: a fresh Agent object
+    # with an empty AgentState, but durable rows still on record.
+    readded = Agent(agent_id="su", bot_name="SuBot", pi_name="PI su")
+    eng.agents["su"] = readded
+
+    await eng._rebuild_one_agent_state("su")
+
+    assert readded.state.last_seen_cursor == eng.message_log.latest_timestamp, (
+        "a re-added agent lost its high-water mark and will re-scan its own "
+        f"history: cursor {readded.state.last_seen_cursor} vs high-water mark "
+        f"{eng.message_log.latest_timestamp}"
+    )

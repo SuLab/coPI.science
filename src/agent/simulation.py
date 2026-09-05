@@ -5355,9 +5355,15 @@ class SimulationEngine:
             # active_threads from the in-memory message_log (already loaded
             # at startup and kept live since) — mirrors _rebuild_agent_state's
             # own reconstruction loop (:4190-4243), scoped to this agent only.
+            # `has_own_messages` doubles as the message half of the
+            # prior-state test below: every entry in the log was hydrated from
+            # an `agent_messages` row, so "this agent authored one" is durable
+            # evidence it has been live before, not an in-memory artefact.
+            has_own_messages = False
             for entry in self.message_log._entries:
                 if entry.sender_agent_id != agent_id:
                     continue
+                has_own_messages = True
                 thread_id = entry.thread_ts or entry.ts
                 if thread_id in self._closed_thread_ids:
                     continue
@@ -5403,10 +5409,34 @@ class SimulationEngine:
                     pi_context=pi_context,
                 )
 
-            agent.state.last_seen_cursor = self.message_log.latest_timestamp
+            # Fast-forward the cursor ONLY for an agent that has prior state to
+            # resume from. A re-added agent legitimately picks up at the log's
+            # high-water mark — re-scanning history it demonstrably already
+            # saw would re-evaluate the same posts. A FIRST-TIME activation has
+            # no high-water mark, and fast-forwarding it there suppresses the
+            # whole REBUILD_WINDOW_S backlog that startup just hydrated: its
+            # first Phase 2 scans an empty channel and it can only ever react
+            # to traffic posted after the flip. See E6(2).
+            #
+            # `last_seen_cursor` is persisted nowhere, so the test is made
+            # against the three things that ARE durable and are already read
+            # above: `agent_messages` rows this agent authored (hydrated into
+            # the log), `thread_decisions` naming it, and its `llm_call_logs`
+            # rows for this run. A first-time activation has none of the three.
+            # `reopened_rows` is the unfiltered ThreadDecision read (every row
+            # naming this agent, whatever its outcome), so it subsumes
+            # `decisions`, which is only the outcome=='proposal' subset.
+            # On the false branch the cursor is left ALONE rather than forced
+            # to 0.0 — a fresh Agent() already starts at 0.0 (state.py:80), and
+            # an explicit rewind would be a way to un-scan a live agent's
+            # history if this ever gains a second caller.
+            has_prior_state = bool(has_own_messages or reopened_rows or call_count)
+            if has_prior_state:
+                agent.state.last_seen_cursor = self.message_log.latest_timestamp
             logger.info(
-                "[roster] Rebuilt state for re-added agent %s: %d active thread(s), "
+                "[roster] Rebuilt state for %s agent %s: %d active thread(s), "
                 "%d proposal(s), %d API call(s)",
+                "re-added" if has_prior_state else "first-time",
                 agent_id, len(agent.state.active_threads),
                 len(agent.state.pending_proposals), agent.api_call_count,
             )
