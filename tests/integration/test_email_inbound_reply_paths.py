@@ -649,6 +649,199 @@ async def test_a_legacy_pre_slack_failure_still_raises_and_retries(
     assert "will not be retried" not in mail["body"]
 
 
+# --- 2c-bis. A PRE-mutation migration failure is retried, not consumed (COR-32) --
+#
+# The terminal path above exists because migrate_public_thread_to_private is not
+# idempotent ONCE IT HAS CREATED A SLACK CHANNEL. Everything it does before that --
+# resolving the run, both bot tokens, both authenticated clients, the other bot's user
+# id, and conversations.create itself when Slack answers and refuses -- leaves nothing
+# on Slack and nothing committed in the DB. Consuming the PI's instruction for one of
+# those is the COR-32 defect: a DNS blip, a throttled auth.test or a rotated token
+# silently discards a real instruction.
+
+
+class _NoAuthClient(FakeSlackClient):
+    """connect() fails -- `_make_client`'s raise site (private_channels.py:196)."""
+
+    def connect(self) -> bool:
+        return False
+
+
+class _NoBotUserIdClient(FakeSlackClient):
+    """auth.test came back without a user_id -- private_channels.py:481."""
+
+    @property
+    def bot_user_id(self):
+        return None
+
+
+class _RefusingClient(FakeSlackClient):
+    """conversations.create answered and refused -- private_channels.py:486."""
+
+    def create_private_channel(self, name):
+        return None
+
+
+def _force_pre_mutation_failure(monkeypatch, case: str) -> list:
+    """Drive the REAL migration into one of its pre-Slack-mutation raise sites.
+
+    Each case fails at the raise site itself: a double standing in for
+    `migrate_public_thread_to_private` wholesale (what the terminal tests above use)
+    would prove nothing about *where* the boundary sits. Returns the Slack client
+    doubles the migration constructed, so a caller can assert conversations.create was
+    never asked for a channel.
+    """
+    made: list[FakeSlackClient] = []
+
+    async def _on(*a, **k):
+        return True
+
+    monkeypatch.setattr("src.services.private_channels._slack_enabled_for_migration", _on)
+
+    if case == "no_bot_token":
+        async def _no_token(db, agent_id):
+            return None
+
+        # _get_or_fail_bot_token (private_channels.py:188) imports this by name inside
+        # the function body, so patching the source module is what takes effect.
+        monkeypatch.setattr("src.services.slack_tokens.get_agent_bot_token", _no_token)
+        return made
+
+    async def _token(db, agent_id):
+        return f"xoxb-fake-{agent_id}"
+
+    monkeypatch.setattr("src.services.private_channels._get_or_fail_bot_token", _token)
+
+    cls = {
+        "client_auth_fails": _NoAuthClient,
+        "no_bot_user_id": _NoBotUserIdClient,
+        "slack_refuses_create": _RefusingClient,
+    }[case]
+
+    def _build(agent_id, bot_token):
+        client = cls(agent_id=agent_id, bot_token=bot_token)
+        made.append(client)
+        return client
+
+    monkeypatch.setattr("src.services.private_channels.AgentSlackClient", _build)
+    return made
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no_bot_token", "client_auth_fails", "no_bot_user_id", "slack_refuses_create"],
+)
+async def test_a_pre_mutation_migration_failure_is_retried_not_consumed(
+    db_session, monkeypatch, sent_emails, case,
+):
+    """#21 COR-32: "on a failed post, don't mark-responded and don't delete the object".
+
+    All four cases fail inside `migrate_public_thread_to_private` before it has asked
+    Slack for a channel, so nothing irreversible has happened on Slack OR in the DB.
+    The instruction must therefore survive: InstructionApplyFailed propagates out of
+    process_inbound_email, which leaves the notification at status='sent' and (in
+    poll_inbound_emails) leaves the S3 object in place for the next poll. Pre-fix,
+    every one of these took the terminal arm added for the post-mutation case: the
+    notification was retired, the object deleted, and the PI told their instruction
+    "will not be retried" -- for a transient DNS/throttle/token blip.
+    """
+    token = f"premut{case}".ljust(48, "p")[:48]
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email=f"pi.premut.{case}@scripps.edu", token=token
+    )
+    # Commit the fixture first: the failure handler rolls back (a DB-flavored failure
+    # needs it), and that rollback must discard only the migration's own writes.
+    await db_session.commit()
+    run_id = td.simulation_run_id
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
+
+    made = _force_pre_mutation_failure(monkeypatch, case)
+
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, f"pi.premut.{case}@scripps.edu", "please focus on X"),
+            db_session,
+        )
+
+    await db_session.refresh(notification)
+    assert notification.status == "sent", (
+        "a pre-mutation failure must not retire the notification -- a resend would "
+        "then hit the status != 'sent' bail and the instruction is gone"
+    )
+    assert await _reviews(db_session) == []
+    channels = (await db_session.execute(
+        select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+    )).scalars().all()
+    assert channels == [], "nothing may have been written before a pre-mutation failure"
+    assert sum(len(c.created_channels) for c in made) == 0, (
+        "the migration must not have reached conversations.create"
+    )
+    (mail,) = sent_emails
+    assert "We'll retry automatically" in mail["body"]
+    assert "will not be retried" not in mail["body"]
+
+
+async def test_a_retried_pre_mutation_failure_applies_the_instruction_exactly_once(
+    db_session, monkeypatch, sent_emails, slack_migration_stub,
+):
+    """The retry has to be worth having: it must apply the instruction, once.
+
+    Poll 1 fails at `_get_or_fail_bot_token` (a rotated/blipped token) and keeps the S3
+    object; poll 2 re-delivers the same object with the blip over. The end state must be
+    exactly one private channel (on Slack AND in agent_channels), exactly one review
+    row, a retired notification, and exactly two emails to the PI -- the retry notice
+    and the confirmation. Routing the exception correctly is not enough on its own: a
+    retry that duplicated the channel, the review or the mail would be a worse defect
+    than the one COR-32 describes.
+    """
+    addr = "pi.premut.retry@scripps.edu"
+    token = "premutretry".ljust(48, "q")[:48]
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email=addr, token=token
+    )
+    await db_session.commit()
+    run_id, td_id = td.simulation_run_id, td.id
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
+
+    attempts = {"n": 0}
+
+    async def _flaky_token(db, agent_id):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("slack.com temporarily unresolvable")
+        return f"xoxb-fake-{agent_id}"
+
+    # Overrides slack_migration_stub's own _get_or_fail_bot_token patch.
+    monkeypatch.setattr("src.services.private_channels._get_or_fail_bot_token", _flaky_token)
+
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(_raw_reply(token, addr, "please focus on X"), db_session)
+
+    await db_session.refresh(notification)
+    assert notification.status == "sent"
+    assert sum(len(c.created_channels) for c in slack_migration_stub) == 0
+
+    # Poll 2: the same S3 object, re-delivered.
+    await process_inbound_email(_raw_reply(token, addr, "please focus on X"), db_session)
+    await db_session.commit()
+
+    channels = (await db_session.execute(
+        select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+    )).scalars().all()
+    assert len(channels) == 1, "the retry must mint exactly one private channel"
+    assert sum(len(c.created_channels) for c in slack_migration_stub) == 1
+    reviews = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == td_id)
+    )).scalars().all()
+    assert len(reviews) == 1 and reviews[0].rating == 0
+    await db_session.refresh(notification)
+    assert notification.status == "responded"
+    assert len(sent_emails) == 2, (
+        f"expected the retry notice + the confirmation, got {[m['subject'] for m in sent_emails]}"
+    )
+    assert not any("will not be retried" in m["body"] for m in sent_emails)
+
+
 async def test_a_failed_failure_notification_send_does_not_consume_the_cap(
     db_session, monkeypatch,
 ):
@@ -850,7 +1043,8 @@ async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker
         channel_name = "priv-d6instr"
 
     async def _migrate_stub(
-        db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text
+        db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text,
+        progress=None,
     ):
         calls.append(guidance_text)
         thread_decision.refined_in_channel = _MigrateResult.channel_name

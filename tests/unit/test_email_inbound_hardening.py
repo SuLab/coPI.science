@@ -11,8 +11,10 @@ bucket was retried forever.
 import email
 
 import pytest
+from sqlalchemy import select
 
 import src.services.email_inbound as inbound
+from src.models import AgentChannel, EmailNotification
 from src.services.email_inbound import (
     MAX_REPLIES_PER_TOKEN_PER_HOUR,
     _authentication_results_ok,
@@ -21,7 +23,9 @@ from src.services.email_inbound import (
     poll_inbound_emails,
     process_inbound_email,
 )
+from tests import factories
 from tests.factories import SES_PASS_HEADER
+from tests.fakes import FakeSlackClient
 
 
 def _msg(raw: str) -> email.message.Message:
@@ -510,3 +514,124 @@ async def test_classify_reply_coerces_a_string_rating_to_int(monkeypatch):
 
     assert result["rating"] == 3
     assert isinstance(result["rating"], int) and not isinstance(result["rating"], bool)
+
+
+# --- The retry/terminal split follows the Slack mutation, not the exception ---
+
+
+class _UnhappySlackClient(FakeSlackClient):
+    """Raises one identical exception at a configurable point in the migration.
+
+    ``connect()`` is reached by ``_make_client`` before any Slack write; the first
+    ``invite_to_channel`` happens immediately after ``conversations.create`` has
+    returned a real private channel. Same type, same message, opposite sides of the
+    migration's point of no return.
+    """
+
+    fail_at = "before"
+
+    def connect(self) -> bool:
+        if self.fail_at == "before":
+            raise RuntimeError("slack is unhappy")
+        return True
+
+    def invite_to_channel(self, channel_id, user_ids):
+        if self.fail_at == "after":
+            raise RuntimeError("slack is unhappy")
+        return super().invite_to_channel(channel_id, user_ids)
+
+
+async def _instruction_world(db, *, email_addr, token):
+    owner = await factories.make_user(db)
+    recipient = await factories.make_user(db, email=email_addr)
+    agent = await factories.make_agent(db, user=owner)
+    td = await factories.make_thread_decision(
+        db, agent_a=agent.agent_id, summary_text="A proposal to collaborate."
+    )
+    notification = EmailNotification(
+        user_id=recipient.id,
+        thread_decision_id=td.id,
+        agent_registry_id=agent.id,
+        reply_token=token,
+        category="proposal_review",
+        status="sent",
+    )
+    db.add(notification)
+    await db.flush()
+    return recipient, td, notification
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("fail_at,retried", [("before", True), ("after", False)])
+async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type(
+    db_session, monkeypatch, fail_at, retried,
+):
+    """#21 COR-32: what makes a failure terminal is that a Slack channel now exists.
+
+    Both halves raise the *same* ``RuntimeError("slack is unhappy")`` out of
+    ``migrate_public_thread_to_private``; the only difference is where the migration
+    was when it happened. So nothing about the exception can be used to route it, and
+    a handler that routes on type (or that treats "the migration raised" as terminal
+    full stop, which is the pre-fix behaviour) gets exactly one of the two wrong.
+
+    The fact the split is made on is asserted directly: ``created_channels`` is 0 on
+    the retried side and 1 on the terminal side.
+    """
+    inbound._INSTRUCTION_FAILURE_EMAILS_SENT.clear()
+    addr = f"pi.boundary.{fail_at}@scripps.edu"
+    recipient, td, notification = await _instruction_world(
+        db_session, email_addr=addr, token=f"boundary{fail_at}".ljust(48, "b")[:48]
+    )
+    await db_session.commit()
+    run_id = td.simulation_run_id
+
+    mails: list[dict] = []
+
+    def _record(to_email, subject, text_body, reply_to=None):
+        mails.append({"to": to_email, "subject": subject, "body": text_body})
+        return True
+
+    monkeypatch.setattr(inbound, "_send_simple_email", _record)
+
+    made: list[_UnhappySlackClient] = []
+
+    async def _on(*a, **k):
+        return True
+
+    async def _token(db, agent_id):
+        return f"xoxb-fake-{agent_id}"
+
+    def _build(agent_id, bot_token):
+        client = _UnhappySlackClient(agent_id=agent_id, bot_token=bot_token)
+        client.fail_at = fail_at
+        made.append(client)
+        return client
+
+    monkeypatch.setattr("src.services.private_channels._slack_enabled_for_migration", _on)
+    monkeypatch.setattr("src.services.private_channels._get_or_fail_bot_token", _token)
+    monkeypatch.setattr("src.services.private_channels.AgentSlackClient", _build)
+
+    if retried:
+        with pytest.raises(inbound.InstructionApplyFailed):
+            await inbound._handle_instruction(
+                user=recipient, notification=notification, td=td,
+                instruction="focus on X", db=db_session,
+            )
+    else:
+        assert await inbound._handle_instruction(
+            user=recipient, notification=notification, td=td,
+            instruction="focus on X", db=db_session,
+        ) is False
+
+    created = sum(len(c.created_channels) for c in made)
+    assert created == (0 if retried else 1), (
+        "the test's own premise: 'before' must not have created a channel, "
+        "'after' must have"
+    )
+    channels = (await db_session.execute(
+        select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+    )).scalars().all()
+    assert channels == [], "neither half commits an AgentChannel row"
+    (mail,) = mails
+    assert ("will not be retried" in mail["body"]) is not retried
+    assert ("We'll retry automatically" in mail["body"]) is retried

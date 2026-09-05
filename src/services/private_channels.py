@@ -60,6 +60,26 @@ _CLOSE_MARKER_TEXT = "⏸️ continuing this discussion off-channel."
 
 
 @dataclass
+class MigrationProgress:
+    """Caller-owned record of whether the migration has yet done anything a retry
+    would duplicate (#21 COR-32).
+
+    A caller that must decide "retry or give up" cannot answer it from the exception:
+    the same ``RuntimeError`` can come from ``auth.test`` being throttled (nothing has
+    happened; retry) or from the invite that follows ``conversations.create`` (a real
+    private channel now exists; a retry mints a second, orphaned one). Only this
+    function knows how far it got, so it says so here.
+
+    ``safe_to_retry`` starts **False** deliberately. The default is what a caller sees
+    when the migration never ran, never reached its first statement, or was replaced by
+    a double — i.e. when we know nothing — and the safe reading of "we don't know" is
+    that a retry might duplicate a real Slack channel.
+    """
+
+    safe_to_retry: bool = False
+
+
+@dataclass
 class MigrationResult:
     channel_id: str           # Slack channel ID of the new private channel
     channel_name: str         # Slug, e.g., priv-su-wiseman-drug-repurposing
@@ -430,6 +450,7 @@ async def migrate_public_thread_to_private(
     creator_agent_id: str,  # triggering PI's agent — becomes channel creator
     creator_pi_user: User,
     guidance_text: str,
+    progress: MigrationProgress | None = None,
 ) -> MigrationResult:
     """Create a collab_private channel for this thread and close the public origin.
 
@@ -437,9 +458,20 @@ async def migrate_public_thread_to_private(
     other PI's DM fails) are logged but do not abort the migration — the
     private channel is the primary artifact.
 
+    Pass a ``MigrationProgress`` as ``progress`` to learn, when this raises, whether
+    anything irreversible had happened yet (#21 COR-32); see that class and the
+    "point of no return" comment below. Omitting it is not an error — a caller with
+    no retry to make (the web reopen route answers a human who can simply click
+    again) does not need the distinction.
+
     Does NOT write the ProposalReview row — the caller (reopen endpoint) owns
     that decision and persists it after this function returns.
     """
+    # Nothing has happened yet, on Slack or in the DB, so a failure from here on is
+    # clean to retry until this is cleared again at the point of no return below.
+    if progress is not None:
+        progress.safe_to_retry = True
+
     # Identify the other agent in the thread
     a = thread_decision.agent_a
     b = thread_decision.agent_b
@@ -453,6 +485,13 @@ async def migrate_public_thread_to_private(
 
     # Slack-off: DB-only migration (no channel/invite/post/DM). The handover is
     # written straight to agent_messages for the sim to ingest.
+    #
+    # `progress.safe_to_retry` deliberately stays True across this whole branch: it
+    # makes no Slack call, so its only durable effect is its own commit, and both
+    # outcomes of that commit are retry-safe. If it did not land, nothing exists. If it
+    # landed and only the acknowledgement was lost, it wrote
+    # `thread_decisions.refined_in_channel`, which is exactly what a retrying caller
+    # reads to skip the migration (email_inbound.py's second idempotency guard).
     if not await _slack_enabled_for_migration(db, creator_agent_id, other_agent_id):
         return await _migrate_offline(
             db,
@@ -481,8 +520,19 @@ async def migrate_public_thread_to_private(
         raise RuntimeError(f"Could not resolve bot user ID for '{other_agent_id}'")
 
     slug = _build_slug(a, b, origin_channel_name)
+    # Point of no return (#21 COR-32). Cleared BEFORE the call, not after it: an
+    # exception escaping create_private_channel (a connection reset, a read timeout —
+    # a SlackApiError is caught in there and returns None instead) leaves it unknown
+    # whether Slack acted on the request, and the slug carries a second-resolution
+    # timestamp, so a retry would ask for a *differently named* channel rather than
+    # colliding on name_taken. Unknown must read as "irreversible".
+    if progress is not None:
+        progress.safe_to_retry = False
     new_channel = creator_client.create_private_channel(slug)
     if not new_channel:
+        # Slack answered and refused: no channel exists, so this one is clean again.
+        if progress is not None:
+            progress.safe_to_retry = True
         raise RuntimeError(f"Slack refused to create private channel '{slug}'")
     new_channel_id = new_channel["id"]
     new_channel_name = new_channel["name"]

@@ -60,14 +60,23 @@ _HELP_EMAILS_SENT: dict[str, int] = {}
 
 # notification id -> instruction-failure emails sent (in-memory, like the help-email rate
 # limiter above). Caps the PI-facing email at one per notification. _handle_instruction's
-# failure sites split into two shapes (COR-32 fix round A): a failure INSIDE
-# migrate_public_thread_to_private is terminal — it already created a real Slack channel,
-# so retrying would mint a second orphan one — _handle_instruction notifies the PI and
-# returns False, the caller retires the notification, and the S3 object is CONSUMED
-# (deleted after this one attempt). The three pre-Slack-mutation failures (no active
-# simulation run, no bot token, channel not found) happen before anything irreversible, so
-# they notify the PI and RAISE InstructionApplyFailed instead — the S3 object is kept and
-# RETRIED on every poll until either a retry succeeds or MAX_S3_PROCESS_ATTEMPTS quarantines it.
+# failure sites split into two shapes, and the line between them is NOT which exception
+# was raised — it is whether anything irreversible had happened yet (COR-32):
+#
+#   TERMINAL (notify the PI, return False, caller retires the notification, S3 object
+#   CONSUMED): a real Slack private channel already exists. Only
+#   migrate_public_thread_to_private past its point of no return can reach this, and it
+#   is terminal precisely because it is not idempotent from there — a retry mints a
+#   second orphan channel. MigrationProgress.safe_to_retry is how it says so.
+#
+#   RETRYABLE (notify the PI, RAISE InstructionApplyFailed; the S3 object is kept and
+#   retried every poll until a retry succeeds or MAX_S3_PROCESS_ATTEMPTS quarantines it):
+#   everything else, because nothing has happened on Slack or been committed in the DB.
+#   That covers the three legacy-branch failures (no active simulation run, no bot token,
+#   channel not found) AND the migration's own pre-mutation prefix — the run lookup, both
+#   bot tokens, both authenticated clients, the other bot's user id, and a
+#   conversations.create that Slack answers and refuses. A transient DNS/throttle/token
+#   blip in any of those must not discard a legitimate PI instruction.
 _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
@@ -733,19 +742,22 @@ async def _handle_review(
 
 
 class InstructionApplyFailed(Exception):
-    """Raised by `_handle_instruction` for a retryable (pre-Slack-mutation) failure to
-    apply a PI's email instruction: no active simulation run, no bot token, channel
-    missing, or an unexpected error in the legacy post step. The PI has already been
-    emailed an explanation by the time this is raised — raising (instead of returning
-    False) tells process_inbound_email's poller caller to retry the whole message
-    rather than silently marking the notification responded and deleting the S3 object
-    (COR-32).
+    """Raised by `_handle_instruction` for a retryable (pre-mutation) failure to apply a
+    PI's email instruction: no active simulation run, no bot token, channel missing, an
+    unexpected error in the legacy post step, or a failure inside
+    migrate_public_thread_to_private before it reached its point of no return. The PI
+    has already been emailed an explanation by the time this is raised — raising
+    (instead of returning False) tells process_inbound_email's poller caller to retry
+    the whole message rather than silently marking the notification responded and
+    deleting the S3 object (COR-32).
 
-    A failure INSIDE migrate_public_thread_to_private (or anything after it in the
-    private-refinement branch) is NOT raised this way: the migration creates a real
-    Slack channel before most of its DB work, so retrying would mint a second orphan
-    channel. That failure is terminal instead — _handle_instruction emails the PI and
-    returns False (fix round A, Critical #1).
+    "Pre-mutation" means precisely: nothing irreversible has happened on Slack, and
+    nothing has been committed to the DB that a retry could duplicate. It is a fact
+    about how far the work got, not a class of exception — `migrate_public_thread_to_
+    private` reports it through `MigrationProgress`, because it is the only code that
+    knows. Once that migration has a live Slack channel, the identical exception means
+    the opposite: retrying would mint a second orphan channel, so _handle_instruction
+    emails the PI and returns False instead (fix round A, Critical #1).
 
     `notification_id`, when set, lets `poll_inbound_emails` clear this notification's
     entry in `_INSTRUCTION_FAILURE_EMAILS_SENT` once it gives up and quarantines the
@@ -759,7 +771,7 @@ class InstructionApplyFailed(Exception):
 
 
 def _notify_instruction_failure(
-    pi_email: str, bot_name: str, notification_id, *, will_retry: bool
+    pi_email: str | None, bot_name: str, notification_id, *, will_retry: bool
 ) -> None:
     """PI-facing explanation for a _handle_instruction failure (COR-32).
 
@@ -779,6 +791,16 @@ def _notify_instruction_failure(
     the notification is retired right after this call, so there is no second chance to
     tell the PI, and the dashboard is the only way forward.
     """
+    if not pi_email:
+        # `User.email` is nullable, so every call site's value is `str | None`.
+        # process_inbound_email refuses a reply from a user with no registered
+        # address (the fail-closed check above), so this is unreachable through the
+        # poller; say so rather than handing SES a None it would only reject.
+        logger.warning(
+            "No registered address to send the %s instruction-failure notice to "
+            "(notification %s)", bot_name, notification_id,
+        )
+        return
     key = str(notification_id)
     if _INSTRUCTION_FAILURE_EMAILS_SENT.get(key):
         return
@@ -896,7 +918,17 @@ async def _handle_instruction(
         elif settings.enable_private_refinement and td.origin_visibility == VISIBILITY_PUBLIC:
             # Migrate to a collab_private channel before any PI text touches
             # Slack — the guidance never lands in the public thread.
-            from src.services.private_channels import migrate_public_thread_to_private
+            from src.services.private_channels import (
+                MigrationProgress,
+                migrate_public_thread_to_private,
+            )
+
+            # COR-32 (round C): the migration reports here whether it had reached its
+            # point of no return — a live Slack channel — when it failed. The failure
+            # branch below routes on THAT fact, not on the exception's type or message:
+            # the same RuntimeError means "retry me" from a throttled auth.test and
+            # "never retry me" from the invite one statement after conversations.create.
+            progress = MigrationProgress()
 
             # C1 (COR-32 fix round B): capture into plain locals BEFORE the call. A
             # DB-flavored failure inside the migration (its own db.flush(), or a
@@ -916,6 +948,7 @@ async def _handle_instruction(
                     creator_agent_id=agent.agent_id,
                     creator_pi_user=user,
                     guidance_text=instruction,
+                    progress=progress,
                 )
                 logger.info(
                     "PI %s reopened proposal %s via email: migrated #%s → private #%s",
@@ -924,13 +957,14 @@ async def _handle_instruction(
             except Exception as exc:
                 # Critical #1 (COR-32 fix round): migrate_public_thread_to_private
                 # creates a real Slack channel and DB rows before most of its work —
-                # it is NOT idempotent. Raising here (21.9's original fix) would let
-                # the S3 object retry up to MAX_S3_PROCESS_ATTEMPTS times, minting
-                # that many orphan channels on every attempt. Treat this as terminal
-                # instead: notify the PI (dashboard is now the only way forward) and
-                # let the caller retire the notification and commit as usual — same
-                # shape as a pre-COR-32 silent failure (at most one orphan channel),
-                # except the PI is now told.
+                # it is NOT idempotent ONCE THAT CHANNEL EXISTS. Raising past that
+                # point (21.9's original fix) would let the S3 object retry up to
+                # MAX_S3_PROCESS_ATTEMPTS times, minting that many orphan channels.
+                # Such a failure is terminal: notify the PI (dashboard is now the only
+                # way forward) and let the caller retire the notification and commit as
+                # usual — same shape as a pre-COR-32 silent failure (at most one orphan
+                # channel), except the PI is now told. Everything the migration does
+                # BEFORE that point is a different case entirely, handled below.
                 #
                 # C1 (fix round B): roll back FIRST, as the very first statement,
                 # before touching td/notification/user/agent at all — a DB-flavored
@@ -950,6 +984,36 @@ async def _handle_instruction(
                     "Failed to migrate proposal %s to a private channel via email "
                     "reopen: %s", thread_id_s, exc, exc_info=True,
                 )
+                if progress.safe_to_retry:
+                    # COR-32 (round C): the migration got nowhere — no Slack channel
+                    # was requested and its own commit never ran, so the rollback above
+                    # left the world exactly as this delivery found it. Consuming the
+                    # PI's instruction here was the defect the issue actually describes:
+                    # a throttled auth.test, a DNS blip or a token rotated a minute ago
+                    # retired the notification (a resend then hits the
+                    # `status != "sent"` bail) and deleted the S3 object. Raise instead,
+                    # exactly like the legacy pre-Slack failures below: nothing is
+                    # marked responded, the object survives, and the next poll tries
+                    # again until it works or MAX_S3_PROCESS_ATTEMPTS quarantines it.
+                    # The PI's "we'll retry" email is capped at one per notification, so
+                    # repeated attempts do not repeatedly mail them.
+                    try:
+                        _notify_instruction_failure(
+                            pi_email, bot_name, notif_id, will_retry=True
+                        )
+                    except Exception:
+                        # Same reasoning as the terminal notify below: a fault from the
+                        # send itself must not escape into the outer blanket handler,
+                        # which would re-raise this as a differently-worded failure.
+                        logger.exception(
+                            "Failed to send the retryable-failure notification for "
+                            "proposal %s; retrying the delivery anyway", thread_id_s,
+                        )
+                    raise InstructionApplyFailed(
+                        f"private-channel migration for {thread_id_s} failed before "
+                        f"any irreversible side effect",
+                        notification_id=notif_id,
+                    ) from exc
                 # Item 4 (COR-32 fix round A tidy): _notify_instruction_failure's own
                 # send can fault too (SES down, an unexpected exception from
                 # _send_simple_email). Left uncaught, that would escape this inner
