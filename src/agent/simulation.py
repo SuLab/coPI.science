@@ -181,6 +181,22 @@ _UNSET = object()
 PI_INBOX_LOOKBACK_S = 300.0
 PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 
+# agent_messages.pi_inbound_state (migration 0029) — the DB inbound poller's
+# durable handled-marker, and the only two values anything writes. It exists
+# because _poll_inbound_from_db now appends a PI row to the MessageLog BEFORE it
+# runs the handler (the append is what records the PI's text durably), so the
+# log entry's presence can no longer be the dedup key: MessageLog.append is not
+# idempotent, so keying on it would either skip the retry or duplicate the PI's
+# message. A THIRD state is carried by NULL — "no inbound poller has claimed
+# this row" — which every reader must treat as the pre-0029 behaviour, i.e.
+# dedup on log presence. That covers every legacy row and, crucially, every row
+# _poll_channels appended itself: this poller re-reads those with no origin
+# predicate, so a two-valued marker would re-run handle_channel_tag on every
+# tagged Slack message. See docs/plans/2026-09-04-decisions/task-7.md (which
+# supersedes D25) and task-8.md.
+PI_INBOUND_INGESTED = "ingested"
+PI_INBOUND_HANDLED = "handled"
+
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 
@@ -3332,8 +3348,24 @@ class SimulationEngine:
             return
 
         for r in rows:
-            if not r.message_ts or self.message_log.get_entry(r.message_ts):
-                # Already known (the engine itself appended and flushed it, or a
+            # COR-10(3): dedup for a PI row reads the durable handled-marker,
+            # not the log entry, because the append now runs ahead of the
+            # handler. NULL means "no inbound poller has claimed this row",
+            # which is every pre-0029 row and every row _poll_channels appended
+            # itself (this query has no origin predicate) — for those, dedup
+            # falls back to log presence exactly as before, so a database that
+            # is migrated but running older code, or code rolled back over a
+            # migrated database, behaves as it does today. Bot rows never carry
+            # the marker at all. See PI_INBOUND_INGESTED.
+            state = r.pi_inbound_state if not r.is_bot else None
+            in_log = bool(r.message_ts and self.message_log.get_entry(r.message_ts))
+            if (
+                not r.message_ts
+                or state == PI_INBOUND_HANDLED
+                or (state is None and in_log)
+            ):
+                # Already known (the handler confirmed it, or — under the NULL
+                # fallback — the engine itself appended and flushed it, or a
                 # prior poll ingested it) — skip re-processing, but the cursor
                 # still advances: this row is fully accounted for.
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
@@ -3366,23 +3398,22 @@ class SimulationEngine:
             )
             if not r.is_bot:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
-                # COR-10(3) clause 2: run the side effects BEFORE the log
-                # append and the cursor advance, and only commit both once
-                # the handler returns successfully. Previously the append
-                # (and the cursor advance above) happened unconditionally
-                # first, so a raise here still left the row's content in the
-                # log while its PI-specific side effects (proposal-review
-                # clearing, reopen, pi_context, @bot tag routing) were logged
-                # and dropped forever — the lookback re-scan dedups on the
-                # now-present log entry, so there was never a second chance.
-                # This deliberately trades at-most-once for at-least-once:
-                # on a transient failure the row is left exactly as it was
-                # (not in the log, cursor unmoved) and the next poll's
-                # PI_INBOX_LOOKBACK re-scan retries it — which can re-run a
-                # non-idempotent side effect (e.g. a DM) that already
-                # happened once. That is the trade issue #20's COR-10 Fix:
-                # clause explicitly asks for, and it reverses Decision D25's
-                # "accept the single-loss" — see the closure audit / plan.
+                # COR-10(3), ruled option (a): the append is what records the
+                # PI's TEXT, so it happens BEFORE the handler and the cursor
+                # advance happens after it — "apply side effects before ... the
+                # cursor advance", with the row itself never at risk. The
+                # marker, not the log entry, is what keeps the retry from
+                # re-applying side effects, so appending first no longer
+                # re-creates the defect COR-10(3) was filed for. This supersedes
+                # Decision D25 (which kept the row but lost the triggers) and
+                # this session's c4de842 ordering (which ran the handler first
+                # and so lost the row outright once it aged past
+                # PI_INBOX_LOOKBACK_S). Ruling:
+                # docs/plans/2026-09-04-decisions/task-7.md.
+                if not in_log:
+                    self.message_log.append(entry)
+                if state is None:
+                    await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_INGESTED)
                 try:
                     await self._handle_pi_inbound_entry(entry)
                 except Exception as exc:
@@ -3390,12 +3421,58 @@ class SimulationEngine:
                         "[%s] Failed to apply PI inbound side effects for %s: %s",
                         entry.channel, entry.thread_ts or entry.ts, exc,
                     )
+                    # 'ingested' is durable, so the next poll re-runs the
+                    # handler for as long as the row stays inside
+                    # PI_INBOX_LOOKBACK_S; the cursor stays put so it is
+                    # re-scanned. Past that window the triggers are lost (D25's
+                    # trade) but the PI's message is in the log either way.
+                    # At-least-once: a retry can repeat a non-idempotent side
+                    # effect (e.g. a DM) that the failed attempt already ran.
                     continue
+                await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_HANDLED)
             else:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
-            self.message_log.append(entry)
+                self.message_log.append(entry)
             if r.created_at and r.created_at > self._pi_inbox_cursor:
                 self._pi_inbox_cursor = r.created_at
+
+    async def _mark_pi_inbound_state(self, message_ts: str, state: str) -> None:
+        """Persist the inbound poller's handled-marker for one PI row.
+
+        The only writer of ``agent_messages.pi_inbound_state``, and only for
+        ``is_bot=False`` rows, so NULL keeps meaning "no inbound poller has
+        claimed this row". Each call is its own short transaction because the
+        ordering is the whole point: ``'ingested'`` must be committed *before*
+        ``_handle_pi_inbound_entry`` runs or its durability is fictional, and
+        ``'handled'`` as soon as it returns. Keyed on
+        ``(simulation_run_id, message_ts)``, which is the table's own unique
+        constraint.
+
+        A write failure is logged and swallowed. ``_run_main_loop`` does not
+        guard its pollers, and the cost of a lost marker write is bounded: a
+        lost ``'handled'`` means one at-least-once retry of a handler that
+        already succeeded, and a lost ``'ingested'`` leaves the row reading NULL
+        — which, now that the entry is in the log, is the pre-0029 skip. Neither
+        can lose the PI's text.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import update as sa_update
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        AgentMessage.message_ts == message_ts,
+                    )
+                    .values(pi_inbound_state=state)
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Inbound marker write failed for %s (%s): %s", message_ts, state, exc
+            )
 
     async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
         """Apply PI-message side effects, derived from the thread (no Slack map).

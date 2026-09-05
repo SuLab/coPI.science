@@ -3,6 +3,8 @@
 import pytest
 
 from src.agent.simulation import (
+    PI_INBOX_LOOKBACK,
+    PI_INBOX_LOOKBACK_S,
     SimulationEngine,
     _extract_json,
     _extract_slack_message,
@@ -1710,7 +1712,7 @@ class TestTombstonedThreadIsNotResurrected:
             message_ts="500.000001", thread_ts=dead_ts, created_at=datetime.now(UTC),
             channel_name="general", agent_id=None, sender_name="PI su",
             content="please revisit the budget line", posted_at=500.000001,
-            is_bot=False, visibility="public",
+            is_bot=False, visibility="public", pi_inbound_state=None,
         )
         agent = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(
@@ -2086,36 +2088,57 @@ class TestPollPiDmsGuardsPerAgent:
 # ---------------------------------------------------------------
 
 class TestPollInboundFromDbGuardsTheHandler:
-    """A raise inside _handle_pi_inbound_entry (e.g. handle_channel_tag's
-    Slack send failing) must not crash _poll_inbound_from_db. COR-10(3)
-    clause 2: the handler now runs BEFORE the log append and the cursor
-    advance, and those only happen once it returns successfully — so a
-    transient failure leaves the row exactly as it was (not yet in the log,
-    cursor not advanced) and the next poll's PI_INBOX_LOOKBACK re-scan
-    retries it, instead of the row's content landing in the log while its
-    PI-specific side effects (proposal-review clearing, reopen, pi_context,
-    @bot tag routing) are silently lost forever. This deliberately trades
-    at-most-once for at-least-once processing of that row: a handler retried
-    after a transient failure can repeat a non-idempotent side effect it
-    already ran (e.g. a DM), which is the trade issue #20's COR-10 Fix:
-    clause explicitly asks for."""
+    """COR-10(3), as ruled in ``docs/plans/2026-09-04-decisions/task-7.md``
+    (option (a) — it supersedes Decision D25 *and* this session's ``c4de842``
+    ordering).
+
+    The MessageLog append is what records the PI's **text** durably, so it runs
+    BEFORE ``_handle_pi_inbound_entry`` and the cursor advance runs after it.
+    Dedup therefore can no longer key on the log entry's presence
+    (``MessageLog.append`` is not idempotent — keying on it would skip the retry,
+    and appending on every retry would duplicate the PI's message). It keys on
+    the durable marker ``agent_messages.pi_inbound_state`` (migration 0029)
+    instead:
+
+    ``NULL``
+        Unknown — no DB inbound poller has claimed this row. Falls back to
+        today's behaviour, i.e. dedup on MessageLog presence. That is every
+        pre-0029 row and every row ``_poll_channels`` appended itself.
+    ``'ingested'``
+        The text is in the log, the handler has not confirmed — re-run it.
+    ``'handled'``
+        The handler returned — skip, and advance the cursor.
+    """
 
     class _Row:
-        def __init__(self, created_at, message_ts="1.0"):
+        def __init__(self, created_at, message_ts="1.0", content="hello",
+                     pi_inbound_state=None, is_bot=False):
             self.created_at = created_at
             self.message_ts = message_ts
             self.channel_name = "general"
             self.agent_id = None
             self.sender_name = "Some PI"
-            self.content = "hello"
+            self.content = content
             self.thread_ts = None
             self.posted_at = 1.0
-            self.is_bot = False
+            self.is_bot = is_bot
             self.visibility = "public"
+            self.pi_inbound_state = pi_inbound_state
 
     class _FakeDB:
-        def __init__(self, rows):
+        """Serves the SELECT through the real ``PI_INBOX_LOOKBACK`` window and
+        APPLIES the marker UPDATE to the row objects, so ``pi_inbound_state``
+        survives from one poll to the next exactly as the column does.
+
+        ``stmt.compile()`` is the real SQLAlchemy compiler running against the
+        real mapped table, so a marker written to a column ``agent_messages``
+        does not have raises here instead of passing silently; ``sql_log``
+        makes that assertable rather than incidental."""
+
+        def __init__(self, rows, engine, sql_log):
             self._rows = rows
+            self._engine = engine
+            self._sql_log = sql_log
 
         async def __aenter__(self):
             return self
@@ -2123,7 +2146,10 @@ class TestPollInboundFromDbGuardsTheHandler:
         async def __aexit__(self, *exc):
             return False
 
-        async def execute(self, *a, **kw):
+        async def commit(self):
+            return None
+
+        async def execute(self, stmt=None, *a, **kw):
             class _R:
                 def __init__(self_inner, rows):
                     self_inner._rows = rows
@@ -2134,22 +2160,43 @@ class TestPollInboundFromDbGuardsTheHandler:
                 def all(self_inner):
                     return self_inner._rows
 
-            return _R(self._rows)
+            if getattr(stmt, "is_update", False):
+                compiled = stmt.compile()
+                self._sql_log.append(str(compiled))
+                params = compiled.params
+                for r in self._rows:
+                    if r.message_ts == params.get("message_ts_1"):
+                        r.pi_inbound_state = params.get("pi_inbound_state")
+                return _R([])
+            floor = self._engine._pi_inbox_cursor - PI_INBOX_LOOKBACK
+            return _R([r for r in self._rows if r.created_at > floor])
 
-    def _engine(self, rows, handler):
+    def _engine(self, rows, handler=None):
         from src.agent.agent import Agent
 
         agent = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(agents=[agent], slack_clients={})
-        engine._handle_pi_inbound_entry = handler
-        engine.session_factory = lambda: self._FakeDB(rows)
+        if handler is not None:
+            engine._handle_pi_inbound_entry = handler
+        self.marker_sql: list[str] = []
+        engine.session_factory = lambda: self._FakeDB(rows, engine, self.marker_sql)
         engine.simulation_run_id = "run-1"
         return engine
 
+    def _engine_with_the_real_handler(self, rows):
+        """Same engine, but ``_handle_pi_inbound_entry`` is the real one, with
+        only its two observable side effects stubbed — so "the tag route did
+        not re-run" is an assertion about the production code path."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        engine = self._engine(rows)
+        engine._check_pi_proposal_review = AsyncMock()
+        engine._pi_handler = SimpleNamespace(handle_channel_tag=AsyncMock())
+        return engine
+
     @pytest.mark.asyncio
-    async def test_a_permanently_raising_handler_leaves_the_row_unadvanced_and_the_poll_alive(
-        self,
-    ):
+    async def test_a_failing_handler_still_records_the_pi_text_in_the_log(self):
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock
 
@@ -2161,13 +2208,54 @@ class TestPollInboundFromDbGuardsTheHandler:
 
         await engine._poll_inbound_from_db()  # must not raise
 
-        assert engine.message_log.get_entry("1.0") is None, (
-            "a permanently failing handler must not let the row land in the "
-            "log — the row must stay retryable on the next poll"
+        entry = engine.message_log.get_entry("1.0")
+        assert entry is not None and entry.content == "hello", (
+            "the append is what records the PI's text durably — a handler "
+            "failure must not be able to lose it"
+        )
+        assert rows[0].pi_inbound_state == "ingested", (
+            "the marker must record that the text is in the log but the side "
+            "effects are unconfirmed, so the next poll retries the handler"
         )
         assert engine._pi_inbox_cursor == starting_cursor, (
-            "the cursor must not advance past a row whose side effects never "
-            "ran, or the lookback re-scan would never retry it"
+            "the cursor must not advance past a row whose side effects never ran"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_row_failing_past_the_lookback_window_keeps_its_text(self):
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import AsyncMock
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        # A bot row well past the lookback: it needs no handler, so it always
+        # succeeds and drags _pi_inbox_cursor more than PI_INBOX_LOOKBACK_S
+        # beyond the PI row — which is exactly what evicts the PI row from the
+        # next poll's re-scan window.
+        later = row_created_at + timedelta(seconds=2 * PI_INBOX_LOOKBACK_S)
+        rows = [
+            self._Row(row_created_at),
+            self._Row(later, message_ts="2.0", content="handover", is_bot=True),
+        ]
+        handler = AsyncMock(side_effect=ConnectionError("boom"))
+        engine = self._engine(rows, handler)
+
+        await engine._poll_inbound_from_db()
+        assert engine._pi_inbox_cursor == later
+
+        await engine._poll_inbound_from_db()
+
+        assert handler.await_count == 1, (
+            "the PI row has fallen out of the lookback window, so it is no "
+            "longer re-scanned — the point of the test is what survives that"
+        )
+        entry = engine.message_log.get_entry("1.0")
+        assert entry is not None and entry.content == "hello", (
+            "past the window the side effects are gone (D25's trade), but the "
+            "PI's message itself must still be in the log — losing it outright "
+            "is the defect this task fixes"
+        )
+        assert rows[0].pi_inbound_state == "ingested", (
+            "and the marker still says so, so a stranded row is findable"
         )
 
     @pytest.mark.asyncio
@@ -2178,29 +2266,31 @@ class TestPollInboundFromDbGuardsTheHandler:
         from unittest.mock import AsyncMock
 
         row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
-        # The mocked DB returns the SAME un-dedup'd row on both polls, exactly
-        # like the real lookback re-scan would for a row that never made it
-        # into the log.
         rows = [self._Row(row_created_at)]
         handler = AsyncMock(side_effect=[ConnectionError("boom"), None])
         engine = self._engine(rows, handler)
 
         await engine._poll_inbound_from_db()
-        assert engine.message_log.get_entry("1.0") is None
+        assert engine.message_log.get_entry("1.0") is not None, (
+            "the text lands immediately, on the failing attempt"
+        )
+        assert rows[0].pi_inbound_state == "ingested"
         assert engine._pi_inbox_cursor < row_created_at
 
         await engine._poll_inbound_from_db()
 
         assert handler.await_count == 2, "the retry must re-run the handler"
-        entry = engine.message_log.get_entry("1.0")
-        assert entry is not None, "the row must be processed once the handler succeeds"
+        assert rows[0].pi_inbound_state == "handled"
         assert engine._pi_inbox_cursor == row_created_at
         assert len([
             e for e in engine.message_log._entries if e.ts == "1.0"
-        ]) == 1, "the row must be appended exactly once overall, not once per attempt"
+        ]) == 1, (
+            "MessageLog.append is not idempotent, so the retry must not append "
+            "a second copy of the PI's message"
+        )
 
     @pytest.mark.asyncio
-    async def test_the_happy_path_still_appends_and_advances_the_cursor(self):
+    async def test_the_happy_path_appends_advances_and_marks_the_row_handled(self):
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock
 
@@ -2213,7 +2303,97 @@ class TestPollInboundFromDbGuardsTheHandler:
 
         assert engine.message_log.get_entry("1.0") is not None
         assert engine._pi_inbox_cursor == row_created_at
+        assert rows[0].pi_inbound_state == "handled"
         handler.assert_awaited_once()
+        # The marker is a real column write, not a bag the tests invented: the
+        # statements above are compiled by SQLAlchemy against the real mapped
+        # AgentMessage, and they name the 0029 column and its unique key.
+        assert [s.split(" WHERE ")[0] for s in self.marker_sql] == [
+            "UPDATE agent_messages SET pi_inbound_state=:pi_inbound_state"
+        ] * 2
+        assert all(
+            "agent_messages.simulation_run_id = :simulation_run_id_1" in s
+            and "agent_messages.message_ts = :message_ts_1" in s
+            for s in self.marker_sql
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_handled_row_is_not_reprocessed_even_when_it_left_the_log(self):
+        """'handled' is what makes the marker durable rather than a restatement
+        of log presence: a row can be absent from the log (a restart rebuilds it
+        from a window, _evict_dead_thread purges it) and still be fully
+        processed. Under the pre-0029 log-presence dedup this row would be
+        re-appended and its side effects re-run."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at, pi_inbound_state="handled")]
+        handler = AsyncMock(return_value=None)
+        engine = self._engine(rows, handler)
+
+        await engine._poll_inbound_from_db()
+
+        handler.assert_not_awaited()
+        assert engine.message_log.get_entry("1.0") is None
+        assert engine._pi_inbox_cursor == row_created_at
+
+    @pytest.mark.asyncio
+    async def test_a_tagged_slack_row_already_in_the_log_does_not_rerun_the_tag_route(
+        self,
+    ):
+        """``_poll_channels`` appends a Slack-origin PI message to the log and
+        applies the same side effects inline, then persists it as an
+        ``agent_messages`` row this poller re-reads with no origin predicate.
+        Its ``pi_inbound_state`` is NULL, and NULL has to keep meaning "dedup on
+        log presence" — under a two-valued marker every tagged Slack message
+        would get ``handle_channel_tag`` run on it a second time, i.e. a
+        duplicate bot reply on every tag."""
+        from datetime import UTC, datetime
+
+        from src.agent.message_log import LogEntry
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at, content="@SuBot please look")]
+        engine = self._engine_with_the_real_handler(rows)
+        # What _poll_channels already did with this message.
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id=None,
+            sender_name="Some PI", content="@SuBot please look", thread_ts=None,
+            posted_at=1.0, is_bot=False,
+        ))
+
+        await engine._poll_inbound_from_db()
+
+        engine._pi_handler.handle_channel_tag.assert_not_awaited()
+        engine._check_pi_proposal_review.assert_not_awaited()
+        assert rows[0].pi_inbound_state is None, (
+            "a row this poller never claimed stays NULL — the marker is not a "
+            "second copy of log presence"
+        )
+        assert engine._pi_inbox_cursor == row_created_at
+        assert len([e for e in engine.message_log._entries if e.ts == "1.0"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_null_row_absent_from_the_log_is_processed_exactly_as_today(self):
+        """The other half of the NULL contract, and what stops the test above
+        from passing vacuously: a NULL row the log has never seen is a genuinely
+        new web-origin PI message, so it is ingested and its tag route runs —
+        today's behaviour, unchanged. This is what a deploy that migrates before
+        the code lands, or that rolls the code back, keeps doing."""
+        from datetime import UTC, datetime
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at, content="@SuBot please look")]
+        engine = self._engine_with_the_real_handler(rows)
+
+        await engine._poll_inbound_from_db()
+
+        engine._pi_handler.handle_channel_tag.assert_awaited_once()
+        engine._check_pi_proposal_review.assert_awaited_once()
+        assert engine.message_log.get_entry("1.0") is not None
+        assert rows[0].pi_inbound_state == "handled"
+        assert engine._pi_inbox_cursor == row_created_at
 
 
 # ---------------------------------------------------------------
