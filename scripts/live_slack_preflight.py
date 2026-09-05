@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -254,6 +255,45 @@ def check_tier_environment_complete(env: Mapping[str, str]) -> Check:
     return _verdict("4. the tier's own environment is complete", problems, evidence)
 
 
+def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
+    """Check 5 — the tier must build its own throwaway database, not reuse one.
+
+    Checks 1-2 bound what the ENVIRONMENT can hand out, and that is not the whole
+    surface: CLAUDE.md records `AgentRegistry.slack_bot_token` as the AUTHORITATIVE
+    token source, ahead of `.env` and `get_slack_tokens()`, and the running engine
+    re-reads it every ~30s in `_sync_roster_from_db` (`src/agent/simulation.py`). A
+    roster row carrying a production `xoxb-` token therefore reaches Slack through a
+    client the fixtures never built and the off-channel guard never sees, no matter how
+    thoroughly the environment was blanked.
+
+    An audit of the first live run found the blast radius was bounded only by accident:
+    `agent_registry.agent_id` is UNIQUE, so the seeded fixtures would have collided with
+    any pre-existing roster and errored out. That is a lucky schema constraint, not a
+    control. So: refuse when `TEST_DATABASE_URL` is set at all, and let the suite spin
+    its own container, whose roster is empty by construction.
+    """
+    dsn = env.get("TEST_DATABASE_URL", "")
+    if not dsn:
+        return _verdict(
+            "5. no operator-supplied database",
+            [],
+            ["TEST_DATABASE_URL unset — the suite builds a throwaway Postgres with an "
+             "empty agent_registry, so no DB-sourced bot token can exist"],
+        )
+    # Report the host/db shape only. A DSN can carry a password.
+    shape = re.sub(r"//[^@/]*@", "//<redacted>@", dsn)
+    return _verdict(
+        "5. no operator-supplied database",
+        [
+            f"TEST_DATABASE_URL is set ({shape}) — refusing. AgentRegistry.slack_bot_token "
+            "is DB-first and authoritative, so a roster row in that database would reach "
+            "Slack through _sync_roster_from_db regardless of a blanked environment. "
+            "Unset it and let the suite build its own."
+        ],
+        [],
+    )
+
+
 def run_checks(
     *,
     env: Mapping[str, str],
@@ -261,13 +301,19 @@ def run_checks(
     env_token: EnvTokenFn,
     auth_test: AuthTest,
 ) -> list[Check]:
-    """The four checks, in the plan's order. Every dependency is injected, so this is
-    unit-testable without Slack, without `.env` and without a network."""
+    """The five checks, in order. Every dependency is injected, so this is unit-testable
+    without Slack, without `.env` and without a network.
+
+    Check 5 gates check 3 alongside 1 and 2: an operator-supplied database is an
+    unbounded token source, so it is not an environment to start sending tokens from."""
     one = check_production_credentials_blanked(env)
     two = check_no_usable_token_resolves(tokens, env_token)
-    three = check_fixture_tokens_are_copi_test(env, auth_test, isolated=one.ok and two.ok)
+    five = check_no_operator_supplied_database(env)
+    three = check_fixture_tokens_are_copi_test(
+        env, auth_test, isolated=one.ok and two.ok and five.ok
+    )
     four = check_tier_environment_complete(env)
-    return [one, two, three, four]
+    return [one, two, three, four, five]
 
 
 def slack_auth_test(token: str) -> Mapping[str, object]:

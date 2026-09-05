@@ -21,6 +21,7 @@ from scripts.live_slack_preflight import (
     FIXTURE_TOKEN_KEYS,
     PRODUCTION_CREDENTIAL_KEYS,
     TIER_REQUIRED_KEYS,
+    check_no_operator_supplied_database,
     production_credential_keys,
     production_token_map,
     refusals,
@@ -336,3 +337,58 @@ def test_the_runner_aborts_before_pytest_when_the_preflight_refuses():
     assert proc.returncode != 0, out
     assert "REFUS" in out.upper(), out
     assert "= test session starts" not in out, f"pytest must never start: {out}"
+
+# ---------------------------------------------------------------------------
+# Check 5 — an operator-supplied database is an unbounded token source.
+# Added after an audit of the first live run found that checks 1-2 bound only the
+# ENVIRONMENT, while AgentRegistry.slack_bot_token is DB-first and authoritative
+# (CLAUDE.md) and _sync_roster_from_db re-reads it every ~30s. That run was safe only
+# because agent_registry.agent_id is UNIQUE and the fixtures would have collided with
+# any pre-existing roster -- a schema accident, not a control.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unset_test_database_url_passes_check_five():
+    check = check_no_operator_supplied_database({})
+    assert check.ok
+    assert "empty agent_registry" in check.detail
+
+
+def test_an_operator_supplied_database_is_refused():
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://copi:copi@127.0.0.1:55434/copi_verify"}
+    )
+    assert not check.ok
+    assert "AgentRegistry.slack_bot_token" in check.detail
+
+
+def test_check_five_never_echoes_a_dsn_password():
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:hunter2@db.internal:5432/prod"}
+    )
+    assert not check.ok
+    assert "hunter2" not in check.detail
+    assert "someuser" not in check.detail
+    assert "<redacted>" in check.detail
+
+
+def test_check_five_gates_check_three_so_no_token_is_sent():
+    """A leaky database must stop the tier BEFORE any auth.test call, exactly as a
+    leaky environment does -- an un-run check is a refusal, never a pass."""
+    called: list[str] = []
+
+    def _auth_test(token: str):
+        called.append(token)
+        return {"ok": True, "team_id": COPI_TEST_TEAM_ID}
+
+    env = {k: "" for k in PRODUCTION_CREDENTIAL_KEYS}
+    env.update(dict.fromkeys(TIER_REQUIRED_KEYS, "x"))
+    env["SLACK_TEST_BOT_TOKEN_SU"] = "xoxb-test"
+    env["TEST_DATABASE_URL"] = "postgresql://x/y"
+
+    results = run_checks(env=env, tokens={}, env_token=lambda _a: None, auth_test=_auth_test)
+
+    assert called == [], "a token was sent to Slack despite an operator-supplied database"
+    by_name = {c.name[0]: c for c in results}
+    assert not by_name["5"].ok
+    assert not by_name["3"].ok and "NOT ATTEMPTED" in by_name["3"].detail

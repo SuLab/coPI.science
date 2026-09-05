@@ -248,11 +248,36 @@ def test_supported_start_revisions_are_the_whole_chain_below_the_head():
     same omission had to be repaired by hand twice before (c70b48b added 0023,
     3a726bb added 0024), each time one release late.
     """
-    expected = tuple(
-        r for r in pf.REVISION_ORDER if r >= pf.OLDEST_SUPPORTED_START and r != pf.DEFAULT_TARGET
-    )
-    assert pf.SUPPORTED_START_REVISIONS == expected
+    # Assert the PROPERTY, with concrete values -- never re-derive the expression the
+    # module uses. An audit found the previous version of this test was a
+    # character-for-character copy of preflight.py's own comprehension, so it asserted
+    # the implementation against itself and could not fail: the 0024 bug it exists to
+    # catch would have sailed straight through it.
+    supported = pf.SUPPORTED_START_REVISIONS
+
+    # The defect this test exists for: a rolled-back-and-retried migration leaves the
+    # database at 0025-0028, and every one of those was refused.
+    for rev in ("0025", "0026", "0027", "0028"):
+        assert rev in supported, (
+            f"{rev} is where a rolled-back migration leaves a database, and it is not a "
+            f"supported start: {supported}"
+        )
+    # The oldest deployment we still support, and the two ends of the range.
+    assert "0018" in supported
     assert pf.OLDEST_SUPPORTED_START == "0018"
+    assert "0017" not in supported, "0017 predates the oldest supported deployment"
+    # The target itself is not a *start* -- preflight has a separate already-at-target path.
+    assert pf.DEFAULT_TARGET not in supported, (
+        f"the target {pf.DEFAULT_TARGET} must not appear as a supported start: {supported}"
+    )
+    # And it must not go stale the way the hand-maintained tuple did: every revision
+    # between the oldest and the head is reachable as a start.
+    head_idx = pf.REVISION_ORDER.index(pf.DEFAULT_TARGET)
+    oldest_idx = pf.REVISION_ORDER.index(pf.OLDEST_SUPPORTED_START)
+    assert len(supported) == head_idx - oldest_idx, (
+        f"the allowlist has gaps: {supported} against "
+        f"{pf.REVISION_ORDER[oldest_idx:head_idx]}"
+    )
     for rev in ("0025", "0026", "0027", "0028"):
         assert rev in pf.SUPPORTED_START_REVISIONS, (
             f"{rev} is in the chain below the head but is not an accepted starting point"
