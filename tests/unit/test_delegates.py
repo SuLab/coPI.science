@@ -160,3 +160,114 @@ class TestInviteRouter:
         """The _accept_invitation helper is importable."""
         from src.routers.invite import _accept_invitation
         assert callable(_accept_invitation)
+
+
+# ---------------------------------------------------------------
+# Delegate Slack-ID sync: the no-token branch (#23 R5 / V10b)
+# ---------------------------------------------------------------
+
+
+class _FakeResult:
+    """The one value each `db.execute(...)` in `_accept_invitation` is asked for."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+    def scalar_one(self):
+        return self._value
+
+
+class _FakeSession:
+    """Just enough AsyncSession for `_accept_invitation`'s create-delegation path.
+
+    Deliberately not the `db_session` fixture: the branch under test is a pure
+    in-Python `if bot_token: ... else: ...`, and pinning it should not cost the
+    suite a Postgres container. `execute` returns the queued values in the order
+    the handler asks for them — first the "already a delegate?" lookup, then the
+    AgentRegistry row.
+    """
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.added = []
+        self.commits = 0
+
+    async def execute(self, statement, *args, **kwargs):
+        return _FakeResult(self._results.pop(0))
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.commits += 1
+
+    async def rollback(self):
+        raise AssertionError("_accept_invitation rolled back on the happy path")
+
+
+class TestDelegateSlackIdSyncLogging:
+    async def test_no_bot_token_logs_the_skipped_delegate_slack_id_sync(
+        self, monkeypatch, caplog
+    ):
+        """#23 V10b: an agent with no usable bot token must SAY it skipped the sync.
+
+        `if bot_token:` used to have no `else`, so an unconfigured agent was
+        indistinguishable in the logs from "the sync ran and found nothing to link".
+        Asserted on the emitted message rather than on a bare "something was logged"
+        so the phrase an operator greps for is what the branch actually prints —
+        closure-23's own R5 measurement (`grep "skipping delegate Slack-ID sync"
+        tests/` = 0 hits) was a search for a string no test spelled out.
+        """
+        import logging
+
+        from src.models import AgentRegistry, User
+        from src.routers import invite as invite_mod
+        from src.services import slack_tokens, slack_web
+
+        agent = AgentRegistry(
+            id=uuid.uuid4(),
+            agent_id="unconfigured",
+            bot_name="UnconfiguredBot",
+            pi_name="Un Configured",
+            slack_bot_token=None,
+        )
+        invitation = DelegateInvitation(
+            id=uuid.uuid4(),
+            agent_registry_id=agent.id,
+            invited_by_user_id=uuid.uuid4(),
+            email="dee@example.org",
+            token=secrets.token_urlsafe(48),
+            status="pending",
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+        )
+        user = User(id=uuid.uuid4(), email="dee@example.org")
+
+        # token_for_agent_row's real precedence runs (DB column, then .env), but the
+        # .env tier is neutered: a developer who happens to have a token for this slug
+        # in their own .env must not flip the branch under test.
+        monkeypatch.setattr(slack_tokens, "env_token", lambda agent_id: None)
+
+        async def _never(*args, **kwargs):
+            raise AssertionError("called Slack with no bot token")
+
+        monkeypatch.setattr(slack_web, "lookup_user_by_email_async", _never)
+
+        db = _FakeSession([None, agent])
+        with caplog.at_level(logging.INFO, logger="src.routers.invite"):
+            response = await invite_mod._accept_invitation(invitation, user, db, None)
+
+        # The delegation still lands — the Slack sync is best-effort, not a gate.
+        assert response.status_code == 302
+        assert invitation.status == "accepted"
+        assert db.commits >= 1
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "skipping delegate Slack-ID sync" in m
+            and "unconfigured" in m
+            and "dee@example.org" in m
+            for m in messages
+        ), messages

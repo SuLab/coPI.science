@@ -158,3 +158,59 @@ async def test_search_for_researchers_swallows_search_errors():
     out = await grants.search_for_researchers({"agent1": ["kw-a"]})
     assert out == {"agent1": []}
     assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it
+
+
+# ---- retry behaviour, not just the wiring (#23 COR-29a / R6) ----
+#
+# As in test_orcid_contract.py: the `_no_retry_backoff` fixture above pinned only that
+# `_RETRY_BACKOFF` still exists, and the generic loop is exercised in
+# tests/unit/test_http_retry.py against a hand-built client. Nothing asserted that a
+# grants.gov POST survives a transient failure.
+
+
+@respx.mock
+async def test_search_opportunities_retries_a_transient_503_then_succeeds():
+    hit = {"id": 1, "number": "N1", "title": "T1", "agencyCode": "NSF",
+           "openDate": "2026-01-01", "closeDate": "2026-02-01"}
+    route = respx.post(SEARCH_URL).mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=_search_payload([hit]))]
+    )
+    results = await grants.search_opportunities("immunology")
+    assert route.call_count == 2, "the 503 was not retried"
+    assert [r["number"] for r in results] == ["N1"]
+
+
+@respx.mock
+async def test_search_opportunities_gives_up_after_the_retry_budget():
+    """Four attempts total (retries=3), then the HTTPStatusError reaches the caller —
+    which is what `search_for_researchers`' own try/except is written against."""
+    route = respx.post(SEARCH_URL).mock(return_value=httpx.Response(503))
+    with pytest.raises(httpx.HTTPStatusError):
+        await grants.search_opportunities("x")
+    assert route.call_count == 4
+
+
+@respx.mock
+async def test_search_for_researchers_no_longer_drops_a_lab_on_one_transient_500():
+    """The retry sits under search_for_researchers' swallow-all except, so a single
+    transient 500 used to silently cost that researcher every opportunity for the run."""
+    hit = {"id": 1, "number": "N1", "title": "T1", "agencyCode": "NSF",
+           "openDate": "", "closeDate": ""}
+    route = respx.post(SEARCH_URL).mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json=_search_payload([hit]))]
+    )
+    out = await grants.search_for_researchers({"agent1": ["kw-a"]})
+    assert route.call_count == 2
+    assert [o["number"] for o in out["agent1"]] == ["N1"]
+
+
+@respx.mock
+async def test_fetch_opportunity_detail_retries_a_transport_error_then_succeeds():
+    """A connect/read timeout is retried too, not only a retryable status."""
+    opp = {"id": 777, "number": "RFA-AI-27-019", "title": "Immunology R01"}
+    route = respx.post(DETAIL_URL).mock(
+        side_effect=[httpx.ConnectTimeout("boom"), httpx.Response(200, json={"data": opp})]
+    )
+    detail = await grants.fetch_opportunity_detail("777")
+    assert route.call_count == 2
+    assert detail["number"] == "RFA-AI-27-019"

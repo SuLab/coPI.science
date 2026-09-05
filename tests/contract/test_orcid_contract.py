@@ -283,3 +283,77 @@ async def test_fetch_orcid_works_tolerates_a_null_external_id_type():
     works = await orcid.fetch_orcid_works(OID)
     # the null-typed id is skipped, not fatal, and does not block the valid one after it
     assert works[0]["pmid"] == "31000001"
+
+
+# ---- retry behaviour, not just the wiring (#23 COR-29a / R6) ----
+#
+# Until now the only thing pinning orcid.py's retry loop was the `_no_retry_backoff`
+# fixture above — i.e. the *wiring*: if the module stopped calling get_with_retry, the
+# monkeypatch target would still exist and every test would stay green. The retry
+# BEHAVIOUR was covered generically in tests/unit/test_http_retry.py, against a hand-built
+# client, so nothing observed that an ORCID fetch survives a transient failure.
+
+
+@respx.mock
+async def test_fetch_orcid_record_retries_a_transient_503_then_succeeds():
+    route = respx.get(f"{BASE}/{OID}/record").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=_record())]
+    )
+    record = await orcid.fetch_orcid_record(OID)
+    assert route.call_count == 2, "the 503 was not retried"
+    assert record["person"]["name"]["family-name"]["value"] == "Carberry"
+
+
+@respx.mock
+async def test_fetch_orcid_record_gives_up_after_the_retry_budget():
+    """Four attempts total (retries=3), then the caller sees the real HTTPStatusError.
+
+    Pins the budget as well as the retry: an unbounded loop against a hard-down ORCID
+    would hold a worker job open indefinitely, and `raise_for_status()` on the last
+    attempt is what keeps every existing `except Exception` caller working.
+    """
+    route = respx.get(f"{BASE}/{OID}/record").mock(return_value=httpx.Response(503))
+    with pytest.raises(httpx.HTTPStatusError):
+        await orcid.fetch_orcid_record(OID)
+    assert route.call_count == 4
+
+
+@respx.mock
+async def test_fetch_orcid_works_returns_the_works_after_a_transient_429():
+    """The retry sits INSIDE fetch_orcid_works' swallow-all try, so a single 429 no
+    longer costs a PI their whole publication list — it used to degrade to []."""
+    data = {
+        "group": [
+            {
+                "work-summary": [
+                    {
+                        "title": {"title": {"value": "A Paper"}},
+                        "type": "journal-article",
+                        "publication-date": {"year": {"value": "2019"}},
+                        "external-ids": {
+                            "external-id": [
+                                {"external-id-type": "pmid", "external-id-value": "31000000"},
+                            ]
+                        },
+                    }
+                ]
+            }
+        ]
+    }
+    route = respx.get(f"{BASE}/{OID}/works").mock(
+        side_effect=[httpx.Response(429), httpx.Response(200, json=data)]
+    )
+    works = await orcid.fetch_orcid_works(OID)
+    assert route.call_count == 2
+    assert [w["pmid"] for w in works] == ["31000000"]
+
+
+@respx.mock
+async def test_fetch_orcid_grants_retries_a_transport_error_then_succeeds():
+    """A connect/read timeout is retried too, not only a retryable status."""
+    data = {"group": [{"funding-summary": [{"title": {"title": {"value": "R01 Big Grant"}}}]}]}
+    route = respx.get(f"{BASE}/{OID}/fundings").mock(
+        side_effect=[httpx.ConnectTimeout("boom"), httpx.Response(200, json=data)]
+    )
+    assert await orcid.fetch_orcid_grants(OID) == ["R01 Big Grant"]
+    assert route.call_count == 2
