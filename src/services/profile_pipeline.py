@@ -247,7 +247,7 @@ async def run_profile_pipeline(
             # COR-16 Note: tolerates a concurrent writer that already committed
             # this same (user_id, pmid) between our existing_pubs SELECT above
             # and this INSERT -- see _insert_publication_tolerating_conflict.
-            pub, inserted = await _insert_publication_tolerating_conflict(
+            written, inserted = await _insert_publication_tolerating_conflict(
                 db, user_id, pmid,
                 pmcid=rec.get("pmcid"),
                 doi=doi,
@@ -256,13 +256,25 @@ async def run_profile_pipeline(
                 journal=rec.get("journal"),
                 year=rec.get("year"),
             )
-            if inserted:
-                new_publications.append(pub)
-            # COR-16: a PMID repeated later in this same loop (e.g. two ORCID
-            # works resolving to one PMID) must hit the update branch above,
-            # not attempt a second insert that collides with
-            # uq_publications_user_pmid (migration 0025).
-            existing_pubs[pmid] = pub
+            if written is None:
+                # Neither our INSERT nor the conflicting row survived to be read
+                # back (the concurrent writer's row was deleted inside the same
+                # window). There is no row to remember or to report as new; the
+                # record still contributes its abstract to the synthesis context
+                # below, which reads `rec`, not the DB.
+                logger.warning(
+                    "Publication (user_id=%s, pmid=%s) could not be read back "
+                    "after INSERT ... ON CONFLICT DO NOTHING; skipping the row",
+                    user_id, pmid,
+                )
+            else:
+                if inserted:
+                    new_publications.append(written)
+                # COR-16: a PMID repeated later in this same loop (e.g. two ORCID
+                # works resolving to one PMID) must hit the update branch above,
+                # not attempt a second insert that collides with
+                # uq_publications_user_pmid (migration 0025).
+                existing_pubs[pmid] = written
 
         if is_research and rec.get("abstract") and pmid not in synthesis_pmids_seen:
             synthesis_pmids_seen.add(pmid)
@@ -765,7 +777,7 @@ def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]
 
 async def _insert_publication_tolerating_conflict(
     db: AsyncSession, user_id: uuid.UUID, pmid: str, **fields: Any
-) -> tuple[Publication, bool]:
+) -> tuple[Publication | None, bool]:
     """INSERT a new Publication row, tolerating a concurrent writer that already
     committed the same (user_id, pmid) (issue #22 COR-16 Note: the new
     uq_publications_user_pmid constraint (migration 0025) makes two overlapping
@@ -791,6 +803,16 @@ async def _insert_publication_tolerating_conflict(
 
     Returns (row, True) when this call's own INSERT landed, or (row, False)
     with the concurrent writer's row when it lost the race.
+
+    The row is `None` when neither is there to return: both lookups below can
+    come back empty (`Session.get` and `.first()` are each `Publication | None`)
+    if the row this statement conflicted with was itself deleted between the
+    INSERT and the SELECT — which is exactly the concurrent-writer window this
+    function exists for, only with a DELETE in it. The annotation used to
+    promise a `Publication` regardless, which was both dishonest and the two
+    `[return-value]` findings that moved the branch's mypy ceiling from 145 to
+    147 (issue #27 I1); the caller handles the `None` rather than dereferencing
+    it and raising `AttributeError` on the next repeat of that PMID.
     """
     new_id = uuid.uuid4()
     stmt = (
@@ -892,18 +914,73 @@ def _validate_profile(profile: dict[str, Any] | None) -> bool:
     return True
 
 
-def _as_list(v: Any) -> list[Any]:
-    """Coerce a synthesized field to a list, or drop it (issue #22 I1).
+# The ARRAY(String) columns apply_synthesis writes. Spelled out rather than
+# derived from the response, because the response is untrusted input and this
+# tuple is what decides which attributes may be set at all.
+_SYNTHESIZED_LIST_FIELDS = (
+    "techniques",
+    "experimental_models",
+    "disease_areas",
+    "key_targets",
+    "keywords",
+)
 
-    `apply_synthesis` used to type-guard only `techniques`; a model returning
-    a bare string for `disease_areas`/`keywords`/`key_targets`/
-    `experimental_models` iterated character-by-character onto the column
-    (`"cancer"` -> `['c','a','n','c','e','r']`), and a non-iterable (e.g. an
-    int) raised `StatementError` at flush, failing the whole job. Only an
-    actual `list` is trustworthy here; anything else (string, int, dict,
-    None) becomes an empty list rather than being stored or raising.
+# Tells "the response has no such key" apart from "the response has that key and
+# its value is None". `dict.get(key)` collapses the two, and here they mean
+# opposite things: the first is the absence of an instruction, the second is a
+# value of the wrong type.
+_ABSENT = object()
+
+
+def _usable_synthesized_fields(
+    synthesized: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Split a synthesized profile into (fields to write, omitted, mistyped).
+
+    Only a value of the column's own type is an instruction to write. Everything
+    else leaves the stored value alone, and there are two different reasons for
+    that (both are returned, because the caller logs them differently):
+
+    * **Omitted** — the model simply did not emit the key. Measured in
+      production as a response that PASSES `_validate_profile` (which checks
+      only research_summary/techniques/disease_areas) while omitting
+      `keywords`/`key_targets`/`experimental_models`; the old per-field
+      `synthesized.get(field, [])` then wrote `[]` over curated values (issue
+      #22 V6). An omission is not an instruction to empty a column.
+    * **Mistyped** — the key is present with a value of the wrong type. Storing
+      it is the per-character corruption `beae171` fixed (a bare `"cancer"` for
+      `disease_areas` iterated onto the column as `['c','a','n','c','e','r']`,
+      and a non-iterable raised `StatementError` at flush, failing the whole
+      job); coercing it to `[]`, as `beae171` then did, blanks the same curated
+      values the omitted case does. A value of the wrong type says nothing about
+      the stored one, so it is rejected without being stored.
+
+    An explicit `[]` (or `""`) IS a real instruction and is applied — that is the
+    whole point of separating absent from empty, and it is why this reads
+    `_ABSENT` rather than testing truthiness.
     """
-    return v if isinstance(v, list) else []
+    writes: dict[str, Any] = {}
+    omitted: list[str] = []
+    mistyped: list[str] = []
+
+    summary = synthesized.get("research_summary", _ABSENT)
+    if isinstance(summary, str):
+        writes["research_summary"] = summary
+    elif summary is _ABSENT:
+        omitted.append("research_summary")
+    else:
+        mistyped.append("research_summary")
+
+    for field in _SYNTHESIZED_LIST_FIELDS:
+        value = synthesized.get(field, _ABSENT)
+        if isinstance(value, list):
+            writes[field] = value
+        elif value is _ABSENT:
+            omitted.append(field)
+        else:
+            mistyped.append(field)
+
+    return writes, omitted, mistyped
 
 
 def apply_synthesis(
@@ -921,7 +998,15 @@ def apply_synthesis(
     caller that does its own ORCID/PubMed fetch) can compute; script callers leave
     the existing evidence counts as they are.
 
-    Returns True if the fields were applied (and `profile.synthesis_validated`
+    Applies only the fields the response actually carries, and only when their
+    type matches the column's (`_usable_synthesized_fields`). This is the layer
+    that owns "absent vs empty": it is the one place that both reads the
+    response's keys and holds the stored row, and it is shared by all five
+    callers — `run_profile_pipeline` plus the four scripts/ synthesizers — so a
+    per-script fallback would be four copies of the same rule, in two files this
+    module cannot see.
+
+    Returns True if any field was applied (and `profile.synthesis_validated`
     updated), False if the existing stored profile was kept unchanged.
     """
     # extract_json's return type is annotated dict[str, Any] but is a bare
@@ -940,12 +1025,35 @@ def apply_synthesis(
     if _stored_is_worth_keeping(profile) and not validated:
         return False
 
-    profile.research_summary = synthesized.get("research_summary", "")
-    profile.techniques = _as_list(synthesized.get("techniques"))
-    profile.experimental_models = _as_list(synthesized.get("experimental_models"))
-    profile.disease_areas = _as_list(synthesized.get("disease_areas"))
-    profile.key_targets = _as_list(synthesized.get("key_targets"))
-    profile.keywords = _as_list(synthesized.get("keywords"))
+    writes, omitted, mistyped = _usable_synthesized_fields(synthesized)
+
+    if omitted or mistyped:
+        # WARNING, not debug: this is the operator-visible record that a repair
+        # script (vet_publications.py, resynth_from_current_pubs.py, ...) kept
+        # curated values instead of applying a synthesis to them. Both scripts
+        # log at INFO to the console, so the operator sees this line.
+        logger.warning(
+            "Synthesized profile is incomplete: omitted %s, wrong type for %s. "
+            "Keeping the stored value for each rather than blanking it "
+            "(issue #22 V6).",
+            omitted or "nothing", mistyped or "nothing",
+        )
+
+    if not writes:
+        # Nothing to apply. Returning True here would still stamp
+        # synthesis_validated and profile_generated_at, recording provenance for
+        # a synthesis that never landed.
+        logger.error(
+            "Synthesized profile carried none of the fields apply_synthesis "
+            "writes (its keys: %s); keeping the stored profile unchanged.",
+            sorted(str(k) for k in synthesized)[:20],
+        )
+        return False
+
+    # Field names come from _usable_synthesized_fields' own whitelist, never
+    # from the response, so this cannot set an arbitrary attribute.
+    for field, value in writes.items():
+        setattr(profile, field, value)
     profile.synthesis_validated = validated
     profile.profile_generated_at = datetime.now(UTC)
     return True

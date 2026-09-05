@@ -4,11 +4,39 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from src.services.profile_pipeline import apply_synthesis
+
+_LIST_FIELDS = (
+    "techniques",
+    "experimental_models",
+    "disease_areas",
+    "key_targets",
+    "keywords",
+)
 
 
 def _profile(**overrides):
-    defaults = dict(profile_version=0, research_summary=None, synthesis_validated=None)
+    """A stand-in for a ResearcherProfile row.
+
+    Every synthesized column is present and None, which is what a freshly
+    created row really holds (models/profile.py: each is `nullable=True` with no
+    default). Tests that need a *curated* stored value pass it explicitly -- the
+    distinction between "this column has never been written" and "this column
+    holds something a PI or an earlier run put there" is the whole subject of
+    the absent-vs-empty cases below.
+    """
+    defaults = dict(
+        profile_version=0,
+        research_summary=None,
+        synthesis_validated=None,
+        techniques=None,
+        experimental_models=None,
+        disease_areas=None,
+        key_targets=None,
+        keywords=None,
+    )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -48,71 +76,137 @@ def test_empty_synthesized_is_never_applied():
     assert apply_synthesis(p, None, validated=False) is False
 
 
-def test_non_list_techniques_is_coerced_to_empty_list_not_stored_as_a_string():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "techniques": "PCR"}, validated=False)
-    assert p.techniques == []
+@pytest.mark.parametrize("wrong", ["cancer", 5, {"a": 1}])
+@pytest.mark.parametrize("field", _LIST_FIELDS)
+def test_a_non_list_value_is_rejected_and_the_stored_list_survives(field, wrong):
+    """issue #22 I1 (`beae171`) + #22 V6: a model returning a bare string for a
+    list column iterated it character-by-character onto the column
+    (`"cancer"` -> `['c','a','n','c','e','r']`) and a non-iterable raised
+    `StatementError` at flush, failing the whole job. `beae171` coerced every
+    non-list to `[]` -- which fixed the corruption and introduced a second
+    one, because `[]` is written over whatever was curated there. A value of
+    the wrong type says nothing about the stored one, so it is rejected and
+    the stored value is left alone.
 
-
-def test_non_iterable_techniques_does_not_raise_and_is_coerced_to_empty_list():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "techniques": 5}, validated=False)
-    assert p.techniques == []
-
-
-def test_non_list_disease_areas_is_coerced_to_empty_list_not_stored_as_a_string():
-    """issue #22 I1: apply_synthesis used to type-guard only `techniques`; a
-    string for `disease_areas` iterated character-by-character onto the
-    column (`"cancer"` -> `['c','a','n','c','e','r']`)."""
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "disease_areas": "cancer"}, validated=False)
-    assert p.disease_areas == []
-
-
-def test_non_iterable_disease_areas_does_not_raise_and_is_coerced_to_empty_list():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "disease_areas": 5}, validated=False)
-    assert p.disease_areas == []
-
-
-def test_non_list_keywords_is_coerced_to_empty_list_not_stored_as_a_string():
-    p = _profile()
-    apply_synthesis(
-        p, {"research_summary": "x", "keywords": "ferroptosis"}, validated=False
+    Three mutants die here: storing the raw value (per-character corruption),
+    coercing it to `[]` (blanking), and raising on a non-iterable.
+    """
+    curated = ["curated-a", "curated-b"]
+    p = _profile(**{field: list(curated)})
+    applied = apply_synthesis(
+        p, {"research_summary": "x", field: wrong}, validated=False
     )
-    assert p.keywords == []
+    assert applied is True
+    assert getattr(p, field) == curated
 
 
-def test_non_iterable_keywords_does_not_raise_and_is_coerced_to_empty_list():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "keywords": 5}, validated=False)
-    assert p.keywords == []
-
-
-def test_non_list_key_targets_is_coerced_to_empty_list_not_stored_as_a_string():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "key_targets": "TP53"}, validated=False)
-    assert p.key_targets == []
-
-
-def test_non_iterable_key_targets_does_not_raise_and_is_coerced_to_empty_list():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "key_targets": 5}, validated=False)
-    assert p.key_targets == []
-
-
-def test_non_list_experimental_models_is_coerced_to_empty_list_not_stored_as_a_string():
-    p = _profile()
-    apply_synthesis(
-        p, {"research_summary": "x", "experimental_models": "mouse"}, validated=False
+@pytest.mark.parametrize("field", _LIST_FIELDS)
+def test_an_omitted_list_field_leaves_the_stored_list_alone(field):
+    """issue #22 V6, the filed shape: a response that PASSES validation while
+    omitting `keywords`/`key_targets`/`experimental_models` used to write `[]`
+    over curated values (measured in production as
+    `keywords=[] key_targets=[] experimental_models=[]`). An omitted key is not
+    an instruction to empty a column -- it is the absence of one.
+    """
+    curated = ["curated-a", "curated-b"]
+    p = _profile(profile_version=4, research_summary="OLD", synthesis_validated=True,
+                 **{field: list(curated)})
+    applied = apply_synthesis(
+        p, {"research_summary": "a new summary"}, validated=True
     )
-    assert p.experimental_models == []
+    assert applied is True
+    assert p.research_summary == "a new summary"
+    assert getattr(p, field) == curated
 
 
-def test_non_iterable_experimental_models_does_not_raise_and_is_coerced_to_empty_list():
-    p = _profile()
-    apply_synthesis(p, {"research_summary": "x", "experimental_models": 5}, validated=False)
-    assert p.experimental_models == []
+@pytest.mark.parametrize("field", _LIST_FIELDS)
+def test_an_explicitly_empty_list_really_does_empty_the_stored_list(field):
+    """The other half of the distinction: `[]` present in the response IS an
+    instruction to empty the column, and stays one. Without this, "keep what
+    you have" would be indistinguishable from "never shrink a list".
+    """
+    p = _profile(profile_version=4, research_summary="OLD", synthesis_validated=True,
+                 **{field: ["curated-a"]})
+    applied = apply_synthesis(
+        p, {"research_summary": "a new summary", field: []}, validated=True
+    )
+    assert applied is True
+    assert getattr(p, field) == []
+
+
+def test_a_synthesis_that_omits_every_known_field_changes_nothing():
+    """A response whose keys are all misspelled (or which is a JSON object of
+    something else entirely) parses, is truthy, and used to blank the summary
+    and all five list columns in one go. There is nothing in it to apply, so
+    nothing is applied -- including `synthesis_validated` and
+    `profile_generated_at`, which describe a synthesis that never landed.
+    """
+    p = _profile(profile_version=4, research_summary="OLD", synthesis_validated=True,
+                 techniques=["t"], experimental_models=["em"], disease_areas=["d"],
+                 key_targets=["kt"], keywords=["k"])
+    applied = apply_synthesis(
+        p, {"summary": "misspelled", "keyword": ["also misspelled"]}, validated=True
+    )
+    assert applied is False
+    assert p.research_summary == "OLD"
+    assert p.techniques == ["t"]
+    assert p.experimental_models == ["em"]
+    assert p.disease_areas == ["d"]
+    assert p.key_targets == ["kt"]
+    assert p.keywords == ["k"]
+    assert p.synthesis_validated is True
+    assert not hasattr(p, "profile_generated_at")
+
+
+def test_an_unvalidated_stored_profile_is_not_blanked_by_an_incomplete_synthesis():
+    """The second, unfiled shape. `_stored_is_worth_keeping` returns False for
+    `synthesis_validated=False`, so the keep-what-you-have gate above does not
+    protect such a profile at all -- an incomplete synthesis was applied to it
+    in full, blanking every curated list. The gate decides whether the new
+    synthesis may be applied; it does not decide what "the new synthesis" even
+    contains, which is why the per-field rule has to hold on this path too.
+    """
+    p = _profile(profile_version=3, research_summary="OLD DRAFT",
+                 synthesis_validated=False, keywords=["ferroptosis", "autophagy"],
+                 key_targets=["GPX4"], experimental_models=["HEK293"])
+    applied = apply_synthesis(
+        p,
+        {"research_summary": "new draft", "techniques": ["a", "b", "c"],
+         "disease_areas": ["cancer"]},
+        validated=False,
+    )
+    assert applied is True
+    assert p.research_summary == "new draft"
+    assert p.keywords == ["ferroptosis", "autophagy"]
+    assert p.key_targets == ["GPX4"]
+    assert p.experimental_models == ["HEK293"]
+
+
+def test_a_non_string_research_summary_is_rejected_and_the_stored_summary_survives():
+    """`research_summary` had no type guard at all: whatever the response held
+    was assigned straight to a Text column, so a `{"research_summary": {...}}`
+    reached the flush as a dict (StatementError, job failure) and a
+    `"research_summary": null` blanked the stored summary. Same rule as the
+    list fields -- a value of the wrong type is not an instruction.
+    """
+    p = _profile(profile_version=2, research_summary="OLD", synthesis_validated=False)
+    applied = apply_synthesis(
+        p,
+        {"research_summary": {"text": "nested"}, "techniques": ["a", "b", "c"]},
+        validated=False,
+    )
+    assert applied is True
+    assert p.research_summary == "OLD"
+    assert p.techniques == ["a", "b", "c"]
+
+
+def test_an_explicitly_empty_research_summary_is_applied():
+    """`""` is a string, so it is an instruction, and it is honoured -- the
+    guard is `isinstance(..., str)`, not truthiness."""
+    p = _profile(profile_version=2, research_summary="OLD", synthesis_validated=False)
+    applied = apply_synthesis(p, {"research_summary": ""}, validated=False)
+    assert applied is True
+    assert p.research_summary == ""
 
 
 def test_sets_profile_generated_at_when_applied():
@@ -163,13 +257,18 @@ def test_a_non_dict_synthesized_result_is_never_applied():
     assert not hasattr(p, "profile_generated_at")
 
 
-def test_missing_keywords_key_defaults_to_empty_list():
-    """A validated synthesis dict that simply omits the `keywords` key (as
-    opposed to supplying a non-list value, already covered for `techniques`)
-    must still leave p.keywords == [] — pins the missing-key convention
-    apply_synthesis uses for every optional field."""
+def test_an_omitted_list_field_on_a_never_written_column_stays_none():
+    """The counterpart of the curated case, and the reason
+    `test_missing_keywords_key_defaults_to_empty_list` was wrong to pin `[]`:
+    "leave the stored value alone" on a column nothing has ever written leaves
+    it NULL, which is exactly what it was. The columns are nullable
+    (models/profile.py) and every reader already handles NULL -- what no reader
+    can recover from is a curated list replaced by `[]`.
+    """
     p = _profile()
-    apply_synthesis(
+    applied = apply_synthesis(
         p, {"research_summary": "x", "techniques": ["a", "b", "c"]}, validated=True
     )
-    assert p.keywords == []
+    assert applied is True
+    assert p.keywords is None
+    assert p.techniques == ["a", "b", "c"]

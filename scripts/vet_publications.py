@@ -182,9 +182,16 @@ async def _process(orcid: str, db: AsyncSession, dry_run: bool) -> dict:
                 logger.info("%s: research_summary re-synthesized (version=%d)",
                             user.name, profile.profile_version)
             else:
+                # Not necessarily a validation failure: apply_synthesis also
+                # declines a response that carries none of the fields it writes,
+                # rather than blanking the profile with it (issue #22 V6) — and
+                # in that case it has already logged the response's keys
+                # immediately above this line. So this line reports the outcome
+                # and `validated`, not a guess at the cause.
                 logger.warning(
-                    "%s: kept existing profile (version %d); new synthesis failed validation",
-                    user.name, profile.profile_version,
+                    "%s: kept existing profile (version %d); the new synthesis "
+                    "was not applied (validated=%s)",
+                    user.name, profile.profile_version, validated,
                 )
         except Exception as exc:
             logger.error("%s: resynthesis failed: %s", user.name, exc)

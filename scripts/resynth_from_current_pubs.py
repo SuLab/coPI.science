@@ -76,7 +76,17 @@ async def _process(orcid: str, db: AsyncSession) -> str:
     validated = _validate_profile(synthesized)
     applied = apply_synthesis(profile, synthesized, validated=validated)
     if not applied:
-        return f"{user.name}: kept existing profile (validation gate); synthesis discarded"
+        # Two reasons now, so this summary line reports the outcome and
+        # `validated` rather than asserting a cause it cannot know: either the
+        # keep-what-you-have gate refused an unvalidated synthesis over a good
+        # stored one (validated=False), or the response carried none of the
+        # fields apply_synthesis writes — and in that second case
+        # apply_synthesis has already logged its keys, immediately above this
+        # line, instead of blanking the profile with it (issue #22 V6).
+        return (
+            f"{user.name}: kept existing profile (validated={validated}); "
+            "the new synthesis was not applied"
+        )
 
     profile.profile_version = await bump_profile_version(db, profile.id)
     abstracts = "\n".join(p.abstract or "" for p in pubs)
