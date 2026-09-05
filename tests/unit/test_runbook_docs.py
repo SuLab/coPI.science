@@ -94,3 +94,81 @@ def test_production_migration_doc_says_the_target_is_derived_not_pinned():
         "docs/production-migration.md must say run_migration.sh derives its target from "
         "the alembic tree, so a reader does not go looking for a constant to bump"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Part R additions deferred to Task 33 (plan Step 11): the per-user pipeline
+# re-run, 0029's measured lock row, and deploy note 18's discharged sentence.
+# --------------------------------------------------------------------------- #
+
+
+def test_part_r_carries_the_publication_text_repair_step():
+    """Task 20 measured 896 rows still holding truncated PubMed text and shipped
+    `scripts/repair_publication_text.py`; without an ordered runbook step the repair is
+    prose nobody re-reads."""
+    text = PLAN_DOC.read_text()
+    assert "scripts/repair_publication_text.py --all" in text, (
+        "Part R must carry Task 20's repair step, including --all (the targeted "
+        "predicate reaches only 248 of the 896 wrong rows)"
+    )
+    assert "--all --apply" in text, (
+        "Part R must show the apply invocation as well as the dry run, since the script "
+        "is dry-run by default"
+    )
+
+
+def test_part_r_carries_task_20s_selection_query_verbatim():
+    """The operator must be able to inventory before and verify after."""
+    text = PLAN_DOC.read_text()
+    predicate = (
+        "WHERE p.title ~ '[[:space:]]$'\n"
+        "   OR char_length(btrim(p.title)) < 2\n"
+        "   OR char_length(btrim(coalesce(p.abstract, ''))) < 80"
+    )
+    assert predicate in text, (
+        "Part R must reproduce SELECTION_PREDICATE_SQL verbatim (three-arm WHERE clause); "
+        "a paraphrase would select a different population than the script does"
+    )
+
+
+def test_part_r_states_why_a_pipeline_re_run_is_not_enough_on_its_own():
+    """The decisive measurement: 84 of 512 flagged rows are unreachable from ORCID."""
+    text = PLAN_DOC.read_text()
+    assert "84 of the 512" in text, (
+        "Part R must state that 84 of the 512 signature-flagged rows carry neither a PMID "
+        "nor a DOI on their owner's ORCID record, so a pipeline re-run never sees them"
+    )
+    assert "twelve PIs whose ORCID works list is empty" in text
+
+
+def test_part_r_lock_table_has_0029s_measured_row():
+    text = PLAN_DOC.read_text()
+    assert "1.6 – 3.1 ms" in text, (
+        "R.6's lock table must carry Task 8's measured 0029 row (whole revision, "
+        "1.6 - 3.1 ms)"
+    )
+    assert "0.77 – 1.27 ms" in text, "R.6 must carry 0029's thread_decisions ADD COLUMN timing"
+    assert "0.28 – 0.42 ms" in text, "R.6 must carry 0029's agent_messages ADD COLUMN timing"
+
+
+def test_part_r_lock_table_says_what_each_figure_measures():
+    """audit-phase8-migration.md N4: preflight's published "worst-case lock window 0.3 s"
+    is `estimate_lock_window_ms(publications_rows)`, a model calibrated on 0019's
+    agent_messages index build -- not a measurement of this chain. A table that mixes
+    measured statement times with that number and labels the column "Measured" is wrong."""
+    text = PLAN_DOC.read_text()
+    assert "not a measurement of this chain" in text, (
+        "R.6's lock table must say which figures are measurements and which are model "
+        "output; audit-phase8-migration.md N4 records the 0.3 s figure as neither"
+    )
+
+
+def test_deploy_note_18_no_longer_defers_the_agent_measurement():
+    text = PLAN_DOC.read_text()
+    assert "docker stats --no-stream` during a turn before tightening." not in text, (
+        "deploy note 18's 'measure before tightening' sentence is discharged by Task 30b "
+        "and must be replaced by the measurement itself"
+    )
+    assert "3.4× headroom" in text, (
+        "deploy note 18 must carry the measured peak behind the agent's 768m cap"
+    )
