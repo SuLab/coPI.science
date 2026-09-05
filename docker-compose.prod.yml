@@ -188,10 +188,24 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    # nginx.conf declares 40 MiB of shared zones (three limit_*_zone 10m +
-    # ssl_session_cache shared:SSL:10m) plus master + workers + proxy
-    # buffers; 64m OOMs under load. 1.0 cpus so a hard CFS quota doesn't
-    # throttle TLS termination for all three vhosts even on an idle host.
+    # Memory budget, re-derived 2026-09-04 (#27 I5 / over-implementation R9).
+    # The figure that used to sit here counted three limit_*_zone 10m plus
+    # ssl_session_cache shared:SSL:10m, and predated 1a430c0, which split
+    # those three zones into eight (one set per vhost) and left 90 MiB
+    # declared into this 128m cgroup. This comment therefore
+    # no longer restates nginx.conf's total; it states only the terms nginx
+    # .conf cannot know, and tests/unit/test_nginx_config.py sums the zones
+    # from nginx.conf itself and checks the whole budget against mem_limit:
+    #   nginx-mem-budget: zones + 48 workers x 1.0 MiB + 16 MiB headroom
+    # = 37 + 48 + 16 = 101 MiB today. 48 is the worker count the image's
+    # stock `worker_processes auto` picks on the 48-core prod host (this is
+    # not ours to pin -- the mounted file is a conf.d snippet and
+    # worker_processes is a main-context directive). 1.0 MiB per worker is
+    # the measured 36.48 MiB RSS for master + 48 workers idle (shmem
+    # 640 KiB) rounded up for proxy/request buffers under load; the 16 MiB
+    # flat headroom covers TLS handshake scratch and page-cache churn. 64m
+    # OOMs under load. 1.0 cpus so a hard CFS quota doesn't throttle TLS
+    # termination for all three vhosts even on an idle host.
     mem_limit: 128m
     cpus: 1.0
     ports:

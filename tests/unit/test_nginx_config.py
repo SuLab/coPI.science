@@ -5,6 +5,8 @@ step, noted in Task 27.12's Deploy note once all nginx tasks have landed."""
 import re
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 GRAPH_LOCATION = r"location ~ ^/(cabo-graph|scripps-graph|schultz-alumni-pilot|schultz-group-alumni)$"
@@ -224,3 +226,101 @@ def test_each_vhost_uses_only_its_own_rate_limit_zones():
     assert devel_general != main_general
     assert devel_general != blackbird_general
     assert main_general != blackbird_general
+
+
+# ---------------------------------------------------------------------------
+# Shared-memory arithmetic (#27 I5, over-implementation R9)
+#
+# `88d1b25` sized nginx's cgroup against "40 MiB of shared zones (three
+# limit_*_zone 10m + ssl_session_cache)"; `1a430c0` then split those three
+# zones into eight, one set per vhost, and revisited neither the cap nor the
+# comment. Both files ended up carrying a stale total — docker-compose.prod.yml
+# said 40 MiB and nginx.conf's own header said "8x10m = 80m", which omits the
+# SSL zone entirely. The tests below DERIVE the total from the declarations
+# instead of restating it, so no future zone edit can leave a figure behind.
+# ---------------------------------------------------------------------------
+
+COMPOSE_PROD = REPO_ROOT / "docker-compose.prod.yml"
+
+# The one machine-readable line in docker-compose.prod.yml's nginx comment.
+# `zones` is deliberately symbolic: it is summed from nginx.conf here, because
+# a number copied into the file that does not declare the zones is exactly what
+# went stale twice.
+BUDGET_RE = re.compile(
+    r"nginx-mem-budget:\s*zones\s*\+\s*(\d+)\s*workers\s*x\s*([\d.]+)\s*MiB"
+    r"\s*\+\s*(\d+)\s*MiB\s*headroom"
+)
+
+_SIZE_MULTIPLIER = {"k": 1 / 1024, "m": 1.0, "g": 1024.0}
+
+
+def _declared_shm_zones(text: str) -> dict[str, float]:
+    """Every shared-memory segment nginx.conf asks the master to allocate, in MiB.
+
+    Keyed by zone NAME, because nginx allocates one segment per name: all three
+    vhosts declare `ssl_session_cache shared:SSL:10m`, and that is one 10 MiB
+    segment, not three. The rate-limit zones are the opposite case — since
+    `1a430c0` each vhost declares its own name, so each is its own segment.
+    """
+    zones: dict[str, float] = {}
+    for name, size, unit in re.findall(
+        r"limit_(?:req|conn)_zone\s+\S+\s+zone=(\w+):(\d+)([kmg])", text
+    ):
+        zones[name] = int(size) * _SIZE_MULTIPLIER[unit.lower()]
+    for name, size, unit in re.findall(r"ssl_session_cache\s+shared:(\w+):(\d+)([kmg])", text):
+        zones[name] = int(size) * _SIZE_MULTIPLIER[unit.lower()]
+    return zones
+
+
+def _nginx_mem_limit_mib() -> int:
+    limit = yaml.safe_load(COMPOSE_PROD.read_text())["services"]["nginx"]["mem_limit"]
+    return int(limit[:-1]) * (1024 if limit[-1] in "gG" else 1)
+
+
+def test_declared_shared_memory_zones_fit_inside_the_nginx_memory_limit():
+    zones = _declared_shm_zones(_nginx_conf())
+    compose = COMPOSE_PROD.read_text()
+
+    budget = BUDGET_RE.search(compose)
+    assert budget, (
+        "docker-compose.prod.yml's nginx service must carry a machine-readable "
+        "'nginx-mem-budget: zones + N workers x X MiB + Y MiB headroom' line, so "
+        "mem_limit can be checked against nginx.conf's actual declarations"
+    )
+    workers, per_worker, headroom = (
+        int(budget.group(1)), float(budget.group(2)), int(budget.group(3))
+    )
+
+    zone_total = sum(zones.values())
+    required = zone_total + workers * per_worker + headroom
+    limit = _nginx_mem_limit_mib()
+    assert required <= limit, (
+        f"nginx.conf declares {zone_total:g} MiB of shared memory "
+        + "(" + ", ".join(f"{n}:{s:g}m" for n, s in sorted(zones.items())) + ") "
+        + f"+ {workers} workers x {per_worker:g} MiB + {headroom} MiB headroom "
+        f"= {required:g} MiB, into mem_limit: {limit}m"
+    )
+
+
+def test_the_zone_total_stated_in_nginx_conf_matches_what_it_declares():
+    text = _nginx_conf()
+    stated = re.search(r"=\s*(\d+)m of shared memory", text)
+    assert stated, "nginx.conf's zone header must state the total it declares"
+    total = sum(_declared_shm_zones(text).values())
+    assert float(stated.group(1)) == total, (
+        f"nginx.conf's comment claims {stated.group(1)}m of shared memory, but its "
+        f"declarations sum to {total:g}m"
+    )
+
+
+def test_compose_does_not_restate_a_zone_total_it_does_not_declare():
+    # docker-compose.prod.yml carried "40 MiB of shared zones (three
+    # limit_*_zone 10m + ssl_session_cache shared:SSL:10m)" for as long as
+    # nginx.conf declared eight zones. The budget line must name `zones`
+    # symbolically and let this file sum them.
+    compose = COMPOSE_PROD.read_text()
+    stale = re.search(r"\d+\s*MiB of shared zones", compose)
+    assert not stale, (
+        f"docker-compose.prod.yml restates nginx.conf's zone total ({stale.group(0)!r}); "
+        "it goes stale the next time a zone is added, split or resized"
+    )
