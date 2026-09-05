@@ -128,11 +128,64 @@ def _ncbi_semaphore(has_key: bool) -> asyncio.Semaphore:
 #           over-impl R4 — throttling ourselves 17% below the ceiling costs
 #           throughput on the profile pipeline and buys nothing)
 #   keyless 1/0.34  = 2.94 req/s = 98.0% of 3   (unchanged — already at ceiling)
-# The gate only ever DELAYS a start, never advances one, so the achieved rate is
-# always <= 1/interval: at or under the policy ceiling, never over it. The few
-# percent of margin is deliberate — NCBI counts arrivals and we can only space
-# departures, and an IP block costs far more than the throughput it buys back.
-_NCBI_PACING_SECONDS = {True: 0.105, False: 0.34}
+#
+# CORRECTED (audit D5). The sentence that stood here — "the gate only ever DELAYS a
+# start, so the achieved rate is always <= 1/interval: at or under the policy
+# ceiling, never over it" — is FALSE, and it is the claim that let a 17-requests-in-
+# one-second regression pass review. Two separate errors:
+#
+#   1. It conflates the reservation SCHEDULE with the DEPARTURES. `_pace_ncbi` hands
+#      out start times at least `interval` apart, but it can only delay a start
+#      relative to a loop that is actually running. Block the loop — as building an
+#      `httpx.AsyncClient` per call did, ~32 ms of synchronous SSL work — and every
+#      reservation that came due during the stall departs in the same tick. Measured
+#      at N=30: 17 starts in one second against the keyed ceiling of 10, and 5
+#      against the keyless ceiling of 3.
+#   2. `1/interval` is an ASYMPTOTIC AVERAGE, not the worst case NCBI meters. The
+#      most starts that fit in a 1 s window is `floor(1/interval) + 1`, because ten
+#      starts spaced 0.105 s apart span only 0.945 s. So even a perfectly-running
+#      loop put 10 in a second at the old interval — exactly the ceiling.
+#
+# What is actually true: the gate bounds the schedule, and the burst bound is
+# `floor(1/interval) + 1`. Both are pinned by tests
+# (`test_the_keyed_burst_bound_is_one_under_the_policy_ceiling` and
+# `test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling`), because pinning
+# the average alone is what failed here.
+#: Built ONCE at import. `httpx.AsyncClient(...)` otherwise does ~32 ms of synchronous,
+#: event-loop-BLOCKING work per call (SSL context + certifi CA bundle parse) -- measured
+#: here: median 31.9 ms, min 27.8, max 33.9 over 12 builds with the caches already warm;
+#: with a shared context, 0.15 ms.
+#:
+#: That block defeats `_pace_ncbi`, which is why this is not a micro-optimisation. The gate
+#: can only delay a start relative to a loop that is actually RUNNING. `asyncio.gather` puts
+#: every `_ncbi_get` coroutine in the ready queue and each runs to its first real await only
+#: after building its client, so the loop stalls for N x 32 ms and every reservation that
+#: came due during the stall departs in the same tick. Measured before this fix: 17 starts
+#: inside one second against NCBI's 10 req/s keyed ceiling at N=30 (min gap 0.15 ms), and 5
+#: inside one second against the 3 req/s keyless ceiling.
+#:
+#: `httpx.create_ssl_context()` rather than a hand-rolled `ssl.create_default_context(...)`:
+#: the two were compared and match exactly on this httpx (0.28.1) -- check_hostname=True,
+#: verify_mode=CERT_REQUIRED, minimum_version=MINIMUM_SUPPORTED -- but only httpx's own
+#: cannot drift away from httpx's defaults and silently weaken TLS. An `ssl.SSLContext` is
+#: not an asyncio object, so unlike a shared `AsyncClient` it does not reintroduce the
+#: event-loop affinity bug closure-23 R7 fixed for the semaphore (verified across two
+#: successive `asyncio.run()` calls).
+_NCBI_SSL_CONTEXT = httpx.create_ssl_context()
+
+#: Keyed: 0.112 s, not the 0.105 this shipped with. NCBI meters ARRIVALS per second, and the
+#: worst-case number of starts a gate spacing them `interval` apart admits inside a 1 s
+#: window is `floor(1/interval) + 1` -- ten starts at 0.105 s span 0.945 s and all land in
+#: the same second. So 0.105 sat at exactly 10, the ceiling itself, with no tolerance for
+#: any jitter between our start and NCBI's arrival. 0.112 > 1/9 puts the worst case at 9,
+#: one request of margin, for 8.93 req/s average (89.3% of the granted ceiling -- still well
+#: above the 83.3% that over-impl R4 / closure-23 R2 filed as wasteful).
+#:
+#: Keyless stays at 0.34 (2.94 req/s, worst-case burst 3 = its ceiling). Buying the same
+#: one-request margin there needs interval > 0.5 s, i.e. a third of the throughput, on a
+#: fallback path production does not use -- so that path is held AT its ceiling rather than
+#: under it, and the asymmetry is deliberate.
+_NCBI_PACING_SECONDS = {True: 0.112, False: 0.34}
 
 # Total retry budget for ONE logical `_ncbi_get`, in seconds (over-impl R3: the
 # retry loop shipped with four attempts and no total ceiling). 120 s = 2x the 60 s
@@ -218,7 +271,9 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
         params["api_key"] = settings.ncbi_api_key
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=60, follow_redirects=True, verify=_NCBI_SSL_CONTEXT
+    ) as client:
         return await get_with_retry(
             client,
             url,

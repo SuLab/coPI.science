@@ -10,12 +10,14 @@ below that need real values).
 
 import asyncio
 import itertools
+import math
 import time
 
 import httpx
 import pytest
 import respx
 
+from src.config import get_settings
 from src.services import http_retry, pubmed
 
 pytestmark = pytest.mark.contract
@@ -29,6 +31,10 @@ _UNPACED_TESTS = {
     "test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it",
     "test_ncbi_pacing_spaces_concurrent_starts",
     "test_a_429_retry_still_respects_the_ncbi_pacing_gate",
+    # Both read the shipped pacing constants: the point is the burst NCBI would actually
+    # count, so a zeroed interval would make them vacuous.
+    "test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling",
+    "test_the_keyed_burst_bound_is_one_under_the_policy_ceiling",
 }
 
 
@@ -72,7 +78,14 @@ def test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it():
     """
     keyed_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[True]
     keyless_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[False]
-    assert 9.5 <= keyed_rate <= 10.0, keyed_rate      # NCBI keyed ceiling: 10 req/s
+    # AMENDED (audit D5). This lower bound was 9.5, which forced the interval to 0.105 --
+    # and at 0.105 the worst-case BURST is floor(1/0.105)+1 = 10, i.e. exactly NCBI's
+    # ceiling with no tolerance for jitter. Pinning the average alone is what let a
+    # 17-in-one-second regression through, so the bound is now 8.9 (0.112 s, 89.3% of the
+    # granted ceiling -- still comfortably above the 83.3% over-impl R4 filed as wasteful)
+    # and the burst is pinned separately by
+    # test_the_keyed_burst_bound_is_one_under_the_policy_ceiling.
+    assert 8.9 <= keyed_rate <= 10.0, keyed_rate      # NCBI keyed ceiling: 10 req/s
     assert 2.9 <= keyless_rate <= 3.0, keyless_rate   # NCBI keyless ceiling: 3 req/s
 
 
@@ -222,6 +235,74 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     gaps = [b - a for a, b in itertools.pairwise(starts)]
     assert all(gap >= interval * 0.5 for gap in gaps), gaps
     assert starts[-1] - starts[0] >= 3 * interval * 0.85
+
+
+def test_the_keyed_burst_bound_is_one_under_the_policy_ceiling():
+    """Audit D5, the arithmetic half. `test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it`
+    above pins the AVERAGE rate, and that is the wrong invariant on its own -- it is exactly why
+    a defect that put 17 requests into a one-second window passed it.
+
+    NCBI counts ARRIVALS per second. `_pace_ncbi` spaces STARTS at least `interval` apart, so the
+    worst-case number of starts inside a 1 s window is `floor(1/interval) + 1` -- ten starts at
+    0.105 s span 0.945 s and all fall in the same second. At 0.105 that bound is exactly 10,
+    which is the ceiling itself, leaving zero tolerance for any jitter between our start and
+    NCBI's arrival. The interval must leave one request of margin.
+    """
+    # The two paths are held to DIFFERENT bounds, deliberately. Keyed is the production
+    # path the profile pipeline spends its time in, and one request of margin costs
+    # 9.52 -> 8.93 req/s there. Buying the same margin on the keyless fallback needs
+    # interval > 0.5 s -- a third of its throughput -- so that path is held AT its ceiling.
+    for has_key, ceiling, max_burst in ((True, 10, 9), (False, 3, 3)):
+        interval = pubmed._NCBI_PACING_SECONDS[has_key]
+        burst = math.floor(1.0 / interval) + 1
+        assert burst <= max_burst, (
+            f"has_key={has_key}: interval {interval}s admits {burst} starts in a 1 s window, "
+            f"over the {max_burst} allowed against NCBI's {ceiling} req/s ceiling"
+        )
+
+
+@respx.mock
+async def test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling(monkeypatch):
+    """Audit D5, the behavioural half: 17 requests left in one second against a 10 req/s ceiling.
+
+    `_pace_ncbi` can only delay a start relative to a loop that is RUNNING. `962aa6c` moved
+    `httpx.AsyncClient(...)` construction out of the concurrency slot, and building one does ~32 ms
+    of synchronous, loop-blocking work (SSL context + CA bundle). `asyncio.gather` puts every
+    coroutine in the ready queue, each runs to its first real await only after building its client,
+    so the loop stalls for N x 32 ms and every reservation that came due during the stall departs
+    in the same tick. Measured by the audit at N=30: 17 starts in one second, minimum gap 0.15 ms.
+
+    Counted in a sliding window, never compared against a wall-clock threshold, so a loaded
+    machine cannot flake it: the assertion is "how many starts share any one second", which is
+    precisely what NCBI meters.
+    """
+    starts: list[float] = []
+
+    def _record_start(request):
+        starts.append(time.monotonic())
+        return httpx.Response(200, text=EFETCH_XML)
+
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(side_effect=_record_start)
+    n = 30
+    await asyncio.gather(
+        *(pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {}) for _ in range(n))
+    )
+    assert len(starts) == n, f"only {len(starts)} of {n} requests were issued"
+
+    starts.sort()
+    has_key = bool(get_settings().ncbi_api_key)
+    # Same asymmetry as the arithmetic pin above: keyed carries a request of margin,
+    # keyless is held at its ceiling.
+    ceiling, allowed = (10, 9) if has_key else (3, 3)
+    worst = max(
+        sum(1 for t in starts if s <= t < s + 1.0) for s in starts
+    )
+    assert worst <= allowed, (
+        f"{worst} requests left inside one second, over the {allowed} allowed against "
+        f"NCBI's {ceiling} req/s ceiling "
+        f"(interval={pubmed._NCBI_PACING_SECONDS[has_key]}s, n={n}); "
+        f"min gap {min(b - a for a, b in itertools.pairwise(starts)) * 1000:.2f} ms"
+    )
 
 
 @respx.mock
