@@ -128,17 +128,17 @@
 {% block content %}
 <div class="-mx-4 sm:-mx-6 lg:-mx-8 -mt-8 -mb-16">
 
+    {# The copy exists to point at the waitlist, so the whole bar goes when
+       signups are off rather than leaving an empty amber strip. #}
+    {% if waitlist_enabled %}
     <!-- Announcement bar -->
     <div class="bg-gradient-to-r from-amber-50 via-amber-100 to-amber-50 border-b border-amber-200">
         <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 text-center text-sm text-amber-900">
             <span class="inline-block w-2 h-2 bg-amber-500 rounded-full mr-2 animate-pulse"></span>
-            {% if waitlist_enabled %}
             <strong>Pre-release.</strong> CoPI is not yet open for general signups — join the waitlist below to be notified when access opens.
-            {% else %}
-            <strong>Pre-release.</strong> CoPI is not yet open for general signups, and waitlist signups are paused right now.
-            {% endif %}
         </div>
     </div>
+    {% endif %}
 
     <!-- Hero -->
     <section class="relative overflow-hidden bg-gradient-to-b from-white via-indigo-50/30 to-white">
@@ -164,7 +164,7 @@
             </p>
 
             <div class="flex flex-col sm:flex-row gap-4 justify-center items-center">
-                <a href="/login/start"
+                <a href="/login"
                    class="group inline-flex items-center justify-center bg-gray-900 hover:bg-gray-800 text-white font-semibold py-3.5 px-7 rounded-lg text-base shadow-lg shadow-gray-900/20 transition-all">
                     <svg class="w-5 h-5 mr-2.5 text-green-400" viewBox="0 0 32 32" fill="currentColor">
                         <path d="M16 0C7.163 0 0 7.163 0 16s7.163 16 16 16 16-7.163 16-16S24.837 0 16 0zm0 4.516c2.032 0 3.677 1.646 3.677 3.677S18.032 11.87 16 11.87s-3.677-1.646-3.677-3.677S13.968 4.516 16 4.516zm0 22.968c-4.516 0-8.516-2.258-10.968-5.677 0-3.677 7.291-5.677 10.968-5.677 3.677 0 10.968 2 10.968 5.677C24.516 25.226 20.516 27.484 16 27.484z"/>
@@ -181,10 +181,6 @@
                 </a>
                 {% endif %}
             </div>
-
-            <p class="text-xs text-gray-400 mt-6">
-                Already added to the system? Sign in with your ORCID.
-            </p>
         </div>
     </section>
 
@@ -596,23 +592,17 @@
         </div>
     </section>
 
+    {# Hidden wholesale when signups are off: with no form and no paused-state
+       copy there is nothing left for the section to say. The section label sits
+       inside the gate too — HTML comments ship to the client, and the disabled
+       page should not leak even the word. #}
+    {% if waitlist_enabled %}
     <!-- Waitlist -->
     <section id="waitlist" class="relative overflow-hidden bg-gradient-to-br from-indigo-600 via-purple-600 to-indigo-800 py-20">
         <div class="absolute inset-0 opacity-20" style="background-image: radial-gradient(circle at 20% 30%, rgba(255,255,255,0.3) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(255,255,255,0.2) 0%, transparent 50%);"></div>
 
         <div class="relative max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-            {% if not waitlist_enabled %}
-            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-white/20 backdrop-blur mb-6">
-                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 9v6m4-6v6M5 12a7 7 0 1114 0 7 7 0 01-14 0z"/>
-                </svg>
-            </div>
-            <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4">Signups are paused.</h2>
-            <p class="text-lg text-indigo-100 max-w-lg mx-auto">
-                We've temporarily closed the waitlist while we work through the labs already in line.
-                Check back soon — and if you're already in the system, you can sign in with your ORCID above.
-            </p>
-            {% elif waitlist_success %}
+            {% if waitlist_success %}
             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-white/20 backdrop-blur mb-6">
                 <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
@@ -659,6 +649,34 @@
             {% endif %}
         </div>
     </section>
+    {% else %}
+    <!-- Sign-in CTA -->
+    {# Stands in for the waitlist band so the page still closes on a call to
+       action rather than trailing off the end of "How it works". Same gradient
+       as the waitlist section: exactly one of the two ever renders. #}
+    <section class="relative overflow-hidden bg-gradient-to-br from-indigo-600 via-purple-600 to-indigo-800 py-20">
+        <div class="absolute inset-0 opacity-20" style="background-image: radial-gradient(circle at 20% 30%, rgba(255,255,255,0.3) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(255,255,255,0.2) 0%, transparent 50%);"></div>
+
+        <div class="relative max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4">Ready to meet your co-PI?</h2>
+            <p class="text-lg text-indigo-100 mb-10 max-w-lg mx-auto">
+                Sign in with your ORCID and we'll build your research profile from your
+                own publications — no forms to fill in.
+            </p>
+
+            <a href="/login"
+               class="group inline-flex items-center justify-center bg-white hover:bg-gray-100 text-indigo-700 font-semibold py-3.5 px-7 rounded-lg text-base shadow-lg transition-all">
+                <svg class="w-5 h-5 mr-2.5 text-green-600" viewBox="0 0 32 32" fill="currentColor">
+                    <path d="M16 0C7.163 0 0 7.163 0 16s7.163 16 16 16 16-7.163 16-16S24.837 0 16 0zm0 4.516c2.032 0 3.677 1.646 3.677 3.677S18.032 11.87 16 11.87s-3.677-1.646-3.677-3.677S13.968 4.516 16 4.516zm0 22.968c-4.516 0-8.516-2.258-10.968-5.677 0-3.677 7.291-5.677 10.968-5.677 3.677 0 10.968 2 10.968 5.677C24.516 25.226 20.516 27.484 16 27.484z"/>
+                </svg>
+                Sign in with ORCID
+                <svg class="w-4 h-4 ml-2 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
+                </svg>
+            </a>
+        </div>
+    </section>
+    {% endif %}
 </div>
 {% endblock %}
 

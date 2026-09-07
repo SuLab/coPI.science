@@ -81,9 +81,13 @@ async def accept_invite(
     # Valid invitation — check if user is logged in
     user_id_str = request.session.get("user_id")
     if not user_id_str:
-        # Store token and redirect to login
+        # Store the token and send them to the login page — not /login/start,
+        # which 302s straight out to orcid.org. Someone who followed an invite
+        # from their inbox has no idea what CoPI is yet; /login explains it
+        # before the external consent screen. The token rides in the session,
+        # so the extra hop costs nothing (auth_callback pops it).
         request.session["pending_invite_token"] = token
-        return RedirectResponse(url="/login/start", status_code=302)
+        return RedirectResponse(url="/login", status_code=302)
 
     # User is logged in — check onboarding
     user_result = await db.execute(
@@ -92,7 +96,7 @@ async def accept_invite(
     user = user_result.scalar_one_or_none()
     if not user:
         request.session["pending_invite_token"] = token
-        return RedirectResponse(url="/login/start", status_code=302)
+        return RedirectResponse(url="/login", status_code=302)
 
     # Bind the invite to the address it was sent to — a forwarded/leaked link
     # opened by a different account must not reach the acceptance page.

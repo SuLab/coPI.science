@@ -36,6 +36,14 @@ pytestmark = pytest.mark.integration
 # POST target is what actually distinguishes "form present" from "form gone".
 FORM_MARKER = 'action="/waitlist"'
 
+# The section wrapper itself. The form can be gone while the section survives as
+# an empty gradient band, so "no form" and "no section" are separate assertions.
+SECTION_MARKER = 'id="waitlist"'
+
+# The waitlist band is the last thing on the page, so hiding it costs the page
+# its closing call to action. A sign-in band takes over; this is its heading.
+CTA_MARKER = "Ready to meet your co-PI?"
+
 
 @pytest.fixture
 def waitlist_flag(monkeypatch):
@@ -149,13 +157,51 @@ async def test_enabled_landing_page_renders_the_form(client, waitlist_flag):
     assert FORM_MARKER in r.text
 
 
-async def test_disabled_landing_page_explains_why(client, waitlist_flag):
-    """A visitor arriving at #waitlist gets told signups are paused rather than
-    finding an empty section."""
+async def test_disabled_landing_page_drops_every_trace_of_the_waitlist(
+    client, waitlist_flag
+):
+    """With signups off the page says nothing about a waitlist at all.
+
+    Asserting on the section anchor as well as the prose is what stops a future
+    edit from leaving the <section> in place with all of its inner branches
+    false: that is invisible in a markup diff but renders as a bare band of
+    indigo gradient at the foot of the page.
+    """
     waitlist_flag(False)
     r = await client.get("/")
 
-    assert "paused" in r.text.lower()
+    assert r.status_code == 200
+    assert SECTION_MARKER not in r.text, "an empty waitlist section is still rendered"
+    assert "paused" not in r.text.lower()
+    assert "waitlist" not in r.text.lower()
+
+
+async def test_enabled_landing_page_keeps_the_waitlist_section(client, waitlist_flag):
+    """Positive control: the markers above really do appear when signups are on.
+
+    Also the other half of the swap — with the waitlist band back, the stand-in
+    sign-in band must not render, or the page ends on two closing CTAs.
+    """
+    waitlist_flag(True)
+    r = await client.get("/")
+
+    assert r.status_code == 200
+    assert SECTION_MARKER in r.text
+    assert "waitlist" in r.text.lower()
+    assert CTA_MARKER not in r.text, "both closing bands rendered at once"
+
+
+async def test_disabled_landing_page_closes_on_a_signin_cta(client, waitlist_flag):
+    """Hiding the waitlist must not leave the page trailing off the end of the
+    "How it works" section: a sign-in band closes it instead, pointing at
+    /login (the explainer) rather than /login/start (a bare ORCID redirect).
+    """
+    waitlist_flag(False)
+    r = await client.get("/")
+
+    assert r.status_code == 200
+    assert CTA_MARKER in r.text, "the page has no closing call to action"
+    assert 'href="/login"' in r.text
 
 
 async def test_disabled_refusal_page_renders_without_the_form(client, waitlist_flag):

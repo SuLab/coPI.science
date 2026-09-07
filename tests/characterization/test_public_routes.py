@@ -8,9 +8,28 @@ import uuid
 
 import pytest
 
+from src.config import get_settings
 from tests import factories
 
 pytestmark = pytest.mark.characterization
+
+
+@pytest.fixture
+def waitlist_on(monkeypatch):
+    """Pin WAITLIST_ENABLED on for the signup pins below.
+
+    They characterize the OPEN-signup behavior, but Settings reads the repo's
+    .env (config.py: ``env_file=".env"``), so running the suite on a host whose
+    .env disables signups — which is exactly how prod is configured — turned
+    every one of these into a 403. The switch's own behavior is pinned in
+    tests/integration/test_waitlist_toggle.py; these tests are about what the
+    handler does once it is past the guard.
+    """
+    monkeypatch.setenv("WAITLIST_ENABLED", "true")
+    get_settings.cache_clear()
+    yield
+    monkeypatch.undo()
+    get_settings.cache_clear()
 
 
 # --- landing -----------------------------------------------------------------
@@ -21,26 +40,39 @@ async def test_landing_anonymous_200_html(client):
     assert "text/html" in r.headers["content-type"]
 
 
+async def test_landing_signin_links_to_the_login_page_not_the_orcid_redirect(client):
+    """The landing CTA goes to /login, which explains what signing in does.
+
+    /login/start 302s straight to orcid.org, so linking it from the landing page
+    threw visitors at an external consent screen on their first click. The extra
+    click is deliberate — see the info box in templates/login.html.
+    """
+    r = await client.get("/")
+
+    assert 'href="/login"' in r.text
+    assert 'href="/login/start"' not in r.text, "landing page still jumps straight to ORCID"
+
+
 # --- waitlist (POST /waitlist) ----------------------------------------------
 
-async def test_waitlist_valid_email_succeeds(client):
+async def test_waitlist_valid_email_succeeds(client, waitlist_on):
     r = await client.post("/waitlist", data={"email": "pin-valid@example.edu"})
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
 
 
-async def test_waitlist_invalid_email_400(client):
+async def test_waitlist_invalid_email_400(client, waitlist_on):
     r = await client.post("/waitlist", data={"email": "not-an-email"})
     assert r.status_code == 400
 
 
-async def test_waitlist_missing_email_422(client):
+async def test_waitlist_missing_email_422(client, waitlist_on):
     # email is Form(...) — required; FastAPI rejects the missing field.
     r = await client.post("/waitlist", data={"name": "No Email"})
     assert r.status_code == 422
 
 
-async def test_waitlist_oversized_fields_truncated_not_500(client):
+async def test_waitlist_oversized_fields_truncated_not_500(client, waitlist_on):
     # SEC-17: name/institution/note are truncated to column limits before the
     # DB write, so oversized input returns 200 instead of a 500 DataError.
     r = await client.post(
