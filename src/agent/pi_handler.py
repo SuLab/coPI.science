@@ -147,6 +147,20 @@ class PIHandler:
                 # all (e.g. in tests) — that is a deployment choice, not a
                 # failed write, so it must not trigger the "couldn't be saved"
                 # acknowledgement below.
+                # `db_ok` is the one flag the ack and the disk write key on, and
+                # once persist_private_profile_to_db returns True the profile
+                # row is durably committed — nothing after that point may flip
+                # `db_ok` back to False (Opus follow-up review, 2026-09-08).
+                # The revision bookkeeping (two more SELECTs, create_revision,
+                # a second commit) that used to share this method's outer
+                # try/except could do exactly that: an exception there, AFTER
+                # the profile row was already saved, reported the whole write
+                # as failed — DB held the new content, disk and the in-memory
+                # cache stayed on the old content (skipped per the `if db_ok:`
+                # guard below), and the PI was told to retry. A committed
+                # profile row is final regardless of what happens to its
+                # revision record, so bookkeeping failures are caught and
+                # logged in their own try/except that cannot touch `db_ok`.
                 db_ok = True
                 if self.session_factory:
                     db_ok = False
@@ -154,29 +168,37 @@ class PIHandler:
                         async with self.session_factory() as db:
                             db_ok = await agent.persist_private_profile_to_db(db, new_profile)
                             if db_ok:
-                                # Record profile revision
-                                from sqlalchemy import select
-                                from src.models import AgentRegistry, User
-                                from src.services.profile_versioning import create_revision
-                                agent_reg = (await db.execute(
-                                    select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-                                )).scalar_one_or_none()
-                                pi_user = (await db.execute(
-                                    select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
-                                    .where(AgentRegistry.slack_user_id == pi_slack_id)
-                                )).scalar_one_or_none()
-                                if agent_reg:
-                                    summary = instruction[:200] if instruction else None
-                                    await create_revision(
-                                        db,
-                                        agent_registry_id=agent_reg.id,
-                                        profile_type="private",
-                                        content=new_profile,
-                                        changed_by_user_id=pi_user.id if pi_user else None,
-                                        mechanism="slack_dm",
-                                        change_summary=f"PI instruction: {summary}" if summary else None,
+                                try:
+                                    # Record profile revision — best-effort:
+                                    # its failure must not undo the commit above.
+                                    from sqlalchemy import select
+                                    from src.models import AgentRegistry, User
+                                    from src.services.profile_versioning import create_revision
+                                    agent_reg = (await db.execute(
+                                        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+                                    )).scalar_one_or_none()
+                                    pi_user = (await db.execute(
+                                        select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
+                                        .where(AgentRegistry.slack_user_id == pi_slack_id)
+                                    )).scalar_one_or_none()
+                                    if agent_reg:
+                                        summary = instruction[:200] if instruction else None
+                                        await create_revision(
+                                            db,
+                                            agent_registry_id=agent_reg.id,
+                                            profile_type="private",
+                                            content=new_profile,
+                                            changed_by_user_id=pi_user.id if pi_user else None,
+                                            mechanism="slack_dm",
+                                            change_summary=f"PI instruction: {summary}" if summary else None,
+                                        )
+                                        await db.commit()
+                                except Exception as revision_exc:
+                                    logger.error(
+                                        "[%s] Profile revision bookkeeping failed "
+                                        "after a committed profile row: %s",
+                                        agent_id, revision_exc,
                                     )
-                                    await db.commit()
                     except Exception as db_exc:
                         logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
                         db_ok = False
