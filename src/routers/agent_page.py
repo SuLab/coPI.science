@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_agent_with_access, get_current_user
 from src.models import (
@@ -36,7 +37,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-PROFILES_DIR = Path("profiles")
+# See src/agent/agent.py's PROFILES_DIR — same setting, same default (audit
+# 2026-09-08 RC-13).
+PROFILES_DIR = Path(get_settings().profiles_dir)
 SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"

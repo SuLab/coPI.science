@@ -4,13 +4,16 @@ import logging
 import re
 from pathlib import Path
 
+from src.config import get_settings
 from src.models import Publication, ResearcherProfile, User
 from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles/public")
-PRIVATE_PROFILES_DIR = Path("profiles/private")
+# See src/agent/agent.py's PROFILES_DIR — same setting, same defaults (audit
+# 2026-09-08 RC-13).
+PROFILES_DIR = Path(get_settings().profiles_dir) / "public"
+PRIVATE_PROFILES_DIR = Path(get_settings().profiles_dir) / "private"
 
 
 def export_profile_to_markdown(

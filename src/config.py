@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,9 @@ def _redact_url_credentials(value: str) -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
+    )
 
     # Deployment environment. "development" (default) tolerates the insecure
     # default SECRET_KEY; any other value (e.g. "production") fails fast.
@@ -304,6 +306,14 @@ class Settings(BaseSettings):
 
     # Analytics
     posthog_api_key: str = ""
+
+    # Root directory for agent public/private/memory profile files on disk (audit
+    # 2026-09-08 RC-13). Was a CWD-relative `Path("profiles")` literal duplicated
+    # across src/agent/agent.py, src/agent/tools.py, src/routers/agent_page.py and
+    # src/services/profile_export.py; on a host where profiles/ is root-owned (see
+    # CLAUDE.md's UID 10001 precondition) a write under one of those paths fails --
+    # silently, in the case RC-7 closes. Default unchanged.
+    profiles_dir: str = Field(default="profiles", validation_alias="COPI_PROFILES_DIR")
 
     # LLM models
     llm_profile_model: str = "claude-opus-5"

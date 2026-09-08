@@ -156,6 +156,7 @@ NON_SECRET_STR_FIELDS = {
     "llm_agent_model",
     "llm_agent_model_opus",
     "llm_agent_model_sonnet",
+    "profiles_dir",  # a local filesystem path, not a credential (audit RC-13)
 }
 
 

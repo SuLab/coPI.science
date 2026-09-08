@@ -10,12 +10,16 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
+from src.config import get_settings
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles")
+# Root for public/private/memory profile files on disk. Resolved from `profiles_dir`
+# (env COPI_PROFILES_DIR, default "profiles" — audit 2026-09-08 RC-13) so a host where
+# profiles/ is not writable from the CWD can point this elsewhere.
+PROFILES_DIR = Path(get_settings().profiles_dir)
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets and the

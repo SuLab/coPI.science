@@ -14,8 +14,13 @@
 #      Settings' own fields by `--print-blank-keys`, so an agent added to config.py
 #      later is blanked too. Names only; no value is ever read or printed.
 #   2. scripts/live_slack_preflight.py must exit 0. It re-proves the blanking through
-#      the real settings object and asks Slack's own auth.test which workspace each
-#      fixture token belongs to. A non-zero exit ABORTS — pytest is never reached.
+#      the real settings object, asks Slack's own auth.test which workspace each
+#      fixture token belongs to (check 3), and — audit 2026-09-08 RC-13 — confirms
+#      profiles/{public,private,memory} under `profiles_dir` (env COPI_PROFILES_DIR,
+#      default "profiles") exist and are writable, creating them if missing (check 6).
+#      An unwritable profiles dir is exactly RC-7's silent-clobber trigger, so this
+#      tier refuses up front rather than discovering it mid-run. A non-zero exit from
+#      any check ABORTS — pytest is never reached.
 #   3. only then does pytest run, with the tier's own SLACK_TEST_* environment.
 #
 # The tier's credentials come from YOUR environment, never from this repo. Put them in
@@ -26,7 +31,9 @@
 #
 # Extra arguments are passed through to pytest (e.g. -k, -x, --lf).
 #
-# Overridable env: VENV_PY (interpreter; default .venv-test/bin/python).
+# Overridable env: VENV_PY (interpreter; default .venv-test/bin/python),
+# COPI_PROFILES_DIR (where agent profiles live on disk; default "profiles" — point
+# this at a writable directory if the repo's own profiles/ is not, e.g. root-owned).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

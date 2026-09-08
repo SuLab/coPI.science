@@ -12,8 +12,10 @@ no Slack call, no `.env` read, no network.
 """
 
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from scripts.live_slack_preflight import (
@@ -22,6 +24,7 @@ from scripts.live_slack_preflight import (
     PRODUCTION_CREDENTIAL_KEYS,
     TIER_REQUIRED_KEYS,
     check_no_operator_supplied_database,
+    check_profiles_dir_writable,
     production_credential_keys,
     production_token_map,
     refusals,
@@ -29,6 +32,11 @@ from scripts.live_slack_preflight import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# A real, writable directory for the tests that don't care about check 6 -- created
+# once so the 20-odd call sites that only exercise checks 1-5 don't each need their own
+# tmp_path plumbed through. Tests that DO care about check 6 pass their own tmp_path.
+_DEFAULT_TEST_PROFILES_DIR = Path(tempfile.mkdtemp(prefix="live-slack-preflight-test-"))
 
 # Fabricated, token-shaped, and deliberately not real. Nothing in this file may hold a
 # credential, and nothing the preflight prints may echo one back.
@@ -58,12 +66,13 @@ def _copi_test_auth(token: str) -> dict:
     return {"ok": True, "team_id": COPI_TEST_TEAM_ID}
 
 
-def _checks(env=None, tokens=None, env_token=None, auth_test=None):
+def _checks(env=None, tokens=None, env_token=None, auth_test=None, profiles_dir=None):
     return run_checks(
         env=ISOLATED_ENV if env is None else env,
         tokens=NO_PROD_TOKENS if tokens is None else tokens,
         env_token=env_token or _no_env_token,
         auth_test=auth_test or _copi_test_auth,
+        profiles_dir=_DEFAULT_TEST_PROFILES_DIR if profiles_dir is None else profiles_dir,
     )
 
 
@@ -77,7 +86,7 @@ def _why(results) -> str:
 def test_a_fully_isolated_environment_passes_every_check():
     results = _checks()
     assert refusals(results) == [], _why(results)
-    assert len(results) >= 4, _why(results)
+    assert len(results) >= 6, _why(results)
 
 
 def test_the_four_checks_run_in_the_order_the_plan_specifies():
@@ -277,6 +286,7 @@ def test_production_token_map_covers_the_field_get_slack_tokens_forgets():
         tokens=mapped,
         env_token=_no_env_token,
         auth_test=_copi_test_auth,
+        profiles_dir=_DEFAULT_TEST_PROFILES_DIR,
     )
     assert any("grantbot" in c.detail for c in refusals(results)), _why(results)
 
@@ -386,9 +396,93 @@ def test_check_five_gates_check_three_so_no_token_is_sent():
     env["SLACK_TEST_BOT_TOKEN_SU"] = "xoxb-test"
     env["TEST_DATABASE_URL"] = "postgresql://x/y"
 
-    results = run_checks(env=env, tokens={}, env_token=lambda _a: None, auth_test=_auth_test)
+    results = run_checks(
+        env=env,
+        tokens={},
+        env_token=lambda _a: None,
+        auth_test=_auth_test,
+        profiles_dir=_DEFAULT_TEST_PROFILES_DIR,
+    )
 
     assert called == [], "a token was sent to Slack despite an operator-supplied database"
     by_name = {c.name[0]: c for c in results}
     assert not by_name["5"].ok
     assert not by_name["3"].ok and "NOT ATTEMPTED" in by_name["3"].detail
+
+
+# ---------------------------------------------------------------------------
+# Check 6 (audit 2026-09-08 RC-13) — the resolved profiles/{public,private,memory}
+# directories must be writable by the current uid before the tier (or any agent code)
+# tries to write a profile there. RC-7's silent-clobber bug was triggered by exactly
+# this: a permission-denied temp-file write that got swallowed instead of refused up
+# front. Must run BEFORE any Slack call, same as checks 1/2/5.
+# ---------------------------------------------------------------------------
+
+
+def test_check_six_creates_and_accepts_a_writable_profiles_dir(tmp_path):
+    target = tmp_path / "profiles"
+    assert not target.exists()
+    check = check_profiles_dir_writable(target)
+    assert check.ok, check.detail
+    for sub in ("public", "private", "memory"):
+        assert (target / sub).is_dir(), f"{sub} was not created"
+
+
+def test_check_six_refuses_a_read_only_profiles_dir_with_the_exact_remedy(tmp_path):
+    target = tmp_path / "profiles"
+    target.mkdir()
+    target.chmod(stat.S_IREAD | stat.S_IEXEC)  # r-x: cannot create subdirectories
+    try:
+        check = check_profiles_dir_writable(target)
+    finally:
+        target.chmod(stat.S_IRWXU)  # restore so tmp_path cleanup can remove it
+    assert not check.ok
+    assert "chown" in check.detail
+    assert "COPI_PROFILES_DIR" in check.detail
+
+
+def test_check_six_runs_before_check_threes_slack_call(monkeypatch):
+    """Actually pins call ORDER (not just that both eventually ran), by recording
+    each into a shared list: `check_profiles_dir_writable` (check 6, real -- via the
+    module attribute run_checks calls through) must be recorded before `auth_test`
+    (check 3's Slack call, injected)."""
+    import scripts.live_slack_preflight as m
+
+    call_order: list[str] = []
+
+    real_check_six = m.check_profiles_dir_writable
+
+    def _spy_check_six(profiles_dir):
+        call_order.append("check_6")
+        return real_check_six(profiles_dir)
+
+    def _auth_test(token: str):
+        call_order.append("check_3_auth_test")
+        return {"ok": True, "team_id": COPI_TEST_TEAM_ID}
+
+    monkeypatch.setattr(m, "check_profiles_dir_writable", _spy_check_six)
+
+    m.run_checks(
+        env=ISOLATED_ENV,
+        tokens=NO_PROD_TOKENS,
+        env_token=_no_env_token,
+        auth_test=_auth_test,
+        profiles_dir=_DEFAULT_TEST_PROFILES_DIR,
+    )
+
+    assert "check_6" in call_order and "check_3_auth_test" in call_order, call_order
+    assert call_order.index("check_6") < call_order.index("check_3_auth_test"), (
+        f"check 6 must run before check 3's Slack call; observed order: {call_order}"
+    )
+
+
+def test_check_six_refusal_is_visible_alongside_an_otherwise_isolated_environment():
+    read_only = Path(tempfile.mkdtemp(prefix="preflight-readonly-"))
+    read_only.chmod(stat.S_IREAD | stat.S_IEXEC)
+    try:
+        results = _checks(profiles_dir=read_only)
+    finally:
+        read_only.chmod(stat.S_IRWXU)  # restore so cleanup can remove it
+
+    by_name = {c.name[0]: c for c in results}
+    assert not by_name["6"].ok, _why(results)

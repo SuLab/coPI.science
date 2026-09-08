@@ -6,11 +6,13 @@ from typing import Any
 
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
+from src.config import get_settings
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles")
+# See src/agent/agent.py's PROFILES_DIR — same setting, same default (RC-13).
+PROFILES_DIR = Path(get_settings().profiles_dir)
 
 # Anthropic tool-use schema definitions
 TOOL_DEFINITIONS: list[dict[str, Any]] = [

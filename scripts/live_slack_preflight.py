@@ -71,6 +71,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # importing src.config eagerly is not worth it for one annotation
@@ -294,26 +295,62 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
     )
 
 
+def check_profiles_dir_writable(profiles_dir: Path) -> Check:
+    """Check 6 (audit 2026-09-08 RC-13) — the resolved
+    `profiles/{public,private,memory}` directories exist and are writable by the
+    current process, creating them if missing.
+
+    Runs before any Slack call (see `run_checks`): a `profiles_dir` that turns out to
+    be read-only is exactly the failure mode RC-7 traced to a silent DB clobber
+    (`Agent.update_private_profile` swallowed the write error and the caller re-read
+    the stale file), and the live tier should refuse up front rather than discover it
+    mid-run with a PI told their instruction was saved when it was not.
+    """
+    problems: list[str] = []
+    evidence: list[str] = []
+    for sub in ("public", "private", "memory"):
+        target = profiles_dir / sub
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".preflight-write-probe"
+            probe.write_text("")
+            probe.unlink()
+            evidence.append(f"{target} is writable")
+        except OSError as exc:
+            problems.append(
+                f"{target} is not writable ({exc.strerror or exc}). Fix with either: "
+                f"`sudo chown -R $(id -u):$(id -g) {profiles_dir}` (or the deploy "
+                "image's UID 10001 -- see CLAUDE.md's UID 10001 precondition), or "
+                f"point elsewhere with `COPI_PROFILES_DIR=<a-writable-directory>`."
+            )
+    return _verdict("6. profiles/ is writable", problems, evidence)
+
+
 def run_checks(
     *,
     env: Mapping[str, str],
     tokens: Mapping[str, str],
     env_token: EnvTokenFn,
     auth_test: AuthTest,
+    profiles_dir: Path,
 ) -> list[Check]:
-    """The five checks, in order. Every dependency is injected, so this is unit-testable
+    """The six checks, in order. Every dependency is injected, so this is unit-testable
     without Slack, without `.env` and without a network.
 
     Check 5 gates check 3 alongside 1 and 2: an operator-supplied database is an
-    unbounded token source, so it is not an environment to start sending tokens from."""
+    unbounded token source, so it is not an environment to start sending tokens from.
+    Check 6 (profiles/ writability) is not a Slack-isolation concern, so it does not
+    gate check 3 -- but it is still computed before check 3's Slack call, same as 1, 2
+    and 5, so a profiles/ problem is never masked by a network call that ran first."""
     one = check_production_credentials_blanked(env)
     two = check_no_usable_token_resolves(tokens, env_token)
     five = check_no_operator_supplied_database(env)
+    six = check_profiles_dir_writable(profiles_dir)
     three = check_fixture_tokens_are_copi_test(
         env, auth_test, isolated=one.ok and two.ok and five.ok
     )
     four = check_tier_environment_complete(env)
-    return [one, two, three, four, five]
+    return [one, two, three, four, five, six]
 
 
 def slack_auth_test(token: str) -> Mapping[str, object]:
@@ -391,11 +428,13 @@ def main(argv: list[str] | None = None) -> int:
     from src.config import get_settings
     from src.services.slack_tokens import env_token
 
+    settings = get_settings()
     results = run_checks(
         env=os.environ,
-        tokens=production_token_map(get_settings()),
+        tokens=production_token_map(settings),
         env_token=env_token,
         auth_test=slack_auth_test,
+        profiles_dir=Path(settings.profiles_dir),
     )
 
     print(f"live-Slack preflight — the only permitted workspace is {COPI_TEST_TEAM_ID} (copi-test)")
