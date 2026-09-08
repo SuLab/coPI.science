@@ -79,7 +79,7 @@ async def _slack_on(*a, **k):
     return True
 
 
-async def _world(db_session, *, recipient_email, token):
+async def _world(db_session, *, recipient_email, token, sent_at=None):
     """An agent-owning PI, a notification recipient, and a live notification."""
     owner = await factories.make_user(db_session)
     recipient = await factories.make_user(db_session, email=recipient_email)
@@ -96,6 +96,7 @@ async def _world(db_session, *, recipient_email, token):
         reply_token=token,
         category="proposal_review",
         status="sent",
+        **({"sent_at": sent_at} if sent_at is not None else {}),
     )
     db_session.add(notification)
     await db_session.flush()
@@ -104,6 +105,88 @@ async def _world(db_session, *, recipient_email, token):
 
 async def _reviews(db_session):
     return (await db_session.execute(select(ProposalReview))).scalars().all()
+
+
+# --- 0. RC-4: a reply token expires at the consumer, not just on resend -------
+#
+# Previously `expired` was written only when a REPLACEMENT reminder was sent
+# (email_notifications.py), and the inbound side checked only `status == "sent"` --
+# so a PI who never got a second reminder (nothing left to send, or suppressed by the
+# allowlist) held a bearer credential good forever. `settings.email_notification_
+# expiry_days` (default 14) is now enforced here too, measured from `sent_at`.
+
+
+async def test_a_reply_past_the_expiry_window_is_refused_and_the_row_expires(
+    db_session, monkeypatch, sent_emails
+):
+    token = "expiredtok" + "c" * 40
+    old_sent_at = datetime.now(UTC) - timedelta(
+        days=get_settings().email_notification_expiry_days + 1
+    )
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.expired@scripps.edu", token=token,
+        sent_at=old_sent_at,
+    )
+    _classifies_as(monkeypatch, {"category": "review", "rating": 4, "comment": "great"})
+
+    await process_inbound_email(
+        _raw_reply(token, recipient.email, "4 great"), db_session
+    )
+
+    assert await _reviews(db_session) == [], "a rating must not be applied past the window"
+    await db_session.refresh(notification)
+    assert notification.status == "expired"
+    assert len(sent_emails) == 1, "the PI should get exactly one expiry notice"
+    assert "expired" in sent_emails[0]["subject"].lower()
+    assert sent_emails[0]["to"] == recipient.email
+
+
+async def test_a_reply_inside_the_expiry_window_is_still_applied(
+    db_session, monkeypatch, sent_emails
+):
+    """Control: one day short of the window, the reply is applied exactly as before."""
+    token = "freshtok" + "d" * 40
+    recent_sent_at = datetime.now(UTC) - timedelta(
+        days=get_settings().email_notification_expiry_days - 1
+    )
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.fresh@scripps.edu", token=token,
+        sent_at=recent_sent_at,
+    )
+    _classifies_as(monkeypatch, {"category": "review", "rating": 3, "comment": "good"})
+
+    await process_inbound_email(
+        _raw_reply(token, recipient.email, "3 good"), db_session
+    )
+
+    (review,) = await _reviews(db_session)
+    assert review.rating == 3
+    await db_session.refresh(notification)
+    assert notification.status == "responded"
+
+
+async def test_a_second_reply_after_expiry_gets_no_further_notice(
+    db_session, monkeypatch, sent_emails
+):
+    """The expiry notice fires at most once per token: once the row is `expired`, a
+    later reply hits the pre-existing `status != "sent"` gate before ever reaching the
+    new expiry check, so it can't send a second notice."""
+    token = "twicetok" + "e" * 40
+    old_sent_at = datetime.now(UTC) - timedelta(
+        days=get_settings().email_notification_expiry_days + 1
+    )
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.twice@scripps.edu", token=token,
+        sent_at=old_sent_at,
+    )
+    _classifies_as(monkeypatch, {"category": "review", "rating": 4, "comment": "great"})
+
+    await process_inbound_email(_raw_reply(token, recipient.email, "4 great"), db_session)
+    assert len(sent_emails) == 1
+
+    await process_inbound_email(_raw_reply(token, recipient.email, "4 great again"), db_session)
+    assert len(sent_emails) == 1, "a stale token must not earn a second expiry notice"
+    assert await _reviews(db_session) == []
 
 
 # --- 1. Fail closed on a NULL registered email --------------------------------

@@ -250,6 +250,32 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
     return sent_count
 
 
+async def _expire_lapsed_outstanding(
+    outstanding_notification: EmailNotification | None,
+    user: User,
+    db: AsyncSession,
+    *,
+    reason: str,
+) -> None:
+    """Mark an outstanding proposal_review row `expired` (RC-4), if there is one.
+
+    Callers only reach here after the reply-window check earlier in
+    `_process_user_notifications` has already let a non-None `outstanding_notification`
+    fall through -- which happens only when it is already past
+    `settings.email_notification_expiry_days`. A no-op when there is nothing
+    outstanding.
+    """
+    if outstanding_notification is None:
+        return
+    outstanding_notification.status = "expired"
+    await db.flush()
+    logger.info(
+        "Expired unanswered proposal_review notification %s for user %s (%s, and the "
+        "reply window has passed)",
+        outstanding_notification.id, user.id, reason,
+    )
+
+
 async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     """Process notifications for a single user. Returns True if an email was sent."""
     # Get or create engagement tracker
@@ -311,6 +337,16 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     # Get unreviewed proposals
     proposals = await _get_unreviewed_proposals_for_user(user, db)
     if not proposals:
+        # RC-4 (#21 V4-3): reaching here with a non-None `outstanding_notification` means
+        # the age check above already fell through (it's past the reply window), and
+        # there is nothing left to review that would ever replace it. Retiring it is now
+        # safe: email_inbound.process_inbound_email (RC-4) refuses a reply whose
+        # `sent_at` is past the window on its own, independent of `status` -- so this
+        # write changes bookkeeping, not what a stray reply to the old token would do.
+        await _expire_lapsed_outstanding(
+            outstanding_notification, user, db,
+            reason="no unreviewed proposals remain",
+        )
         return False
 
     # Send one email for the oldest unreviewed proposal
@@ -324,6 +360,14 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(user.email):
         tracker.last_notification_sent_at = datetime.now(timezone.utc)
+        # RC-4: same reasoning as the no-proposals bail above -- nothing will ever
+        # replace this row while the allowlist keeps blocking this recipient, and it
+        # is already past the reply window, so email_inbound refuses a reply to it
+        # regardless of `status`.
+        await _expire_lapsed_outstanding(
+            outstanding_notification, user, db,
+            reason="the replacement was suppressed by the outbound allowlist",
+        )
         logger.info(
             "Proposal notification to %s suppressed by outbound allowlist; "
             "advancing send clock to pace by frequency (proposal %s)",

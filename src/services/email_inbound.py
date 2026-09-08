@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -365,6 +365,27 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             from_addr,
             notification.id,
         )
+        return
+
+    # RC-4 (#21 V4-3): the reply token is a bearer credential -- it must not stay live
+    # forever. `expired` was previously written only when a replacement reminder went
+    # out, so a PI who never got a second reminder (nothing left to review, or the
+    # outbound allowlist suppressed it) could still redeem the original token months
+    # later. Enforce the same expiry window here, independent of whether the sweep
+    # ever marks the row. Refuse BEFORE the LLM classification / rating-or-instruction
+    # application below, and mark the row so a retried stale reply short-circuits on
+    # the `status != "sent"` check above instead of earning a second notice.
+    settings = get_settings()
+    reply_age = datetime.now(UTC) - notification.sent_at
+    if reply_age > timedelta(days=settings.email_notification_expiry_days):
+        logger.info(
+            "Reply to notification %s arrived %s after it was sent, past the "
+            "%d-day reply window; refusing to apply it",
+            notification.id, reply_age, settings.email_notification_expiry_days,
+        )
+        notification.status = "expired"
+        await db.commit()
+        _notify_reply_expired(user.email, notification.id)
         return
 
     # Extract reply body
@@ -829,6 +850,33 @@ def _notify_instruction_failure(
     )
     if sent:
         _INSTRUCTION_FAILURE_EMAILS_SENT[key] = 1
+
+
+def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
+    """PI-facing notice that a reply arrived after its token's reply window closed
+    (RC-4, #21 V4-3).
+
+    Unlike `_notify_instruction_failure`'s in-memory send cap, this needs no dedup
+    dict: the caller marks the row `expired` (and commits) before calling this, so a
+    retry of the same stale reply short-circuits earlier, at this module's
+    `notification.status != "sent"` gate in `process_inbound_email` -- this can fire
+    at most once per token.
+    """
+    if not pi_email:
+        # User.email is nullable; process_inbound_email's fail-closed check above
+        # already refuses a reply from a user with no registered address, so this is
+        # unreachable through the poller -- say so rather than handing SES a None.
+        logger.warning(
+            "No registered address to send the expired-reply notice to "
+            "(notification %s)", notification_id,
+        )
+        return
+    _send_simple_email(
+        pi_email,
+        "This review link has expired",
+        "This reply link has expired, so we couldn't apply your reply. Please review "
+        "this proposal from your dashboard at copi.science instead.",
+    )
 
 
 async def _handle_instruction(

@@ -3,12 +3,17 @@ downgrade ladder can advance past its first rung. V4-3's third test also pins B3
 falling through to a re-send for the SAME proposal must reconcile the existing row, not violate
 uq_email_notification_user_thread_category.
 
-`expired` is only ever written once a REPLACEMENT has been accepted by SES -- the same ordering
-Task 21.11 established for row creation. The three tests named `..._leaves_the_notification_
-answerable` cover the three ways `_process_user_notifications` can reach the end of a sweep
-without sending anything after the reply window lapsed; on each of them the row must stay `sent`,
-because `email_inbound.process_inbound_email` drops any reply whose notification is not `sent`
-and that token is the only reply address the PI was ever given.
+Originally (V4-3) `expired` was written only once a REPLACEMENT had been accepted by SES, because
+`email_inbound.process_inbound_email` dropped any reply whose notification was not `status ==
+"sent"` -- so retiring the row here, with nothing to replace it, would have killed the only reply
+address the PI was ever given. RC-4 (audit 2026-09-08, #21 V4-3) closed that gap on the inbound
+side: a reply is now refused on its own once `sent_at` is older than
+`settings.email_notification_expiry_days`, independent of this row's `status`. That makes it safe
+for the SWEEP to mark `expired` on the two bail paths below where nothing was sent AND the
+outstanding row was already past the window -- inbound would refuse a reply to it regardless. The
+THIRD no-send path (`test_a_failed_ses_send_leaves_the_notification_answerable`) is deliberately
+unchanged: an SES-refused send is a transient failure, not a sign there is nothing left to answer,
+so that row must stay `sent` and answerable on the next attempt.
 
 Also here (same sweep, same file): the reopen sentinel. `reopen_proposal` files a ProposalReview
 with `rating=0`, which `_get_unreviewed_proposals_for_user` and the status_overview digest both
@@ -55,13 +60,13 @@ async def _eager(db_session, user_id) -> User:
     ).scalar_one()
 
 
-async def test_a_sweep_with_nothing_to_send_leaves_the_notification_answerable(db_session):
-    """V4-3, no-send path 1 of 3: `_process_user_notifications` returns at its
-    `if not proposals` bail. The reply window lapsed, so the sweep falls through — but the
-    proposal has since been reviewed on the dashboard, so there is nothing to send. Retiring
-    the row here retires the only reply address this PI was ever given, and
-    `email_inbound.process_inbound_email` then drops their reply on its `status != "sent"`
-    gate. 'expired' may only be written once a replacement has been accepted by SES.
+async def test_a_sweep_with_nothing_to_send_and_a_lapsed_reminder_expires_it(db_session):
+    """RC-4: `_process_user_notifications` returns at its `if not proposals` bail. The
+    reply window lapsed, so the sweep falls through — but the proposal has since been
+    reviewed on the dashboard, so there is nothing left to send. Nothing will ever
+    replace this row, and `email_inbound.process_inbound_email` now refuses a reply to
+    it on its own (RC-4's `sent_at` age check) regardless of `status` — so marking it
+    `expired` here is bookkeeping, not a functional change to what a reply would do.
     """
     user = await factories.make_user(db_session, email="pi.expiry@scripps.edu")
     agent = await factories.make_agent(db_session, user=user)
@@ -89,20 +94,24 @@ async def test_a_sweep_with_nothing_to_send_leaves_the_notification_answerable(d
 
     assert sent is False, "nothing was sendable, so the sweep must report no send"
     await db_session.refresh(notification)
-    assert notification.status == "sent", (
-        f"notification {notif_id} was marked {notification.status!r} on a sweep that sent "
-        "NOTHING — the PI still holds an e-mail whose reply+<token> address is now dead, and "
-        "email_inbound drops the reply at its `status != 'sent'` gate. Expire a row only when "
-        "a replacement has actually gone out."
+    assert notification.status == "expired", (
+        f"notification {notif_id} is {notification.status!r} after a sweep that found "
+        "nothing left to send for an outstanding row already past the reply window — RC-4 "
+        "expects it retired here, since email_inbound's own age check would refuse a reply "
+        "to it either way."
     )
 
 
-async def test_an_allowlist_suppressed_sweep_leaves_the_notification_answerable(
+async def test_an_allowlist_suppressed_sweep_with_a_lapsed_reminder_expires_it(
     db_session, monkeypatch,
 ):
-    """V4-3, no-send path 2 of 3: the outbound allowlist bail in `_process_user_notifications`
-    (it advances the send clock and returns False without sending). Driven end to end — the
-    PI's reply to the still-outstanding reminder must file a review.
+    """RC-4: the outbound allowlist bail in `_process_user_notifications` (it advances
+    the send clock and returns False without sending) marks the outstanding row expired
+    when it was already past the reply window — nothing will ever replace it while the
+    allowlist blocks this recipient, and a reply to it would be refused by
+    email_inbound's own age check regardless. Driven end to end: the PI's reply then
+    hits the ordinary `status != "sent"` gate and is dropped, exactly as a reply to any
+    other already-expired row would be.
     """
     monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "someone.else@scripps.edu")
     monkeypatch.setattr(inbound, "_send_simple_email", lambda *a, **k: True)
@@ -130,6 +139,18 @@ async def test_an_allowlist_suppressed_sweep_leaves_the_notification_answerable(
     sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
     assert sent is False, "the allowlist should have suppressed the replacement"
 
+    row = (
+        await db_session.execute(
+            select(EmailNotification).where(EmailNotification.reply_token == token)
+        )
+    ).scalar_one()
+    assert row.status == "expired", (
+        f"notification {notification.id} is {row.status!r} after an allowlist-suppressed "
+        "sweep found the outstanding row already past the reply window — RC-4 expects it "
+        "retired here, since nothing will ever replace it while the allowlist blocks this "
+        "recipient and email_inbound's own age check would refuse a reply to it either way."
+    )
+
     raw = (
         factories.SES_PASS_HEADER
         + f"From: {user.email}\n"
@@ -139,22 +160,14 @@ async def test_an_allowlist_suppressed_sweep_leaves_the_notification_answerable(
     ).encode()
     await process_inbound_email(raw, db_session)
 
-    row = (
-        await db_session.execute(
-            select(EmailNotification).where(EmailNotification.reply_token == token)
-        )
-    ).scalar_one()
-    assert row.status == "responded", (
-        f"the reply was dropped: the row is {row.status!r}. The sweep suppressed the "
-        "replacement e-mail but retired the reply token anyway, so the PI's rating went "
-        "nowhere — no ProposalReview, no confirmation, no log the PI can see."
-    )
+    await db_session.refresh(row)
+    assert row.status == "expired", "a reply to an already-expired row must not be applied"
     review = (
         await db_session.execute(
             select(ProposalReview).where(ProposalReview.thread_decision_id == td.id)
         )
     ).scalar_one_or_none()
-    assert review is not None and review.rating == 4
+    assert review is None, "an expired token must not be able to file a review"
 
 
 async def test_a_failed_ses_send_leaves_the_notification_answerable(db_session, monkeypatch):
