@@ -188,12 +188,38 @@ class Agent:
             return False
         return bool(_extract_dois(content) & own)
 
-    def reload_profiles(self):
-        """Reload profiles from disk."""
-        self._public_profile = None
+    def reload_private_profile(self) -> None:
+        """Invalidate the private-profile cache only, forcing a re-read from disk.
+
+        Split out from ``reload_profiles`` (RC-7, audit 2026-09-08 follow-up):
+        an external reload keyed to a single combined (private, public)
+        signature called ``reload_profiles`` — which clears both caches — for
+        ANY change to either file. That let an unrelated public-profile edit
+        resurrect a stale private file: if a private disk write had just
+        failed (leaving the on-disk file's mtime unchanged, per
+        ``atomic_write.py``'s write-then-``os.replace`` semantics) while
+        ``self._private_profile`` correctly held the newly-accepted
+        instruction, the next public-only reload still cleared
+        ``self._private_profile`` too — and the next read re-loaded the stale
+        on-disk file, discarding the accepted instruction. Reloading only the
+        cache whose own file actually changed is what closes that path. See
+        ``SimulationEngine._sync_profiles_from_disk``.
+        """
         self._private_profile = None
+        self._own_publication_dois = None  # derived from both profiles
+
+    def reload_public_profile(self) -> None:
+        """Invalidate the public-profile cache (and its derivatives) only."""
+        self._public_profile = None
         self._public_working_memory = None
-        self._own_publication_dois = None
+        self._own_publication_dois = None  # derived from both profiles
+
+    def reload_profiles(self):
+        """Reload both profiles from disk. Prefer the per-profile methods
+        above for a reload triggered by one file's change — see
+        ``reload_private_profile``'s docstring for why."""
+        self.reload_private_profile()
+        self.reload_public_profile()
 
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)

@@ -454,13 +454,16 @@ class SimulationEngine:
         self._finalized_private_channels: set[str] = set()
 
         # Last-seen (exists, mtime) signature of each agent's on-disk profile
-        # files (private + public), keyed by agent_id. The web editor runs in
-        # a separate process and writes profiles/{private,public}/{id}.md on a
-        # shared volume; this process caches profile content per Agent, so a
-        # per-turn signature check tells us when an external edit — including
-        # a deletion — happened and the cache must be invalidated. See
-        # _sync_profiles_from_disk.
-        self._profile_mtimes: dict[str, tuple[tuple[str, bool, float | None], ...]] = {}
+        # files, keyed by agent_id then by sub-profile ("private"/"public").
+        # The web editor runs in a separate process and writes
+        # profiles/{private,public}/{id}.md on a shared volume; this process
+        # caches profile content per Agent, so a per-turn signature check
+        # tells us when an external edit — including a deletion — happened
+        # and the cache must be invalidated. Tracked per sub-profile (RC-7
+        # follow-up, audit 2026-09-08) rather than as one combined signature
+        # — see _sync_profiles_from_disk for why a combined signature let an
+        # unrelated public edit resurrect a stale private file.
+        self._profile_mtimes: dict[str, dict[str, tuple[bool, float | None]]] = {}
 
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
@@ -6005,30 +6008,46 @@ class SimulationEngine:
         instructions until restart. Comparing the whole (exists, mtime) pair
         per file, cheap (two stat() calls per agent, no DB round-trip) and
         tied to exactly what the agent reads, catches deletions too.
+
+        Private and public are tracked and reloaded independently (RC-7
+        follow-up, audit 2026-09-08 — reviewer-reproduced): the previous
+        combined signature over both files called ``agent.reload_profiles()``
+        — clearing BOTH caches — for a change to EITHER one. A failed private
+        disk write leaves the on-disk file's mtime unchanged (see
+        ``atomic_write.py``: it only calls ``os.replace`` on success) while
+        the in-memory cache correctly holds the newly-accepted instruction —
+        but the next *public* edit still flipped the combined signature,
+        triggered a full reload, and clobbered that private cache back to
+        None, so the next read resurrected the stale on-disk private file and
+        silently discarded the PI's instruction. Reloading only the
+        sub-profile whose own signature changed removes that coupling.
         """
         for agent in self.agents.values():
-            signature: list[tuple[str, bool, float | None]] = []
+            agent_sigs = self._profile_mtimes.setdefault(agent.agent_id, {})
             for sub in ("private", "public"):
                 path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
                 try:
                     mtime: float | None = path.stat().st_mtime
                 except OSError:
                     mtime = None  # file may not exist yet (or a race) — treat as absent
-                signature.append((sub, mtime is not None, mtime))
+                new_sig = (mtime is not None, mtime)
 
-            prev = self._profile_mtimes.get(agent.agent_id)
-            new_signature = tuple(signature)
-            if prev is None:
-                # First observation — record the baseline without reloading.
-                self._profile_mtimes[agent.agent_id] = new_signature
-                continue
-            if new_signature != prev:
-                agent.reload_profiles()
-                self._profile_mtimes[agent.agent_id] = new_signature
-                logger.info(
-                    "[%s] Reloaded profiles from disk (external edit detected)",
-                    agent.agent_id,
-                )
+                prev_sig = agent_sigs.get(sub)
+                if prev_sig is None:
+                    # First observation of this sub-profile — record the
+                    # baseline without reloading.
+                    agent_sigs[sub] = new_sig
+                    continue
+                if new_sig != prev_sig:
+                    if sub == "private":
+                        agent.reload_private_profile()
+                    else:
+                        agent.reload_public_profile()
+                    agent_sigs[sub] = new_sig
+                    logger.info(
+                        "[%s] Reloaded %s profile from disk (external edit detected)",
+                        agent.agent_id, sub,
+                    )
 
     def _rebuild_bot_name_map(self) -> None:
         """Recompute ``_bot_name_to_id`` from ``self.agents`` and re-seed the
