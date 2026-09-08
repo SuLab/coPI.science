@@ -176,7 +176,7 @@ The chain runs in ONE transaction, so its locks are additive — R.6 now carries
 - `.superpowers/sdd/2026-09-02-close-issues-20-27/` holds the ledger (`progress.md`), every brief, review and audit; it is
   git-ignored and not part of this PR.
 
-Closes #20, #21, #22, #23, #24, #25, #26, #27
+Closes #22, #23, #24, #25
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

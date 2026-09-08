@@ -297,7 +297,7 @@ have since been closed or ruled:
 
 | `closure-23` residual | state at HEAD |
 |---|---|
-| R2 keyed NCBI paced at 8.33 req/s against a 10 req/s ceiling | **fixed** — Task 23 (`962aa6c`) paces at **9.52 req/s**, and the semaphore slot is released across backoff instead of held for the whole retry loop |
+| R2 keyed NCBI paced at 8.33 req/s against a 10 req/s ceiling | **fixed** — Task 23 (`962aa6c`) originally paced at 9.52 req/s (0.105 s); `b982d53` (#23 COR-29, audit D5) retightened it to **8.93 req/s** (0.112 s), because 0.105 s sat at exactly the 10 req/s ceiling with zero jitter margin — see `src/services/pubmed.py`'s `_NCBI_PACING_SECONDS` comment. The semaphore slot is released across backoff instead of held for the whole retry loop |
 | R3 apostrophe class misses U+2018 / U+00B4 / U+FF07 | **fixed** — `554b139` |
 | R4 `extract_foa_number` returns the matched case verbatim | **fixed** — `554b139` canonicalises |
 | R5 the V10b log line has no assertion | **fixed** — Task 24 (`df5c45b`) asserts the whole message in `tests/unit/test_delegates.py`. **But R5's premise was wrong**: see carve-out 1 |
@@ -335,9 +335,9 @@ have since been closed or ruled:
    individual lookup sooner, so a profile synthesized during an outage may carry fewer publications.
    Already possible after 4 attempts; likelier now, in exchange for a job that terminates.
 6. **COR-28b's ack detector (D12).** The word-count threshold closes the filed false positive by
-   introducing an unfiled false negative — a short but substantive reply reads as an ack. **12 words**
-   was a deliberate cut. State the trade with the measured number; a length-independent content test
-   is larger than the clause asks.
+   introducing an unfiled false negative — a short but substantive reply reads as an ack. **10 words**
+   (`_ACK_SUBSTANTIVE_WORD_COUNT`, `src/agent/funding_rules.py`) was a deliberate cut. State the trade
+   with the measured number; a length-independent content test is larger than the clause asks.
 7. **Task 22's widening beyond U+2019** — the issue names only that code point; the shipped class
    covers the remaining apostrophe forms. Declared, not silent.
 8. **D10 is a rollout note, not a defect:** prod needs a dedicated GrantBot Slack token or GrantBot
