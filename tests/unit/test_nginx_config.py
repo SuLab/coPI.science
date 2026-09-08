@@ -139,9 +139,7 @@ def test_csp_report_only_lines_are_byte_identical_across_vhosts():
 # or style execution) — default-src/script-src/style-src stay Report-Only only until
 # those are audited for nonces/hashes.
 CSP_ENFORCING = "Content-Security-Policy"
-EXPECTED_ENFORCING_POLICY = (
-    "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
-)
+EXPECTED_ENFORCING_POLICY = "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
 
 
 def _enforcing_csp_line(block: str) -> str:
@@ -186,6 +184,26 @@ def test_csp_enforcing_lines_are_byte_identical_across_vhosts():
     text = _nginx_conf()
     lines = {_enforcing_csp_line(_https_block(text, name)) for name in VHOSTS}
     assert len(lines) == 1, f"enforcing {CSP_ENFORCING} lines differ across vhosts: {lines}"
+
+
+def test_csp_enforcing_header_never_restricts_form_action():
+    # Opus review of RC-5 (2026-09-08): Chromium (and Firefox) apply `form-action` to
+    # the REDIRECT a form submission's response returns, not just the form's own
+    # `action` attribute. The admin Provision button
+    # (templates/admin/agent_detail.html:107-129) POSTs to
+    # /admin/agents/{id}/slack/provision (src/routers/admin.py:998-1023), which 302s to
+    # Slack's OAuth consent screen at https://slack.com/oauth/v2/authorize
+    # (src/services/admin_provisioning.py:216) -- a same-origin `form-action 'self'`
+    # enforced at the edge would block that redirect and break provisioning outright.
+    # `form-action` stays in the Report-Only header (still collects violation data);
+    # the enforcing header must never carry it.
+    text = _nginx_conf()
+    for name in VHOSTS:
+        line = _enforcing_csp_line(_https_block(text, name))
+        assert "form-action" not in line, (
+            f"{name}'s enforcing {CSP_ENFORCING} line restricts form-action, which "
+            "would break the admin Slack-provisioning POST-then-redirect flow"
+        )
 
 
 def test_general_timeout_stays_120s():
