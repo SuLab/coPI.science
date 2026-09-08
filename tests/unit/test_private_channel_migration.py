@@ -9,6 +9,8 @@ Most of the file is pure and DB-free; the transaction-boundary tests at the end
 ``integration`` marker.
 """
 
+import threading
+
 import pytest
 from sqlalchemy import func, select
 
@@ -27,6 +29,7 @@ from src.services.private_channels import (
     migrate_public_thread_to_private,
 )
 from tests import factories
+from tests.fakes import FakeSlackClient
 
 
 def _join_handover(
@@ -466,3 +469,134 @@ class TestOfflineMigrationDurability:
                 AgentMessage.channel_id == channel_id
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# RC-14 (audit 2026-09-08 follow-up) — every Slack call runs off the event loop
+# ---------------------------------------------------------------------------
+
+
+class _ThreadRecordingSlackClient(FakeSlackClient):
+    """Records which OS thread each Slack-calling method actually ran on.
+
+    A synchronous ``AgentSlackClient`` call can block for up to
+    ``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s, RC-3) under a
+    sustained 429. Called straight from async code, that freezes the single
+    ASGI worker or the worker process for the whole retry loop. This fake
+    proves the fix: every method the migration calls records
+    ``threading.get_ident()`` before delegating to the real (mock-mode)
+    behaviour, so a test can assert none of them ran on the event loop's own
+    thread.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.threads_seen: set[int] = set()
+
+    def _record(self) -> None:
+        self.threads_seen.add(threading.get_ident())
+
+    def create_private_channel(self, name):
+        self._record()
+        return super().create_private_channel(name)
+
+    def invite_to_channel(self, channel_id, user_ids):
+        self._record()
+        return super().invite_to_channel(channel_id, user_ids)
+
+    def post_message(self, channel, text, thread_ts=None):
+        self._record()
+        return super().post_message(channel, text, thread_ts)
+
+    def send_dm(self, user_id, text):
+        self._record()
+        return super().send_dm(user_id, text)
+
+    def _resolve_channel_id(self, channel):
+        self._record()
+        return super()._resolve_channel_id(channel)
+
+
+@pytest.mark.integration
+class TestSlackCallsRunOffTheEventLoop:
+    """RC-14: src/services/private_channels.py calls straight into
+    AgentSlackClient's synchronous, blocking methods from async code (the web
+    reopen route, the e-mail inbound worker). Every one of those calls must go
+    through ``asyncio.to_thread`` so a Slack throttle cannot freeze the
+    process.
+    """
+
+    async def _seed(self, db):
+        run = await factories.make_simulation_run(db)
+        pi = await factories.make_user(db, name="Andrew Su")
+        await factories.make_agent(
+            db, user=pi, agent_id="alpha", bot_name="AlphaBot", pi_name="Andrew Su",
+            slack_user_id="U_ALPHA_PI",
+        )
+        other_pi = await factories.make_user(db, name="Luke Wiseman")
+        await factories.make_agent(
+            db, user=other_pi, agent_id="beta", bot_name="BetaBot", pi_name="Luke Wiseman",
+            slack_user_id="U_BETA_PI",
+        )
+        td = await factories.make_thread_decision(
+            db, run=run, agent_a="alpha", agent_b="beta",
+            channel="drug-repurposing", origin_visibility="public",
+            summary_text="Joint repurposing screen of the HRI activator series.",
+        )
+        return run, pi, td
+
+    async def test_migration_slack_calls_execute_off_the_event_loop_thread(
+        self, db_session, monkeypatch,
+    ):
+        run, pi, td = await self._seed(db_session)
+        loop_thread = threading.get_ident()
+
+        made: list[_ThreadRecordingSlackClient] = []
+        make_client_threads: list[int] = []
+
+        async def _on(*a, **k):
+            return True
+
+        async def _token(db, agent_id):
+            return f"xoxb-fake-{agent_id}"
+
+        def _client(agent_id, bot_token):
+            make_client_threads.append(threading.get_ident())
+            c = _ThreadRecordingSlackClient(agent_id=agent_id, bot_token=bot_token)
+            made.append(c)
+            return c
+
+        monkeypatch.setattr(
+            "src.services.private_channels._slack_enabled_for_migration", _on)
+        monkeypatch.setattr(
+            "src.services.private_channels._get_or_fail_bot_token", _token)
+        monkeypatch.setattr("src.services.private_channels._make_client", _client)
+
+        result = await migrate_public_thread_to_private(
+            db_session,
+            thread_decision=td,
+            creator_agent_id="alpha",
+            creator_pi_user=pi,
+            guidance_text="Nail down the ternary-complex geometry first.",
+        )
+
+        # Sanity: this exercised the Slack-on path (a real channel-shaped id),
+        # not the DB-only fallback — otherwise the assertions below would be
+        # vacuously true because no Slack call was ever made.
+        assert result.channel_id.startswith("G_")
+        assert len(made) == 2, "expected one client each for the creator and other bot"
+
+        assert make_client_threads, "_make_client was never called"
+        assert loop_thread not in make_client_threads, (
+            "_make_client (which calls AgentSlackClient.connect()) ran on the "
+            "event loop's own thread"
+        )
+        for client in made:
+            assert client.threads_seen, (
+                f"no Slack calls were recorded on the {client.agent_id} client"
+            )
+            assert loop_thread not in client.threads_seen, (
+                f"a Slack call on the {client.agent_id} client ran on the event "
+                "loop's own thread — a sustained throttle would freeze the "
+                "whole process for up to RATE_LIMIT_WAIT_BUDGET_SECONDS"
+            )

@@ -231,6 +231,34 @@ call time; default behaviour unchanged). `scripts/live_slack_preflight.py` check
 otherwise with the exact `chown` or `COPI_PROFILES_DIR=` remedy. `scripts/run_live_slack.sh`
 docstring documents it. Tests red first for the preflight check and for the setting.
 
+## RC-14 — MEDIUM — synchronous Slack calls in `private_channels.py` block the event loop (Opus review, 2026-09-08)
+
+**Root cause.** `src/services/private_channels.py`'s `migrate_public_thread_to_private`
+(and its `_make_client` helper) is `async` but calls straight into `AgentSlackClient`'s
+synchronous, blocking methods — `connect()` (via `_make_client`), `create_private_channel`,
+`invite_to_channel`, `_resolve_channel_id`, `post_message`, `send_dm` — from the web reopen
+route and the e-mail inbound worker. Since RC-3 raised the rate-limit wait budget to
+`RATE_LIMIT_WAIT_BUDGET_SECONDS = 180.0`, a single sustained Slack throttle during this flow
+can now block for up to 180s on the calling thread. Because both callers are async
+(single-worker ASGI app / worker event loop), that blocks every other request or job in the
+process for the duration, not just the one PI's reopen.
+
+**Fix.** Wrap every `AgentSlackClient` call site in `private_channels.py` in
+`asyncio.to_thread(...)`: the two `_make_client(...)` calls, `create_private_channel`,
+`invite_to_channel` (both bots), `_resolve_channel_id`, the handover `post_message` loop, the
+close-marker `post_message`, and `send_dm`. `other_client.bot_user_id` is a plain in-memory
+property read (no I/O) and is left as-is. The engine's own `_post_message`
+(`src/agent/simulation.py`) is deliberately NOT touched — the simulation main loop is
+synchronous by design and runs in its own process, so it was never in scope here.
+
+**Tests (red first).** `tests/unit/test_private_channel_migration.py`,
+`TestSlackCallsRunOffTheEventLoop`: drives `migrate_public_thread_to_private` through its
+Slack-on path with `_ThreadRecordingSlackClient` (records `threading.get_ident()` on every
+call) standing in for both bots' clients, and asserts none of those calls — nor the
+`_make_client` dispatch itself — ran on the event loop's own thread. Failed pre-fix with
+`_make_client` recorded on the loop thread; passes post-fix. Style follows
+`tests/unit/test_slack_provisioning.py`'s `test_create_app_async_runs_off_the_event_loop`.
+
 ## RC-12 — closure paperwork
 
 - `docs/plans/2026-09-02-close-issues-20-27-pr-body.md:179`: `Closes #22, #23, #24, #25` (add
