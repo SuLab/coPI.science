@@ -16,10 +16,22 @@
 #
 # THE FIX IS ORDERING, ENFORCED EXPLICITLY, NOT LEFT TO depends_on:
 #   1. build migrate, app, worker (new images)
-#   2. stop the OLD app/worker (they must not serve while migrate runs)
+#   2. stop the OLD app/worker, GRACEFULLY (`-t 30`, matching the agent-restart runbook
+#      in CLAUDE.md -- an in-flight request gets a chance to finish rather than being
+#      SIGKILLed at 0s); they must not serve while migrate runs
 #   3. start migrate and wait for it to exit; abort on nonzero (old containers stay
-#      stopped -- refusing is safer than guessing)
-#   4. start the NEW app/worker only once migrate is verified to have exited 0
+#      stopped -- refusing is safer than guessing). The exit code is read via `docker
+#      wait <container id>`, NOT `docker compose wait migrate` (opus review,
+#      2026-09-08): the latter looks up the service by PROJECT state, and measured
+#      against a `migrate` that has already exited by the time `wait` runs, it fails
+#      with "no containers for project" in >=0.3 s instead of reporting the exit code
+#      -- which would abort this script with app/worker left stopped even though
+#      migrate actually succeeded. `docker wait` on the container's own id talks to
+#      the Engine API directly and has no such race.
+#   4. start the NEW app/worker only once migrate is verified to have exited 0, and
+#      wait for the new app container to report Docker-healthy (bounded; see
+#      APP_HEALTH_TIMEOUT_SECONDS) before declaring success -- `up -d` returning just
+#      means the container was created, not that it is serving.
 #   5. reload nginx -- the recreated app container gets a new IP, and nginx's static
 #      `upstream app { server app:8000; }` caches the old one until reloaded (see the
 #      nginx-stale-upstream-ip-after-app-recreate memory note; it self-heals in <=6h
@@ -98,18 +110,33 @@ compose() {
   docker compose "${COMPOSE_ARGS[@]}" "$@"
 }
 
-echo "==> [1/5] building migrate, app, worker"
+# How long to wait for the new app container to report Docker-healthy before giving up
+# (its healthcheck in docker-compose.prod.yml polls every 30s with a 15s start_period,
+# so 120s gives it roughly three tries). Overridable for testing.
+APP_HEALTH_TIMEOUT_SECONDS="${APP_HEALTH_TIMEOUT_SECONDS:-120}"
+APP_HEALTH_POLL_INTERVAL_SECONDS="${APP_HEALTH_POLL_INTERVAL_SECONDS:-3}"
+
+echo "==> [1/6] building migrate, app, worker"
 compose build migrate app worker
 
-echo "==> [2/5] stopping app, worker (must not serve while migrate applies the new schema)"
-compose stop app worker
+echo "==> [2/6] stopping app, worker (must not serve while migrate applies the new schema)"
+compose stop -t 30 app worker
 
-echo "==> [3/5] running migrate"
+echo "==> [3/6] running migrate"
 compose up -d migrate
+MIGRATE_CID="$(compose ps -aq migrate)"
+if [ -z "$MIGRATE_CID" ]; then
+  die "no migrate container found after \`up -d migrate\` -- cannot verify its exit code.
+  app/worker remain stopped. See docs/production-migration.md section 10.6."
+fi
 set +e
-compose wait migrate
-MIGRATE_EXIT=$?
+MIGRATE_EXIT="$(docker wait "$MIGRATE_CID")"
+WAIT_RC=$?
 set -e
+if [ "$WAIT_RC" -ne 0 ] || [ -z "$MIGRATE_EXIT" ]; then
+  die "\`docker wait $MIGRATE_CID\` failed to report an exit code (rc=$WAIT_RC) --
+  cannot confirm migrate succeeded. app/worker remain stopped."
+fi
 if [ "$MIGRATE_EXIT" -ne 0 ]; then
   die "migrate exited $MIGRATE_EXIT -- aborting. app/worker remain stopped (old code is
   not serving, but neither is the new code). Fix the migration, then re-run this script.
@@ -117,10 +144,29 @@ if [ "$MIGRATE_EXIT" -ne 0 ]; then
 fi
 echo "    migrate exited 0"
 
-echo "==> [4/5] starting app, worker on the new image"
+echo "==> [4/6] starting app, worker on the new image"
 compose up -d app worker
 
-echo "==> [5/5] reloading nginx (picks up the recreated app container's new IP)"
+echo "==> [5/6] waiting for the new app container to report healthy (up to ${APP_HEALTH_TIMEOUT_SECONDS}s)"
+APP_CID="$(compose ps -q app)"
+if [ -z "$APP_CID" ]; then
+  die "no app container found after \`up -d app worker\` -- cannot confirm it is serving."
+fi
+DEADLINE=$(( $(date +%s) + APP_HEALTH_TIMEOUT_SECONDS ))
+HEALTH="unknown"
+while :; do
+  HEALTH="$(docker inspect -f '{{.State.Health.Status}}' "$APP_CID" 2>/dev/null || echo "unknown")"
+  [ "$HEALTH" = "healthy" ] && break
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    die "app container did not report healthy within ${APP_HEALTH_TIMEOUT_SECONDS}s
+  (last status: $HEALTH). It is running the new image but may not be serving correctly --
+  check \`docker compose logs app\` before assuming the deploy succeeded."
+  fi
+  sleep "$APP_HEALTH_POLL_INTERVAL_SECONDS"
+done
+echo "    app is healthy"
+
+echo "==> [6/6] reloading nginx (picks up the recreated app container's new IP)"
 compose exec -T nginx nginx -s reload
 
 echo "==> redeploy complete"

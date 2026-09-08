@@ -30,17 +30,36 @@ PROD_FILE = "docker-compose.prod.yml"
 OVERRIDE_FILE = "docker-compose.override.yml"
 
 
-def _shim(tmp_path: Path, *, migrate_exit: int = 0) -> tuple[Path, Path]:
-    """A `docker` on PATH that logs every invocation and answers `docker compose wait
-    migrate` with `migrate_exit` (the exit code check redeploy.sh must perform after
-    starting `migrate`)."""
+MIGRATE_CID = "fake-migrate-cid"
+APP_CID = "fake-app-cid"
+
+
+def _shim(
+    tmp_path: Path, *, migrate_exit: int = 0, app_health_status: str = "healthy"
+) -> tuple[Path, Path]:
+    """A `docker` on PATH that logs every invocation and fakes just enough of the real
+    CLI for redeploy.sh's post-RC-6-review flow:
+
+    - `docker compose ... ps -aq migrate` -> a fake container id (so the script has
+      something to pass to `docker wait`, mirroring the real one-shot's lifecycle).
+    - `docker wait <that id>` -> prints `migrate_exit` to stdout, exits 0 itself (this
+      is the real command's contract: the container's exit code is the OUTPUT, not the
+      process's own exit status -- unlike the `docker compose wait` this replaced,
+      which returned the exit code as ITS OWN exit status and had a "no containers for
+      project" race against an already-exited one-shot).
+    - `docker compose ... ps -q app` -> a fake app container id.
+    - `docker inspect -f '{{.State.Health.Status}}' <that id>` -> `app_health_status`.
+    """
     log = tmp_path / "argv.log"
     shim = tmp_path / "docker"
     shim.write_text(
         "#!/usr/bin/env bash\n"
         f'echo "$@" >> {log}\n'
         'case "$*" in\n'
-        f'  *"wait migrate"*) exit {migrate_exit} ;;\n'
+        f'  *"ps -aq migrate"*) echo {MIGRATE_CID} ;;\n'
+        f'  "wait {MIGRATE_CID}") echo {migrate_exit} ;;\n'
+        f'  *"ps -q app"*) echo {APP_CID} ;;\n'
+        f'  *"inspect -f "*"{APP_CID}"*) echo {app_health_status} ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
@@ -48,9 +67,25 @@ def _shim(tmp_path: Path, *, migrate_exit: int = 0) -> tuple[Path, Path]:
     return shim, log
 
 
-def _run(tmp_path: Path, args: list[str], *, compose_file_env: str | None = None):
-    shim, log = _shim(tmp_path)
-    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+def _run(
+    tmp_path: Path,
+    args: list[str],
+    *,
+    compose_file_env: str | None = None,
+    migrate_exit: int = 0,
+    app_health_status: str = "healthy",
+    extra_env: dict | None = None,
+):
+    shim, log = _shim(tmp_path, migrate_exit=migrate_exit, app_health_status=app_health_status)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        # Fast and deterministic: the happy path answers "healthy" on the first poll
+        # regardless of these, and the timeout test wants a short bound.
+        "APP_HEALTH_TIMEOUT_SECONDS": "1",
+        "APP_HEALTH_POLL_INTERVAL_SECONDS": "0",
+        **(extra_env or {}),
+    }
     env.pop("COMPOSE_FILE", None)
     if compose_file_env is not None:
         env["COMPOSE_FILE"] = compose_file_env
@@ -151,7 +186,60 @@ def test_never_passes_remove_orphans():
 
 
 def test_aborts_and_does_not_start_app_worker_when_migrate_fails(tmp_path):
-    shim, log = _shim(tmp_path, migrate_exit=1)
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE], migrate_exit=1)
+    assert proc.returncode != 0
+    argv = log.read_text()
+    started_new_app_worker = any(
+        "up" in line and "-d" in line and "app" in line and "worker" in line and "migrate" not in line
+        for line in argv.splitlines()
+    )
+    assert not started_new_app_worker, (
+        "redeploy.sh started app/worker on the new image after migrate failed:\n" + argv
+    )
+
+
+# --- Opus review of RC-6 (2026-09-08) ----------------------------------------------
+# `docker compose wait migrate` returns 1 with "no containers for project" (measured
+# by the reviewer at >=0.3s) when the one-shot has ALREADY exited by the time `wait`
+# runs -- a real race, not a hypothetical, since `up -d migrate` can return before or
+# after the container finishes. That would abort the deploy with app/worker stopped
+# even though migrate actually succeeded. Fixed by reading the exit code via `docker
+# wait <container id>` (talks to the Engine API directly, no project-state race).
+
+
+def test_migrate_exit_code_is_read_via_docker_wait_on_the_container_id_not_compose_wait(tmp_path):
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    argv = log.read_text()
+    lines = [line for line in argv.splitlines() if line.strip()]
+
+    # The `ps -aq migrate` lookup happened (redeploy.sh resolves the container id).
+    assert any("ps -aq migrate" in line for line in lines), argv
+    # And the exit code came from a BARE `docker wait <id>` call -- not routed through
+    # `docker compose ... wait migrate` (compose-level `wait`), which is the buggy
+    # command this replaces.
+    assert any(line.strip() == f"wait {MIGRATE_CID}" for line in lines), (
+        f"expected a bare 'docker wait {MIGRATE_CID}' call; got:\n{argv}"
+    )
+    assert not any("compose" in line and "wait" in line and "migrate" in line for line in lines), (
+        f"redeploy.sh must not call 'docker compose ... wait migrate':\n{argv}"
+    )
+
+
+def test_aborts_when_migrate_container_id_cannot_be_resolved(tmp_path):
+    # `ps -aq migrate` prints nothing (e.g. the compose project name doesn't match) --
+    # redeploy.sh must refuse rather than call `docker wait ""`.
+    log = tmp_path / "argv.log"
+    shim = tmp_path / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> {log}\n'
+        'case "$*" in\n'
+        '  *"ps -aq migrate"*) ;;\n'  # prints nothing
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
     env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
     env.pop("COMPOSE_FILE", None)
     proc = subprocess.run(
@@ -163,11 +251,49 @@ def test_aborts_and_does_not_start_app_worker_when_migrate_fails(tmp_path):
         timeout=30,
     )
     assert proc.returncode != 0
-    argv = log.read_text()
-    started_new_app_worker = any(
-        "up" in line and "-d" in line and "app" in line and "worker" in line and "migrate" not in line
-        for line in argv.splitlines()
+    assert "wait \"\"" not in log.read_text()
+
+
+def test_app_worker_are_stopped_gracefully_with_a_30s_timeout(tmp_path):
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = [line for line in log.read_text().splitlines() if line.strip()]
+    stop_lines = [line for line in lines if " stop " in f" {line} "]
+    assert stop_lines, log.read_text()
+    assert any("-t 30" in line for line in stop_lines), (
+        f"stop must use '-t 30' (matches CLAUDE.md's agent-restart runbook), got: {stop_lines}"
     )
-    assert not started_new_app_worker, (
-        "redeploy.sh started app/worker on the new image after migrate failed:\n" + argv
+
+
+def test_waits_for_the_new_app_container_to_report_healthy_before_reloading_nginx(tmp_path):
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE], app_health_status="healthy")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = [line for line in log.read_text().splitlines() if line.strip()]
+
+    def first_index(predicate):
+        for i, line in enumerate(lines):
+            if predicate(line):
+                return i
+        raise AssertionError(f"no matching call found in:\n{lines}")
+
+    i_up_app = first_index(
+        lambda line: "up" in line and "-d" in line and "app" in line and "worker" in line
+        and "migrate" not in line
+    )
+    i_health = first_index(lambda line: "inspect" in line and APP_CID in line)
+    i_reload = first_index(lambda line: "nginx" in line and "reload" in line)
+    assert i_up_app < i_health < i_reload, f"order out of sequence:\n{lines}"
+
+
+def test_aborts_if_the_app_container_never_becomes_healthy_within_the_bound(tmp_path):
+    # Always "starting" -- a container that never passes its healthcheck. Must abort
+    # within the bounded timeout (env-overridden to 1s / 0s poll by _run) rather than
+    # hang or declare success anyway, and must never reach the nginx reload step.
+    proc, log = _run(
+        tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE], app_health_status="starting"
+    )
+    assert proc.returncode != 0
+    argv = log.read_text()
+    assert not any("nginx" in line and "reload" in line for line in argv.splitlines()), (
+        f"nginx was reloaded even though the app container never reported healthy:\n{argv}"
     )
