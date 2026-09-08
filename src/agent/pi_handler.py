@@ -137,52 +137,79 @@ class PIHandler:
 
             if profile_match:
                 new_profile = profile_match.group(1).strip()
-                agent.update_private_profile(new_profile)
 
-                # Persist to DB and record revision
+                # DB first, disk second (RC-7, audit 2026-09-08). The DB is the
+                # primary store; a disk write failure must never be reported to
+                # the PI as success, and it must never be allowed to overwrite a
+                # good DB row with stale content (that was the original defect —
+                # see Agent.update_private_profile / persist_private_profile_to_db).
+                # `db_ok` stays True when no session_factory is configured at
+                # all (e.g. in tests) — that is a deployment choice, not a
+                # failed write, so it must not trigger the "couldn't be saved"
+                # acknowledgement below.
+                db_ok = True
                 if self.session_factory:
+                    db_ok = False
                     try:
                         async with self.session_factory() as db:
-                            await agent.persist_private_profile_to_db(db)
-
-                            # Record profile revision
-                            from sqlalchemy import select
-                            from src.models import AgentRegistry, User
-                            from src.services.profile_versioning import create_revision
-                            agent_reg = (await db.execute(
-                                select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-                            )).scalar_one_or_none()
-                            pi_user = (await db.execute(
-                                select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
-                                .where(AgentRegistry.slack_user_id == pi_slack_id)
-                            )).scalar_one_or_none()
-                            if agent_reg:
-                                summary = instruction[:200] if instruction else None
-                                await create_revision(
-                                    db,
-                                    agent_registry_id=agent_reg.id,
-                                    profile_type="private",
-                                    content=new_profile,
-                                    changed_by_user_id=pi_user.id if pi_user else None,
-                                    mechanism="slack_dm",
-                                    change_summary=f"PI instruction: {summary}" if summary else None,
-                                )
-                                await db.commit()
+                            db_ok = await agent.persist_private_profile_to_db(db, new_profile)
+                            if db_ok:
+                                # Record profile revision
+                                from sqlalchemy import select
+                                from src.models import AgentRegistry, User
+                                from src.services.profile_versioning import create_revision
+                                agent_reg = (await db.execute(
+                                    select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+                                )).scalar_one_or_none()
+                                pi_user = (await db.execute(
+                                    select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
+                                    .where(AgentRegistry.slack_user_id == pi_slack_id)
+                                )).scalar_one_or_none()
+                                if agent_reg:
+                                    summary = instruction[:200] if instruction else None
+                                    await create_revision(
+                                        db,
+                                        agent_registry_id=agent_reg.id,
+                                        profile_type="private",
+                                        content=new_profile,
+                                        changed_by_user_id=pi_user.id if pi_user else None,
+                                        mechanism="slack_dm",
+                                        change_summary=f"PI instruction: {summary}" if summary else None,
+                                    )
+                                    await db.commit()
                     except Exception as db_exc:
                         logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
+                        db_ok = False
+
+                # Disk is best-effort once the DB outcome is known: a disk
+                # failure here is logged and does not change the acknowledgement
+                # (the DB already has — or doesn't have — the new content, and
+                # that is what the PI is told about).
+                if not agent.update_private_profile(new_profile):
+                    logger.warning(
+                        "[%s] Private profile disk write failed (db_ok=%s); "
+                        "the in-memory cache still reflects the new instruction",
+                        agent_id, db_ok,
+                    )
 
                 changes = changes_match.group(1).strip() if changes_match else "Profile updated."
 
-                confirmation = (
-                    f"I've updated my private profile to reflect your instruction. "
-                    f"Here's what changed: {changes}\n\n"
-                    f"Here's my full updated profile:\n\n"
-                    f"```\n{new_profile}\n```\n\n"
-                    f"Reply with further instructions to refine, or edit directly "
-                    f"at copi.science/agent/profile/edit."
-                )
-                await self._send_dm(agent_id, pi_slack_id, confirmation)
-                logger.info("[%s] Private profile rewritten per PI instruction", agent_id)
+                if db_ok:
+                    confirmation = (
+                        f"I've updated my private profile to reflect your instruction. "
+                        f"Here's what changed: {changes}\n\n"
+                        f"Here's my full updated profile:\n\n"
+                        f"```\n{new_profile}\n```\n\n"
+                        f"Reply with further instructions to refine, or edit directly "
+                        f"at copi.science/agent/profile/edit."
+                    )
+                    await self._send_dm(agent_id, pi_slack_id, confirmation)
+                    logger.info("[%s] Private profile rewritten per PI instruction", agent_id)
+                else:
+                    await self._send_dm(agent_id, pi_slack_id,
+                        "I received your instruction, but I wasn't able to save it. "
+                        "Please try again in a moment, or edit your profile directly "
+                        "at copi.science/agent/profile/edit.")
             else:
                 logger.warning("[%s] Profile rewrite response missing <profile> tags", agent_id)
                 await self._send_dm(agent_id, pi_slack_id,

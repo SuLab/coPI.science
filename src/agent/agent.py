@@ -728,21 +728,51 @@ Use these to reference other labs' work in conversations. Include links when cit
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 
-    def update_private_profile(self, new_profile: str) -> None:
+    def update_private_profile(self, new_profile: str) -> bool:
         """Write private profile to profiles/private/{agent_id}.md (disk only).
 
-        For DB persistence, call persist_private_profile_to_db() afterward.
+        Returns True if the disk write succeeded, False otherwise (and logs an
+        ERROR). Either way, the in-memory cache is set to ``new_profile`` — an
+        accepted instruction must be reflected in the agent's behaviour
+        immediately, even if it could not (yet) be written to disk. See RC-7
+        (audit 2026-09-08): the old contract invalidated the cache to None on
+        failure, so the *next* read re-loaded the (unchanged, stale) file from
+        disk — and callers that then persisted "the current private profile"
+        to the database silently overwrote a good DB copy with that stale
+        content. Making the write's own argument the source of truth for the
+        cache, on both branches, closes that path entirely: the cache can only
+        ever hold what was actually attempted, never a reload of something
+        older.
+
+        For DB persistence, call persist_private_profile_to_db() with this
+        same content afterward (never with `self.private_profile` — see that
+        method's docstring).
         """
         profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(profile_path, new_profile + "\n", encoding="utf-8")
-            self._private_profile = None  # Invalidate cache
+            self._private_profile = new_profile
+            return True
         except Exception as exc:
             logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)
+            self._private_profile = new_profile
+            return False
 
-    async def persist_private_profile_to_db(self, db: "AsyncSession") -> None:
-        """Sync the on-disk private profile to the database."""
+    async def persist_private_profile_to_db(self, db: "AsyncSession", content: str) -> bool:
+        """Sync ``content`` to the database. Returns True on success.
+
+        Takes the content to persist explicitly and never reads
+        ``self.private_profile`` (disk or cache) — see RC-7 (audit 2026-09-08).
+        The old signature re-read ``self.private_profile`` here, which on a
+        cache miss re-loads the on-disk file; if a prior
+        ``update_private_profile`` call had just failed to write that file,
+        this method faithfully persisted the STALE file over a DB row the
+        caller believed it was updating with the PI's new instruction. Taking
+        the content as a parameter makes this method's output depend only on
+        its argument, decoupled from whatever the disk write did or did not
+        do.
+        """
         from sqlalchemy import select
         from src.models import AgentRegistry, ResearcherProfile
 
@@ -752,18 +782,29 @@ Use these to reference other labs' work in conversations. Include links when cit
             )
             agent_reg = agent_result.scalar_one_or_none()
             if not agent_reg:
-                return
+                logger.error(
+                    "[%s] Failed to persist private profile to DB: no AgentRegistry row",
+                    self.agent_id,
+                )
+                return False
             profile_result = await db.execute(
                 select(ResearcherProfile).where(
                     ResearcherProfile.user_id == agent_reg.user_id
                 )
             )
             profile = profile_result.scalar_one_or_none()
-            if profile:
-                profile.private_profile_md = self.private_profile
-                await db.commit()
+            if not profile:
+                logger.error(
+                    "[%s] Failed to persist private profile to DB: no ResearcherProfile row",
+                    self.agent_id,
+                )
+                return False
+            profile.private_profile_md = content
+            await db.commit()
+            return True
         except Exception as exc:
             logger.error("[%s] Failed to persist private profile to DB: %s", self.agent_id, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Helpers
