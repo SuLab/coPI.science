@@ -1239,6 +1239,12 @@ async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     assert msg.sender_name == "Pat Owner (PI)"
     assert msg.content == "@OwnerBot Let's aim at the assay."  # tag_bot prepends
     assert msg.visibility == "public"
+    # RC-1 (#20 COR-5): the ownership carrier _agent_ids_owned_by_user
+    # resolves against — must be the acting PI's own id, not NULL.
+    assert msg.sender_user_id == world.pi.id
+    # RC-2: stamped 'pending' at insert time so a down agent-run's cursor
+    # jump can never make this row permanently invisible to the poller.
+    assert msg.pi_inbound_state == "pending"
 
     # …and it is visible on the read view (control that the write is reachable).
     page = await client.get(f"/agent/{OWNER_AGENT}/conversations",

@@ -41,9 +41,11 @@ async def test_record_pi_message_resolves_channel_and_writes_human_row(db_sessio
         db_session, run=run, channel_name="general", channel_id="C-GEN",
         visibility="collab_private",
     )
+    user = await factories.make_user(db_session)
     msg = await record_pi_message(
         db_session, run_id=run.id, channel_name="general",
         content="please prioritize the kinase panel", sender_name="Dr Smoke (PI)",
+        sender_user_id=user.id,
     )
     await db_session.flush()
 
@@ -53,25 +55,38 @@ async def test_record_pi_message_resolves_channel_and_writes_human_row(db_sessio
     assert msg.visibility == "collab_private"
     assert msg.phase == "new_post"       # top-level (no thread_ts)
     assert msg.posted_at > 0 and msg.message_ts
+    # RC-1: the ownership carrier _agent_ids_owned_by_user resolves against.
+    assert msg.sender_user_id == user.id
 
     row = (await db_session.execute(
         select(AgentMessage).where(AgentMessage.message_ts == msg.message_ts)
     )).scalar_one()
     assert row.content == "please prioritize the kinase panel"
     assert row.sender_name == "Dr Smoke (PI)"
+    assert row.sender_user_id == user.id
+    # RC-2: stamped 'pending' at insert time so a down agent-run's cursor
+    # jump can never make this row permanently invisible to the poller.
+    assert row.pi_inbound_state == "pending"
 
 
 async def test_record_pi_message_reply_and_local_channel_fallback(db_session):
     run = await factories.make_simulation_run(db_session)
     # No agent_channels row for this name -> local: id, public visibility.
+    # sender_user_id=None is an accepted value (the caller must still pass the
+    # keyword explicitly) -- record_pi_message must not choke on it, though
+    # SimulationEngine._handle_pi_inbound_entry will skip every ownership-
+    # gated side effect for a row that ends up with a NULL sender_user_id.
     msg = await record_pi_message(
         db_session, run_id=run.id, channel_name="drug-repurposing",
-        content="following up here", sender_name="PI", thread_ts="123.456",
+        content="following up here", sender_name="PI", sender_user_id=None,
+        thread_ts="123.456",
     )
     assert msg.channel_id == "local:drug-repurposing"
     assert msg.visibility == "public"
     assert msg.thread_ts == "123.456"
     assert msg.phase == "thread_reply"   # has a thread_ts
+    assert msg.sender_user_id is None
+    assert msg.pi_inbound_state == "pending"
 
 
 async def test_record_pi_dm_inbound_and_outbound(db_session):

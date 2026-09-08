@@ -196,6 +196,17 @@ PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 # supersedes D25) and task-8.md.
 PI_INBOUND_INGESTED = "ingested"
 PI_INBOUND_HANDLED = "handled"
+# A fourth state, written at INSERT time by record_pi_message (RC-2 / #20
+# blocker): "this row needs a DB inbound poller's attention no matter how far
+# behind the cursor it is". Without it, a PI message written while agent-run
+# was down could age past PI_INBOX_LOOKBACK_S before the process came back —
+# _seed_pi_inbox_cursor jumps the cursor to max(created_at) at startup, so the
+# lookback window never reaches a row older than that. 'pending' rows are
+# fetched by _poll_inbound_from_db regardless of the cursor and are never
+# skipped by the dedup predicate (it only special-cases HANDLED and the
+# NULL-fallback), so they always reach the normal ingest→handle→HANDLED path
+# once a poller is running again. See docs/plans/2026-09-08-audit-fixes.md RC-2.
+PI_INBOUND_PENDING = "pending"
 
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
@@ -3325,6 +3336,8 @@ class SimulationEngine:
         """
         if not self.session_factory or not self.simulation_run_id:
             return
+        from sqlalchemy import and_ as sa_and
+        from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
         try:
             async with self.session_factory() as db:
@@ -3332,12 +3345,24 @@ class SimulationEngine:
                     sa_select(AgentMessage)
                     .where(
                         AgentMessage.simulation_run_id == self.simulation_run_id,
-                        # Cursor over created_at (the DB server's clock), with a
-                        # lookback so a row that committed after the cursor
-                        # advanced past its stamp is still caught (H2). Re-scanned
-                        # rows are free — the log dedup below skips anything
-                        # already ingested. See PI_INBOX_LOOKBACK_S (H2 + R3).
-                        AgentMessage.created_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK,
+                        sa_or(
+                            # Cursor over created_at (the DB server's clock), with a
+                            # lookback so a row that committed after the cursor
+                            # advanced past its stamp is still caught (H2). Re-scanned
+                            # rows are free — the log dedup below skips anything
+                            # already ingested. See PI_INBOX_LOOKBACK_S (H2 + R3).
+                            AgentMessage.created_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK,
+                            # A row explicitly marked 'pending' at write time (RC-2)
+                            # is fetched regardless of how far behind the cursor it
+                            # is — this is exactly the recovery path for a PI
+                            # message written while agent-run was down, which would
+                            # otherwise age past the lookback window before the
+                            # process ever came back to see it.
+                            sa_and(
+                                AgentMessage.is_bot.is_(False),
+                                AgentMessage.pi_inbound_state == PI_INBOUND_PENDING,
+                            ),
+                        ),
                     )
                     # Ingest in the DB's arrival order; posted_at remains the
                     # ordering key for the conversation content itself.
@@ -3898,12 +3923,17 @@ class SimulationEngine:
                         self._dm_poll_cursors[agent_id] = ts
 
     async def _seed_pi_dm_cursor(self) -> None:
-        """Start the DM poller past existing inbound DMs (don't replay history).
+        """Start the DM poller's window past existing inbound DMs on startup.
 
-        Seeds both the cursor (max created_at — the DB server's clock, see R3)
-        and the seen-set (ts of inbound DMs within the lookback window), so the
-        first poll's lookback re-scan doesn't re-process history through
-        handle_dm on restart.
+        Seeds only the cursor (max created_at — the DB server's clock, see
+        R3), which bounds the query window for performance. It no longer also
+        seeds ``_pi_dm_seen`` from the DB (RC-2): dedup against a row already
+        processed is now the durable ``handled_at`` column, which — unlike the
+        in-memory seen-set — survives a restart, so an unhandled DM older than
+        the window is still found by ``_poll_pi_dms_from_db``'s ``handled_at
+        IS NULL`` clause instead of being silently skipped. ``_pi_dm_seen``
+        remains as in-process dedup only (populated as rows are processed,
+        within one process's lifetime).
         """
         if not self.session_factory or not self.simulation_run_id:
             return
@@ -3921,18 +3951,40 @@ class SimulationEngine:
                 )).scalar_one_or_none()
                 if mx:
                     self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
-                    seen = (await db.execute(
-                        sa_select(PiDmMessage.ts, PiDmMessage.created_at).where(
-                            PiDmMessage.simulation_run_id == self.simulation_run_id,
-                            PiDmMessage.direction == "inbound",
-                            PiDmMessage.created_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK,
-                        )
-                    )).all()
-                    for ts, created_at in seen:
-                        if ts:
-                            self._pi_dm_seen[ts] = created_at or EPOCH_UTC
         except Exception as exc:
             logger.warning("PI DM cursor seed failed: %s", exc)
+
+    async def _mark_pi_dm_handled(self, dm_id: uuid.UUID) -> None:
+        """Durably mark one pi_dm_messages row as handled (RC-2).
+
+        Set once, after ``PIHandler.handle_dm`` returns OR after a handler
+        exception is logged — one attempt, unlike the channel path's two-state
+        INGESTED->HANDLED marker: a DM has no thread-reopen/tag side effect
+        whose retry would duplicate a Slack post, so there is nothing extra a
+        second state would protect. Best-effort like
+        ``_mark_pi_inbound_state``: a failed write here just means one
+        at-least-once retry of a handler that may have already run, which
+        ``PIHandler.handle_dm`` must already tolerate for the same reason the
+        channel path's callers do.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+
+        from sqlalchemy import update as sa_update
+
+        from src.models import PiDmMessage
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(PiDmMessage)
+                    .where(PiDmMessage.id == dm_id)
+                    .values(handled_at=_datetime.now(_UTC))
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.warning("PI DM handled-marker write failed for %s: %s", dm_id, exc)
 
     async def _poll_pi_dms_from_db(self) -> None:
         """Process inbound PI DMs recorded in the DB (Slack or web-originated).
@@ -3941,9 +3993,21 @@ class SimulationEngine:
         and runs each through PIHandler.handle_dm (classify → standing
         instruction / feedback / question), then flips has_pi_directive so
         Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
+
+        RC-2: dedup is keyed on the durable ``handled_at`` column, not on
+        presence in the in-memory ``_pi_dm_seen`` set or on the lookback
+        window alone — both reset to nothing on every restart, which is
+        exactly how a DM written while ``agent-run`` was down used to lose its
+        side effects forever (the cursor jumps past it at startup, and the
+        window never reaches back far enough once enough time has passed).
+        The query still ORs in the existing lookback window, mirroring the
+        channel poller's own 'pending' OR clause, so a late-committing row is
+        still caught even though its ``handled_at`` write hasn't landed yet
+        (H2).
         """
         if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
             return
+        from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
 
         from src.models import PiDmMessage
@@ -3955,11 +4019,16 @@ class SimulationEngine:
                     .where(
                         PiDmMessage.simulation_run_id == self.simulation_run_id,
                         PiDmMessage.direction == "inbound",
-                        # Lookback + seen-set dedup below, mirroring the channel
-                        # poller, so a late-committing DM row isn't skipped (H2).
-                        # created_at, not posted_at, so the window doesn't depend
-                        # on the writing process's clock (R3).
-                        PiDmMessage.created_at > floor,
+                        sa_or(
+                            # created_at, not posted_at, so the window doesn't
+                            # depend on the writing process's clock (R3).
+                            PiDmMessage.created_at > floor,
+                            # The durable marker (RC-2): an unhandled row is
+                            # always re-fetched, however far behind the
+                            # cursor it has fallen — this is the recovery
+                            # path for a DM written while agent-run was down.
+                            PiDmMessage.handled_at.is_(None),
+                        ),
                     )
                     .order_by(PiDmMessage.created_at.asc())
                 )).scalars().all()
@@ -3970,8 +4039,10 @@ class SimulationEngine:
         for r in rows:
             if r.created_at and r.created_at > self._pi_dm_cursor:
                 self._pi_dm_cursor = r.created_at
+            if r.handled_at is not None:
+                continue  # durable marker — already processed
             if r.ts and r.ts in self._pi_dm_seen:
-                continue  # already processed (lookback re-scan)
+                continue  # in-process dedup (same tick/lookback re-scan)
             if r.agent_id not in self.agents:
                 continue
             if r.ts:
@@ -3981,6 +4052,7 @@ class SimulationEngine:
                 self.agents[r.agent_id].state.has_pi_directive = True
             except Exception as exc:
                 logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
+            await self._mark_pi_dm_handled(r.id)
 
         # Prune the seen-set to the lookback window — anything at or below the new
         # floor won't be re-queried, so it no longer needs tracking.

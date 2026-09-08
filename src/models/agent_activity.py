@@ -384,6 +384,20 @@ class PiDmMessage(Base):
     ts: Mapped[str] = mapped_column(String(50), nullable=False)  # canonical id
     slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # Durable at-least-once marker for inbound rows (RC-2): set once, after
+    # SimulationEngine._poll_pi_dms_from_db's PIHandler.handle_dm call returns
+    # (successfully or not — one attempt, mirroring agent_messages.pi_inbound_state's
+    # INGESTED->HANDLED shape with a single timestamp rather than two states, since a
+    # DM has no ordering/idempotency requirement across a crash mid-handler for the
+    # extra state to protect). NULL means "not yet processed" — the durable signal
+    # that used to be inferred from the in-memory `_pi_dm_seen` set, which a process
+    # restart or a down `agent-run` silently reset to empty, losing every side effect
+    # of a DM written while the sim was down. Migration 0030 backfills every existing
+    # inbound row to its own created_at (already handled or unrecoverable); NULL after
+    # that migration means a row no `_poll_pi_dms_from_db` tick has claimed yet.
+    handled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

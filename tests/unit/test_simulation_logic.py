@@ -3,6 +3,7 @@
 import pytest
 
 from src.agent.simulation import (
+    PI_INBOUND_PENDING,
     PI_INBOX_LOOKBACK,
     PI_INBOX_LOOKBACK_S,
     SimulationEngine,
@@ -2435,6 +2436,147 @@ class TestPollPiDmsGuardsPerAgent:
 
 
 # ---------------------------------------------------------------
+# _poll_pi_dms_from_db's durable handled_at marker (RC-2, #20 audit 2026-09-08)
+# ---------------------------------------------------------------
+
+class TestPollPiDmsFromDbUsesTheHandledAtMarker:
+    """A PI DM written while agent-run is down used to lose its side effects
+    forever: nothing durable recorded "needs handling", `_seed_pi_dm_cursor`
+    jumped the cursor to max(created_at) at startup, and the in-memory
+    `_pi_dm_seen` dedup set reset to empty on every restart. `handled_at`
+    (migration 0030) is the durable, timestamp-based marker: NULL means
+    unprocessed, and the poller fetches such a row regardless of how far
+    behind the cursor it has fallen."""
+
+    class _Row:
+        def __init__(self, id, created_at, ts="1.0", handled_at=None,
+                     agent_id="su", content="please cc me on proposals"):
+            self.id = id
+            self.created_at = created_at
+            self.ts = ts
+            self.handled_at = handled_at
+            self.agent_id = agent_id
+            self.pi_user_id = "local:pi-1"
+            self.content = content
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeDB:
+        """Mirrors TestPollInboundFromDbGuardsTheHandler's _FakeDB: the SELECT
+        applies the real OR condition in Python (window OR unhandled) and the
+        UPDATE is the real compiled statement, so a marker written to
+        ``handled_at`` is a real column write, not a bag the test invented."""
+
+        def __init__(self, rows, engine, sql_log):
+            self._rows = rows
+            self._engine = engine
+            self._sql_log = sql_log
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def commit(self):
+            return None
+
+        async def execute(self, stmt):
+            if getattr(stmt, "is_update", False):
+                compiled = stmt.compile()
+                self._sql_log.append(str(compiled))
+                params = compiled.params
+                for r in self._rows:
+                    if r.id == params.get("id_1"):
+                        r.handled_at = params.get("handled_at")
+                return TestPollPiDmsFromDbUsesTheHandledAtMarker._FakeResult([])
+            floor = self._engine._pi_dm_cursor - PI_INBOX_LOOKBACK
+            visible = [
+                r for r in self._rows
+                if r.created_at > floor or r.handled_at is None
+            ]
+            return TestPollPiDmsFromDbUsesTheHandledAtMarker._FakeResult(visible)
+
+    def _engine(self, rows, *, cursor):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        self.update_log: list[str] = []
+        engine.session_factory = lambda: self._FakeDB(rows, engine, self.update_log)
+        engine.simulation_run_id = "run-1"
+        engine._pi_dm_cursor = cursor
+        engine._pi_handler = SimpleNamespace(handle_dm=AsyncMock())
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_an_unhandled_row_far_behind_the_cursor_is_still_processed(self):
+        """The regression this closes: a DM written while agent-run was down,
+        whose created_at is now far outside PI_INBOX_LOOKBACK_S behind the
+        (already-advanced) cursor, must still be handled."""
+        import uuid as uuid_mod
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        stale = now - 10 * PI_INBOX_LOOKBACK
+        row = self._Row(uuid_mod.uuid4(), stale, handled_at=None)
+        engine = self._engine([row], cursor=now)
+
+        await engine._poll_pi_dms_from_db()
+
+        engine._pi_handler.handle_dm.assert_awaited_once_with(
+            "su", "local:pi-1", "please cc me on proposals",
+        )
+        assert engine.agents["su"].state.has_pi_directive is True
+        assert row.handled_at is not None, "the durable marker must be set after handling"
+
+    @pytest.mark.asyncio
+    async def test_an_already_handled_row_within_the_window_is_not_reprocessed(self):
+        """The other half of the contract: `handled_at` is what stops a
+        re-scan from re-running the handler, independent of the in-memory
+        seen-set (which no longer carries this responsibility alone)."""
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        row = self._Row(id="x", created_at=now, handled_at=now)
+        engine = self._engine([row], cursor=now)
+
+        await engine._poll_pi_dms_from_db()
+
+        engine._pi_handler.handle_dm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_marker_is_set_even_when_the_handler_raises(self):
+        """One attempt: a poison DM must not re-run the handler forever."""
+        import uuid as uuid_mod
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        now = datetime.now(UTC)
+        row = self._Row(uuid_mod.uuid4(), now, handled_at=None)
+        engine = self._engine([row], cursor=now)
+        engine._pi_handler.handle_dm = AsyncMock(side_effect=ConnectionError("boom"))
+
+        await engine._poll_pi_dms_from_db()  # must not raise
+
+        assert row.handled_at is not None, (
+            "even a handler failure must mark the row handled — one attempt, "
+            "like the channel path's INGESTED->HANDLED shape"
+        )
+
+
+# ---------------------------------------------------------------
 # _poll_inbound_from_db handler guard (COR-10(3))
 # ---------------------------------------------------------------
 
@@ -2520,8 +2662,15 @@ class TestPollInboundFromDbGuardsTheHandler:
                     if r.message_ts == params.get("message_ts_1"):
                         r.pi_inbound_state = params.get("pi_inbound_state")
                 return _R([])
+            # Mirrors the real WHERE clause (RC-2): the lookback window OR a
+            # row explicitly marked 'pending' at write time, however far
+            # behind the cursor it has fallen.
             floor = self._engine._pi_inbox_cursor - PI_INBOX_LOOKBACK
-            return _R([r for r in self._rows if r.created_at > floor])
+            return _R([
+                r for r in self._rows
+                if r.created_at > floor
+                or (not r.is_bot and r.pi_inbound_state == PI_INBOUND_PENDING)
+            ])
 
     def _engine(self, rows, handler=None):
         from src.agent.agent import Agent
@@ -2786,9 +2935,61 @@ class TestPollInboundFromDbGuardsTheHandler:
         # only the automatic reactions are withheld.
         assert engine.message_log.get_entry("1.0") is not None
         assert rows[0].pi_inbound_state == "handled"
-        assert engine.message_log.get_entry("1.0") is not None
-        assert rows[0].pi_inbound_state == "handled"
         assert engine._pi_inbox_cursor == row_created_at
+
+    @pytest.mark.asyncio
+    async def test_a_pending_row_is_fetched_however_far_behind_the_cursor_it_is(self):
+        """RC-2 (#20 audit 2026-09-08): record_pi_message now stamps
+        ``pi_inbound_state='pending'`` at insert time. A PI message written
+        while agent-run is down must not be silently skipped once the
+        process comes back and its cursor has advanced (via other traffic)
+        far past PI_INBOX_LOOKBACK_S beyond this row's created_at — the
+        defect ``_seed_pi_inbox_cursor`` jumping to ``max(created_at)`` used
+        to cause.
+        """
+        from datetime import UTC, datetime
+
+        cursor_now = datetime(2026, 1, 1, tzinfo=UTC)
+        stale_created_at = cursor_now - 10 * PI_INBOX_LOOKBACK
+        rows = [self._Row(
+            stale_created_at, content="please look at this",
+            pi_inbound_state=PI_INBOUND_PENDING,
+        )]
+        handler = None
+        engine = self._engine(rows, handler)
+        engine._pi_inbox_cursor = cursor_now  # simulates a cursor far ahead of this row
+
+        await engine._poll_inbound_from_db()
+
+        assert engine.message_log.get_entry("1.0") is not None, (
+            "a 'pending' row must be fetched no matter how far behind the "
+            "cursor it is"
+        )
+        assert rows[0].pi_inbound_state == "handled"
+
+    @pytest.mark.asyncio
+    async def test_a_non_pending_row_behind_the_cursor_is_still_skipped(self):
+        """Control for the test above: an ordinary (non-pending) bot row this
+        far behind the cursor is correctly left alone by the lookback window
+        — the 'pending' OR-clause must not accidentally widen the window for
+        everything."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        cursor_now = datetime(2026, 1, 1, tzinfo=UTC)
+        stale_created_at = cursor_now - 10 * PI_INBOX_LOOKBACK
+        rows = [self._Row(
+            stale_created_at, content="handover", is_bot=True,
+        )]
+        engine = self._engine(rows, AsyncMock())
+        engine._pi_inbox_cursor = cursor_now
+
+        await engine._poll_inbound_from_db()
+
+        assert engine.message_log.get_entry("1.0") is None, (
+            "a stale non-pending row must still be excluded by the lookback "
+            "window"
+        )
 
 
 # ---------------------------------------------------------------
