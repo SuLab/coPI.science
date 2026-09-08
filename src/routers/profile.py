@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
-from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
+from src.models import Job, Publication, ResearcherProfile, User
+from src.services.account_deletion import agent_blocking_account_delete
 from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
@@ -244,35 +245,6 @@ async def profile_refresh(
     return RedirectResponse(url="/profile?refreshing=1", status_code=302)
 
 
-# AgentRegistry.status values that make an owned agent too live to orphan.
-# 'active' is on the simulation roster and posting to Slack as the PI;
-# 'pending' is one admin click from it, because admin_update_agent promotes a
-# pending row straight to 'active' without re-reading user_id. The parked
-# states ('inactive', 'suspended') are deliberately absent: "deactivate the
-# agent" is the remedy the refusal page offers, so it has to unblock the
-# delete. See docs/plans/2026-09-04-decisions/task-25.md.
-AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE = ("active", "pending")
-
-
-async def _agent_blocking_account_delete(
-    db: AsyncSession, user: User
-) -> AgentRegistry | None:
-    """The agent this user owns that account deletion would orphan, if any.
-
-    Ownership is ``agents.user_id`` (a UNIQUE column, so at most one row). A
-    delegation is not ownership: ``agent_delegates.user_id`` is
-    ``ondelete="CASCADE"``, so deleting a delegate removes the delegation and
-    leaves the agent's owner alone.
-    """
-    result = await db.execute(
-        select(AgentRegistry).where(
-            AgentRegistry.user_id == user.id,
-            AgentRegistry.status.in_(AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE),
-        )
-    )
-    return result.scalar_one_or_none()
-
-
 @router.get("/delete-account", response_class=HTMLResponse)
 async def delete_account_confirm(
     request: Request,
@@ -294,7 +266,7 @@ async def delete_account_confirm(
         _template_context(
             request,
             current_user,
-            blocking_agent=await _agent_blocking_account_delete(db, current_user),
+            blocking_agent=await agent_blocking_account_delete(db, current_user),
         ),
     )
 
@@ -315,7 +287,7 @@ async def delete_account(
     # name that nobody can deactivate, edit or answer proposals for. Refuse,
     # and say what to do about it, rather than silently deactivating an agent
     # the user did not ask us to touch. (#25 D1 / phase8 I3.)
-    blocking_agent = await _agent_blocking_account_delete(db, current_user)
+    blocking_agent = await agent_blocking_account_delete(db, current_user)
     if blocking_agent is not None:
         return templates.TemplateResponse(
             request,

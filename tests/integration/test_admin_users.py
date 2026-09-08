@@ -492,3 +492,45 @@ async def test_admin_delete_user_returns_409_on_integrity_error(
         await db_session.execute(select(User).where(User.id == target_id))
     ).scalar_one_or_none()
     assert row is not None, "user row was deleted despite the simulated commit failure"
+
+
+async def test_admin_delete_user_refuses_when_it_would_orphan_an_active_agent(
+    client, db_session, admin
+):
+    """RC-8 (#25 D1 asymmetry): the orphan guard lived only in profile.py's self-service
+    delete-account route. admin_delete_user skipped it entirely, and agents.user_id is
+    ondelete='SET NULL' (not CASCADE), so an admin could delete the owner of a live agent
+    and leave a Slack bot posting under nobody's account -- active on the roster, but with
+    no owner able to deactivate, edit, or answer proposals for it."""
+    target = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=target, status="active")
+    target_id = target.id
+    await db_session.commit()
+
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
+
+    assert r.status_code == 409
+    assert agent.bot_name in r.text, "the 409 detail must name the blocking agent"
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is not None, "user was deleted despite owning an active agent"
+
+
+async def test_admin_delete_user_allowed_when_the_owned_agent_is_inactive(
+    client, db_session, admin
+):
+    """Control: an inactive/suspended agent does not block the delete -- 'deactivate the
+    agent' is the remedy the refusal names, so it has to actually unblock things."""
+    target = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=target, status="inactive")
+    target_id = target.id
+    await db_session.commit()
+
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
+
+    assert r.status_code in (302, 303)
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is None, "an inactive owned agent should not have blocked the delete"

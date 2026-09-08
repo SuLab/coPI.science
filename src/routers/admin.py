@@ -42,6 +42,7 @@ from src.models import (
     User,
     WaitlistSignup,
 )
+from src.services.account_deletion import agent_blocking_account_delete
 from src.services.cohorts import (
     SERVICE_AGENT_IDS,
     compute_gates,
@@ -224,6 +225,22 @@ async def admin_delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+    # agents.user_id is ondelete="SET NULL", so deleting the owner of a live agent
+    # leaves status='active' with no owner -- a bot on Slack in this PI's name that
+    # nobody can deactivate, edit, or answer proposals for. Refuse, and say what to
+    # do about it, mirroring the self-service guard in profile.py's delete-account
+    # route (#25 D1 / audit 2026-09-08 RC-8: this route had never applied it).
+    blocking_agent = await agent_blocking_account_delete(db, user)
+    if blocking_agent is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot delete {user.name}: they own {blocking_agent.bot_name} "
+                f"(status={blocking_agent.status}), which would be left with no "
+                "owner. Deactivate the agent or re-link it to another user first."
+            ),
+        )
 
     name = user.name
     try:
