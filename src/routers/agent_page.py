@@ -849,7 +849,7 @@ async def reopen_proposal(
     # Set only by the legacy Slack-off branch below, and only there because that is the
     # one branch whose PI text lives in a row this route itself must commit. Declared
     # here so the `except IntegrityError` arm can read it whichever branch ran.
-    inbox_row: tuple[uuid.UUID, str, str, str, str] | None = None
+    inbox_row: tuple[uuid.UUID, str, str, str, str, uuid.UUID] | None = None
 
     if already_migrated:
         # Nothing to do on Slack: the first attempt's migration posted this same
@@ -921,10 +921,11 @@ async def reopen_proposal(
                 await record_pi_message(
                     db, run_id=run_id, channel_name=td.channel,
                     content=inbox_content, sender_name=inbox_sender,
-                    thread_ts=td.thread_id,
+                    sender_user_id=current_user.id, thread_ts=td.thread_id,
                 )
                 inbox_row = (
                     run_id, td.channel, inbox_content, inbox_sender, td.thread_id,
+                    current_user.id,
                 )
             logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
         else:
@@ -1128,10 +1129,14 @@ async def reopen_proposal(
             # this row, and an early commit there would let a retried S3 delivery mint
             # a second guidance row (#21 COR-19.6).
             from src.services.pi_inbox import record_pi_message
-            inbox_run, inbox_channel, inbox_text, inbox_from, inbox_thread = inbox_row
+            (
+                inbox_run, inbox_channel, inbox_text, inbox_from, inbox_thread,
+                inbox_sender_user_id,
+            ) = inbox_row
             await record_pi_message(
                 db, run_id=inbox_run, channel_name=inbox_channel, content=inbox_text,
-                sender_name=inbox_from, thread_ts=inbox_thread,
+                sender_name=inbox_from, sender_user_id=inbox_sender_user_id,
+                thread_ts=inbox_thread,
             )
 
         await record_engagement(current_user_id, db)
@@ -1448,6 +1453,7 @@ async def post_agent_message(
             channel_name=target_channel,
             content=text,
             sender_name=f"{current_user.name} (PI)",
+            sender_user_id=current_user.id,
             thread_ts=reply_to,
         )
         await db.commit()

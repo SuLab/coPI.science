@@ -1819,13 +1819,16 @@ class TestCheckPiProposalReviewRequiresAuthorization:
         assert victim.state.pending_proposals[0].reviewed is False
 
 
-class TestHandlePiInboundEntryDerivesAuthorizationFromThreadParticipants:
-    """The DB/web path has no sender identity on the row itself, so it must
-    derive the authorized set from the thread's actual participants rather
-    than trusting every agent in the roster."""
+class TestHandlePiInboundEntryRequiresOwnership:
+    """RC-1 / #20 COR-5: ``_handle_pi_inbound_entry`` gates every side effect
+    on the set of agents the row's ``sender_user_id`` actually owns
+    (``_agent_ids_owned_by_user``), intersected with the thread's own
+    participants — never on thread participation alone. Before migration
+    0030 this used to trust "any agent that ever posted in this thread" by
+    itself, which let PI A, acting in a thread A's agent shares with B's
+    agent, clear B's pending-proposal block."""
 
-    @pytest.mark.asyncio
-    async def test_only_a_thread_participant_gets_unblocked(self):
+    def _engine_with_two_agents_sharing_a_thread(self):
         from src.agent.agent import Agent
         from src.agent.message_log import LogEntry
         from src.agent.state import ProposalRef
@@ -1834,8 +1837,9 @@ class TestHandlePiInboundEntryDerivesAuthorizationFromThreadParticipants:
         bystander = Agent("bystander", "BystanderBot", "Bystander PI")
         engine = SimulationEngine(agents=[participant, bystander], slack_clients={})
         # Both happen to have a pending proposal keyed to the SAME thread_id —
-        # contrived, but it isolates exactly what the participant-derivation
-        # guards: only an agent who actually posted in the thread is eligible.
+        # contrived, but it isolates exactly what ownership-gating guards:
+        # only an agent BOTH owned by the sender AND an actual thread
+        # participant is eligible.
         for ag in (participant, bystander):
             ag.state.pending_proposals.append(ProposalRef(
                 thread_id="1.0", channel="general", other_agent_id="other",
@@ -1845,15 +1849,189 @@ class TestHandlePiInboundEntryDerivesAuthorizationFromThreadParticipants:
             ts="1.0", channel="general", sender_agent_id="participant", sender_name="ParticipantBot",
             content="the original proposal thread", posted_at=1.0, is_bot=True,
         ))
+        engine.message_log.append(LogEntry(
+            ts="1.5", channel="general", sender_agent_id="bystander", sender_name="BystanderBot",
+            content="bystander's own unrelated post in the same thread", thread_ts="1.0",
+            posted_at=1.5, is_bot=True,
+        ))
+        return engine, participant, bystander
+
+    @pytest.mark.asyncio
+    async def test_thread_participation_alone_does_not_unblock_without_a_sender_user_id(self):
+        """The pre-0030 shape, now refused: a PI row with no recorded sender
+        gets NO ownership-gated side effect, even though both agents are
+        verifiably thread participants."""
+        from src.agent.message_log import LogEntry
+
+        engine, participant, bystander = self._engine_with_two_agents_sharing_a_thread()
         pi_entry = LogEntry(
             ts="2.0", channel="general", sender_agent_id=None, sender_name="Some PI",
             content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
+            sender_user_id=None,
         )
 
         await engine._handle_pi_inbound_entry(pi_entry)
 
+        assert participant.state.pending_proposals[0].reviewed is False
+        assert bystander.state.pending_proposals[0].reviewed is False
+
+    @pytest.mark.asyncio
+    async def test_only_the_owned_participant_gets_unblocked(self, monkeypatch):
+        """PI A (who owns only `participant`) posts in a thread `bystander`
+        also participates in. Only `participant` — owned AND a participant —
+        is unblocked; `bystander` is untouched even though it is a thread
+        participant too."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+
+        engine, participant, bystander = self._engine_with_two_agents_sharing_a_thread()
+        sender_user_id = "pi-a"
+        engine._agent_ids_owned_by_user = AsyncMock(return_value={"participant"})
+        pi_entry = LogEntry(
+            ts="2.0", channel="general", sender_agent_id=None, sender_name="PI A",
+            content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
+            sender_user_id=sender_user_id,
+        )
+
+        await engine._handle_pi_inbound_entry(pi_entry)
+
+        engine._agent_ids_owned_by_user.assert_awaited_once_with(sender_user_id)
         assert participant.state.pending_proposals[0].reviewed is True
         assert bystander.state.pending_proposals[0].reviewed is False
+
+    @pytest.mark.asyncio
+    async def test_owning_an_agent_that_is_not_a_thread_participant_still_unblocks_nothing(self):
+        """Ownership alone is not sufficient either — the owned agent must
+        ALSO actually be a participant in this specific thread (the
+        intersection, not either set alone)."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+
+        engine, participant, bystander = self._engine_with_two_agents_sharing_a_thread()
+        # PI owns some agent that never posted in this thread at all.
+        engine._agent_ids_owned_by_user = AsyncMock(return_value={"someone-else"})
+        pi_entry = LogEntry(
+            ts="2.0", channel="general", sender_agent_id=None, sender_name="Some PI",
+            content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
+            sender_user_id="pi-x",
+        )
+
+        await engine._handle_pi_inbound_entry(pi_entry)
+
+        assert participant.state.pending_proposals[0].reviewed is False
+        assert bystander.state.pending_proposals[0].reviewed is False
+
+
+class TestAgentIdsOwnedByUser:
+    """_agent_ids_owned_by_user is the DB/web/email inbound path's equivalent
+    of the Slack map (_pi_slack_id_to_agent_ids): registry ownership UNION
+    delegate access. See RC-1 / #20 COR-5."""
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeDB:
+        def __init__(self, rows, sql_log):
+            self._rows = rows
+            self._sql_log = sql_log
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, stmt):
+            self._sql_log.append(str(stmt.compile()))
+            return TestAgentIdsOwnedByUser._FakeResult(self._rows)
+
+    def _engine(self, rows):
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        self.sql_log: list[str] = []
+        engine.session_factory = lambda: self._FakeDB(rows, self.sql_log)
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_none_user_id_short_circuits_without_a_db_call(self):
+        engine = self._engine(["su"])
+
+        result = await engine._agent_ids_owned_by_user(None)
+
+        assert result == set()
+        assert self.sql_log == [], "a None sender must not even reach the DB"
+
+    @pytest.mark.asyncio
+    async def test_no_session_factory_returns_empty_set(self):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        engine = SimulationEngine(agents=[Agent("su", "SuBot", "Andrew Su")], slack_clients={})
+        engine.session_factory = None
+
+        result = await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
+
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_returns_the_agents_the_query_finds(self):
+        import uuid as uuid_mod
+
+        engine = self._engine(["su", "wiseman"])
+
+        result = await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
+
+        assert result == {"su", "wiseman"}
+
+    @pytest.mark.asyncio
+    async def test_the_query_reaches_agent_delegates_so_a_delegate_is_included(self):
+        """Compiled-SQL pin: the query must reach agent_delegates.user_id, not
+        just agents.user_id, or a delegate's own PI account could never
+        unblock the agent they represent — the same gap the Slack map already
+        closes by unioning delegate_slack_ids. See
+        src/models/delegate.py:AgentDelegate.agent_registry_id."""
+        import uuid as uuid_mod
+
+        engine = self._engine([])
+
+        await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
+
+        assert self.sql_log, "the query never ran"
+        sql = self.sql_log[0]
+        assert "agent_delegates" in sql
+        assert "agents.user_id" in sql
+
+    @pytest.mark.asyncio
+    async def test_a_db_failure_fails_closed_to_the_empty_set(self):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        class _RaisingDB:
+            async def __aenter__(self):
+                raise ConnectionError("db down")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        engine = SimulationEngine(agents=[Agent("su", "SuBot", "Andrew Su")], slack_clients={})
+        engine.session_factory = lambda: _RaisingDB()
+
+        result = await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
+
+        assert result == set()
 
 
 class TestPersistImplicitProposalReview:
@@ -2285,7 +2463,7 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     class _Row:
         def __init__(self, created_at, message_ts="1.0", content="hello",
-                     pi_inbound_state=None, is_bot=False):
+                     pi_inbound_state=None, is_bot=False, sender_user_id=None):
             self.created_at = created_at
             self.message_ts = message_ts
             self.channel_name = "general"
@@ -2297,6 +2475,7 @@ class TestPollInboundFromDbGuardsTheHandler:
             self.is_bot = is_bot
             self.visibility = "public"
             self.pi_inbound_state = pi_inbound_state
+            self.sender_user_id = sender_user_id
 
     class _FakeDB:
         """Serves the SELECT through the real ``PI_INBOX_LOOKBACK`` window and
@@ -2356,16 +2535,23 @@ class TestPollInboundFromDbGuardsTheHandler:
         engine.simulation_run_id = "run-1"
         return engine
 
-    def _engine_with_the_real_handler(self, rows):
+    def _engine_with_the_real_handler(self, rows, *, owned=frozenset({"su"})):
         """Same engine, but ``_handle_pi_inbound_entry`` is the real one, with
         only its two observable side effects stubbed — so "the tag route did
-        not re-run" is an assertion about the production code path."""
+        not re-run" is an assertion about the production code path.
+
+        ``_agent_ids_owned_by_user`` is stubbed too (RC-1): its own DB-backed
+        resolution is covered separately (TestAgentIdsOwnedByUser /
+        tests/integration/test_state_rebuild.py), and these tests are about
+        the poller's dedup/marker contract, not ownership resolution itself.
+        """
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
         engine = self._engine(rows)
         engine._check_pi_proposal_review = AsyncMock()
         engine._pi_handler = SimpleNamespace(handle_channel_tag=AsyncMock())
+        engine._agent_ids_owned_by_user = AsyncMock(return_value=set(owned))
         return engine
 
     @pytest.mark.asyncio
@@ -2549,21 +2735,57 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_null_row_absent_from_the_log_is_processed_exactly_as_today(self):
-        """The other half of the NULL contract, and what stops the test above
-        from passing vacuously: a NULL row the log has never seen is a genuinely
-        new web-origin PI message, so it is ingested and its tag route runs —
-        today's behaviour, unchanged. This is what a deploy that migrates before
-        the code lands, or that rolls the code back, keeps doing."""
+        """The other half of the NULL ``pi_inbound_state`` contract, and what
+        stops the test above from passing vacuously: a NULL-marker row the log
+        has never seen is a genuinely new web-origin PI message, so it is
+        ingested and its tag route runs — today's behaviour, unchanged. This is
+        what a deploy that migrates before the code lands, or that rolls the
+        code back, keeps doing.
+
+        Carries a real ``sender_user_id`` (RC-1): the tag route is gated on
+        ownership now, independent of the ``pi_inbound_state`` marker this
+        test is actually about — see the sibling
+        ``test_a_row_with_no_sender_user_id_gets_no_side_effects`` for the
+        NULL-``sender_user_id`` half.
+        """
+        import uuid as uuid_mod
         from datetime import UTC, datetime
 
         row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
-        rows = [self._Row(row_created_at, content="@SuBot please look")]
-        engine = self._engine_with_the_real_handler(rows)
+        rows = [self._Row(
+            row_created_at, content="@SuBot please look", sender_user_id=uuid_mod.uuid4(),
+        )]
+        engine = self._engine_with_the_real_handler(rows, owned={"su"})
 
         await engine._poll_inbound_from_db()
 
         engine._pi_handler.handle_channel_tag.assert_awaited_once()
         engine._check_pi_proposal_review.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_row_with_no_sender_user_id_gets_no_side_effects(self):
+        """RC-1 (#20 COR-5): a row with no recorded sender — every pre-0030
+        row, and any future write path that forgets to stamp it — must not
+        fall back to "everyone in the thread is authorized" (the pre-fix
+        behaviour). It gets no ownership-gated side effect at all, only a
+        logged warning; the text is still ingested into the log by the
+        caller."""
+        from datetime import UTC, datetime
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(
+            row_created_at, content="@SuBot please look", sender_user_id=None,
+        )]
+        engine = self._engine_with_the_real_handler(rows, owned={"su"})
+
+        await engine._poll_inbound_from_db()
+
+        engine._pi_handler.handle_channel_tag.assert_not_awaited()
+        engine._check_pi_proposal_review.assert_not_awaited()
+        # The row is still durably marked handled and its text still ingested —
+        # only the automatic reactions are withheld.
+        assert engine.message_log.get_entry("1.0") is not None
+        assert rows[0].pi_inbound_state == "handled"
         assert engine.message_log.get_entry("1.0") is not None
         assert rows[0].pi_inbound_state == "handled"
         assert engine._pi_inbox_cursor == row_created_at

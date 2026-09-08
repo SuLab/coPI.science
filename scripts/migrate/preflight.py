@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0029"
+DEFAULT_TARGET = "0030"
 
 #: The oldest stamp this tooling will migrate from. Below it the chain has never been
 #: rehearsed end to end and the runbook does not describe it; 0018 is `main` before PR19
@@ -225,6 +225,10 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0029_pi_engagement_and_inbound_state
     PlannedObject("0029", "column", "pi_engaged_at", "thread_decisions"),
     PlannedObject("0029", "column", "pi_inbound_state", "agent_messages"),
+    # 0030_pi_ownership_and_dm_handled
+    PlannedObject("0030", "column", "sender_user_id", "agent_messages"),
+    PlannedObject("0030", "index", "ix_agent_messages_sender_user_id", "agent_messages"),
+    PlannedObject("0030", "column", "handled_at", "pi_dm_messages"),
 )
 
 #: Every revision in the chain, in order. A revision missing from here is invisible
@@ -233,7 +237,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
 #: whose target it cannot find in the list.
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
-    "0028", "0029",
+    "0028", "0029", "0030",
 )
 
 #: Every revision an upgrade may legitimately START from: the whole chain from
@@ -281,6 +285,8 @@ REVISION_COST_NOTES: dict[str, str] = {
     "0027": "0027's 20 non-concurrent CREATE INDEXes (SHARE on 13 tables)",
     "0028": "0028 one nullable ADD COLUMN",
     "0029": "0029 two more nullable ADD COLUMNs (catalogue-only, no rewrite)",
+    "0030": "0030 two more nullable ADD COLUMNs plus one small backfill UPDATE "
+            "on pi_dm_messages (catalogue-only column adds, no table rewrite)",
 }
 
 

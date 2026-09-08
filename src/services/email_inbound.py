@@ -1067,7 +1067,8 @@ async def _handle_instruction(
                     await record_pi_message(
                         db, run_id=run_id, channel_name=td.channel,
                         content=f"PI guidance from {user.name} (via email): {instruction}",
-                        sender_name=f"{user.name} (PI)", thread_ts=td.thread_id,
+                        sender_name=f"{user.name} (PI)", sender_user_id=user.id,
+                        thread_ts=td.thread_id,
                     )
                     logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
                     return True

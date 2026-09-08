@@ -116,6 +116,23 @@ class AgentMessage(Base):
     # MessageLog presence. See COR-10(3) / migration 0029 /
     # docs/plans/2026-09-04-decisions/task-7.md.
     pi_inbound_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # The PI/user who actually wrote this row — NULL for every bot-authored row
+    # and for a pre-0030 human/web row (migration 0030 adds no backfill for
+    # existing rows: there is no way to recover who wrote them). This is the
+    # ownership carrier RC-1 (#20 COR-5) uses in place of thread membership:
+    # SimulationEngine._agent_ids_owned_by_user(sender_user_id) resolves the
+    # set of agents this user actually owns (AgentRegistry.user_id, or an
+    # AgentDelegate row), and _handle_pi_inbound_entry restricts every
+    # ownership-gated side effect (proposal-review clear, reopen, pi_context,
+    # @bot tag) to that set — never to "whoever else happens to share this
+    # thread". ON DELETE SET NULL rather than CASCADE: deleting a PI's account
+    # must not delete the historical record of what was said in a shared
+    # thread. See docs/plans/2026-09-08-audit-fixes.md RC-1.
+    sender_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -136,6 +153,7 @@ class AgentMessage(Base):
             "simulation_run_id", "slack_ts",
             postgresql_where=text("slack_ts IS NOT NULL"),
         ),
+        Index("ix_agent_messages_sender_user_id", "sender_user_id"),
     )
 
     # Relationships

@@ -154,6 +154,7 @@ async def record_pi_message(
     channel_name: str,
     content: str,
     sender_name: str,
+    sender_user_id: uuid.UUID | None,
     thread_ts: str | None = None,
 ) -> AgentMessage:
     """Insert a human/PI message (is_bot=False) into agent_messages.
@@ -171,7 +172,22 @@ async def record_pi_message(
     (``email_inbound._handle_instruction``) depends on this row riding the same
     commit that retires the notification, so an early commit would let a retried
     S3 delivery write a second guidance row (the #21 COR-19.6 shape).
+
+    ``sender_user_id`` is required (though ``None`` is an accepted value) so no
+    caller can silently omit it: it is the ownership carrier
+    ``SimulationEngine._handle_pi_inbound_entry`` uses to decide which agent(s)
+    this message is allowed to act on (RC-1 / #20 COR-5) — a row written with
+    ``None`` gets no ownership-gated side effect at all, only a logged warning,
+    so every real caller must pass the acting user's id.
+
+    ``pi_inbound_state`` is stamped ``'pending'`` at insert time (RC-2): the
+    durable marker that tells ``_poll_inbound_from_db`` to fetch this row
+    regardless of how far its cursor has advanced, so a message written while
+    ``agent-run`` is down is not silently skipped once the row ages past the
+    poller's lookback window.
     """
+    from src.agent.simulation import PI_INBOUND_PENDING
+
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
     ts = mint_local_ts()
     msg = AgentMessage(
@@ -185,8 +201,10 @@ async def record_pi_message(
         visibility=visibility,
         content=content,
         sender_name=sender_name,
+        sender_user_id=sender_user_id,
         is_bot=False,
         posted_at=float(ts),
+        pi_inbound_state=PI_INBOUND_PENDING,
     )
     db.add(msg)
     return msg

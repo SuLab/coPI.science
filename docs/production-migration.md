@@ -6,7 +6,7 @@ and you need to stop when something says STOP.
 
 **The target is not a number you configure.** `run_migration.sh` derives that target from `alembic/versions/`
 — every `revision` id minus every `down_revision` id, which must leave exactly one — and refuses
-to run if it does not. That one id is the alembic tree's single head, **0029** at the time of writing.
+to run if it does not. That one id is the alembic tree's single head, **0030** at the time of writing.
 Pass `--target <rev>` only when you mean to stop somewhere short of the head, deliberately; the
 script's banner says which of the two happened. The pinned constant this replaced went stale
 twice, and the second time a bare `--apply` would have migrated to 0028, stamped it, verified it
@@ -646,10 +646,10 @@ unset PW PW_ENC
 # Exit 1 = BLOCKED: read the check name, fix, re-run. Check 7 (blocking sessions) => something is still connected: stop the writers again.
 ls -l data/preflight_snapshot.json             # written by the rehearsal on the HOST (bind-mounted by --via-run)
 ./scripts/migrate/run_migration.sh --via-run --apply --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
-# Expect: "alembic_version = 0029" read back (the head the script derived and printed in its banner), postflight 0 FAIL, exit 0.
+# Expect: "alembic_version = 0030" read back (the head the script derived and printed in its banner), postflight 0 FAIL, exit 0.
 ls -l data/preflight_snapshot.json             # newer than the rehearsal's
 unset DATABASE_URL
-docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0029
+docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0030
 ```
 
 If alembic reports `LockNotAvailableError`, something is still connected: `docker compose $C ps -a`,
@@ -664,7 +664,7 @@ path's `migrate` service agrees the database is now at head:
 
 ```bash
 cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
-docker compose $C run --rm --no-deps -T migrate python -m alembic current    # prints 0029 (head)
+docker compose $C run --rm --no-deps -T migrate python -m alembic current    # prints 0030 (head)
 ```
 
 ### 10.3 Both paths are idempotent

@@ -3395,6 +3395,7 @@ class SimulationEngine:
                 posted_at=r.posted_at or 0.0,
                 is_bot=r.is_bot,
                 visibility=r.visibility,
+                sender_user_id=r.sender_user_id,
             )
             if not r.is_bot:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
@@ -3474,13 +3475,68 @@ class SimulationEngine:
                 "Inbound marker write failed for %s (%s): %s", message_ts, state, exc
             )
 
-    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
-        """Apply PI-message side effects, derived from the thread (no Slack map).
+    async def _agent_ids_owned_by_user(self, user_id: uuid.UUID | None) -> set[str]:
+        """Agents this user actually owns or represents (RC-1 / #20 COR-5).
 
-        Clears pending-proposal blocks, reopens closed threads, sets pi_context
-        on active threads, and honors @bot tags — using the thread's own
-        participants rather than a Slack user→agent mapping, so it works with
-        Slack off.
+        The DB/web (and now e-mail) inbound path has a real sender identity
+        since migration 0030 (``agent_messages.sender_user_id``), so ownership
+        can be resolved the same way the Slack map already does — registry
+        owner (``AgentRegistry.user_id``) union delegate
+        (``AgentDelegate.agent_registry_id -> AgentRegistry.id`` for this
+        user) — instead of trusting whoever else happens to have posted in the
+        same thread. Returns the empty set for ``None`` (no sender recorded)
+        or on any DB failure: fail closed, since an empty set makes every
+        ownership-gated side effect in ``_handle_pi_inbound_entry`` a no-op
+        rather than a wrong grant.
+        """
+        if not user_id or not self.session_factory:
+            return set()
+        from sqlalchemy import or_ as sa_or
+        from sqlalchemy import select as sa_select
+
+        from src.models import AgentRegistry
+        from src.models.delegate import AgentDelegate
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AgentRegistry.agent_id)
+                    .outerjoin(
+                        AgentDelegate, AgentDelegate.agent_registry_id == AgentRegistry.id,
+                    )
+                    .where(
+                        sa_or(
+                            AgentRegistry.user_id == user_id,
+                            AgentDelegate.user_id == user_id,
+                        )
+                    )
+                    .distinct()
+                )).scalars().all()
+            return set(rows)
+        except Exception as exc:
+            logger.warning("Failed to resolve agents owned by user %s: %s", user_id, exc)
+            return set()
+
+    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
+        """Apply PI-message side effects, gated to agents the sender owns.
+
+        ``owned`` is the set of agent_ids ``entry.sender_user_id`` actually
+        owns or represents (registry owner or delegate — see
+        ``_agent_ids_owned_by_user``). Every side effect below — clearing a
+        pending-proposal block, reopening a closed thread, setting
+        ``pi_context``/``has_pending_reply``/``has_pi_directive`` on an active
+        thread, and the ``@bot`` tag route — is restricted to that set. Before
+        migration 0030 this used to trust the thread's own participants
+        instead (any agent that had ever posted in the thread), which let PI A
+        drive PI B's agent in a thread the two agents share. See #20 COR-5 /
+        docs/plans/2026-09-08-audit-fixes.md RC-1.
+
+        A row with ``sender_user_id IS NULL`` — a bot-authored row (never
+        reaches here; callers only invoke this for ``is_bot=False`` rows), a
+        pre-0030 row, or a since-deleted user — gets NO ownership-gated side
+        effect at all and one WARNING naming the row. It is still appended to
+        the log by the caller, so the text is never lost; only the automatic
+        reactions to it are withheld, since there is nothing to authorize them
+        against.
         """
         # Tombstoned: this thread's Slack parent is confirmed gone
         # (_evict_dead_thread). _poll_inbound_from_db already skips tombstoned
@@ -3492,11 +3548,22 @@ class SimulationEngine:
         ):
             return
 
-        # Clears any pending proposal on this thread. The DB/web row carries no
-        # sender identity (AgentMessage has no user_id column), so the
-        # authorized set is derived from the thread's own participants —
-        # only an agent who actually posted in this thread can be unblocked
-        # by a message landing in it. See COR-5.
+        if entry.sender_user_id is None:
+            logger.warning(
+                "PI inbound row %s (thread %s) has no sender_user_id — skipping "
+                "ownership-gated side effects (proposal-review clear, reopen, "
+                "pi_context, @bot tag)",
+                entry.ts, entry.thread_ts,
+            )
+            return
+
+        owned = await self._agent_ids_owned_by_user(entry.sender_user_id)
+
+        # Clears any pending proposal on this thread, but only for an agent
+        # that BOTH the sender owns AND actually participates in this
+        # thread — the second clause keeps a PI's message in one thread from
+        # reaching into an unrelated proposal their agent happens to also have
+        # pending elsewhere.
         thread_participants: set[str] = set()
         if entry.thread_ts:
             thread_participants = {
@@ -3504,11 +3571,14 @@ class SimulationEngine:
                 for e in self.message_log.get_thread_history(entry.thread_ts)
                 if e.sender_agent_id
             }
-        await self._check_pi_proposal_review(entry, authorized_agent_ids=thread_participants)
+        await self._check_pi_proposal_review(
+            entry, authorized_agent_ids=owned & thread_participants,
+        )
 
         thread_ts = entry.thread_ts
         if thread_ts:
-            # Reopen a closed thread for its participants.
+            # Reopen a closed thread for its participants — restricted to the
+            # sender's own agent(s).
             if thread_ts in self._closed_thread_ids:
                 # Old closed threads may have been windowed out of the log at
                 # startup (B2) — pull the history back so participants resolve.
@@ -3517,21 +3587,29 @@ class SimulationEngine:
                 participants = [
                     h.sender_agent_id for h in history
                     if h.sender_agent_id and h.sender_agent_id in self.agents
+                    and h.sender_agent_id in owned
                 ]
                 if participants:
                     await self._reopen_thread(participants[0], thread_ts, entry)
             else:
-                # Active thread → treat the PI message as authoritative context.
+                # Active thread → treat the PI message as authoritative context
+                # for the sender's own agent(s) only.
                 for agent in self.agents.values():
+                    if agent.agent_id not in owned:
+                        continue
                     thread = agent.state.active_threads.get(thread_ts)
                     if thread:
                         thread.pi_context = entry.content
                         thread.has_pending_reply = True
                         agent.state.has_pi_directive = True
 
-        # @bot tag → route to the tagged agent (same as the Slack path).
+        # @bot tag → route to the tagged agent, only if the sender owns it
+        # (same as the Slack path). Keeps F1's forged-injection concern closed.
         tagged_id = self.message_log._extract_tagged_agent(entry.content)
-        if tagged_id and tagged_id in self.agents and self._pi_handler:
+        if (
+            tagged_id and tagged_id in self.agents and tagged_id in owned
+            and self._pi_handler
+        ):
             self.agents[tagged_id].state.has_pi_directive = True
             await self._pi_handler.handle_channel_tag(tagged_id, entry)
 
@@ -4566,6 +4644,7 @@ class SimulationEngine:
                 slack_ts=_restored_slack_ts(r),
                 slack_channel_id=r.slack_channel_id,
                 slack_thread_ts=r.slack_thread_ts,
+                sender_user_id=r.sender_user_id,
             )
             self.message_log.load_entry(entry)
             loaded += 1
@@ -4656,6 +4735,7 @@ class SimulationEngine:
                 slack_ts=_restored_slack_ts(r),
                 slack_channel_id=r.slack_channel_id,
                 slack_thread_ts=r.slack_thread_ts,
+                sender_user_id=r.sender_user_id,
             ))
 
     async def _flush_persisted(self, force_stats: bool = False) -> None:

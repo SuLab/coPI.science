@@ -1,6 +1,7 @@
 """Global append-only message log — single source of truth for the simulation."""
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -39,6 +40,13 @@ class LogEntry:
     # entry has no Slack parent — either it is not a reply, or its thread has no
     # Slack presence. See SimulationEngine._slack_parent_ts.
     slack_thread_ts: str | None = None
+    # The DB user id who actually wrote this entry — set only for a human/PI
+    # row (mirrors agent_messages.sender_user_id), None for every bot-authored
+    # entry and for a PI row with no recorded sender (a pre-migration row, or a
+    # since-deleted user). SimulationEngine._handle_pi_inbound_entry resolves
+    # this to an owned-agent set and gates every side effect on it instead of
+    # on thread membership. See docs/plans/2026-09-08-audit-fixes.md RC-1.
+    sender_user_id: uuid.UUID | None = None
 
 
 def is_funding_post(content: str) -> bool:
