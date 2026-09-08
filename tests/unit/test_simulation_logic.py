@@ -4739,3 +4739,118 @@ class TestAParkedThreadDoesNotConsumeARegularSlot:
             "so Phase 5 filtered out its only regular candidate and returned "
             "before reaching the LLM"
         )
+
+
+# ---------------------------------------------------------------
+# Parked threads never exited parking; PARKED_THREAD_MAX_TURNS eviction
+# (RC-9a, #20 audit 2026-09-08)
+# ---------------------------------------------------------------
+
+class TestEvictStaleParkedThreads:
+    """A parked thread (post_failure_count >= 2, has_pending_reply False)
+    generated no LLM work but was never removed from active_threads either —
+    a counterpart that never posts again left it sitting there forever, one
+    of the agent's active-thread slots spent on a conversation that can never
+    revive on its own. ``_evict_stale_parked_threads`` (called once per turn,
+    from ``_run_turn``) drops it after ``PARKED_THREAD_MAX_TURNS`` consecutive
+    parked turns — no decision, no DM (task-5's ruling stands)."""
+
+    def _parked_thread(self, thread_id="100.1"):
+        from src.agent.state import ThreadState
+
+        return ThreadState(
+            thread_id=thread_id, channel="general", other_agent_id="nobody",
+            post_failure_count=2, has_pending_reply=False,
+        )
+
+    def _engine_with_one_agent(self):
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        return SimulationEngine(agents=[agent], slack_clients={}), agent
+
+    def test_a_freshly_parked_thread_survives_one_eviction_pass(self):
+        engine, agent = self._engine_with_one_agent()
+        thread = self._parked_thread()
+        agent.state.active_threads[thread.thread_id] = thread
+
+        engine._evict_stale_parked_threads(agent)
+
+        assert thread.thread_id in agent.state.active_threads
+        assert thread.parked_turns == 1
+
+    def test_a_thread_parked_for_the_max_turns_is_dropped(self):
+        from src.agent.simulation import PARKED_THREAD_MAX_TURNS
+
+        engine, agent = self._engine_with_one_agent()
+        thread = self._parked_thread()
+        agent.state.active_threads[thread.thread_id] = thread
+
+        for _ in range(PARKED_THREAD_MAX_TURNS - 1):
+            engine._evict_stale_parked_threads(agent)
+        assert thread.thread_id in agent.state.active_threads, (
+            "must not be evicted before reaching the max"
+        )
+
+        engine._evict_stale_parked_threads(agent)
+
+        assert thread.thread_id not in agent.state.active_threads
+
+    def test_the_counterpart_posting_again_resets_the_parked_turn_count(self):
+        """A thread revived (has_pending_reply set True, e.g. by has_new)
+        before hitting the max must not carry its partial count forward if it
+        gets parked again later — parked_turns resets to 0 the instant the
+        thread is no longer parked."""
+        engine, agent = self._engine_with_one_agent()
+        thread = self._parked_thread()
+        agent.state.active_threads[thread.thread_id] = thread
+
+        for _ in range(5):
+            engine._evict_stale_parked_threads(agent)
+        assert thread.parked_turns == 5
+
+        thread.has_pending_reply = True  # counterpart posted — no longer parked
+        engine._evict_stale_parked_threads(agent)
+        assert thread.parked_turns == 0
+
+    def test_only_this_agents_thread_state_is_touched(self):
+        """Eviction is per-agent: a second agent's own ThreadState for the
+        same conceptual thread is untouched by the first agent's turn."""
+        engine, agent = self._engine_with_one_agent()
+        from src.agent.agent import Agent
+
+        other = Agent("wiseman", "WisemanBot", "PI wiseman")
+        engine.agents["wiseman"] = other
+        thread_a = self._parked_thread()
+        thread_b = self._parked_thread()
+        agent.state.active_threads[thread_a.thread_id] = thread_a
+        other.state.active_threads[thread_b.thread_id] = thread_b
+
+        engine._evict_stale_parked_threads(agent)
+
+        assert thread_a.parked_turns == 1
+        assert thread_b.parked_turns == 0, "the other agent's turn never ran"
+
+    @pytest.mark.asyncio
+    async def test_run_turn_evicts_a_stale_parked_thread(self, monkeypatch):
+        """End-to-end: _run_turn itself calls the eviction, not just a unit
+        test of the helper in isolation."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PARKED_THREAD_MAX_TURNS
+
+        engine, agent = self._engine_with_one_agent()
+        thread = self._parked_thread()
+        thread.parked_turns = PARKED_THREAD_MAX_TURNS - 1
+        agent.state.active_threads[thread.thread_id] = thread
+        # Stub out everything else _run_turn does so this exercises only the
+        # eviction step, not a full turn's phases.
+        engine._phase1_channel_discovery = lambda a: None
+        engine._phase2_scan_filter = AsyncMock()
+        engine._phase3_activate_threads = lambda a: None
+        engine._phase4_reply_threads = AsyncMock(return_value=set())
+        engine._phase5_new_post = AsyncMock()
+
+        await engine._run_turn(agent)
+
+        assert thread.thread_id not in agent.state.active_threads

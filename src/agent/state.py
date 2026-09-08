@@ -50,9 +50,25 @@ class ThreadState:
     # recurring msg_too_long). Mirrors authorship_reject_count's two-strike
     # backoff: without it a permanently-failing post regenerates an LLM reply
     # every turn forever and the thread can never reach the 12-message
-    # timeout close. Not persisted/reconstructed on rebuild — it defaults to
-    # 0, so a restart gives a failing thread a fresh two strikes. See #20 I1.
+    # timeout close. Reconstructed on rebuild from the trailing DB-only
+    # (slack_ts IS NULL) rows this agent authored in the thread, capped at 2 —
+    # see SimulationEngine._derive_post_failure_count (RC-9b, #20 audit
+    # 2026-09-08).
     post_failure_count: int = 0
+    # Consecutive AGENT TURNS this thread has spent parked (_is_parked_thread),
+    # i.e. post_failure_count >= 2 and has_pending_reply False. Reset to 0 the
+    # moment the thread stops being parked (the counterpart posts, or a
+    # successful reply zeroes post_failure_count). Not persisted/reconstructed
+    # on rebuild — a restart gives a still-parked thread a fresh count, which
+    # only delays eviction by at most one restart's worth of turns; it never
+    # un-parks a thread outright the way post_failure_count resetting would.
+    # Drives PARKED_THREAD_MAX_TURNS eviction (RC-9a): a thread parked for
+    # that many of the agent's own turns is dropped from active_threads
+    # entirely — it generates no LLM work while parked, so leaving it in
+    # active_threads forever wastes a permanent slot on a conversation that
+    # only a restart's Phase 3 re-hydration or the counterpart posting again
+    # can ever revive.
+    parked_turns: int = 0
 
 
 @dataclass

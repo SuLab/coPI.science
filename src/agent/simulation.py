@@ -260,6 +260,16 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
 UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
+# RC-9a (#20 audit 2026-09-08): a thread parked for this many of its agent's
+# own turns is dropped from active_threads entirely. _is_parked_thread already
+# excludes a parked thread from load/rate accounting, but nothing previously
+# evicted it — a counterpart that never posts again left the ThreadState
+# sitting in active_threads forever, and Phase 3 can always re-activate the
+# conversation later if the counterpart does come back. No decision is
+# written and no DM is sent (task-5's ruling stands: a parked thread is not
+# closed, since it never reached outcome=timeout).
+PARKED_THREAD_MAX_TURNS = 20
+
 # Prose-named lab mentions ("the Good lab", "Su Lab's") for the authorship
 # guard (audit finding I4): a fabricated co-author named in prose instead of
 # @-tagged must still be resolved against the roster. Possessive/article
@@ -569,6 +579,34 @@ class SimulationEngine:
         docs/plans/2026-09-04-decisions/task-5.md (#20 COR-1b).
         """
         return thread.post_failure_count >= 2 and not thread.has_pending_reply
+
+    def _evict_stale_parked_threads(self, agent: Agent) -> None:
+        """Drop a thread parked for PARKED_THREAD_MAX_TURNS of this agent's
+        own turns (RC-9a, #20 audit 2026-09-08).
+
+        A parked thread (``_is_parked_thread``) already generates no LLM work
+        and is excluded from load/rate accounting, but nothing previously
+        evicted it from ``active_threads`` — a counterpart that never posts
+        again left it sitting there forever, a permanent slot spent on a
+        conversation that can only be revived by a restart's Phase 3
+        re-hydration or the counterpart posting again. This only removes THIS
+        agent's ``ThreadState``; it writes no decision and sends no DM (a
+        parked thread never reached outcome=timeout — task-5's ruling stands),
+        so the counterpart's own side (if any) and the persisted message
+        history are untouched, and Phase 3 can re-activate the thread later.
+        """
+        for thread_id, thread in list(agent.state.active_threads.items()):
+            if self._is_parked_thread(thread):
+                thread.parked_turns += 1
+                if thread.parked_turns >= PARKED_THREAD_MAX_TURNS:
+                    agent.state.active_threads.pop(thread_id, None)
+                    logger.info(
+                        "[%s] Dropping thread %s from active_threads after %d "
+                        "parked turns",
+                        agent.agent_id, thread_id, thread.parked_turns,
+                    )
+            else:
+                thread.parked_turns = 0
 
     def _agent_load(self, agent: Agent) -> int:
         """Concurrent conversational obligations for one agent.
@@ -1119,6 +1157,10 @@ class SimulationEngine:
         """Run all 5 phases for a single agent turn. Returns True if work was done."""
         settings = get_settings()
         api_calls_before = agent.api_call_count
+
+        # RC-9a: evict a thread that has been parked too long before it can
+        # occupy any of this turn's other phases.
+        self._evict_stale_parked_threads(agent)
 
         # Phase 1: Channel discovery
         self._phase1_channel_discovery(agent)
@@ -5207,6 +5249,39 @@ class SimulationEngine:
         """
         return sum(1 for h in history if h.posted_at < reopened_at)
 
+    def _derive_post_failure_count(self, agent_id: str, history: list[LogEntry]) -> int:
+        """Reconstruct the two-strike post-failure backoff on rebuild (RC-9b,
+        #20 audit 2026-09-08).
+
+        ``ThreadState.post_failure_count`` is in-memory only, so a restart
+        used to hand a still-failing thread a fresh two strikes every time —
+        silently undoing the #20 COR-1b back-off (the thread re-enters
+        ``active_threads`` unparked and burns another LLM call per turn until
+        it fails twice again). A trailing run of this agent's own DB-only rows
+        (``slack_ts IS NULL``) at the tail of the thread history is exactly
+        what a Slack-refused post leaves behind (``_post_message``'s
+        ``slack_refused`` branch) — counting it reconstructs the same signal.
+
+        Gated on ``self.slack_clients.get(agent_id)`` being a CONNECTED
+        client: with Slack off (or no client for this agent), EVERY row is
+        legitimately ``slack_ts IS NULL`` — that is the normal DB-primary
+        write path, not a failure — so the trailing-run signal would
+        misinterpret ordinary traffic as two strikes and park every thread on
+        every restart. Only a connected client's refusal is evidence of an
+        actual failure.
+        """
+        client = self.slack_clients.get(agent_id)
+        if not (client and client.is_connected):
+            return 0
+        count = 0
+        for entry in reversed(history):
+            if entry.sender_agent_id != agent_id or entry.slack_ts is not None:
+                break
+            count += 1
+            if count >= 2:
+                break
+        return count
+
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
@@ -5380,6 +5455,7 @@ class SimulationEngine:
                     has_pending_reply=has_pending,
                     message_count_offset=offset,
                     pi_context=pi_context,
+                    post_failure_count=self._derive_post_failure_count(aid, history),
                 )
 
         # 3. Rebuild pending_proposals per agent
@@ -5787,6 +5863,7 @@ class SimulationEngine:
                     has_pending_reply=(last_sender is not None and last_sender != agent_id),
                     message_count_offset=offset,
                     pi_context=pi_context,
+                    post_failure_count=self._derive_post_failure_count(agent_id, history),
                 )
 
             # Fast-forward the cursor ONLY for an agent that has prior state to

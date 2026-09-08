@@ -136,6 +136,14 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     # reasoning).
     ("thread_decisions", "pi_engaged_at", "timestamp with time zone", True, ""),
     ("agent_messages", "pi_inbound_state", "character varying", True, ""),
+    # 0030 — RC-1's ownership carrier and RC-2's DM handled-marker. Both
+    # nullable, no default; sender_user_id has no backfill (there is no way to
+    # recover who wrote a pre-existing row), handled_at IS backfilled by the
+    # migration itself for pre-existing inbound rows (to created_at) — but a
+    # freshly-migrated row observed here can still legitimately be NULL
+    # (outbound, or not yet processed), so the column stays declared nullable.
+    ("agent_messages", "sender_user_id", "uuid", True, ""),
+    ("pi_dm_messages", "handled_at", "timestamp with time zone", True, ""),
 )
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
@@ -193,6 +201,8 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_slack_app_provisions_agent_registry_id": "USING btree (agent_registry_id)",
     "ix_thread_decisions_agent_a_outcome": "USING btree (agent_a, outcome)",
     "ix_thread_decisions_agent_b_outcome": "USING btree (agent_b, outcome)",
+    # 0030
+    "ix_agent_messages_sender_user_id": "USING btree (sender_user_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)

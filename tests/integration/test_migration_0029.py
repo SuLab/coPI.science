@@ -143,7 +143,12 @@ async def test_0029_adds_two_nullable_markers_and_downgrades_back_out(scratch_db
     finally:
         await engine.dispose()
 
-    _run_alembic(scratch_db, "head")
+    # Pinned to 0029, not "head": once a later migration (0030) lands, "head"
+    # would migrate past what this test exists to check, and its own
+    # assertions about "exactly these two columns" would start failing for a
+    # reason that has nothing to do with 0029. See test_migration_0030.py for
+    # 0030's own head-pinned equivalent.
+    _run_alembic(scratch_db, "0029")
 
     engine = create_async_engine(scratch_db, poolclass=NullPool)
     try:
@@ -220,7 +225,7 @@ async def test_0029_adds_two_nullable_markers_and_downgrades_back_out(scratch_db
 async def test_0029_downgrade_is_idempotent_when_the_columns_are_already_gone(scratch_db):
     """The 0022+ convention: downgrades are ``if_exists``-guarded, so a half-applied
     or hand-repaired database does not abort the downgrade mid stop-the-world window."""
-    _run_alembic(scratch_db, "head")
+    _run_alembic(scratch_db, "0029")
 
     engine = create_async_engine(scratch_db, poolclass=NullPool)
     try:
@@ -241,11 +246,12 @@ async def test_0029_downgrade_is_idempotent_when_the_columns_are_already_gone(sc
         await engine.dispose()
 
 
-def test_0029_is_the_only_head():
-    alembic = os.path.join(os.path.dirname(sys.executable), "alembic")
-    r = subprocess.run(
-        [alembic, "heads"], cwd=str(_REPO_ROOT), capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    heads = [ln.split()[0] for ln in r.stdout.splitlines() if ln.strip()]
-    assert heads == ["0029"], r.stdout
+# "0029 is the only head" was checked here until migration 0030 landed and
+# made it false by construction — 0029 is now an interior revision, not the
+# head. That single-head property is exactly the thing
+# test_migration_0030.py::test_0030_is_the_only_head (and
+# tests/unit/test_migration_checks.py's `test_alembic_scripts_agrees_with_the_
+# real_tree`, which reads `pf.DEFAULT_TARGET` rather than a literal) exist to
+# keep current for whichever revision is actually the head, so it is not
+# re-pinned here under a name that would go stale again at the next
+# migration. See docs/plans/2026-09-08-audit-fixes.md RC-1/RC-2.

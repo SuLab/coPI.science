@@ -24,11 +24,13 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from src.agent.agent import Agent
-from src.agent.simulation import SimulationEngine
+from src.agent.simulation import PI_INBOX_LOOKBACK_S, SimulationEngine
 from src.agent.transport import NullTransport
 from src.config import get_settings
+from src.models import AgentMessage
 from src.models.agent_registry import ProposalReview
 from tests import factories
 
@@ -76,15 +78,25 @@ class _FixtureSessionFactory:
         return False
 
 
-def _engine_for(session, run_id, agent_ids=AGENT_IDS):
-    """A real SimulationEngine with Slack off and no budget."""
+def _engine_for(session, run_id, agent_ids=AGENT_IDS, slack_clients=None):
+    """A real SimulationEngine with Slack off (by default) and no budget.
+
+    ``slack_clients`` defaults to a ``NullTransport`` per agent (Slack fully
+    off); pass an explicit mapping to give one agent a CONNECTED client (RC-9b
+    tests need this — ``_derive_post_failure_count`` only trusts a trailing
+    ``slack_ts IS NULL`` run as evidence of a failure when the agent has a
+    connected client).
+    """
     agents = [
         Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}")
         for a in agent_ids
     ]
     return SimulationEngine(
         agents=agents,
-        slack_clients={a: NullTransport(a) for a in agent_ids},
+        slack_clients=(
+            slack_clients if slack_clients is not None
+            else {a: NullTransport(a) for a in agent_ids}
+        ),
         budget_cap=0,
         session_factory=_FixtureSessionFactory(session),
         simulation_run_id=run_id,
@@ -825,3 +837,151 @@ async def test_a_roster_flip_rebuilds_the_same_reopen_offset_as_a_restart(
         f"{restart_offset}, expected 4 for both"
     )
     assert _budget_left(eng, "su", root_ts) == 10
+
+
+# ---------------------------------------------------------------
+# RC-2 (#20 audit 2026-09-08): a PI row marked 'pending' survives a restart
+# whose inbound cursor has already advanced well past it.
+# ---------------------------------------------------------------
+
+async def test_a_pending_pi_row_is_handled_after_a_restart_despite_the_cursor(db_session):
+    """Three cooperating mechanisms used to lose a PI message written while
+    agent-run was down: record_pi_message never marked anything durable,
+    _rebuild_state_from_db loaded the PI row into the MessageLog (so the old
+    NULL-fallback `state is None and in_log` skip treated it as already
+    accounted for), and _seed_pi_inbox_cursor jumped the cursor to
+    max(created_at) — well past this row once a later message exists. RC-2's
+    'pending' marker (stamped by record_pi_message at insert time) survives
+    all three: it is neither None (so the NULL-fallback skip never applies)
+    nor bounded by the cursor window (the WHERE clause ORs it in explicitly).
+    """
+    run = await factories.make_simulation_run(db_session)
+    now = datetime.now(UTC)
+    old_created = now - timedelta(seconds=10 * PI_INBOX_LOOKBACK_S)
+    pi_ts = f"{old_created.timestamp():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C1", channel_name="general", message_ts=pi_ts,
+        thread_ts=None, posted_at=old_created.timestamp(),
+        content="please look at this", sender_name="PI su",
+        pi_inbound_state="pending", created_at=old_created,
+    )
+    # A later, unrelated bot message — what advances _pi_inbox_cursor well
+    # past the PI row's created_at once _seed_pi_inbox_cursor runs.
+    newer_created = now - timedelta(seconds=10)
+    later_ts = f"{newer_created.timestamp():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="C1", channel_name="general", message_ts=later_ts,
+        thread_ts=None, posted_at=newer_created.timestamp(),
+        content="an unrelated later post", sender_name="SuBot",
+        created_at=newer_created,
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()  # loads both rows; seeds the cursor near "now"
+    # Sanity: the cursor really did advance well past the PI row, which is
+    # the whole point of the test — without that, the plain lookback window
+    # would already cover the row and the 'pending' OR-clause would be
+    # untested.
+    assert eng._pi_inbox_cursor - old_created > timedelta(seconds=2 * PI_INBOX_LOOKBACK_S)
+
+    await eng._poll_inbound_from_db()
+
+    row = (await db_session.execute(
+        select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+    )).scalar_one()
+    assert row.pi_inbound_state == "handled", (
+        "a 'pending' row must be handled on the first post-restart poll, "
+        "however far the cursor has already advanced past it"
+    )
+
+    # A second tick is a no-op — the durable marker, not presence, stops it.
+    await eng._poll_inbound_from_db()
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "handled"
+
+
+# ---------------------------------------------------------------
+# RC-9b (#20 audit 2026-09-08): post_failure_count is reconstructed on
+# rebuild from trailing DB-only rows, but only when Slack is actually
+# connected for this agent.
+# ---------------------------------------------------------------
+
+class _ConnectedClient:
+    """Minimal stand-in for a connected AgentSlackClient."""
+
+    is_connected = True
+
+
+async def test_post_failure_count_is_derived_from_trailing_db_only_rows(db_session):
+    """ThreadState.post_failure_count is in-memory only, so a restart used to
+    hand a still-failing thread a fresh two strikes every time — silently
+    undoing the #20 COR-1b back-off. Two trailing DB-only (slack_ts IS NULL)
+    rows authored by `su` are exactly what two Slack-refused posts leave
+    behind; with a CONNECTED client for `su`, the rebuild must reconstruct
+    post_failure_count == 2 from them.
+    """
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    root_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="wiseman", channel_id="C1",
+        channel_name="general", message_ts=root_ts, thread_ts=None,
+        posted_at=base, content="root post", sender_name="WisemanBot",
+        is_bot=True, slack_ts=root_ts,
+    )
+    for i in range(2):
+        ts = f"{base + i + 1:.6f}"
+        await factories.make_agent_message(
+            db_session, run=run, agent_id="su", channel_id="C1",
+            channel_name="general", message_ts=ts, thread_ts=root_ts,
+            posted_at=base + i + 1, content=f"failed reply {i}",
+            sender_name="SuBot", is_bot=True,  # slack_ts left NULL: a refused post
+        )
+    await db_session.flush()
+
+    eng = _engine_for(
+        db_session, run.id,
+        slack_clients={"su": _ConnectedClient(), "wiseman": NullTransport("wiseman")},
+    )
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.post_failure_count == 2, (
+        f"expected the two-strike backoff reconstructed from trailing DB-only "
+        f"rows, got {thread.post_failure_count}"
+    )
+
+
+async def test_post_failure_count_stays_zero_when_slack_is_off_for_the_agent(db_session):
+    """Control: with Slack off (no connected client), every row is
+    legitimately slack_ts IS NULL — the ordinary DB-primary write path, not a
+    failure. The trailing-run signal must not misfire on ordinary traffic and
+    park every thread on every restart."""
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    root_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="wiseman", channel_id="C1",
+        channel_name="general", message_ts=root_ts, thread_ts=None,
+        posted_at=base, content="root post", sender_name="WisemanBot", is_bot=True,
+    )
+    for i in range(2):
+        ts = f"{base + i + 1:.6f}"
+        await factories.make_agent_message(
+            db_session, run=run, agent_id="su", channel_id="C1",
+            channel_name="general", message_ts=ts, thread_ts=root_ts,
+            posted_at=base + i + 1, content=f"reply {i}",
+            sender_name="SuBot", is_bot=True,
+        )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)  # Slack off for both agents (default)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.post_failure_count == 0
