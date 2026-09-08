@@ -105,6 +105,9 @@ def _csp_ro_line(block: str) -> str:
     return block[line_start:line_end]
 
 
+CSP_REPORT_URI = "report-uri /api/csp-report"
+
+
 def test_csp_report_only_policy_content():
     text = _nginx_conf()
     for name in VHOSTS:
@@ -116,6 +119,7 @@ def test_csp_report_only_policy_content():
             "frame-ancestors 'none'",
             "base-uri 'self'",
             "form-action 'self'",
+            CSP_REPORT_URI,
             "always",
         ):
             assert expected in line, f"{name}'s {CSP_RO} line is missing {expected!r}"
@@ -127,14 +131,61 @@ def test_csp_report_only_lines_are_byte_identical_across_vhosts():
     assert len(csp_lines) == 1, f"{CSP_RO} lines differ across vhosts: {csp_lines}"
 
 
-def test_no_enforcing_csp_added_at_the_nginx_layer():
-    # Report-Only only, by decision — an enforcing CSP from nginx would break
-    # base.html's inline PostHog bootstrap and the Tailwind CDN <script>
-    # before those are audited (#27 I5). Regex-based so it can't be fooled by
-    # whitespace/quote-style variants of the enforcing header, while still
-    # correctly ignoring the "-Report-Only" suffixed header above.
+# The enforcing header (audit 2026-09-08 RC-5, #27 I5). Report-Only alone collected
+# nothing usable: it had no report-uri/report-to, so violations went nowhere, and
+# nothing was ever actually blocked. Scoped to directives that cannot break rendering
+# regardless of what base.html's inline PostHog bootstrap or the Tailwind CDN <script>
+# do (frame-ancestors/base-uri/form-action/object-src never affect same-origin script
+# or style execution) — default-src/script-src/style-src stay Report-Only only until
+# those are audited for nonces/hashes.
+CSP_ENFORCING = "Content-Security-Policy"
+EXPECTED_ENFORCING_POLICY = (
+    "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+)
+
+
+def _enforcing_csp_line(block: str) -> str:
+    # Find a `Content-Security-Policy` header that is NOT the "-Report-Only" one —
+    # `CSP_RO` is a superstring of `CSP_ENFORCING`, so a naive `.index(CSP_ENFORCING)`
+    # would just find the Report-Only header's own header name.
+    for match in re.finditer(r'add_header\s+["\']?Content-Security-Policy["\']?\s', block):
+        line_start = block.rindex("\n", 0, match.start()) + 1
+        line_end = block.index("\n", match.start())
+        line = block[line_start:line_end]
+        if CSP_RO not in line:
+            return line
+    raise AssertionError("no enforcing Content-Security-Policy header found in block")
+
+
+def test_csp_enforcing_header_present_on_all_three_https_vhosts():
     text = _nginx_conf()
-    assert not re.search(r'add_header\s+["\']?Content-Security-Policy["\']?\s', text)
+    for name in VHOSTS:
+        block = _https_block(text, name)
+        line = _enforcing_csp_line(block)
+        assert EXPECTED_ENFORCING_POLICY in line, (
+            f"{name}'s enforcing {CSP_ENFORCING} line is missing the expected policy: {line!r}"
+        )
+        assert "always" in line
+
+
+def test_csp_enforcing_header_carries_only_the_non_breaking_directives():
+    # An enforcing header that ALSO restricted default-src/script-src/style-src would
+    # break the Tailwind CDN <script> and the inline PostHog bootstrap immediately —
+    # exactly what keeping those Report-Only-only is meant to avoid.
+    text = _nginx_conf()
+    for name in VHOSTS:
+        line = _enforcing_csp_line(_https_block(text, name))
+        for must_not_appear in ("default-src", "script-src", "style-src", "connect-src"):
+            assert must_not_appear not in line, (
+                f"{name}'s enforcing {CSP_ENFORCING} line unexpectedly restricts "
+                f"{must_not_appear!r}, which would break rendering: {line!r}"
+            )
+
+
+def test_csp_enforcing_lines_are_byte_identical_across_vhosts():
+    text = _nginx_conf()
+    lines = {_enforcing_csp_line(_https_block(text, name)) for name in VHOSTS}
+    assert len(lines) == 1, f"enforcing {CSP_ENFORCING} lines differ across vhosts: {lines}"
 
 
 def test_general_timeout_stays_120s():

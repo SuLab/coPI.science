@@ -1,10 +1,11 @@
 """FastAPI application factory for CoPI/LabAgent."""
 
 import asyncio
+import json
 import logging
 import uuid
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -22,6 +23,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Cap on a CSP violation report's body (#27 I5 RC-5): /api/csp-report is public and
+# unauthenticated, so an unbounded body is a way to push arbitrary bytes into the app
+# logs. Real reports (either format) are well under 1 KB.
+CSP_REPORT_MAX_BODY_BYTES = 8 * 1024
 
 # Bounds the /api/health DB probe (#27 I2 review): without this, a stalled
 # Postgres (TCP open, no query response) piles orphaned probe coroutines and
@@ -102,7 +108,7 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path == "/api/health" or path.startswith("/static/"):
+        if path in ("/api/health", "/api/csp-report") or path.startswith("/static/"):
             return await call_next(request)
         request.state.posthog_api_key = get_settings().posthog_api_key
         request.state.agent_badge_count = 0
@@ -295,6 +301,54 @@ def create_app() -> FastAPI:
             logger.warning("Health check DB probe failed: %s", exc)
             raise HTTPException(status_code=503, detail="database unavailable") from exc
         return {"status": "ok"}
+
+    @application.post("/api/csp-report", include_in_schema=False)
+    async def csp_report(request: Request) -> Response:
+        """Collects violation reports for the Report-Only CSP header nginx sends
+        (`report-uri /api/csp-report`; #27 I5, audit RC-5 — the header previously had
+        no report-uri/report-to at all, so nothing was enforced OR collected). Public
+        and unauthenticated: the browser sending a report never carries this app's
+        session cookie. Accepts the two content types browsers actually send
+        (the legacy `application/csp-report` and the newer Reporting API's
+        `application/reports+json`); a malformed or oversized body is refused or
+        dropped, never a 500."""
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > CSP_REPORT_MAX_BODY_BYTES:
+                    raise HTTPException(status_code=413, detail="report too large")
+            except ValueError:
+                pass  # malformed header; the actual-length check below still applies
+        body = await request.body()
+        if len(body) > CSP_REPORT_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="report too large")
+
+        document_uri = violated_directive = blocked_uri = "unknown"
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                # application/csp-report: {"csp-report": {"document-uri": ..., ...}}
+                report = payload.get("csp-report") or {}
+                document_uri = report.get("document-uri", document_uri)
+                violated_directive = report.get("violated-directive", violated_directive)
+                blocked_uri = report.get("blocked-uri", blocked_uri)
+            elif isinstance(payload, list) and payload:
+                # application/reports+json: [{"body": {"documentURL": ..., ...}}, ...]
+                report = payload[0].get("body") or {}
+                document_uri = report.get("documentURL", document_uri)
+                violated_directive = report.get("effectiveDirective", violated_directive)
+                blocked_uri = report.get("blockedURL", blocked_uri)
+        except (json.JSONDecodeError, AttributeError, TypeError, IndexError) as exc:
+            logger.warning("CSP violation report was not parseable: %s", exc)
+            return Response(status_code=204)
+
+        logger.warning(
+            "CSP violation: document-uri=%s violated-directive=%s blocked-uri=%s",
+            document_uri,
+            violated_directive,
+            blocked_uri,
+        )
+        return Response(status_code=204)
 
     return application
 
