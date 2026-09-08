@@ -29,6 +29,26 @@ logger = logging.getLogger(__name__)
 # logs. Real reports (either format) are well under 1 KB.
 CSP_REPORT_MAX_BODY_BYTES = 8 * 1024
 
+# The only content types a real CSP violation report arrives with: the legacy
+# `application/csp-report` (older Chrome/Firefox), the newer Reporting API's
+# `application/reports+json`, and `application/json` (some browsers/versions send
+# plain JSON). Anything else is refused with 415 before the body is even parsed
+# (opus review, audit 2026-09-08 RC-5: this was documented but never enforced).
+CSP_REPORT_ALLOWED_CONTENT_TYPES = frozenset(
+    {"application/csp-report", "application/reports+json", "application/json"}
+)
+
+# Cap on one logged CSP-report field (opus review, audit 2026-09-08 RC-5): every field
+# below comes straight from an unauthenticated, attacker-controlled request body.
+# Truncating AND stripping \n/\r before it reaches the logger closes CRLF log
+# injection (a crafted document-uri could otherwise forge additional log lines).
+CSP_REPORT_LOG_FIELD_MAX_CHARS = 200
+
+
+def _sanitize_csp_log_field(value: object) -> str:
+    text = str(value)[:CSP_REPORT_LOG_FIELD_MAX_CHARS]
+    return text.replace("\n", " ").replace("\r", " ")
+
 # Bounds the /api/health DB probe (#27 I2 review): without this, a stalled
 # Postgres (TCP open, no query response) piles orphaned probe coroutines and
 # connections against the pool instead of failing fast.
@@ -308,10 +328,15 @@ def create_app() -> FastAPI:
         (`report-uri /api/csp-report`; #27 I5, audit RC-5 — the header previously had
         no report-uri/report-to at all, so nothing was enforced OR collected). Public
         and unauthenticated: the browser sending a report never carries this app's
-        session cookie. Accepts the two content types browsers actually send
-        (the legacy `application/csp-report` and the newer Reporting API's
-        `application/reports+json`); a malformed or oversized body is refused or
+        session cookie. Accepts only the content types browsers actually send for a
+        report (`CSP_REPORT_ALLOWED_CONTENT_TYPES`) — anything else is refused with
+        415 before the body is read; a malformed or oversized body is refused or
         dropped, never a 500."""
+        content_type = request.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type not in CSP_REPORT_ALLOWED_CONTENT_TYPES:
+            raise HTTPException(status_code=415, detail="unsupported content type")
+
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
@@ -344,9 +369,9 @@ def create_app() -> FastAPI:
 
         logger.warning(
             "CSP violation: document-uri=%s violated-directive=%s blocked-uri=%s",
-            document_uri,
-            violated_directive,
-            blocked_uri,
+            _sanitize_csp_log_field(document_uri),
+            _sanitize_csp_log_field(violated_directive),
+            _sanitize_csp_log_field(blocked_uri),
         )
         return Response(status_code=204)
 

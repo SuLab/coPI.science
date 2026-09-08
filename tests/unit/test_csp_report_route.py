@@ -136,3 +136,68 @@ async def test_csp_report_endpoint_is_excluded_from_badge_middleware(monkeypatch
             headers={"Content-Type": "application/csp-report", **_auth(uuid.uuid4())},
         )
     assert r.status_code == 204
+
+
+# --- Opus review of RC-5 (2026-09-08) --------------------------------------------
+# 1. Content-type enforcement was only DOCUMENTED, never actually checked -- any
+#    content-type reached the JSON parser. 2. Logged fields came straight from an
+#    attacker-controlled JSON body with no length cap or newline stripping, so a
+#    crafted document-uri could inject fake log lines (CRLF log injection).
+
+
+async def test_csp_report_endpoint_accepts_application_json():
+    r = await _post(CSP_REPORT_BODY, "application/json")
+    assert r.status_code == 204
+
+
+async def test_csp_report_endpoint_rejects_unsupported_content_type_with_415():
+    r = await _post(CSP_REPORT_BODY, "text/plain")
+    assert r.status_code == 415
+
+
+async def test_csp_report_endpoint_rejects_unsupported_content_type_even_with_valid_body():
+    # A wrong content-type is refused before the body is even inspected -- a
+    # perfectly well-formed report must not slip through on the wrong header.
+    r = await _post(REPORTS_JSON_BODY, "application/xml")
+    assert r.status_code == 415
+
+
+async def test_csp_report_endpoint_ignores_content_type_parameters():
+    # `application/csp-report; charset=utf-8` is a real shape browsers send —
+    # only the media type (before the first ';') should be checked.
+    r = await _post(CSP_REPORT_BODY, "application/csp-report; charset=utf-8")
+    assert r.status_code == 204
+
+
+async def test_csp_report_endpoint_sanitizes_an_embedded_newline_in_logged_fields(caplog):
+    injected = json.dumps(
+        {
+            "csp-report": {
+                "document-uri": "https://copi.science/x\n2026-09-08 CRITICAL fake log line",
+                "violated-directive": "script-src-elem",
+                "blocked-uri": "https://evil.example/y\rinjected",
+            }
+        }
+    ).encode()
+    with caplog.at_level(logging.WARNING):
+        r = await _post(injected, "application/csp-report")
+    assert r.status_code == 204
+    [record] = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    msg = record.getMessage()
+    assert "\n" not in msg
+    assert "\r" not in msg
+    # The record itself is one line in any line-oriented log sink, i.e. `str(record)`
+    # / the formatted message has no embedded newline that could masquerade as a
+    # second, forged log line.
+    assert len(msg.splitlines()) == 1
+
+
+async def test_csp_report_endpoint_truncates_an_oversized_logged_field(caplog):
+    long_uri = "https://copi.science/" + "a" * 5000
+    injected = json.dumps({"csp-report": {"document-uri": long_uri}}).encode()
+    with caplog.at_level(logging.WARNING):
+        r = await _post(injected, "application/csp-report")
+    assert r.status_code == 204
+    [record] = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    msg = record.getMessage()
+    assert len(msg) < len(long_uri)
