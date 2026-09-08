@@ -151,3 +151,172 @@ async def test_persist_returns_false_and_logs_on_a_db_exception(tmp_path, monkey
 
     assert ok is False
     assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# PIHandler._handle_standing_instruction end-to-end: DB-first-then-disk, with
+# a stub session_factory (RC-7 follow-ups 2 and 3, Opus review 2026-09-08).
+# ---------------------------------------------------------------------------
+
+
+class _StubResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _StubDb:
+    """Scripts `db.execute(...)` by call order, matching
+    PIHandler._handle_standing_instruction's fixed sequence: the two selects
+    inside `persist_private_profile_to_db` (AgentRegistry, then
+    ResearcherProfile), then — only when that persist succeeds — the
+    revision-lookup selects (AgentRegistry again, then a User join).
+
+    `raise_on_call` lets a test make one specific call in that sequence blow
+    up, simulating a genuine DB failure (as opposed to "no such row").
+    """
+
+    def __init__(self, results, *, raise_on_call: int | None = None):
+        self._results = list(results)
+        self._call = 0
+        self._raise_on_call = raise_on_call
+        self.commits = 0
+
+    async def execute(self, *a, **k):
+        self._call += 1
+        if self._raise_on_call == self._call:
+            raise RuntimeError("connection reset")
+        return _StubResult(self._results.pop(0))
+
+    async def commit(self):
+        self.commits += 1
+
+
+class _StubSessionCtx:
+    def __init__(self, db):
+        self._db = db
+
+    async def __aenter__(self):
+        return self._db
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _StubSessionFactory:
+    def __init__(self, db):
+        self._db = db
+
+    def __call__(self):
+        return _StubSessionCtx(self._db)
+
+
+def _pi_handler(tmp_path, monkeypatch, db, *, disk_write_result: bool = True):
+    """Build a PIHandler wired to a real Agent (disk under tmp_path) and a
+    stub DB session_factory, with the LLM and Slack DM calls stubbed out.
+    Returns (handler, agent, sent) where `sent` accumulates every DM text."""
+    from src.agent import pi_handler as ph
+    from src.agent.message_log import MessageLog
+
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "su.md").write_text("old instruction\n")
+
+    agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+    handler = ph.PIHandler(
+        agents={"su": agent},
+        slack_clients={},
+        pi_slack_id_to_agent_ids={"U1": ["su"]},
+        message_log=MessageLog(),
+        session_factory=_StubSessionFactory(db),
+    )
+
+    async def _fake_llm(**kwargs):
+        return "<profile>new instruction from PI</profile><changes>tightened scope</changes>"
+
+    sent: list[str] = []
+
+    async def _fake_dm(agent_id, pi_slack_id, text):
+        sent.append(text)
+
+    revisions_created: list[str] = []
+
+    async def _fake_create_revision(db_arg, **kwargs):
+        revisions_created.append(kwargs.get("content"))
+        return None
+
+    monkeypatch.setattr(ph, "generate_agent_response", _fake_llm)
+    monkeypatch.setattr(handler, "_send_dm", _fake_dm)
+    monkeypatch.setattr(
+        "src.services.profile_versioning.create_revision", _fake_create_revision
+    )
+    monkeypatch.setattr(
+        agent, "update_private_profile", lambda text: disk_write_result
+    )
+
+    return handler, agent, sent, revisions_created
+
+
+async def test_a_db_failure_tells_the_pi_it_could_not_be_saved_and_skips_the_disk_write(
+    tmp_path, monkeypatch,
+):
+    """RC-7 follow-ups 2+3: when the DB persist fails, (a) the acknowledgement
+    must say so rather than claiming success, (b) no profile revision is
+    recorded, and (c) the disk write is skipped entirely so the agent's actual
+    in-memory profile is not left disagreeing with what the PI was told (an
+    unsaved instruction must not silently take effect)."""
+    from types import SimpleNamespace
+
+    agent_reg = SimpleNamespace(user_id=uuid.uuid4())
+    # raise_on_call=2: the AgentRegistry lookup (call 1) succeeds, then the
+    # ResearcherProfile lookup (call 2) blows up — persist_private_profile_to_db
+    # catches this and returns False.
+    db = _StubDb([agent_reg], raise_on_call=2)
+
+    handler, agent, sent, revisions_created = _pi_handler(tmp_path, monkeypatch, db)
+    disk_write_calls = []
+    monkeypatch.setattr(
+        agent, "update_private_profile",
+        lambda text: disk_write_calls.append(text) or True,
+    )
+
+    await handler._handle_standing_instruction("su", "U1", "always cite DOIs")
+
+    assert len(sent) == 1
+    assert "wasn't able to save it" in sent[0]
+    assert "I've updated my private profile" not in sent[0]
+    assert revisions_created == [], "a failed DB persist must not record a profile revision"
+    assert disk_write_calls == [], "the disk write must be skipped when the DB persist failed"
+    # The ack and the agent's actual behaviour must agree: nothing changed.
+    assert agent.private_profile == "old instruction\n"
+
+
+async def test_a_disk_failure_alone_still_acknowledges_success_and_the_db_holds_the_new_content(
+    tmp_path, monkeypatch,
+):
+    """RC-7's main fix, exercised through the full handler: the DB is primary,
+    so a disk write failure (permission denied, a read-only mount, ...) after
+    a successful DB persist must not be reported to the PI as a failure — and
+    the DB row must actually carry the new content, not something stale."""
+    from types import SimpleNamespace
+
+    agent_reg = SimpleNamespace(id=uuid.uuid4(), user_id=uuid.uuid4())
+    profile = SimpleNamespace(private_profile_md="old db content")
+    # persist_private_profile_to_db's two selects, then the revision lookup's
+    # two selects (AgentRegistry again, then the PI User row).
+    db = _StubDb([agent_reg, profile, agent_reg, None])
+
+    handler, agent, sent, revisions_created = _pi_handler(
+        tmp_path, monkeypatch, db, disk_write_result=False,  # disk write "fails"
+    )
+
+    await handler._handle_standing_instruction("su", "U1", "always cite DOIs")
+
+    assert len(sent) == 1
+    assert "I've updated my private profile" in sent[0]
+    assert "wasn't able to save it" not in sent[0]
+    assert profile.private_profile_md == "new instruction from PI"
+    assert revisions_created == ["new instruction from PI"]
+    assert db.commits == 2  # one inside persist_private_profile_to_db, one after the revision

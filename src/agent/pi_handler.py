@@ -181,16 +181,23 @@ class PIHandler:
                         logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
                         db_ok = False
 
-                # Disk is best-effort once the DB outcome is known: a disk
-                # failure here is logged and does not change the acknowledgement
-                # (the DB already has — or doesn't have — the new content, and
-                # that is what the PI is told about).
-                if not agent.update_private_profile(new_profile):
-                    logger.warning(
-                        "[%s] Private profile disk write failed (db_ok=%s); "
-                        "the in-memory cache still reflects the new instruction",
-                        agent_id, db_ok,
-                    )
+                # Disk is best-effort, and only attempted once the DB persist
+                # actually succeeded (RC-7 follow-up 3, Opus review
+                # 2026-09-08): when db_ok is False, nothing was durably saved
+                # anywhere, the PI is told to retry, and the agent must not
+                # start behaving on an instruction it just reported as
+                # unsaved — update_private_profile always sets the in-memory
+                # cache to its argument (see its docstring), so calling it
+                # here on a DB failure would make the ack and the agent's
+                # actual behaviour disagree.
+                if db_ok:
+                    if not agent.update_private_profile(new_profile):
+                        logger.warning(
+                            "[%s] Private profile disk write failed after a "
+                            "successful DB persist; the in-memory cache still "
+                            "reflects the new instruction",
+                            agent_id,
+                        )
 
                 changes = changes_match.group(1).strip() if changes_match else "Profile updated."
 
