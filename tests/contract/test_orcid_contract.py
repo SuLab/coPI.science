@@ -285,6 +285,50 @@ async def test_fetch_orcid_works_tolerates_a_null_external_id_type():
     assert works[0]["pmid"] == "31000001"
 
 
+# ---- RC-11: a *present* container that is explicitly null, not merely absent ----
+#
+# The tests above (COR-15) cover null leaves nested under a container that itself exists.
+# These cover the container ORCID sometimes nulls out entirely: "group": null on the
+# fundings/works envelope, and "summaries": null on one affiliation-group entry. Plain
+# `dict.get(key, [])` only substitutes the default for a *missing* key — a present `None`
+# sails through and the next `for x in None:` raises TypeError.
+
+
+@respx.mock
+async def test_fetch_orcid_grants_tolerates_a_null_group_container():
+    respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(200, json={"group": None}))
+    assert await orcid.fetch_orcid_grants(OID) == []
+
+
+@respx.mock
+async def test_fetch_orcid_grants_tolerates_a_null_funding_summary_container():
+    data = {"group": [{"funding-summary": None}]}
+    respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(200, json=data))
+    assert await orcid.fetch_orcid_grants(OID) == []
+
+
+@respx.mock
+async def test_fetch_orcid_works_tolerates_a_null_group_container():
+    respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(200, json={"group": None}))
+    assert await orcid.fetch_orcid_works(OID) == []
+
+
+@respx.mock
+async def test_fetch_orcid_works_tolerates_a_null_work_summary_container():
+    data = {"group": [{"work-summary": None}]}
+    respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(200, json=data))
+    assert await orcid.fetch_orcid_works(OID) == []
+
+
+@respx.mock
+async def test_fetch_orcid_profile_tolerates_a_null_summaries_container():
+    record = _record()
+    record["activities-summary"]["employments"]["affiliation-group"][0]["summaries"] = None
+    respx.get(f"{BASE}/{OID}/record").mock(return_value=httpx.Response(200, json=record))
+    prof = await orcid.fetch_orcid_profile(OID)
+    assert prof.get("institution") is None
+
+
 # ---- retry behaviour, not just the wiring (#23 COR-29a / R6) ----
 #
 # Until now the only thing pinning orcid.py's retry loop was the `_no_retry_backoff`

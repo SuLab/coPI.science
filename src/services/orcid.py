@@ -64,7 +64,7 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
     )
     current_employments: list[dict[str, Any]] = []
     for grp in employments:
-        for summaries in grp.get("summaries", []):
+        for summaries in _get(grp, "summaries", default=[]):
             emp = summaries.get("employment-summary", {})
             if emp.get("end-date") is None:  # Current employment
                 current_employments.append(emp)
@@ -107,8 +107,8 @@ async def fetch_orcid_grants(orcid_id: str) -> list[str]:
             return []
 
     titles = []
-    for grp in data.get("group", []):
-        for summary in grp.get("funding-summary", []):
+    for grp in _get(data, "group", default=[]):
+        for summary in _get(grp, "funding-summary", default=[]):
             title = _get(summary, "title", "title", "value")
             if title:
                 titles.append(title)
@@ -128,8 +128,8 @@ async def fetch_orcid_works(orcid_id: str) -> list[dict[str, Any]]:
             return []
 
     works = []
-    for grp in data.get("group", []):
-        for summary in grp.get("work-summary", []):
+    for grp in _get(data, "group", default=[]):
+        for summary in _get(grp, "work-summary", default=[]):
             work: dict[str, Any] = {
                 "title": _get(summary, "title", "title", "value", default=""),
                 "year": None,
