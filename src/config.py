@@ -162,6 +162,13 @@ class Settings(BaseSettings):
     # as valid; nothing wrote it until #21 V4-3/V4-4a). Chosen to match FREQUENCY_INTERVALS'
     # "biweekly" cadence — long enough that a PI on any frequency has had at least one more
     # regularly-scheduled nudge before being written off.
+    #
+    # Also the bound the inbound poller enforces on its end (audit 2026-09-08 RC-4):
+    # email_inbound.process_inbound_email refuses ANY reply -- proposal_review or
+    # new_proposal, the category is not distinguished on this path -- whose
+    # EmailNotification.sent_at is older than this many days, independent of the row's
+    # `status`. A `review+<token>@...` address is otherwise a bearer credential with no
+    # expiry of its own.
     email_notification_expiry_days: int = 14
 
     # Slack bot tokens — one per agent

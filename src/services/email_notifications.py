@@ -257,15 +257,22 @@ async def _expire_lapsed_outstanding(
     *,
     reason: str,
 ) -> None:
-    """Mark an outstanding proposal_review row `expired` (RC-4), if there is one.
+    """Mark an outstanding proposal_review row `expired` (RC-4), if there is one AND it
+    is actually past the reply window.
 
-    Callers only reach here after the reply-window check earlier in
-    `_process_user_notifications` has already let a non-None `outstanding_notification`
-    fall through -- which happens only when it is already past
-    `settings.email_notification_expiry_days`. A no-op when there is nothing
-    outstanding.
+    Re-checks `sent_at` against `settings.email_notification_expiry_days` itself
+    (RC-4 follow-up, opus review) rather than trusting that a caller's earlier check
+    still holds -- callers currently only reach here after the reply-window check
+    earlier in `_process_user_notifications` has already let a non-None
+    `outstanding_notification` fall through, but correctness must not depend on
+    control flow 40 lines away surviving a future edit. A no-op when there is nothing
+    outstanding, or when the outstanding row is still inside its reply window.
     """
     if outstanding_notification is None:
+        return
+    settings = get_settings()
+    age = datetime.now(UTC) - outstanding_notification.sent_at
+    if age < timedelta(days=settings.email_notification_expiry_days):
         return
     outstanding_notification.status = "expired"
     await db.flush()

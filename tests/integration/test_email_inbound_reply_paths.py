@@ -79,7 +79,7 @@ async def _slack_on(*a, **k):
     return True
 
 
-async def _world(db_session, *, recipient_email, token, sent_at=None):
+async def _world(db_session, *, recipient_email, token, sent_at=None, category="proposal_review"):
     """An agent-owning PI, a notification recipient, and a live notification."""
     owner = await factories.make_user(db_session)
     recipient = await factories.make_user(db_session, email=recipient_email)
@@ -94,7 +94,7 @@ async def _world(db_session, *, recipient_email, token, sent_at=None):
         thread_decision_id=td.id,
         agent_registry_id=agent.id,
         reply_token=token,
-        category="proposal_review",
+        category=category,
         status="sent",
         **({"sent_at": sent_at} if sent_at is not None else {}),
     )
@@ -139,6 +139,34 @@ async def test_a_reply_past_the_expiry_window_is_refused_and_the_row_expires(
     assert len(sent_emails) == 1, "the PI should get exactly one expiry notice"
     assert "expired" in sent_emails[0]["subject"].lower()
     assert sent_emails[0]["to"] == recipient.email
+
+
+async def test_an_expired_new_proposal_reply_is_also_refused(
+    db_session, monkeypatch, sent_emails
+):
+    """The expiry check in process_inbound_email sits after notification lookup and
+    sender verification, common to every reply regardless of the outbound e-mail's
+    EmailNotification.category -- 'new_proposal' tokens are just as much a bearer
+    credential as 'proposal_review' ones, and get no special treatment here."""
+    token = "expirednp" + "f" * 40
+    old_sent_at = datetime.now(UTC) - timedelta(
+        days=get_settings().email_notification_expiry_days + 1
+    )
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.expirednp@scripps.edu", token=token,
+        sent_at=old_sent_at, category="new_proposal",
+    )
+    _classifies_as(monkeypatch, {"category": "review", "rating": 4, "comment": "great"})
+
+    await process_inbound_email(
+        _raw_reply(token, recipient.email, "4 great"), db_session
+    )
+
+    assert await _reviews(db_session) == [], "a rating must not be applied past the window"
+    await db_session.refresh(notification)
+    assert notification.status == "expired"
+    assert len(sent_emails) == 1, "the PI should get exactly one expiry notice"
+    assert "expired" in sent_emails[0]["subject"].lower()
 
 
 async def test_a_reply_inside_the_expiry_window_is_still_applied(

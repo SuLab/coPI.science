@@ -332,3 +332,66 @@ async def test_send_proposal_notification_never_reaches_ses_for_a_blocked_recipi
     assert sent is False
     assert recorder.calls == []
     assert any("suppressed by outbound allowlist" in r.getMessage() for r in caplog.records)
+
+
+# --- RC-4 follow-up: _expire_lapsed_outstanding must not trust its callers ---------
+
+
+class _Notif:
+    """Minimal stand-in for EmailNotification: the helper only touches id/status/sent_at."""
+
+    def __init__(self, sent_at):
+        self.id = "6f1b9e1e-0000-4000-8000-000000000002"
+        self.status = "sent"
+        self.sent_at = sent_at
+
+
+class _NoFlushDB:
+    """Fails the test loudly if the helper writes anything -- a real AsyncSession's
+    flush() would otherwise silently no-op over an in-window row that should never have
+    been touched."""
+
+    async def flush(self):
+        raise AssertionError("_expire_lapsed_outstanding flushed a row it should not have")
+
+
+@pytest.mark.asyncio
+async def test_expire_lapsed_outstanding_leaves_an_in_window_row_alone(monkeypatch):
+    """Opus review, RC-4 follow-up: the helper previously trusted its caller's earlier
+    age check (40 lines away in `_process_user_notifications`) to guarantee any row
+    reaching it was already past the reply window. It must re-check `sent_at` against
+    `settings.email_notification_expiry_days` itself, so correctness does not depend on
+    control flow the reader has to trace elsewhere."""
+    from datetime import UTC, datetime
+
+    notification = _Notif(sent_at=datetime.now(UTC))  # sent moments ago -- well inside the window
+
+    await en._expire_lapsed_outstanding(notification, _U(), _NoFlushDB(), reason="test")
+
+    assert notification.status == "sent", "an in-window row must not be expired"
+
+
+@pytest.mark.asyncio
+async def test_expire_lapsed_outstanding_still_expires_a_row_past_the_window():
+    """Control: the helper's own purpose still works when given a genuinely lapsed row."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.config import get_settings as _get_settings
+
+    class _FlushingDB:
+        def __init__(self):
+            self.flushed = False
+
+        async def flush(self):
+            self.flushed = True
+
+    old_sent_at = datetime.now(UTC) - timedelta(
+        days=_get_settings().email_notification_expiry_days + 1
+    )
+    notification = _Notif(sent_at=old_sent_at)
+    db = _FlushingDB()
+
+    await en._expire_lapsed_outstanding(notification, _U(), db, reason="test")
+
+    assert notification.status == "expired"
+    assert db.flushed is True
