@@ -118,8 +118,23 @@ def markdown_to_mrkdwn(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-MAX_RETRIES = 3
+# Hard ceiling on retry *attempts*, independent of the wait budget below — what
+# stops a Retry-After of 1s (or less) from spinning through hundreds of quick
+# retries while staying "within budget". At MAX_RETRY_AFTER's 30s cap, 8
+# attempts is well clear of RATE_LIMIT_WAIT_BUDGET_SECONDS on its own (8 * 30 =
+# 240 > 180), so in practice the budget is what ends a sustained 30s-header
+# throttle; the attempt ceiling is what ends a sustained short-header one.
+MAX_RETRIES = 8
 MAX_RETRY_AFTER = 30.0
+
+# Total time `_call_with_retry` will spend sleeping on a single call before
+# giving up, regardless of how many attempts that took. #23 V7: a legitimate
+# `Retry-After: 60` capped per-sleep at 30s and MAX_RETRIES=3 exhausted after
+# three 30s sleeps (90s) — well short of the two real 60s waits Slack actually
+# asked for — and the caller then wrote a DB-only row the PIs never saw on
+# Slack. Sized so a sustained 30s-per-attempt throttle gets six full attempts
+# (180 / 30 = 6) before giving up.
+RATE_LIMIT_WAIT_BUDGET_SECONDS = 180.0
 
 # How many times to attempt private-channel creation. Attempt 0 uses a plain
 # timestamp suffix; later attempts add random entropy to survive the (extremely
@@ -317,6 +332,16 @@ class AgentSlackClient:
         because test teardown reaches for endpoints the client has no wrapper for
         (``conversations_archive``) and must still get the backoff.
 
+        Bounded by two independent limits rather than a fixed attempt count
+        (#23 V7): a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS``),
+        so a legitimate ``Retry-After: 60`` gets several real waits rather than
+        being exhausted by attempt count alone, and a hard attempt ceiling
+        (``MAX_RETRIES``), so a short or zero Retry-After cannot spin through
+        hundreds of near-instant retries while staying "within budget". Giving
+        up is decided *before* sleeping — a wait that would push the cumulative
+        total over budget is not taken at all, so the total time actually slept
+        never exceeds the budget.
+
         ``last_exc`` exists because Python unbinds an ``except ... as exc`` name at the
         end of the except block. Referring to ``exc`` after the loop raised
         ``UnboundLocalError`` instead of the intended ``SlackApiError`` — and callers
@@ -325,26 +350,40 @@ class AgentSlackClient:
         throttling us, i.e. when the system is busiest.
         """
         last_exc: SlackApiError | None = None
+        total_slept = 0.0
+        attempts_made = 0
         for attempt in range(MAX_RETRIES):
+            attempts_made = attempt + 1
             try:
                 return method(**kwargs)
             except SlackApiError as exc:
-                if exc.response.get("error") == "ratelimited":
-                    last_exc = exc
-                    retry_after = parse_retry_after(
-                        exc.response.headers.get("Retry-After"),
-                        default=5.0,
-                        cap=MAX_RETRY_AFTER,
-                    )
-                    logger.warning(
-                        "[%s] Rate limited, retrying in %.1fs (attempt %d/%d)",
-                        self.agent_id, retry_after, attempt + 1, MAX_RETRIES,
-                    )
-                    time.sleep(retry_after)
-                else:
+                if exc.response.get("error") != "ratelimited":
                     raise
+                last_exc = exc
+                retry_after = parse_retry_after(
+                    exc.response.headers.get("Retry-After"),
+                    default=5.0,
+                    cap=MAX_RETRY_AFTER,
+                )
+                if total_slept + retry_after > RATE_LIMIT_WAIT_BUDGET_SECONDS:
+                    logger.warning(
+                        "[%s] Rate limit wait budget exhausted after %.1fs/%.1fs "
+                        "(attempt %d/%d) — giving up rather than sleeping %.1fs more",
+                        self.agent_id, total_slept, RATE_LIMIT_WAIT_BUDGET_SECONDS,
+                        attempts_made, MAX_RETRIES, retry_after,
+                    )
+                    break
+                logger.warning(
+                    "[%s] Rate limited, retrying in %.1fs (attempt %d/%d, "
+                    "%.1fs/%.1fs of wait budget used)",
+                    self.agent_id, retry_after, attempts_made, MAX_RETRIES,
+                    total_slept, RATE_LIMIT_WAIT_BUDGET_SECONDS,
+                )
+                time.sleep(retry_after)
+                total_slept += retry_after
         raise SlackApiError(
-            "Rate limit retries exhausted",
+            f"Rate limit retries exhausted after {attempts_made} attempt(s), "
+            f"waited {total_slept:.1f}s (budget {RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s)",
             response=last_exc.response if last_exc else None,
         )
 

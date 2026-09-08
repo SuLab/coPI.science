@@ -26,6 +26,7 @@ from src.agent import slack_client as slack_client_module
 from src.agent.slack_client import (
     MAX_PAGES,
     MAX_RETRIES,
+    RATE_LIMIT_WAIT_BUDGET_SECONDS,
     SLACK_MAX_TEXT_CHARS,
     SLACK_PAGE_LIMIT,
     AgentSlackClient,
@@ -223,6 +224,58 @@ def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
     # Same as above: a negative header is not a valid backoff, so the caller's default wins.
     # The point of this test is that nothing raises and `time.sleep` gets a sane float.
     assert slept == [5.0]
+
+
+def test_a_60s_retry_after_is_honoured_across_multiple_throttled_attempts(monkeypatch):
+    """#23 V7: `Retry-After: 60` used to be indistinguishable from a dropped post — the
+    old fixed `MAX_RETRIES = 3` exhausted after three 30s-capped sleeps (90s total) even
+    though Slack asked for only three real waits' worth of patience. The wait budget
+    (180s) must let this succeed instead of raising."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.30"}},
+        errors={"chat_postMessage": [
+            slack_error("ratelimited", retry_after=60),
+            slack_error("ratelimited", retry_after=60),
+            slack_error("ratelimited", retry_after=60),
+        ]},
+    )
+    out = _client(fake).post_message("general", "hi")
+    assert out is not None, "a budget-honouring retry should have succeeded, not exhausted"
+    assert out["ts"] == "1.30"
+    assert len(fake.calls_to("chat_postMessage")) == 4
+    # Each 60s header is capped to MAX_RETRY_AFTER (30s) per sleep, as before.
+    assert slept == [30.0, 30.0, 30.0]
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS
+
+
+def test_a_persistently_short_retry_after_exhausts_at_the_attempt_ceiling(monkeypatch):
+    """A 1s header forever must still give up eventually (never spin) — bounded by
+    MAX_RETRIES, not by the (much larger) wait budget, since the cumulative sleep never
+    gets close to it."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after=1)] * 50})
+    assert _client(fake).post_message("general", "hi") is None
+    assert len(fake.calls_to("chat_postMessage")) == MAX_RETRIES
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS
+
+
+def test_exhaustion_error_states_how_long_was_waited(monkeypatch):
+    """The exhaustion message is the only diagnostic an operator sees in the logs for a
+    dropped-to-DB-only post; it must say how long the client actually waited, not just
+    that it gave up."""
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    fake = RecordingSlackClient(
+        errors={"conversations_history": [slack_error("ratelimited", retry_after=1)] * 50})
+    c = _client(fake)
+    from slack_sdk.errors import SlackApiError
+    with pytest.raises(SlackApiError) as exc_info:
+        c._call_with_retry(fake.conversations_history, channel="C_GENERAL")
+    assert "waited" in str(exc_info.value).lower()
+    assert "s" in str(exc_info.value)  # a seconds figure is present
 
 
 # --- what actually goes on the wire ------------------------------------------------
