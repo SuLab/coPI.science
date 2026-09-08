@@ -44,6 +44,31 @@ def test_claude_md_restart_step_mentions_migrate():
     assert "migrate" in restart_section
 
 
+def test_claude_md_restart_step_3_points_at_redeploy_script():
+    """audit 2026-09-08 RC-6, #27 I2: a bare `docker compose up -d --build app worker`
+    on a running stack does not guarantee `migrate` reruns before the new containers
+    start. Step 3 must drive scripts/redeploy.sh, which enforces the ordering
+    explicitly, not the raw compose invocation this replaced."""
+    text = CLAUDE_MD.read_text()
+    idx = text.index("Before restarting")
+    restart_section = text[idx : idx + 2000]
+    assert "scripts/redeploy.sh" in restart_section
+    assert "up -d --build app worker" not in restart_section, (
+        "step 3 must no longer recreate app/worker with a raw compose command that "
+        "cannot guarantee migrate reran first"
+    )
+
+
+def test_production_migration_doc_routine_deploy_section_points_at_redeploy_script():
+    """RC-6: the routine-deploy section (10.1) described the exact race this script
+    fixes; it must now tell the reader to run scripts/redeploy.sh instead of the raw
+    `up -d --build app worker grantbot` invocation."""
+    text = PROD_MIGRATION_DOC.read_text()
+    idx = text.index("### 10.1 The routine path")
+    section = text[idx : idx + 2500]
+    assert "scripts/redeploy.sh" in section
+
+
 def test_production_migration_doc_lists_0024_as_a_supported_starting_point():
     """issue #26 Minor 10: A4's doc widening (Part M) added 0024 as a
     supported starting point but no test pinned it."""

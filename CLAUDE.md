@@ -98,18 +98,25 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 docker stop -t 30 agent-run
 docker rm agent-run
 
-# 3. Rebuild app + worker (picks up code changes). This now also builds the
-#    `migrate` one-shot image and re-runs `alembic upgrade head` first
-#    (idempotent — a deploy with no new revision just finds it's already at
-#    head and exits 0); app/worker wait on migrate's success before they
-#    start. The image runs as UID 10001, so profiles/ and data/ on the host
-#    must already be owned by 10001:10001 (never prompts/ — see
-#    docs/production-migration.md §10.8 and Part R.5 of
-#    docs/plans/2026-09-02-close-issues-20-27.md) or the services that mount
-#    them fail to write into their bind mounts — profiles/ and prompts/ are
-#    mounted on app/worker (and agent/grantbot); data/ is mounted only on
-#    agent/grantbot, not app/worker.
-docker compose $C up -d --build app worker
+# 3. Redeploy app + worker against the migrated schema — via scripts/redeploy.sh,
+#    NOT a bare `up -d --build`. `depends_on: migrate: condition:
+#    service_completed_successfully` only orders container CREATION: on an
+#    already-running stack, an existing exited `migrate` container from the last
+#    deploy can satisfy that condition without being re-run against the freshly
+#    built image, so old code can keep serving requests against a schema the new
+#    migration hasn't applied yet (audit 2026-09-08 RC-6, #27 I2). redeploy.sh
+#    builds migrate+app+worker, STOPS app/worker first, runs migrate and checks
+#    its exit code, only then starts the new app/worker, then reloads nginx (the
+#    recreated app container gets a new IP — see the nginx-stale-upstream-ip
+#    memory note). It refuses to run unless both prod compose files are visible
+#    (via $COMPOSE_FILE or -f) and never passes an orphan-removal flag. The image
+#    runs as UID 10001, so profiles/ and data/ on the host must already be owned
+#    by 10001:10001 (never prompts/ — see docs/production-migration.md §10.8 and
+#    Part R.5 of docs/plans/2026-09-02-close-issues-20-27.md) or the services
+#    that mount them fail to write into their bind mounts — profiles/ and
+#    prompts/ are mounted on app/worker (and agent/grantbot); data/ is mounted
+#    only on agent/grantbot, not app/worker.
+./scripts/redeploy.sh $C
 
 # 4. Rebuild the agent image too — prod bakes code into the image, so skipping
 #    this silently runs whatever source was current at the last build.
