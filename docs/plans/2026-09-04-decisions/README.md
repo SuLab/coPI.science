@@ -297,7 +297,7 @@ have since been closed or ruled:
 
 | `closure-23` residual | state at HEAD |
 |---|---|
-| R2 keyed NCBI paced at 8.33 req/s against a 10 req/s ceiling | **fixed** — Task 23 (`962aa6c`) originally paced at 9.52 req/s (0.105 s); `b982d53` (#23 COR-29, audit D5) retightened it to **8.93 req/s** (0.112 s), because 0.105 s sat at exactly the 10 req/s ceiling with zero jitter margin — see `src/services/pubmed.py`'s `_NCBI_PACING_SECONDS` comment. The semaphore slot is released across backoff instead of held for the whole retry loop |
+| R2 keyed NCBI paced at 8.33 req/s against a 10 req/s ceiling | **fixed** — Task 23 (`962aa6c`) originally paced at 9.52 req/s (0.105 s); `b982d53` (#23 COR-29, audit D5) retightened it to **8.93 req/s** (0.112 s, worst-case burst 9), because 0.105 s sat at exactly the 10 req/s ceiling (worst-case burst 10) with zero jitter margin — see `src/services/pubmed.py`'s `_NCBI_PACING_SECONDS` comment. The semaphore slot is released across backoff instead of held for the whole retry loop |
 | R3 apostrophe class misses U+2018 / U+00B4 / U+FF07 | **fixed** — `554b139` |
 | R4 `extract_foa_number` returns the matched case verbatim | **fixed** — `554b139` canonicalises |
 | R5 the V10b log line has no assertion | **fixed** — Task 24 (`df5c45b`) asserts the whole message in `tests/unit/test_delegates.py`. **But R5's premise was wrong**: see carve-out 1 |
@@ -630,6 +630,33 @@ All three of `closure-27`'s blockers are closed: the stale `requirements.lock` (
     **phase-8 I4 — an evidence caveat on every "measured on the production copy" number in this
     plan**, because those measurements ran against a copy whose `llm_call_logs` was empty (1,509 MB
     of a 1,548 MB database).
+11. **RC-5 and RC-6, closed in the 2026-09-08 audit fix wave.** I5's CSP was inert
+    (Report-Only with no `report-uri`/`report-to`) and its own routine-deploy path
+    (I2) could serve old code against a migrated schema on a running stack. Both are
+    now closed, each with its own review-caught correction:
+    - **RC-5.** An enforcing `Content-Security-Policy` header (`frame-ancestors 'none';
+      base-uri 'self'; object-src 'none'`) ships on all three vhosts; the existing
+      Report-Only header keeps its policy and gains `report-uri /api/csp-report`
+      (`POST /api/csp-report` in `src/main.py`, public, 8 KB cap, 415 on an
+      unsupported content-type, logged fields truncated to 200 chars with `\n`/`\r`
+      stripped before logging). `form-action` was dropped from the ENFORCING header
+      after review: Chromium/Firefox apply it to the redirect a form POST's response
+      returns, and the admin Provision button POSTs then 302s to Slack's OAuth
+      consent screen (`templates/admin/agent_detail.html:107-129` →
+      `src/routers/admin.py:998-1023` → `src/services/admin_provisioning.py:216`) --
+      an enforced `form-action 'self'` would have broken provisioning outright.
+      `form-action` remains in the Report-Only policy.
+    - **RC-6.** `scripts/redeploy.sh` builds `migrate`+`app`+`worker`, stops
+      `app`/`worker` (`-t 30`), runs `migrate` and reads its exit code via `docker
+      wait <container id>` (NOT `docker compose wait migrate`, which was tried first
+      and, per review, races an already-exited one-shot: measured at >=0.3s to fail
+      with "no containers for project" instead of reporting the exit code), starts
+      the new `app`/`worker` only once migrate is verified to have exited 0, polls
+      the new `app` container's Docker health status (bounded, 120s) before
+      declaring success, then reloads nginx. Current scope is `app`/`worker`;
+      `grantbot` still relies on `depends_on` ordering, called out in
+      `docs/production-migration.md` §10.1 as the same insufficient guarantee on a
+      running stack.
 
 Follow-ups: **F17**, **F18**, **F19**, **F20**, **F21**.
 
