@@ -214,13 +214,6 @@ class Agent:
         self._public_working_memory = None
         self._own_publication_dois = None  # derived from both profiles
 
-    def reload_profiles(self):
-        """Reload both profiles from disk. Prefer the per-profile methods
-        above for a reload triggered by one file's change — see
-        ``reload_private_profile``'s docstring for why."""
-        self.reload_private_profile()
-        self.reload_public_profile()
-
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)
     # ------------------------------------------------------------------

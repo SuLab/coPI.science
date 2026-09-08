@@ -251,6 +251,21 @@ property read (no I/O) and is left as-is. The engine's own `_post_message`
 (`src/agent/simulation.py`) is deliberately NOT touched — the simulation main loop is
 synchronous by design and runs in its own process, so it was never in scope here.
 
+**Cancellation caveat (pre-existing class, not introduced here).** `asyncio.to_thread`
+schedules the call on a worker thread via an executor and is not itself cancellable — an
+`await asyncio.to_thread(...)` that is cancelled (caller timeout, task group failure, process
+shutdown) does not stop the underlying thread; the Slack call keeps running to completion (or
+its own timeout) in the background, detached from whatever awaited it. This widens, slightly,
+the same "unknown whether Slack acted on the request" window `migrate_public_thread_to_private`
+already documents at its point of no return: a cancellation during `create_private_channel`
+now has a running background thread as well as an ambiguous Slack response. It does not weaken
+the e-mail retry guard, though — `progress.safe_to_retry` is set to `False` *before* the
+`create_private_channel` call (not after), specifically because the outcome is unknowable the
+moment the call is made, threaded or not. Pre-existing risk class (any blocking call under an
+`await` was already subject to caller-side cancellation not stopping in-flight Slack I/O);
+`asyncio.to_thread` does not add a new failure mode, it just means the in-flight work now
+outlives cancellation in a background thread rather than an already-blocked coroutine.
+
 **Tests (red first).** `tests/unit/test_private_channel_migration.py`,
 `TestSlackCallsRunOffTheEventLoop`: drives `migrate_public_thread_to_private` through its
 Slack-on path with `_ThreadRecordingSlackClient` (records `threading.get_ident()` on every
