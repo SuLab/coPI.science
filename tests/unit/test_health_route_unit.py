@@ -11,9 +11,11 @@ timeouts armed it returns 503 in 3.0s. See the note in src/main.py."""
 
 import asyncio
 import inspect
+import time
 
 import httpx
 from httpx import ASGITransport
+from sqlalchemy.exc import DBAPIError
 
 from src.main import create_app
 
@@ -111,3 +113,55 @@ def test_the_probe_engine_bounds_both_connect_and_command():
         "capped at one connection so a public endpoint cannot amplify into Postgres"
     )
     assert "command_timeout" in src and '"timeout"' in src
+
+
+class _ReapedThenHangingSession:
+    """First `execute` burns most of the outer budget then raises the reaped-connection
+    error (`connection_invalidated=True`); the retry that follows hangs forever. Only a
+    retry that is itself wrapped in a bounded `wait_for` (using what's left of the
+    outer deadline, not a fresh full budget) can make the route answer in time (#27 I2:
+    `engine.connect()` and the second attempt sit outside the bound today, so this
+    retry would hang for the full HEALTH_PROBE_TIMEOUT_SECONDS on top of the time
+    already spent)."""
+
+    def __init__(self, *, first_probe_seconds: float):
+        self._first_probe_seconds = first_probe_seconds
+        self._calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def execute(self, *args, **kwargs):
+        self._calls += 1
+        if self._calls == 1:
+            await asyncio.sleep(self._first_probe_seconds)
+            raise DBAPIError("SELECT 1", {}, Exception("conn reset"), connection_invalidated=True)
+        await asyncio.Event().wait()  # never set: only a bounded retry escapes this
+
+
+async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeypatch):
+    # first_probe_seconds leaves only ~0.05s of the outer deadline remaining before the
+    # retry starts. A retry re-armed with a fresh full HEALTH_PROBE_TIMEOUT_SECONDS
+    # budget (today's behaviour) blows well past `timeout`; a retry bounded by what's
+    # left of the deadline does not. The assertion's slack (0.15s) is small relative to
+    # `timeout` on purpose, so a fresh-budget retry (+0.3s) trips it while a
+    # remaining-budget retry (+~0.05s) does not.
+    timeout = 0.5
+    monkeypatch.setattr("src.main.HEALTH_PROBE_TIMEOUT_SECONDS", timeout)
+    session = _ReapedThenHangingSession(first_probe_seconds=timeout - 0.1)
+    monkeypatch.setattr("src.main.get_health_engine", lambda: _FakeEngine(session))
+    app = create_app()
+    transport = ASGITransport(app=app)
+    start = time.monotonic()
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/api/health")
+    elapsed = time.monotonic() - start
+    assert r.status_code == 503
+    assert elapsed <= timeout + 0.3, (
+        f"probe took {elapsed:.3f}s against HEALTH_PROBE_TIMEOUT_SECONDS={timeout} — "
+        "the retry after a reaped connection is not bounded by what remains of the "
+        "outer deadline (it is re-armed with a fresh full budget instead)"
+    )

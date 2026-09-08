@@ -260,28 +260,37 @@ def create_app() -> FastAPI:
         let traffic through regardless)."""
 
         async def probe_once() -> None:
+            # `engine.connect()` is inside this coroutine (not wrapped in its own
+            # wait_for) so the caller can bound BOTH connect and execute under one
+            # deadline — a probe that only bounded conn.execute() left connect() (and,
+            # on retry, a second full connect+execute) free to run past
+            # HEALTH_PROBE_TIMEOUT_SECONDS (#27 I2 audit RC-10).
             async with get_health_engine().connect() as conn:
-                await asyncio.wait_for(
-                    conn.execute(text("SELECT 1")), timeout=HEALTH_PROBE_TIMEOUT_SECONDS
-                )
+                await conn.execute(text("SELECT 1"))
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HEALTH_PROBE_TIMEOUT_SECONDS
 
         try:
             try:
-                await probe_once()
+                await asyncio.wait_for(probe_once(), timeout=HEALTH_PROBE_TIMEOUT_SECONDS)
             except DBAPIError as exc:
                 # The probe pools one connection, so between probes it sits idle and a
                 # Postgres restart, an idle-connection reaper or a pg_terminate_backend
                 # can reap it. Its next use fails on a socket the database already
                 # closed, which is not the database being unavailable. SQLAlchemy has
                 # already invalidated and discarded that connection by the time this
-                # runs (connection_invalidated), so one retry gets a fresh one.
-                # Bounded: a genuine outage raises TimeoutError or a connect failure
-                # instead, neither of which sets the flag, so it is never retried and
-                # the response still lands inside HEALTH_PROBE_TIMEOUT_SECONDS.
+                # runs (connection_invalidated), so one retry gets a fresh one — but
+                # only with whatever remains of the outer deadline, never a fresh full
+                # budget, so the response still lands inside HEALTH_PROBE_TIMEOUT_SECONDS
+                # even counting the first attempt's connect+execute time.
                 if not exc.connection_invalidated:
                     raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
                 logger.info("Health probe reconnecting after a reaped connection: %s", exc)
-                await probe_once()
+                await asyncio.wait_for(probe_once(), timeout=remaining)
         except Exception as exc:
             logger.warning("Health check DB probe failed: %s", exc)
             raise HTTPException(status_code=503, detail="database unavailable") from exc
