@@ -238,6 +238,7 @@ def backfill_profile_revisions():
 
         from sqlalchemy import select
 
+        from src.config import get_settings
         from src.models import AgentRegistry
         from src.services.profile_versioning import create_revision, latest_revision
 
@@ -247,11 +248,15 @@ def backfill_profile_revisions():
             result = await db.execute(select(AgentRegistry))
             agents = {a.agent_id: a for a in result.scalars().all()}
 
+            # Derived from the setting (env COPI_PROFILES_DIR, default "profiles") rather
+            # than a hardcoded literal (audit 2026-09-08 RC-13 L2, opus review) -- every
+            # other profile path builder was converted for RC-13; this one was missed.
+            profiles_root = Path(get_settings().profiles_dir)
             count = 0
             for profile_type, subdir in [
-                ("public", "profiles/public"),
-                ("private", "profiles/private"),
-                ("memory", "profiles/memory"),
+                ("public", profiles_root / "public"),
+                ("private", profiles_root / "private"),
+                ("memory", profiles_root / "memory"),
             ]:
                 dirpath = Path(subdir)
                 if not dirpath.exists():
