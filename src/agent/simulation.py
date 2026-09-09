@@ -4481,6 +4481,7 @@ class SimulationEngine:
         gating = _normalize_gating(verdict.get("gating"))
         red_flags = verdict.get("red_flags")
         milestones = verdict.get("suggested_derisking_milestones")
+        key_points = verdict.get("key_points")
         # subject_agent_id/funnel_stage/recommendation/confidence are bounded
         # VARCHAR columns (see src/models/opportunity.py); every other field
         # degrades per-field on a bad value (wrong type -> None), but a
@@ -4493,6 +4494,25 @@ class SimulationEngine:
         funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
         recommendation = _bounded_str(verdict.get("recommendation"), 30)
         confidence = _bounded_str(verdict.get("confidence"), 20)
+        # Shape checks are WARNINGS, never drops (A4). Nothing here can verify
+        # that a headline tells the whole story — only that it is the shape the
+        # contract asks for. A verdict that misses the shape is still the
+        # archive's copy of that verdict.
+        if isinstance(verdict.get("headline"), str) and len(
+            verdict["headline"]
+        ) > _HEADLINE_SOFT_LIMIT:
+            logger.warning(
+                "[%s] Assessment headline is %d chars (contract asks for <=%d): %s",
+                agent_id, len(verdict["headline"]), _HEADLINE_SOFT_LIMIT,
+                verdict["headline"][:80],
+            )
+        if isinstance(key_points, list) and not (
+            _KEY_POINTS_MIN <= len(key_points) <= _KEY_POINTS_MAX
+        ):
+            logger.warning(
+                "[%s] Assessment carries %d key_points (contract asks for %d-%d)",
+                agent_id, len(key_points), _KEY_POINTS_MIN, _KEY_POINTS_MAX,
+            )
         # Built once, up front, so a failed first attempt has a plain dict —
         # not a session-bound ORM instance — ready to hand straight to
         # _pending_assessments for a later retry.
@@ -4517,6 +4537,17 @@ class SimulationEngine:
             # treating the interview's own concluding verdict as a first one.
             thread_id=(thread.thread_id if thread is not None else None) or None,
             company_or_project=_str_or_none(verdict.get("company_or_project")),
+            # Sidecar items 6-8 (2026-09-09): the reviewer-facing narrative.
+            # `company_or_project` above stays the short label — these three are
+            # what the assessment pages lead with. Each degrades exactly like
+            # its existing siblings: a wrong type becomes None and `raw_verdict`
+            # keeps the original, because a malformed narrative field must never
+            # cost the verdict (A20).
+            headline=_str_or_none(verdict.get("headline")),
+            key_points=(
+                key_points if isinstance(key_points, list) else None
+            ),
+            elevator_pitch=_str_or_none(verdict.get("elevator_pitch")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
             confidence=confidence,
@@ -9068,6 +9099,14 @@ def _sidecar_has_valid_json_block(text: str) -> bool:
 # asked" (unconfirmed) are different facts, and a boolean can express only the
 # first two of these three outcomes.
 _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
+
+#: Contract bounds from prompts/roles/scout_hub/phase4-thread-reply.md items
+#: 6-7. SOFT: exceeding one logs a WARNING and stores the value as emitted.
+#: Enforcing them by dropping would trade a long headline for a lost verdict,
+#: and the row is the archive.
+_HEADLINE_SOFT_LIMIT = 200
+_KEY_POINTS_MIN = 3
+_KEY_POINTS_MAX = 5
 
 
 def _normalize_gating(raw: object) -> dict | None:

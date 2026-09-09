@@ -68,3 +68,76 @@ async def test_narrative_fields_default_to_sql_null_not_json_null(db_session):
         )
     ).scalar_one_or_none()
     assert found == row.id
+
+
+async def test_persist_assessment_stores_the_three_narrative_fields(engine):
+    """Sidecar items 6-8 reach their columns."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        "subject_agent_id": "wang",
+        "company_or_project": "Short label",
+        "headline": "A blood test that says who responds to immunotherapy.",
+        "key_points": ["No classifier exists yet", "Circadian confound unmeasured"],
+        "elevator_pitch": "Hopkins has cytokine data on 124 patients.",
+        "recommendation": "conditional",
+        "scores": {},
+    })
+
+    async with factory() as db:
+        row = (await db.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().one()
+    assert row.headline.startswith("A blood test")
+    assert row.key_points == ["No classifier exists yet", "Circadian confound unmeasured"]
+    assert row.elevator_pitch.startswith("Hopkins has")
+
+
+async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engine):
+    """A20. A model that answers `key_points` with a string must not DataError
+    the row out of existence — the row IS the archive. It degrades to NULL and
+    raw_verdict keeps what was actually emitted, exactly like `red_flags` and
+    `derisking_milestones` already do."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        "company_or_project": "Short label",
+        "key_points": "not a list at all",
+        "recommendation": "pass",
+        "scores": {},
+    })
+
+    async with factory() as db:
+        row = (await db.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().one()
+    assert row.key_points is None
+    assert row.raw_verdict["key_points"] == "not a list at all"
