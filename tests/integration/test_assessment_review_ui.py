@@ -394,10 +394,16 @@ async def test_the_form_shows_the_bots_own_score_beside_each_dimension(
         )
     ).text
 
-    assert "BlackbirdBot scored 4" in html
+    # Whitespace-normalized: the literal "BlackbirdBot scored" text and the
+    # interpolated score sit on one unwrapped template source line today
+    # (the `review-bot-score` span), but nothing pins them there — a harmless
+    # reflow of that line's attributes would otherwise break this assertion
+    # for a reason that has nothing to do with the behavior under test.
+    normalized = " ".join(html.split())
+    assert "BlackbirdBot scored 4" in normalized
     # The human's select for that dimension must have nothing selected.
     assert f'name="dim_{first.key}"' in html
-    assert 'value="4" selected' not in html
+    assert 'value="4" selected' not in normalized
 
 
 async def test_a_stored_review_renders_its_dimension_scores(
@@ -476,7 +482,10 @@ async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(
         )
     ).text
     assert "some_retired_dimension" in html
-    assert "unrecognized rubric revision" in html
+    # Whitespace-normalized: this phrase is rendered prose from the warning
+    # paragraph's literal template text, currently unwrapped onto one source
+    # line — the same reflow risk as test_manager_views.py:530's pattern.
+    assert "unrecognized rubric revision" in " ".join(html.split())
 
 
 async def test_the_form_renders_for_a_reviewer_on_the_manager_surface(

@@ -777,6 +777,19 @@ def _review_dimension_rows(review: AssessmentReview) -> tuple[list[dict], str]:
     )
     if not scores:
         return [], ""
+    # `resolve_revision(None, None)` returns `(live, PROVENANCE_UNSTAMPED)`,
+    # not `(None, PROVENANCE_UNKNOWN)` — an unstamped row would title its
+    # keys from TODAY's document with no warning, which is exactly what this
+    # function exists to avoid. That combination (scores present, both stamp
+    # columns NULL) is unreachable in practice, by two independent facts
+    # rather than one: Task 3's `submit_feedback`/`edit_feedback` always
+    # stamp both columns whenever a row is written, so any row that HAS
+    # `dimension_scores` also has a stamp; and every row written before
+    # `dimension_scores` existed (pre-0043) has it NULL, which the `if not
+    # scores` guard above already returns on before `resolve_revision` is
+    # ever called. Only a hand-built fixture or manual SQL could produce
+    # scores with no stamp — not deliberately guarded against here, because
+    # code defending an unreachable state would be untestable.
     revision, provenance = resolve_revision(
         review.rubric_version, review.rubric_content_hash
     )
