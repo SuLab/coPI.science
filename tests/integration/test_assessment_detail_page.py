@@ -220,7 +220,10 @@ async def test_detail_page_renders_the_recommended_next_experiment(
 ):
     """Sidecar item 10 is the line Blackbird staff act on, so it renders as its
     own labelled block on BOTH surfaces — the shared body template — and only
-    when the column holds something (rows written before 0037 are NULL)."""
+    when the column holds something (rows written before 0037 are NULL).
+
+    Task 10 moved this block directly under the brief and relabelled it
+    "The ask" — the heading text changed, the column and its guard did not."""
     run = await factories.make_simulation_run(db_session)
     assessment = OpportunityAssessment(
         simulation_run_id=run.id,
@@ -240,7 +243,7 @@ async def test_detail_page_renders_the_recommended_next_experiment(
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
         assert "NEXT-EXPERIMENT-MARKER-SELECTIVITY-PANEL" in resp.text
-        assert "Recommended next experiment" in resp.text
+        assert "The ask" in resp.text
 
 
 # Deliberately no apostrophes or double quotes: markupsafe escapes ' -> &#39;
@@ -1313,3 +1316,112 @@ async def test_the_truncated_marking_survives_a_manager_render(
     assert "scientific &middot; caution" in html
     assert f"{TRUNCATED_DOMAIN} &middot; caution" not in html
     assert html.count("panel-cut-off") == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 10: brief first, evidence collapsed, sticky nav
+# ---------------------------------------------------------------------------
+
+
+async def test_the_brief_leads_with_headline_pitch_and_points(
+    client, db_session, admin
+):
+    run, assessment = await _seed(db_session)
+    assessment.headline = "HEADLINE-MARKER: a blood test for immunotherapy response."
+    assessment.elevator_pitch = "PITCH-MARKER. Hopkins has data on 124 patients."
+    assessment.key_points = ["POINT-ONE-MARKER", "POINT-TWO-MARKER"]
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "assessment-brief" in html
+    assert "HEADLINE-MARKER" in html
+    assert "PITCH-MARKER" in html
+    assert "POINT-ONE-MARKER" in html and "POINT-TWO-MARKER" in html
+    # The brief precedes the rationale on the page, not just in the DOM tree.
+    assert html.index("assessment-brief") < html.index("assessment-rationale")
+
+
+async def test_a_pre_0043_row_renders_the_brief_without_empty_states(
+    client, db_session, admin
+):
+    """A3: every row in production today has all three fields NULL. The page
+    must degrade to the short label and show no bullet or pitch block."""
+    run, assessment = await _seed(db_session)
+    assessment.company_or_project = "ONLY-LABEL-MARKER"
+    assessment.headline = None
+    assessment.elevator_pitch = None
+    assessment.key_points = None
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "ONLY-LABEL-MARKER" in html
+    assert "assessment-brief-pitch" not in html
+    assert "assessment-brief-points" not in html
+
+
+async def test_the_panel_banner_is_never_inside_a_collapsed_details(
+    client, db_session, admin
+):
+    """N8/design §5. The panel banner is a WARNING, not evidence. Rendering a
+    non-verified panel as unremarkable is a named failure mode in this repo;
+    putting it behind a disclosure is the same error in a different place."""
+    import re
+
+    run, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    # Everything inside any <details>...</details> must not contain the banner.
+    inside = "".join(re.findall(r"<details\b.*?</details>", html, re.DOTALL))
+    assert "Specialist panel" not in inside
+
+
+async def test_a_non_empty_red_flag_list_is_never_collapsed(
+    client, db_session, admin
+):
+    """Same reasoning: a disqualifier-grade flag behind a click is a flag the
+    reviewer does not see."""
+    import re
+
+    run, assessment = await _seed(db_session)
+    assessment.red_flags = ["RED-FLAG-MARKER-MUST-BE-VISIBLE"]
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    inside = "".join(re.findall(r"<details\b.*?</details>", html, re.DOTALL))
+    assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" in html
+    assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" not in inside
+
+
+async def test_the_rationale_is_collapsed_and_labelled_with_its_size(
+    client, db_session, admin
+):
+    run, assessment = await _seed(db_session)
+    assessment.rationale = "**A.** one\n\n**B.** two\n\n**C.** three"
+    assessment.prose_format = "markdown"
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "Full rationale (3 paragraphs)" in html
+
+
+async def test_the_jump_nav_lists_every_section(client, db_session, admin):
+    run, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "assessment-jump-nav" in html
+    for anchor in ("#brief", "#rationale", "#panel", "#scores", "#review", "#timeline"):
+        assert f'href="{anchor}"' in html, anchor
