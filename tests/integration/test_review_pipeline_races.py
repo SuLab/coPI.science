@@ -22,6 +22,7 @@ from src.models import (
 )
 from src.services import review_bot
 from src.services.assessment_reviews import edit_feedback, submit_feedback
+from src.services.blackbird_rubric import load_rubric
 from tests import factories
 
 _HAPPY = '{"target": "scout_hub", "suggestion": "S", "rationale": "R"}'
@@ -117,6 +118,56 @@ async def test_edit_mid_job_leaves_the_edited_row_unconsumed_and_requeued(
     assert r1.consumed_at is None, "only ORIGINAL was analyzed; EDITED is still owed a job"
     suggestion = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
     assert suggestion.feedback_snapshot[0]["comment"] == "ORIGINAL"
+    assert sorted(j.status for j in await _review_jobs(db_session)) == ["pending", "processing"]
+
+
+async def test_dimension_only_edit_mid_job_leaves_the_row_unconsumed_and_requeued(
+    db_session, monkeypatch
+):
+    """A1, through the real code path. Sibling to
+    ``test_edit_mid_job_leaves_the_edited_row_unconsumed_and_requeued`` above,
+    but the mid-flight edit here changes ONLY the per-dimension scores —
+    ``score`` and ``comment`` are identical before and after. Before this fix,
+    the job's conditional UPDATE compared score/comment alone, so this exact
+    edit re-stamped the row consumed and the replacement job (already
+    enqueued by ``edit_feedback``) found nothing to analyze: the edit was
+    lost with no warning, because the stamp genuinely succeeded. Nothing in
+    the suite exercised this shape through ``execute_review_analysis`` itself
+    until now — the unit-level `consumed_at_predicates` test proves the
+    predicate, this proves the whole job survives the race.
+    """
+    dims = load_rubric().dimensions
+    key_a, key_b = dims[0].key, dims[1].key
+
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r1 = await submit_feedback(
+        db_session, assessment=assessment, reviewer=reviewer,
+        score=2, comment="steady", feedback_mode="learn",
+        dimension_scores={key_a: 3},
+    )
+    (job,) = await _review_jobs(db_session)
+    job.status = "processing"
+    await db_session.flush()
+
+    async def _fake(system_prompt, messages, model=None, max_tokens=None, **kw):
+        assert "steady" in messages[0]["content"]
+        await edit_feedback(
+            db_session, review=r1, score=2, comment="steady", feedback_mode="learn",
+            dimension_scores={key_a: 3, key_b: 5},
+        )
+        return _HAPPY
+
+    monkeypatch.setattr(review_bot, "generate_agent_response", _fake)
+    await review_bot.execute_review_analysis(job, db_session)
+
+    await db_session.refresh(r1)
+    assert r1.dimension_scores == {key_a: 3, key_b: 5}
+    assert r1.consumed_at is None, (
+        "only the pre-edit dimension scores were analyzed; the edited row is still owed a job"
+    )
+    suggestion = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
+    assert suggestion.feedback_snapshot[0]["dimension_scores"] == {key_a: 3}
     assert sorted(j.status for j in await _review_jobs(db_session)) == ["pending", "processing"]
 
 

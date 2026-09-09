@@ -360,3 +360,88 @@ def test_the_bot_module_stays_free_of_web_tier_rubric_modules():
         "blackbird_rubric", "rubric_revisions", "assessment_detail", "assessment_reviews",
     ):
         assert not any(banned in m for m in mods), mods
+
+
+# ---------------------------------------------------------------------------
+# consumed_at_predicates / _feedback_snapshot_entry field-coverage drift (A1)
+# ---------------------------------------------------------------------------
+
+
+def _predicate_referenced_columns() -> set[str]:
+    """The `AssessmentReview.<field>` names ``consumed_at_predicates``
+    actually mentions in its OWN body — read from the live source at test
+    time, not a hand-maintained list, so this checks what the function
+    currently does rather than what it did when this test was written."""
+    src = (ROOT / "src/services/review_bot.py").read_text()
+    tree = ast.parse(src)
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "consumed_at_predicates"
+    )
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "AssessmentReview"
+    }
+
+
+def test_consumed_at_predicates_covers_every_content_field_of_the_snapshot():
+    """A1's durable half, made real rather than asserted.
+
+    The brief that produced this fix claimed the snapshot/predicate pair
+    "cannot describe different fields again" — but `consumed_at_predicates`
+    hand-picks `snap["score"]`, `snap["comment"]`, `snap["dimension_scores"]`
+    by literal key name; it does not iterate the snapshot's keys. A future
+    engineer who adds a new reviewer-editable field to the model and to
+    `_feedback_snapshot_entry` — exactly what this fix just did for
+    `dimension_scores` — but forgets the matching predicate term reproduces
+    A1 in that new field, and nothing else in the suite would catch it: not
+    ruff, not a type check, not any existing test. This test is that check.
+
+    `_feedback_snapshot_entry`'s keys split into two kinds:
+      * METADATA (`id`, `reviewer_name`, `created_at`) — identity/provenance,
+        fixed at submission and never touched by `edit_feedback`. A stale
+        value here cannot cause the A1 failure (a changed row being
+        re-stamped as unchanged), so these are deliberately excluded below.
+      * CONTENT — every keyword `edit_feedback` accepts (`score`, `comment`,
+        `feedback_mode`, `dimension_scores`). Each one MUST be named in
+        `consumed_at_predicates`, or an edit touching only that field is
+        silently re-stamped consumed.
+
+    "Referenced" is checked as "the function body names
+    `AssessmentReview.<field>`", not "the function reads
+    `snap[\"<field>\"]`": `feedback_mode` is compared against the literal
+    `"learn"` rather than `snap["feedback_mode"]` (the rows being stamped are
+    already filtered to `feedback_mode == "learn"` by the query that produced
+    `reviews`, so the literal is equivalent and slightly more direct — see
+    `consumed_at_predicates`). A snap-key-only scan would wrongly flag that
+    as uncovered, so the probe below inspects column references instead.
+    """
+    review = AssessmentReview(
+        id=uuid.uuid4(),
+        reviewer_name="Dr. Reviewer",
+        score=3,
+        dimension_scores={"some_dim": 4},
+        feedback_mode="learn",
+        comment="c",
+        created_at=datetime.now(UTC),
+    )
+    snap = review_bot._feedback_snapshot_entry(review)
+
+    metadata_keys = {"id", "reviewer_name", "created_at"}
+    content_keys = set(snap) - metadata_keys
+    assert content_keys == {"score", "comment", "feedback_mode", "dimension_scores"}, (
+        "the metadata/content split above is stale against the snapshot's "
+        "actual keys; update BOTH the split and this assertion together"
+    )
+
+    referenced = _predicate_referenced_columns()
+    missing = content_keys - referenced
+    assert not missing, (
+        f"consumed_at_predicates does not reference {sorted(missing)}: an edit "
+        "that changes only that field would be silently re-stamped consumed, "
+        "reproducing A1 for a new field"
+    )
