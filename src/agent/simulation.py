@@ -3786,6 +3786,7 @@ class SimulationEngine:
                 recommendation=verdict.get("recommendation"),
                 scores=verdict.get("scores"),
                 permalink=permalink,
+                elevator_pitch=verdict.get("elevator_pitch"),
             )
             posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
             if not posted:

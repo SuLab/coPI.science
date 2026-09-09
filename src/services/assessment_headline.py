@@ -5,13 +5,18 @@ engine and `scripts/backfill_assessment_headlines.py` cannot render differently
 — a repaired headline that reads unlike a live one is worse than no repair,
 because a reader cannot tell which rows were repaired.
 
-**Content policy, not formatting (design D12).** Exactly five fields are ever
-rendered: PI/lab name, project, recommendation, band/score, permalink. The
-verdict's `rationale`, `red_flags`, `gating` and `raw_verdict` are never read
-here at all, which is what keeps this post from saying more than the manager
-read-only detail view already shows staff. Widening this — interpolating a
-verdict wholesale, adding a "why" line — is a policy change requiring sign-off,
-not a tidy-up.
+**Content policy, not formatting (design D12, widened once).** Exactly six
+fields are ever rendered: PI/lab name, project, recommendation, band/score,
+permalink, and — since 2026-09-09 — the sidecar's `elevator_pitch` on a second
+line. The verdict's `rationale`, `red_flags`, `gating` and `raw_verdict` are
+never read here at all, which is what keeps this post from saying more than
+the manager read-only detail view already shows staff. The pitch widening
+rests on the operator's assertion (2026-09-09, design §0.2/A6) that PIs cannot
+join the Slack workspace — no code enforces that, and it is a SIDECAR field
+that may carry a PI's unpublished disclosures, so publishing it is a real risk
+accepted deliberately, not a free extension of the existing policy. Widening
+this further — interpolating a verdict wholesale, adding a "why" line — is a
+policy change requiring sign-off, not a tidy-up.
 
 **Why `score`/`band` can be passed in verbatim (2026-08-29, fix round 1).** The
 engine's own call site (`_post_assessment_summary`) computes band/score live
@@ -45,6 +50,12 @@ PROJECT_DISPLAY_CHARS = 120
 # `recommendation`'s own column width, so the post and the stored row can never
 # disagree about it.
 RECOMMENDATION_DISPLAY_CHARS = 30
+# This post's own display bound for the pitch, the same reasoning as
+# PROJECT_DISPLAY_CHARS above: `elevator_pitch` is an unbounded Text column and
+# a headline is not the place for a wall of model prose. Generous enough for the
+# 3-5 sentences the contract asks for; the full text is on the detail page the
+# permalink's reader can reach.
+PITCH_DISPLAY_CHARS = 600
 
 
 def _clip(value: object, max_len: int) -> str | None:
@@ -67,6 +78,7 @@ def render_assessment_headline(
     permalink: str | None,
     score: float | None = None,
     band: str | None = None,
+    elevator_pitch: object = None,
 ) -> str:
     """Render the complete Slack text for one headline.
 
@@ -128,4 +140,16 @@ def render_assessment_headline(
     link_part = (
         f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
     )
-    return f":mag: {pi_label} — {project_text} → *{display}*{score_part}{link_part}"
+    # Sixth field (2026-09-09), a deliberate widening of design D12's five.
+    # OMITTED ENTIRELY when absent, exactly as the band/score segment is for an
+    # empty `scores` map — every row written before 0043 has NULL here and is
+    # deliberately never backfilled, so a repaired headline for one of those
+    # rows must be byte-identical to what this function produced before the
+    # widening. `_clip` drops a non-string outright, so a model that answers
+    # with an object cannot have a Python repr posted to a channel humans read.
+    pitch_text = _clip(elevator_pitch, PITCH_DISPLAY_CHARS)
+    pitch_part = f"\n{pitch_text}" if pitch_text else ""
+    return (
+        f":mag: {pi_label} — {project_text} → *{display}*{score_part}{link_part}"
+        f"{pitch_part}"
+    )

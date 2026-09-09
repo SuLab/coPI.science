@@ -287,6 +287,7 @@ def _render_for(row: OpportunityAssessment, pi_labels: dict[str, str], permalink
         # see the module docstring and assessment_headline.py's.
         score=row.weighted_score,
         band=row.band,
+        elevator_pitch=row.elevator_pitch,
     )
 
 

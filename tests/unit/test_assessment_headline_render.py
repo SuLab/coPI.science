@@ -163,3 +163,62 @@ def test_a_null_stored_score_omits_the_band_segment_entirely():
     assert "band" not in text.lower()
     assert "score" not in text.lower()
     assert "None" not in text
+
+
+# ---------------------------------------------------------------------------
+# Elevator pitch (2026-09-09) — a deliberate widening of D12 from five fields
+# to six. See the module docstring.
+# ---------------------------------------------------------------------------
+
+
+def test_the_pitch_renders_as_a_second_line():
+    text = render_assessment_headline(
+        pi_label="Yarchoan lab",
+        project="Th17/IL-8 plasma cytokine score",
+        recommendation="conditional",
+        scores={},
+        permalink=None,
+        elevator_pitch="Hopkins has 39-plex cytokine data on 124 ICI patients.",
+    )
+    assert "Hopkins has 39-plex cytokine data" in text
+    assert text.count("\n") == 1
+
+
+def test_an_absent_pitch_is_byte_identical_to_the_old_output():
+    """A6/A3. Every row in production today has elevator_pitch IS NULL, and the
+    repair script shares this renderer — so the widening must be invisible for
+    a row that carries no pitch, or re-running the backfill would change what
+    it posts for rows it has already handled."""
+    common = dict(
+        pi_label="Yarchoan lab",
+        project="Th17/IL-8 plasma cytokine score",
+        recommendation="conditional",
+        scores={},
+        permalink=None,
+    )
+    assert render_assessment_headline(**common) == render_assessment_headline(
+        **common, elevator_pitch=None
+    )
+    assert "\n" not in render_assessment_headline(**common)
+
+
+def test_a_non_string_pitch_is_dropped_not_repr_posted():
+    """`_clip` drops a non-string outright: a model that answers with an object
+    must not have a Python repr posted to a workspace-visible channel."""
+    text = render_assessment_headline(
+        pi_label="L", project="P", recommendation="pass", scores={}, permalink=None,
+        elevator_pitch={"not": "a string"},
+    )
+    assert "not" not in text
+    assert "\n" not in text
+
+
+def test_an_overlong_pitch_is_clipped():
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS
+
+    text = render_assessment_headline(
+        pi_label="L", project="P", recommendation="pass", scores={}, permalink=None,
+        elevator_pitch="x" * (PITCH_DISPLAY_CHARS + 500),
+    )
+    assert "x" * PITCH_DISPLAY_CHARS in text
+    assert "x" * (PITCH_DISPLAY_CHARS + 1) not in text

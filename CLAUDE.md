@@ -1248,11 +1248,17 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), a HELD
   verdict — pass or fail alike — does additionally trigger one genuinely top-level post,
   written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
-  headline-only line (PI/lab name, `company_or_project`, `recommendation`, band/score, and a
-  permalink or `(link unavailable)`) to `#assessments-summary`
+  headline line (PI/lab name, `company_or_project`, `recommendation`,
+  band/score, a permalink or `(link unavailable)`, and — since 2026-09-09 — the
+  sidecar's `elevator_pitch` on a second line) to `#assessments-summary`
   (`ASSESSMENTS_SUMMARY_CHANNEL`, `src/agent/channels.py`) — deliberately with **no**
-  rationale, red flags, gating, or `raw_verdict` (design D12). Band/score are omitted
-  entirely when the verdict carried no dimension scores, for the same reason
+  rationale, red flags, gating, or `raw_verdict` (design D12, widened once). The pitch is
+  a SIDECAR field and may carry the PI's unpublished disclosures; publishing it rests on
+  the operator's assertion (2026-09-09) that PIs cannot join the workspace, which no code
+  enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:37`) still renders a join link
+  on every PI's own `/agent` page. The pitch segment is omitted entirely when
+  `elevator_pitch` is NULL, which is every row written before migration `0043`. Band/score
+  are omitted entirely when the verdict carried no dimension scores, for the same reason
   `_persist_assessment` leaves those columns NULL: an empty `scores` map is "we don't know",
   and `weighted_score({})` is a 0.00 that bands as a decline nobody made. That channel is
   human-joinable/workspace-visible ("public" in the Slack sense — design D11) but is never
