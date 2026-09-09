@@ -1098,7 +1098,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > nobody is tailing while the Slack replies keep looking completely normal.
 > That is the silent half, and it is the same shape as the 2026-08-06 near-miss
 > this file already records. `submit_feedback` and `edit_feedback`
-> (`src/services/assessment_reviews.py:191-205`, `:230-236`) unconditionally
+> (`src/services/assessment_reviews.py:196-208`, `:257-259`) unconditionally
 > assign `dimension_scores`/`rubric_version`/`rubric_content_hash` on every
 > human review submission and edit too, so those ALSO fail against a
 > pre-`0043` database — but LOUDLY, not silently: neither call site is wrapped
