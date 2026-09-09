@@ -52,7 +52,7 @@
    --------------------------------------------------------------------------- #}
 <nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-xs text-gray-500 backdrop-blur border-b border-gray-100">
     <a class="hover:text-indigo-600" href="#brief">Brief</a>
-    <a class="hover:text-indigo-600" href="#rationale">Rationale</a>
+    {% if a.rationale %}<a class="hover:text-indigo-600" href="#rationale">Rationale</a>{% endif %}
     <a class="hover:text-indigo-600" href="#panel">Panel</a>
     <a class="hover:text-indigo-600" href="#scores">Scores</a>
     <a class="hover:text-indigo-600" href="#review">Review</a>
@@ -60,7 +60,18 @@
 </nav>
 
 <div id="brief" class="assessment-brief bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-    <h2 class="text-xl font-semibold text-gray-900">{{ a.headline or a.company_or_project or "—" }}</h2>
+    <h2 class="text-xl font-semibold text-gray-900">
+        {{ a.headline or a.company_or_project or "—" }}
+        {% if a.confidence %}
+            {# Brackets stripped before re-wrapping, the same way the
+               list page does it: the sidecar's value is sometimes
+               already bracketed and "[[High]]" is nobody's label. Moved
+               here (Task 10 fix round 1) from the verdict-header card
+               below, which used to duplicate the project name in its own
+               <h2> right under this one. #}
+            <span class="text-sm font-normal text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
+        {% endif %}
+    </h2>
     {% if a.headline and a.company_or_project %}
     <div class="assessment-brief-label text-sm text-gray-500 mt-1">{{ a.company_or_project }}</div>
     {% endif %}
@@ -186,15 +197,11 @@
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <div class="flex items-start justify-between gap-4 flex-wrap">
         <div>
-            <h2 class="text-xl font-semibold text-gray-900">
-                {{ a.company_or_project or "—" }}
-                {% if a.confidence %}
-                    {# Brackets stripped before re-wrapping, the same way the
-                       list page does it: the sidecar's value is sometimes
-                       already bracketed and "[[High]]" is nobody's label. #}
-                    <span class="text-sm font-normal text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
-                {% endif %}
-            </h2>
+            {# The project name + confidence chip used to live in an <h2>
+               here, duplicating the brief card's title a few lines above it
+               (Task 10 fix round 1 / design doc §5's "fold in rather than
+               duplicate"). The name is gone from here; confidence moved up
+               into the brief card's own heading rather than being lost. #}
             <div class="text-sm text-gray-500 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
                 &middot; Screened by {{ a.agent_id }}

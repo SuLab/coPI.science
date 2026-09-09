@@ -12,6 +12,7 @@ nowhere else on the page.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -1322,6 +1323,76 @@ async def test_the_truncated_marking_survives_a_manager_render(
 # Task 10: brief first, evidence collapsed, sticky nav
 # ---------------------------------------------------------------------------
 
+_DETAILS_TAG_RE = re.compile(r"<details\b|</details>", re.IGNORECASE)
+
+
+def _top_level_details_contents(html: str) -> str:
+    """Concatenate the full contents of every TOP-LEVEL <details>...</details>
+    element on the page, including everything nested inside it.
+
+    A flat, non-greedy regex (`r"<details\\b.*?</details>"`) is the wrong tool
+    here, because this page genuinely nests <details> elements: the "What the
+    scale means here" disclosure inside `dimension_score_rows` (rendered
+    inside both the Human-review card's Edit and Add-feedback <details>), the
+    per-chip tool-call <details> the `tool_turn` macro renders inside the
+    Interview timeline, and the "Full opinion (raw)" <details> on a timeline
+    consult card. Against a nested pair, a non-greedy match stops at the
+    FIRST inner </details> it meets, so the OUTER element's real closing tag
+    is orphaned — and any plain content between the last inner match consumed
+    and that orphaned tag is silently dropped from the result, even though it
+    is genuinely collapsed inside the outer <details>. A test asserting a
+    warning string is never inside a collapsed region would then pass by
+    under-reporting what "inside" contains, not by the warning being safe.
+
+    This instead walks every <details>/</details> occurrence in document
+    order, tracking nesting depth, and captures each TOP-LEVEL element's span
+    (open tag through its own matching close tag) exactly once — nested
+    <details> content is included as part of its enclosing top-level span
+    rather than cutting it short.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = None
+    for m in _DETAILS_TAG_RE.finditer(html):
+        if m.group().lower().startswith("<details"):
+            if depth == 0:
+                start = m.start()
+            depth += 1
+        else:
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    parts.append(html[start : m.end()])
+                    start = None
+    return "".join(parts)
+
+
+def test_the_details_extraction_helper_catches_nested_content_a_flat_regex_misses():
+    """Proof for `_top_level_details_contents`, per the fix-round request: a
+    warning string sitting AFTER a nested <details> but still inside the
+    enclosing outer <details> must be caught. The old flat, non-greedy regex
+    (`r"<details\\b.*?</details>"`) stops at the first inner </details> and
+    never sees it."""
+    synthetic = (
+        "<p>outside, visible</p>"
+        "<details><summary>outer</summary>"
+        "<details><summary>inner</summary><p>inner body</p></details>"
+        "<p>WARNING-AFTER-NESTED-DETAILS</p>"
+        "</details>"
+    )
+
+    old_regex_extraction = "".join(
+        re.findall(r"<details\b.*?</details>", synthetic, re.DOTALL)
+    )
+    assert "WARNING-AFTER-NESTED-DETAILS" not in old_regex_extraction, (
+        "the old flat regex was expected to MISS this — if it no longer does, "
+        "the premise for replacing it is gone"
+    )
+
+    assert "WARNING-AFTER-NESTED-DETAILS" in _top_level_details_contents(synthetic)
+    # And the truly-outside paragraph must still read as outside.
+    assert "outside, visible" not in _top_level_details_contents(synthetic)
+
 
 async def test_the_brief_leads_with_headline_pitch_and_points(
     client, db_session, admin
@@ -1368,9 +1439,11 @@ async def test_the_panel_banner_is_never_inside_a_collapsed_details(
 ):
     """N8/design §5. The panel banner is a WARNING, not evidence. Rendering a
     non-verified panel as unremarkable is a named failure mode in this repo;
-    putting it behind a disclosure is the same error in a different place."""
-    import re
+    putting it behind a disclosure is the same error in a different place.
 
+    Uses `_top_level_details_contents`, not a flat non-greedy regex: this
+    page nests <details> (see that helper's docstring), and a flat regex can
+    under-report what "inside" contains."""
     run, assessment = await _seed(db_session)
     await db_session.flush()
 
@@ -1378,7 +1451,7 @@ async def test_the_panel_banner_is_never_inside_a_collapsed_details(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     # Everything inside any <details>...</details> must not contain the banner.
-    inside = "".join(re.findall(r"<details\b.*?</details>", html, re.DOTALL))
+    inside = _top_level_details_contents(html)
     assert "Specialist panel" not in inside
 
 
@@ -1386,9 +1459,8 @@ async def test_a_non_empty_red_flag_list_is_never_collapsed(
     client, db_session, admin
 ):
     """Same reasoning: a disqualifier-grade flag behind a click is a flag the
-    reviewer does not see."""
-    import re
-
+    reviewer does not see. See `_top_level_details_contents` for why this
+    uses a nesting-aware scan rather than a flat regex."""
     run, assessment = await _seed(db_session)
     assessment.red_flags = ["RED-FLAG-MARKER-MUST-BE-VISIBLE"]
     await db_session.flush()
@@ -1396,7 +1468,7 @@ async def test_a_non_empty_red_flag_list_is_never_collapsed(
     html = (await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
-    inside = "".join(re.findall(r"<details\b.*?</details>", html, re.DOTALL))
+    inside = _top_level_details_contents(html)
     assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" in html
     assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" not in inside
 
@@ -1424,4 +1496,25 @@ async def test_the_jump_nav_lists_every_section(client, db_session, admin):
     )).text
     assert "assessment-jump-nav" in html
     for anchor in ("#brief", "#rationale", "#panel", "#scores", "#review", "#timeline"):
+        assert f'href="{anchor}"' in html, anchor
+
+
+async def test_the_jump_nav_omits_rationale_when_there_is_none(
+    client, db_session, admin
+):
+    """FIX 1 (review round 1). `rationale` is nullable and the `#rationale`
+    section only renders inside `{% if a.rationale %}` — the nav link must be
+    gated the same way, or a NULL-rationale row ships a nav that points at
+    nothing. `_seed()` always sets a rationale, which is why none of the
+    original six tests caught this; null it out the way
+    test_admin_detail_page_survives_a_wiped_transcript does for other fields."""
+    run, assessment = await _seed(db_session)
+    assessment.rationale = None
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert 'href="#rationale"' not in html
+    for anchor in ("#brief", "#panel", "#scores", "#review", "#timeline"):
         assert f'href="{anchor}"' in html, anchor
