@@ -56,9 +56,9 @@ from src.models import (
     SpecialistConsult,
     User,
 )
-from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION
+from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, load_rubric
 from src.services.interview_transcript import load_interview_thread
-from src.services.rubric_revisions import resolve_revision
+from src.services.rubric_revisions import PROVENANCE_UNKNOWN, resolve_revision
 
 # Hard bounds. This page is a read of unbounded production data: a channel can
 # hold hundreds of hub turns and a retrieve_full_text result can be an entire
@@ -692,6 +692,30 @@ async def build_assessment_detail(
         await _load_review_capable_users(db) if viewer_is_staff else []
     )
 
+    # The scoring form's own source of truth: the LIVE document, because that
+    # is what the reviewer is about to score against and what
+    # `submit_feedback` will stamp on the row. Deliberately NOT the revision
+    # that scored the assessment — a human reviewing a v3.2.0 verdict today is
+    # giving a v3.4.0 opinion, and the stamp on their row must say so.
+    # `bot_score` rides along per dimension (A9): disagreement has to be
+    # visible where the human is choosing, and it is labelled as the bot's.
+    live_rubric = load_rubric()
+    review_rubric = {
+        "version": live_rubric.version,
+        "scale_min": live_rubric.scale_min,
+        "scale_max": live_rubric.scale_max,
+        "dimensions": [
+            {
+                "key": d.key,
+                "title": d.title,
+                "weight": d.weight,
+                "anchors": d.anchors,
+                "bot_score": _score_value(normalized_scores.get(d.key)),
+            }
+            for d in live_rubric.dimensions
+        ],
+    }
+
     return {
         "assessment": assessment,
         "pi_user_id": pi_user_id,
@@ -733,7 +757,37 @@ async def build_assessment_detail(
         "review_status_history": review_status_history,
         "review_assignments": review_assignments,
         "review_capable_users": review_capable_users,
+        "review_rubric": review_rubric,
+        "revision_provenance_unknown": PROVENANCE_UNKNOWN,
     }
+
+
+def _review_dimension_rows(review: AssessmentReview) -> tuple[list[dict], str]:
+    """One reviewer's stored per-dimension scores, titled by the revision THEY
+    scored against — never by today's document.
+
+    Rubric v3.0.0 replaced thirteen dual-scale dimensions with six single-scale
+    ones, so a dimension key is only meaningful against its own revision. An
+    unresolvable stamp renders the keys as stored, untitled: silently remapping
+    them onto today's dimensions would manufacture a claim nobody made (A13).
+    Returns ``([], "")`` for a review that scored no dimensions.
+    """
+    scores = (
+        review.dimension_scores if isinstance(review.dimension_scores, dict) else {}
+    )
+    if not scores:
+        return [], ""
+    revision, provenance = resolve_revision(
+        review.rubric_version, review.rubric_content_hash
+    )
+    titles = (
+        {d.key: d.title for d in revision.dimensions} if revision is not None else {}
+    )
+    rows = [
+        {"key": key, "title": titles.get(key, key), "score": scores[key]}
+        for key in sorted(scores)
+    ]
+    return rows, provenance
 
 
 async def _load_review_feedback(
@@ -747,7 +801,12 @@ async def _load_review_feedback(
             .order_by(AssessmentReview.created_at, AssessmentReview.id)
         )
     ).scalars().all()
-    return list(rows)
+    rows = list(rows)
+    for row in rows:
+        # Not mapped columns — ordinary instance attributes on read-only rows
+        # handed straight to a template. Nothing is persisted.
+        row.dimension_rows, row.dimension_provenance = _review_dimension_rows(row)
+    return rows
 
 
 async def _load_review_status_history(

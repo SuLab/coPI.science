@@ -432,14 +432,64 @@
    — a Jinja expression fills only a path-param slot — and every form
    carries `method="post"`: both are load-bearing for
    tests/unit/test_reachability.py's route-reference credit. #}
+{# N3/N11: one optional select per LIVE rubric dimension, rendered from
+   `review_rubric` (src/services/assessment_detail.py), which reads
+   prompts/rubric/blackbird-rubric.toml directly. Rendering the six from the
+   document rather than from literals here is what stops this form drifting
+   from the validator that checks it and the stamp that records it.
+
+   `selected` is the reviewer's stored map on an edit form and `{}` on the add
+   form. A blank select is a real answer — "I cannot judge this one" — and
+   posts an empty string that src/routers/reviews.py drops rather than
+   coercing to 0 (the scale starts at 1). #}
+{% macro dimension_score_rows(review_rubric, selected) %}
+<div class="review-dimension-scores space-y-2">
+    {% for d in review_rubric.dimensions %}
+    <div class="review-dimension-row review-dim-{{ d.key }} flex items-start gap-2">
+        <select name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-xs shrink-0">
+            <option value="">&mdash;</option>
+            {% for n in range(review_rubric.scale_min, review_rubric.scale_max + 1) %}
+            <option value="{{ n }}" {% if selected.get(d.key) == n %}selected{% endif %}>{{ n }}</option>
+            {% endfor %}
+        </select>
+        <div class="min-w-0">
+            <div class="text-xs font-medium text-gray-700">
+                {{ d.title }}
+                <span class="font-normal text-gray-400">&middot; {{ d.weight }}% weight</span>
+                {# A9: the bot's own number, muted and explicitly attributed so
+                   it reads as its claim, never as a pre-filled default. The
+                   human's select above stays empty either way. #}
+                {% if d.bot_score is not none %}
+                <span class="review-bot-score font-normal text-gray-400">&middot; BlackbirdBot scored {{ "%g"|format(d.bot_score) }}</span>
+                {% else %}
+                <span class="review-bot-score font-normal text-gray-400">&middot; BlackbirdBot did not score this</span>
+                {% endif %}
+            </div>
+            <details class="mt-0.5">
+                <summary class="cursor-pointer text-xs text-indigo-600">What the scale means here</summary>
+                <p class="mt-1 text-xs text-gray-500">{{ d.anchors }}</p>
+            </details>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endmacro %}
+
 {% set effective_user = impersonation_banner or current_user %}
 {% set can_write = not impersonation_banner %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
-    <p class="text-xs text-gray-500 mb-3">
-        Scores here rate the proposal's own scientific and strategic merit
-        (1 = weak, 5 = strong), not how well the bot performed. Use the comment
-        to explain the score and to flag anything the assessment got wrong.
+    <p class="review-rubric-instructions text-xs text-gray-500 mb-3">
+        Scores here rate the proposal's own scientific and strategic merit, not
+        how well the bot performed. Review it against Blackbird's rubric
+        (<span class="font-mono">{{ review_rubric.version }}</span>): read the
+        full rationale below before scoring — the brief at the top of this page
+        is BlackbirdBot's own summary of it, not an independent account. Score
+        each rubric dimension from {{ review_rubric.scale_min }} (weak) to
+        {{ review_rubric.scale_max }} (strongly meets Blackbird's bar), and leave
+        a dimension blank if you cannot judge it. The overall proposal-merit
+        score is required; the per-dimension scores are not. Use the comment to
+        explain the score and to flag anything the assessment got wrong.
     </p>
 
     {# N1. `can_write` suppresses the entire write half under impersonation
@@ -550,6 +600,25 @@
                 {% if review.comment %}
                 <p class="review-comment mt-1 text-sm text-gray-700 whitespace-pre-line">{{ review.comment }}</p>
                 {% endif %}
+                {% if review.dimension_rows %}
+                <ul class="review-dimension-list mt-1 text-xs text-gray-600 space-y-0.5">
+                    {% for row in review.dimension_rows %}
+                    <li><span class="font-semibold text-gray-700">{{ row.score }}</span> &mdash; {{ row.title }}</li>
+                    {% endfor %}
+                </ul>
+                {% if review.dimension_provenance == revision_provenance_unknown %}
+                {# A13. The stamp matches no entry in prompts/rubric/revisions.toml,
+                   so the keys above are printed exactly as stored and carry no
+                   titles or weights. Saying nothing would let them read as
+                   today's dimensions, which is the claim this branch exists to
+                   avoid making. #}
+                <p class="review-dimension-unknown-revision mt-1 text-xs text-amber-700">
+                    Scored against an unrecognized rubric revision
+                    (<span class="font-mono">{{ review.rubric_version or 'unstamped' }}</span>) —
+                    shown as stored, with no dimension titles or weights.
+                </p>
+                {% endif %}
+                {% endif %}
                 {% if can_write %}
                     {% if effective_user and review.reviewer_user_id == effective_user.id %}
                     <details class="mt-2">
@@ -560,6 +629,8 @@
                             <select name="score" class="border rounded px-1 py-0.5 text-xs">
                                 {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
                             </select>
+                            <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
+                            {{ dimension_score_rows(review_rubric, review.dimension_scores or {}) }}
                             <textarea name="comment" rows="2" class="w-full border rounded px-2 py-1 text-xs">{{ review.comment }}</textarea>
                             <select name="feedback_mode" class="border rounded px-1 py-0.5 text-xs">
                                 <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
@@ -594,6 +665,8 @@
                 <option value="" disabled selected>Proposal merit</option>
                 {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
             </select>
+            <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
+            {{ dimension_score_rows(review_rubric, {}) }}
             <textarea name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
             <select name="feedback_mode" required class="border rounded px-1 py-0.5 text-xs">
                 <option value="" disabled selected>Mode</option>

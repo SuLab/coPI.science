@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from markupsafe import escape
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -344,3 +345,154 @@ async def test_unknown_status_action_and_mode_render_alarming(
     html = resp.text
     assert "Unknown mode: maybe" in html
     assert "Unknown status action: frobbed" in html
+
+
+async def test_the_add_form_renders_one_select_per_live_rubric_dimension(
+    client, db_session, admin
+):
+    """Rendered from prompts/rubric/blackbird-rubric.toml, not from template
+    literals: the form and the validator that stamps the score must read one
+    document (design §2.3)."""
+    from src.services.blackbird_rubric import load_rubric
+
+    rubric = load_rubric()
+    assessment = await _seed_assessment(db_session)
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert "review-rubric-instructions" in html
+    assert rubric.version in html
+    for dim in rubric.dimensions:
+        assert f'name="dim_{dim.key}"' in html, dim.key
+        # Several dimension titles carry a literal "&" (e.g. "Differentiation
+        # & unmet need"), which Jinja's autoescaping renders as "&amp;" — so
+        # the raw title never appears verbatim in the HTML. Compare against
+        # what autoescaping actually produces, not the source string.
+        assert str(escape(dim.title)) in html, dim.key
+
+
+async def test_the_form_shows_the_bots_own_score_beside_each_dimension(
+    client, db_session, admin
+):
+    """A9, accepted with the anchoring cost recorded: disagreement has to be
+    visible at the point of scoring. It must read as the BOT's claim, never as
+    a pre-filled default — so the human's own select stays empty."""
+    from src.services.blackbird_rubric import load_rubric
+
+    first = load_rubric().dimensions[0]
+    assessment = await _seed_assessment(db_session)
+    assessment.scores = {first.key: 4}
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert "BlackbirdBot scored 4" in html
+    # The human's select for that dimension must have nothing selected.
+    assert f'name="dim_{first.key}"' in html
+    assert 'value="4" selected' not in html
+
+
+async def test_a_stored_review_renders_its_dimension_scores(
+    client, db_session, admin, reviewer
+):
+    from src.services.blackbird_rubric import (
+        RUBRIC_CONTENT_HASH,
+        RUBRIC_VERSION,
+        load_rubric,
+    )
+
+    first = load_rubric().dimensions[0]
+    assessment = await _seed_assessment(db_session)
+    db_session.add(
+        AssessmentReview(
+            assessment_id=assessment.id,
+            reviewer_user_id=reviewer.id,
+            reviewer_name=reviewer.name,
+            score=4,
+            comment="",
+            feedback_mode="log_only",
+            dimension_scores={first.key: 2},
+            rubric_version=RUBRIC_VERSION,
+            rubric_content_hash=RUBRIC_CONTENT_HASH,
+            created_at=BASE_TIME,
+            updated_at=BASE_TIME,
+        )
+    )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert "review-dimension-list" in html
+    # See the escaping note above: the title carries a literal "&".
+    assert str(escape(first.title)) in html
+
+
+async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(
+    client, db_session, admin, reviewer
+):
+    """A13. Rubric v3.0.0 replaced thirteen dual-scale dimensions with six
+    single-scale ones, so a key means nothing outside its own revision.
+    Titling an unresolvable stamp from today's document would invent a claim;
+    the keys render as stored instead, with a warning."""
+    assessment = await _seed_assessment(db_session)
+    db_session.add(
+        AssessmentReview(
+            assessment_id=assessment.id,
+            reviewer_user_id=reviewer.id,
+            reviewer_name=reviewer.name,
+            score=3,
+            comment="",
+            feedback_mode="log_only",
+            dimension_scores={"some_retired_dimension": 5},
+            # `rubric_version` is `String(20)` (migration 0043) — this literal
+            # is shortened from the brief's `"1.0.0-not-in-the-registry"`
+            # (25 chars, would raise StringDataRightTruncationError) while
+            # keeping the same property under test: a stamp matching no
+            # registry entry (there IS a bare "1.0.0" in
+            # prompts/rubric/revisions.toml, so the "-not-known" suffix is
+            # load-bearing, not decorative).
+            rubric_version="1.0.0-not-known",
+            rubric_content_hash="ffffffffffff",
+            created_at=BASE_TIME,
+            updated_at=BASE_TIME,
+        )
+    )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert "some_retired_dimension" in html
+    assert "unrecognized rubric revision" in html
+
+
+async def test_the_form_renders_for_a_reviewer_on_the_manager_surface(
+    client, db_session, reviewer
+):
+    """The whole point of the feature: a reviewer, signed in as themselves,
+    gets the scoring form on the only assessment surface they can reach."""
+    from src.services.blackbird_rubric import load_rubric
+
+    first = load_rubric().dimensions[0]
+    assessment = await _seed_assessment(db_session)
+
+    html = (
+        await client.get(
+            f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+        )
+    ).text
+    assert f'name="dim_{first.key}"' in html
+    assert "review-rubric-instructions" in html
