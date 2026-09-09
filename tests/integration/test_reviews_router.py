@@ -645,3 +645,30 @@ async def test_malformed_assignee_id_is_400(client, db_session):
     assert r.status_code == 400
     rows = (await db_session.execute(select(AssessmentReviewAssignment))).scalars().all()
     assert rows == []
+
+
+async def test_a_manager_can_submit_feedback(client, db_session):
+    """The manager half of the review gate. The reviewer half is covered by
+    test_reviewer_can_submit_feedback_and_learn_enqueues_one_deduped_job above;
+    nothing covered a manager, which is the role the 2026-09-09 "cannot add
+    reviews" report was actually about."""
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+
+    resp = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "manager review", "feedback_mode": "log_only"},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+
+    row = (
+        await db_session.execute(
+            select(AssessmentReview).where(
+                AssessmentReview.assessment_id == assessment.id
+            )
+        )
+    ).scalar_one()
+    assert row.reviewer_user_id == manager.id
+    assert row.score == 3

@@ -442,6 +442,20 @@
         to explain the score and to flag anything the assessment got wrong.
     </p>
 
+    {# N1. `can_write` suppresses the entire write half under impersonation
+       (F6: a live-looking control that 403s on submit is worse than none —
+       every /reviews handler is behind `_refuse_impersonation`). That is
+       correct and stays. What was wrong was doing it SILENTLY: the blank card
+       reads as "this role cannot review", and that is exactly how it was read
+       (design doc §0.1). Say what happened and how to undo it. #}
+    {% if not can_write %}
+    <p class="review-impersonation-notice mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        Review actions are hidden while you are impersonating another account.
+        A review is recorded against the person who wrote it, so
+        stop impersonating to review as yourself.
+    </p>
+    {% endif %}
+
     {# --- Status: explicit approved/disapproved branches, quiet "Unreviewed"
        for none-or-cleared, and an alarming terminal else for anything the
        `assessment_review_events.action` CHECK "guarantees" cannot happen —
