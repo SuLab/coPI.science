@@ -12,6 +12,29 @@ from src.models import OpportunityAssessment, SimulationRun
 pytestmark = pytest.mark.integration
 
 
+async def _delete_run(factory, run_id):
+    """Clean up a run committed outside the rollback-scoped `db_session` fixture.
+
+    The two `engine`-based tests below open their own `async_sessionmaker` and
+    call `.commit()` for real, so nothing rolls their `SimulationRun` back —
+    unlike the rest of this file, which uses `db_session` and is cleaned up by
+    its per-test transaction. `tests/integration/test_harness_smoke.py`'s
+    `test_writes_are_rolled_back_*` pair is the canary that catches a leak
+    like this (it sorts alphabetically after this file, so a leaked row here
+    is still present when it runs); a future test copying this `engine`/
+    `async_sessionmaker` harness needs its own cleanup too. Deleting the run
+    is sufficient — `OpportunityAssessment.simulation_run_id` is
+    ON DELETE CASCADE, so its row goes with it.
+    """
+    async with factory() as cleanup:
+        stale = (await cleanup.execute(
+            select(SimulationRun).where(SimulationRun.id == run_id)
+        )).scalar_one_or_none()
+        if stale is not None:
+            await cleanup.delete(stale)  # cascades to the assessment
+            await cleanup.commit()
+
+
 async def _seed_run(db):
     run = SimulationRun()
     db.add(run)
@@ -83,28 +106,31 @@ async def test_persist_assessment_stores_the_three_narrative_fields(engine):
         await setup.commit()
         run_id = run.id
 
-    stub = SimulationEngine(
-        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
-    )
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
-        "subject_agent_id": "wang",
-        "company_or_project": "Short label",
-        "headline": "A blood test that says who responds to immunotherapy.",
-        "key_points": ["No classifier exists yet", "Circadian confound unmeasured"],
-        "elevator_pitch": "Hopkins has cytokine data on 124 patients.",
-        "recommendation": "conditional",
-        "scores": {},
-    })
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            "subject_agent_id": "wang",
+            "company_or_project": "Short label",
+            "headline": "A blood test that says who responds to immunotherapy.",
+            "key_points": ["No classifier exists yet", "Circadian confound unmeasured"],
+            "elevator_pitch": "Hopkins has cytokine data on 124 patients.",
+            "recommendation": "conditional",
+            "scores": {},
+        })
 
-    async with factory() as db:
-        row = (await db.execute(
-            select(OpportunityAssessment).where(
-                OpportunityAssessment.simulation_run_id == run_id
-            )
-        )).scalars().one()
-    assert row.headline.startswith("A blood test")
-    assert row.key_points == ["No classifier exists yet", "Circadian confound unmeasured"]
-    assert row.elevator_pitch.startswith("Hopkins has")
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.headline.startswith("A blood test")
+        assert row.key_points == ["No classifier exists yet", "Circadian confound unmeasured"]
+        assert row.elevator_pitch.startswith("Hopkins has")
+    finally:
+        await _delete_run(factory, run_id)
 
 
 async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engine):
@@ -123,21 +149,24 @@ async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engi
         await setup.commit()
         run_id = run.id
 
-    stub = SimulationEngine(
-        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
-    )
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
-        "company_or_project": "Short label",
-        "key_points": "not a list at all",
-        "recommendation": "pass",
-        "scores": {},
-    })
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            "company_or_project": "Short label",
+            "key_points": "not a list at all",
+            "recommendation": "pass",
+            "scores": {},
+        })
 
-    async with factory() as db:
-        row = (await db.execute(
-            select(OpportunityAssessment).where(
-                OpportunityAssessment.simulation_run_id == run_id
-            )
-        )).scalars().one()
-    assert row.key_points is None
-    assert row.raw_verdict["key_points"] == "not a list at all"
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.key_points is None
+        assert row.raw_verdict["key_points"] == "not a list at all"
+    finally:
+        await _delete_run(factory, run_id)

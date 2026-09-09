@@ -1082,6 +1082,49 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > NO headlines in Slack needs none of this; the sweep announcing its rows is
 > the fix working.
 
+> **Deploy order for `0043_assessment_narrative_and_review_dimension_scores` —
+> migrate BEFORE the new code serves.** `0043` is six additive nullable columns
+> across two tables (`opportunity_assessments.headline` / `.key_points` /
+> `.elevator_pitch`; `assessment_reviews.dimension_scores` / `.rubric_version` /
+> `.rubric_content_hash`), so *old code against the new schema* is safe. The
+> reverse fails in both directions at once. READ side: the new code **maps all
+> six**, so against a pre-`0043` database every `select(OpportunityAssessment)`
+> — both assessment list pages, both detail pages — and every
+> `select(AssessmentReview)` — the detail pages' feedback list and
+> `review_bot`'s own load — raises `UndefinedColumn`. WRITE side:
+> `_persist_assessment`'s INSERT names the three narrative columns, so **every
+> verdict write of a running simulation fails** — and that write is
+> best-effort, so the failure is swallowed and one ERROR line lands in a log
+> nobody is tailing while the Slack replies keep looking completely normal.
+> That is the silent half, and it is the same shape as the 2026-08-06 near-miss
+> this file already records.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> The agent rebuild is **not optional and not interchangeable with the prompt
+> mount**. `prompts/` is bind-mounted, `src/` is baked. Prompt without image
+> means the hub emits `headline`/`key_points`/`elevator_pitch` and
+> `_persist_assessment` discards them — they survive only inside `raw_verdict`.
+> Image without prompt means every new row writes NULL.
+>
+> All three narrative columns are NULL on every pre-`0043` row and are
+> **deliberately never backfilled**: those verdicts were never asked for a
+> headline, and a generated one would be indistinguishable from one the hub
+> wrote. Every read path degrades — `headline` falls back to
+> `company_or_project`, absent bullets and pitch render nothing, and the
+> `#assessments-summary` headline omits the pitch segment entirely. Expect the
+> new card list and the new detail brief to look, for the 12 rows currently on
+> record, almost exactly like the pages they replaced; the narrative half
+> arrives with the first interview a rebuilt agent concludes.
+>
+> Production is stamped `0042`, so this box applies to the next deploy.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —

@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0042"
+DEFAULT_TARGET = "0043"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -106,7 +106,12 @@ DEFAULT_TARGET = "0042"
 #: DEFAULT_TARGET moved to 0040, 0039 is the starting point and must be a supported
 #: start, not a BLOCK. 0040 joins now for the identical reason: production is
 #: stamped 0040, so with DEFAULT_TARGET moved to 0041, 0040 is the starting point
-#: and must be a supported start, not a BLOCK.
+#: and must be a supported start, not a BLOCK. 0041 joins now for the identical
+#: reason: production is stamped 0041, so with DEFAULT_TARGET moved to 0042, 0041
+#: is the starting point and must be a supported start, not a BLOCK. 0042 joins now
+#: for the identical reason: production is stamped 0042, so with DEFAULT_TARGET
+#: moved to 0043, 0042 is the starting point and must be a supported start, not a
+#: BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -123,7 +128,7 @@ DEFAULT_TARGET = "0042"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041",
+    "0041", "0042",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -382,12 +387,19 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject(
         "0042", "index", "uq_simulation_commands_one_pending", "simulation_commands",
     ),
+    # 0043_assessment_narrative_and_review_dimension_scores
+    PlannedObject("0043", "column", "headline", "opportunity_assessments"),
+    PlannedObject("0043", "column", "key_points", "opportunity_assessments"),
+    PlannedObject("0043", "column", "elevator_pitch", "opportunity_assessments"),
+    PlannedObject("0043", "column", "dimension_scores", "assessment_reviews"),
+    PlannedObject("0043", "column", "rubric_version", "assessment_reviews"),
+    PlannedObject("0043", "column", "rubric_content_hash", "assessment_reviews"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041", "0042",
+    "0040", "0041", "0042", "0043",
 )
 
 

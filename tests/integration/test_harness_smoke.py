@@ -42,7 +42,11 @@ async def test_container_is_migrated(engine):
         #      record that a #assessments-summary headline posted for this row)
         # 0042 simulation_commands, simulation_process_status, admin_audit_events
         #      tables; llm_call_logs.thread_ts column
-        assert v == "0042"
+        # 0043 opportunity_assessments.headline/.key_points/.elevator_pitch,
+        #      assessment_reviews.dimension_scores/.rubric_version/
+        #      .rubric_content_hash (assessment narrative fields + per-dimension
+        #      human review scores)
+        assert v == "0043"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
