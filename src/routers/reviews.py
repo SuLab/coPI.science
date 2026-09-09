@@ -13,7 +13,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,9 +113,42 @@ def _parse_assignee_id(assignee_user_id: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail="Malformed assignee id") from exc
 
 
+#: Prefix for the per-rubric-dimension score fields the Human-review card
+#: posts. One field per dimension, named from the rubric document's own key
+#: (`dim_scientific_credibility`), so the form and the validator cannot drift.
+_DIM_FIELD_PREFIX = "dim_"
+
+
+def _parse_dimension_scores(form) -> dict[str, int]:
+    """Pull the `dim_<key>` fields out of a posted form.
+
+    An empty value means "not scored" and is DROPPED, never coerced to 0: the
+    rubric scale starts at 1, so a stored 0 is a score nobody gave. A
+    non-integer is a 400 rather than a silent skip — recording a review that
+    quietly omits what the reviewer typed is worse than refusing it. Unknown
+    KEYS are not checked here; `assessment_reviews._validate` owns that, against
+    the live document.
+    """
+    scores: dict[str, int] = {}
+    for field, raw in form.multi_items():
+        if not field.startswith(_DIM_FIELD_PREFIX):
+            continue
+        value = (raw or "").strip()
+        if not value:
+            continue
+        try:
+            scores[field[len(_DIM_FIELD_PREFIX) :]] = int(value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Malformed dimension score for {field}"
+            ) from exc
+    return scores
+
+
 @router.post("/assessments/{assessment_id}/feedback")
 async def submit_review_feedback(
     assessment_id: uuid.UUID,
+    request: Request,
     score: int = Form(...),
     comment: str = Form(""),
     feedback_mode: str = Form(...),
@@ -125,6 +158,7 @@ async def submit_review_feedback(
 ):
     _refuse_impersonation(current_user)
     assessment = await _load_assessment(db, assessment_id)
+    dimension_scores = _parse_dimension_scores(await request.form())
     try:
         await submit_feedback(
             db,
@@ -133,13 +167,15 @@ async def submit_review_feedback(
             score=score,
             comment=comment,
             feedback_mode=feedback_mode,
+            dimension_scores=dimension_scores,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
     logger.info(
-        "Review feedback by %s (%s) on assessment %s: score=%s mode=%s",
+        "Review feedback by %s (%s) on assessment %s: score=%s mode=%s dims=%d",
         current_user.name, current_user.id, assessment_id, score, feedback_mode,
+        len(dimension_scores),
     )
     return _assessments_redirect(surface, current_user, assessment_id)
 
@@ -147,6 +183,7 @@ async def submit_review_feedback(
 @router.post("/feedback/{feedback_id}/edit")
 async def edit_review_feedback(
     feedback_id: uuid.UUID,
+    request: Request,
     score: int = Form(...),
     comment: str = Form(""),
     feedback_mode: str = Form(...),
@@ -158,16 +195,27 @@ async def edit_review_feedback(
     review = await _load_review(db, feedback_id)
     if review.reviewer_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the author may edit this feedback")
+    # The form re-posts every dimension on each edit, so parsing unconditionally
+    # and always passing the result through (even `{}`) is deliberate: a
+    # dimension the reviewer cleared must actually clear on the row, not be
+    # left at its previous value. See edit_feedback's own docstring (Task 3).
+    dimension_scores = _parse_dimension_scores(await request.form())
     try:
         await edit_feedback(
-            db, review=review, score=score, comment=comment, feedback_mode=feedback_mode
+            db,
+            review=review,
+            score=score,
+            comment=comment,
+            feedback_mode=feedback_mode,
+            dimension_scores=dimension_scores,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
     logger.info(
-        "Review feedback %s edited by %s (%s): score=%s mode=%s",
+        "Review feedback %s edited by %s (%s): score=%s mode=%s dims=%d",
         feedback_id, current_user.name, current_user.id, score, feedback_mode,
+        len(dimension_scores),
     )
     return _assessments_redirect(surface, current_user, review.assessment_id)
 

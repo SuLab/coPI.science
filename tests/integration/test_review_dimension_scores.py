@@ -16,7 +16,7 @@ from src.services.blackbird_rubric import (
     load_rubric,
 )
 from tests import factories
-from tests.integration.test_manager_access import auth_headers  # noqa: F401
+from tests.integration.test_manager_access import auth_headers
 from tests.integration.test_reviews_router import _seed_assessment
 
 pytestmark = pytest.mark.integration
@@ -192,3 +192,103 @@ async def test_editing_restamps_to_the_rubric_live_at_edit_time(
 
     assert review.rubric_version == "9.9.9-sentinel"
     assert review.rubric_content_hash == "sentinelhash01"
+
+
+async def test_the_form_posts_dimension_scores_and_blanks_are_dropped(
+    client, db_session
+):
+    """An unfilled select posts an empty string. It must be DROPPED, never
+    coerced to 0 — the rubric scale starts at 1, so a stored 0 would be a
+    score nobody gave (and would drag any future average)."""
+    key_a, key_b = _first_two_dimension_keys()
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    resp = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={
+            "score": "4",
+            "comment": "c",
+            "feedback_mode": "log_only",
+            f"dim_{key_a}": "5",
+            f"dim_{key_b}": "",
+        },
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+
+    row = (
+        await db_session.execute(
+            select(AssessmentReview).where(
+                AssessmentReview.assessment_id == assessment.id
+            )
+        )
+    ).scalar_one()
+    assert row.dimension_scores == {key_a: 5}
+
+
+async def test_posting_no_dimension_fields_at_all_still_works(client, db_session):
+    """Backwards compatibility with the pre-0043 form shape, and with any
+    script that posts only the overall score."""
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    resp = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "4", "comment": "c", "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+    row = (
+        await db_session.execute(
+            select(AssessmentReview).where(
+                AssessmentReview.assessment_id == assessment.id
+            )
+        )
+    ).scalar_one()
+    assert row.dimension_scores is None
+
+
+async def test_an_unknown_dimension_field_is_a_400_and_writes_nothing(
+    client, db_session
+):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    resp = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={
+            "score": "4", "comment": "c", "feedback_mode": "log_only",
+            "dim_not_a_real_dimension": "3",
+        },
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    rows = (
+        await db_session.execute(
+            select(AssessmentReview).where(
+                AssessmentReview.assessment_id == assessment.id
+            )
+        )
+    ).scalars().all()
+    assert rows == []
+
+
+async def test_a_non_numeric_dimension_field_is_a_400(client, db_session):
+    key_a, _ = _first_two_dimension_keys()
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    resp = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={
+            "score": "4", "comment": "c", "feedback_mode": "log_only",
+            f"dim_{key_a}": "excellent",
+        },
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
