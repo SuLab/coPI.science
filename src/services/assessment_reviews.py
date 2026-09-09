@@ -28,8 +28,11 @@ Python fold, never a ``DISTINCT ON``.
 safe because this module is web-tier only — it is imported by
 ``src/routers/reviews.py`` and ``src/services/directory.py`` and by nothing the
 worker loads. ``src/services/review_bot.py``, which DOES run on the worker,
-must stay free of ``blackbird_rubric``/``rubric_revisions``/``assessment_detail``;
-see the probe in ``tests/unit/test_review_bot_inputs.py``.
+must stay free of ``blackbird_rubric``/``rubric_revisions``/``assessment_detail``/
+``assessment_reviews``; see
+``tests/unit/test_review_bot.py::test_the_bot_module_stays_free_of_web_tier_rubric_modules``,
+an AST import scan in the same idiom as that file's
+``test_the_bot_module_imports_no_transport``.
 """
 
 from __future__ import annotations
@@ -193,9 +196,13 @@ async def submit_feedback(
         comment=comment[:_MAX_COMMENT_CHARS],
         feedback_mode=feedback_mode,
         dimension_scores=_normalized_dimension_scores(dimension_scores),
-        # Stamped from the module-level constants, not re-read from disk: the
-        # rubric cannot change under a running process, so this is the same
-        # document `_validate` just checked the keys against.
+        # Stamped from the module-level constants, not re-read from disk, and
+        # unconditionally — whether or not any dimension was scored.
+        # `_validate` only calls `load_rubric()` when `dimension_scores` is
+        # truthy (it short-circuits on an empty/None map before ever reading
+        # the document), but these constants are derived from that same
+        # document at import time and cannot change under a running process,
+        # so the row is always stamped with the live document either way.
         rubric_version=RUBRIC_VERSION,
         rubric_content_hash=RUBRIC_CONTENT_HASH,
     )
@@ -225,9 +232,11 @@ async def edit_feedback(
 
     ``dimension_scores`` REPLACES the stored set rather than merging into it —
     the form re-posts every dimension, so a field the reviewer cleared must
-    actually clear. The rubric stamp is rewritten for the same reason: the
-    scores now on the row are the ones given under the document live at edit
-    time, which is not necessarily the one that scored the original.
+    actually clear. The rubric stamp is rewritten unconditionally for the
+    same reason — whether or not any dimension was scored THIS time, and
+    whether or not the incoming set differs from what was there before: the
+    stamp records which document is live at edit time, which is not
+    necessarily the one that scored (or stamped) the original.
     """
     _validate(score, feedback_mode, dimension_scores)
     review.score = score

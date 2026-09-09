@@ -336,3 +336,26 @@ def test_the_bot_module_imports_no_transport():
         n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
     }
     assert not any("slack" in m for m in mods), mods
+
+
+def test_the_bot_module_stays_free_of_web_tier_rubric_modules():
+    """``review_bot`` runs on the WORKER, which has no Docker socket and no
+    reason to load web-tier modules. ``blackbird_rubric`` in particular reads
+    ``prompts/rubric/blackbird-rubric.toml`` at IMPORT time and fails fast
+    (``RubricError``) if it is missing or invalid — an accidental import here
+    would tie the worker's boot to that file's presence/validity for no
+    reason the job needs. ``rubric_revisions``, ``assessment_detail`` and
+    ``assessment_reviews`` are the same family: all web-tier, all read by
+    ``src/routers/reviews.py`` or the assessment-detail pages, none of them
+    needed by a job that reads prompt files as plain data through
+    ``src/services/interview_transcript.py``. This is the probe
+    ``src/services/assessment_reviews.py``'s module docstring points at."""
+    src = (ROOT / "src/services/review_bot.py").read_text()
+    tree = ast.parse(src)
+    mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names} | {
+        n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
+    }
+    for banned in (
+        "blackbird_rubric", "rubric_revisions", "assessment_detail", "assessment_reviews",
+    ):
+        assert not any(banned in m for m in mods), mods
