@@ -266,3 +266,48 @@ def test_pi_lab_prompt_never_carries_the_rubric(tmp_path, monkeypatch):
     assert "{rubric}" not in prompt
     assert "Blackbird's Screening Rubric" not in prompt
     assert "| 1 | Differentiation" not in prompt
+
+
+def test_skeleton_carries_the_three_narrative_fields():
+    """The reviewer-facing narrative contract (design §3.2). These are NOT
+    scored and are deliberately absent from the rubric document — the sidecar
+    skeleton is their only definition, so this is where drift is caught."""
+    skeleton = _skeleton()
+    for key in ("headline", "key_points", "elevator_pitch"):
+        assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
+    assert skeleton["key_points"] == []
+    assert skeleton["headline"] == ""
+    assert skeleton["elevator_pitch"] == ""
+
+
+def test_phase4_binds_the_rationale_to_a_bolded_summary_sentence():
+    """N6: a short run-in label AND a bolded one-sentence summary, so reading
+    only the bold text gives the whole argument."""
+    body = _norm(_phase4_text())
+    assert "bolded one-sentence summary" in body
+    assert "two to four words" in body
+
+
+def test_phase4_binds_the_next_experiment_to_a_bolded_one_line_ask():
+    """The detail page's "The ask" line is the FIRST line of
+    recommended_next_experiment. Parsing cost and duration out of prose would
+    be fragile in exactly the way that produces a confidently wrong number, so
+    the prompt is asked for it instead (design §3.2)."""
+    body = _norm(_phase4_text())
+    assert "bolded one-line ask" in body
+
+
+def test_the_scout_hub_prompt_set_version_moved_with_the_contract():
+    """`prompt_set_stamp` records version + content hash in every run-start
+    announcement, so a content change without a version bump is by definition
+    an unrecorded edit (A17)."""
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = tomllib.loads(
+        (root / "prompts/roles/scout_hub/role.toml").read_text(encoding="utf-8")
+    )
+    assert manifest["version"] != "1.0.0", (
+        "phase4-thread-reply.md changed; bump prompts/roles/scout_hub/role.toml"
+    )

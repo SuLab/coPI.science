@@ -227,12 +227,49 @@ of it may appear anywhere in `<slack_message>` above:
    the PI what would change your read, record the same thing so staff and PI are working
    from one list.
 
-**Formatting `rationale` and `recommended_next_experiment`.** Write both fields in
-simple Markdown: short paragraphs separated by a blank line, `**bold**` run-in labels
-to open a section (e.g. `**FTO:** ...`), and `-` bullets for lists. No headings, no
-tables, no code fences. Wrap any identifier that contains a literal asterisk in
-backticks — e.g. `` `HLA-A*02:01` `` — so it renders as text instead of being read as
-emphasis.
+6. **Headline.** One sentence, at most 200 characters, written for a Blackbird
+   reviewer who has never heard of this lab. It must name the mechanism or
+   tool, the target disease or patient population, and the reason this is
+   fundable — the whole story in one line. This is NOT the project label;
+   `company_or_project` already carries that, and both are stored.
+   Record it in `headline`.
+7. **Key points.** Three to five bullets, each at most 160 characters and each
+   a complete claim rather than a topic — "the classifier does not exist yet;
+   no AUC was ever computed", not "classifier status". Together they must let a
+   reviewer who reads nothing else say what the idea is, what is actually
+   established, and what the deciding risk is. Record them in `key_points` as
+   an array of strings.
+8. **Elevator pitch.** Three to five sentences of plain language, for a
+   scientifically literate reader who is not a specialist in this field. State
+   what exists today, what the money would buy, and why the answer matters.
+   Minimal jargon; spell out an abbreviation the first time. Record it in
+   `elevator_pitch`.
+
+**Formatting `rationale` and `recommended_next_experiment`.** Write both fields
+in simple Markdown: short paragraphs separated by a blank line, `-` bullets for
+lists. No headings, no tables, no code fences. Wrap any identifier that contains
+a literal asterisk in backticks — e.g. `` `HLA-A*02:01` `` — so it renders as
+text instead of being read as emphasis.
+
+Open **every** `rationale` paragraph with a run-in label of **two to four
+words** in bold, then a **bolded one-sentence summary** of that paragraph:
+
+    **Scientific panel.** **The circadian confound is the biggest threat to
+    this biomarker.** Ordering (discovery-set analytics, then randomised
+    interaction) is correct. At 30 events a composite AUC is estimable but not
+    lockable...
+
+Keep the label short — it names the source, the summary carries the finding. A
+reader who reads only the bold text must get the whole argument.
+
+Open `recommended_next_experiment` with a **bolded one-line ask** naming the
+cost and the duration before anything else:
+
+    **$100–175K · 4–6 months — pre-registered analytical-validity package on
+    the existing 124-patient cohort.**
+
+Everything else — scope of work, deliverable, pass threshold — follows that
+line as normal paragraphs and bullets.
 
 If you're missing information for one of these, say so in `rationale` and mark the
 relevant gating criterion *unconfirmed* — never skip it silently and never guess.
@@ -250,6 +287,9 @@ every proposal.
 {
   "company_or_project": "",
   "subject_agent_id": "",
+  "headline": "",
+  "key_points": [],
+  "elevator_pitch": "",
   "gating": {
     "life_sciences_domain": "met",
     "credible_science": "not_met",
