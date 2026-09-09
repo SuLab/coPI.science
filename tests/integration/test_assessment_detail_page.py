@@ -1349,6 +1349,25 @@ def _top_level_details_contents(html: str) -> str:
     (open tag through its own matching close tag) exactly once — nested
     <details> content is included as part of its enclosing top-level span
     rather than cutting it short.
+
+    Two failure modes are asserted LOUDLY rather than degrading to a
+    valid-looking value, because both of this helper's two callers
+    (`test_the_panel_banner_is_never_inside_a_collapsed_details` and
+    `test_a_non_empty_red_flag_list_is_never_collapsed`) are pure ABSENCE
+    assertions against the return value — `"X" not in inside`. Either failure
+    mode below used to return a value that made those assertions pass
+    vacuously, for a reason that has nothing to do with the thing they claim
+    to guard:
+
+    * an unclosed `<details>` (a template bug, or a change to this page that
+      breaks tag balance) used to leave that element's content out of `parts`
+      silently, so a warning genuinely trapped inside it would read as "not
+      inside" simply because the scan never captured the span;
+    * a page with no `<details>` at all — e.g. a template regression that
+      drops the collapsible sections entirely, or a caller pointed at the
+      wrong response body — used to return `""`, and `"X" not in ""` is
+      trivially true for every `X`, so the assertion would pass while proving
+      nothing about where `X` actually rendered.
     """
     parts: list[str] = []
     depth = 0
@@ -1364,6 +1383,15 @@ def _top_level_details_contents(html: str) -> str:
                 if depth == 0 and start is not None:
                     parts.append(html[start : m.end()])
                     start = None
+    assert depth == 0, (
+        "an unclosed <details> element — the scan ended still inside one, so "
+        "its content would have been silently dropped from the result"
+    )
+    assert parts, (
+        "no top-level <details> element was found on this page at all — "
+        "either the page regressed and lost its collapsible sections, or "
+        "this helper was pointed at the wrong HTML"
+    )
     return "".join(parts)
 
 
@@ -1452,6 +1480,11 @@ async def test_the_panel_banner_is_never_inside_a_collapsed_details(
     )).text
     # Everything inside any <details>...</details> must not contain the banner.
     inside = _top_level_details_contents(html)
+    # Positive control: prove the scan actually covered the region we think it
+    # did, not just that the banner text happens to be absent from it — an
+    # empty or wrongly-scoped `inside` would make the assertion below pass for
+    # the wrong reason.
+    assert "Full rationale" in inside
     assert "Specialist panel" not in inside
 
 
@@ -1469,6 +1502,10 @@ async def test_a_non_empty_red_flag_list_is_never_collapsed(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     inside = _top_level_details_contents(html)
+    # Positive control: same reasoning as the panel-banner test above — prove
+    # the scan covered the region we think it did before trusting an absence
+    # assertion against it.
+    assert "Full rationale" in inside
     assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" in html
     assert "RED-FLAG-MARKER-MUST-BE-VISIBLE" not in inside
 

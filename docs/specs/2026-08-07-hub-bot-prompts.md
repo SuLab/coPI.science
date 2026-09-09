@@ -556,11 +556,14 @@ of it may appear anywhere in `<slack_message>` above:
    Minimal jargon; spell out an abbreviation the first time. Record it in
    `elevator_pitch`.
 
-**Formatting `rationale` and `recommended_next_experiment`.** Write both fields
-in simple Markdown: short paragraphs separated by a blank line, `-` bullets for
-lists. No headings, no tables, no code fences. Wrap any identifier that contains
-a literal asterisk in backticks — e.g. `` `HLA-A*02:01` `` — so it renders as
-text instead of being read as emphasis.
+**Formatting `rationale`, `recommended_next_experiment` and `elevator_pitch`.**
+Write all three fields in simple Markdown: short paragraphs separated by a
+blank line, `-` bullets for lists. No headings, no tables, no code fences.
+Wrap any identifier that contains a literal asterisk in backticks — e.g.
+`` `HLA-A*02:01` `` — so it renders as text instead of being read as
+emphasis. This applies to the elevator pitch exactly as it does to the other
+two: an unwrapped `HLA-A*02:01` in three sentences of plain-language prose is
+read as emphasis just as readily as it is in a rationale paragraph.
 
 Open **every** `rationale` paragraph with a run-in label of **two to four
 words** in bold, then a **bolded one-sentence summary** of that paragraph:

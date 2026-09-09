@@ -3719,13 +3719,18 @@ class SimulationEngine:
         (design D16 — "(link unavailable)", never a dropped post), while the
         outer one is the last resort for the post itself.
 
-        Only the headline's five fields are ever rendered — PI/lab name,
-        project, recommendation, band/score, permalink (design D12). The
-        verdict's `rationale`, `red_flags`, `gating` and `raw_verdict` are
-        never read here at all, which is what keeps this post from saying more
-        than the manager read-only detail view already shows staff. Pinned by
+        Only the headline's six fields are ever rendered — PI/lab name,
+        project, recommendation, band/score, permalink, and — since
+        2026-09-09 — the sidecar's `elevator_pitch` on a second line (design
+        D12, widened once). The pitch widening rests on the operator's
+        assertion that PIs cannot join the Slack workspace, which no code
+        enforces; it is a real risk accepted deliberately, not a free
+        extension of the existing policy. The verdict's `rationale`,
+        `red_flags`, `gating` and `raw_verdict` are never read here at all,
+        which is what keeps this post from saying more than the manager
+        read-only detail view already shows staff. Pinned by
         `tests/unit/test_assessments_summary_post.py`'s sentinel test —
-        widening this to interpolate `verdict` wholesale, or to add a
+        widening this further to interpolate `verdict` wholesale, or to add a
         "why" line, is a content-policy change, not a formatting one.
         """
         try:
@@ -4207,6 +4212,7 @@ class SimulationEngine:
             "company_or_project": row.company_or_project,
             "recommendation": row.recommendation,
             "scores": row.scores or {},
+            "elevator_pitch": row.elevator_pitch,
         }
         posted = await self._post_assessment_summary(
             agent, thread, verdict, row.slack_ts,

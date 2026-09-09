@@ -237,6 +237,18 @@ async def edit_feedback(
     whether or not the incoming set differs from what was there before: the
     stamp records which document is live at edit time, which is not
     necessarily the one that scored (or stamped) the original.
+
+    A second consequence of that same replace-and-restamp behavior: editing a
+    review that was originally scored under an OLDER rubric revision silently
+    DROPS whatever dimension keys that older revision used and are no longer
+    live — the edit form only ever renders the CURRENT document's dimensions,
+    so there is nothing in the submitted payload to carry a retired key
+    forward, and the row's stamp moves to the live revision regardless. This
+    is defensible, not just tolerated: a retired dimension key would fail
+    ``_validate`` against the live rubric anyway, and re-stamping keeps the
+    row self-consistent (its ``dimension_scores`` keys always match its own
+    ``rubric_version``) rather than leaving a row that claims one revision but
+    carries another revision's keys.
     """
     _validate(score, feedback_mode, dimension_scores)
     review.score = score

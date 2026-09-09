@@ -106,12 +106,12 @@ DEFAULT_TARGET = "0043"
 #: DEFAULT_TARGET moved to 0040, 0039 is the starting point and must be a supported
 #: start, not a BLOCK. 0040 joins now for the identical reason: production is
 #: stamped 0040, so with DEFAULT_TARGET moved to 0041, 0040 is the starting point
-#: and must be a supported start, not a BLOCK. 0041 joins now for the identical
-#: reason: production is stamped 0041, so with DEFAULT_TARGET moved to 0042, 0041
-#: is the starting point and must be a supported start, not a BLOCK. 0042 joins now
-#: for the identical reason: production is stamped 0042, so with DEFAULT_TARGET
-#: moved to 0043, 0042 is the starting point and must be a supported start, not a
-#: BLOCK.
+#: and must be a supported start, not a BLOCK. (0041 itself was added to
+#: SUPPORTED_START_REVISIONS by d129d2e, alongside the 0042 bump below — not by
+#: this sentence, and not in this cycle; it is listed here only because this
+#: comment was not updated at the time.) 0042 joins now for the identical
+#: reason: production is stamped 0042, so with DEFAULT_TARGET moved to 0043,
+#: 0042 is the starting point and must be a supported start, not a BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to

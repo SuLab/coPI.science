@@ -397,3 +397,118 @@ async def test_a_provisional_verdict_is_stored_but_not_announced(monkeypatch, tm
     assert len(persisted) == 1, "an early sidecar must be stored, not destroyed"
     assert ASSESSMENTS_SUMMARY_CHANNEL not in hub_client.posted_messages
     assert eng._assessed_threads["t7"].final is False
+
+
+# ---------------------------------------------------------------------------
+# The elevator pitch (2026-09-09) must reach Slack through EVERY engine call
+# site that can produce a #assessments-summary headline, not just the one the
+# original widening happened to touch. Pitch prose below is deliberately
+# chosen to avoid every substring
+# `test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict` scans
+# for (rationale/red_flag/gating/raw_verdict/milestone/confidence) — an
+# ordinary-English collision there would fail for a reason that is not a leak.
+# ---------------------------------------------------------------------------
+
+PITCH_TEXT = "Uses banked plasma the lab already has; no new patient consent needed."
+
+
+async def test_the_elevator_pitch_reaches_slack_via_post_assessment_summary(
+    monkeypatch, tmp_path,
+):
+    """Covers the in-turn / terminal-reply call site (`_capture_hub_assessment`
+    -> `_post_assessment_summary`, `simulation.py:3789`): a verdict dict that
+    carries `elevator_pitch` must have it show up in the posted text."""
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    thread = ThreadState(thread_id="t14", channel="general", other_agent_id="wang")
+    verdict = {**VERDICT, "elevator_pitch": PITCH_TEXT}
+
+    await eng._post_assessment_summary(hub, thread, verdict, "141.000")
+
+    assert len(hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL]) == 1
+    text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
+    assert PITCH_TEXT in text
+
+
+class _FakeOwedRow:
+    """Stands in for the `OpportunityAssessment` row
+    `_announce_owed_headline` SELECTs — only the attributes that method
+    actually reads."""
+
+    def __init__(self, **kw):
+        for key, value in kw.items():
+            setattr(self, key, value)
+
+
+class _FakeScalars:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _FakeResult:
+    def __init__(self, row):
+        self._row = row
+
+    def scalars(self):
+        return _FakeScalars(self._row)
+
+
+class _FakeOwedDb:
+    """A DB session double: `execute` answers the same row for the SELECT
+    `_announce_owed_headline` issues, and is a harmless no-op for the UPDATE
+    `_mark_summary_posted` issues afterwards."""
+
+    def __init__(self, row):
+        self._row = row
+
+    async def execute(self, *a, **kw):
+        return _FakeResult(self._row)
+
+    async def commit(self):
+        pass
+
+
+class _FakeOwedSessionCM:
+    def __init__(self, row):
+        self._row = row
+
+    async def __aenter__(self):
+        return _FakeOwedDb(self._row)
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+async def test_the_owed_headline_rescue_path_carries_the_elevator_pitch(
+    monkeypatch, tmp_path,
+):
+    """I1: `_announce_owed_headline` (simulation.py:4108) rebuilds a synthetic
+    verdict from the stored row to hand to the SAME renderer the terminal-reply
+    path uses. Before this fix it named only `company_or_project`,
+    `recommendation` and `scores` — dropping `row.elevator_pitch`, which was
+    right there on the row it just SELECTed. This drives the rescue path with
+    a fake DB session (no real database needed for a unit test) and asserts
+    the pitch makes it into the post."""
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    row = _FakeOwedRow(
+        agent_id="blackbird",
+        channel_name="general",
+        thread_id="t-owed",
+        subject_agent_id="wang",
+        slack_ts="151.000",
+        company_or_project="CRISPR Platform",
+        recommendation="pass",
+        scores={},
+        elevator_pitch=PITCH_TEXT,
+    )
+    eng.session_factory = lambda: _FakeOwedSessionCM(row)
+    eng.simulation_run_id = uuid.uuid4()
+
+    posted = await eng._announce_owed_headline("t-owed", trigger="test_timeout")
+
+    assert posted is True
+    assert len(hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL]) == 1
+    text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
+    assert PITCH_TEXT in text

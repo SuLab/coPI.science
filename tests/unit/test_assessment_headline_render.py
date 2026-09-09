@@ -1,4 +1,11 @@
-"""The `#assessments-summary` headline renders five fields and no more (D12).
+"""The `#assessments-summary` headline renders six fields and no more (D12,
+widened once). PI/lab name, project, recommendation, band/score and permalink
+were the original five; since 2026-09-09 a sixth, the sidecar's
+`elevator_pitch`, renders on a second line — see the "Elevator pitch" section
+below and the module docstring of `src/services/assessment_headline.py`. The
+widening rests on the operator's assertion that PIs cannot join the Slack
+workspace, which no code enforces, so it is a deliberately accepted risk, not
+a free extension of the existing five-field policy.
 
 Also covers the `score`/`band` override added in fix round 1 (2026-08-29): a
 repaired headline must say exactly what the stored row already said —

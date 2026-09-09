@@ -24,7 +24,12 @@ something to work around.
   gap is legitimate grounds for a `rubric` or `scout_hub` suggestion. A gap with no
   corroborating comment is not, on its own, a fixable defect — say so and stay
   `out_of_scope`. Ground your suggestion in what the feedback actually says, never in a
-  generic sense that the prompt could be better.
+  generic sense that the prompt could be better. A note may also carry `dimension_scores`,
+  an optional sparse map of rubric-dimension key to the reviewer's own 1–5 score for that
+  one dimension, given against the rubric revision named on the row. It is not a separate
+  measurement from `score` — it is the same human's same read of the PROPOSAL, broken out
+  per dimension, so read it with the same care: it rates the proposal's merit on each named
+  dimension, never the assessment's own per-dimension rubric scores.
 
 - **ASSESSMENT** — the stored verdict: recommendation, band, gating status, red flags,
   the rationale text, and (when the row carries one) the recommended next experiment.

@@ -550,7 +550,16 @@ def _row_slice(html: str, marker: str) -> str:
     marker, then walks ``<div`` / ``</div`` depth from there to that div's own
     matching close — bounded by the card's own structure, so it cannot leak
     into anything that follows regardless of what that happens to be.
+
+    ``html.find`` below picks the FIRST occurrence of ``marker`` — silently,
+    for a duplicate marker, the same shape of bug the two forms above were
+    retired for: a caller asserting against the wrong card's slice without
+    any failure naming why. The count check below closes that.
     """
+    assert html.count(marker) == 1, (
+        f"marker {marker!r} appears {html.count(marker)} times in html; "
+        "_row_slice would silently scope to the FIRST occurrence"
+    )
     marker_pos = html.find(marker)
     if marker_pos == -1:
         raise AssertionError(f"marker {marker!r} not found in html")

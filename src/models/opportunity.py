@@ -55,7 +55,7 @@ class OpportunityAssessment(Base):
     )
 
     company_or_project: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # The three reviewer-facing narrative fields (sidecar items 11-13, 0043).
+    # The three reviewer-facing narrative fields (sidecar items 6-8, 0043).
     # `company_or_project` above stays the SHORT label and keeps its current
     # meaning — it is the only project field the public #assessments-summary
     # headline renders, so widening it would change what is posted to Slack.
@@ -100,10 +100,13 @@ class OpportunityAssessment(Base):
     # the markdown-prompt regime (0040) and some contain literal `*` in
     # scientific identifiers (e.g. `HLA-A*02:01`) that a markdown pass would
     # corrupt by reading as emphasis, so they stay rendered
-    # `white-space: pre-line` forever. `'markdown'` means `rationale` and
-    # `recommended_next_experiment` were written under the markdown-prompt
-    # contract and are safe to render through the sanitized data-markdown
-    # pipeline.
+    # `white-space: pre-line` forever. `'markdown'` means `rationale`,
+    # `recommended_next_experiment`, and — since the elevator-pitch sidecar
+    # fields landed in the same commit — `elevator_pitch` were all written
+    # under the markdown-prompt contract and are safe to render through the
+    # sanitized data-markdown pipeline. All three fields share one stamp
+    # because they come from the same prompt and the same commit; there is no
+    # per-field granularity here.
     prose_format: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # The durable half of the at-most-once headline guarantee (2026-08-29).
     # Set when a `#assessments-summary` headline for THIS row reaches Slack.

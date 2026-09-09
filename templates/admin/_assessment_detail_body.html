@@ -552,8 +552,9 @@
         Scores here rate the proposal's own scientific and strategic merit, not
         how well the bot performed. Review it against Blackbird's rubric
         (<span class="font-mono">{{ review_rubric.version }}</span>): read the
-        full rationale below before scoring — the brief at the top of this page
-        is BlackbirdBot's own summary of it, not an independent account. Score
+        {% if a.rationale %}<a href="#rationale" class="underline">full rationale</a>{% else %}full rationale{% endif %}
+        before scoring — the brief at the top of this page is BlackbirdBot's
+        own summary of it, not an independent account. Score
         each rubric dimension from {{ review_rubric.scale_min }} (weak) to
         {{ review_rubric.scale_max }} (strongly meets Blackbird's bar), and leave
         a dimension blank if you cannot judge it. The overall proposal-merit
