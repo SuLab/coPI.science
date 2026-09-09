@@ -351,6 +351,50 @@ async def _load_assessment(
     ).scalar_one_or_none()
 
 
+def _feedback_snapshot_entry(review: AssessmentReview) -> dict:
+    """One review row as the plain dict a suggestion records as provenance.
+
+    Extracted from the inline comprehension so the consumed_at predicate below
+    and the snapshot can never describe different fields again — which is
+    exactly how a dimension-score-only edit came to be silently swallowed (A1).
+    """
+    return {
+        "id": str(review.id),
+        "reviewer_name": review.reviewer_name,
+        "score": review.score,
+        "dimension_scores": review.dimension_scores,
+        "feedback_mode": review.feedback_mode,
+        "comment": review.comment,
+        "created_at": review.created_at.isoformat(),
+    }
+
+
+def consumed_at_predicates(snap: dict) -> tuple:
+    """WHERE terms that match a row ONLY if it still reads exactly as
+    snapshotted.
+
+    EVERY reviewer-editable field must appear here. `edit_feedback` resets
+    `consumed_at` and enqueues a replacement job, so a field missing from this
+    tuple means an in-flight job re-stamps a row that has since changed, the
+    replacement job finds nothing unconsumed, and the edit is lost with no
+    warning — the stamp having *succeeded* is why nothing logs (A1).
+
+    `dimension_scores` is JSONB and nullable, so the None case must be spelled
+    `.is_(None)`: SQL `col = NULL` is never true, which would make every
+    unscored row look edited and leave it permanently unconsumed.
+    """
+    dims = snap["dimension_scores"]
+    return (
+        AssessmentReview.consumed_at.is_(None),
+        AssessmentReview.feedback_mode == "learn",
+        AssessmentReview.score == snap["score"],
+        AssessmentReview.comment == snap["comment"],
+        AssessmentReview.dimension_scores.is_(None)
+        if dims is None
+        else AssessmentReview.dimension_scores == dims,
+    )
+
+
 async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     """Distill unconsumed 'learn' feedback on one assessment into one suggestion.
 
@@ -440,18 +484,10 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     # Snapshotted BEFORE the LLM call, as plain dicts: this is what the
     # suggestion row records as provenance, and it must name exactly the rows
     # this job is about to mark consumed — not whatever the table looks like
-    # after an Opus round trip that could take tens of seconds.
-    feedback_snapshot = [
-        {
-            "id": str(review.id),
-            "reviewer_name": review.reviewer_name,
-            "score": review.score,
-            "feedback_mode": review.feedback_mode,
-            "comment": review.comment,
-            "created_at": review.created_at.isoformat(),
-        }
-        for review in reviews
-    ]
+    # after an Opus round trip that could take tens of seconds. Extracted to
+    # `_feedback_snapshot_entry` so the consumed_at predicate below is built
+    # from the very same field list (A1).
+    feedback_snapshot = [_feedback_snapshot_entry(review) for review in reviews]
 
     thread_id, messages = await load_interview_thread(db, assessment)
     transcript_text, input_truncated = _render_transcript(thread_id, messages)
@@ -499,18 +535,15 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     # edit/submit path already enqueued (the dedupe counts PENDING jobs only).
     # A Core UPDATE rather than `review.consumed_at = now` on the ORM objects,
     # because the ORM write would overwrite whatever the concurrent edit stored
-    # (audit 2026-09-02, D2).
+    # (audit 2026-09-02, D2). `consumed_at_predicates` is the same field list
+    # `_feedback_snapshot_entry` captured above, so an edit to ANY
+    # reviewer-editable field — including dimension_scores, not just score/
+    # comment — leaves the row unmatched here rather than re-stamped (A1).
     stamped = 0
     for review, snap in zip(reviews, feedback_snapshot, strict=True):
         result = await db.execute(
             update(AssessmentReview)
-            .where(
-                AssessmentReview.id == review.id,
-                AssessmentReview.consumed_at.is_(None),
-                AssessmentReview.feedback_mode == "learn",
-                AssessmentReview.score == snap["score"],
-                AssessmentReview.comment == snap["comment"],
-            )
+            .where(AssessmentReview.id == review.id, *consumed_at_predicates(snap))
             .values(consumed_at=now)
         )
         stamped += result.rowcount or 0

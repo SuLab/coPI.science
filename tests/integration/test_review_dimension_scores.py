@@ -302,3 +302,67 @@ async def test_a_non_numeric_dimension_field_is_a_400_and_writes_nothing(
         )
     ).scalars().all()
     assert rows == []
+
+
+async def test_a_dimension_only_edit_survives_an_in_flight_analysis_job(
+    client, db_session
+):
+    """A1. `edit_feedback` resets consumed_at and enqueues a new job, but the
+    in-flight job's conditional UPDATE used to match on (score, comment) alone
+    — so an edit that touched ONLY the dimension scores got re-stamped
+    consumed, and the new job then found nothing to analyze. Silent: the stamp
+    SUCCEEDED, so the job's own `stamped != len(reviews)` warning never fired.
+
+    Simulated by snapshotting the row, editing it, then running the UPDATE the
+    handler runs — the same shape as the handler, without an Opus round trip.
+    """
+    from sqlalchemy import update
+
+    from src.models import AssessmentReview as AR
+    from src.services.review_bot import _feedback_snapshot_entry
+
+    key_a, key_b = _first_two_dimension_keys()
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    review = await submit_feedback(
+        db_session, assessment=assessment, reviewer=reviewer, score=4,
+        comment="unchanged", feedback_mode="learn",
+        dimension_scores={key_a: 5},
+    )
+    await db_session.flush()
+
+    # The job snapshots the row, then goes off to the model.
+    snap = _feedback_snapshot_entry(review)
+
+    # Meanwhile the reviewer changes ONLY the dimension scores.
+    await edit_feedback(
+        db_session, review=review, score=4, comment="unchanged",
+        feedback_mode="learn", dimension_scores={key_a: 5, key_b: 1},
+    )
+    await db_session.flush()
+
+    # The job comes back and tries to stamp what it snapshotted.
+    from src.services.review_bot import consumed_at_predicates
+
+    result = await db_session.execute(
+        update(AR)
+        .where(AR.id == review.id, *consumed_at_predicates(snap))
+        .values(consumed_at=review.created_at)
+    )
+    assert result.rowcount == 0, (
+        "the in-flight job re-stamped a row whose dimension scores had changed"
+    )
+    await db_session.refresh(review)
+    assert review.consumed_at is None
+
+    # CONTROL, so the assertion above cannot pass for the wrong reason: the
+    # same predicate against an UNCHANGED snapshot must still match. Without
+    # it, a `consumed_at_predicates` that matched NOTHING at all would look
+    # exactly like a pass.
+    fresh = _feedback_snapshot_entry(review)
+    ok = await db_session.execute(
+        update(AR).where(AR.id == review.id, *consumed_at_predicates(fresh))
+        .values(consumed_at=review.created_at)
+    )
+    assert ok.rowcount == 1
