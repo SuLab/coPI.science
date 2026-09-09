@@ -1265,14 +1265,28 @@ def _band_label(html: str) -> str:
 def _gating_state_for(html: str, label: str) -> str:
     """Pull the ``gating-<state>`` class rendered for a given gate's row.
 
-    Matches the template's ``<div class="gating-row gating-{state}">...{label}
-    </div>`` markup, so this fails loudly if a future template refactor drops
-    the class rather than silently passing on unrelated markup.
+    Matches the template's per-gate row, tagged ``class="gating-row
+    gating-{state} ..."``. Until the 2026-09-09 card list this was a ``<div>``
+    with no nested tags, so a non-greedy ``.*?</div>`` was enough. The card
+    markup wraps each row in a ``<span>`` and nests one icon ``<span>`` inside
+    it (for the glyph), so a naive ``.*?</span>`` would stop at that INNER
+    close instead of the row's own — this walks the tag depth explicitly so
+    it still fails loudly on a genuinely missing row rather than silently
+    matching the wrong span.
     """
-    for state, content in re.findall(
-        r'<div class="gating-row gating-(\w+)">(.*?)</div>', html, re.S
-    ):
-        if label in content:
+    for m in re.finditer(r'<span class="gating-row gating-(\w+)[^"]*">', html):
+        state = m.group(1)
+        pos = m.end()
+        depth = 1
+        end = None
+        for tag in re.finditer(r'</span>|<span\b', html[pos:]):
+            depth += 1 if tag.group() == "<span" else -1
+            if depth == 0:
+                end = pos + tag.start()
+                break
+        if end is None:
+            raise AssertionError(f"unbalanced gating-row span for state {state!r}")
+        if label in html[pos:end]:
             return state
     raise AssertionError(f"no gating row rendered for label {label!r} in: {html}")
 
@@ -1460,18 +1474,18 @@ async def test_admin_assessments_page_handles_null_and_unrecognized_gating(
 async def test_admin_assessments_page_renders_no_inline_detail_rows(
     client, db_session, admin
 ):
-    """The expandable per-row detail (rationale + thirteen score chips +
-    red-flag list + milestones, toggled by an onclick on the triage row) was
-    removed 2026-08-27: the triage table is scan-only, and a verdict's full
-    content lives on the detail page behind each row's "detail →" link —
-    test_admin_detail_page_renders_the_whole_verdict
-    (tests/integration/test_assessment_detail_page.py) pins that page rendering
-    all four fields, and its scale tests pin the version/stage weight gate the
-    chips used to exercise here. Even the richest possible verdict must render
-    none of the old machinery, while the link out survives. The blanket
-    "assessment-detail" not-in check also keeps the wrapper macros' class name
-    honest (templates/admin/assessments.html deliberately avoids that
-    substring)."""
+    """The expandable per-row detail (rationale + score chips + red-flag list +
+    milestones, toggled by an onclick) was removed 2026-08-27, and the three
+    DENSE fields it showed stay off this page.
+
+    NARROWED 2026-09-09 (design §4.1): the page is now a card list and each card
+    carries `key_points`. That is a deliberate, bounded reversal — `key_points`
+    is a purpose-built 3-5 bullet summary written for triage, not the dense
+    evidence this pin was written about. `rationale`, red-flag TEXT and
+    `derisking_milestones` remain detail-page content, and the flag COUNT
+    remains their only trace here. The blanket "assessment-detail" not-in check
+    also keeps the wrapper macros' class name honest.
+    """
     run = SimulationRun()
     db_session.add(run)
     await db_session.flush()
@@ -1483,6 +1497,7 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
         red_flags=["FLAG-ONLY-ON-THE-DETAIL-PAGE"],
         derisking_milestones=["MILESTONE-ONLY-ON-THE-DETAIL-PAGE"],
         scores={"differentiation": 4},
+        key_points=["KEY-POINT-BELONGS-ON-THE-TRIAGE-PAGE"],
     )
     db_session.add(assessment)
     await db_session.flush()
@@ -1497,15 +1512,15 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
     assert "Expand all" not in html and "Collapse all" not in html
     assert "Click for rationale" not in html
 
-    # The detail fields themselves stay off the triage page — the flag count
-    # badge is their only trace here.
+    # The three dense fields stay off the triage page — the flag count badge is
+    # their only trace here.
     assert "RATIONALE-ONLY-ON-THE-DETAIL-PAGE" not in html
     assert "FLAG-ONLY-ON-THE-DETAIL-PAGE" not in html
     assert "MILESTONE-ONLY-ON-THE-DETAIL-PAGE" not in html
     assert "1 flag" in html
 
-    # The one remaining route to that content: the per-row detail link.
-    assert f'href="/admin/assessments/{assessment.id}"' in html
+    # The summary field DOES render — that is the point of the card list.
+    assert "KEY-POINT-BELONGS-ON-THE-TRIAGE-PAGE" in html
 
 
 async def _two_runs_with_one_assessment_each(db_session):

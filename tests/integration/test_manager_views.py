@@ -531,7 +531,11 @@ async def test_manager_assessments_renders_the_incomplete_panel_marker(client, d
         in " ".join(html.split())
     )
     assert "Gapped Panel Fixture Co" in html
-    assert "panel</span>" in html
+    # Relabelled 2026-09-09 with the card list: the badge read "⚑ panel" when
+    # it sat inside the Recommendation column and had that column for context.
+    # On a card it needs to say what it means. Still the per-row marker, still
+    # distinct from the banner copy asserted above.
+    assert "panel incomplete</span>" in html
     assert "Missing: chemistry" in html
 
 

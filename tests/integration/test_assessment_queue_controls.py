@@ -516,11 +516,27 @@ async def _seed_reviewed_row(db_session, run, *, project="Reviewed Co"):
     return assessment
 
 
+#: One card's markup, from the row marker to the start of the NEXT card.
+#: Was `.split("</tr>", 1)[0]` until 2026-09-09. The card list has no `</tr>`,
+#: and `str.split` on an absent separator returns the whole remaining page —
+#: so every caller silently became a PAGE-wide assertion instead of a
+#: row-scoped one, and none of them failed.
 def _row_slice(html: str, marker: str) -> str:
-    """The rest of the <tr> the row marker sits in — the same
-    split-on-a-known-string convention _order() above uses for the sort
-    tests, scoped to one row rather than the whole page."""
-    return html.split(marker, 1)[1].split("</tr>", 1)[0]
+    """The rest of the card the row marker sits in."""
+    return html.split(marker, 1)[1].split('class="assessment-card ', 1)[0]
+
+
+def test_row_slice_stops_at_the_next_card():
+    """Guard on the guard. `_row_slice` is what makes four column assertions
+    ROW-scoped. If its boundary string stops matching the markup it does not
+    fail — it returns the whole page, and those four stop testing anything."""
+    html = (
+        '<div class="assessment-card p-5">A-MARKER Alice</div>'
+        '<div class="assessment-card p-5">B-MARKER Bob</div>'
+    )
+    sliced = _row_slice(html, "A-MARKER")
+    assert "Alice" in sliced
+    assert "Bob" not in sliced
 
 
 @pytest.mark.parametrize(
@@ -650,3 +666,90 @@ async def test_no_detail_prose_in_new_columns(client, db_session, admin):
 
     assert "Prose Reviewer" in html
     assert "TOP-SECRET-REVIEW-COMMENT-TEXT" not in html
+
+
+async def test_the_card_leads_with_the_headline_and_keeps_the_short_label(
+    client, db_session, admin
+):
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general",
+        company_or_project="SHORT-LABEL-MARKER",
+        headline="HEADLINE-MARKER: a blood test for immunotherapy response.",
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "assessment-card-headline" in html
+    assert "HEADLINE-MARKER" in html
+    assert "SHORT-LABEL-MARKER" in html
+
+
+async def test_a_row_with_no_headline_falls_back_to_the_short_label(
+    client, db_session, admin
+):
+    """A3. All 12 rows in production today have headline IS NULL and are never
+    backfilled, so the fallback is the COMMON case, not an edge one. It must
+    render exactly what today's page renders, with no empty-state artefact."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="ONLY-LABEL-MARKER",
+        headline=None, key_points=None,
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "ONLY-LABEL-MARKER" in html
+    # No bullet block, and no subtitle line — the fallback shows the label
+    # ONCE, as the heading, exactly as the old Project cell did.
+    assert "assessment-card-points" not in html
+    assert "assessment-card-label" not in html
+
+
+async def test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face(
+    client, db_session, admin
+):
+    """N9. Dropping the panel badge in particular would be a real loss:
+    rendering a non-verified panel as unremarkable is a named failure mode."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Face check",
+        gating={"life_sciences_domain": "met", "credible_science": "unconfirmed"},
+        red_flags=["one", "two"],
+        rubric_version="3.4.0",
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "life sciences domain" in html
+    assert "2 flags" in html
+    assert "3.4.0" in html
+    assert "panel not recorded" in html   # panel_owed IS NULL -> 'unrecorded'
+
+
+async def test_the_manager_surface_renders_the_same_cards(client, db_session):
+    from src.models import USER_ROLE_MANAGER
+
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Manager card",
+        headline="MANAGER-HEADLINE-MARKER",
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id)
+    )).text
+    assert "assessment-card" in html
+    assert "MANAGER-HEADLINE-MARKER" in html
