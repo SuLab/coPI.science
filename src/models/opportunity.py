@@ -55,6 +55,23 @@ class OpportunityAssessment(Base):
     )
 
     company_or_project: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The three reviewer-facing narrative fields (sidecar items 11-13, 0043).
+    # `company_or_project` above stays the SHORT label and keeps its current
+    # meaning — it is the only project field the public #assessments-summary
+    # headline renders, so widening it would change what is posted to Slack.
+    #
+    # NULL on every row written before 0043 and deliberately never backfilled:
+    # those verdicts were not asked for a headline, and a generated one would be
+    # indistinguishable from one the hub wrote. Every read path falls back to
+    # `company_or_project` and renders nothing for absent bullets/pitch.
+    headline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 3-5 short strings. `none_as_null=True` for the reason given on
+    # `missing_domains` below: without it Python None persists as the JSONB
+    # scalar `null`, which `WHERE key_points IS NULL` does not match.
+    key_points: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    elevator_pitch: Mapped[str | None] = mapped_column(Text, nullable=True)
     funnel_stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
     recommendation: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)

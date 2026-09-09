@@ -187,3 +187,79 @@ async def test_job_enum_round_trips_the_new_type(db_session):
     db_session.expire_all()
     fetched = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
     assert fetched.type == "review_feedback_analysis"
+
+
+async def test_review_dimension_scores_and_rubric_stamp_round_trip(db_session):
+    """A per-dimension human score is uninterpretable without knowing which
+    dimensions existed when it was given, so the review carries its own rubric
+    stamp — the same pair specialist_consults got in 0038, for the same reason
+    (design §2.1)."""
+    from sqlalchemy import select
+
+    from src.models import AssessmentReview, OpportunityAssessment, SimulationRun
+
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general"
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    review = AssessmentReview(
+        assessment_id=assessment.id,
+        reviewer_name="Someone",
+        score=4,
+        comment="",
+        feedback_mode="log_only",
+        dimension_scores={"scientific_credibility": 4, "team_executability": 2},
+        rubric_version="3.4.0",
+        rubric_content_hash="abc123def456",
+    )
+    db_session.add(review)
+    await db_session.flush()
+    db_session.expunge(review)
+
+    stored = (
+        await db_session.execute(
+            select(AssessmentReview).where(AssessmentReview.id == review.id)
+        )
+    ).scalar_one()
+    assert stored.dimension_scores == {
+        "scientific_credibility": 4,
+        "team_executability": 2,
+    }
+    assert stored.rubric_version == "3.4.0"
+    assert stored.rubric_content_hash == "abc123def456"
+
+
+async def test_review_dimension_scores_absent_is_sql_null(db_session):
+    from sqlalchemy import select
+
+    from src.models import AssessmentReview, OpportunityAssessment, SimulationRun
+
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general"
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    review = AssessmentReview(
+        assessment_id=assessment.id, reviewer_name="Someone", score=4,
+        comment="", feedback_mode="log_only", dimension_scores=None,
+    )
+    db_session.add(review)
+    await db_session.flush()
+
+    found = (
+        await db_session.execute(
+            select(AssessmentReview.id).where(
+                AssessmentReview.id == review.id,
+                AssessmentReview.dimension_scores.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    assert found == review.id

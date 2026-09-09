@@ -82,6 +82,23 @@ class AssessmentReview(Base):
     )
     reviewer_name: Mapped[str] = mapped_column(String(255), nullable=False)
     score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    #: Sparse per-rubric-dimension human scores, `{dimension_key: int}` on the
+    #: live rubric's scale — only the dimensions this reviewer actually filled
+    #: in. `{}` and NULL are ONE state ("scored no dimensions") and normalize to
+    #: NULL at the service layer, so the column has a single encoding of
+    #: absence. `none_as_null=True` is what makes that encoding a real SQL NULL.
+    dimension_scores: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    #: WHICH rubric the human scored against. Not decoration: a per-dimension
+    #: score is uninterpretable without knowing which dimensions existed when it
+    #: was given (v3.0.0 replaced thirteen dual-scale dimensions with six
+    #: single-scale ones). Reading a stored score back against TODAY's document
+    #: is the same defect `OpportunityAssessment.panel_owed` exists to end — a
+    #: write-time fact answered at render time. `specialist_consults` got this
+    #: same pair in 0038 for this same reason. NULL on every pre-0043 row.
+    rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rubric_content_hash: Mapped[str | None] = mapped_column(String(20), nullable=True)
     comment: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     #: 'learn' / 'log_only' — whether the review-feedback-analysis job should
     #: consider this row.
