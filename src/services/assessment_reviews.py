@@ -23,6 +23,13 @@ precedent at ``src/agent/simulation.py:6298``).
 pages' "Assigned"/"Reviewed by" columns and approval-status chip — see its
 own docstring for why it is exactly three ``IN``-clause queries plus a
 Python fold, never a ``DISTINCT ON``.
+
+``blackbird_rubric`` is imported here for dimension-key validation. That is
+safe because this module is web-tier only — it is imported by
+``src/routers/reviews.py`` and ``src/services/directory.py`` and by nothing the
+worker loads. ``src/services/review_bot.py``, which DOES run on the worker,
+must stay free of ``blackbird_rubric``/``rubric_revisions``/``assessment_detail``;
+see the probe in ``tests/unit/test_review_bot_inputs.py``.
 """
 
 from __future__ import annotations
@@ -42,6 +49,11 @@ from src.models import (
     Job,
     OpportunityAssessment,
     User,
+)
+from src.services.blackbird_rubric import (
+    RUBRIC_CONTENT_HASH,
+    RUBRIC_VERSION,
+    load_rubric,
 )
 
 #: The three approval-status actions a reviewer/staff member may record.
@@ -76,11 +88,42 @@ EMPTY_REVIEW_COLUMNS = ReviewColumns((), (), None)
 _CHIP_STATUSES = ("approved", "disapproved")
 
 
-def _validate(score: int, feedback_mode: str) -> None:
+def _validate(
+    score: int,
+    feedback_mode: str,
+    dimension_scores: dict[str, int] | None = None,
+) -> None:
     if not (1 <= score <= 5):
         raise ValueError("score must be between 1 and 5")
     if feedback_mode not in VALID_FEEDBACK_MODES:
         raise ValueError(f"feedback_mode must be one of {VALID_FEEDBACK_MODES}")
+    if not dimension_scores:
+        return
+    # Validated against the LIVE document, which is also what gets stamped on
+    # the row — the two cannot disagree, because they are read in the same call.
+    rubric = load_rubric()
+    valid_keys = {d.key for d in rubric.dimensions}
+    for key, value in dimension_scores.items():
+        if key not in valid_keys:
+            raise ValueError(f"unknown rubric dimension: {key}")
+        # `bool` subclasses `int`, so `True` would sail through the range check
+        # below and store as a 1 nobody chose. Reject it explicitly.
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"dimension score for {key} must be an integer")
+        if not (rubric.scale_min <= value <= rubric.scale_max):
+            raise ValueError(
+                f"dimension score for {key} must be between "
+                f"{rubric.scale_min} and {rubric.scale_max}"
+            )
+
+
+def _normalized_dimension_scores(
+    dimension_scores: dict[str, int] | None,
+) -> dict[str, int] | None:
+    """`{}` and `None` are the same state — "scored no dimensions" — so they
+    store as one value. Two encodings of absence on a JSONB column is the
+    defect 0031 and 0036 each had to repair once already."""
+    return dimension_scores or None
 
 
 async def enqueue_analysis_if_absent(
@@ -133,6 +176,7 @@ async def submit_feedback(
     score: int,
     comment: str,
     feedback_mode: str,
+    dimension_scores: dict[str, int] | None = None,
 ) -> AssessmentReview:
     """Create one ``AssessmentReview`` row. Caller commits.
 
@@ -140,7 +184,7 @@ async def submit_feedback(
     ``reviewer_name`` is denormalized at write time (A-3) so the review stays
     attributable after the reviewer's account is deleted.
     """
-    _validate(score, feedback_mode)
+    _validate(score, feedback_mode, dimension_scores)
     review = AssessmentReview(
         assessment_id=assessment.id,
         reviewer_user_id=reviewer.id,
@@ -148,6 +192,12 @@ async def submit_feedback(
         score=score,
         comment=comment[:_MAX_COMMENT_CHARS],
         feedback_mode=feedback_mode,
+        dimension_scores=_normalized_dimension_scores(dimension_scores),
+        # Stamped from the module-level constants, not re-read from disk: the
+        # rubric cannot change under a running process, so this is the same
+        # document `_validate` just checked the keys against.
+        rubric_version=RUBRIC_VERSION,
+        rubric_content_hash=RUBRIC_CONTENT_HASH,
     )
     db.add(review)
     await db.flush()
@@ -165,17 +215,27 @@ async def edit_feedback(
     score: int,
     comment: str,
     feedback_mode: str,
+    dimension_scores: dict[str, int] | None = None,
 ) -> AssessmentReview:
     """Mutate an existing review in place. Caller commits.
 
     Author-only is the router's check, not this function's. Resets
     ``consumed_at`` to ``None`` so an edited row is picked back up by the
     next analysis job even if the original had already been consumed.
+
+    ``dimension_scores`` REPLACES the stored set rather than merging into it —
+    the form re-posts every dimension, so a field the reviewer cleared must
+    actually clear. The rubric stamp is rewritten for the same reason: the
+    scores now on the row are the ones given under the document live at edit
+    time, which is not necessarily the one that scored the original.
     """
-    _validate(score, feedback_mode)
+    _validate(score, feedback_mode, dimension_scores)
     review.score = score
     review.comment = comment[:_MAX_COMMENT_CHARS]
     review.feedback_mode = feedback_mode
+    review.dimension_scores = _normalized_dimension_scores(dimension_scores)
+    review.rubric_version = RUBRIC_VERSION
+    review.rubric_content_hash = RUBRIC_CONTENT_HASH
     review.edited = True
     review.consumed_at = None
     if feedback_mode == "learn":
