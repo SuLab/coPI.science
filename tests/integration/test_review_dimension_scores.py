@@ -277,7 +277,9 @@ async def test_an_unknown_dimension_field_is_a_400_and_writes_nothing(
     assert rows == []
 
 
-async def test_a_non_numeric_dimension_field_is_a_400(client, db_session):
+async def test_a_non_numeric_dimension_field_is_a_400_and_writes_nothing(
+    client, db_session
+):
     key_a, _ = _first_two_dimension_keys()
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     assessment = await _seed_assessment(db_session)
@@ -292,3 +294,11 @@ async def test_a_non_numeric_dimension_field_is_a_400(client, db_session):
         follow_redirects=False,
     )
     assert resp.status_code == 400
+    rows = (
+        await db_session.execute(
+            select(AssessmentReview).where(
+                AssessmentReview.assessment_id == assessment.id
+            )
+        )
+    ).scalars().all()
+    assert rows == []

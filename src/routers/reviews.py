@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import FormData
 
 from src.database import get_db
 from src.dependencies import get_admin_user, get_review_user, get_staff_user
@@ -119,7 +120,7 @@ def _parse_assignee_id(assignee_user_id: str) -> uuid.UUID:
 _DIM_FIELD_PREFIX = "dim_"
 
 
-def _parse_dimension_scores(form) -> dict[str, int]:
+def _parse_dimension_scores(form: FormData) -> dict[str, int]:
     """Pull the `dim_<key>` fields out of a posted form.
 
     An empty value means "not scored" and is DROPPED, never coerced to 0: the
@@ -128,12 +129,25 @@ def _parse_dimension_scores(form) -> dict[str, int]:
     quietly omits what the reviewer typed is worse than refusing it. Unknown
     KEYS are not checked here; `assessment_reviews._validate` owns that, against
     the live document.
+
+    A duplicate `dim_<key>` field (the same name posted twice) quietly keeps
+    the LAST value seen, matching plain HTML form semantics — the real
+    `<select>`-per-dimension form can never produce one, so this is a
+    considered default rather than an oversight.
     """
     scores: dict[str, int] = {}
     for field, raw in form.multi_items():
         if not field.startswith(_DIM_FIELD_PREFIX):
             continue
-        value = (raw or "").strip()
+        # A same-named field can arrive as an UploadFile in a crafted
+        # multipart/form-data POST rather than a str. A file part is not a
+        # score, so treat it the same as any other malformed value: 400,
+        # not an unhandled AttributeError from calling .strip() on it.
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=400, detail=f"Malformed dimension score for {field}"
+            )
+        value = raw.strip()
         if not value:
             continue
         try:
