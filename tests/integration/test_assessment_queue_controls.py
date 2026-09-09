@@ -10,6 +10,7 @@ means the rows a reader was looking at vanish.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -516,14 +517,71 @@ async def _seed_reviewed_row(db_session, run, *, project="Reviewed Co"):
     return assessment
 
 
-#: One card's markup, from the row marker to the start of the NEXT card.
-#: Was `.split("</tr>", 1)[0]` until 2026-09-09. The card list has no `</tr>`,
-#: and `str.split` on an absent separator returns the whole remaining page —
-#: so every caller silently became a PAGE-wide assertion instead of a
-#: row-scoped one, and none of them failed.
+#: The exact opening substring the template's card `<div>` must carry
+#: (trailing space included) — see the header comment of
+#: templates/admin/_assessments_body.html and the card list section of
+#: task-9-brief.md.
+_CARD_OPEN = 'class="assessment-card '
+
+
 def _row_slice(html: str, marker: str) -> str:
-    """The rest of the card the row marker sits in."""
-    return html.split(marker, 1)[1].split('class="assessment-card ', 1)[0]
+    """The inner markup of the ``assessment-card`` ``<div>`` that CONTAINS
+    marker — bounded by that div's own matching close tag, found by walking
+    tag depth, not by any sentinel that happens to follow it.
+
+    Two prior forms of this helper both over-returned instead of failing:
+
+    * Until 2026-09-09 this split on ``"</tr>"``, a leftover from the table
+      layout. The card list has no ``</tr>`` at all, so ``str.split`` on an
+      absent separator returned the WHOLE REMAINING PAGE, and every caller
+      silently became page-scoped rather than row-scoped without a single
+      test failing.
+    * The 2026-09-09 fix for that bounded on the NEXT ``class="assessment-card
+      "`` occurrence instead — which does not exist when the marked row is
+      the LAST card on a page, so the same over-return happened again, just
+      narrower: only the last card leaked into whatever page chrome follows
+      it (footer, scripts). Two of the three real call sites hit this exact
+      case (fix round 1, 2026-09-09) and none of them failed, only because
+      the trailing markup happened not to contain any asserted string.
+
+    A sentinel is the wrong shape of fix twice in a row for the same reason:
+    it assumes something about what comes AFTER the card. This version
+    instead locates the last ``assessment-card`` opening tag before the
+    marker, then walks ``<div`` / ``</div`` depth from there to that div's own
+    matching close — bounded by the card's own structure, so it cannot leak
+    into anything that follows regardless of what that happens to be.
+    """
+    marker_pos = html.find(marker)
+    if marker_pos == -1:
+        raise AssertionError(f"marker {marker!r} not found in html")
+
+    card_class_pos = html.rfind(_CARD_OPEN, 0, marker_pos)
+    if card_class_pos == -1:
+        raise AssertionError(
+            f"no {_CARD_OPEN!r} div found before marker {marker!r}"
+        )
+    div_start = html.rfind("<div", 0, card_class_pos)
+    tag_end = html.find(">", card_class_pos)
+    if div_start == -1 or tag_end == -1:
+        raise AssertionError(f"malformed assessment-card div near marker {marker!r}")
+    pos = tag_end + 1
+
+    depth = 1  # the card's own <div>, already open
+    end = None
+    for tag in re.finditer(r"</div>|<div\b", html[pos:]):
+        depth += 1 if tag.group() == "<div" else -1
+        if depth == 0:
+            end = pos + tag.start()
+            break
+    if end is None:
+        raise AssertionError(f"unbalanced assessment-card div for marker {marker!r}")
+
+    if not (pos <= marker_pos < end):
+        raise AssertionError(
+            f"marker {marker!r} (at {marker_pos}) is not inside the "
+            f"assessment-card div that precedes it (card spans [{pos}, {end}))"
+        )
+    return html[pos:end]
 
 
 def test_row_slice_stops_at_the_next_card():
@@ -537,6 +595,27 @@ def test_row_slice_stops_at_the_next_card():
     sliced = _row_slice(html, "A-MARKER")
     assert "Alice" in sliced
     assert "Bob" not in sliced
+
+
+def test_row_slice_stops_at_the_end_of_the_last_card():
+    """Second guard case, added in fix round 1 (2026-09-09). The 2026-09-09
+    `</tr>`-fix bounded on the NEXT `class="assessment-card ` occurrence —
+    which does not exist when the marked row is the LAST card on the page, so
+    `str.split` on an absent separator again returned everything from the
+    marker to end-of-document (footer, scripts, all of it). Same failure
+    mode as the original `</tr>` bug, just narrower: it only bit the
+    last-card case. Two real call sites hit it (`test_list_pages_show_
+    reviewer_columns`'s "Untouched Co", which sorts last by score, and
+    `test_reviewer_role.py`'s single-assessment fixture, which is trivially
+    last) — nothing failed only because the page's own footer happens not to
+    contain any of the strings those tests assert against."""
+    html = (
+        '<div class="assessment-card p-5">A-MARKER Alice</div>'
+        '<footer>Approved</footer>'
+    )
+    sliced = _row_slice(html, "A-MARKER")
+    assert "Alice" in sliced
+    assert "Approved" not in sliced
 
 
 @pytest.mark.parametrize(
