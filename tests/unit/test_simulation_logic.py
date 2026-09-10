@@ -3268,6 +3268,70 @@ class TestPollInboundFromDbGuardsTheHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_a_persistently_failing_fallback_stamp_is_parked_after_the_write_gives_up(
+        self, caplog,
+    ):
+        """M-5 (opus review, audit 2026-09-10): once the HANDLED marker write
+        itself is exhausted (WARNING, above), the give-up branch falls back to
+        `_mark_pi_inbound_row_handled(r.id)`. Before this fix, a persistently
+        failing fallback stamp was simply never accounted for: the row stayed
+        in `_pi_inbound_handled_pending_mark`, `_record_pi_inbound_attempt`
+        kept incrementing past the cap forever, and the same WARNING (and a
+        `_mark_pi_inbound_row_handled` call) repeated on every single poll —
+        an unbounded retry loop with no terminal state, unlike every other
+        give-up path in this poller.
+
+        It must instead track its OWN attempt budget and, once THAT is
+        exhausted, log a single ERROR and permanently park the row (skipped
+        by the poller from then on) rather than retry forever.
+        """
+        import logging
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_HANDLED, PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(return_value=None)
+        engine = self._engine(rows, handler)
+        real_mark = engine._mark_pi_inbound_state
+
+        async def _flaky_mark(message_ts, state):
+            if state == PI_INBOUND_HANDLED:
+                return False
+            return await real_mark(message_ts, state)
+
+        engine._mark_pi_inbound_state = _flaky_mark
+        engine._mark_pi_inbound_row_handled = AsyncMock(return_value=False)
+
+        with caplog.at_level(logging.WARNING):
+            # PI_INBOUND_MAX_ATTEMPTS polls to exhaust the write, then another
+            # full PI_INBOUND_MAX_ATTEMPTS to exhaust the fallback stamp, plus
+            # a couple more to prove the row stays parked afterward.
+            for _ in range(2 * PI_INBOUND_MAX_ATTEMPTS + 2):
+                await engine._poll_inbound_from_db()
+
+        assert handler.await_count == 1, "the handler must never be re-run for this row"
+        assert rows[0].pi_inbound_state != PI_INBOUND_HANDLED, (
+            "both durable writes for this row are simulated as permanently "
+            "failing, so it can never actually reach HANDLED in the DB"
+        )
+        assert "1.0" in engine._pi_inbound_parked, (
+            "the row must be parked in-process once the fallback stamp's own "
+            "budget is exhausted"
+        )
+
+        error_records = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and "fallback" in r.message.lower()
+        ]
+        assert len(error_records) == 1, (
+            f"expected exactly one ERROR for the exhausted fallback stamp, "
+            f"got {len(error_records)}: {[r.message for r in error_records]}"
+        )
+
+    @pytest.mark.asyncio
     async def test_attempt_entries_for_rows_no_longer_in_the_batch_are_pruned(self, monkeypatch):
         """The per-message_ts attempt dict is bounded by the polled batch: an
         entry whose row no longer appears (stamped terminal, superseded) is

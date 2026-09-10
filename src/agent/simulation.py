@@ -568,6 +568,23 @@ class SimulationEngine:
         # given up terminal, and pruned alongside `_pi_inbound_attempts` for
         # rows no longer in the polled batch.
         self._pi_inbound_handled_pending_mark: set[str] = set()
+        # Attempt counter for the id-based fallback stamp used by the
+        # "give up on the HANDLED marker write" branch of
+        # `_poll_inbound_from_db` (M-5, opus review, audit 2026-09-10) --
+        # separate from `_pi_inbound_attempts` because that counter is
+        # already AT its own cap by the time the fallback runs (that is why
+        # the fallback runs at all). Without its own budget, a fallback stamp
+        # that itself persistently fails would retry forever, once per poll,
+        # with no terminal state -- unlike every other give-up path here.
+        self._pi_inbound_fallback_attempts: dict[str, int] = {}
+        # message_ts values whose fallback stamp exhausted ITS OWN attempt
+        # budget (see `_pi_inbound_fallback_attempts` above). `_poll_inbound_from_db`
+        # skips any row whose message_ts is in this set — permanently, since
+        # both durable write paths for it are established to be persistently
+        # failing and nothing else in-process can un-wedge it. A single ERROR
+        # is logged the moment a row is parked; a wedged row afterward causes
+        # NO further logging or writes, only silence, by design.
+        self._pi_inbound_parked: set[str] = set()
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -3478,6 +3495,14 @@ class SimulationEngine:
         for ts in [ts for ts in self._pi_inbound_attempts if ts not in current_batch]:
             del self._pi_inbound_attempts[ts]
         self._pi_inbound_handled_pending_mark &= current_batch
+        # M-5 (opus review, audit 2026-09-10): same bounding for the
+        # fallback-stamp attempt counter. `_pi_inbound_parked` is
+        # deliberately NOT pruned here — a parked row is meant to stay
+        # skipped by the poller for as long as it keeps appearing in the
+        # batch (the whole point of parking it), and once it ages out of the
+        # batch entirely there is nothing left to prune it FOR.
+        for ts in [ts for ts in self._pi_inbound_fallback_attempts if ts not in current_batch]:
+            del self._pi_inbound_fallback_attempts[ts]
 
     async def _poll_inbound_from_db(self) -> None:
         """Ingest messages written to the DB by other processes.
@@ -3537,6 +3562,13 @@ class SimulationEngine:
         self._prune_stale_pi_inbound_attempts({r.message_ts for r in rows if r.message_ts})
 
         for r in rows:
+            # M-5 (opus review, audit 2026-09-10): a row whose id-based
+            # fallback stamp itself persistently failed has already been
+            # logged once (ERROR) and parked -- both durable write paths for
+            # it are established dead ends, so skip it entirely rather than
+            # re-attempt anything or re-log every poll.
+            if r.message_ts and r.message_ts in self._pi_inbound_parked:
+                continue
             # COR-10(3): dedup for a PI row reads the durable handled-marker,
             # not the log entry, because the append now runs ahead of the
             # handler. NULL means "no inbound poller has claimed this row",
@@ -3770,6 +3802,7 @@ class SimulationEngine:
                 if marked:
                     self._pi_inbound_attempts.pop(r.message_ts, None)
                     self._pi_inbound_handled_pending_mark.discard(r.message_ts)
+                    self._pi_inbound_fallback_attempts.pop(r.message_ts, None)
                 else:
                     self._pi_inbound_handled_pending_mark.add(r.message_ts)
                     attempts = self._record_pi_inbound_attempt(r.message_ts)
@@ -3790,6 +3823,35 @@ class SimulationEngine:
                         if await self._mark_pi_inbound_row_handled(r.id):
                             self._pi_inbound_attempts.pop(r.message_ts, None)
                             self._pi_inbound_handled_pending_mark.discard(r.message_ts)
+                            self._pi_inbound_fallback_attempts.pop(r.message_ts, None)
+                        else:
+                            # M-5 (opus review, audit 2026-09-10): the
+                            # id-based fallback stamp itself failed. This
+                            # branch used to do nothing here — the row stayed
+                            # in `_pi_inbound_handled_pending_mark`, and since
+                            # `_pi_inbound_attempts` was already AT
+                            # PI_INBOUND_MAX_ATTEMPTS, the very next poll hit
+                            # this SAME give-up branch again, forever: one
+                            # WARNING and one fallback-stamp attempt per poll,
+                            # with no terminal state. Track the fallback's OWN
+                            # budget and park the row once IT is exhausted.
+                            fallback_attempts = (
+                                self._pi_inbound_fallback_attempts.get(r.message_ts, 0) + 1
+                            )
+                            self._pi_inbound_fallback_attempts[r.message_ts] = fallback_attempts
+                            if fallback_attempts >= PI_INBOUND_MAX_ATTEMPTS:
+                                logger.error(
+                                    "[%s] Giving up on the id-based fallback stamp for "
+                                    "%s after %d attempts — side effects already "
+                                    "applied; parking this row, the poller will skip "
+                                    "it from now on",
+                                    entry.channel, entry.thread_ts or entry.ts,
+                                    fallback_attempts,
+                                )
+                                self._pi_inbound_parked.add(r.message_ts)
+                                self._pi_inbound_attempts.pop(r.message_ts, None)
+                                self._pi_inbound_handled_pending_mark.discard(r.message_ts)
+                                self._pi_inbound_fallback_attempts.pop(r.message_ts, None)
                     else:
                         logger.warning(
                             "[%s] HANDLED marker write failed for %s after the "
