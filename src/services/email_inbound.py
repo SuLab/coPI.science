@@ -211,14 +211,26 @@ def _domain_of(value: str) -> str:
     return value
 
 
-def _domains_aligned(a: str, b: str) -> bool:
-    """Relaxed DMARC-style alignment: equal, or one is a subdomain of the
-    other (a dotted suffix), not merely a same-string suffix like
-    'evilscripps.edu' vs 'scripps.edu'."""
-    a, b = a.rstrip("."), b.rstrip(".")
-    if not a or not b:
+def _domains_aligned(authenticated_domain: str, from_domain: str) -> bool:
+    """Relaxed DMARC-style alignment, one-directional (opus review follow-up,
+    audit 2026-09-10): ``authenticated_domain`` (the ``smtp.mailfrom=``/
+    ``header.d=``/``header.i=`` domain that actually passed SPF/DKIM) must
+    equal ``from_domain`` or be a SUBdomain of it (a dotted suffix, not merely
+    a same-string suffix like 'evilscripps.edu' vs 'scripps.edu') -- never the
+    other way around. Accepting the reverse (``authenticated_domain`` a
+    PARENT of ``from_domain``) would let a broad platform domain that
+    legitimately passes SPF/DKIM for itself (e.g. a shared email provider)
+    authenticate ANY of its tenants' subdomains, letting one tenant spoof
+    another.
+    """
+    authenticated_domain = authenticated_domain.rstrip(".")
+    from_domain = from_domain.rstrip(".")
+    if not authenticated_domain or not from_domain:
         return False
-    return a == b or a.endswith("." + b) or b.endswith("." + a)
+    return (
+        authenticated_domain == from_domain
+        or authenticated_domain.endswith("." + from_domain)
+    )
 
 
 def _authentication_results_ok(msg: email.message.Message) -> bool:
@@ -668,9 +680,13 @@ def _extract_email_address(msg: email.message.Message) -> str | None:
     envelope/DKIM domain is attacker-controlled. ``email.utils.getaddresses``
     parses RFC 5322 address syntax properly and returns the real address.
 
-    Also refuses (returns None) unless there is EXACTLY one address: multiple
-    From headers or group syntax (``Group: a@b.com, c@d.com;``) are ambiguous
-    identities, not a single sender to trust.
+    Also refuses (returns None) unless there is EXACTLY one address:
+    multiple From headers, or group syntax naming more than one member
+    (``Group: a@b.com, c@d.com;``), are ambiguous identities, not a single
+    sender to trust. A group with exactly one member (``Group: a@b.com;``)
+    resolves to that one address via ``getaddresses`` and IS accepted, same
+    as any other single-address header -- the refusal is about ambiguity
+    (multiple candidate addresses), not group syntax itself.
     """
     addresses = email.utils.getaddresses(msg.get_all("From", []))
     if len(addresses) != 1:

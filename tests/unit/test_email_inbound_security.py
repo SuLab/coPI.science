@@ -104,14 +104,30 @@ def test_dmarc_pass_accepted_regardless_of_alignment():
 
 
 def test_subdomain_alignment_accepted():
-    # Relaxed alignment: a subdomain of the From domain (or vice versa) is
-    # still aligned.
+    # Relaxed alignment: an authenticated domain that is a SUBDOMAIN of the
+    # From domain is still aligned (one-directional -- see the rejection test
+    # below for why the reverse is NOT allowed).
     h = (
         "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=mail.scripps.edu; "
         "dkim=none; dmarc=none\n"
         "From: pi@scripps.edu"
     )
     assert _authentication_results_ok(_msg(h)) is True
+
+
+def test_parent_domain_of_the_from_domain_is_not_aligned():
+    # Opus review follow-up (audit 2026-09-10): alignment must be
+    # one-directional. If a PARENT domain (e.g. a shared email platform like
+    # provider.com) passing SPF/DKIM for itself were accepted as "aligned"
+    # with any From address at a subdomain of it (pi@pi.provider.com), any
+    # OTHER tenant of that same platform could spoof any other tenant's users
+    # merely by sending through the platform's own authenticated infrastructure.
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=provider.com; "
+        "dkim=none; dmarc=none\n"
+        "From: pi@pi.provider.com"
+    )
+    assert _authentication_results_ok(_msg(h)) is False
 
 
 def test_header_present_but_no_verdicts_rejected():
@@ -155,3 +171,12 @@ def test_two_from_headers_rejected():
 def test_group_syntax_rejected():
     h = "From: Group: a@b.com, c@d.com;"
     assert _extract_email_address(_msg(h)) is None
+
+
+def test_single_member_group_syntax_is_accepted():
+    # Opus review follow-up (audit 2026-09-10): the refusal above is about
+    # AMBIGUITY (more than one candidate address), not group syntax itself --
+    # a group naming exactly one member resolves unambiguously via
+    # getaddresses and must be accepted like any other single-address header.
+    h = "From: Group: a@b.com;"
+    assert _extract_email_address(_msg(h)) == "a@b.com"
