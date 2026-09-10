@@ -36,9 +36,81 @@ def test_spf_softfail_rejected():
     assert _authentication_results_ok(_msg(h)) is False
 
 
-def test_dmarc_none_with_spf_pass_accepted():
-    # "none" means no published policy, not a failure; a passing SPF suffices.
-    h = "Authentication-Results: amazonses.com; spf=pass; dkim=none; dmarc=none"
+def test_dmarc_none_with_aligned_spf_pass_accepted():
+    # "none" means no published policy, not a failure; a passing SPF whose
+    # envelope domain matches the From domain suffices.
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=b.com; "
+        "dkim=none; dmarc=none\n"
+        "From: pi@b.com"
+    )
+    assert _authentication_results_ok(_msg(h)) is True
+
+
+# --- DMARC alignment when dmarc != pass (SEC3-2, audit 2026-09-10) ---------
+#
+# dmarc=none means the sender's domain publishes no DMARC policy, not that
+# the message failed -- but without dmarc=pass, a lone spf=pass on the
+# ATTACKER's own envelope domain (unrelated to the From address) satisfied
+# the old "one strong pass" rule. A PI domain with no DMARC policy was
+# therefore forgeable: the attacker's own domain passes SPF/DKIM for itself
+# while the From header claims to be the PI.
+
+
+def test_unaligned_spf_pass_on_attacker_domain_rejected():
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=evil.com; "
+        "dkim=none; dmarc=none\n"
+        "From: pi@scripps.edu"
+    )
+    assert _authentication_results_ok(_msg(h)) is False
+
+
+def test_aligned_spf_pass_accepted():
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=scripps.edu; "
+        "dkim=none; dmarc=none\n"
+        "From: pi@scripps.edu"
+    )
+    assert _authentication_results_ok(_msg(h)) is True
+
+
+def test_aligned_dkim_header_d_accepted():
+    h = (
+        "Authentication-Results: amazonses.com; spf=none; "
+        "dkim=pass header.d=scripps.edu; dmarc=none\n"
+        "From: pi@scripps.edu"
+    )
+    assert _authentication_results_ok(_msg(h)) is True
+
+
+def test_unaligned_dkim_header_d_rejected():
+    h = (
+        "Authentication-Results: amazonses.com; spf=none; "
+        "dkim=pass header.d=evil.com; dmarc=none\n"
+        "From: pi@scripps.edu"
+    )
+    assert _authentication_results_ok(_msg(h)) is False
+
+
+def test_dmarc_pass_accepted_regardless_of_alignment():
+    # dmarc=pass is sufficient on its own -- it already encodes alignment.
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=evil.com; "
+        "dkim=none; dmarc=pass\n"
+        "From: pi@scripps.edu"
+    )
+    assert _authentication_results_ok(_msg(h)) is True
+
+
+def test_subdomain_alignment_accepted():
+    # Relaxed alignment: a subdomain of the From domain (or vice versa) is
+    # still aligned.
+    h = (
+        "Authentication-Results: amazonses.com; spf=pass smtp.mailfrom=mail.scripps.edu; "
+        "dkim=none; dmarc=none\n"
+        "From: pi@scripps.edu"
+    )
     assert _authentication_results_ok(_msg(h)) is True
 
 

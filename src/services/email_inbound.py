@@ -156,6 +156,32 @@ def _is_auto_submitted(msg: email.message.Message) -> bool:
 _AUTH_FAIL_VERDICTS = {"fail", "softfail", "temperror", "permerror"}
 _AUTH_VERDICT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*(\w+)", re.IGNORECASE)
 
+# SEC3-2 (audit 2026-09-10): the domain tags carried alongside a passing spf/
+# dkim verdict, used to check alignment with the From address when dmarc!=pass
+# (see below).
+_SPF_MAILFROM_RE = re.compile(r"smtp\.mailfrom=([^\s;]+)", re.IGNORECASE)
+_DKIM_D_RE = re.compile(r"header\.d=([^\s;]+)", re.IGNORECASE)
+_DKIM_I_RE = re.compile(r"header\.i=([^\s;]+)", re.IGNORECASE)
+
+
+def _domain_of(value: str) -> str:
+    """Extract the domain from a `smtp.mailfrom=`/`header.d=`/`header.i=`
+    value, which may be a bare domain or a full address."""
+    value = value.strip().rstrip(",;").lower()
+    if "@" in value:
+        value = value.rsplit("@", 1)[1]
+    return value
+
+
+def _domains_aligned(a: str, b: str) -> bool:
+    """Relaxed DMARC-style alignment: equal, or one is a subdomain of the
+    other (a dotted suffix), not merely a same-string suffix like
+    'evilscripps.edu' vs 'scripps.edu'."""
+    a, b = a.rstrip("."), b.rstrip(".")
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
 
 def _authentication_results_ok(msg: email.message.Message) -> bool:
     """Validate the SES-stamped ``Authentication-Results`` header(s).
@@ -166,6 +192,16 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     then reject on any explicit failure verdict and require at least one strong
     pass — this is the primary anti-spoofing gate, since the From header alone
     is trivially forgeable. See SEC-5.
+
+    SEC3-2 (audit 2026-09-10): ``dmarc=pass`` already encodes alignment and is
+    accepted on its own. Without it (``dmarc=none``/missing), a lone
+    ``spf=pass`` or ``dkim=pass`` is not enough by itself: SES will happily
+    report ``spf=pass`` for an envelope sender that has nothing to do with the
+    From address (e.g. attacker@evil.com passes SPF for evil.com while From
+    claims to be a PI at a domain with no DMARC policy). We additionally
+    require the domain that actually passed (``smtp.mailfrom=`` for SPF,
+    ``header.d=``/``header.i=`` for DKIM) to align with the From address's
+    domain.
     """
     headers = msg.get_all("Authentication-Results") or []
     if not headers:
@@ -204,6 +240,30 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     if not any(verdicts.get(m) == "pass" for m in ("spf", "dkim", "dmarc")):
         logger.warning(
             "Rejecting inbound reply: no passing spf/dkim/dmarc verdict (%s)", verdicts
+        )
+        return False
+
+    if verdicts.get("dmarc") == "pass":
+        return True
+
+    from_addr = _extract_email_address(msg)
+    from_domain = from_addr.rsplit("@", 1)[1].lower() if from_addr and "@" in from_addr else None
+
+    aligned = False
+    if from_domain:
+        if verdicts.get("spf") == "pass":
+            m = _SPF_MAILFROM_RE.search(header)
+            if m and _domains_aligned(_domain_of(m.group(1)), from_domain):
+                aligned = True
+        if not aligned and verdicts.get("dkim") == "pass":
+            m = _DKIM_D_RE.search(header) or _DKIM_I_RE.search(header)
+            if m and _domains_aligned(_domain_of(m.group(1)), from_domain):
+                aligned = True
+
+    if not aligned:
+        logger.warning(
+            "Rejecting inbound reply: no dmarc=pass and no aligned spf/dkim "
+            "pass for From domain %r (%s)", from_domain, verdicts,
         )
         return False
 
