@@ -67,13 +67,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shlex
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # importing src.config eagerly is not worth it for one annotation
     from src.config import Settings
@@ -282,8 +282,19 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
             ["TEST_DATABASE_URL unset — the suite builds a throwaway Postgres with an "
              "empty agent_registry, so no DB-sourced bot token can exist"],
         )
-    # Report the host/db shape only. A DSN can carry a password.
-    shape = re.sub(r"//[^@/]*@", "//<redacted>@", dsn)
+    # Report the host/db shape only. A DSN can carry a password -- and that
+    # password can itself contain a literal `@`, which broke the old
+    # `re.sub(r"//[^@/]*@", ...)` (SEC3-3, audit 2026-09-10): the regex stops
+    # at the FIRST `@`, so a `user:pass@word@host` DSN left `word@host`
+    # un-redacted, leaking the tail of the password. urlsplit resolves the
+    # real host the same way browsers/DSN parsers do (split on the LAST `@`
+    # in the authority section), so we can drop userinfo entirely and print
+    # only the scheme and host/path.
+    parts = urlsplit(dsn)
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc += f":{parts.port}"
+    shape = f"{parts.scheme}://<redacted>@{netloc}{parts.path}"
     return _verdict(
         "5. no operator-supplied database",
         [

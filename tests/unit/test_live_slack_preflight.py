@@ -393,6 +393,22 @@ def test_check_five_never_echoes_a_dsn_password():
     assert "<redacted>" in check.detail
 
 
+def test_check_five_never_echoes_a_dsn_password_containing_an_at_sign():
+    # SEC3-3 (audit 2026-09-10): the old `//[^@/]*@` regex stops at the FIRST
+    # `@`, so a password containing a literal `@` leaks its tail (everything
+    # after that first `@`, up to and including the real host) into the
+    # printed detail.
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:hun@ter2@db.internal:5432/prod"}
+    )
+    assert not check.ok
+    assert "hun" not in check.detail
+    assert "ter2" not in check.detail
+    assert "someuser" not in check.detail
+    assert "db.internal:5432/prod" in check.detail
+    assert "<redacted>" in check.detail
+
+
 def test_check_five_gates_check_three_so_no_token_is_sent():
     """A leaky database must stop the tier BEFORE any auth.test call, exactly as a
     leaky environment does -- an un-run check is a refusal, never a pass."""
