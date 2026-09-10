@@ -23,6 +23,28 @@ from src.services.slack_executor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _shut_down_whatever_pool_this_test_leaves_behind(monkeypatch):
+    """Several tests in this file force a REAL pool into existence — either
+    the process-wide singleton (via `run_slack_call`/`_get_executor`) or a
+    throwaway ``fresh`` one substituted via ``monkeypatch.setattr`` — and a
+    ``ThreadPoolExecutor`` that is never ``.shutdown()``ed leaks up to
+    ``SLACK_IO_MAX_WORKERS`` (16) live, non-daemon worker threads (opus
+    review, audit 2026-09-10). Relying on ``monkeypatch``'s own teardown to
+    fix this does not work: it only restores the ``_SLACK_EXECUTOR``
+    *attribute* to its pre-test value, which does nothing to the actual pool
+    object the test created and orphans its threads.
+
+    Requesting ``monkeypatch`` as a dependency (even though this fixture does
+    not call it) makes pytest set it up before this fixture, so at teardown
+    this fixture's ``yield`` resumes BEFORE monkeypatch reverts
+    ``_SLACK_EXECUTOR`` — this shuts down whatever pool the test actually
+    left assigned there, not whatever it was before the test ran.
+    """
+    yield
+    shutdown_slack_executor()
+
+
 def test_the_slack_pool_is_a_bounded_dedicated_executor():
     # K-9 (audit 2026-09-10): the pool is now created lazily (see
     # `_get_executor`'s docstring/module docstring), so `_SLACK_EXECUTOR`
