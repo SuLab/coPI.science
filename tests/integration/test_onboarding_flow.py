@@ -90,10 +90,9 @@ def export_dirs(tmp_path, monkeypatch):
     pub, priv = tmp_path / "public", tmp_path / "private"
     monkeypatch.setattr(profile_export, "PROFILES_DIR", pub)
     monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", priv)
-    # onboarding.py bound PRIVATE_PROFILES_DIR into its own namespace at import
-    # time (the on-disk fallback in the private-profile editor), so patching the
-    # service module alone would leave that read pointed at the repo.
-    monkeypatch.setattr(onboarding_router, "PRIVATE_PROFILES_DIR", priv)
+    # onboarding.py's on-disk fallback now calls profile_export._private_profiles_dir()
+    # at request time (REV4-1) instead of reading a module-level constant bound at
+    # import time, so patching the service module's constant is sufficient here.
     return SimpleNamespace(public=pub, private=priv)
 
 

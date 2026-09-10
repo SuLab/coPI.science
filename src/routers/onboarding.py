@@ -13,7 +13,7 @@ from src.dependencies import get_current_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
 from src.services.profile_export import (
-    PRIVATE_PROFILES_DIR,
+    _private_profiles_dir,
     export_private_profile,
 )
 from src.services.profile_pipeline import bump_profile_version
@@ -228,7 +228,7 @@ async def private_profile(
         )
         agent_reg = agent_result.scalar_one_or_none()
         if agent_reg:
-            disk_path = PRIVATE_PROFILES_DIR / f"{agent_reg.agent_id}.md"
+            disk_path = _private_profiles_dir() / f"{agent_reg.agent_id}.md"
             if disk_path.exists():
                 content = disk_path.read_text(encoding="utf-8").strip()
 

@@ -550,10 +550,10 @@ async def run_profile_pipeline(
     # onboarding.py:save_private_profile via remove_if_empty=True, and
     # agent_page.py:save_private_profile via profile_path.unlink — so there is
     # nothing here to adopt for a PI who cleared.
-    from src.services.profile_export import PRIVATE_PROFILES_DIR, export_private_profile
+    from src.services.profile_export import _private_profiles_dir, export_private_profile
     private_seed_generated = False
     if not profile.private_profile_md and not profile.private_profile_seed and agent_id:
-        disk_private_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+        disk_private_path = _private_profiles_dir() / f"{agent_id}.md"
         if disk_private_path.exists():
             profile.private_profile_md = (
                 disk_private_path.read_text(encoding="utf-8").strip() or None
@@ -635,7 +635,7 @@ async def run_profile_pipeline(
     #
     # remove_if_empty stays at its default False (#22 C1): this call must never delete
     # a disk-only private profile it did not itself create.
-    _private_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md" if agent_id else None
+    _private_path = _private_profiles_dir() / f"{agent_id}.md" if agent_id else None
     if private_seed_generated or (_private_path is not None and not _private_path.exists()):
         export_private_profile(user, profile, agent_id)
 

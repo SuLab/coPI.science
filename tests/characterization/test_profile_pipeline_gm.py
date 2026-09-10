@@ -1125,6 +1125,45 @@ async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatc
     assert written.strip() == _PRIVATE_SEED.strip()
 
 
+async def test_first_run_exports_the_private_seed_via_the_configured_profiles_dir(
+    db_session, monkeypatch, tmp_path
+):
+    """REV4-1 (audit 2026-09-08): same scenario as
+    test_first_run_exports_the_private_seed_to_disk, but WITHOUT monkeypatching
+    profile_export.PROFILES_DIR/PRIVATE_PROFILES_DIR directly -- only
+    COPI_PROFILES_DIR + get_settings.cache_clear(), exactly like a real deployment
+    that sets the env var. run_profile_pipeline's own private-seed adoption/export
+    call sites (src/services/profile_pipeline.py) used to read the module
+    constants directly, which stayed None and raised TypeError even though the
+    accessor-based settings path was configured correctly.
+    """
+    from src.config import get_settings
+
+    monkeypatch.setenv("COPI_PROFILES_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _install_fakes(monkeypatch)
+
+        user = await factories.make_user(
+            db_session, name="Ada Lovelace", onboarding_complete=False
+        )
+        agent = await factories.make_agent(
+            db_session, user=user, agent_id="gmseedenv", bot_name="GmSeedEnvBot"
+        )
+        await db_session.flush()
+
+        profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+        assert profile.private_profile_md is None
+        assert profile.private_profile_seed
+        written = (tmp_path / "private" / f"{agent.agent_id}.md").read_text(
+            encoding="utf-8"
+        )
+        assert written.strip() == _PRIVATE_SEED.strip()
+    finally:
+        get_settings.cache_clear()
+
+
 async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
     db_session, monkeypatch, tmp_path
 ):
