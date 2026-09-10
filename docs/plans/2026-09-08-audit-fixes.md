@@ -444,3 +444,55 @@ space in its name; asserts the exact quoted `chown` command line is present and 
 form is not (while still permitting the unquoted path to appear in the unrelated "does not
 exist" prefix). Failed pre-fix on the missing quoting, passes post-fix (34 tests total in the
 file).
+
+## Opus review of R-1..R-5 (same day, 2026-09-10) — five follow-ups, all landed
+
+**R-1 follow-up (MEDIUM) — page 0's budget was the full listing budget, not the per-call
+default.** `_paginate` passed `max(remaining, 0.0)` as each page's `_wait_budget`, and page 0
+starts with the *entire* `PAGINATION_WAIT_BUDGET_SECONDS` (600s) remaining — so a single early
+page could be handed ~600s of retry patience instead of the 180s any other caller gets. Fixed
+by capping every page's budget at `min(RATE_LIMIT_WAIT_BUDGET_SECONDS, max(remaining, 0.0))`.
+Test (red first): a one-page listing 429ing with `Retry-After: 200` (capped to `MAX_RETRY_AFTER`
+30s per attempt by `parse_retry_after`, as always) slept 240s pre-fix and 180s post-fix —
+`tests/unit/test_slack_client_contract.py::test_a_single_pages_wait_budget_is_capped_at_the_per_call_default`.
+
+**R-2 follow-up #1 (MEDIUM) — the Slack executor was never shut down.** A bare module-level
+`ThreadPoolExecutor` blocks interpreter shutdown until every worker thread finishes; an
+in-flight Slack call sleeping through a sustained throttle (up to 180s) could hold the process
+open past `docker stop -t 30`'s grace period, which then SIGKILLs it. Added
+`shutdown_slack_executor()` (`.shutdown(wait=False, cancel_futures=True)`), wired into a new
+FastAPI `lifespan` in `src/main.py` and a new `_shutdown_worker()` helper in
+`src/worker/main.py` (called before `engine.dispose()`), plus an `atexit` backstop. Documented
+contract: `run_slack_call` after shutdown raises `RuntimeError` (not a silently re-created
+pool) — this is `ThreadPoolExecutor`'s own native behaviour, needing no extra code. Tests (red
+first): `tests/unit/test_main_lifespan.py`, `tests/unit/test_worker_shutdown.py`,
+`tests/unit/test_slack_executor.py`'s two new shutdown tests.
+
+**R-2 follow-up #2 (LOW) — executor sizing was undocumented and tight.** A single
+`migrate_public_thread_to_private` reopen makes ~8 sequential `run_slack_call`s by itself;
+`max_workers=8` left zero headroom for a second concurrent flow, which would simply queue
+behind the first — indistinguishable from a Slack throttle. Made the size a named constant,
+`SLACK_IO_MAX_WORKERS = 16` (~2x one flow's call count), and documented the reasoning in the
+module docstring. Test: `test_slack_io_max_workers_exceeds_one_reopen_flows_sequential_call_count`.
+
+**R-3 follow-up #1 (LOW) — the bounce budget was charged after dispatch, not reserved before
+it.** `_maybe_send_stale_token_bounce` read `sent_so_far`, dispatched, and only then charged —
+a check-then-act race that (for a future threaded/concurrent send) could let two replies from
+one address both pass the cap check before either charged the budget. Now reserves the slot
+before dispatch and refunds it only for `SUPPRESSED`/`NOT_DISPATCHED`. Tests (red first):
+`test_the_slot_is_reserved_before_the_send_is_dispatched` (asserts the counter is already
+incremented *while* the send is in flight) and
+`test_a_refunded_reservation_does_not_leak_across_repeated_suppressions`.
+
+**R-3 follow-up #2 (LOW) — `NOT_DISPATCHED` conflated two failure shapes.** `boto3.client(...)`
+raising (a persistent misconfiguration — bad/missing AWS credentials, a bad region — that will
+keep failing every retry) and MIME/message construction raising (a property of THIS message,
+e.g. an unencodable header) both returned `NOT_DISPATCHED`, so a broken SES client and a one-off
+message error were treated identically by the bounce budget. Added `SendOutcome.CLIENT_UNAVAILABLE`
+for the former (`boto3.client(...)` itself); `NOT_DISPATCHED` now means only the latter (MIME
+construction). `_maybe_send_stale_token_bounce` charges the budget for `CLIENT_UNAVAILABLE` too
+(a persistently broken client should be capped like a real failure), while `NOT_DISPATCHED`
+stays refunded (the next message can still succeed). Tests (red first):
+`test_a_client_construction_failure_is_client_unavailable`,
+`test_a_mime_construction_failure_is_not_dispatched`,
+`test_a_client_unavailable_outcome_consumes_the_budget`.
