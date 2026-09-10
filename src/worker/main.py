@@ -18,6 +18,7 @@ from src.config import get_settings
 from src.database import make_engine
 from src.models import Job, User
 from src.services.profile_pipeline import run_profile_pipeline
+from src.services.slack_executor import shutdown_slack_executor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -317,7 +318,21 @@ async def run_worker():
             logger.error("Worker loop error: %s", exc, exc_info=True)
             await asyncio.sleep(settings.worker_poll_interval)
 
+    await _shutdown_worker(engine)
+
+
+async def _shutdown_worker(engine) -> None:
+    """The worker's shutdown path, factored out so it's testable without
+    spinning the real (Postgres-backed, runs-forever) ``run_worker`` loop.
+
+    Opus review follow-up (audit 2026-09-10): shuts the Slack I/O executor
+    down BEFORE disposing the DB engine — a Slack call abandoned mid-throttle
+    has no further use for the DB connection pool either way, and ordering it
+    first means a slow/hung executor shutdown can never leave the engine
+    undisposed.
+    """
     logger.info("Worker shutting down")
+    shutdown_slack_executor()
     await engine.dispose()
 
 

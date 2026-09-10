@@ -13,7 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.services.slack_executor import _SLACK_EXECUTOR, run_slack_call
+import src.services.slack_executor as slack_executor_module
+from src.services.slack_executor import _SLACK_EXECUTOR, run_slack_call, shutdown_slack_executor
 
 
 def test_the_slack_pool_is_a_bounded_dedicated_executor():
@@ -57,3 +58,27 @@ async def test_an_exception_from_the_call_propagates_unchanged():
     with pytest.raises(_Boom) as exc_info:
         await run_slack_call(fn)
     assert exc_info.value is marker
+
+
+# --- shutdown (opus review follow-up, audit 2026-09-10) ---------------------------
+#
+# `_SLACK_EXECUTOR` is a process-wide singleton, so these tests substitute a
+# throwaway executor via monkeypatch rather than shutting down the real one out
+# from under every other test in this file/session.
+
+
+def test_shutdown_slack_executor_shuts_down_without_waiting(monkeypatch):
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    shutdown_slack_executor()
+    assert fresh._shutdown, "shutdown_slack_executor() must actually shut the pool down"
+
+
+async def test_run_slack_call_after_shutdown_raises_a_clear_runtimeerror(monkeypatch):
+    """Documented contract (see module docstring): once shut down, `run_slack_call`
+    raises rather than silently re-creating the pool or hanging."""
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    shutdown_slack_executor()
+    with pytest.raises(RuntimeError, match="shutdown"):
+        await run_slack_call(lambda: 1)

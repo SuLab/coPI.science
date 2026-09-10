@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +18,7 @@ from src.config import get_settings
 from src.database import get_session_factory
 from src.routers import admin, agent_page, auth, invite, onboarding, profile, public
 from src.routers import settings as settings_router
+from src.services.slack_executor import shutdown_slack_executor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -239,6 +241,23 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """No startup work of its own; shuts the Slack I/O executor down on exit.
+
+    Opus review follow-up (audit 2026-09-10) to the slack_executor addition: a
+    bare module-level ``ThreadPoolExecutor`` is never torn down on its own, and
+    an in-flight Slack call blocked on a sustained throttle (up to
+    ``RATE_LIMIT_WAIT_BUDGET_SECONDS``, 180s) could hold interpreter shutdown
+    open past ``docker stop -t 30``'s grace period, which then SIGKILLs the
+    process — losing whatever that thread was doing instead of letting it
+    fail cleanly. Module scope (not nested in ``create_app``) so it is
+    importable and testable on its own, per ``tests/unit/test_main_lifespan.py``.
+    """
+    yield
+    shutdown_slack_executor()
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -251,6 +270,7 @@ def create_app() -> FastAPI:
         title="CoPI / LabAgent",
         description="Research collaboration platform with Slack-based AI agents",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # Agent badge middleware (added first so it runs inside session middleware)
