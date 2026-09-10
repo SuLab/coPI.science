@@ -146,7 +146,7 @@ async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeyp
     # first_probe_seconds leaves only ~0.05s of the outer deadline remaining before the
     # retry starts. A retry re-armed with a fresh full HEALTH_PROBE_TIMEOUT_SECONDS
     # budget (today's behaviour) blows well past `timeout`; a retry bounded by what's
-    # left of the deadline does not. The assertion's slack (0.15s) is small relative to
+    # left of the deadline does not. The assertion's slack (0.3s) is small relative to
     # `timeout` on purpose, so a fresh-budget retry (+0.3s) trips it while a
     # remaining-budget retry (+~0.05s) does not.
     timeout = 0.5

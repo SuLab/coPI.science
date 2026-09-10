@@ -15,8 +15,9 @@ import os
 import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+import pytest
 
 from scripts.live_slack_preflight import (
     COPI_TEST_TEAM_ID,
@@ -33,10 +34,20 @@ from scripts.live_slack_preflight import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# A real, writable directory for the tests that don't care about check 6 -- created
-# once so the 20-odd call sites that only exercise checks 1-5 don't each need their own
-# tmp_path plumbed through. Tests that DO care about check 6 pass their own tmp_path.
-_DEFAULT_TEST_PROFILES_DIR = Path(tempfile.mkdtemp(prefix="live-slack-preflight-test-"))
+# A real, writable directory for the tests that don't care about check 6 -- set by the
+# autouse fixture below (from pytest's tmp_path, so it is cleaned up automatically)
+# rather than an import-time tempfile.mkdtemp() that would leak on every test run. The
+# 20-odd call sites that only exercise checks 1-5 read this module global instead of
+# each plumbing their own tmp_path through; tests that DO care about check 6 pass
+# their own tmp_path.
+_DEFAULT_TEST_PROFILES_DIR: Path
+
+
+@pytest.fixture(autouse=True)
+def _default_test_profiles_dir(tmp_path):
+    global _DEFAULT_TEST_PROFILES_DIR
+    _DEFAULT_TEST_PROFILES_DIR = tmp_path / "default-profiles"
+    _DEFAULT_TEST_PROFILES_DIR.mkdir()
 
 # Fabricated, token-shaped, and deliberately not real. Nothing in this file may hold a
 # credential, and nothing the preflight prints may echo one back.
@@ -442,6 +453,10 @@ def test_check_six_refuses_a_nonexistent_profiles_dir_with_the_exact_remedy(tmp_
     assert "COPI_PROFILES_DIR" in check.detail
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root ignores directory permission bits, so the read-only probe can't fail",
+)
 def test_check_six_refuses_a_read_only_profiles_dir_with_the_exact_remedy(tmp_path):
     target = tmp_path / "profiles"
     target.mkdir()
@@ -490,8 +505,13 @@ def test_check_six_runs_before_check_threes_slack_call(monkeypatch):
     )
 
 
-def test_check_six_refusal_is_visible_alongside_an_otherwise_isolated_environment():
-    read_only = Path(tempfile.mkdtemp(prefix="preflight-readonly-"))
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root ignores directory permission bits, so the read-only probe can't fail",
+)
+def test_check_six_refusal_is_visible_alongside_an_otherwise_isolated_environment(tmp_path):
+    read_only = tmp_path / "preflight-readonly"
+    read_only.mkdir()
     read_only.chmod(stat.S_IREAD | stat.S_IEXEC)
     try:
         results = _checks(profiles_dir=read_only)
