@@ -456,8 +456,13 @@ archived). Re-run once the cause is fixed. Do not read exit 2 as "done".
 ### Step 9 — deploy the application code, then restart
 
 ```bash
-docker compose up -d --build app worker
+export COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml
+./scripts/redeploy.sh
 ```
+
+See §10.1 for what this script does and why a raw `docker compose up -d --build app
+worker` is unsafe against an already-running stack (it can find `migrate`'s exited
+container from the last deploy and skip re-running it).
 
 **Order matters, and only one order is safe.** The new code requires columns that only
 exist at 0023, so code-before-migration fails immediately and obviously. Migration-before-code

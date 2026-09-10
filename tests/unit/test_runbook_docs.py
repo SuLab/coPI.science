@@ -69,6 +69,17 @@ def test_production_migration_doc_routine_deploy_section_points_at_redeploy_scri
     assert "scripts/redeploy.sh" in section
 
 
+def test_production_migration_doc_step_9_points_at_redeploy_script():
+    """RC-6 follow-up (audit 2026-09-08, opus review): Step 9 still told the reader
+    to run the raw `up -d --build app worker` this section (10.1) documents as
+    racy against a running stack. It must point at scripts/redeploy.sh too."""
+    text = PROD_MIGRATION_DOC.read_text()
+    idx = text.index("### Step 9")
+    section = text[idx : idx + 700]
+    assert "scripts/redeploy.sh" in section
+    assert "docker compose up -d --build app worker" not in section
+
+
 def test_production_migration_doc_lists_0024_as_a_supported_starting_point():
     """issue #26 Minor 10: A4's doc widening (Part M) added 0024 as a
     supported starting point but no test pinned it."""
