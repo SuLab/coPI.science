@@ -518,3 +518,19 @@ def test_several_candidates_and_an_unreadable_oneoff_label_fail_closed(tmp_path)
     assert "none carries com.docker.compose.oneoff=False" in proc.stdout + proc.stderr
     text = log.read_text()
     assert "up -d app worker" not in text, text
+
+
+# --- K-3 (audit 2026-09-10) ---------------------------------------------------------
+# `[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value prints "integer expression
+# expected" to stderr and returns exit status 2 -- which `if` treats the same as a
+# clean "false", so the script fell through as though migrate had exited 0.
+
+
+def test_a_non_numeric_migrate_exit_code_aborts_the_deploy(tmp_path):
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE], migrate_exit="abc")
+    assert proc.returncode != 0
+    text = log.read_text()
+    assert "up -d app worker" not in text, text
+    assert "grantbot" not in "\n".join(
+        line for line in text.splitlines() if "up" in line and "-d" in line
+    ), text

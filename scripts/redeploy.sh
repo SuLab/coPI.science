@@ -200,6 +200,18 @@ if [ "$WAIT_RC" -ne 0 ] || [ -z "$MIGRATE_EXIT" ]; then
   die "\`docker wait $MIGRATE_CID\` failed to report an exit code (rc=$WAIT_RC) --
   cannot confirm migrate succeeded. app/worker/grantbot remain stopped."
 fi
+# K-3: `[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value (e.g. `docker wait`
+# printing garbage) makes `[` print "integer expression expected" to stderr and
+# return exit status 2 -- which `if` treats identically to a clean "false",
+# falling through as though migrate had exited 0. Reject anything that is not
+# a plain non-negative integer before the numeric comparison ever runs.
+case "$MIGRATE_EXIT" in
+  ''|*[!0-9]*)
+    die "\`docker wait $MIGRATE_CID\` reported a non-numeric exit code
+  ('$MIGRATE_EXIT') -- cannot confirm migrate succeeded. app/worker/grantbot
+  remain stopped."
+    ;;
+esac
 if [ "$MIGRATE_EXIT" -ne 0 ]; then
   die "migrate exited $MIGRATE_EXIT -- aborting. app/worker/grantbot remain stopped (old code is
   not serving, but neither is the new code). Fix the migration, then re-run this script.
