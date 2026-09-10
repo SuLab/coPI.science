@@ -100,7 +100,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
-from src.agent.slack_client import bind_shutdown_event
+from src.agent.slack_client import bind_shutdown_event, signal_shutdown
 
 _T = TypeVar("_T")
 
@@ -207,6 +207,13 @@ def shutdown_slack_executor() -> None:
     (``ThreadPoolExecutor.shutdown`` is idempotent; setting an already-set
     ``Event`` is a no-op; shutting down with no pool currently created is a
     no-op).
+
+    L-1 (opus review, audit 2026-09-10): also calls
+    ``slack_client.signal_shutdown()``, which sets the module-level fallback
+    event a caller bypassing this pool entirely (an ``AgentSlackClient`` call
+    made directly on its own thread) is bound to. Without this, that kind of
+    caller had no abort signal set anywhere in production, since nothing else
+    in this process calls it either.
     """
     global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
     with _POOL_LOCK:
@@ -214,6 +221,13 @@ def shutdown_slack_executor() -> None:
         event, _CURRENT_SHUTDOWN_EVENT = _CURRENT_SHUTDOWN_EVENT, None
     if event is not None:
         event.set()
+    # L-1 (opus review, audit 2026-09-10): also set the module-level fallback
+    # (slack_client.SHUTTING_DOWN) that a caller running AgentSlackClient
+    # directly on its own thread — never through this pool — is bound to.
+    # Without this, shutting THIS pool down leaves such a caller (e.g. an
+    # ASGI lifespan's own thread, or anything else outside run_slack_call)
+    # with no abort signal at all.
+    signal_shutdown()
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
 

@@ -82,6 +82,24 @@ def _current_shutdown_event() -> threading.Event:
     return getattr(_shutdown_local, "event", SHUTTING_DOWN)
 
 
+def signal_shutdown() -> None:
+    """Set the fallback shutdown event (L-1, opus review, audit 2026-09-10).
+
+    Per-pool events (bound via ``bind_shutdown_event``) only cover calls made
+    on a ``slack_executor`` worker thread. A caller that runs
+    ``AgentSlackClient`` directly on its own thread instead — most
+    concretely the agent-run process, where ``src/agent/main.py`` and
+    ``src/agent/simulation.py`` call it straight from the event-loop
+    coroutine, never through ``run_slack_call`` — is bound to
+    ``SHUTTING_DOWN`` by ``_current_shutdown_event``'s fallback and has no
+    other way to abort a retry sleep at shutdown. Both
+    ``shutdown_slack_executor()`` (for the pool-based case) and the
+    agent-run process's own SIGTERM/SIGINT handler (for this fallback case)
+    call this.
+    """
+    SHUTTING_DOWN.set()
+
+
 class SlackShuttingDown(SlackApiError):
     """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown
     (K-2 follow-up, audit 2026-09-10).

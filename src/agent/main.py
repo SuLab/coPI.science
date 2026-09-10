@@ -18,6 +18,7 @@ import typer
 from src.agent.agent import Agent
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
+from src.agent.slack_client import signal_shutdown
 from src.config import get_settings
 
 logging.basicConfig(
@@ -271,6 +272,16 @@ async def _run_simulation(
         # turn's messages. It is awaited in the finally-block below instead (R2).
         logger.info("Received shutdown signal")
         sim_engine.request_stop()
+        # L-1 (opus review, audit 2026-09-10): this process's AgentSlackClient
+        # calls (here and in SimulationEngine's roster sync/turn-taking) run
+        # directly on this event-loop thread, never through
+        # src.services.slack_executor's pool — so they are bound to
+        # slack_client's fallback event, not any per-pool one. request_stop()
+        # alone only stops the NEXT turn from starting; it does not abort a
+        # call already sleeping through a Slack Retry-After backoff. Setting
+        # the fallback here aborts that sleep within ~1s instead of letting
+        # it run out its (up to 180s) wait budget and hold up shutdown.
+        signal_shutdown()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
