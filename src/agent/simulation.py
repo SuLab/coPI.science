@@ -3617,10 +3617,33 @@ class SimulationEngine:
                         r.message_ts, PI_INBOUND_INGESTED
                     )
                     if not marked:
+                        # K-8 (audit 2026-09-10): a persistently failing
+                        # INGESTED write used to `continue` with no attempt
+                        # accounting at all — an unbounded, silent retry that
+                        # never engaged SEC2-1's cap (unlike every other
+                        # give-up path in this loop). Record an attempt here
+                        # too, and once it is exhausted, give up the same way:
+                        # stamp the row HANDLED (only forgetting the count if
+                        # that write itself commits — see K-7) so it stops
+                        # being cursor-independently re-selected forever.
+                        attempts = self._record_pi_inbound_attempt(r.message_ts)
+                        if attempts >= PI_INBOUND_MAX_ATTEMPTS:
+                            logger.error(
+                                "[%s] Giving up on PI inbound row %s — INGESTED "
+                                "marker write persistently failed after %d "
+                                "attempts",
+                                r.channel_name, r.message_ts, attempts,
+                            )
+                            if await self._mark_pi_inbound_row_handled(r.id):
+                                self._pi_inbound_attempts.pop(r.message_ts, None)
+                            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                                self._pi_inbox_cursor = r.created_at
+                            continue
                         logger.warning(
                             "Skipping PI inbound handling for %s this tick — "
-                            "INGESTED marker write failed; will retry next poll",
-                            r.message_ts,
+                            "INGESTED marker write failed (attempt %d/%d); "
+                            "will retry next poll",
+                            r.message_ts, attempts, PI_INBOUND_MAX_ATTEMPTS,
                         )
                         continue
                 # COR-10(3), ruled option (a): the append is what records the

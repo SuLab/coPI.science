@@ -3064,6 +3064,38 @@ class TestPollInboundFromDbGuardsTheHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_a_persistently_failing_ingested_marker_write_is_capped(self):
+        """K-8 (audit 2026-09-10): before this fix, a persistently failing
+        INGESTED marker write `continue`d with NO attempt accounting at all —
+        an unbounded, silent retry loop that never engaged SEC2-1's cap, unlike
+        every other give-up path in this poller. It must be capped the same
+        way: record an attempt, and once exhausted, stamp the row HANDLED."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_HANDLED, PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]  # pi_inbound_state=None by default
+        handler = AsyncMock()
+        engine = self._engine(rows, handler)
+        engine._mark_pi_inbound_state = AsyncMock(return_value=False)
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS):
+            await engine._poll_inbound_from_db()
+
+        handler.assert_not_awaited(), (
+            "the handler must never run while the INGESTED write keeps failing"
+        )
+        assert rows[0].pi_inbound_state == PI_INBOUND_HANDLED, (
+            "past the attempt cap the row must be stamped HANDLED via the "
+            "same terminal path every other give-up branch uses"
+        )
+        assert engine._pi_inbound_attempts == {}, (
+            "the per-message_ts counter must be pruned once the row is terminal"
+        )
+
+    @pytest.mark.asyncio
     async def test_attempt_entries_for_rows_no_longer_in_the_batch_are_pruned(self, monkeypatch):
         """The per-message_ts attempt dict is bounded by the polled batch: an
         entry whose row no longer appears (stamped terminal, superseded) is
