@@ -904,6 +904,165 @@ async def test_a_pending_pi_row_is_handled_after_a_restart_despite_the_cursor(db
 
 
 # ---------------------------------------------------------------
+# SEC-F2 (opus review, audit 2026-09-08): a row left 'ingested' by a handler
+# that was interrupted mid-flight (process restart between the INGESTED write
+# and the HANDLED write) must still be recovered, however far the cursor has
+# advanced past it — the same cursor-independent guarantee RC-2 gave 'pending'.
+# ---------------------------------------------------------------
+
+async def test_an_ingested_pi_row_is_handled_after_a_restart_despite_the_cursor(db_session):
+    """Before this fix the cursor-independent OR-clause only named 'pending', so
+    a row that had already advanced to 'ingested' (its handler ran and then the
+    process died before the HANDLED write landed) was invisible to this recovery
+    path once it aged past PI_INBOX_LOOKBACK_S — identical to the RC-2 bug this
+    file already pins for 'pending', but for the OTHER durable marker value."""
+    run = await factories.make_simulation_run(db_session)
+    now = datetime.now(UTC)
+    old_created = now - timedelta(seconds=10 * PI_INBOX_LOOKBACK_S)
+    pi_ts = f"{old_created.timestamp():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C1", channel_name="general", message_ts=pi_ts,
+        thread_ts=None, posted_at=old_created.timestamp(),
+        content="please look at this", sender_name="PI su",
+        pi_inbound_state="ingested", created_at=old_created,
+    )
+    newer_created = now - timedelta(seconds=10)
+    later_ts = f"{newer_created.timestamp():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="C1", channel_name="general", message_ts=later_ts,
+        thread_ts=None, posted_at=newer_created.timestamp(),
+        content="an unrelated later post", sender_name="SuBot",
+        created_at=newer_created,
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    assert eng._pi_inbox_cursor - old_created > timedelta(seconds=2 * PI_INBOX_LOOKBACK_S)
+
+    await eng._poll_inbound_from_db()
+
+    row = (await db_session.execute(
+        select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+    )).scalar_one()
+    assert row.pi_inbound_state == "handled", (
+        "an 'ingested' row must be recovered on the first post-restart poll, "
+        "however far the cursor has already advanced past it"
+    )
+
+
+# ---------------------------------------------------------------
+# A1 (opus review, audit 2026-09-08): the INGESTED marker used to be written
+# only for `state is None`, so a row already stamped 'pending' at insert (RC-2's
+# default) whose handler raises left no durable record that an attempt was
+# made — unlike a fresh legacy NULL-state row, which at least advanced to
+# 'ingested'. Folded into the F2 fix: INGESTED is now written for
+# `state in (None, 'pending')` before the handler runs, and a failed write
+# skips the handler for that tick rather than letting the row look
+# already-appended with no marker progress.
+# ---------------------------------------------------------------
+
+async def test_a_raising_handler_still_advances_a_pending_row_to_ingested(db_session, monkeypatch):
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    pi_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C1", channel_name="general", message_ts=pi_ts,
+        thread_ts=None, posted_at=base, content="please look at this",
+        sender_name="PI su", pi_inbound_state="pending",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    calls = []
+
+    async def _raising_handler(entry):
+        calls.append(entry.ts)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(eng, "_handle_pi_inbound_entry", _raising_handler)
+
+    await eng._poll_inbound_from_db()
+
+    row = (await db_session.execute(
+        select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+    )).scalar_one()
+    assert len(calls) == 1
+    assert row.pi_inbound_state == "ingested", (
+        "a raising handler must still leave the row advanced past 'pending' — "
+        "before this fix a row already stamped 'pending' at insert never got "
+        "an INGESTED write at all (only a NULL-state row did), so a failing "
+        "handler left no durable record that an attempt was made"
+    )
+
+    # At-least-once: the row stays inside the lookback window and unhandled, so
+    # a second tick retries the (still-raising) handler rather than losing it.
+    await eng._poll_inbound_from_db()
+    assert len(calls) == 2
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "ingested"
+
+
+async def test_a_failed_ingested_mark_skips_the_handler_and_retries_next_tick(
+    db_session, monkeypatch,
+):
+    """SEC-F2's other half: when the INGESTED write itself fails, the handler
+    must not run this tick — the row is left exactly as it was (here,
+    'pending') so the ordinary cursor-independent recovery path retries it,
+    rather than risk appending the entry into the log with no durable marker
+    progress to show for it."""
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    pi_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C1", channel_name="general", message_ts=pi_ts,
+        thread_ts=None, posted_at=base, content="please look at this",
+        sender_name="PI su", pi_inbound_state="pending",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    handler_calls = []
+
+    async def _handler(entry):
+        handler_calls.append(entry.ts)
+
+    monkeypatch.setattr(eng, "_handle_pi_inbound_entry", _handler)
+
+    real_mark = eng._mark_pi_inbound_state
+    mark_calls = {"n": 0}
+
+    async def _flaky_mark(message_ts, state):
+        mark_calls["n"] += 1
+        if state == "ingested" and mark_calls["n"] == 1:
+            return False  # simulate a swallowed write failure
+        return await real_mark(message_ts, state)
+
+    monkeypatch.setattr(eng, "_mark_pi_inbound_state", _flaky_mark)
+
+    await eng._poll_inbound_from_db()
+    assert handler_calls == [], "the handler must not run when the INGESTED mark failed"
+    row = (await db_session.execute(
+        select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+    )).scalar_one()
+    assert row.pi_inbound_state == "pending", "the row must be left untouched for retry"
+    assert eng.message_log.get_entry(pi_ts) is None, (
+        "the entry must not be appended into the log when the INGESTED mark "
+        "failed — otherwise a later NULL-state row would match the "
+        "`state is None and in_log` fallback skip forever"
+    )
+
+    await eng._poll_inbound_from_db()
+    assert handler_calls == [pi_ts], "the retry on the next tick must succeed"
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "handled"
+
+
+# ---------------------------------------------------------------
 # RC-9b (#20 audit 2026-09-08): post_failure_count is reconstructed on
 # rebuild from trailing DB-only rows, but only when Slack is actually
 # connected for this agent.

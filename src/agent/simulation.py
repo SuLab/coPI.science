@@ -3402,10 +3402,18 @@ class SimulationEngine:
                             # is — this is exactly the recovery path for a PI
                             # message written while agent-run was down, which would
                             # otherwise age past the lookback window before the
-                            # process ever came back to see it.
+                            # process ever came back to see it. 'ingested' is ORed
+                            # in too (SEC-F2, opus review, audit 2026-09-08): a row
+                            # whose handler was interrupted mid-flight (process
+                            # restart between the INGESTED write and HANDLED)
+                            # committed 'ingested', not 'pending', and without this
+                            # the cursor-independent recovery path would never see
+                            # it again once it aged past the lookback window.
                             sa_and(
                                 AgentMessage.is_bot.is_(False),
-                                AgentMessage.pi_inbound_state == PI_INBOUND_PENDING,
+                                AgentMessage.pi_inbound_state.in_(
+                                    (PI_INBOUND_PENDING, PI_INBOUND_INGESTED)
+                                ),
                             ),
                         ),
                     )
@@ -3469,6 +3477,30 @@ class SimulationEngine:
             )
             if not r.is_bot:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
+                # SEC-F2/A1 (opus review, audit 2026-09-08): a 'pending' (or
+                # legacy NULL-state) row is marked INGESTED before the append,
+                # and a failed mark write skips the append AND the handler
+                # entirely this tick — leaving the row's DB state untouched so
+                # it is refetched next poll. Without this, a swallowed mark
+                # failure could still let the append run, and a NULL-state row
+                # that is now `in_log` matches the pre-0029 fallback
+                # `state is None and in_log` skip below forever, on top of
+                # A1's original bug: an INGESTED marker written only for
+                # `state is None` never covered a row already stamped
+                # 'pending' at insert (RC-2's default), so a raising handler
+                # left it looking untouched instead of recording that an
+                # attempt was made.
+                if state is None or state == PI_INBOUND_PENDING:
+                    marked = await self._mark_pi_inbound_state(
+                        r.message_ts, PI_INBOUND_INGESTED
+                    )
+                    if not marked:
+                        logger.warning(
+                            "Skipping PI inbound handling for %s this tick — "
+                            "INGESTED marker write failed; will retry next poll",
+                            r.message_ts,
+                        )
+                        continue
                 # COR-10(3), ruled option (a): the append is what records the
                 # PI's TEXT, so it happens BEFORE the handler and the cursor
                 # advance happens after it — "apply side effects before ... the
@@ -3483,8 +3515,6 @@ class SimulationEngine:
                 # docs/plans/2026-09-04-decisions/task-7.md.
                 if not in_log:
                     self.message_log.append(entry)
-                if state is None:
-                    await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_INGESTED)
                 try:
                     await self._handle_pi_inbound_entry(entry)
                 except Exception as exc:
@@ -3507,7 +3537,7 @@ class SimulationEngine:
             if r.created_at and r.created_at > self._pi_inbox_cursor:
                 self._pi_inbox_cursor = r.created_at
 
-    async def _mark_pi_inbound_state(self, message_ts: str, state: str) -> None:
+    async def _mark_pi_inbound_state(self, message_ts: str, state: str) -> bool:
         """Persist the inbound poller's handled-marker for one PI row.
 
         The only writer of ``agent_messages.pi_inbound_state``, and only for
@@ -3519,15 +3549,18 @@ class SimulationEngine:
         ``(simulation_run_id, message_ts)``, which is the table's own unique
         constraint.
 
-        A write failure is logged and swallowed. ``_run_main_loop`` does not
-        guard its pollers, and the cost of a lost marker write is bounded: a
-        lost ``'handled'`` means one at-least-once retry of a handler that
-        already succeeded, and a lost ``'ingested'`` leaves the row reading NULL
-        — which, now that the entry is in the log, is the pre-0029 skip. Neither
-        can lose the PI's text.
+        Returns whether the write committed (SEC-F2, opus review, audit
+        2026-09-08). A write failure is logged and swallowed rather than
+        raised — ``_run_main_loop`` does not guard its pollers — but the
+        caller marking INGESTED must see the failure: it skips running the
+        handler this tick rather than risk appending the entry into the log
+        (making it look already-accounted-for) while the durable marker
+        never advanced. A lost ``'handled'`` write is cheaper and stays
+        swallowed by its caller: it costs one at-least-once retry of a
+        handler that already succeeded.
         """
         if not self.session_factory or not self.simulation_run_id:
-            return
+            return False
         from sqlalchemy import update as sa_update
         try:
             async with self.session_factory() as db:
@@ -3540,10 +3573,12 @@ class SimulationEngine:
                     .values(pi_inbound_state=state)
                 )
                 await db.commit()
+            return True
         except Exception as exc:
             logger.warning(
                 "Inbound marker write failed for %s (%s): %s", message_ts, state, exc
             )
+            return False
 
     async def _agent_ids_owned_by_user(self, user_id: uuid.UUID | None) -> set[str]:
         """Agents this user actually owns or represents (RC-1 / #20 COR-5).
