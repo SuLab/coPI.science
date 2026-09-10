@@ -145,11 +145,11 @@ so three consecutive misses take about three months rather than three cycles.
 
 ## Verification
 
-**Final gate, 2026-09-10 at `9f1ca5a` (after the audit fix wave):** `./scripts/ci.sh` → single head
-`0030`, round trip clean, ruff src 249/260, mypy 138/150, **2942 passed / 120 skipped**, branch
-coverage **80.15 %**, `CI passed` in 10:11. Live copi-test tier the same day: 53/53 non-LLM at
-`9f1ca5a`, 8/8 real-LLM at `9e66199` (see `docs/plans/2026-09-04-decisions/task-35.md`). The block
-below is the earlier measurement kept for history.
+**Final gate, 2026-09-10 at `72caa26` (after the audit fix waves):** `./scripts/ci.sh` → single head
+`0030`, round trip clean, ruff src 248/260, mypy 139/150, **3111 passed / 120 skipped**, branch
+coverage **80.84 %**, `CI passed` in 10:14. Live copi-test tier at the same commit: 53/53 non-LLM and
+8/8 real-LLM (see `docs/plans/2026-09-04-decisions/task-35.md`). The block below is the earlier
+measurement kept for history.
 
 
 `MIGCHECK_PORT=55433 LOCK_SMOKE=1 ./scripts/ci.sh` at `c049ec7` — **exit 0**, 7:46:

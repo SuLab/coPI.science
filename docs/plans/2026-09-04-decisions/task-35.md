@@ -56,12 +56,12 @@ scratch directory (preflight check 6, RC-13, passed; the host's `profiles/` is r
 | + E + RC-15 (9e66199) | `live_slack and not real_llm` | 53 passed / 0 failed, 6:29 |
 | + E + RC-15 (9e66199) | `live_slack and real_llm` | **8 passed / 0 failed**, 26:53 — the standing-instruction test that failed at bc03917 (RC-7) and the bijection test (RC-15) both pass |
 | + F (63 commits, ac2b… tree) | `live_slack and not real_llm` | 53 passed / 0 failed, 10:25 |
-| final (9f1ca5a, 69 commits) | `live_slack and not real_llm` | **53 passed / 0 failed**, 8:26 |
+| 9f1ca5a (69 commits) | `live_slack and not real_llm` | **53 passed / 0 failed**, 8:26 |
+| 112 → 162 commits (each intermediate fix wave) | both slices | non-LLM 53/53 on every tree; real-LLM 8/8 on 129, 138, 143, 153, 162 (one 7/8 on 112: a ThreadDecision write dropped after a blocking Slack retry sleep → fixed by M-7/M-8, durable retried writes + Slack calls off the loop) |
+| **final 72caa26 (163 commits)** | `live_slack and not real_llm` | **53 passed / 0 failed**, 10:34 (2026-09-10) |
+| **final 72caa26 (163 commits)** | `live_slack and real_llm` | **8 passed / 0 failed**, 23:37 (2026-09-10) |
 
-The real-LLM slice was not re-run on the final tree: the commits after 9e66199 touch the inbound-poll
-attempt counter, the delete guard, the CSP endpoint, the deploy script, the profiles-dir accessors
-and docs — none of the LLM-driven paths those eight tests exercise — and the slice costs ~27 minutes of
-paid model calls per run.
+| 83cb084 (70 commits) | `live_slack and real_llm` | **8 passed / 0 failed**, 23:36 (2026-09-10) |
 
-Gate at the same commit (`./scripts/ci.sh`, 2026-09-10): 2942 passed / 120 skipped, branch coverage
-80.15 %, ruff 249/260, mypy 138/150, alembic head 0030, CI passed.
+Gate at the final commit 72caa26 (`./scripts/ci.sh`, 2026-09-10): **3111 passed / 120 skipped**, branch
+coverage **80.84 %**, ruff 248/260, mypy 139/150, alembic head 0030, round trip clean, CI passed.

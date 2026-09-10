@@ -1509,3 +1509,10 @@ of 1) before the fix.
 - **U-2** SIGINT is restored to `signal.default_int_handler` (raises `KeyboardInterrupt`), not `SIG_DFL`.
 - **U-3** the handler docstring now describes the deferred `request_stop()`; CLAUDE.md's stop section
   documents the first/second/third-signal semantics.
+
+## Final verification (2026-09-10, HEAD 72caa26, 163 commits on bc03917)
+
+`./scripts/ci.sh`: 3111 passed / 120 skipped, 80.84 % branch, ruff 248/260, mypy 139/150, head 0030,
+CI passed. Live copi-test (`scripts/run_live_slack.sh`, preflight 6/6): 53/53 non-LLM, 8/8 real-LLM.
+Every fix round (RC, SEC, A, SEC2, REV3-5, R, SEC3, K..U) was reviewed by an opus pass before merge;
+the last review (U) reported no HIGH/MEDIUM findings.
