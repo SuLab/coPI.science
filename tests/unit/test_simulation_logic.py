@@ -5143,3 +5143,51 @@ class TestPhase5NewPostNeverDefaultsToGeneral:
         await engine._phase5_new_post(a)
         posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
         assert [p.channel for p in posts] == ["t-only"]
+
+    @pytest.mark.asyncio
+    async def test_a_new_post_naming_another_pairs_private_channel_is_refused(
+        self, monkeypatch,
+    ):
+        """K-6 (audit 2026-09-10, RC-15 residual): `_channel_visibility` is a
+        single process-wide map holding every collab_private channel
+        discovered for EVERY pair this run, not just ones this agent belongs
+        to. Membership there alone (the pre-fix check) let an agent name
+        another pair's private channel and pass the "known channel" gate —
+        this pins that a collab_private entry this agent is not subscribed to
+        must NOT count as known."""
+        from unittest.mock import AsyncMock
+
+        engine, a = self._engine(monkeypatch)
+        # Another pair's private channel, discovered by the engine but never
+        # joined by `a`.
+        engine._channel_visibility["other-pair-private"] = "collab_private"
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._response(
+                '{"action": "new_post", "channel": "#other-pair-private", "post_type": "idea"}'
+            )),
+        )
+        await engine._phase5_new_post(a)
+        assert [e for e in engine.message_log._entries if e.sender_agent_id == "a"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_new_post_naming_the_agents_own_private_channel_is_allowed(
+        self, monkeypatch,
+    ):
+        """The positive control for the test above: a collab_private channel
+        this agent IS a member of (in `subscribed_channels`) is known and the
+        post goes through."""
+        from unittest.mock import AsyncMock
+
+        engine, a = self._engine(monkeypatch)
+        engine._channel_visibility["own-private"] = "collab_private"
+        a.state.subscribed_channels.add("own-private")
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._response(
+                '{"action": "new_post", "channel": "#own-private", "post_type": "idea"}'
+            )),
+        )
+        await engine._phase5_new_post(a)
+        posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
+        assert [p.channel for p in posts] == ["own-private"]

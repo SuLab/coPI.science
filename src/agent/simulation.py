@@ -2765,9 +2765,18 @@ class SimulationEngine:
             # exactly like every sibling rejection further down this method,
             # instead of being counted as a real action that never happened.
             if action == "new_post":
+                # K-6 (audit 2026-09-10 RC-15 residual): `_channel_visibility`
+                # is a single process-wide map holding every collab_private
+                # channel discovered for EVERY pair this run, not just ones
+                # this agent belongs to — membership there alone would let an
+                # agent name another pair's private channel and pass this
+                # check. A private channel is only "known" to THIS agent via
+                # `subscribed_channels` (populated when the agent is actually
+                # invited — see :2325); `_channel_visibility` only vouches for
+                # a channel here when its own entry says PUBLIC.
                 known = (
-                    channel in self._channel_visibility
-                    or channel in SEEDED_CHANNELS
+                    channel in SEEDED_CHANNELS
+                    or self._channel_visibility.get(channel) == VISIBILITY_PUBLIC
                     or channel in agent.state.subscribed_channels
                 )
                 if not channel or not known:
