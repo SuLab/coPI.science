@@ -525,18 +525,19 @@
    form. A blank select is a real answer — "I cannot judge this one" — and
    posts an empty string that src/routers/reviews.py drops rather than
    coercing to 0 (the scale starts at 1). #}
-{% macro dimension_score_rows(review_rubric, selected) %}
+{% macro dimension_score_rows(review_rubric, selected, prefix) %}
 <div class="review-dimension-scores space-y-2">
     {% for d in review_rubric.dimensions %}
+    {% set sid = prefix ~ 'dim-' ~ d.key %}
     <div class="review-dimension-row review-dim-{{ d.key }} flex items-start gap-2">
-        <select name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-xs shrink-0">
+        <select id="{{ sid }}" name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-xs shrink-0">
             <option value="">&mdash;</option>
             {% for n in range(review_rubric.scale_min, review_rubric.scale_max + 1) %}
             <option value="{{ n }}" {% if selected.get(d.key) == n %}selected{% endif %}>{{ n }}</option>
             {% endfor %}
         </select>
         <div class="min-w-0">
-            <div class="text-xs font-medium text-gray-700">
+            <label for="{{ sid }}" class="text-xs font-medium text-gray-700">
                 {{ d.title }}
                 <span class="font-normal text-gray-400">&middot; {{ d.weight }}% weight</span>
                 {# A9: the bot's own number, muted and explicitly attributed so
@@ -547,7 +548,7 @@
                 {% else %}
                 <span class="review-bot-score font-normal text-gray-400">&middot; BlackbirdBot did not score this</span>
                 {% endif %}
-            </div>
+            </label>
             <details class="mt-0.5">
                 <summary class="cursor-pointer text-xs text-indigo-600">What the scale means here</summary>
                 <p class="mt-1 text-xs text-gray-500">{{ d.anchors }}</p>
@@ -563,7 +564,7 @@
 <div id="review" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
     <p class="review-rubric-instructions text-xs text-gray-500 mb-3">
-        Scores here rate the proposal's own scientific and strategic merit, not
+        Scores here rate the proposal's own scientific and strategic quality, not
         how well the bot performed. Review it against Blackbird's rubric
         (<span class="font-mono">{{ review_rubric.version }}</span>): read the
         {% if a.rationale %}<a href="#rationale" class="underline">full rationale</a>{% else %}full rationale{% endif %}
@@ -571,8 +572,8 @@
         own summary of it, not an independent account. Score
         each rubric dimension from {{ review_rubric.scale_min }} (weak) to
         {{ review_rubric.scale_max }} (strongly meets Blackbird's bar), and leave
-        a dimension blank if you cannot judge it. The overall proposal-merit
-        score is required; the per-dimension scores are not. Use the comment to
+        a dimension blank if you cannot judge it. The overall rating is
+        required; the per-dimension scores are not. Use the comment to
         explain the score and to flag anything the assessment got wrong.
     </p>
 
@@ -708,14 +709,17 @@
                         <summary class="cursor-pointer text-xs text-indigo-600">Edit</summary>
                         <form method="post" action="/reviews/feedback/{{ review.id }}/edit" class="mt-2 space-y-2">
                             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Proposal merit (1 = weak … 5 = strong)</label>
-                            <select name="score" class="border rounded px-1 py-0.5 text-xs">
+                            {% set edit_prefix = 'edit-' ~ review.id ~ '-' %}
+                            <label for="{{ edit_prefix }}score" class="block text-xs font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+                            <select id="{{ edit_prefix }}score" name="score" class="border rounded px-1 py-0.5 text-xs">
                                 {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
                             </select>
                             <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
-                            {{ dimension_score_rows(review_rubric, review.dimension_scores or {}) }}
-                            <textarea name="comment" rows="2" class="w-full border rounded px-2 py-1 text-xs">{{ review.comment }}</textarea>
-                            <select name="feedback_mode" class="border rounded px-1 py-0.5 text-xs">
+                            {{ dimension_score_rows(review_rubric, review.dimension_scores or {}, edit_prefix) }}
+                            <label for="{{ edit_prefix }}comment" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Comment</label>
+                            <textarea id="{{ edit_prefix }}comment" name="comment" rows="2" class="w-full border rounded px-2 py-1 text-xs">{{ review.comment }}</textarea>
+                            <label for="{{ edit_prefix }}mode" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+                            <select id="{{ edit_prefix }}mode" name="feedback_mode" class="border rounded px-1 py-0.5 text-xs">
                                 <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
                                 <option value="log_only" {% if review.feedback_mode == 'log_only' %}selected{% endif %}>Don't learn — log only</option>
                             </select>
@@ -743,16 +747,18 @@
         <summary class="cursor-pointer text-xs text-indigo-600">Add feedback</summary>
         <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Proposal merit (1 = weak … 5 = strong)</label>
-            <select name="score" required class="border rounded px-1 py-0.5 text-xs">
-                <option value="" disabled selected>Proposal merit</option>
+            <label for="add-score" class="block text-xs font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+            <select id="add-score" name="score" required class="border rounded px-1 py-0.5 text-xs">
+                <option value="" disabled selected>&mdash;</option>
                 {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
             </select>
             <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
-            {{ dimension_score_rows(review_rubric, {}) }}
-            <textarea name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
-            <select name="feedback_mode" required class="border rounded px-1 py-0.5 text-xs">
-                <option value="" disabled selected>Mode</option>
+            {{ dimension_score_rows(review_rubric, {}, 'add-') }}
+            <label for="add-comment" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Comment</label>
+            <textarea id="add-comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
+            <label for="add-mode" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+            <select id="add-mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-xs">
+                <option value="" disabled selected>&mdash;</option>
                 <option value="learn">Learn</option>
                 <option value="log_only">Don't learn — log only</option>
             </select>
@@ -789,7 +795,8 @@
         {% if can_write and effective_user.is_staff and not impersonation_banner %}
         <form method="post" action="/reviews/assessments/{{ a.id }}/assign" class="mt-2 flex items-center gap-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-            <select name="assignee_user_id" class="border rounded px-1 py-0.5 text-xs">
+            <label for="assign-user" class="text-xs text-gray-700">Assign reviewer</label>
+            <select id="assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-xs">
                 {% for u in review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
             </select>
             <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>

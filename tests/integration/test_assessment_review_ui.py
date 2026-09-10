@@ -16,6 +16,7 @@ service promises would not actually be exercised.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -130,7 +131,7 @@ async def test_card_explains_the_score_rates_the_proposal(client, db_session, ad
     assert resp.status_code == 200
     html = resp.text
     assert "rate the proposal" in html.lower()
-    assert "Proposal merit" in html
+    assert "Overall rating" in html
 
 
 async def test_comment_is_escaped_not_rendered(client, db_session, admin, reviewer):
@@ -504,3 +505,24 @@ async def test_the_form_renders_for_a_reviewer_on_the_manager_surface(
     ).text
     assert f'name="dim_{first.key}"' in html
     assert "review-rubric-instructions" in html
+
+async def test_every_select_on_the_detail_page_has_an_external_label(
+    client, db_session, manager
+):
+    assessment = await _seed_assessment(db_session)
+    html = (
+        await client.get(
+            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        )
+    ).text
+    assert "Proposal merit" not in html
+    assert "Overall rating (1 = weak … 5 = strong)" in html
+    select_ids = re.findall(r'<select[^>]*\bid="([^"]+)"', html)
+    selects_total = len(re.findall(r"<select\b", html))
+    assert selects_total == len(select_ids), "every <select> must carry an id"
+    for sid in select_ids:
+        assert f'for="{sid}"' in html, f"no <label for> for select #{sid}"
+    # The score select keeps a blank first option so an untouched form cannot
+    # post score=1 (reviews.py declares score: int = Form(...)).
+    m = re.search(r'<select[^>]*id="add-score"[^>]*>\s*<option value=""', html)
+    assert m, "score select lost its blank first option"

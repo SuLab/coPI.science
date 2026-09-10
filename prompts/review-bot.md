@@ -15,20 +15,20 @@ something to work around.
 
 - **FEEDBACK** — one or more human reviewer notes about this specific assessment, as a
   JSON list: a numeric `score` (1–5), a `feedback_mode` (always `learn` — rows a reviewer marked
-  `log_only` are never shown to you), and a free-text `comment`. **The score rates the
-  PROPOSAL's own scientific and strategic merit on the same 1–5 scale the rubric uses —
-  it does not grade the assessment or the verdict.** The `comment` is the reviewer's
-  critique and is your primary, actionable signal for what to change. Treat a large gap
-  between the reviewer's proposal-merit score and the assessment's own `weighted_score` /
-  `band` (see ASSESSMENT) as a calibration signal: when the comment corroborates it, that
-  gap is legitimate grounds for a `rubric` or `scout_hub` suggestion. A gap with no
-  corroborating comment is not, on its own, a fixable defect — say so and stay
+  `log_only` are never shown to you), and a free-text `comment`. **The score is an overall
+  rating of the PROPOSAL's own scientific and strategic quality (what human reviewers call
+  its merit) on the rubric's 1–5 scale — it does not grade the assessment or the verdict.**
+  The `comment` is the reviewer's critique and is your primary, actionable signal for what
+  to change. Treat a large gap between the reviewer's overall rating and the assessment's
+  own `weighted_score` / `band` (see ASSESSMENT) as a calibration signal: when the comment
+  corroborates it, that gap is legitimate grounds for a `rubric` or `scout_hub` suggestion.
+  A gap with no corroborating comment is not, on its own, a fixable defect — say so and stay
   `out_of_scope`. Ground your suggestion in what the feedback actually says, never in a
   generic sense that the prompt could be better. A note may also carry `dimension_scores`,
   an optional sparse map of rubric-dimension key to the reviewer's own 1–5 score for that
   one dimension, given against the rubric revision named on the row. It is not a separate
   measurement from `score` — it is the same human's same read of the PROPOSAL, broken out
-  per dimension, so read it with the same care: it rates the proposal's merit on each named
+  per dimension, so read it with the same care: it rates the proposal's quality on each named
   dimension, never the assessment's own per-dimension rubric scores.
 
 - **ASSESSMENT** — the stored verdict: recommendation, band, gating status, red flags,

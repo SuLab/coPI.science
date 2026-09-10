@@ -55,7 +55,7 @@ from src.database import Base
 
 
 class AssessmentReview(Base):
-    """One human reviewer's rating of a proposal's merit (1–5) plus a free-text
+    """One human reviewer's overall rating of a proposal (1–5) plus a free-text
     comment, attached to one BlackbirdBot assessment. The score rates the
     PROPOSAL, not the bot's performance; the comment is the actionable critique.
 
