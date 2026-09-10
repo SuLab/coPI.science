@@ -80,6 +80,17 @@ from src.services.llm import (
 logger = logging.getLogger(__name__)
 
 
+def _thread_phase_label(thread_phase: str) -> str:
+    """Map a ``thread_guidance`` phase constant to the ``llm_call_logs``
+    enum value (``explore`` / ``decide`` / ``conclude``).
+
+    ``EXPLORE``/``DECIDE`` lowercase directly; ``CONCLUDE``'s actual value is
+    ``"MUST CONCLUDE"`` (see thread_guidance.py), so it is special-cased
+    rather than blindly lowered.
+    """
+    return "conclude" if thread_phase == CONCLUDE else thread_phase.lower()
+
+
 def _was_truncated(stop_reasons: list[str]) -> bool:
     """Did the reply this turn is holding stop BEFORE the model finished it?
 
@@ -2312,6 +2323,14 @@ class SimulationEngine:
         thread_visibility = self._resolve_channel_visibility(thread.channel)
         thread_channel_id = self._channel_id_map.get(thread.channel)
 
+        # Same computation `build_phase4_prompt` makes internally (message
+        # count read BEFORE this reply exists, +1 for the reply's own
+        # ordinal) — recomputed here rather than threaded back out of that
+        # call, purely to stamp the llm_call_logs row below with what phase
+        # and ordinal this turn was composed under.
+        reply_message_ordinal = thread.message_count + 1
+        reply_thread_phase, _, _ = phase4_guidance(agent.role, reply_message_ordinal)
+
         # Build prompt
         system_prompt, messages = agent.build_phase4_prompt(
             thread=thread,
@@ -2473,6 +2492,8 @@ class SimulationEngine:
                     "phase": "thread_reply",
                     "channel": thread.channel,
                     "thread_ts": thread.thread_id,
+                    "thread_phase": _thread_phase_label(reply_thread_phase),
+                    "message_ordinal": reply_message_ordinal,
                 },
                 on_retry=agent.record_api_call,
                 # Was the reply the model handed back FINISHED? llm.py returns
@@ -8187,6 +8208,8 @@ class SimulationEngine:
             phase=entry.get("phase", "unknown"),
             channel=entry.get("channel"),
             thread_ts=entry.get("thread_ts"),
+            thread_phase=entry.get("thread_phase"),
+            message_ordinal=entry.get("message_ordinal"),
             model=entry.get("model", ""),
             system_prompt=entry.get("system_prompt", ""),
             messages_json=entry.get("messages", []),

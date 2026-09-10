@@ -17,6 +17,7 @@ from src.agent.specialists import (
     persona_path,
     read_state_for,
 )
+from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.services.blackbird_rubric import render_stage_bar_markdown
 from src.services.llm import generate_agent_response, is_truncated_stop
 from src.services.patents import PriorArtResult, search_prior_art
@@ -224,6 +225,20 @@ def tools_for_role(role: str) -> list[dict[str, Any]]:
     return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
 
 
+def _consult_thread_phase(role: str, thread_state: Any | None) -> str | None:
+    """The same ``phase4_guidance()`` computation ``_reply_to_thread`` makes
+    for its own ``llm_call_logs`` row (message_count + 1), recomputed here so
+    a consult made mid-turn stamps the same phase band as the reply that
+    triggered it. ``None`` for a direct caller with no ``thread_state`` —
+    same convention ``thread_ts`` uses immediately below.
+    """
+    message_count = getattr(thread_state, "message_count", None)
+    if message_count is None:
+        return None
+    phase, _, _ = phase4_guidance(role, message_count + 1)
+    return "conclude" if phase == CONCLUDE else phase.lower()
+
+
 async def execute_tool(
     tool_name: str,
     tool_input: dict[str, Any],
@@ -335,6 +350,7 @@ async def execute_tool(
                 # made during. `getattr` for the same direct-caller-with-no-
                 # thread reason.
                 thread_ts=getattr(thread_state, "thread_id", None),
+                thread_phase=_consult_thread_phase(role, thread_state),
                 on_consult=on_consult,
                 on_consult_record=on_consult_record,
                 on_api_call=on_api_call,
@@ -553,6 +569,7 @@ async def _execute_consult_specialist(
     agent_id: str,
     channel: str | None = None,
     thread_ts: str | None = None,
+    thread_phase: str | None = None,
     on_consult: Callable[[str, str], None] | None = None,
     on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
@@ -680,6 +697,7 @@ async def _execute_consult_specialist(
                 "phase": f"consult_{domain}",
                 "channel": channel,
                 "thread_ts": thread_ts,
+                "thread_phase": thread_phase,
             },
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.

@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0044"
+DEFAULT_TARGET = "0045"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -131,7 +131,7 @@ DEFAULT_TARGET = "0044"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041", "0042", "0043",
+    "0041", "0042", "0043", "0044",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -400,12 +400,15 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0044_review_recorded_by
     PlannedObject("0044", "column", "recorded_by_user_id", "assessment_reviews"),
     PlannedObject("0044", "column", "recorded_by_user_id", "assessment_review_events"),
+    # 0045_llm_call_logs_thread_phase
+    PlannedObject("0045", "column", "thread_phase", "llm_call_logs"),
+    PlannedObject("0045", "column", "message_ordinal", "llm_call_logs"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041", "0042", "0043", "0044",
+    "0040", "0041", "0042", "0043", "0044", "0045",
 )
 
 

@@ -94,3 +94,23 @@ async def test_channel_is_stamped_onto_the_callers_own_row_not_the_last_one(monk
         "the interloper's row (last in the buffer) must NOT be stamped with "
         "gill's channel — that is exactly the positional bug"
     )
+
+
+def test_llm_log_record_maps_thread_phase_and_ordinal():
+    """`_llm_log_record` (Task 10, migration 0045) must carry the producer's
+    `thread_phase`/`message_ordinal` log_meta keys onto the row.
+    """
+    eng = SimulationEngine(agents=[], slack_clients={})
+    row = eng._llm_log_record({
+        "agent_id": "hub", "phase": "thread_reply",
+        "thread_phase": "decide", "message_ordinal": 7,
+    })
+    assert row.thread_phase == "decide"
+    assert row.message_ordinal == 7
+
+
+def test_llm_log_record_defaults_thread_phase_and_ordinal_to_none():
+    eng = SimulationEngine(agents=[], slack_clients={})
+    row = eng._llm_log_record({"agent_id": "hub", "phase": "thread_reply"})
+    assert row.thread_phase is None
+    assert row.message_ordinal is None

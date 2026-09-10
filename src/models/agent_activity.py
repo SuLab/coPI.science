@@ -202,6 +202,12 @@ class LlmCallLog(Base):
     #: backfilled: pre-0042 rows cannot be attributed retroactively, and
     #: cost-per-interview treats NULL as "unattributed". Added 0042.
     thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    #: Phase-4 interview stage of a thread_reply/consult turn (explore|decide|
+    #: conclude) and the reply's ordinal in the thread, stamped by the producer
+    #: from the same phase4_guidance() call that built the prompt. NULL on
+    #: every pre-0045 row and on new_post/memory turns — never backfilled.
+    thread_phase: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    message_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     messages_json: Mapped[dict] = mapped_column(JSON, nullable=False)
