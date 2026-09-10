@@ -32,92 +32,36 @@ from src.agent.retry_after import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
-# Per-worker-thread shutdown signal (K-2 follow-up #3, opus review, audit
-# 2026-09-10).
+# Process-wide shutdown signal (O-1, audit 2026-09-10, replacing the
+# per-pool/thread-local/pending-flag machinery that regressed in three
+# consecutive review rounds -- K-2, M-2, N-2).
 #
-# A single SHARED Event cannot distinguish "THIS pool is shutting down" from
-# "a brand-new pool was just created" — src.services.slack_executor's K-9 fix
-# lazily re-creates the pool after a shutdown and, to keep the new pool's
-# retries from aborting instantly, has to clear the abort signal at that
-# point. If the signal were one shared Event, clearing it would ALSO silence
-# the abort for a worker thread from the OLD pool that is still sleeping
-# through a backoff right now — defeating K-2 entirely for exactly the
-# thread it exists to interrupt.
-#
-# Each pool gets its OWN `threading.Event`, created by
-# `slack_executor._get_executor()`. Every worker thread in that pool binds
-# it to this thread-local the moment it starts, via the pool's
-# `initializer=bind_shutdown_event` — so a call running on that thread always
-# checks the event for the SPECIFIC pool it belongs to, never whatever pool
-# happens to be "current" by the time the check runs. `shutdown_slack_executor()`
-# sets that specific pool's event and drops the pool; a subsequent
-# `_get_executor()` call creates both a fresh pool AND a fresh, unset event
-# for it, so the old pool's bound event (still referenced by its own
-# worker threads' thread-locals) stays exactly as it was set.
-_shutdown_local = threading.local()
+# One threading.Event, shared by every caller regardless of which thread or
+# pool it runs on. It is STICKY for the lifetime of the process: nothing in
+# src/ ever clears it once set, because a process that received SIGTERM or
+# ran its lifespan/worker shutdown is exiting anyway -- there is no "shut
+# down without exiting" case to accommodate in production. _get_executor()
+# creating a fresh pool after a shutdown does NOT touch this event; a call
+# queued on that fresh pool aborts immediately via _sleep_interruptibly, same
+# as any other post-shutdown caller. Tests that share one interpreter across
+# multiple independent lifespans/pools clear it themselves in a fixture.
+SHUTDOWN_REQUESTED = threading.Event()
 
-# Fallback event for any caller whose thread was never bound via
-# `bind_shutdown_event` — the main thread, a plain `threading.Thread` a test
-# spins up directly (as most of this file's own K-2 tests do), or any future
-# caller of `_call_with_retry` outside `run_slack_call`'s pool. Kept named
-# `SHUTTING_DOWN` for backward compatibility with every test that
-# imports/sets/clears it directly against exactly that kind of caller.
-SHUTTING_DOWN = threading.Event()
-
-
-def bind_shutdown_event(event: threading.Event) -> None:
-    """Bind ``event`` as the CURRENT THREAD's shutdown signal.
-
-    Passed as a ``ThreadPoolExecutor(initializer=...)`` so it runs once, at
-    the start of every worker thread in one specific pool — after this,
-    every call that thread ever runs checks THIS pool's event via
-    ``_current_shutdown_event()``, regardless of what pool is "current"
-    module-wide by the time the check happens.
-    """
-    _shutdown_local.event = event
-
-
-def _current_shutdown_event() -> threading.Event:
-    """The shutdown signal for whichever pool (if any) owns this thread."""
-    return getattr(_shutdown_local, "event", SHUTTING_DOWN)
+# Backward-compatible alias -- existing call sites/tests may still refer to
+# this name.
+SHUTTING_DOWN = SHUTDOWN_REQUESTED
 
 
 def signal_shutdown() -> None:
-    """Set the fallback shutdown event (L-1, opus review, audit 2026-09-10).
+    """Set the process-wide shutdown event.
 
-    Per-pool events (bound via ``bind_shutdown_event``) only cover calls made
-    on a ``slack_executor`` worker thread. A caller that runs
-    ``AgentSlackClient`` directly on its own thread instead — most
-    concretely the agent-run process, where ``src/agent/main.py`` and
-    ``src/agent/simulation.py`` call it straight from the event-loop
-    coroutine, never through ``run_slack_call`` — is bound to
-    ``SHUTTING_DOWN`` by ``_current_shutdown_event``'s fallback and has no
-    other way to abort a retry sleep at shutdown. Both
-    ``shutdown_slack_executor()`` (for the pool-based case) and the
-    agent-run process's own SIGTERM/SIGINT handler (for this fallback case)
-    call this.
+    Called by ``shutdown_slack_executor()`` (FastAPI lifespan / worker
+    shutdown) and directly by the agent-run process's own SIGTERM/SIGINT
+    handler (``src/agent/main.py``), which never goes through the pool at
+    all. Idempotent; safe to call more than once. Nothing in ``src/`` ever
+    clears this once set -- it is sticky for the rest of the process's life.
     """
-    SHUTTING_DOWN.set()
-
-
-def clear_shutdown() -> None:
-    """Clear the fallback shutdown event (M-2, opus review, audit 2026-09-10).
-
-    ``SHUTTING_DOWN`` is never cleared anywhere in ``src/`` once
-    ``signal_shutdown()`` sets it -- only tests reach in and clear it
-    directly. In a process that shuts the Slack pool down and later
-    lazily re-creates it (K-9's "shut down without exiting" case, e.g. a test
-    process sharing one interpreter across many independent lifespans),
-    every subsequent off-pool caller (the main thread, or any thread never
-    bound to a pool via ``bind_shutdown_event``) is bound to this fallback by
-    ``_current_shutdown_event`` and would find it permanently SET, aborting
-    its very first retry sleep instantly forever after. ``_get_executor``
-    calls this whenever it creates a fresh pool, mirroring K-9's own
-    "re-creation means we are live again" signal for the per-pool event --
-    safe for any OLD pool's still-sleeping worker thread, which is bound to
-    its OWN event via the thread-local, never to this fallback.
-    """
-    SHUTTING_DOWN.clear()
+    SHUTDOWN_REQUESTED.set()
 
 
 class SlackShuttingDown(SlackApiError):
@@ -143,18 +87,16 @@ class SlackShuttingDown(SlackApiError):
 
 
 def _sleep_interruptibly(seconds: float) -> None:
-    """Sleep for ``seconds``, in <=1s slices, aborting early if this thread's
-    pool is shutting down.
+    """Sleep for ``seconds``, in <=1s slices, aborting early on shutdown.
 
-    Raises ``SlackShuttingDown`` the moment this thread's shutdown event (see
-    ``_current_shutdown_event``) is set, rather than finishing out the sleep,
-    so a worker thread mid-backoff does not hold up interpreter exit for
-    however much of the Retry-After it has left.
+    Raises ``SlackShuttingDown`` the moment ``SHUTDOWN_REQUESTED`` is set,
+    rather than finishing out the sleep, so a thread mid-backoff (whether on
+    a ``slack_executor`` worker or the caller's own thread) does not hold up
+    interpreter exit for however much of the Retry-After it has left.
     """
-    event = _current_shutdown_event()
     remaining = seconds
     while remaining > 0:
-        if event.is_set():
+        if SHUTDOWN_REQUESTED.is_set():
             raise SlackShuttingDown()
         slice_s = min(1.0, remaining)
         time.sleep(slice_s)

@@ -16,6 +16,14 @@ same as before.
 this can be pinned without a full DB session factory / agent roster (see
 ``test_agent_main_shutdown.py``'s docstring for why standing that up here
 would be out of proportion).
+
+O-1 (audit 2026-09-10): the handler now calls
+``slack_client.signal_shutdown()`` directly (not
+``shutdown_slack_executor()`` -- the agent-run process does not own that
+pool's lifecycle). There is a single process-wide
+``slack_client.SHUTDOWN_REQUESTED`` event shared by every caller regardless
+of thread/pool, so a `run_slack_call`-bound sleeper aborts the same way a
+main-thread one does.
 """
 
 import asyncio
@@ -26,22 +34,15 @@ from types import SimpleNamespace
 import pytest
 
 from src.agent import main as _main_module
-from src.agent.slack_client import SHUTTING_DOWN, SlackShuttingDown, _sleep_interruptibly
-from src.services.slack_executor import run_slack_call, shutdown_slack_executor
+from src.agent.slack_client import SHUTDOWN_REQUESTED, SlackShuttingDown, _sleep_interruptibly
+from src.services.slack_executor import run_slack_call
 
 
 @pytest.fixture(autouse=True)
-def _clear_shutting_down():
-    SHUTTING_DOWN.clear()
+def _clear_shutdown_requested():
+    SHUTDOWN_REQUESTED.clear()
     yield
-    # N-1 (opus review, audit 2026-09-10): tests below make _make_shutdown_handler
-    # call the REAL shutdown_slack_executor(), which shuts down the process-wide
-    # Slack I/O pool singleton. Re-run it at teardown too (idempotent, safe with
-    # no pool created) so a test that fails before reaching its own cleanup does
-    # not leave the singleton's threads dangling for a later test.
-    shutdown_slack_executor()
-    SHUTTING_DOWN.clear()
-    SHUTTING_DOWN.clear()
+    SHUTDOWN_REQUESTED.clear()
 
 
 async def test_a_single_signal_does_not_abort_a_sleep_shorter_than_the_grace_period(monkeypatch):
@@ -105,16 +106,13 @@ def test_shutdown_slack_abort_grace_seconds_is_documented_under_the_stop_grace()
 
 
 async def test_a_pool_bound_slack_call_aborts_promptly_after_the_second_signal():
-    """N-1 (opus review, audit 2026-09-10): after M-8, this process's hottest
-    per-tick Slack calls (_post_message, the channel/DM/proposal-thread
-    pollers) run through src.services.slack_executor's dedicated pool, not
-    directly on this event-loop thread. Before this fix, the shutdown handler
-    only ever called slack_client.signal_shutdown() (the module-level
-    fallback), which a pool-bound sleeper is NOT bound to -- it would sleep
-    out its full Retry-After budget (up to 180s) regardless of shutdown,
-    forcing `docker stop -t 30` to SIGKILL the process. The handler must call
-    shutdown_slack_executor() instead, which sets both the pool's own event
-    and the fallback.
+    """After M-8, this process's hottest per-tick Slack calls (_post_message,
+    the channel/DM/proposal-thread pollers) run through
+    src.services.slack_executor's dedicated pool, not directly on this
+    event-loop thread. O-1 (audit 2026-09-10): there is a single process-wide
+    shutdown event shared by every caller, so the handler's plain
+    `signal_shutdown()` call aborts a pool-bound sleeper just as promptly as
+    a main-thread one.
     """
     loop = asyncio.get_running_loop()
     fake_engine = SimpleNamespace(request_stop=lambda: None)

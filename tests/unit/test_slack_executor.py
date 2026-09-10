@@ -1,6 +1,13 @@
 """``run_slack_call`` runs on its own bounded pool, isolated from every other
 ``asyncio.to_thread`` user in the process (audit 2026-09-10 R-2).
 
+O-1 (audit 2026-09-10): rewritten for the single process-wide
+``slack_client.SHUTDOWN_REQUESTED`` event, replacing the per-pool
+event/thread-local/pending-flag design (K-2/M-2/N-2) that regressed in three
+consecutive review rounds. There is now exactly one sticky shutdown signal;
+``shutdown_slack_executor()`` sets it and drops the pool reference (without
+cancelling queued work); ``_get_executor()`` never touches the event.
+
 Reuses the exception-identity pattern from
 ``tests/unit/test_private_channel_migration.py::TestSlackCallsRunOffTheEventLoop``:
 proving a call ran on a worker thread and that its exception propagated
@@ -10,11 +17,13 @@ from "looks async but isn't".
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 import src.services.slack_executor as slack_executor_module
+from src.agent.slack_client import SHUTDOWN_REQUESTED, SlackShuttingDown, _sleep_interruptibly
 from src.services.slack_executor import (
     SLACK_IO_MAX_WORKERS,
     _get_executor,
@@ -24,40 +33,23 @@ from src.services.slack_executor import (
 
 
 @pytest.fixture(autouse=True)
-def _shut_down_whatever_pool_this_test_leaves_behind(monkeypatch):
-    """Several tests in this file force a REAL pool into existence — either
-    the process-wide singleton (via `run_slack_call`/`_get_executor`) or a
-    throwaway ``fresh`` one substituted via ``monkeypatch.setattr`` — and a
-    ``ThreadPoolExecutor`` that is never ``.shutdown()``ed leaks up to
-    ``SLACK_IO_MAX_WORKERS`` (16) live, non-daemon worker threads (opus
-    review, audit 2026-09-10). Relying on ``monkeypatch``'s own teardown to
-    fix this does not work: it only restores the ``_SLACK_EXECUTOR``
-    *attribute* to its pre-test value, which does nothing to the actual pool
-    object the test created and orphans its threads.
+def _reset_shutdown_state():
+    """Several tests in this file force a REAL pool into existence or set the
+    process-wide shutdown event — reset both so tests stay order-independent
+    within this file and do not leak state into other test files sharing the
+    same pytest process.
 
-    Requesting ``monkeypatch`` as a dependency (even though this fixture does
-    not call it) makes pytest set it up before this fixture, so at teardown
-    this fixture's ``yield`` resumes BEFORE monkeypatch reverts
-    ``_SLACK_EXECUTOR`` — this shuts down whatever pool the test actually
-    left assigned there, not whatever it was before the test ran.
+    A ``ThreadPoolExecutor`` that is never ``.shutdown()``ed leaks up to
+    ``SLACK_IO_MAX_WORKERS`` (16) live, non-daemon worker threads, so this
+    also shuts down whatever pool a test leaves assigned to the module
+    global (real or a throwaway substituted via ``monkeypatch``).
     """
     yield
     shutdown_slack_executor()
-    # L-1 (opus review, audit 2026-09-10): shutdown_slack_executor() now also
-    # sets slack_client.SHUTTING_DOWN, the fallback event — every test in
-    # this file calls it at least once (directly or via this fixture), so
-    # without clearing it back here it leaks SET into every OTHER test file
-    # in the same pytest process, aborting their retry sleeps instantly.
-    from src.agent.slack_client import SHUTTING_DOWN
-
-    SHUTTING_DOWN.clear()
+    SHUTDOWN_REQUESTED.clear()
 
 
 def test_the_slack_pool_is_a_bounded_dedicated_executor():
-    # K-9 (audit 2026-09-10): the pool is now created lazily (see
-    # `_get_executor`'s docstring/module docstring), so `_SLACK_EXECUTOR`
-    # itself may be `None` at import time — force creation the same way
-    # `run_slack_call` does before asserting on its shape.
     pool = _get_executor()
     assert isinstance(pool, ThreadPoolExecutor)
     assert pool._max_workers == SLACK_IO_MAX_WORKERS
@@ -110,7 +102,7 @@ async def test_an_exception_from_the_call_propagates_unchanged():
     assert exc_info.value is marker
 
 
-# --- shutdown (opus review follow-up, audit 2026-09-10) ---------------------------
+# --- shutdown (O-1, audit 2026-09-10) ---------------------------------------
 #
 # `_SLACK_EXECUTOR` is a process-wide singleton, so these tests substitute a
 # throwaway executor via monkeypatch rather than shutting down the real one out
@@ -124,31 +116,19 @@ def test_shutdown_slack_executor_shuts_down_without_waiting(monkeypatch):
     assert fresh._shutdown, "shutdown_slack_executor() must actually shut the pool down"
 
 
-def test_shutdown_slack_executor_sets_the_current_pools_shutdown_event(monkeypatch):
-    """K-2 follow-up #3 (opus review, audit 2026-09-10): the abort signal is
-    per-pool, not one shared `slack_client.SHUTTING_DOWN` — signals the
-    CURRENT pool's own event before shutting the pool down, so an in-flight
-    retry sleep bound to that event can abort rather than block interpreter
-    exit."""
-    import threading as threading_module
-
+def test_shutdown_slack_executor_sets_the_shared_shutdown_event(monkeypatch):
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
-    event = threading_module.Event()
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
-    monkeypatch.setattr(slack_executor_module, "_CURRENT_SHUTDOWN_EVENT", event)
-    assert not event.is_set()
+    assert not SHUTDOWN_REQUESTED.is_set()
     shutdown_slack_executor()
-    assert event.is_set()
+    assert SHUTDOWN_REQUESTED.is_set()
 
 
 async def test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool(monkeypatch):
-    """K-9 (audit 2026-09-10): the old contract (see module docstring history)
-    had `run_slack_call` raise RuntimeError after a shutdown. That broke any
-    process sharing one interpreter across more than one lifespan — most
-    concretely the test suite, where an unrelated integration test's
-    `create_app()` ASGI lifespan shutdown permanently killed this singleton
-    for every later test in the same pytest process. `run_slack_call` must now
-    succeed on a freshly created pool instead."""
+    """K-9 (audit 2026-09-10): a shut-down pool is lazily replaced with a
+    fresh one on the next call rather than raising, so a process sharing one
+    interpreter across more than one lifespan (most concretely the test
+    suite) does not permanently kill this singleton for every later test."""
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
     shutdown_slack_executor()
@@ -161,140 +141,55 @@ async def test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool(monkeyp
     assert not new_pool._shutdown
 
 
-async def test_a_new_pools_calls_are_not_immediately_aborted(monkeypatch):
-    """K-9/K-2 interaction: a freshly created pool must start with an UNSET
-    event of its own, or every retry on the new pool would abort instantly —
-    this is exactly why the abort signal had to become per-pool (K-2 follow-up
-    #3) instead of one shared Event that shutdown set and re-creation cleared."""
+def test_a_new_pool_created_after_shutdown_does_not_clear_the_event(monkeypatch):
+    """O-1 requirement (b): the shutdown event is sticky for the process's
+    life — `_get_executor()` must not clear it just because it minted a
+    fresh pool."""
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
     shutdown_slack_executor()
+    assert SHUTDOWN_REQUESTED.is_set()
 
-    from src.agent.slack_client import _current_shutdown_event
+    new_pool = _get_executor()
 
-    def check_event():
-        return _current_shutdown_event().is_set()
-
-    assert await run_slack_call(check_event) is False
-
-
-def test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event(monkeypatch):
-    """L-1 (opus review, audit 2026-09-10): a caller that never went through
-    `run_slack_call`'s pool — e.g. `AgentSlackClient` calls made directly on
-    the agent-run process's event-loop thread (src/agent/main.py,
-    src/agent/simulation.py) — is bound to `slack_client.SHUTTING_DOWN`, the
-    module-level fallback, not to any per-pool event. Setting only the
-    current pool's own event on shutdown left that fallback caller with no
-    way to abort a retry sleep at process shutdown at all.
-    `shutdown_slack_executor()` must also flip the fallback so a
-    `_call_with_retry` sleeping on the main thread aborts promptly, with NO
-    monkeypatching of the event itself.
-    """
-    import time
-
-    from slack_sdk.errors import SlackApiError
-
-    from src.agent import slack_client as slack_client_module
-
-    slack_client_module.SHUTTING_DOWN.clear()
-    try:
-        fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
-        monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
-
-        outcome: dict = {}
-
-        def run():
-            try:
-                slack_client_module._sleep_interruptibly(30.0)
-            except Exception as exc:
-                outcome["exc"] = exc
-            else:
-                outcome["completed"] = True
-
-        # M-6 (opus review, audit 2026-09-10): daemon=True so a THIS test's
-        # own failure (the sleeper never aborting) cannot hold up interpreter
-        # exit for the rest of the 30s sleep -- a plain non-daemon thread
-        # would otherwise be joined by the interpreter's own atexit handling.
-        t = threading.Thread(target=run, daemon=True)
-        start = time.monotonic()
-        t.start()
-        time.sleep(0.05)  # let the main-thread-bound sleeper start
-
-        shutdown_slack_executor()
-
-        t.join(timeout=3.0)
-        elapsed = time.monotonic() - start
-
-        assert not t.is_alive(), "the main-thread sleeper did not abort promptly"
-        assert elapsed < 2.0, f"took {elapsed:.2f}s to abort"
-        assert isinstance(outcome.get("exc"), SlackApiError)
-    finally:
-        # M-6: re-set and fully join BEFORE clearing, rather than clearing
-        # unconditionally. If the assertions above already failed, `t` may
-        # still be alive and sleeping through `_sleep_interruptibly`'s
-        # <=1s-sliced checks of THIS event -- clearing it immediately would
-        # silence its only abort signal and leave it to sleep out the full
-        # 30s in the background instead of exiting promptly right here.
-        slack_client_module.SHUTTING_DOWN.set()
-        t.join(timeout=30.0)
-        slack_client_module.SHUTTING_DOWN.clear()
-
-
-async def test_get_executor_clears_the_fallback_event_when_it_creates_a_new_pool(monkeypatch):
-    """M-2 (opus review, audit 2026-09-10): SHUTTING_DOWN (the fallback event
-    for off-pool callers, e.g. AgentSlackClient calls made directly on
-    src/agent/main.py's event-loop thread) is never cleared anywhere in
-    src/ -- only tests reach in and clear it directly. In a process that
-    shuts the pool down and later lazily re-creates it without exiting the
-    interpreter (K-9), every later off-pool retry sleep would be bound to a
-    permanently-SET fallback and abort instantly forever after. `_get_executor`
-    must clear it when it mints a fresh pool.
-    """
-    from src.agent import slack_client as slack_client_module
-
-    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
-    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
-    shutdown_slack_executor()  # sets the fallback (L-1) as a side effect
-    assert slack_client_module.SHUTTING_DOWN.is_set()
-
-    # Force _get_executor() to mint a fresh pool (this is what run_slack_call
-    # does lazily on any call after a shutdown) BEFORE starting the sleeper --
-    # this test is about a sleeper that starts after re-creation, not one
-    # already mid-sleep across it (that scenario is covered separately below).
-    await run_slack_call(lambda: 1)
-    assert not slack_client_module.SHUTTING_DOWN.is_set()
-
-    outcome: dict = {}
-
-    def sleeper():
-        try:
-            slack_client_module._sleep_interruptibly(0.2)
-        except Exception as exc:
-            outcome["exc"] = exc
-        else:
-            outcome["completed"] = True
-
-    t = threading.Thread(target=sleeper, daemon=True)
-    t.start()
-    t.join(timeout=2.0)
-
-    assert outcome.get("completed") is True, (
-        "an off-pool sleeper started AFTER a new pool was created must not be "
-        f"aborted by the stale fallback event, got {outcome!r}"
+    assert new_pool is not fresh
+    assert SHUTDOWN_REQUESTED.is_set(), (
+        "_get_executor() must not clear the sticky shutdown event when it "
+        "creates a fresh pool"
     )
 
 
-async def test_an_old_pools_sleeper_still_aborts_after_a_new_pool_is_created():
-    """K-2 follow-up #3 (opus review, audit 2026-09-10): the abort signal must
-    be bound per pool, not shared. Reproduces the reviewer's exact scenario
-    against the real singleton pool: a call is mid-sleep on the CURRENT pool,
-    shutdown fires (setting that pool's own event), and a fresh pool is
-    created immediately afterward via `run_slack_call` — the OLD pool's
-    sleeper must still abort promptly. A single shared Event that shutdown set
-    and pool-recreation cleared would silently lose this thread's signal.
-    """
-    from src.agent.slack_client import SlackShuttingDown, _sleep_interruptibly
+async def test_queued_run_slack_call_is_not_cancelled_by_shutdown(monkeypatch):
+    """O-1 requirement (c): `shutdown_slack_executor()` must call
+    `pool.shutdown(wait=False, cancel_futures=False)` — a queued
+    `run_slack_call` still runs (and aborts quickly via the event) rather
+    than raising `CancelledError` into whatever awaits it."""
+    fresh = ThreadPoolExecutor(max_workers=1, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
 
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+
+    def blocker():
+        blocker_started.set()
+        release_blocker.wait(timeout=5.0)
+
+    # Occupy the pool's only worker so the second call is queued, not running.
+    blocker_future = fresh.submit(blocker)
+    blocker_started.wait(timeout=2.0)
+
+    queued_task = asyncio.ensure_future(run_slack_call(lambda: "ran"))
+    await asyncio.sleep(0.05)  # let the second call actually enqueue
+
+    shutdown_slack_executor()  # cancel_futures=False: must not drop the queued call
+    release_blocker.set()
+    blocker_future.result(timeout=2.0)
+
+    result = await asyncio.wait_for(queued_task, timeout=3.0)
+    assert result == "ran"
+
+
+async def test_a_sleeper_via_run_slack_call_aborts_within_a_second_of_shutdown():
     outcome: dict = {}
 
     def sleeper():
@@ -305,58 +200,46 @@ async def test_an_old_pools_sleeper_still_aborts_after_a_new_pool_is_created():
         else:
             outcome["completed"] = True
 
-    sleeper_task = asyncio.ensure_future(run_slack_call(sleeper))
+    task = asyncio.ensure_future(run_slack_call(sleeper))
     await asyncio.sleep(0.05)  # let the worker thread get into its first slice
 
-    shutdown_slack_executor()  # sets the OLD pool's event; drops the pool ref
-    await run_slack_call(lambda: 1)  # forces _get_executor() to mint a NEW pool + event
+    start = time.monotonic()
+    shutdown_slack_executor()
 
-    await asyncio.wait_for(sleeper_task, timeout=3.0)
+    await asyncio.wait_for(task, timeout=3.0)
+    elapsed = time.monotonic() - start
 
-    assert isinstance(outcome.get("exc"), SlackShuttingDown), (
-        f"the old pool's sleeper must still abort promptly, got {outcome!r}"
-    )
-
-
-async def test_get_executor_does_not_clear_a_fallback_set_directly_by_signal_shutdown(monkeypatch):
-    """N-2 (opus review, audit 2026-09-10): `_get_executor()` used to clear
-    the fallback (`slack_client.SHUTTING_DOWN`) unconditionally whenever it
-    lazily minted a fresh pool. That is correct immediately after
-    `shutdown_slack_executor()` itself set the fallback (M-2's case), but
-    wrong when some OTHER caller set it directly via `signal_shutdown()` --
-    a `run_slack_call` made afterwards (which always goes through
-    `_get_executor()`) would silently clear a REAL, currently-active
-    shutdown signal out from under that other caller, even though no pool
-    shutdown/re-create cycle happened at all.
-    """
-    from src.agent.slack_client import SHUTTING_DOWN, signal_shutdown
-
-    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", None)
-    monkeypatch.setattr(slack_executor_module, "_pool_shutdown_pending", False)
-    signal_shutdown()
-    assert SHUTTING_DOWN.is_set()
-
-    result = await run_slack_call(lambda: 1)
-
-    assert result == 1
-    assert SHUTTING_DOWN.is_set(), (
-        "a fallback set directly via signal_shutdown() must survive a lazy "
-        "pool creation that was not preceded by shutdown_slack_executor()"
-    )
+    assert isinstance(outcome.get("exc"), SlackShuttingDown)
+    assert elapsed < 2.0, f"took {elapsed:.2f}s to abort"
 
 
-async def test_get_executor_clears_the_fallback_only_after_shutdown_slack_executor(monkeypatch):
-    """N-2 counterpart: the clear DOES still happen, but only when
-    `_pool_shutdown_pending` was set by `shutdown_slack_executor()` itself."""
-    from src.agent.slack_client import SHUTTING_DOWN
-
+def test_a_main_thread_sleeper_aborts_within_a_second_of_shutdown(monkeypatch):
+    """A caller running `AgentSlackClient` directly on its own thread (never
+    through `run_slack_call`'s pool) is bound to the same shared event and
+    must abort just as promptly."""
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
-    shutdown_slack_executor()  # sets the fallback AND _pool_shutdown_pending
-    assert SHUTTING_DOWN.is_set()
-    assert slack_executor_module._pool_shutdown_pending is True
 
-    await run_slack_call(lambda: 1)
+    outcome: dict = {}
 
-    assert not SHUTTING_DOWN.is_set()
-    assert slack_executor_module._pool_shutdown_pending is False
+    def run():
+        try:
+            _sleep_interruptibly(30.0)
+        except Exception as exc:
+            outcome["exc"] = exc
+        else:
+            outcome["completed"] = True
+
+    t = threading.Thread(target=run, daemon=True)
+    start = time.monotonic()
+    t.start()
+    time.sleep(0.05)  # let the sleeper start
+
+    shutdown_slack_executor()
+
+    t.join(timeout=3.0)
+    elapsed = time.monotonic() - start
+
+    assert not t.is_alive(), "the main-thread sleeper did not abort promptly"
+    assert elapsed < 2.0, f"took {elapsed:.2f}s to abort"
+    assert isinstance(outcome.get("exc"), SlackShuttingDown)

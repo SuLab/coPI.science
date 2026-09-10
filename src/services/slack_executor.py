@@ -15,43 +15,20 @@ process. Use it everywhere a synchronous Slack Web API call (through
 ``AgentSlackClient`` or the ``slack_web``/``slack_provisioning`` httpx helpers)
 is moved off the event loop; leave non-Slack ``to_thread`` call sites alone.
 
-**Shutdown (opus review follow-up, audit 2026-09-10).** A bare module-level
-``ThreadPoolExecutor`` is never torn down on its own: the interpreter's default
-shutdown behaviour joins every non-daemon thread pool at exit, so a single
-in-flight Slack call blocked on a sustained throttle (up to
-``RATE_LIMIT_WAIT_BUDGET_SECONDS`` — 180s) can hold the whole process open past
-``docker stop -t 30``'s grace period, which then SIGKILLs it — losing whatever
-that thread was doing mid-flight rather than letting it finish or fail cleanly.
-``shutdown_slack_executor()`` sets the CURRENT pool's own shutdown event (a
-per-pool ``threading.Event``, not a single shared one — see the K-2 follow-up
-note below) and then calls ``.shutdown(wait=False, cancel_futures=True)``:
-queued-but-not-yet-started work is dropped immediately. ``wait=False`` on its
-own does NOT stop an already-running call — ``ThreadPoolExecutor`` worker
-threads are ordinary (non-daemon) threads, and the interpreter's own atexit
-machinery still joins them after this module's ``atexit`` backstop runs, so a
-thread genuinely still blocked would hold up exit regardless of what this
-function does (K-2, opus review, audit 2026-09-10, fixing an inaccurate claim
-in an earlier version of this docstring). What actually makes shutdown prompt
-is ``slack_client._call_with_retry`` sleeping a Retry-After backoff in <=1s
-slices and checking its bound shutdown event between slices, aborting with a
-``SlackApiError`` (``SlackShuttingDown``) as soon as it is set — so a call
-that is mid-throttle gives up within about a second. A call that is NOT
-currently sleeping on a throttle (e.g. blocked on the underlying HTTP request
-itself) is not interrupted by this at all; it still runs to completion or
-times out on its own.
-
-**Per-pool shutdown event (K-2 follow-up, opus review, audit 2026-09-10).** A
-single shared shutdown ``Event`` cannot survive a shutdown/re-create cycle
-(K-9, below) correctly: clearing it the moment a fresh pool is created — so
-that new pool's OWN retries do not abort instantly — would also silence the
-signal for an OLD pool's worker thread still sleeping through a backoff right
-now. Each pool generation gets its own ``threading.Event``
-(``_CURRENT_SHUTDOWN_EVENT``), bound into every worker thread's thread-local
-at thread start via ``ThreadPoolExecutor(initializer=bind_shutdown_event,
-initargs=(event,))``, so a call always checks the event for the SPECIFIC pool
-it is running on — a fresh pool's fresh event, or an old pool's already-set
-one — never whatever pool happens to be "current" module-wide by the time the
-check runs.
+**Shutdown (O-1, audit 2026-09-10 — replaces the per-pool
+event/thread-local/pending-flag design from K-2/M-2/N-2, which regressed in
+three consecutive review rounds).** ``shutdown_slack_executor()`` sets the
+single process-wide ``slack_client.SHUTDOWN_REQUESTED`` event (sticky for the
+rest of the process's life — see that module) and then calls
+``pool.shutdown(wait=False, cancel_futures=False)``: queued-but-not-yet-started
+work still runs (it is NOT dropped — a queued ``run_slack_call`` must
+execute and abort quickly via the event rather than raise ``CancelledError``
+into an in-flight turn), and an in-flight call already sleeping through a
+Retry-After backoff aborts within about a second because
+``slack_client._sleep_interruptibly`` checks the event between <=1s slices.
+A call that is NOT currently sleeping on a throttle (e.g. blocked on the
+underlying HTTP request itself) is not interrupted by this at all; it still
+runs to completion or times out on its own.
 
 Call this from every process's shutdown path: the FastAPI app's lifespan
 (``src/main.py``) and the worker's shutdown path (``src/worker/main.py``) call it
@@ -59,19 +36,22 @@ explicitly; ``atexit.register`` below is a backstop for anything that exits
 without running either (a crash path, a script that imports this module
 directly, etc.) so the pool is never the reason interpreter shutdown hangs.
 
-**Contract after shutdown (revised by K-9, audit 2026-09-10)**: ``run_slack_call``
-IS re-entrant across a shutdown — the pool is created lazily, so a call after
-``shutdown_slack_executor()`` transparently creates a fresh pool rather than
-raising. The pre-K-9 contract (raise ``RuntimeError``, never re-create) broke
-any process that shares one interpreter across more than one lifespan, most
-concretely the test suite: many unrelated integration tests spin up
-``create_app()``'s ASGI lifespan via ``httpx.ASGITransport`` for reasons that
-have nothing to do with Slack, and its shutdown path calls
-``shutdown_slack_executor()`` -- permanently killing the process-wide
-singleton for every OTHER test in the same pytest process. A real process's
-shutdown path (SIGTERM in main.py/worker/main.py) still exits the interpreter
-shortly after calling this, so the lazy re-create is mostly invisible there;
-it exists for exactly the shared-interpreter case above.
+**The agent-run process (src/agent/main.py) does NOT call this.** Its worker
+threads exit with the process once their sleeps become interruptible via the
+shared event; there is no separate pool lifecycle to tear down there. It
+calls ``slack_client.signal_shutdown()`` directly instead (with a grace
+delay on the first signal — see ``src/agent/main.py``).
+
+**Re-creation after shutdown.** ``_get_executor()`` lazily creates a fresh
+plain ``ThreadPoolExecutor`` when ``_SLACK_EXECUTOR`` is ``None`` — including
+right after a ``shutdown_slack_executor()`` call, so ``run_slack_call`` is
+re-entrant across a shutdown rather than raising. It does NOT touch
+``SHUTDOWN_REQUESTED`` in either direction: because that event is sticky for
+the process's life, a call queued on the fresh pool is expected to still
+abort immediately via ``_sleep_interruptibly``. This matters mainly for a
+test process sharing one interpreter across many independent
+lifespans/pools — real production shutdown paths exit the interpreter
+shortly after calling this anyway.
 
 **Sizing / queuing bound (opus review follow-up, audit 2026-09-10).** A single
 `private_channels.migrate_public_thread_to_private` call ("reopen a public
@@ -100,7 +80,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
-from src.agent.slack_client import bind_shutdown_event, clear_shutdown, signal_shutdown
+from src.agent.slack_client import signal_shutdown
 
 _T = TypeVar("_T")
 
@@ -112,74 +92,21 @@ _T = TypeVar("_T")
 # Slack-specific incident rather than a process-wide one.
 SLACK_IO_MAX_WORKERS = 16
 
-# K-9 (audit 2026-09-10): the pool used to be created once at import time and
-# never re-created. `shutdown_slack_executor()` is called from every
-# lifespan/worker shutdown path (src/main.py, src/worker/main.py) AND from
-# this module's own atexit backstop, so any test process that spins up
-# `create_app()`'s ASGI lifespan even once (most of the httpx-ASGITransport
-# integration tests do, incidentally, for reasons unrelated to Slack)
-# permanently shut this singleton down for the rest of that interpreter --
-# every later `run_slack_call` anywhere else in the same pytest process then
-# raised "cannot schedule new futures after shutdown", regardless of whether
-# THAT test ever touched shutdown itself. `_SLACK_EXECUTOR` now starts (and
-# becomes, after a shutdown) `None`; `_get_executor()` lazily creates a fresh
-# pool on demand, guarded by `_POOL_LOCK` so two concurrent callers cannot
-# each create and orphan one.
-#
-# K-2 follow-up #3 (opus review, audit 2026-09-10): a shared shutdown Event
-# cannot survive a shutdown/re-create cycle correctly -- clearing it the
-# moment a new pool is created (so the NEW pool's retries do not abort
-# instantly) would also silence the abort signal for an OLD pool's worker
-# thread still sleeping through a backoff right now, defeating K-2 for
-# exactly the thread it exists to interrupt. `_CURRENT_SHUTDOWN_EVENT` is a
-# fresh `threading.Event` per pool generation, bound into each worker
-# thread's thread-local via `initializer=bind_shutdown_event` at thread
-# start (see slack_client.py) -- so a call keeps checking the event for the
-# SPECIFIC pool it started on, regardless of what "current" means by the
-# time the check runs.
+# The pool starts (and becomes, after a shutdown) `None`; `_get_executor()`
+# lazily creates a fresh one on demand, guarded by `_POOL_LOCK` so two
+# concurrent callers cannot each create and orphan one. See the module
+# docstring's "Re-creation after shutdown" for why this does not touch the
+# shutdown event in either direction.
 _POOL_LOCK = threading.Lock()
 _SLACK_EXECUTOR: ThreadPoolExecutor | None = None
-_CURRENT_SHUTDOWN_EVENT: threading.Event | None = None
-
-# N-2 (opus review, audit 2026-09-10): set ONLY by `shutdown_slack_executor()`,
-# never by a bare `slack_client.signal_shutdown()` call made directly by some
-# other caller. `_get_executor()` used to clear the fallback unconditionally
-# whenever it lazily minted a fresh pool -- which is correct for "a pool
-# shutdown/re-create cycle just happened" (M-2's case) but wrong for "someone
-# set the fallback directly and a Slack call that never goes through this
-# pool at all is relying on it staying set" (e.g. a caller that signals
-# shutdown without ever calling `shutdown_slack_executor()`): a `run_slack_call`
-# made afterwards would silently clear a REAL, currently-active shutdown
-# signal out from under that other caller. Gating the clear on this flag
-# means it only ever fires immediately after `shutdown_slack_executor()`
-# itself set the fallback, which is exactly the case M-2 was fixing.
-_pool_shutdown_pending = False
 
 
 def _get_executor() -> ThreadPoolExecutor:
-    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT, _pool_shutdown_pending
+    global _SLACK_EXECUTOR
     with _POOL_LOCK:
         if _SLACK_EXECUTOR is None:
-            # M-2 (opus review, audit 2026-09-10): clear the fallback event
-            # (slack_client.SHUTTING_DOWN) whenever a fresh pool is minted
-            # AFTER a shutdown_slack_executor() call (N-2, audit 2026-09-10:
-            # gated on `_pool_shutdown_pending`, see its definition above, so
-            # a fallback set by some OTHER caller via signal_shutdown() alone
-            # is never cleared out from under it). Nothing else in src/ ever
-            # clears the fallback once shutdown_slack_executor() sets it, so
-            # an off-pool caller (e.g. AgentSlackClient calls made directly on
-            # src/agent/main.py's event-loop thread) would find it permanently
-            # SET after any shutdown/re-create cycle and abort its very next
-            # retry sleep instantly forever after. Safe for an OLD pool's
-            # still-sleeping worker thread: that thread is bound to its OWN
-            # per-pool event via the thread-local, never to this fallback.
-            if _pool_shutdown_pending:
-                _pool_shutdown_pending = False
-                clear_shutdown()
-            _CURRENT_SHUTDOWN_EVENT = threading.Event()
             _SLACK_EXECUTOR = ThreadPoolExecutor(
                 max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io",
-                initializer=bind_shutdown_event, initargs=(_CURRENT_SHUTDOWN_EVENT,),
             )
         return _SLACK_EXECUTOR
 
@@ -192,11 +119,11 @@ async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
     the result" behaviour, same exception propagation. The only difference is
     *which* thread pool it runs on.
 
-    Contract after a shutdown (K-9, audit 2026-09-10): this does NOT raise —
-    a shut-down pool is lazily replaced with a fresh one on the next call, the
-    same way a fresh ``asyncio.to_thread`` default executor would be. A
-    process's *real* shutdown path (SIGTERM handling in main.py/worker/main.py)
-    exits the interpreter shortly after calling ``shutdown_slack_executor()``
+    This does NOT raise after a shutdown — a shut-down pool is lazily
+    replaced with a fresh one on the next call, the same way a fresh
+    ``asyncio.to_thread`` default executor would be. A real process's
+    shutdown path (SIGTERM handling in main.py/worker/main.py) exits the
+    interpreter shortly after calling ``shutdown_slack_executor()``
     regardless, so this only matters for a long-lived process that shuts the
     pool down without exiting (or a test process sharing one interpreter
     across many independent lifespans).
@@ -209,63 +136,35 @@ async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
 def shutdown_slack_executor() -> None:
     """Shut the Slack I/O pool down without blocking on in-flight calls.
 
-    Sets the CURRENT pool's own shutdown event FIRST (K-2, opus review, audit
-    2026-09-10; made per-pool by a K-2 follow-up, same day):
-    ``_call_with_retry`` sleeps a Retry-After backoff in <=1s slices and
-    checks this thread's bound event between slices, so an in-flight call
+    Sets the process-wide ``slack_client.SHUTDOWN_REQUESTED`` event FIRST:
+    ``_call_with_retry``/``_sleep_interruptibly`` sleeps a Retry-After backoff
+    in <=1s slices and checks this event between slices, so an in-flight call
     that is mid-throttle aborts within about a second instead of finishing
     out whatever it had left of the (up to 180s) wait budget. This does NOT
     make an in-flight *HTTP request* interruptible — only the retry sleep —
     so a call that is not currently throttled still runs to completion; only
-    something already sleeping on a 429 is cut short. Setting THIS pool's own
-    event (rather than a single shared one) means a subsequent
-    ``_get_executor()`` call can safely start the next pool with a fresh,
-    unset event of its own — the old pool's worker threads keep whatever
-    event they were bound to at their own start, so this shutdown's signal
-    reaches them regardless of what pool is "current" by the time they next
-    check it.
+    something already sleeping on a 429 is cut short.
 
     ``wait=False``: does not block the caller (a FastAPI lifespan or the
-    worker's shutdown path) on however long an in-flight Slack call has left to
-    run. ``cancel_futures=True``: drops anything still queued (not yet
-    started) rather than starting it during shutdown.
+    worker's shutdown path) on however long an in-flight Slack call has left
+    to run. ``cancel_futures=False`` (deliberately NOT True): a
+    ``run_slack_call`` that is already queued but not yet started must still
+    run and abort quickly via the event, rather than raise
+    ``CancelledError`` into whatever in-flight turn is awaiting it.
 
-    K-9 (audit 2026-09-10): drops the reference to the now-shut-down pool
-    (setting the module global to ``None``) instead of leaving callers pointed
-    at a permanently-dead singleton — ``run_slack_call`` lazily creates a
-    fresh pool on its next invocation. Safe to call more than once
-    (``ThreadPoolExecutor.shutdown`` is idempotent; setting an already-set
-    ``Event`` is a no-op; shutting down with no pool currently created is a
-    no-op).
-
-    L-1 (opus review, audit 2026-09-10): also calls
-    ``slack_client.signal_shutdown()``, which sets the module-level fallback
-    event a caller bypassing this pool entirely (an ``AgentSlackClient`` call
-    made directly on its own thread) is bound to. Without this, that kind of
-    caller had no abort signal set anywhere in production, since nothing else
-    in this process calls it either.
+    Drops the reference to the now-shut-down pool (setting the module global
+    to ``None``) instead of leaving callers pointed at a permanently-dead
+    singleton — ``run_slack_call`` lazily creates a fresh pool on its next
+    invocation. Safe to call more than once (``ThreadPoolExecutor.shutdown``
+    is idempotent; setting an already-set ``Event`` is a no-op; shutting down
+    with no pool currently created is a no-op).
     """
-    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT, _pool_shutdown_pending
+    global _SLACK_EXECUTOR
+    signal_shutdown()
     with _POOL_LOCK:
         executor, _SLACK_EXECUTOR = _SLACK_EXECUTOR, None
-        event, _CURRENT_SHUTDOWN_EVENT = _CURRENT_SHUTDOWN_EVENT, None
-        # N-2 (opus review, audit 2026-09-10): mark that the fallback was set
-        # BY THIS FUNCTION, so `_get_executor()`'s next lazy pool creation
-        # knows it is safe (and correct, per M-2) to clear it -- as opposed to
-        # a fallback some other caller set directly via signal_shutdown(),
-        # which must survive a pool re-create untouched.
-        _pool_shutdown_pending = True
-    if event is not None:
-        event.set()
-    # L-1 (opus review, audit 2026-09-10): also set the module-level fallback
-    # (slack_client.SHUTTING_DOWN) that a caller running AgentSlackClient
-    # directly on its own thread — never through this pool — is bound to.
-    # Without this, shutting THIS pool down leaves such a caller (e.g. an
-    # ASGI lifespan's own thread, or anything else outside run_slack_call)
-    # with no abort signal at all.
-    signal_shutdown()
     if executor is not None:
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=False, cancel_futures=False)
 
 
 # Backstop for any exit path that does not run the FastAPI lifespan or the

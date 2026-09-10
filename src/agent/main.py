@@ -18,8 +18,8 @@ import typer
 from src.agent.agent import Agent
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
+from src.agent.slack_client import signal_shutdown
 from src.config import get_settings
-from src.services.slack_executor import shutdown_slack_executor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,22 +48,16 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
     DB session factory / agent roster / signal loop (see
     ``tests/unit/test_agent_main_shutdown_grace.py``).
 
-    N-1 (opus review, audit 2026-09-10): calls ``shutdown_slack_executor()``,
-    not just ``slack_client.signal_shutdown()``. After M-8
-    (audit 2026-09-10), this process's hottest per-tick Slack calls
-    (``_post_message``, the channel/DM/proposal-thread pollers) run through
-    ``src.services.slack_executor``'s dedicated thread pool, not directly on
-    this event-loop thread -- so they are bound to that pool's OWN shutdown
-    event, never to the module-level fallback ``signal_shutdown()`` alone
-    sets. Calling only ``signal_shutdown()`` here (the pre-N-1 behaviour) left
-    every one of those hot-path calls with no abort signal at all: an
-    in-flight one would sleep out its full Retry-After budget (up to
-    ``RATE_LIMIT_WAIT_BUDGET_SECONDS``, 180s) regardless of this handler,
-    comfortably outlasting the runbook's `docker stop -t 30` grace and
-    forcing a SIGKILL that loses whatever that thread was doing mid-flight.
-    ``shutdown_slack_executor()`` sets BOTH the current pool's own event and
-    the fallback (see its docstring), so a caller on either path aborts
-    promptly.
+    O-1 (audit 2026-09-10): calls ``slack_client.signal_shutdown()`` directly
+    rather than ``shutdown_slack_executor()``. There is now exactly one
+    process-wide shutdown event (``slack_client.SHUTDOWN_REQUESTED``), shared
+    by every caller regardless of which thread or pool it runs on --
+    ``signal_shutdown()`` sets it for everyone, including calls running
+    through ``src.services.slack_executor``'s pool. The agent-run process
+    does not own that pool's lifecycle (it never calls
+    ``shutdown_slack_executor()`` -- its worker threads simply exit with the
+    process once their sleeps become interruptible), so signalling the
+    shared event is all that is needed here.
 
     The first call only schedules the abort after
     ``SHUTDOWN_SLACK_ABORT_GRACE_SECONDS`` — request_stop() alone already stops
@@ -78,9 +72,9 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
         sim_engine.request_stop()
         state["signals_received"] += 1
         if state["signals_received"] == 1:
-            loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, shutdown_slack_executor)
+            loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)
         else:
-            shutdown_slack_executor()
+            signal_shutdown()
 
     return shutdown
 
@@ -324,23 +318,19 @@ async def _run_simulation(
     # mid-await, losing the in-flight turn's messages. It is awaited in the
     # finally-block below instead (R2).
     #
-    # L-1 (opus review, audit 2026-09-10): some of this process's
-    # AgentSlackClient calls (SimulationEngine's roster sync/reconnect paths)
-    # still run directly on this event-loop thread, never through
-    # src.services.slack_executor's pool — so they are bound to slack_client's
-    # fallback event, not any per-pool one. N-1 (audit 2026-09-10, fixing a
-    # now-false claim in an earlier version of this comment): after M-8
-    # (audit 2026-09-10), the hottest per-tick paths (_post_message, the
-    # channel/DM/proposal-thread pollers) DO run through that pool instead,
-    # which is why _make_shutdown_handler calls shutdown_slack_executor()
-    # (sets both the pool's own event and the fallback), not just
-    # slack_client.signal_shutdown(). request_stop() alone only stops the
-    # NEXT turn from starting; it does not abort a call already sleeping
-    # through a Slack Retry-After backoff. M-1 (audit 2026-09-10): the abort
-    # is now delayed by SHUTDOWN_SLACK_ABORT_GRACE_SECONDS on the first
-    # signal (see _make_shutdown_handler) instead of firing at t=0, so a
-    # typical ~10s backoff can finish naturally within docker stop -t 30's
-    # grace instead of being aborted and leaving that post DB-only.
+    # O-1 (audit 2026-09-10): there is one process-wide shutdown event
+    # (slack_client.SHUTDOWN_REQUESTED), shared by every AgentSlackClient
+    # call regardless of which thread or pool it runs on -- whether directly
+    # on this event-loop thread (SimulationEngine's roster sync/reconnect
+    # paths) or through src.services.slack_executor's pool (_post_message,
+    # the channel/DM/proposal-thread pollers, after M-8). _make_shutdown_handler
+    # calls slack_client.signal_shutdown() directly; request_stop() alone
+    # only stops the NEXT turn from starting, it does not abort a call
+    # already sleeping through a Slack Retry-After backoff. The abort is
+    # delayed by SHUTDOWN_SLACK_ABORT_GRACE_SECONDS on the first signal (see
+    # _make_shutdown_handler) instead of firing at t=0, so a typical ~10s
+    # backoff can finish naturally within docker stop -t 30's grace instead
+    # of being aborted and leaving that post DB-only.
     loop = asyncio.get_event_loop()
     shutdown = _make_shutdown_handler(loop, sim_engine)
 
