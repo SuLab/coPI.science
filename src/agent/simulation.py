@@ -270,6 +270,18 @@ LLM_LOG_REQUEUE_MAX_ROWS = 1000
 THREAD_DECISION_WRITE_MAX_ATTEMPTS = 3
 THREAD_DECISION_RETRY_BACKOFF_S = 0.2
 
+# N-6 (opus review, audit 2026-09-10): ceiling on `_pending_thread_decisions`
+# (mirrors LLM_LOG_REQUEUE_MAX_ROWS above) -- a DB outage long enough to
+# persistently fail every ThreadDecision write would otherwise buffer one
+# entry per closed thread in RAM indefinitely. Overflow drops the OLDEST
+# entries with one ERROR per overflowing append, same rationale as
+# LLM_LOG_REQUEUE_MAX_ROWS: a decision from long ago is both the least
+# actionable (its conversation is stale) and the one blocking a legitimate
+# recent PI review — see _persist_implicit_proposal_review /
+# TestDeferredImplicitProposalReview (N-5) for why a decision this drops can
+# also permanently lose an already-cleared PI engagement review.
+PENDING_THREAD_DECISIONS_MAX = 500
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -2051,7 +2063,9 @@ class SimulationEngine:
                 )
             return confirmed
 
-    async def _write_thread_decision_with_retry(self, payload: dict) -> uuid.UUID | None:
+    async def _write_thread_decision_with_retry(
+        self, payload: dict, *, max_attempts: int | None = None,
+    ) -> uuid.UUID | None:
         """Insert a ThreadDecision row, retrying transient failures in-call
         (M-7, opus review, audit 2026-09-10).
 
@@ -2081,10 +2095,23 @@ class SimulationEngine:
         no way to tell "did my last attempt already succeed?" from "it never
         ran". ``_insert_thread_decision_row``'s ``ON CONFLICT (id) DO NOTHING``
         + re-select makes a retry of an already-landed insert a no-op instead.
+
+        N-6 (opus review, audit 2026-09-10): ``max_attempts`` lets
+        ``_flush_pending_thread_decisions`` override
+        ``THREAD_DECISION_WRITE_MAX_ATTEMPTS`` down to a single attempt per
+        entry per tick. Without this, a DB outage spanning many queued
+        entries paid this method's full in-call retry budget (3 attempts,
+        each with a blocking backoff sleep) for EVERY entry, EVERY tick --
+        turning what should be one blocked tick into
+        `len(_pending_thread_decisions) * (THREAD_DECISION_WRITE_MAX_ATTEMPTS
+        - 1) * THREAD_DECISION_RETRY_BACKOFF_S` seconds of the main loop not
+        polling Slack, PI DMs, or anything else, an outage-proportional stall
+        entirely disjoint from the DB outage itself.
         """
         payload["id"] = payload.get("id") or uuid.uuid4()
+        attempts = THREAD_DECISION_WRITE_MAX_ATTEMPTS if max_attempts is None else max_attempts
         last_exc: Exception | None = None
-        for attempt in range(1, THREAD_DECISION_WRITE_MAX_ATTEMPTS + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 decision_id = await self._insert_thread_decision_row(payload)
                 if attempt > 1:
@@ -2092,21 +2119,46 @@ class SimulationEngine:
                         "[%s] ThreadDecision write for thread %s succeeded on "
                         "attempt %d/%d, after %r (%s)",
                         payload["agent_a"], payload["thread_id"], attempt,
-                        THREAD_DECISION_WRITE_MAX_ATTEMPTS, last_exc,
-                        type(last_exc).__name__,
+                        attempts, last_exc, type(last_exc).__name__,
                     )
                 return decision_id
             except Exception as exc:
                 last_exc = exc
-                if attempt < THREAD_DECISION_WRITE_MAX_ATTEMPTS:
+                if attempt < attempts:
                     await asyncio.sleep(THREAD_DECISION_RETRY_BACKOFF_S)
         logger.error(
             "[%s] Giving up writing ThreadDecision for thread %s after %d "
             "attempts: %r (%s) — queuing for retry on the next tick",
             payload["agent_a"], payload["thread_id"],
-            THREAD_DECISION_WRITE_MAX_ATTEMPTS, last_exc, type(last_exc).__name__,
+            attempts, last_exc, type(last_exc).__name__,
         )
         return None
+
+    def _enqueue_pending_thread_decision(self, payload: dict) -> None:
+        """Queue a ThreadDecision payload for retry, capped at
+        ``PENDING_THREAD_DECISIONS_MAX`` (N-6, opus review, audit 2026-09-10).
+
+        Mirrors ``LLM_LOG_REQUEUE_MAX_ROWS``'s drop-oldest-with-one-ERROR
+        pattern (see ``_flush_llm_call_logs``): a DB outage long enough to
+        persistently fail every ThreadDecision write would otherwise buffer
+        one entry per closed thread in RAM for as long as the outage lasts.
+        Drops the OLDEST entries on overflow -- an old decision's
+        conversation is the most stale, and (per N-5) an old queued entry can
+        also be the one blocking a legitimate, already-cleared PI engagement
+        review (`_deferred_implicit_reviews`) from ever being replayed.
+        """
+        self._pending_thread_decisions.append(payload)
+        overflow = len(self._pending_thread_decisions) - PENDING_THREAD_DECISIONS_MAX
+        if overflow > 0:
+            dropped = self._pending_thread_decisions[:overflow]
+            del self._pending_thread_decisions[:overflow]
+            logger.error(
+                "_pending_thread_decisions is over its %d-entry ceiling: "
+                "dropped the %d oldest queued ThreadDecision write(s), for "
+                "thread(s) %s",
+                PENDING_THREAD_DECISIONS_MAX, overflow,
+                [d["thread_id"] for d in dropped],
+            )
 
     async def _flush_pending_thread_decisions(self) -> None:
         """Retry any ThreadDecision rows queued by ``_close_thread`` after
@@ -2130,12 +2182,26 @@ class SimulationEngine:
         a real id exists — otherwise that engagement's review would be lost
         forever (`proposal.reviewed` is already `True`, so the caller's own
         guard never calls the persist again for this thread).
+
+        N-6 (opus review, audit 2026-09-10): each entry gets exactly ONE
+        attempt here (``max_attempts=1``), not
+        ``_close_thread``'s own ``THREAD_DECISION_WRITE_MAX_ATTEMPTS``-attempt
+        budget. This method already IS the retry mechanism, called again
+        every tick — paying a multi-attempt, multi-sleep budget for every
+        still-failing entry on every single tick would stall the main loop
+        (Slack polling, PI DMs, everything) for
+        ``len(_pending_thread_decisions) * (in-call attempts - 1) *
+        THREAD_DECISION_RETRY_BACKOFF_S`` seconds per tick during a
+        sustained outage, proportional to queue size on top of the outage
+        itself.
         """
         if not self._pending_thread_decisions:
             return
         still_pending = []
         for payload in self._pending_thread_decisions:
-            decision_id = await self._write_thread_decision_with_retry(payload)
+            decision_id = await self._write_thread_decision_with_retry(
+                payload, max_attempts=1,
+            )
             if decision_id is None:
                 still_pending.append(payload)
                 continue
@@ -2210,7 +2276,7 @@ class SimulationEngine:
             # `_flush_pending_thread_decisions()`.
             decision_id = await self._write_thread_decision_with_retry(payload)
             if decision_id is None:
-                self._pending_thread_decisions.append(payload)
+                self._enqueue_pending_thread_decision(payload)
 
         # Track for Phase 5 dedup context. Carries thread_id (missing before —
         # COR-7) so a future reader can tell two entries apart or dedup by it;

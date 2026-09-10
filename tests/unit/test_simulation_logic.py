@@ -1490,6 +1490,82 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
         assert second == next(iter(server_rows)) == payload["id"]
 
 
+class TestPendingThreadDecisionsCap:
+    """N-6 (opus review, audit 2026-09-10): _pending_thread_decisions must
+    not grow without bound during a sustained DB outage -- capped at
+    PENDING_THREAD_DECISIONS_MAX, dropping the OLDEST entries with one ERROR
+    per overflowing enqueue (mirrors LLM_LOG_REQUEUE_MAX_ROWS's pattern)."""
+
+    def test_enqueue_past_the_ceiling_drops_the_oldest_entries_and_logs_one_error(
+        self, caplog,
+    ):
+        import logging
+
+        from src.agent.simulation import PENDING_THREAD_DECISIONS_MAX
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        for i in range(PENDING_THREAD_DECISIONS_MAX):
+            engine._pending_thread_decisions.append({"thread_id": f"kept-{i}"})
+
+        with caplog.at_level(logging.ERROR):
+            engine._enqueue_pending_thread_decision({"thread_id": "overflow"})
+
+        assert len(engine._pending_thread_decisions) == PENDING_THREAD_DECISIONS_MAX
+        # The oldest entry (kept-0) was dropped, the newest (overflow) kept.
+        thread_ids = [p["thread_id"] for p in engine._pending_thread_decisions]
+        assert "kept-0" not in thread_ids
+        assert "overflow" in thread_ids
+        assert thread_ids[-1] == "overflow"
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+
+    def test_under_the_ceiling_nothing_is_dropped(self):
+        from src.agent.simulation import PENDING_THREAD_DECISIONS_MAX
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        for i in range(PENDING_THREAD_DECISIONS_MAX - 1):
+            engine._enqueue_pending_thread_decision({"thread_id": f"t-{i}"})
+
+        assert len(engine._pending_thread_decisions) == PENDING_THREAD_DECISIONS_MAX - 1
+
+
+class TestFlushSkipsInCallRetryBudget:
+    """N-6 (opus review, audit 2026-09-10): _flush_pending_thread_decisions
+    must give each entry exactly ONE attempt per tick -- it is itself the
+    retry mechanism (called again every tick), so paying the in-call
+    multi-attempt budget (with its blocking backoff sleeps) for every
+    still-failing entry on every tick would stall the whole main loop for
+    time proportional to queue size on top of the DB outage itself."""
+
+    @pytest.mark.asyncio
+    async def test_a_persistently_failing_entry_gets_one_attempt_not_the_in_call_budget(self):
+        from src.agent.simulation import THREAD_DECISION_WRITE_MAX_ATTEMPTS
+
+        calls = {"n": 0}
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._pending_thread_decisions.append({
+            "thread_id": "1.0", "channel": "general",
+            "agent_a": "a", "agent_b": "b",
+            "outcome": "no_proposal", "summary_text": None,
+        })
+
+        def _fake_factory():
+            calls["n"] += 1
+            raise RuntimeError("still down")
+
+        engine.session_factory = _fake_factory
+
+        await engine._flush_pending_thread_decisions()
+
+        assert calls["n"] == 1, (
+            f"expected exactly one attempt per tick, got {calls['n']} "
+            f"(THREAD_DECISION_WRITE_MAX_ATTEMPTS={THREAD_DECISION_WRITE_MAX_ATTEMPTS})"
+        )
+        assert len(engine._pending_thread_decisions) == 1
+
+
 # ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
