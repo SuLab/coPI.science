@@ -1793,6 +1793,7 @@ class TestTombstonedThreadIsNotResurrected:
         from src.agent.agent import Agent
 
         row = types.SimpleNamespace(
+            id=uuid.uuid4(),
             message_ts="500.000001", thread_ts=dead_ts, created_at=datetime.now(UTC),
             channel_name="general", agent_id=None, sender_name="PI su",
             content="please revisit the budget line", posted_at=500.000001,
@@ -1824,6 +1825,39 @@ class TestTombstonedThreadIsNotResurrected:
         engine._hydrate_thread_from_db.assert_not_awaited()
         engine._reopen_thread.assert_not_awaited()
         engine._update_agent_memory.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_tombstoned_row_is_only_stamped_handled_after_max_attempts(
+        self, monkeypatch,
+    ):
+        """REV3-2 (opus review, audit 2026-09-08): a tombstone must not stamp
+        HANDLED on the very first match — _dead_thread_ids is in-process only
+        and reset on restart, so a thread wrongly tombstoned by a TRANSIENT
+        ThreadNotFound must get a bounded number of retries (a restart before
+        the cap clears the tombstone entirely). Only past
+        PI_INBOUND_MAX_ATTEMPTS does it become terminal, same shape as
+        SEC2-1's handler-failure cap."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
+        dead_ts = "1776900000.000200"
+        engine = self._engine_with_pi_row_on_dead_thread(monkeypatch, dead_ts)
+        engine._mark_pi_inbound_row_handled = AsyncMock()
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS - 1):
+            await engine._poll_inbound_from_db()
+        engine._mark_pi_inbound_row_handled.assert_not_awaited()
+        assert engine.message_log.get_entry("500.000001") is None
+
+        await engine._poll_inbound_from_db()
+
+        engine._mark_pi_inbound_row_handled.assert_awaited_once()
+        assert engine._pi_inbound_attempts == {}, (
+            "the per-message_ts counter must be pruned once stamped terminal"
+        )
+        engine._hydrate_thread_from_db.assert_not_awaited()
+        engine._reopen_thread.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handle_pi_inbound_entry_returns_early_for_a_tombstoned_thread(self, monkeypatch):

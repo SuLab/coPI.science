@@ -1070,7 +1070,17 @@ async def test_a_failed_ingested_mark_skips_the_handler_and_retries_next_tick(
 # process it.
 # ---------------------------------------------------------------
 
-async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled(db_session):
+async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled_after_max_attempts(
+    db_session,
+):
+    """REV3-2 (opus review, audit 2026-09-08) tightened A4: the tombstone
+    branch must not stamp HANDLED on the very first match — _dead_thread_ids
+    is in-process only and reset on restart, so a thread wrongly tombstoned
+    by a TRANSIENT ThreadNotFound must get bounded retries, not be buried
+    permanently on one tick. It goes through the SEC2-1 attempt counter and
+    only becomes terminal past PI_INBOUND_MAX_ATTEMPTS."""
+    from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
     run = await factories.make_simulation_run(db_session)
     base = round(time.time(), 4)
     thread_ts = f"{base:.6f}"
@@ -1091,13 +1101,23 @@ async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled(db_sessi
 
     eng._handle_pi_inbound_entry = _handler
 
+    for _ in range(PI_INBOUND_MAX_ATTEMPTS - 1):
+        await eng._poll_inbound_from_db()
+        row = (await db_session.execute(
+            select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+        )).scalar_one()
+        assert row.pi_inbound_state == "pending", (
+            "a tombstoned row must get bounded retries before it is stamped "
+            "terminal, not be buried on the very first tick"
+        )
+
     await eng._poll_inbound_from_db()
 
     row = (await db_session.execute(
         select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
     )).scalar_one()
     assert row.pi_inbound_state == "handled", (
-        "a 'pending' row for a tombstoned thread must be stamped HANDLED so it "
+        "past PI_INBOUND_MAX_ATTEMPTS the row must be stamped HANDLED so it "
         "stops matching the cursor-independent recovery disjunct forever"
     )
 

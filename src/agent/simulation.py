@@ -3479,16 +3479,30 @@ class SimulationEngine:
                 # lookback window. Re-appending it (and, for a PI row, running
                 # _handle_pi_inbound_entry) would re-hydrate and reopen a
                 # thread whose Slack parent is gone — a resurrection loop. See
-                # COR-1c fix round 1 (C1). Nothing will ever process this row,
-                # so the cursor advances past it too.
+                # COR-1c fix round 1 (C1).
                 #
-                # A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row
-                # for a now-dead thread is otherwise re-selected via the
-                # cursor-independent disjunct forever, since nothing will ever
-                # process it — stamp HANDLED (terminal) to drop it out of that
-                # recovery query.
-                if not r.is_bot and state in (PI_INBOUND_PENDING, PI_INBOUND_INGESTED):
-                    await self._mark_pi_inbound_row_handled(r.id)
+                # REV3-2 (opus review, audit 2026-09-08): route through the
+                # SEC2-1 attempt counter rather than stamping HANDLED on the
+                # very first tombstone match. _dead_thread_ids is in-process
+                # only and reset on restart, so a thread wrongly tombstoned by
+                # a TRANSIENT ThreadNotFound must not be permanently buried —
+                # a restart before the cap is reached clears the tombstone and
+                # the row is processed normally on the next poll. Only past
+                # PI_INBOUND_MAX_ATTEMPTS is it stamped terminal (A4's
+                # original concern: otherwise a genuinely dead thread's row
+                # is re-selected via the cursor-independent 'pending'/
+                # 'ingested' disjunct forever).
+                if not r.is_bot:
+                    attempts = self._pi_inbound_attempts.get(r.message_ts, 0) + 1
+                    self._pi_inbound_attempts[r.message_ts] = attempts
+                    if attempts >= PI_INBOUND_MAX_ATTEMPTS:
+                        logger.error(
+                            "[%s] Giving up on message %s for a tombstoned "
+                            "thread after %d attempts",
+                            r.channel_name, r.message_ts, attempts,
+                        )
+                        await self._mark_pi_inbound_row_handled(r.id)
+                        self._pi_inbound_attempts.pop(r.message_ts, None)
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
                     self._pi_inbox_cursor = r.created_at
                 continue
