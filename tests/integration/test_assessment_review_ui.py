@@ -281,7 +281,7 @@ async def test_impersonating_admin_sees_write_forms_and_the_reviewing_as_notice(
     assert resp.status_code == 200
     html = resp.text
     assert "Human review" in html
-    assert 'action="/reviews/assessments/' in html
+    assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
     assert f"/reviews/assessments/{assessment.id}/assign" not in html
     assert "You are reviewing as" in html
 
@@ -442,6 +442,55 @@ async def test_a_stored_review_renders_its_dimension_scores(
     assert "review-dimension-list" in html
     # See the escaping note above: the title carries a literal "&".
     assert str(escape(first.title)) in html
+
+
+async def test_recorded_by_renders_the_impersonation_note_only_when_set(
+    client, db_session, admin, reviewer
+):
+    """A review written while impersonating (`recorded_by_user_id` set) shows
+    the "(entered by an admin while impersonating)" note beside the
+    reviewer's name; an ordinary review does not."""
+    assessment = await _seed_assessment(db_session)
+    db_session.add_all(
+        [
+            AssessmentReview(
+                assessment_id=assessment.id,
+                reviewer_user_id=reviewer.id,
+                reviewer_name=reviewer.name,
+                score=3,
+                comment="via impersonation",
+                feedback_mode="log_only",
+                dimension_scores={},
+                recorded_by_user_id=admin.id,
+                created_at=BASE_TIME,
+                updated_at=BASE_TIME,
+            ),
+            AssessmentReview(
+                assessment_id=assessment.id,
+                reviewer_user_id=admin.id,
+                reviewer_name=admin.name,
+                score=4,
+                comment="in person",
+                feedback_mode="log_only",
+                dimension_scores={},
+                created_at=BASE_TIME,
+                updated_at=BASE_TIME,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert html.count("(entered by an admin while impersonating)") == 1
+    rows = html.split("review-feedback-row")
+    impersonated_row = next(r for r in rows if reviewer.name in r)
+    in_person_row = next(r for r in rows if admin.name in r)
+    assert "(entered by an admin while impersonating)" in impersonated_row
+    assert "(entered by an admin while impersonating)" not in in_person_row
 
 
 async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(

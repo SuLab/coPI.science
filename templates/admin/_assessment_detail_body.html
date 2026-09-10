@@ -666,7 +666,7 @@
             <li class="review-feedback-row border border-gray-100 rounded-lg p-3">
                 <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
                     <span class="font-semibold text-gray-700">{{ review.reviewer_name }}</span>
-                    {% if review.recorded_by_user_id %}<span class="text-sm text-gray-600">(entered by an admin while impersonating)</span>{% endif %}
+                    {% if review.recorded_by_user_id %}<span class="text-xs text-gray-600">(entered by an admin while impersonating)</span>{% endif %}
                     <span class="font-medium text-gray-700">{{ review.score }}/5</span>
                     {% if review.feedback_mode == 'learn' %}
                         <span class="review-mode-chip px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">Learn</span>

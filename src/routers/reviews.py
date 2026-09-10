@@ -260,10 +260,12 @@ async def delete_review_feedback(
 ):
     review = await _load_review(db, feedback_id)
     assessment_id = review.assessment_id
+    recorder = _recorded_by(current_user)
     await db.delete(review)
     await db.commit()
     logger.info(
-        "Review feedback %s deleted by %s (%s)", feedback_id, current_user.name, current_user.id,
+        "Review feedback %s deleted by %s (%s) recorded_by=%s",
+        feedback_id, current_user.name, current_user.id, getattr(recorder, "id", None),
     )
     return _assessments_redirect(surface, current_user, assessment_id)
 

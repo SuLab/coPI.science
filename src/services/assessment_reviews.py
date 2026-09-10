@@ -239,7 +239,9 @@ async def edit_feedback(
     next analysis job even if the original had already been consumed.
 
     ``recorded_by`` is the real admin when this edit happened while
-    impersonating (F4, 2026-09-10) — same semantics as ``submit_feedback``.
+    impersonating (F4, 2026-09-10) — same semantics as ``submit_feedback``,
+    except it is only ever SET here, never cleared: it records the most
+    recent impersonated writer; never cleared by an in-person edit.
 
     ``dimension_scores`` REPLACES the stored set rather than merging into it —
     the form re-posts every dimension, so a field the reviewer cleared must
@@ -270,7 +272,8 @@ async def edit_feedback(
     review.rubric_content_hash = RUBRIC_CONTENT_HASH
     review.edited = True
     review.consumed_at = None
-    review.recorded_by_user_id = recorded_by.id if recorded_by else None
+    if recorded_by is not None:
+        review.recorded_by_user_id = recorded_by.id
     if feedback_mode == "learn":
         await enqueue_analysis_if_absent(
             db, assessment_id=review.assessment_id, user_id=review.reviewer_user_id
