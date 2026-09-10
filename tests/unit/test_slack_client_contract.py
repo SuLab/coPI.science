@@ -17,16 +17,19 @@ die, not on a tier that needs a real workspace and four minutes.
 """
 
 import ast
+import threading
 import time
 from pathlib import Path
 
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from src.agent import slack_client as slack_client_module
 from src.agent.slack_client import (
     MAX_PAGES,
     MAX_RETRIES,
     RATE_LIMIT_WAIT_BUDGET_SECONDS,
+    SHUTTING_DOWN,
     SLACK_MAX_TEXT_CHARS,
     SLACK_PAGE_LIMIT,
     AgentSlackClient,
@@ -37,6 +40,12 @@ from src.agent.slack_client import (
     split_for_slack,
 )
 from tests.fakes import RecordingSlackClient, _SlackResponse, slack_error
+
+# Captured before the module-level `_no_real_sleep` autouse fixture below ever
+# monkeypatches `time.sleep` to a no-op, so K-2's abort-latency test can
+# restore genuine sleeping for the one test that needs real wall-clock time to
+# pass or fail meaningfully.
+_REAL_SLEEP = time.sleep
 
 
 def _client(fake, *, visibility_lookup=None) -> AgentSlackClient:
@@ -180,7 +189,11 @@ def test_retry_after_header_is_honoured(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
     )
     _client(fake).post_message("general", "hi")
-    assert slept == [17], f"slept {slept}, expected Slack's Retry-After of 17"
+    # K-2: the sleep is now sliced into <=1s chunks so a shutdown can
+    # interrupt it promptly, so it is a list of one-second slices now
+    # rather than one call carrying the full duration.
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 17, f"slept {slept}, expected Slack's Retry-After of 17"
 
 
 def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
@@ -199,7 +212,8 @@ def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
     # A past-dated HTTP-date is unusable, so parse_retry_after falls back to the caller's
     # `default` (5.0 here) rather than the 0.0 it used to compute — a zero backoff is a hot
     # retry against an API that just throttled us (#24 audit Minor 2, commit 35c59a9).
-    assert slept == [5.0]
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 5.0
 
 
 def test_a_huge_retry_after_is_capped(monkeypatch):
@@ -210,7 +224,8 @@ def test_a_huge_retry_after_is_capped(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after="99999999")]},
     )
     _client(fake).post_message("general", "hi")
-    assert slept == [30.0]
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 30.0
 
 
 def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
@@ -223,7 +238,8 @@ def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
     _client(fake).post_message("general", "hi")
     # Same as above: a negative header is not a valid backoff, so the caller's default wins.
     # The point of this test is that nothing raises and `time.sleep` gets a sane float.
-    assert slept == [5.0]
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 5.0
 
 
 def test_a_60s_retry_after_is_honoured_across_multiple_throttled_attempts(monkeypatch):
@@ -246,7 +262,8 @@ def test_a_60s_retry_after_is_honoured_across_multiple_throttled_attempts(monkey
     assert out["ts"] == "1.30"
     assert len(fake.calls_to("chat_postMessage")) == 4
     # Each 60s header is capped to MAX_RETRY_AFTER (30s) per sleep, as before.
-    assert slept == [30.0, 30.0, 30.0]
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 90.0
     assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS
 
 
@@ -276,6 +293,48 @@ def test_exhaustion_error_states_how_long_was_waited(monkeypatch):
         c._call_with_retry(fake.conversations_history, channel="C_GENERAL")
     assert "waited" in str(exc_info.value).lower()
     assert "s" in str(exc_info.value)  # a seconds figure is present
+
+
+def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch):
+    """K-2 (opus review, audit 2026-09-10): a worker thread sleeping through a
+    Retry-After backoff must not hold interpreter shutdown open for the whole
+    (up to 180s) wait budget. `_call_with_retry` sleeps in <=1s slices and
+    checks `SHUTTING_DOWN` between them, so once shutdown is signalled the
+    sleeping thread aborts within about a second, raising `SlackApiError`
+    rather than finishing out a 30s Retry-After.
+
+    Restores real `time.sleep` (the module-level `_no_real_sleep` fixture
+    otherwise makes it a no-op) because this test's assertion is about actual
+    elapsed wall-clock time.
+    """
+    monkeypatch.setattr(time, "sleep", _REAL_SLEEP)
+    SHUTTING_DOWN.clear()
+    try:
+        fake = RecordingSlackClient(
+            errors={"chat_postMessage": [slack_error("ratelimited", retry_after=30)] * 50})
+        c = _client(fake)
+        outcome: dict = {}
+
+        def run():
+            try:
+                c._call_with_retry(fake.chat_postMessage)
+            except Exception as exc:
+                outcome["exc"] = exc
+
+        t = threading.Thread(target=run)
+        start = time.monotonic()
+        t.start()
+        _REAL_SLEEP(0.05)  # let the thread get into its first 1s sleep slice
+        SHUTTING_DOWN.set()
+        t.join(timeout=3.0)
+        elapsed = time.monotonic() - start
+
+        assert not t.is_alive(), "the retry thread did not abort promptly on shutdown"
+        assert elapsed < 2.0, f"took {elapsed:.2f}s to abort after SHUTTING_DOWN was set"
+        assert isinstance(outcome.get("exc"), SlackApiError)
+        assert "shutting down" in str(outcome["exc"]).lower()
+    finally:
+        SHUTTING_DOWN.clear()
 
 
 # --- what actually goes on the wire ------------------------------------------------
@@ -677,7 +736,8 @@ def test_a_single_call_with_no_wait_budget_override_is_unchanged(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
     )
     _client(fake).post_message("general", "hi")
-    assert slept == [17.0]
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 17.0
     assert len(fake.calls_to("chat_postMessage")) == 2
 
 

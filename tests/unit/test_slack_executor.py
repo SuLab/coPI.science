@@ -81,11 +81,34 @@ async def test_an_exception_from_the_call_propagates_unchanged():
 # from under every other test in this file/session.
 
 
+@pytest.fixture(autouse=True)
+def _reset_shutting_down():
+    """`shutdown_slack_executor()` now sets the process-wide
+    `slack_client.SHUTTING_DOWN` event (K-2) — clear it after each test in
+    this file so it does not leak into unrelated tests/processes sharing the
+    same interpreter.
+    """
+    from src.agent.slack_client import SHUTTING_DOWN
+    yield
+    SHUTTING_DOWN.clear()
+
+
 def test_shutdown_slack_executor_shuts_down_without_waiting(monkeypatch):
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
     shutdown_slack_executor()
     assert fresh._shutdown, "shutdown_slack_executor() must actually shut the pool down"
+
+
+def test_shutdown_slack_executor_sets_the_shutting_down_event(monkeypatch):
+    """K-2: signals slack_client's sleep loop before shutting the pool down, so
+    an in-flight retry sleep can abort rather than block interpreter exit."""
+    from src.agent.slack_client import SHUTTING_DOWN
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    assert not SHUTTING_DOWN.is_set()
+    shutdown_slack_executor()
+    assert SHUTTING_DOWN.is_set()
 
 
 async def test_run_slack_call_after_shutdown_raises_a_clear_runtimeerror(monkeypatch):

@@ -20,6 +20,7 @@ the source level.
 import logging
 import re
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -30,6 +31,39 @@ from slack_sdk.errors import SlackApiError
 from src.agent.retry_after import parse_retry_after
 
 logger = logging.getLogger(__name__)
+
+# Set by src.services.slack_executor.shutdown_slack_executor() before it calls
+# ThreadPoolExecutor.shutdown() (K-2, opus review, audit 2026-09-10).
+#
+# ThreadPoolExecutor worker threads are ordinary (non-daemon) threads, joined
+# by the interpreter's own atexit machinery *after* this module's atexit
+# backstop runs `shutdown(wait=False, cancel_futures=True)`. `wait=False`
+# only means that call itself does not block — a worker thread already deep
+# in a `time.sleep(retry_after)` inside `_call_with_retry` (up to
+# RATE_LIMIT_WAIT_BUDGET_SECONDS, 180s) keeps running regardless, and the
+# interpreter's join still waits for it to finish. `_call_with_retry` sleeps
+# in <=1s slices and checks this event between slices so it can abort
+# promptly instead. This does NOT interrupt a request already in flight on
+# the underlying HTTP connection — only the retry *sleep* is interruptible;
+# a slow-but-not-throttled call still runs to completion.
+SHUTTING_DOWN = threading.Event()
+
+
+def _sleep_interruptibly(seconds: float) -> None:
+    """Sleep for ``seconds``, in <=1s slices, aborting early if the process is
+    shutting down.
+
+    Raises ``SlackApiError`` the moment ``SHUTTING_DOWN`` is set rather than
+    finishing out the sleep, so a worker thread mid-backoff does not hold up
+    interpreter exit for however much of the Retry-After it has left.
+    """
+    remaining = seconds
+    while remaining > 0:
+        if SHUTTING_DOWN.is_set():
+            raise SlackApiError("shutting down", response=None)
+        slice_s = min(1.0, remaining)
+        time.sleep(slice_s)
+        remaining -= slice_s
 
 
 class BotNotInvitedToPrivateChannel(Exception):
@@ -396,7 +430,7 @@ class AgentSlackClient:
                     self.agent_id, retry_after, attempts_made, MAX_RETRIES,
                     total_slept, wait_budget,
                 )
-                time.sleep(retry_after)
+                _sleep_interruptibly(retry_after)
                 total_slept += retry_after
         raise SlackApiError(
             f"Rate limit retries exhausted after {attempts_made} attempt(s), "

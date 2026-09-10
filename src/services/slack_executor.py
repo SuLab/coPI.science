@@ -22,13 +22,20 @@ in-flight Slack call blocked on a sustained throttle (up to
 ``RATE_LIMIT_WAIT_BUDGET_SECONDS`` — 180s) can hold the whole process open past
 ``docker stop -t 30``'s grace period, which then SIGKILLs it — losing whatever
 that thread was doing mid-flight rather than letting it finish or fail cleanly.
-``shutdown_slack_executor()`` calls ``.shutdown(wait=False, cancel_futures=True)``:
-queued-but-not-yet-started work is dropped immediately, already-running calls are
-abandoned as daemon-adjacent background threads rather than blocking process exit
-(``ThreadPoolExecutor`` worker threads are **not** daemon threads by default, but
-``wait=False`` means *this call* does not block on them — the interpreter's own
-atexit handling is what would otherwise wait, and this module's own ``atexit``
-registration runs before that point).
+``shutdown_slack_executor()`` sets ``slack_client.SHUTTING_DOWN`` and then calls
+``.shutdown(wait=False, cancel_futures=True)``: queued-but-not-yet-started work is
+dropped immediately. ``wait=False`` on its own does NOT stop an already-running
+call — ``ThreadPoolExecutor`` worker threads are ordinary (non-daemon) threads,
+and the interpreter's own atexit machinery still joins them after this module's
+``atexit`` backstop runs, so a thread genuinely still blocked would hold up exit
+regardless of what this function does (K-2, opus review, audit 2026-09-10, fixing
+an inaccurate claim in an earlier version of this docstring). What actually makes
+shutdown prompt is ``slack_client._call_with_retry`` sleeping a Retry-After
+backoff in <=1s slices and checking ``SHUTTING_DOWN`` between slices, aborting
+with a ``SlackApiError`` as soon as it is set — so a call that is mid-throttle
+gives up within about a second. A call that is NOT currently sleeping on a
+throttle (e.g. blocked on the underlying HTTP request itself) is not
+interrupted by this at all; it still runs to completion or times out on its own.
 
 Call this from every process's shutdown path: the FastAPI app's lifespan
 (``src/main.py``) and the worker's shutdown path (``src/worker/main.py``) call it
@@ -70,6 +77,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
+from src.agent.slack_client import SHUTTING_DOWN
+
 _T = TypeVar("_T")
 
 # See "Sizing / queuing bound" above: sized to comfortably exceed the ~8
@@ -100,13 +109,23 @@ async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
 def shutdown_slack_executor() -> None:
     """Shut the Slack I/O pool down without blocking on in-flight calls.
 
+    Sets ``slack_client.SHUTTING_DOWN`` FIRST (K-2, opus review, audit
+    2026-09-10): ``_call_with_retry`` sleeps a Retry-After backoff in <=1s
+    slices and checks this event between slices, so an in-flight call that is
+    mid-throttle aborts within about a second instead of finishing out
+    whatever it had left of the (up to 180s) wait budget. This does NOT make
+    an in-flight *HTTP request* interruptible — only the retry sleep — so a
+    call that is not currently throttled still runs to completion; only
+    something already sleeping on a 429 is cut short.
+
     ``wait=False``: does not block the caller (a FastAPI lifespan or the
     worker's shutdown path) on however long an in-flight Slack call has left to
-    run — that call may still be sleeping through a Retry-After when this
-    fires. ``cancel_futures=True``: drops anything still queued (not yet
+    run. ``cancel_futures=True``: drops anything still queued (not yet
     started) rather than starting it during shutdown. Safe to call more than
-    once (``ThreadPoolExecutor.shutdown`` is idempotent).
+    once (``ThreadPoolExecutor.shutdown`` is idempotent; setting an already-set
+    ``Event`` is a no-op).
     """
+    SHUTTING_DOWN.set()
     _SLACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
