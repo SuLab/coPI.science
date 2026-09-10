@@ -114,20 +114,53 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
             SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown
         )
 
+    def _on_loop_first_signal() -> None:
+        # Runs on the loop's own turn: the full request_stop() (which may
+        # wake an asyncio.Event waiter -> loop.call_soon) is only ever
+        # invoked here, never from true signal context (T-3).
+        sim_engine.request_stop()
+        _schedule_grace_timer()
+
     def shutdown(signum=None, frame=None) -> None:
         logger.info("Received shutdown signal")
-        # Safe (and immediate) even if the loop is currently blocked inside a
-        # synchronous Slack call: this only flips a flag, no loop access.
-        sim_engine.request_stop()
         state["signals_received"] += 1
-        if state["signals_received"] == 1:
-            loop.call_soon_threadsafe(_schedule_grace_timer)
-        else:
-            # SECOND signal: abort immediately, WITHOUT depending on the loop
-            # ever becoming free -- that is exactly what a blocked loop can
-            # no longer guarantee (S-1, audit 2026-09-10). signal_shutdown()
-            # only sets a threading.Event, safe to call directly here.
+        # The flag flip is a plain attribute write -- safe from signal
+        # context and effective for a loop that is blocked in a sync call.
+        sim_engine._running = False
+        # T-1 (audit 2026-09-10): a signal after asyncio.run() closed the loop
+        # (status update, summary logs, atexit) must not raise
+        # "Event loop is closed" out of an arbitrary bytecode, and must not be
+        # swallowed either: set the abort event and hand the signal back to
+        # the default action so a repeat terminates the process.
+        if loop.is_closed():
             signal_shutdown()
+            _restore_default(signum)
+            return
+        if state["signals_received"] == 1:
+            try:
+                loop.call_soon_threadsafe(_on_loop_first_signal)
+            except RuntimeError:
+                signal_shutdown()
+                _restore_default(signum)
+            return
+        # SECOND signal: abort immediately, WITHOUT depending on the loop
+        # ever becoming free -- signal_shutdown() only sets a threading.Event.
+        signal_shutdown()
+        try:
+            loop.call_soon_threadsafe(sim_engine.request_stop)
+        except RuntimeError:
+            pass
+        # T-2: a THIRD signal falls through to the default action
+        # (SIGTERM terminates, SIGINT raises KeyboardInterrupt), so an
+        # operator is never left with an inert Ctrl-C against a wedged flush.
+        _restore_default(signum)
+
+    def _restore_default(signum) -> None:
+        if signum is not None:
+            try:
+                signal.signal(signum, signal.SIG_DFL)
+            except (ValueError, OSError):  # not on the main thread / bad signum
+                pass
 
     shutdown.state = state
     return shutdown
@@ -472,6 +505,14 @@ async def _run_simulation(
             _finalize_shutdown(shutdown)
         except Exception:  # Q-4: never skip the run-status update below
             logger.exception("Shutdown finalisation failed")
+        # T-1: the loop is about to close; hand SIGTERM/SIGINT back to their
+        # default actions so a signal during the post-loop teardown terminates
+        # the process instead of hitting a closed loop.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
 
         # Update simulation run status
         if session_factory and simulation_run_id:

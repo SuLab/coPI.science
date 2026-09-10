@@ -148,7 +148,7 @@ async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
     """
     loop = asyncio.get_running_loop()
     stop_calls: list[None] = []
-    fake_engine = SimpleNamespace(request_stop=lambda: stop_calls.append(None))
+    fake_engine = SimpleNamespace(_running=True, request_stop=lambda: stop_calls.append(None))
     shutdown = _main_module._make_shutdown_handler(loop, fake_engine)
 
     def call_from_thread():
@@ -160,8 +160,60 @@ async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
     t.join(timeout=2.0)
 
     assert not t.is_alive()
-    assert len(stop_calls) == 2, "request_stop() must run for every signal, even off-thread"
+    # T-3: the flag flip is synchronous (works even against a blocked loop);
+    # the full request_stop() (which may touch the loop) is deferred to the
+    # loop's own turn via call_soon_threadsafe.
+    assert fake_engine._running is False
+    await asyncio.sleep(0)
+    assert len(stop_calls) >= 1, "request_stop() must run once the loop gets a turn"
     assert SHUTDOWN_REQUESTED.is_set(), (
         "a second signal must set SHUTDOWN_REQUESTED synchronously even when "
         "delivered from a thread other than the event loop's own"
     )
+
+
+def test_a_signal_after_the_loop_closed_sets_the_event_and_does_not_raise(monkeypatch):
+    """T-1 (opus review of S-1): signal.signal handlers outlive asyncio.run(); a
+    signal during post-loop teardown must not raise 'Event loop is closed' and
+    must not be swallowed."""
+    import asyncio
+    import signal as _signal
+
+    from src.agent import slack_client
+    from src.agent.main import _make_shutdown_handler
+
+    restored = []
+    monkeypatch.setattr(_signal, "signal", lambda sig, h: restored.append((sig, h)))
+    loop = asyncio.new_event_loop()
+    loop.close()
+    engine = type("E", (), {"_running": True, "request_stop": lambda self: None})()
+    handler = _make_shutdown_handler(loop, engine)
+
+    handler(_signal.SIGTERM, None)  # must not raise
+
+    assert slack_client.SHUTDOWN_REQUESTED.is_set()
+    assert engine._running is False
+    assert (_signal.SIGTERM, _signal.SIG_DFL) in restored
+
+
+def test_a_second_signal_restores_the_default_action_for_a_third(monkeypatch):
+    """T-2: after the immediate abort on the second signal, a third signal must
+    reach the default action (terminate / KeyboardInterrupt) rather than an
+    inert handler against a wedged flush."""
+    import asyncio
+    import signal as _signal
+
+    from src.agent.main import _make_shutdown_handler
+
+    restored = []
+    monkeypatch.setattr(_signal, "signal", lambda sig, h: restored.append((sig, h)))
+    loop = asyncio.new_event_loop()
+    try:
+        engine = type("E", (), {"_running": True, "request_stop": lambda self: None})()
+        handler = _make_shutdown_handler(loop, engine)
+        handler(_signal.SIGINT, None)
+        assert restored == []
+        handler(_signal.SIGINT, None)
+        assert (_signal.SIGINT, _signal.SIG_DFL) in restored
+    finally:
+        loop.close()

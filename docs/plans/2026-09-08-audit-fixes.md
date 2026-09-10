@@ -1490,3 +1490,13 @@ of 1) before the fix.
   `SLACK_IO_MAX_WORKERS = 16`, and the module has carried 16 ever since; the R-2 section's
   "Fix"/"Tests" paragraphs were never updated to say so and read as though 8 were still current.
   Annotated both paragraphs in place rather than rewriting history.
+
+## T — opus review of S-1's signal redesign (2026-09-10)
+
+- **T-1** a signal arriving after `asyncio.run()` closed the loop no longer raises "Event loop is closed"
+  from an arbitrary bytecode nor gets swallowed: the handler sets `SHUTDOWN_REQUESTED` and hands the
+  signal back to `SIG_DFL`; `_run_simulation`'s finally restores the default actions.
+- **T-2** the second signal restores `SIG_DFL` for that signal, so a third terminates the process
+  (SIGTERM) or raises `KeyboardInterrupt` (SIGINT) against a wedged flush.
+- **T-3** only the plain `_running` flag flip runs in signal context; `request_stop()` (which may wake
+  an `asyncio.Event` waiter) is deferred to the loop via `call_soon_threadsafe`.
