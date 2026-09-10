@@ -79,11 +79,22 @@ die() {
   exit 1
 }
 
-# Every compose file this invocation would actually use: $COMPOSE_FILE (colon-
-# separated, matching docker compose's own env var) plus every argument following
-# a `-f`/`--file` flag.
+# Every compose file this invocation would ACTUALLY use once `compose()` runs.
+#
+# S-2 (audit 2026-09-10): `docker compose` ignores $COMPOSE_FILE entirely the moment
+# ANY `-f`/`--file` flag is passed (this is documented `docker compose` behaviour).
+# The prior version of this function unconditionally UNIONED $COMPOSE_FILE with the
+# -f args before the guard below checked for both prod files -- so
+# `COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml ./scripts/redeploy.sh
+# -f docker-compose.prod.yml` passed the guard (the override came from $COMPOSE_FILE)
+# even though the real invocation only ever sees `-f docker-compose.prod.yml`, missing
+# the override entirely -- every service would come up on the prod file's bare
+# `logging.driver: awslogs` and die immediately with AccessDeniedException (see
+# CLAUDE.md "Compose file set"). Only fall back to $COMPOSE_FILE when NO -f/--file was
+# given at all; once any -f is present, it is the exhaustive list and $COMPOSE_FILE is
+# ignored, matching `docker compose`'s own precedence.
 _known_files() {
-  local files="${COMPOSE_FILE:-}"
+  local files=""
   local i=0
   local n=${#COMPOSE_ARGS[@]}
   while [ "$i" -lt "$n" ]; do
@@ -95,6 +106,9 @@ _known_files() {
     esac
     i=$((i + 1))
   done
+  if [ -z "$files" ]; then
+    files="${COMPOSE_FILE:-}"
+  fi
   printf '%s' "$files"
 }
 

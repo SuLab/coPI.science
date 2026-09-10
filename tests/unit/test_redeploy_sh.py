@@ -131,6 +131,28 @@ def test_refuses_with_only_the_prod_file_and_not_the_override(tmp_path):
     assert not log.exists() or log.read_text() == ""
 
 
+# --- S-2 (audit 2026-09-10) ---------------------------------------------------------
+# `docker compose` ignores $COMPOSE_FILE entirely the moment ANY `-f` is given (this is
+# documented `docker compose` behaviour, not a bug in compose). The old guard's
+# `_known_files` UNIONED $COMPOSE_FILE with the -f args before checking for both prod
+# files, so `COMPOSE_FILE=prod:override ./scripts/redeploy.sh -f docker-compose.prod.yml`
+# passed the guard (override came from $COMPOSE_FILE) even though the real `docker
+# compose -f docker-compose.prod.yml ...` invocation this script goes on to run never
+# sees the override file at all -- every service would come up on the prod file's bare
+# `logging.driver: awslogs` and die immediately with AccessDeniedException.
+
+
+def test_refuses_when_a_single_dash_f_is_given_even_with_both_files_in_compose_file_env(tmp_path):
+    proc, log = _run(
+        tmp_path, ["-f", PROD_FILE], compose_file_env=f"{PROD_FILE}:{OVERRIDE_FILE}"
+    )
+    assert proc.returncode != 0, (
+        "docker compose ignores $COMPOSE_FILE once any -f is passed, so a single -f "
+        "PROD_FILE must be refused even though both files are in $COMPOSE_FILE"
+    )
+    assert not log.exists() or log.read_text() == ""
+
+
 def test_accepts_both_prod_files_via_dash_f_flags(tmp_path):
     proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
     assert proc.returncode == 0, proc.stdout + proc.stderr
