@@ -73,7 +73,6 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # importing src.config eagerly is not worth it for one annotation
     from src.config import Settings
@@ -282,19 +281,42 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
             ["TEST_DATABASE_URL unset — the suite builds a throwaway Postgres with an "
              "empty agent_registry, so no DB-sourced bot token can exist"],
         )
-    # Report the host/db shape only. A DSN can carry a password -- and that
-    # password can itself contain a literal `@`, which broke the old
-    # `re.sub(r"//[^@/]*@", ...)` (SEC3-3, audit 2026-09-10): the regex stops
-    # at the FIRST `@`, so a `user:pass@word@host` DSN left `word@host`
-    # un-redacted, leaking the tail of the password. urlsplit resolves the
-    # real host the same way browsers/DSN parsers do (split on the LAST `@`
-    # in the authority section), so we can drop userinfo entirely and print
-    # only the scheme and host/path.
-    parts = urlsplit(dsn)
-    netloc = parts.hostname or ""
-    if parts.port:
-        netloc += f":{parts.port}"
-    shape = f"{parts.scheme}://<redacted>@{netloc}{parts.path}"
+    # Report the host/db shape only. A DSN can carry a password, and that
+    # password is attacker/operator-controlled input we cannot assume is
+    # well-formed. Two redaction approaches already broke on it:
+    #
+    #   `re.sub(r"//[^@/]*@", ...)` (SEC3-3, audit 2026-09-10) stops at the
+    #   FIRST `@`, so a `user:pass@word@host` DSN left `word@host`
+    #   un-redacted, leaking the tail of the password.
+    #
+    #   `urlsplit(dsn)` (SEC3-3 follow-up, opus review, same day) does resolve
+    #   the host on the LAST `@` the way browsers/DSN parsers do, but its
+    #   `.port` property RAISES ValueError for a non-numeric port instead of
+    #   returning None, and a password containing `/` or `#` makes urlsplit
+    #   attribute part of the password to `.path` instead of `.netloc` --
+    #   both put unredacted password bytes in the printed detail (or crashed
+    #   the check outright, an even worse failure mode for a REFUSAL check).
+    #
+    # So: split the authority on the LAST `@` ourselves and print everything
+    # after it verbatim (host, port, and path together, whatever shape they
+    # take) -- there is nothing secret past the final `@` by construction,
+    # and we do not need `.port`/`.path` to be individually well-formed to
+    # know that. `rpartition` never raises.
+    _scheme, sep, rest = dsn.partition("://")
+    if sep and "@" in rest:
+        _before, _, after = rest.rpartition("@")
+        shape = f"{_scheme}://<redacted>@{after}"
+    elif sep:
+        # No credentials in the authority at all -- nothing to redact.
+        shape = f"{_scheme}://{rest}"
+    else:
+        # No `scheme://` found at all (malformed DSN); still redact everything
+        # up to the last `@`, if any, rather than echo the whole string.
+        if "@" in dsn:
+            _before, _, after = dsn.rpartition("@")
+            shape = f"<redacted>@{after}"
+        else:
+            shape = dsn
     return _verdict(
         "5. no operator-supplied database",
         [

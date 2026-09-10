@@ -409,6 +409,46 @@ def test_check_five_never_echoes_a_dsn_password_containing_an_at_sign():
     assert "<redacted>" in check.detail
 
 
+def test_check_five_never_echoes_a_dsn_with_a_non_numeric_port():
+    # SEC3-3 follow-up (opus review, audit 2026-09-10): urlsplit's `.port`
+    # raises ValueError for a non-numeric port instead of returning None, so
+    # the old urlsplit-based redaction crashed on a malformed DSN instead of
+    # refusing safely.
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:hunter2@db.internal:notaport/prod"}
+    )
+    assert not check.ok
+    assert "hunter2" not in check.detail
+    assert "someuser" not in check.detail
+    assert "<redacted>" in check.detail
+
+
+def test_check_five_never_echoes_a_dsn_password_containing_a_slash():
+    # SEC3-3 follow-up: urlsplit puts everything after the first unescaped `/`
+    # into `.path`, so a password containing `/` put part of the password in
+    # `parts.path`, which the old code appended to the printed detail verbatim.
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:pa/ss@db.internal/prod"}
+    )
+    assert not check.ok
+    assert "pa/ss" not in check.detail
+    assert "someuser" not in check.detail
+    assert "<redacted>" in check.detail
+
+
+def test_check_five_never_echoes_a_dsn_password_containing_at_and_the_rest_intact():
+    # Same shape as the plain @-in-password case above, phrased with the
+    # reviewer's exact fixture string.
+    check = check_no_operator_supplied_database(
+        {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:p@ss@db.internal/prod"}
+    )
+    assert not check.ok
+    assert "p@ss" not in check.detail
+    assert "someuser" not in check.detail
+    assert "db.internal/prod" in check.detail
+    assert "<redacted>" in check.detail
+
+
 def test_check_five_gates_check_three_so_no_token_is_sent():
     """A leaky database must stop the tier BEFORE any auth.test call, exactly as a
     leaky environment does -- an un-run check is a refusal, never a pass."""
