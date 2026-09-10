@@ -263,6 +263,69 @@ def test_blackbird_vhost_has_req_graph_limit_for_collaboration_graph_routes():
 # #27 Minor 16: req_general/req_graph/conn_perip were single zones shared across
 # all three vhosts, so one IP's burst against devel or blackbird consumed the
 # primary site's budget (and vice versa). Each vhost must get its own zone.
+# SEC2-4 (audit 2026-09-08): /api/csp-report is public and unauthenticated
+# (like the collaboration-graph routes above) but had no rate limit tighter
+# than the whole-site general zone, big enough that a burst of forged reports
+# could still fill the request pool ahead of it.
+def test_csp_report_zone_is_declared():
+    text = _nginx_conf()
+    assert re.search(
+        r"limit_req_zone\s+\$binary_remote_addr\s+zone=\S*csp_report\S*:\d+[kmg]\s+rate=\S+;",
+        text,
+    ), "expected a dedicated limit_req_zone for /api/csp-report"
+
+
+def test_csp_report_location_present_and_rate_limited_on_all_three_vhosts():
+    text = _nginx_conf()
+    for name in VHOSTS:
+        block = _https_block(text, name)
+        assert "location = /api/csp-report {" in block, (
+            f"{name} has no dedicated /api/csp-report location"
+        )
+        loc_idx = block.index("location = /api/csp-report {")
+        loc_block = block[loc_idx : block.index("}", loc_idx) + 1]
+        assert re.search(r"limit_req zone=\S*csp_report\S*", loc_block), (
+            f"{name}'s /api/csp-report location does not use the dedicated zone"
+        )
+
+
+def test_csp_report_location_proxy_settings_match_general_location():
+    # "Keep proxy settings identical to location /" (SEC2-4) -- same upstream,
+    # headers and timeouts as the vhost's own general reverse proxy.
+    text = _nginx_conf()
+    for name in VHOSTS:
+        block = _https_block(text, name)
+        general_idx = block.index("location / {")
+        general_block = block[general_idx : block.index("}", general_idx) + 1]
+        csp_idx = block.index("location = /api/csp-report {")
+        csp_block = block[csp_idx : block.index("}", csp_idx) + 1]
+        for line in (
+            "proxy_pass",
+            "proxy_http_version",
+            "proxy_set_header Host",
+            "proxy_set_header X-Real-IP",
+            "proxy_set_header X-Forwarded-For",
+            "proxy_set_header X-Forwarded-Proto",
+            "proxy_set_header X-Forwarded-Host",
+            "proxy_connect_timeout",
+            "proxy_send_timeout",
+            "proxy_read_timeout",
+        ):
+            general_line = next(
+                (ln.strip() for ln in general_block.splitlines() if ln.strip().startswith(line)),
+                None,
+            )
+            csp_line = next(
+                (ln.strip() for ln in csp_block.splitlines() if ln.strip().startswith(line)),
+                None,
+            )
+            assert general_line is not None, f"{name}'s general location is missing {line!r}"
+            assert general_line == csp_line, (
+                f"{name}'s csp-report location diverges from location / for {line!r}: "
+                f"{csp_line!r} != {general_line!r}"
+            )
+
+
 def test_rate_limit_zones_are_declared_per_vhost_not_shared():
     text = _nginx_conf()
     general_zones = set(re.findall(r"limit_req_zone\s+\$binary_remote_addr\s+zone=(req_general\S*?):", text))

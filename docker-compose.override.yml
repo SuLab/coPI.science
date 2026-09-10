@@ -10,28 +10,55 @@
 #
 # Remove this file once the admin adds CloudWatch Logs perms to the role
 # (or restores the previous role with the SES policy attached).
+#
+# SEC2-4 (audit 2026-09-08): json-file with no options grows unbounded on
+# disk -- max-size/max-file caps each service's log at 5 x 50m = 250 MiB.
 services:
   postgres:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   app:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   worker:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   agent:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   grantbot:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   nginx:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   certbot:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
   migrate:
     logging:
       driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

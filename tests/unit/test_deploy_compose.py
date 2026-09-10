@@ -43,6 +43,23 @@ def test_every_prod_service_including_migrate_has_the_json_file_log_override():
     assert prod <= override, f"no json-file logging override for {sorted(prod - override)}"
 
 
+def test_every_service_json_file_log_has_rotation_options():
+    # SEC2-4 (audit 2026-09-08): json-file with no options grows unbounded --
+    # every service's override must cap it (max-size/max-file), same as
+    # every other json-file logging block in this repo.
+    override = _override_compose()["services"]
+    for name, svc in override.items():
+        logging_cfg = svc.get("logging", {})
+        assert logging_cfg.get("driver") == "json-file", name
+        options = logging_cfg.get("options", {})
+        assert options.get("max-size") == "50m", (
+            f"{name}'s json-file logging is missing max-size: 50m"
+        )
+        assert options.get("max-file") == "5", (
+            f"{name}'s json-file logging is missing max-file: 5"
+        )
+
+
 EXPECTED_MEM = {
     "migrate": "256m", "app": "384m", "worker": "512m", "agent": "768m",
     "grantbot": "256m", "nginx": "128m", "certbot": "128m",
