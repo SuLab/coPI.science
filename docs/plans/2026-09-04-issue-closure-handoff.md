@@ -36,17 +36,22 @@ looking again. If a precondition is not met, stop and follow Step 7.
       the derived head), `R.7` (service recreate), `R.7c` (the publication-text repair) and `R.9`
       (the agent restart). A closure written from a merged-but-undeployed branch describes code
       that is not running.
-- [ ] **The gate was green at the merge commit.** Measured at the final branch commit:
+- [ ] **The gate was green at the merge commit.** Measured by `./scripts/ci.sh` on 2026-09-10 at
+      `9f1ca5a` (the tree after the 2026-09-08 audit fix wave; earlier figures in this file were taken
+      at `fbc3d2c`, four code commits before the then-HEAD, and must not be quoted):
 
       | figure | value |
       |---|---|
-      | pytest | **2749 passed, 120 skipped** |
-      | ruff `src/` | **250** / `SRC_LINT_MAX=260` |
+      | pytest | **2942 passed, 120 skipped** |
+      | ruff `src/` | **249** / `SRC_LINT_MAX=260` |
       | mypy `src/` | **138** / `MYPY_MAX=150` |
-      | branch coverage | **79.47 %** / `COV_MIN=60` |
-      | alembic single head | **0029** |
+      | branch coverage | **80.15 %** / `COV_MIN=60` |
+      | alembic single head | **0030** (round trip head → 0018 → head clean) |
       | `GATE_EXIT` | **0** |
-      | wall clock | 8:46 |
+      | wall clock | 10:11 |
+
+      Live tier on the same day (`docs/plans/2026-09-04-decisions/task-35.md` addendum): 53/53 non-LLM
+      tests at `9f1ca5a`; 8/8 real-LLM tests at `9e66199`.
 
       Re-run `MIGCHECK_PORT=55433 ./scripts/ci.sh` on the merge commit and compare. **If the gate is
       not green at the merge commit, every `closes at merge` row in Step 2 becomes `do not close`**
