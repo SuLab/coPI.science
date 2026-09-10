@@ -33,11 +33,20 @@ async def agent_blocking_account_delete(
     delegation is not ownership: ``agent_delegates.user_id`` is
     ``ondelete="CASCADE"``, so deleting a delegate removes the delegation and
     leaves the agent's owner alone.
+
+    ``with_for_update()`` (SEC-F3, opus review, audit 2026-09-08) locks the row
+    this reads for the rest of the caller's transaction, so the check and the
+    delete it gates cannot race an admin's concurrent ``UPDATE ... SET
+    status='active'`` on the same row -- without the lock, that update could
+    commit between this read and the delete, orphaning the agent this guard
+    exists to prevent.
     """
     result = await db.execute(
-        select(AgentRegistry).where(
+        select(AgentRegistry)
+        .where(
             AgentRegistry.user_id == user.id,
             AgentRegistry.status.in_(AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE),
         )
+        .with_for_update()
     )
     return result.scalar_one_or_none()
