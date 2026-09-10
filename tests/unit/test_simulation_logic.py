@@ -1641,6 +1641,43 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
         assert b_ref.thread_decision_id == written[0].id
 
     @pytest.mark.asyncio
+    async def test_deferred_review_replays_even_for_an_agent_off_the_live_roster(self):
+        """S-3 (audit 2026-09-10): `if not a: continue` used to skip the
+        deferred-implicit-review replay AND removal whenever the agent had
+        since left the live roster (self.agents) while its decision was
+        still pending -- dropping the queued PI engagement for good and
+        leaking the (aid, thread_id) pair in `_deferred_implicit_reviews`
+        forever (re-checked, and silently no-op'd, on every future flush).
+        The replay only needs `aid` + the now-known `decision_id` --
+        `_persist_implicit_proposal_review` reads from the DB, not from the
+        in-memory Agent object.
+        """
+        from unittest.mock import AsyncMock
+
+        written: list = []
+        factory, _ = self._flaky_factory(written, fail_times=999)
+        engine, a, b, thread = self._engine(factory)
+
+        await engine._close_thread(a, thread, "no_proposal")
+        assert len(engine._pending_thread_decisions) == 1
+
+        engine._deferred_implicit_reviews.append(("a", "1.0"))
+        engine._persist_implicit_proposal_review = AsyncMock()
+
+        # "a" leaves the live roster before the decision write ever recovers
+        # (e.g. deactivated via the roster sync).
+        del engine.agents["a"]
+
+        engine.session_factory = lambda: _FakeDecisionSession(written)
+        await engine._flush_pending_thread_decisions()
+
+        assert ("a", "1.0") not in engine._deferred_implicit_reviews, (
+            "the deferred-review pair must be cleared even for an agent no "
+            "longer on the live roster"
+        )
+        engine._persist_implicit_proposal_review.assert_awaited_once_with("a", written[0].id)
+
+    @pytest.mark.asyncio
     async def test_a_commit_that_lands_server_side_but_raises_client_side_is_not_duplicated(
         self, monkeypatch,
     ):

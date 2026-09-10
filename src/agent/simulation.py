@@ -2263,11 +2263,18 @@ class SimulationEngine:
                 continue
             for aid in (payload["agent_a"], payload["agent_b"]):
                 a = self.agents.get(aid)
-                if not a:
-                    continue
-                for p in a.state.pending_proposals:
-                    if p.thread_id == payload["thread_id"]:
-                        p.thread_decision_id = decision_id
+                if a is not None:
+                    for p in a.state.pending_proposals:
+                        if p.thread_id == payload["thread_id"]:
+                            p.thread_decision_id = decision_id
+                # S-3 (audit 2026-09-10): the deferred-review replay needs
+                # only `aid` and the now-known `decision_id`, not a live
+                # Agent object — `_persist_implicit_proposal_review` reads
+                # from the DB. It must run even when `aid` has since been
+                # removed from the live roster (self.agents), or the queued
+                # PI engagement is dropped AND the (aid, thread_id) pair is
+                # left in `_deferred_implicit_reviews` forever (re-attempted,
+                # and silently no-op'd, on every future flush).
                 if (aid, payload["thread_id"]) in self._deferred_implicit_reviews:
                     self._deferred_implicit_reviews.remove((aid, payload["thread_id"]))
                     await self._persist_implicit_proposal_review(aid, decision_id)
