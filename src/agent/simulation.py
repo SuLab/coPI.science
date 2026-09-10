@@ -627,6 +627,19 @@ class SimulationEngine:
         # `_flush_pending_thread_decisions` re-runs the persist for any entry
         # here once it assigns that thread's `thread_decision_id`.
         self._deferred_implicit_reviews: list[tuple[str, str]] = []
+        # N-8 (opus review, audit 2026-09-10): per-agent asyncio.Semaphore(1),
+        # lazily created, guarding the actual Slack call in `_post_message`.
+        # After M-8, multiple `_post_message` calls for the SAME agent (e.g.
+        # two turns racing, or a Phase 4 reply overlapping a Phase 5 post) run
+        # their `run_slack_call` on separate slack-io worker threads
+        # concurrently, on the SAME `AgentSlackClient` -- nothing serialized
+        # them once they left the event loop. That let two posts for one
+        # agent land out of order on Slack, and let a `_resolve_channel_id`
+        # cache miss (which itself calls Slack) fan out into one call per
+        # concurrent post instead of resolving once. Keyed by agent_id so
+        # cross-agent parallelism (the whole point of the M-8 pool) is
+        # unaffected -- only replies from the SAME agent serialize.
+        self._post_message_semaphores: dict[str, asyncio.Semaphore] = {}
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -4991,6 +5004,22 @@ class SimulationEngine:
         """
         return self._ts_minter.mint()
 
+    def _get_post_message_semaphore(self, agent_id: str) -> asyncio.Semaphore:
+        """Lazily create and return the per-agent semaphore serializing the
+        Slack call in ``_post_message`` (N-8, opus review, audit 2026-09-10).
+
+        ``setdefault`` on a plain dict, not a lock-guarded creation: the
+        engine's own turn-taking already ensures at most one coroutine is
+        actively minting a NEW agent_id key at a time (no concurrent
+        first-post race across agents), and two concurrent callers for the
+        SAME already-registered agent_id are the exact case being serialized
+        by the semaphore itself, so a benign double-``setdefault`` for the
+        same key on a first race is harmless (both get the same object once
+        the dict's own atomic C-level `__setitem__` resolves it in coroutine
+        code, which runs to completion between `await` points).
+        """
+        return self._post_message_semaphores.setdefault(agent_id, asyncio.Semaphore(1))
+
     async def _post_message(
         self,
         agent_id: str,
@@ -5075,7 +5104,22 @@ class SimulationEngine:
                 # connection in the process for its whole duration. Exception
                 # identity/propagation is unchanged (run_slack_call
                 # guarantees this for a synchronous callable).
-                result = await run_slack_call(client.post_message, channel, text, thread_ts=slack_parent)
+                #
+                # N-8 (opus review, audit 2026-09-10): the per-agent
+                # semaphore serializes concurrent `_post_message` calls for
+                # THIS agent on THIS same `AgentSlackClient` -- without it,
+                # M-8's pool lets two such calls run their `run_slack_call`
+                # on separate worker threads at once, which could land them
+                # on Slack out of order and let a `_resolve_channel_id` cache
+                # miss inside `client.post_message` fan out into one Slack
+                # call per concurrent post instead of resolving once.
+                # Cross-agent parallelism (the whole point of the M-8 pool)
+                # is unaffected -- only two calls for the SAME agent_id ever
+                # contend on this semaphore.
+                async with self._get_post_message_semaphore(agent_id):
+                    result = await run_slack_call(
+                        client.post_message, channel, text, thread_ts=slack_parent,
+                    )
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts

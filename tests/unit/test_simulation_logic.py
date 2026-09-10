@@ -1967,6 +1967,100 @@ class TestPostMessageDoesNotBlockTheEventLoop:
         )
 
 
+class TestPostMessageSerializesPerAgent:
+    """N-8 (opus review, audit 2026-09-10): after M-8, two `_post_message`
+    calls for the SAME agent run their Slack call on separate slack-io
+    worker threads concurrently -- nothing serialized them once they left
+    the event loop, which could land two replies from one agent on Slack out
+    of order. A per-agent asyncio.Semaphore(1) around the Slack call must
+    keep them ordered while leaving cross-agent calls fully concurrent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_posts_for_the_same_agent_execute_serially(self):
+        import asyncio
+        import time
+        from unittest.mock import MagicMock
+
+        from src.agent.agent import Agent
+        from src.agent.slack_client import AgentSlackClient
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = AgentSlackClient(agent_id="su", bot_token="xoxb-real-token")
+        client._client = MagicMock()  # is_connected -> True
+
+        events: list[tuple[str, float]] = []
+        start = time.monotonic()
+
+        def slow_post(*_a, **_k):
+            events.append(("enter", time.monotonic() - start))
+            time.sleep(0.2)
+            events.append(("exit", time.monotonic() - start))
+            return {"ts": f"{time.monotonic():.6f}"}
+
+        client.post_message = slow_post
+        engine = SimulationEngine(agents=[agent], slack_clients={"su": client})
+
+        results = await asyncio.gather(
+            engine._post_message("su", "general", "message one"),
+            engine._post_message("su", "general", "message two"),
+        )
+
+        assert results == [True, True]
+        assert [kind for kind, _ in events] == ["enter", "exit", "enter", "exit"], (
+            f"two posts for the SAME agent must execute serially (enter/exit "
+            f"pairs must not interleave), got {events!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_posts_for_different_agents_still_run_concurrently(self):
+        import asyncio
+        import time
+        from unittest.mock import MagicMock
+
+        from src.agent.agent import Agent
+        from src.agent.slack_client import AgentSlackClient
+
+        agent_a = Agent("a", "ABot", "A PI")
+        agent_b = Agent("b", "BBot", "B PI")
+        client_a = AgentSlackClient(agent_id="a", bot_token="xoxb-real-token")
+        client_a._client = MagicMock()
+        client_b = AgentSlackClient(agent_id="b", bot_token="xoxb-real-token")
+        client_b._client = MagicMock()
+
+        events: list[tuple[str, str, float]] = []
+        start = time.monotonic()
+
+        def _make_slow_post(label):
+            def slow_post(*_a, **_k):
+                events.append((label, "enter", time.monotonic() - start))
+                time.sleep(0.2)
+                events.append((label, "exit", time.monotonic() - start))
+                return {"ts": f"{time.monotonic():.6f}"}
+            return slow_post
+
+        client_a.post_message = _make_slow_post("a")
+        client_b.post_message = _make_slow_post("b")
+        engine = SimulationEngine(
+            agents=[agent_a, agent_b],
+            slack_clients={"a": client_a, "b": client_b},
+        )
+
+        results = await asyncio.gather(
+            engine._post_message("a", "general", "message from a"),
+            engine._post_message("b", "general", "message from b"),
+        )
+
+        assert results == [True, True]
+        # Both must have ENTERED before either EXITs -- true concurrency,
+        # not accidentally serialized across agents too.
+        enter_times = sorted(t for _, kind, t in events if kind == "enter")
+        exit_times = sorted(t for _, kind, t in events if kind == "exit")
+        assert enter_times[1] < exit_times[0], (
+            f"posts for DIFFERENT agents must still run concurrently, got {events!r}"
+        )
+
+
 # ---------------------------------------------------------------
 # _post_message — a connected client's genuinely failed post must not be
 # confused with the disconnected/MOCK path (#20 COR-1b).
