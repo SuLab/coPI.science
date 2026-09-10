@@ -22,6 +22,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.io_executor import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -739,8 +740,9 @@ async def _send_paused_email(user: User) -> None:
     # whoever the downgrade ladder happens to auto-pause. Go through the shared helper instead
     # of adding a second gate here: it applies the same check, logs the suppression (at info,
     # with this subject) and logs a send failure (at error), so neither outcome is silent.
-    _send_html_email(
-        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url
+    await run_blocking(
+        _send_html_email,
+        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url,
     )
 
 
@@ -1139,8 +1141,9 @@ async def _send_status_overview(
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    sent = _send_html_email(
-        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url
+    sent = await run_blocking(
+        _send_html_email,
+        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url,
     )
     if sent:
         pref.last_sent_at = now
@@ -1347,7 +1350,8 @@ async def _send_new_proposal_email(
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    sent = _send_html_email(
+    sent = await run_blocking(
+        _send_html_email,
         user.email, subject, text_body, html_body,
         reply_to=reply_to, unsubscribe_url=unsubscribe_url,
     )

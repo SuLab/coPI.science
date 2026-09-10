@@ -18,6 +18,7 @@ from src.config import get_settings
 from src.database import get_session_factory
 from src.routers import admin, agent_page, auth, invite, onboarding, profile, public
 from src.routers import settings as settings_router
+from src.services.io_executor import shutdown_io_executor
 from src.services.slack_executor import shutdown_slack_executor
 
 logging.basicConfig(
@@ -256,6 +257,10 @@ async def lifespan(app: FastAPI):
     """
     yield
     shutdown_slack_executor()
+    # S-7 (audit 2026-09-10): the outbound-email (SES) pool gets the same
+    # shutdown treatment as the Slack pool, for the same reason -- see
+    # src/services/io_executor.py's module docstring.
+    shutdown_io_executor()
 
 
 def create_app() -> FastAPI:

@@ -29,6 +29,7 @@ from src.services.email_notifications import (
     record_engagement,
     send_html_email_outcome,
 )
+from src.services.io_executor import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +649,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         )
         notification.status = "expired"
         await db.commit()
-        _notify_reply_expired(user.email, notification.id)
+        await _notify_reply_expired(user.email, notification.id)
         return
 
     # Extract reply body
@@ -1080,10 +1081,15 @@ class InstructionApplyFailed(Exception):
         self.notification_id = notification_id
 
 
-def _notify_instruction_failure(
+async def _notify_instruction_failure(
     pi_email: str | None, bot_name: str, notification_id, *, will_retry: bool
 ) -> None:
     """PI-facing explanation for a _handle_instruction failure (COR-32).
+
+    S-7 (audit 2026-09-10): async so its ``_send_simple_email`` call can run
+    through ``run_blocking`` off the event loop -- every call site is inside
+    ``_handle_instruction`` (async), and this used to call ``_send_simple_email``
+    (a synchronous boto3 SES call) directly on the loop.
 
     Takes plain values, not ORM objects (C1, COR-32 fix round B): the
     migration-failure call site must invoke this AFTER a `db.rollback()` that
@@ -1125,7 +1131,8 @@ def _notify_instruction_failure(
             "reopen the proposal from your dashboard at copi.science and paste your "
             "guidance there."
         )
-    sent = _send_simple_email(
+    sent = await run_blocking(
+        _send_simple_email,
         pi_email,
         f"Couldn't apply your {bot_name} instruction",
         f"We ran into a problem applying your instruction to this proposal. {outcome_sentence}",
@@ -1135,7 +1142,7 @@ def _notify_instruction_failure(
         _INSTRUCTION_FAILURE_TOUCHED[key] = time.time()
 
 
-def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
+async def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
     """PI-facing notice that a reply arrived after its token's reply window closed
     (RC-4, #21 V4-3).
 
@@ -1144,6 +1151,10 @@ def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
     retry of the same stale reply short-circuits earlier, at this module's
     `notification.status != "sent"` gate in `process_inbound_email` -- this can fire
     at most once per token.
+
+    S-7 (audit 2026-09-10): async so its ``_send_simple_email`` call can run
+    through ``run_blocking`` off the event loop -- see
+    ``_notify_instruction_failure``'s docstring.
     """
     if not pi_email:
         # User.email is nullable; process_inbound_email's fail-closed check above
@@ -1154,7 +1165,8 @@ def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
             "(notification %s)", notification_id,
         )
         return
-    _send_simple_email(
+    await run_blocking(
+        _send_simple_email,
         pi_email,
         "This review link has expired",
         "This reply link has expired, so we couldn't apply your reply. Please review "
@@ -1198,7 +1210,8 @@ async def _handle_instruction(
             "Agent %s is %s — not posting email reopen guidance for proposal %s",
             agent.agent_id, agent.status, td.id,
         )
-        _send_simple_email(
+        await run_blocking(
+            _send_simple_email,
             user.email,
             f"{agent.bot_name} is inactive - couldn't reopen the proposal",
             f"{agent.bot_name} is currently inactive, so it can't reopen this "
@@ -1336,7 +1349,7 @@ async def _handle_instruction(
                     # The PI's "we'll retry" email is capped at one per notification, so
                     # repeated attempts do not repeatedly mail them.
                     try:
-                        _notify_instruction_failure(
+                        await _notify_instruction_failure(
                             pi_email, bot_name, notif_id, will_retry=True
                         )
                     except Exception:
@@ -1363,7 +1376,7 @@ async def _handle_instruction(
                 # explanation email this one time, but the notification still gets
                 # retired below with no further Slack mutation.
                 try:
-                    _notify_instruction_failure(pi_email, bot_name, notif_id, will_retry=False)
+                    await _notify_instruction_failure(pi_email, bot_name, notif_id, will_retry=False)
                 except Exception:
                     logger.exception(
                         "Failed to send the terminal-failure notification for "
@@ -1376,7 +1389,8 @@ async def _handle_instruction(
             logger.info(
                 "Email reopen on already-private origin %s not supported", td.thread_id,
             )
-            _send_simple_email(
+            await run_blocking(
+                _send_simple_email,
                 user.email,
                 f"Couldn't reopen the {agent.bot_name} proposal by email",
                 "This proposal is already in a private refinement channel. "
@@ -1404,7 +1418,7 @@ async def _handle_instruction(
                     logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
                     return True
                 logger.error("No simulation run to record email guidance for %s", td.thread_id)
-                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
+                await _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"no active simulation run for {td.thread_id}",
                     notification_id=notification.id,
@@ -1425,7 +1439,7 @@ async def _handle_instruction(
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
-                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
+                await _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"no bot token for agent {agent.agent_id}",
                     notification_id=notification.id,
@@ -1434,7 +1448,7 @@ async def _handle_instruction(
             channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
-                _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
+                await _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
                 raise InstructionApplyFailed(
                     f"channel #{td.channel} not found", notification_id=notification.id
                 )
@@ -1454,7 +1468,7 @@ async def _handle_instruction(
         raise  # already handled (emailed the PI) at the specific site above
     except Exception as exc:
         logger.error("Failed to reopen proposal from email: %s", exc, exc_info=True)
-        _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
+        await _notify_instruction_failure(user.email, agent.bot_name, notification.id, will_retry=True)
         raise InstructionApplyFailed(
             f"unexpected error reopening {td.thread_id}", notification_id=notification.id
         ) from exc
@@ -1516,7 +1530,7 @@ async def _send_review_confirmation(
         "To change your rating, use your dashboard."
     )
 
-    _send_simple_email(user.email, subject, text_body)
+    await run_blocking(_send_simple_email, user.email, subject, text_body)
 
 
 async def _send_instruction_confirmation(
@@ -1545,7 +1559,7 @@ async def _send_instruction_confirmation(
         f"You'll get another email when the revised proposal is ready."
     )
 
-    _send_simple_email(user.email, subject, text_body)
+    await run_blocking(_send_simple_email, user.email, subject, text_body)
 
 
 async def _maybe_send_stale_token_bounce(to_email: str) -> None:
@@ -1605,7 +1619,9 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
     # first closes that window regardless of how the send is implemented.
     _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
     _STALE_BOUNCES_TOUCHED[key] = time.time()
-    outcome = send_html_email_outcome(to_email, subject, text_body, html_body)
+    outcome = await run_blocking(
+        send_html_email_outcome, to_email, subject, text_body, html_body,
+    )
     if outcome in (SendOutcome.SUPPRESSED, SendOutcome.NOT_DISPATCHED):
         # Refund: nothing reached SES, so this attempt must not count against
         # the cap. K-5 (audit 2026-09-10): must decrement whatever the counter
@@ -1638,7 +1654,7 @@ async def _send_help_email(user: User, notification: EmailNotification) -> None:
     # apex domain's mail forwarding. The token is still valid here — an
     # unparseable reply deliberately leaves the notification at status='sent'.
     reply_to = build_reply_address(notification.reply_token)
-    _send_simple_email(user.email, subject, text_body, reply_to=reply_to)
+    await run_blocking(_send_simple_email, user.email, subject, text_body, reply_to=reply_to)
 
 
 def _send_simple_email(

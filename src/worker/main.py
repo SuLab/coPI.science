@@ -17,6 +17,7 @@ from src.agent.ids import WRITER_WORKER, set_default_writer_id
 from src.config import get_settings
 from src.database import make_engine
 from src.models import Job, User
+from src.services.io_executor import shutdown_io_executor
 from src.services.profile_pipeline import run_profile_pipeline
 from src.services.slack_executor import shutdown_slack_executor
 
@@ -333,6 +334,10 @@ async def _shutdown_worker(engine) -> None:
     """
     logger.info("Worker shutting down")
     shutdown_slack_executor()
+    # S-7 (audit 2026-09-10): same shutdown treatment as the Slack pool for
+    # the outbound-email (SES) pool -- see
+    # src/services/io_executor.py's module docstring.
+    shutdown_io_executor()
     await engine.dispose()
 
 
