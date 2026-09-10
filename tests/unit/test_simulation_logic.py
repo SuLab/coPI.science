@@ -4016,6 +4016,22 @@ class TestPollInboundFromDbGuardsTheHandler:
 
         assert engine._pi_inbound_attempts == {}
 
+    @pytest.mark.asyncio
+    async def test_parked_entries_for_rows_no_longer_in_the_batch_are_pruned(self):
+        """N-7 (opus review, audit 2026-09-10): `_pi_inbound_parked` is bounded
+        by the polled batch too, same as `_pi_inbound_attempts` above --
+        without this it grows by one entry per newly-parked row for the life
+        of the process, since a parked row's whole point is that both its
+        durable write paths are dead and nothing ever moves it to HANDLED."""
+        from unittest.mock import AsyncMock
+
+        engine = self._engine([], AsyncMock())
+        engine._pi_inbound_parked.add("gone.ts")
+
+        await engine._poll_inbound_from_db()
+
+        assert engine._pi_inbound_parked == set()
+
     def test_attempts_accumulate_regardless_of_the_gap_between_polls(self, monkeypatch):
         """Opus review of REV4-5: a decay keyed on the last attempt made the cap
         unreachable when consecutive polls were >PI_INBOX_LOOKBACK_S apart (one

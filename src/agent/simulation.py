@@ -3763,13 +3763,24 @@ class SimulationEngine:
             del self._pi_inbound_attempts[ts]
         self._pi_inbound_handled_pending_mark &= current_batch
         # M-5 (opus review, audit 2026-09-10): same bounding for the
-        # fallback-stamp attempt counter. `_pi_inbound_parked` is
-        # deliberately NOT pruned here — a parked row is meant to stay
-        # skipped by the poller for as long as it keeps appearing in the
-        # batch (the whole point of parking it), and once it ages out of the
-        # batch entirely there is nothing left to prune it FOR.
+        # fallback-stamp attempt counter.
         for ts in [ts for ts in self._pi_inbound_fallback_attempts if ts not in current_batch]:
             del self._pi_inbound_fallback_attempts[ts]
+        # N-7 (opus review, audit 2026-09-10, correcting M-5's rationale
+        # above): `_pi_inbound_parked` IS pruned here too. The M-5 comment
+        # this replaces reasoned "once it ages out of the batch entirely
+        # there is nothing left to prune it FOR" -- but a parked row's whole
+        # point is that both its durable write paths are dead, so nothing
+        # ever moves it to HANDLED; if it keeps satisfying the
+        # cursor-independent PENDING/INGESTED branch of `_poll_inbound_from_db`'s
+        # query it never leaves the batch at all, and this set grows by one
+        # entry per newly-parked row for the life of the process. Pruning
+        # whenever a row DOES leave the batch (superseded, deleted, or
+        # actually resolved some other way) is a pure bound with no downside:
+        # if the same message_ts is later polled again, it is simply
+        # re-parked from scratch (a fresh terminal failure re-derives the
+        # same outcome; see M-5's original parking logic below).
+        self._pi_inbound_parked &= current_batch
 
     async def _poll_inbound_from_db(self) -> None:
         """Ingest messages written to the DB by other processes.
