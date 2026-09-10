@@ -163,11 +163,15 @@ class PIHandler:
                 # logged in their own try/except that cannot touch `db_ok`.
                 db_ok = True
                 if self.session_factory:
-                    db_ok = False
+                    # `committed` is set the instant persist_private_profile_to_db
+                    # returns True and is never assigned again, so neither the
+                    # revision block nor the session's own __aexit__ (a dropped
+                    # connection on close/rollback) can flip it.
+                    committed = False
                     try:
                         async with self.session_factory() as db:
-                            db_ok = await agent.persist_private_profile_to_db(db, new_profile)
-                            if db_ok:
+                            committed = await agent.persist_private_profile_to_db(db, new_profile)
+                            if committed:
                                 try:
                                     # Record profile revision — best-effort:
                                     # its failure must not undo the commit above.
@@ -200,8 +204,14 @@ class PIHandler:
                                         agent_id, revision_exc,
                                     )
                     except Exception as db_exc:
-                        logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
-                        db_ok = False
+                        if committed:
+                            logger.error(
+                                "[%s] Session teardown failed after a committed profile row: %s",
+                                agent_id, db_exc,
+                            )
+                        else:
+                            logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
+                    db_ok = committed
 
                 # Disk is best-effort, and only attempted once the DB persist
                 # actually succeeded (RC-7 follow-up 3, Opus review

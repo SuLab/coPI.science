@@ -367,3 +367,40 @@ async def test_a_disk_failure_alone_still_acknowledges_success_and_the_db_holds_
     assert profile.private_profile_md == "new instruction from PI"
     assert revisions_created == ["new instruction from PI"]
     assert db.commits == 2  # one inside persist_private_profile_to_db, one after the revision
+
+
+class _RaisingExitSessionCtx(_StubSessionCtx):
+    """A session whose teardown blows up (a dropped connection on close/rollback)."""
+
+    async def __aexit__(self, exc_type, exc, tb):
+        raise RuntimeError("connection lost during session close")
+
+
+async def test_a_session_teardown_failure_after_a_committed_profile_row_still_acknowledges_success(
+    tmp_path, monkeypatch,
+):
+    """Opus tail review (2026-09-10): `db_ok` was assigned inside the `async with`, so an
+    exception from the session's `__aexit__` -- after persist had already committed --
+    still reached the outer handler and flipped it to False. Only "the profile row was
+    never committed" may produce the retry acknowledgement."""
+    from types import SimpleNamespace
+
+    agent_reg = SimpleNamespace(id=uuid.uuid4(), user_id=uuid.uuid4())
+    profile = SimpleNamespace(private_profile_md="old db content")
+    db = _StubDb([agent_reg, profile, agent_reg, None])
+
+    handler, agent, sent, revisions_created = _pi_handler(tmp_path, monkeypatch, db)
+    handler.session_factory = lambda: _RaisingExitSessionCtx(db)
+    disk_write_calls = []
+    monkeypatch.setattr(
+        agent, "update_private_profile",
+        lambda text: disk_write_calls.append(text) or True,
+    )
+
+    await handler._handle_standing_instruction("su", "U1", "always cite DOIs")
+
+    assert len(sent) == 1
+    assert "I've updated my private profile" in sent[0]
+    assert "wasn't able to save it" not in sent[0]
+    assert profile.private_profile_md == "new instruction from PI"
+    assert disk_write_calls == ["new instruction from PI"]
