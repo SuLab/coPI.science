@@ -353,6 +353,23 @@
     </div>
 </div>
 
+<!-- Cost by interview stage / specialist consult / call kind -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by interview stage</h2>
+        {% if cost_by_stage_html %}{{ cost_by_stage_html | safe }}{% else %}<p class="text-gray-400">No classified turns yet — rows written before migration 0045 are unclassified.</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by specialist consult</h2>
+        {% if cost_by_specialist_html %}{{ cost_by_specialist_html | safe }}{% else %}<p class="text-gray-400">No classified turns yet — rows written before migration 0045 are unclassified.</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by call kind (excl. cache)</h2>
+        {% if cost_by_call_kind_html %}{{ cost_by_call_kind_html | safe }}{% else %}<p class="text-gray-400">No classified turns yet — rows written before migration 0045 are unclassified.</p>{% endif %}
+        {% if call_kind_is_floor %}<p class="text-xs text-gray-500 mt-2">≥ — some rows of this run have no per-call breakdown (written before migration 0032), so their calls are not counted here.</p>{% endif %}
+    </div>
+</div>
+
 <!-- Funnel + drops -->
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">

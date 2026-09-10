@@ -712,3 +712,174 @@ async def test_cost_per_interview_is_run_scoped(db_session):
 
     results1 = {r.thread_ts: r for r in await stats.cost_per_interview(db_session, run1.id)}
     assert results1["T1"].cost == Decimal("0.00002")
+
+
+# ---------------------------------------------------------------------------
+# cost_by_stage / cost_by_specialist / cost_by_call_kind  (F1)
+# ---------------------------------------------------------------------------
+
+
+async def test_cost_by_stage_joins_the_role_and_buckets_a_null_phase(db_session):
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="blackbird", role="scout_hub")
+    await factories.make_agent(db_session, agent_id="labbot", role="pi_lab")
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    # claude-opus-5: $5/MTok in, $25/MTok out.  claude-sonnet-5: $2 / $10.
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        thread_phase="decide", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+    )  # 1_000_000 * 5 / 1e6 = $5.00
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        thread_phase=None, model="claude-opus-5",
+        input_tokens=200_000, output_tokens=0, **common,
+    )  # 200_000 * 5 / 1e6 = $1.00
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="labbot", phase="thread_reply",
+        thread_phase="explore", model="claude-sonnet-5",
+        input_tokens=1_000_000, output_tokens=100_000, **common,
+    )  # 1_000_000 * 2 / 1e6 + 100_000 * 10 / 1e6 = 2.00 + 1.00 = $3.00
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="ghost", phase="thread_reply",
+        thread_phase="conclude", model="claude-sonnet-5",
+        input_tokens=500_000, output_tokens=0, **common,
+    )  # 500_000 * 2 / 1e6 = $1.00, and `ghost` has no AgentRegistry row.
+    await db_session.commit()
+
+    rows = await stats.cost_by_stage(db_session, run.id)
+    by = {(r.role, r.thread_phase): r for r in rows}
+
+    assert set(by) == {
+        ("scout_hub", "decide"), ("scout_hub", "unclassified"),
+        ("pi_lab", "explore"), ("unknown", "conclude"),
+    }
+    assert by[("scout_hub", "decide")].cost == Decimal("5.00")
+    assert by[("scout_hub", "decide")].call_count == 1
+    assert by[("scout_hub", "unclassified")].cost == Decimal("1.00")
+    assert by[("scout_hub", "unclassified")].call_count == 1
+    assert by[("pi_lab", "explore")].cost == Decimal("3.00")
+    assert by[("unknown", "conclude")].cost == Decimal("1.00")
+
+
+async def test_cost_by_stage_is_run_scoped_and_zeroes_an_unpriced_model(db_session):
+    run1 = await factories.make_simulation_run(db_session)
+    run2 = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="blackbird", role="scout_hub")
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run1, agent_id="blackbird", thread_phase="decide",
+        model="claude-made-up", input_tokens=1_000_000, output_tokens=1_000_000, **common,
+    )
+    await factories.make_llm_call_log(
+        db_session, run=run2, agent_id="blackbird", thread_phase="decide",
+        model="claude-opus-5", input_tokens=1_000_000, output_tokens=0, **common,
+    )
+    await db_session.commit()
+
+    rows = await stats.cost_by_stage(db_session, run1.id)
+
+    assert len(rows) == 1
+    assert rows[0].role == "scout_hub"
+    assert rows[0].thread_phase == "decide"
+    assert rows[0].cost == Decimal(0)  # unpriced contributes nothing
+    assert rows[0].call_count == 1
+
+
+async def test_cost_by_specialist_splits_by_domain_and_labels_unmatched(db_session):
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(_consult(run.id, domain="chemistry", signal="blocking", thread_id="T1"))
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="consult_chemistry",
+        thread_ts="T1", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+    )  # $5.00, matched to the blocking consult above
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="consult_legal",
+        thread_ts="T9", model="claude-sonnet-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+    )  # $2.00, no consult row names (T9, legal)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        thread_ts="T1", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+    )  # not a consult call at all — must not appear
+    await db_session.commit()
+
+    rows = await stats.cost_by_specialist(db_session, run.id)
+    by = {(r.domain, r.verdict_signal): r for r in rows}
+
+    assert set(by) == {("chemistry", "blocking"), ("legal", "unmatched")}
+    assert by[("chemistry", "blocking")].cost == Decimal("5.00")
+    assert by[("chemistry", "blocking")].call_count == 1
+    assert by[("legal", "unmatched")].cost == Decimal("2.00")
+    assert by[("legal", "unmatched")].call_count == 1
+
+
+async def test_cost_by_call_kind_prices_each_call_stats_element(db_session):
+    run = await factories.make_simulation_run(db_session)
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=200_000, **common,
+        call_stats=[
+            {"seq": 0, "kind": "round", "input_tokens": 1_000_000,
+             "output_tokens": 0, "thinking_tokens": 0},
+            {"seq": 1, "kind": "final", "input_tokens": 0,
+             "output_tokens": 100_000, "thinking_tokens": 100_000},
+        ],
+    )
+    # round: 1_000_000 * 5 / 1e6            = $5.00
+    # final: (100_000 + 100_000) * 25 / 1e6 = $5.00
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",
+        input_tokens=0, output_tokens=0, **common,
+        call_stats=[
+            {"seq": 0, "kind": "round", "input_tokens": 500_000,
+             "output_tokens": 0, "thinking_tokens": 0},
+        ],
+    )  # round: 500_000 * 2 / 1e6 = $1.00
+    await db_session.commit()
+
+    rows = await stats.cost_by_call_kind(db_session, run.id)
+    by = {r.kind: r for r in rows}
+
+    assert set(by) == {"round", "final"}
+    assert by["round"].cost == Decimal("6.00")   # 5.00 + 1.00
+    assert by["round"].call_count == 2
+    assert by["final"].cost == Decimal("5.00")
+    assert by["final"].call_count == 1
+    assert all(r.is_floor is False for r in rows)
+
+
+async def test_cost_by_call_kind_is_a_floor_when_a_row_has_no_call_stats(db_session):
+    run = await factories.make_simulation_run(db_session)
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+        call_stats=[
+            {"seq": 0, "kind": "round", "input_tokens": 1_000_000,
+             "output_tokens": 0, "thinking_tokens": 0},
+        ],
+    )
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common, call_stats=None,
+    )
+    await db_session.commit()
+
+    rows = await stats.cost_by_call_kind(db_session, run.id)
+
+    assert len(rows) == 1
+    assert rows[0].kind == "round"
+    assert rows[0].cost == Decimal("5.00")  # the NULL-call_stats row is invisible here
+    assert rows[0].is_floor is True
+
+
+async def test_the_three_f1_aggregates_tolerate_an_empty_run(db_session):
+    run = await factories.make_simulation_run(db_session)
+    assert await stats.cost_by_stage(db_session, run.id) == []
+    assert await stats.cost_by_specialist(db_session, run.id) == []
+    assert await stats.cost_by_call_kind(db_session, run.id) == []

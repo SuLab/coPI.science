@@ -43,7 +43,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import Integer, case, column, func, select, true
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.roles import PromptSetStamp, prompt_set_stamp
@@ -137,6 +138,68 @@ class CostSummary:
     total_output_tokens: int
     total_cache_read_tokens: int
     total_cache_creation_tokens: int
+
+
+@dataclass(frozen=True)
+class StageCost:
+    """One row of "cost by interview stage" — a (role, thread_phase) cell.
+
+    ``role`` is ``AgentRegistry.role`` joined on ``agent_id`` (LEFT JOIN — an
+    ``agent_id`` with no registry row buckets as ``'unknown'`` rather than
+    vanishing), and ``thread_phase`` is Task 10's column, whose NULL means
+    "written before that column existed, or by a call site outside an
+    interview" and buckets as ``'unclassified'``. Both keys are always a
+    string: ``hbar_list`` labels must never be ``None``.
+    """
+
+    role: str
+    thread_phase: str
+    cost: Decimal
+    call_count: int
+
+
+@dataclass(frozen=True)
+class SpecialistCost:
+    """One row of "cost by specialist consult" — a (domain, signal) cell.
+
+    ``domain`` is the suffix of the ``consult_<domain>`` phase written by
+    ``src/agent/tools.py``; ``verdict_signal`` is the signal of the
+    ``specialist_consults`` row for the same (run, thread, domain), or
+    ``'unmatched'`` when no consult row names it — a consult call whose
+    opinion was never recorded is a real, separately interesting bucket, not
+    an error.
+    """
+
+    domain: str
+    verdict_signal: str
+    cost: Decimal
+    call_count: int
+
+
+@dataclass(frozen=True)
+class CallKindCost:
+    """One row of "cost by call kind", priced per ``call_stats[]`` element.
+
+    ``kind`` is ``round | final | forced_final | retry`` as written by
+    ``src/services/llm.py``'s ``_call_stat``. This is the ONLY aggregate here
+    that prices individual API calls rather than whole turns, and it is
+    therefore **excluding cache tokens**: ``call_stats`` elements carry
+    ``input_tokens``/``output_tokens``/``thinking_tokens`` only, so the
+    cache-read and cache-write halves of the bill are simply not recorded per
+    call and cannot be apportioned. Thinking tokens bill at the output rate
+    and are added to ``output_tokens`` before pricing.
+
+    ``is_floor`` means the same thing it means on ``CostSummary``: at least
+    one row of this run carries NULL ``call_stats`` (every row written before
+    migration 0032), so its calls are invisible to this breakdown entirely
+    and the numbers here are a floor. Independently of the flag, the panel is
+    labelled "excl. cache" because of the paragraph above.
+    """
+
+    kind: str
+    cost: Decimal
+    call_count: int
+    is_floor: bool
 
 
 @dataclass(frozen=True)
@@ -409,6 +472,157 @@ async def cost_summary(db: AsyncSession, run_id: uuid.UUID) -> CostSummary:
         total_cache_read_tokens=total_cache_read,
         total_cache_creation_tokens=total_cache_creation,
     )
+
+
+# ---------------------------------------------------------------------------
+# cost_by_stage / cost_by_specialist / cost_by_call_kind
+# ---------------------------------------------------------------------------
+
+
+def _reduce_priced(rows) -> dict[tuple, dict[str, Any]]:
+    """(key..., model, count, tokens...) rows -> key -> {cost, calls}.
+
+    The model column is folded away here rather than in SQL because pricing is
+    per model and lives in Python (`cost_for_tokens`); an unpriced model
+    contributes zero cost but still contributes its calls, exactly as
+    `_grouped_cost` does for the agent/phase breakdowns.
+    """
+    agg: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        *key, model, n, inp, out, cread, ccreate = row
+        bucket = agg.setdefault(tuple(key), {"cost": Decimal(0), "calls": 0})
+        bucket["calls"] += int(n)
+        cost = cost_for_tokens(
+            model, input_tokens=int(inp), output_tokens=int(out),
+            cache_read=int(cread), cache_creation=int(ccreate),
+        )
+        if cost is not None:
+            bucket["cost"] += cost
+    return agg
+
+
+async def cost_by_stage(db: AsyncSession, run_id: uuid.UUID) -> list[StageCost]:
+    """Cost of the run's turns split by (agent role, interview stage)."""
+    role_col = func.coalesce(AgentRegistry.role, "unknown")
+    phase_col = func.coalesce(LlmCallLog.thread_phase, "unclassified")
+    stmt = (
+        _token_sums_stmt(run_id, role_col, phase_col)
+        .select_from(LlmCallLog)
+        .outerjoin(AgentRegistry, AgentRegistry.agent_id == LlmCallLog.agent_id)
+    )
+    agg = _reduce_priced((await db.execute(stmt)).all())
+    return [
+        StageCost(role=role, thread_phase=phase, cost=v["cost"], call_count=v["calls"])
+        for (role, phase), v in sorted(agg.items())
+    ]
+
+
+async def cost_by_specialist(db: AsyncSession, run_id: uuid.UUID) -> list[SpecialistCost]:
+    """Cost of the run's `consult_<domain>` calls split by (domain, signal).
+
+    The signal is read with a correlated scalar subquery rather than a join to
+    `specialist_consults`, deliberately: a plain join fans out when one
+    (thread, domain) pair was consulted more than once — which is the normal
+    case across a long interview — and would then count the same API call's
+    tokens once per consult row.
+    """
+    domain_col = func.substr(LlmCallLog.phase, 9)
+    signal_sub = (
+        select(SpecialistConsult.verdict_signal)
+        .where(
+            SpecialistConsult.simulation_run_id == run_id,
+            SpecialistConsult.thread_id == LlmCallLog.thread_ts,
+            SpecialistConsult.domain == domain_col,
+        )
+        .order_by(SpecialistConsult.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    inner = (
+        select(
+            domain_col.label("domain"),
+            func.coalesce(signal_sub, "unmatched").label("signal"),
+            LlmCallLog.model.label("model"),
+            LlmCallLog.input_tokens.label("inp"),
+            LlmCallLog.output_tokens.label("out"),
+            func.coalesce(LlmCallLog.cache_read_input_tokens, 0).label("cread"),
+            func.coalesce(LlmCallLog.cache_creation_input_tokens, 0).label("ccreate"),
+        )
+        .where(
+            LlmCallLog.simulation_run_id == run_id,
+            LlmCallLog.phase.like("consult_%"),
+        )
+        .subquery()
+    )
+    stmt = select(
+        inner.c.domain,
+        inner.c.signal,
+        inner.c.model,
+        func.count(),
+        func.coalesce(func.sum(inner.c.inp), 0),
+        func.coalesce(func.sum(inner.c.out), 0),
+        func.coalesce(func.sum(inner.c.cread), 0),
+        func.coalesce(func.sum(inner.c.ccreate), 0),
+    ).group_by(inner.c.domain, inner.c.signal, inner.c.model)
+
+    agg = _reduce_priced((await db.execute(stmt)).all())
+    return [
+        SpecialistCost(
+            domain=domain, verdict_signal=signal, cost=v["cost"], call_count=v["calls"],
+        )
+        for (domain, signal), v in sorted(agg.items())
+    ]
+
+
+async def cost_by_call_kind(db: AsyncSession, run_id: uuid.UUID) -> list[CallKindCost]:
+    """Cost of the run's individual API calls split by call kind.
+
+    Prices each `call_stats[]` element, so a row with NULL `call_stats` (every
+    row written before migration 0032) contributes nothing at all — hence
+    `is_floor`. Cache tokens are not recorded per call and are therefore
+    excluded; see `CallKindCost`.
+    """
+    elem = func.jsonb_array_elements(LlmCallLog.call_stats).table_valued(
+        column("value", JSONB)
+    )
+    kind_col = func.coalesce(elem.c.value["kind"].astext, "unknown")
+
+    def _tok(key: str):
+        return func.coalesce(elem.c.value[key].astext.cast(Integer), 0)
+
+    stmt = (
+        select(
+            kind_col,
+            LlmCallLog.model,
+            func.count(),
+            func.coalesce(func.sum(_tok("input_tokens")), 0),
+            func.coalesce(
+                func.sum(_tok("output_tokens") + _tok("thinking_tokens")), 0
+            ),
+        )
+        .select_from(LlmCallLog)
+        .join(elem, true())
+        .where(LlmCallLog.simulation_run_id == run_id)
+        .group_by(kind_col, LlmCallLog.model)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    is_floor = (
+        await db.execute(
+            select(func.count()).select_from(LlmCallLog).where(
+                LlmCallLog.simulation_run_id == run_id,
+                LlmCallLog.call_stats.is_(None),
+            )
+        )
+    ).scalar_one() > 0
+
+    agg = _reduce_priced([(k, m, n, inp, out, 0, 0) for k, m, n, inp, out in rows])
+    return [
+        CallKindCost(
+            kind=kind, cost=v["cost"], call_count=v["calls"], is_floor=is_floor,
+        )
+        for (kind,), v in sorted(agg.items())
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -613,3 +613,52 @@ async def test_admin_waitlist_route_is_gone(client, db_session):
             headers=auth_headers(admin.id),
         )
     ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# F1 — cost by interview stage / specialist consult / call kind
+# ---------------------------------------------------------------------------
+
+
+async def test_live_tab_renders_the_three_f1_cost_panels(client, db_session):
+    admin = await _admin(db_session, "sim-admin-f1@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="blackbird", role="scout_hub")
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        thread_phase="decide", thread_ts="T1", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+        call_stats=[{"seq": 0, "kind": "round", "input_tokens": 1_000_000,
+                     "output_tokens": 0, "thinking_tokens": 0}],
+    )  # $5.00 — as a stage row, and again as a "round" call-kind row
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="consult_chemistry",
+        thread_ts="T1", model="claude-sonnet-5",
+        input_tokens=1_000_000, output_tokens=0, **common, call_stats=None,
+    )  # $2.00 — unmatched consult; NULL call_stats makes the call-kind panel a floor
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "Cost by interview stage" in resp.text
+    assert "Cost by specialist consult" in resp.text
+    assert "Cost by call kind (excl. cache)" in resp.text
+    assert "scout_hub · decide" in resp.text
+    assert "chemistry · unmatched" in resp.text
+    assert "$2.00 (1 turns)" in resp.text
+    assert "≥ $5.00 (1 calls)" in resp.text
+
+
+async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(client, db_session):
+    admin = await _admin(db_session, "sim-admin-f1e@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "Cost by interview stage" in resp.text
+    assert "No classified turns yet" in resp.text
+    assert "Internal Server Error" not in resp.text

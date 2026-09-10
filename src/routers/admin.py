@@ -80,6 +80,9 @@ from src.services.simulation_control import (
 from src.services.simulation_stats import (
     CALL_STATS_ROW_LIMIT,
     consult_fanout,
+    cost_by_call_kind,
+    cost_by_specialist,
+    cost_by_stage,
     cost_per_interview,
     cost_summary,
     funnel,
@@ -2285,6 +2288,9 @@ async def _live_tab_context(
     latency = await latency_percentiles(db, run_id)
     timeline = await interview_timeline(db, run_id)
     per_interview = await cost_per_interview(db, run_id)
+    stage_costs = await cost_by_stage(db, run_id)
+    specialist_costs = await cost_by_specialist(db, run_id)
+    call_kind_costs = await cost_by_call_kind(db, run_id)
 
     total_call_rows = (
         await db.execute(
@@ -2390,6 +2396,38 @@ async def _live_tab_context(
     cost_by_phase_html = (
         hbar_list([(p.phase, float(p.cost), f"${p.cost:.2f} ({p.call_count} calls)") for p in cost.by_phase])
         if cost.by_phase
+        else None
+    )
+
+    # --- cost by interview stage / specialist consult / call kind --------
+    cost_by_stage_html = (
+        hbar_list([
+            (f"{r.role} · {r.thread_phase}", float(r.cost),
+             f"${r.cost:.2f} ({r.call_count} turns)")
+            for r in stage_costs
+        ])
+        if stage_costs
+        else None
+    )
+    cost_by_specialist_html = (
+        hbar_list([
+            (f"{r.domain} · {r.verdict_signal}", float(r.cost),
+             f"${r.cost:.2f} ({r.call_count} turns)")
+            for r in specialist_costs
+        ])
+        if specialist_costs
+        else None
+    )
+    # `is_floor` is a property of the RUN (some row has NULL call_stats), so
+    # every row carries the same value — read it off the first.
+    call_kind_is_floor = bool(call_kind_costs) and call_kind_costs[0].is_floor
+    cost_by_call_kind_html = (
+        hbar_list([
+            (r.kind, float(r.cost),
+             f"{'≥ ' if r.is_floor else ''}${r.cost:.2f} ({r.call_count} calls)")
+            for r in call_kind_costs
+        ])
+        if call_kind_costs
         else None
     )
 
@@ -2550,6 +2588,10 @@ async def _live_tab_context(
         "cost_by_agent_html": cost_by_agent_html,
         "cost_by_model_html": cost_by_model_html,
         "cost_by_phase_html": cost_by_phase_html,
+        "cost_by_stage_html": cost_by_stage_html,
+        "cost_by_specialist_html": cost_by_specialist_html,
+        "cost_by_call_kind_html": cost_by_call_kind_html,
+        "call_kind_is_floor": call_kind_is_floor,
         "funnel_html": funnel_html,
         "drops_rows": drops_rows,
         "unvetted_panel_count": fun.unvetted_panel_count,
