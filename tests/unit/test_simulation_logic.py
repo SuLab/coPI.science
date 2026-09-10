@@ -5017,3 +5017,66 @@ class TestEvictStaleParkedThreads:
         await engine._run_turn(agent)
 
         assert thread.thread_id not in agent.state.active_threads
+
+
+class TestPhase5NewPostNeverDefaultsToGeneral:
+    """Live copi-test run 2026-09-10: a real model omitted `channel` on a new_post and
+    the engine defaulted it to '#general' — a channel that did not exist in that
+    workspace. A missing or unknown channel on a new_post is an unparseable
+    response, not a licence to post somewhere the model never named (audit
+    2026-09-08 RC-15). Replies are unaffected: their channel comes from the
+    target post (COR-9b)."""
+
+    def _engine(self, monkeypatch):
+        from src.agent.agent import Agent
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        # Like the live full-run test: the workspace is collapsed to one channel.
+        monkeypatch.setattr("src.agent.simulation.SEEDED_CHANNELS", ["t-only"])
+        a = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[a], slack_clients={})
+        engine._channel_visibility = {"t-only": "public"}
+        a.state.subscribed_channels = {"t-only"}
+        return engine, a
+
+    @staticmethod
+    def _response(action_json: str) -> str:
+        return (
+            f"```json\n{action_json}\n```\n<slack_message>\n:bulb: Idea — combine our assays.\n"
+            "</slack_message>\n"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action_json", [
+        '{"action": "new_post", "post_type": "idea"}',
+        '{"action": "new_post", "channel": "general", "post_type": "idea"}',
+        '{"action": "new_post", "channel": "#made-up", "post_type": "idea"}',
+    ])
+    async def test_a_new_post_with_a_missing_or_unknown_channel_is_refused(
+        self, monkeypatch, action_json,
+    ):
+        from unittest.mock import AsyncMock
+
+        engine, a = self._engine(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._response(action_json)),
+        )
+        await engine._phase5_new_post(a)
+        assert [e for e in engine.message_log._entries if e.sender_agent_id == "a"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_new_post_into_a_known_channel_still_posts(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        engine, a = self._engine(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._response(
+                '{"action": "new_post", "channel": "#t-only", "post_type": "idea"}'
+            )),
+        )
+        await engine._phase5_new_post(a)
+        posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
+        assert [p.channel for p in posts] == ["t-only"]

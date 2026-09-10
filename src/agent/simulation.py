@@ -2733,9 +2733,32 @@ class SimulationEngine:
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
 
-            channel = action_data.get("channel", "general").lstrip("#")
+            channel = str(action_data.get("channel") or "").lstrip("#")
             target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
+
+            # A new post goes only where the model actually named a channel this
+            # engine knows. The old `.get("channel", "general")` default turned a
+            # malformed response into a post in #general — a channel that need
+            # not even exist in the workspace (seen live on copi-test, where the
+            # roster is collapsed to one probe channel). Missing or unknown is
+            # unparseable, exactly like a missing `action` above. Replies are
+            # not gated here: their channel comes from the target post (COR-9b).
+            # See audit 2026-09-08 RC-15.
+            if action == "new_post":
+                known = (
+                    channel in self._channel_visibility
+                    or channel in SEEDED_CHANNELS
+                    or channel in agent.state.subscribed_channels
+                )
+                if not channel or not known:
+                    logger.warning(
+                        "[%s] Phase 5: new_post %s — refusing to post",
+                        agent.agent_id,
+                        "omitted `channel`" if not channel
+                        else f"named unknown channel #{channel}",
+                    )
+                    return
 
             # A reply's channel is the target post's real channel, never the
             # LLM's free-form field — trusting the LLM here let a reply
