@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}CoPI — Research Collaboration{% endblock %}</title>
+    <title>{% block title %}Blackbird — Review Platform{% endblock %}</title>
     <!-- Tailwind Play CDN: the JIT build is unversioned and cannot carry an SRI
          hash. Vendoring a compiled build (SEC-18) is deferred. -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -46,8 +46,8 @@
         <div class="flex justify-between h-16">
             <div class="flex items-center">
                 <a href="/" class="flex-shrink-0 flex items-center">
-                    <span class="text-xl font-bold text-indigo-600">CoPI</span>
-                    <span class="ml-2 text-sm text-gray-500 hidden sm:block">Research Collaboration</span>
+                    <img src="/static/img/blackbird-laboratories.svg" alt="Blackbird Laboratories" width="46" height="32" class="text-[#353A41]">
+                    <span class="ml-2 text-sm text-gray-500 hidden sm:block">Review Platform</span>
                 </a>
                 {% if current_user %}
                 <div class="ml-8 flex space-x-4">
@@ -179,7 +179,7 @@
 <footer class="border-t border-gray-200 mt-16">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <p class="text-center text-sm text-gray-400">
-            CoPI &mdash; Research Collaboration Platform &bull; Scripps Research
+            Blackbird Laboratories &mdash; Review Platform
         </p>
     </div>
 </footer>
