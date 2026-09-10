@@ -2688,7 +2688,11 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     class _Row:
         def __init__(self, created_at, message_ts="1.0", content="hello",
-                     pi_inbound_state=None, is_bot=False, sender_user_id=None):
+                     pi_inbound_state=None, is_bot=False, sender_user_id=None,
+                     row_id=None):
+            import uuid as _uuid
+
+            self.id = row_id or _uuid.uuid4()
             self.created_at = created_at
             self.message_ts = message_ts
             self.channel_name = "general"
@@ -2742,8 +2746,12 @@ class TestPollInboundFromDbGuardsTheHandler:
                 self._sql_log.append(str(compiled))
                 params = compiled.params
                 for r in self._rows:
-                    if r.message_ts == params.get("message_ts_1"):
-                        r.pi_inbound_state = params.get("pi_inbound_state")
+                    if "message_ts_1" in params:
+                        if r.message_ts == params.get("message_ts_1"):
+                            r.pi_inbound_state = params.get("pi_inbound_state")
+                    elif "id_1" in params:
+                        if r.id == params.get("id_1"):
+                            r.pi_inbound_state = params.get("pi_inbound_state")
                 return _R([])
             # Mirrors the real WHERE clause (RC-2): the lookback window OR a
             # row explicitly marked 'pending' at write time, however far
@@ -2928,6 +2936,44 @@ class TestPollInboundFromDbGuardsTheHandler:
         handler.assert_not_awaited()
         assert engine.message_log.get_entry("1.0") is None
         assert engine._pi_inbox_cursor == row_created_at
+
+    @pytest.mark.asyncio
+    async def test_a_deterministically_raising_handler_gives_up_after_max_attempts(
+        self, caplog,
+    ):
+        """SEC2-1 (audit 2026-09-08): a handler that raises on every attempt
+        must not be re-run forever — it is capped at PI_INBOUND_MAX_ATTEMPTS
+        in-process retries, after which the row is stamped HANDLED (terminal)
+        and one give-up ERROR is logged."""
+        import logging
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(side_effect=ConnectionError("boom"))
+        engine = self._engine(rows, handler)
+
+        with caplog.at_level(logging.ERROR):
+            for _ in range(5):
+                await engine._poll_inbound_from_db()
+
+        assert handler.await_count == PI_INBOUND_MAX_ATTEMPTS, (
+            "the handler must not run past the attempt cap even though the "
+            "row keeps matching the cursor-independent 'ingested' disjunct"
+        )
+        assert rows[0].pi_inbound_state == "handled", (
+            "giving up stamps the row terminal so it stops being re-selected"
+        )
+        give_up_records = [
+            r for r in caplog.records if "Giving up" in r.message
+        ]
+        assert len(give_up_records) == 1
+        assert engine._pi_inbound_attempts == {}, (
+            "the per-message_ts counter must be pruned once the row is terminal"
+        )
 
     @pytest.mark.asyncio
     async def test_a_tagged_slack_row_already_in_the_log_does_not_rerun_the_tag_route(

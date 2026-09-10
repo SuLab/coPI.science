@@ -208,6 +208,14 @@ PI_INBOUND_HANDLED = "handled"
 # once a poller is running again. See docs/plans/2026-09-08-audit-fixes.md RC-2.
 PI_INBOUND_PENDING = "pending"
 
+# SEC2-1 (audit 2026-09-08): a handler that raises deterministically (not a
+# transient ConnectionError) would otherwise be re-run forever — the row stays
+# 'ingested' and the cursor-independent disjunct above re-selects it every
+# tick regardless of PI_INBOX_LOOKBACK_S, which only bounds the cursor-based
+# path. This caps in-process retries per message_ts; on the Nth failure the
+# row is stamped HANDLED (terminal) so it stops being re-selected.
+PI_INBOUND_MAX_ATTEMPTS = 3
+
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 
@@ -519,6 +527,10 @@ class SimulationEngine:
         # interface, private-channel handover) enter the simulation. See
         # _poll_inbound_from_db.
         self._pi_inbox_cursor: datetime = EPOCH_UTC
+        # SEC2-1: in-process attempt counter for _poll_inbound_from_db's
+        # handler, keyed by message_ts. Pruned on give-up (row stamped
+        # HANDLED) or successful handling — see PI_INBOUND_MAX_ATTEMPTS.
+        self._pi_inbound_attempts: dict[str, int] = {}
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -3535,18 +3547,39 @@ class SimulationEngine:
                 try:
                     await self._handle_pi_inbound_entry(entry)
                 except Exception as exc:
+                    attempts = self._pi_inbound_attempts.get(r.message_ts, 0) + 1
+                    self._pi_inbound_attempts[r.message_ts] = attempts
+                    if attempts >= PI_INBOUND_MAX_ATTEMPTS:
+                        logger.error(
+                            "[%s] Giving up on PI inbound side effects for %s "
+                            "after %d attempts: %s",
+                            entry.channel, entry.thread_ts or entry.ts, attempts, exc,
+                        )
+                        # Terminal: stop the cursor-independent 'ingested'
+                        # disjunct from re-selecting this row forever (SEC2-1).
+                        # The PI's text is already in the log either way.
+                        await self._mark_pi_inbound_row_handled(r.id)
+                        self._pi_inbound_attempts.pop(r.message_ts, None)
+                        if r.created_at and r.created_at > self._pi_inbox_cursor:
+                            self._pi_inbox_cursor = r.created_at
+                        continue
                     logger.error(
-                        "[%s] Failed to apply PI inbound side effects for %s: %s",
-                        entry.channel, entry.thread_ts or entry.ts, exc,
+                        "[%s] Failed to apply PI inbound side effects for %s "
+                        "(attempt %d/%d): %s",
+                        entry.channel, entry.thread_ts or entry.ts, attempts,
+                        PI_INBOUND_MAX_ATTEMPTS, exc,
                     )
                     # 'ingested' is durable, so the next poll re-runs the
                     # handler for as long as the row stays inside
-                    # PI_INBOX_LOOKBACK_S; the cursor stays put so it is
-                    # re-scanned. Past that window the triggers are lost (D25's
-                    # trade) but the PI's message is in the log either way.
-                    # At-least-once: a retry can repeat a non-idempotent side
-                    # effect (e.g. a DM) that the failed attempt already ran.
+                    # PI_INBOX_LOOKBACK_S — capped at PI_INBOUND_MAX_ATTEMPTS
+                    # in-process retries, past which the row is stamped
+                    # HANDLED above regardless of the lookback window. The
+                    # cursor stays put so a retry within the window is
+                    # re-scanned. At-least-once: a retry can repeat a
+                    # non-idempotent side effect (e.g. a DM) that the failed
+                    # attempt already ran.
                     continue
+                self._pi_inbound_attempts.pop(r.message_ts, None)
                 await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_HANDLED)
             else:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
