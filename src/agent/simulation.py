@@ -261,6 +261,14 @@ _PG_MAX_BIND_PARAMS = 32767
 # in-window view, and the newest rows are the ones still inside that window.
 LLM_LOG_REQUEUE_MAX_ROWS = 1000
 
+# M-7 (opus review, audit 2026-09-10): in-call retry budget for
+# _close_thread's ThreadDecision write (see _write_thread_decision_with_retry).
+# A short, DB-scoped backoff — this covers a transient connection blip, not a
+# Slack-scale throttle, so it does not need PI_INBOUND_MAX_ATTEMPTS/
+# THREAD_DECISION_RETRY_BACKOFF_S's Slack-poller counterparts' longer windows.
+THREAD_DECISION_WRITE_MAX_ATTEMPTS = 3
+THREAD_DECISION_RETRY_BACKOFF_S = 0.2
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -585,6 +593,15 @@ class SimulationEngine:
         # is logged the moment a row is parked; a wedged row afterward causes
         # NO further logging or writes, only silence, by design.
         self._pi_inbound_parked: set[str] = set()
+
+        # ThreadDecision payloads whose write exhausted _close_thread's own
+        # in-call retry budget (M-7, opus review, audit 2026-09-10). Each
+        # entry is the plain dict of column values needed to retry the
+        # insert; _flush_pending_thread_decisions() retries these at the
+        # start of every main-loop tick and in the shutdown flush, so a DB
+        # outage longer than _close_thread's own budget still eventually
+        # gets the row written instead of losing the decision permanently.
+        self._pending_thread_decisions: list[dict] = []
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -949,6 +966,10 @@ class SimulationEngine:
             # Pick up profile edits made from the web app (separate process).
             self._sync_profiles_from_disk()
 
+            # Retry any ThreadDecision writes _close_thread could not commit
+            # even after its own in-call retry budget (M-7, audit 2026-09-10).
+            await self._flush_pending_thread_decisions()
+
             # Select agent
             agent = self._select_agent()
             if agent is None:
@@ -1069,6 +1090,7 @@ class SimulationEngine:
         self._running = False
         self._stop_event.set()
         set_call_log_callback(None)
+        await self._flush_pending_thread_decisions()
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
@@ -1956,6 +1978,101 @@ class SimulationEngine:
             )
             await self._close_thread(agent, thread, "no_proposal")
 
+    async def _insert_thread_decision_row(self, payload: dict) -> uuid.UUID:
+        """One DB attempt to insert a ThreadDecision row from ``payload``.
+
+        Raises on any failure (caller retries); returns the new row's id on
+        success. Split out of ``_write_thread_decision_with_retry`` (M-7,
+        opus review, audit 2026-09-10) so the retry loop stays readable.
+        """
+        async with self.session_factory() as db:
+            decision = ThreadDecision(
+                simulation_run_id=self.simulation_run_id,
+                thread_id=payload["thread_id"],
+                channel=payload["channel"],
+                agent_a=payload["agent_a"],
+                agent_b=payload["agent_b"],
+                outcome=payload["outcome"],
+                summary_text=payload["summary_text"],
+            )
+            db.add(decision)
+            await db.commit()
+            return decision.id
+
+    async def _write_thread_decision_with_retry(self, payload: dict) -> uuid.UUID | None:
+        """Insert a ThreadDecision row, retrying transient failures in-call
+        (M-7, opus review, audit 2026-09-10).
+
+        The decision is the product of the whole conversation this thread
+        represents — a single try/except-and-give-up dropped it outright on
+        any DB error, logged with a plain ``%s`` that renders EMPTY for an
+        exception whose ``str()`` is empty (e.g. a bare ``TimeoutError()`` —
+        exactly what a 30s blocking Slack retry sleep starving the event loop
+        produced in a live run's log, see docs/plans/2026-09-08-audit-fixes.md
+        §M). ``%r`` plus ``type(exc).__name__`` below make the log line
+        diagnosable regardless of whether the exception carries a message.
+
+        Returns ``None`` once every attempt (``THREAD_DECISION_WRITE_MAX_ATTEMPTS``)
+        is exhausted; the caller (``_close_thread`` or
+        ``_flush_pending_thread_decisions``) is responsible for queuing or
+        re-queuing the payload rather than losing it.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, THREAD_DECISION_WRITE_MAX_ATTEMPTS + 1):
+            try:
+                decision_id = await self._insert_thread_decision_row(payload)
+                if attempt > 1:
+                    logger.warning(
+                        "[%s] ThreadDecision write for thread %s succeeded on "
+                        "attempt %d/%d, after %r (%s)",
+                        payload["agent_a"], payload["thread_id"], attempt,
+                        THREAD_DECISION_WRITE_MAX_ATTEMPTS, last_exc,
+                        type(last_exc).__name__,
+                    )
+                return decision_id
+            except Exception as exc:
+                last_exc = exc
+                if attempt < THREAD_DECISION_WRITE_MAX_ATTEMPTS:
+                    await asyncio.sleep(THREAD_DECISION_RETRY_BACKOFF_S)
+        logger.error(
+            "[%s] Giving up writing ThreadDecision for thread %s after %d "
+            "attempts: %r (%s) — queuing for retry on the next tick",
+            payload["agent_a"], payload["thread_id"],
+            THREAD_DECISION_WRITE_MAX_ATTEMPTS, last_exc, type(last_exc).__name__,
+        )
+        return None
+
+    async def _flush_pending_thread_decisions(self) -> None:
+        """Retry any ThreadDecision rows queued by ``_close_thread`` after
+        exhausting its own in-call retry budget (M-7, opus review, audit
+        2026-09-10).
+
+        Called at the start of every main-loop tick and from the shutdown
+        flush, so a DB outage that outlasts ``_close_thread``'s own budget
+        still eventually gets the row written instead of losing it
+        permanently. A successful write here propagates ``decision_id`` onto
+        any CURRENT ``ProposalRef`` for the same thread on either side — the
+        ref was left with ``thread_decision_id=None`` when ``_close_thread``
+        itself could not obtain an id (documented behaviour: the ref reads
+        as "not yet reviewed against a decision" until this flush succeeds).
+        """
+        if not self._pending_thread_decisions:
+            return
+        still_pending = []
+        for payload in self._pending_thread_decisions:
+            decision_id = await self._write_thread_decision_with_retry(payload)
+            if decision_id is None:
+                still_pending.append(payload)
+                continue
+            for aid in (payload["agent_a"], payload["agent_b"]):
+                a = self.agents.get(aid)
+                if not a:
+                    continue
+                for p in a.state.pending_proposals:
+                    if p.thread_id == payload["thread_id"]:
+                        p.thread_decision_id = decision_id
+        self._pending_thread_decisions = still_pending
+
     async def _close_thread(
         self,
         agent: Agent,
@@ -1996,22 +2113,26 @@ class SimulationEngine:
         # needed to dodge an expired-attribute refresh (red-team m7).
         decision_id: uuid.UUID | None = None
         if self.session_factory and self.simulation_run_id:
-            try:
-                async with self.session_factory() as db:
-                    decision = ThreadDecision(
-                        simulation_run_id=self.simulation_run_id,
-                        thread_id=thread.thread_id,
-                        channel=thread.channel,
-                        agent_a=agent.agent_id,
-                        agent_b=thread.other_agent_id,
-                        outcome=outcome,
-                        summary_text=summary_text,
-                    )
-                    db.add(decision)
-                    await db.commit()
-                    decision_id = decision.id
-            except Exception as exc:
-                logger.warning("Failed to log thread decision: %s", exc)
+            payload = {
+                "thread_id": thread.thread_id,
+                "channel": thread.channel,
+                "agent_a": agent.agent_id,
+                "agent_b": thread.other_agent_id,
+                "outcome": outcome,
+                "summary_text": summary_text,
+            }
+            # M-7 (opus review, audit 2026-09-10): a single try/except here
+            # used to log-and-drop the decision outright on any DB error —
+            # the live run's log showed a bare `TimeoutError()` (str() is
+            # empty) following a 30s blocking Slack retry sleep, losing the
+            # ThreadDecision (the product of the whole conversation) with no
+            # trace it ever existed. _write_thread_decision_with_retry()
+            # retries in-call; a decision that still fails every attempt is
+            # queued in `_pending_thread_decisions` instead of dropped — see
+            # `_flush_pending_thread_decisions()`.
+            decision_id = await self._write_thread_decision_with_retry(payload)
+            if decision_id is None:
+                self._pending_thread_decisions.append(payload)
 
         # Track for Phase 5 dedup context. Carries thread_id (missing before —
         # COR-7) so a future reader can tell two entries apart or dedup by it;

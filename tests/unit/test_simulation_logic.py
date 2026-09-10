@@ -1039,6 +1039,232 @@ class TestCloseThreadIsIdempotent:
 
 
 # ---------------------------------------------------------------
+# _close_thread's ThreadDecision write — retried in-call, then queued rather
+# than lost outright (M-7, opus review, audit 2026-09-10)
+# ---------------------------------------------------------------
+
+class _FakeDecisionSession:
+    """Minimal async-session double for a ThreadDecision insert.
+
+    Real sessions assign `.id` via the model's client-side `default=uuid.uuid4`
+    at flush/commit time (see ThreadDecision's mapped_column) -- this mirrors
+    that so `decision_id` is readable after `commit()`, matching the real
+    session's `expire_on_commit=False` contract these tests are standing in
+    for.
+
+    Also answers `_update_agent_memory`'s own (unrelated) profile-revision
+    query with "no AgentRegistry row found" -- `_close_thread` opens its OWN
+    session for that AFTER the ThreadDecision write, through this same
+    `session_factory`, and these tests are not exercising that path at all.
+    """
+
+    def __init__(self, sink: list):
+        self._sink = sink
+        self._added = None
+
+    def add(self, obj):
+        self._added = obj
+
+    async def execute(self, _stmt):
+        class _NoRowResult:
+            def scalar_one_or_none(self):
+                return None
+        return _NoRowResult()
+
+    async def commit(self):
+        import uuid as uuid_mod
+        self._added.id = uuid_mod.uuid4()
+        self._sink.append(self._added)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class TestCloseThreadDecisionWriteRetriesAndParks:
+    """M-7: a ThreadDecision write that fails must be retried in-call, then
+    queued for the next tick rather than silently lost -- the previous
+    single try/except-and-give-up dropped the decision (the product of the
+    whole conversation) outright on any transient DB error, logging it with
+    a plain %s that renders EMPTY for an exception like a bare
+    `TimeoutError()` (whose `str()` is `""`) -- exactly what the live run's
+    log showed.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
+        """_close_thread ends in _update_agent_memory, which calls the real
+        Anthropic API and writes profiles/memory/<id>/public.md. Stub both,
+        and make the retry backoff instant so these tests stay fast."""
+        from unittest.mock import AsyncMock
+
+        import src.agent.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "PROFILES_DIR", tmp_path)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value="## Working Memory\n1. nothing.\n"),
+        )
+
+    def _engine(self, factory):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(
+            agents=[a, b], slack_clients={},
+            session_factory=factory, simulation_run_id=uuid_mod.uuid4(),
+        )
+        thread = ThreadState(thread_id="1.0", channel="general", other_agent_id="b")
+        a.state.active_threads["1.0"] = thread
+        # Mirror the same thread on b's side too -- _close_thread's other-agent
+        # branch (the "proposal" tests below need it) only fires an agent's
+        # own active_threads entry is present, keyed by thread_id.
+        b.state.active_threads["1.0"] = ThreadState(
+            thread_id="1.0", channel="general", other_agent_id="a",
+        )
+        return engine, a, b, thread
+
+    def _flaky_factory(self, sink, *, fail_times):
+        calls = {"n": 0}
+
+        def factory():
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise RuntimeError(f"transient DB error #{calls['n']}")
+            return _FakeDecisionSession(sink)
+
+        return factory, calls
+
+    @pytest.mark.asyncio
+    async def test_two_transient_failures_then_success_writes_the_row_once(self, caplog):
+        import logging
+
+        written: list = []
+        factory, calls = self._flaky_factory(written, fail_times=2)
+        engine, a, b, thread = self._engine(factory)
+
+        with caplog.at_level(logging.WARNING):
+            await engine._close_thread(a, thread, "no_proposal")
+
+        # calls["n"] also counts _update_agent_memory's unrelated
+        # profile-revision session opens, which succeed once the factory
+        # stops failing (fail_times=2) -- only the FIRST 3 calls are the
+        # ThreadDecision write's own retries.
+        assert calls["n"] >= 3, "expected at least 2 failed attempts then 1 success"
+        assert len(written) == 1, "the row must be written exactly once"
+        assert engine._pending_thread_decisions == [], (
+            "a write that eventually succeeds must not be queued"
+        )
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, f"expected exactly one warning, got {warnings}"
+        assert "RuntimeError" in warnings[0].message, (
+            "the log must never render an empty exception message"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_persistently_failing_write_is_queued_not_lost(self, caplog):
+        import logging
+
+        written: list = []
+        factory, calls = self._flaky_factory(written, fail_times=999)
+        engine, a, b, thread = self._engine(factory)
+
+        with caplog.at_level(logging.WARNING):
+            await engine._close_thread(a, thread, "no_proposal")
+
+        assert written == [], "every attempt failed -- nothing should be written yet"
+        assert len(engine._pending_thread_decisions) == 1, (
+            "the decision must be queued for retry, not dropped"
+        )
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "RuntimeError" in errors[0].message, (
+            "the give-up log must never render an empty exception message"
+        )
+
+        # The in-memory close must still have proceeded regardless of the
+        # DB write's fate.
+        assert thread.status == "closed"
+
+    @pytest.mark.asyncio
+    async def test_the_next_ticks_flush_writes_a_queued_decision_once_recovered(self):
+        written: list = []
+        factory, _ = self._flaky_factory(written, fail_times=999)
+        engine, a, b, thread = self._engine(factory)
+
+        await engine._close_thread(a, thread, "no_proposal")
+        assert len(engine._pending_thread_decisions) == 1
+
+        # The DB "recovers": swap in a factory that always succeeds.
+        engine.session_factory = lambda: _FakeDecisionSession(written)
+
+        await engine._flush_pending_thread_decisions()
+
+        assert len(written) == 1, "the queued decision must be written exactly once"
+        assert engine._pending_thread_decisions == [], (
+            "a decision that flushes successfully must be dropped from the queue"
+        )
+
+        # A second flush with nothing pending must be a no-op.
+        await engine._flush_pending_thread_decisions()
+        assert len(written) == 1
+
+    @pytest.mark.asyncio
+    async def test_decision_id_propagates_to_proposal_ref_on_immediate_success(self):
+        from src.agent.state import ProposalRef
+
+        written: list = []
+        engine, a, b, thread = self._engine(lambda: _FakeDecisionSession(written))
+        a.state.pending_proposals.append(ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="a proposal", proposed_at=0.0,
+        ))
+
+        await engine._close_thread(a, thread, "proposal", "a proposal")
+
+        assert len(written) == 1
+        a_ref = next(p for p in a.state.pending_proposals if p.thread_id == "1.0")
+        assert a_ref.thread_decision_id == written[0].id
+        b_ref = next(p for p in b.state.pending_proposals if p.thread_id == "1.0")
+        assert b_ref.thread_decision_id == written[0].id
+
+    @pytest.mark.asyncio
+    async def test_decision_id_stays_none_until_flushed_then_propagates(self):
+        from src.agent.state import ProposalRef
+
+        written: list = []
+        factory, _ = self._flaky_factory(written, fail_times=999)
+        engine, a, b, thread = self._engine(factory)
+        a.state.pending_proposals.append(ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="a proposal", proposed_at=0.0,
+        ))
+
+        await engine._close_thread(a, thread, "proposal", "a proposal")
+
+        a_ref = next(p for p in a.state.pending_proposals if p.thread_id == "1.0")
+        b_ref = next(p for p in b.state.pending_proposals if p.thread_id == "1.0")
+        assert a_ref.thread_decision_id is None, (
+            "the ref must not carry a decision_id the DB write never produced"
+        )
+        assert b_ref.thread_decision_id is None
+
+        engine.session_factory = lambda: _FakeDecisionSession(written)
+        await engine._flush_pending_thread_decisions()
+
+        assert a_ref.thread_decision_id == written[0].id, (
+            "a successful flush must retroactively stamp the ref"
+        )
+        assert b_ref.thread_decision_id == written[0].id
+
+
+# ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
 
