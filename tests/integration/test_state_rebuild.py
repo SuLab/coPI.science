@@ -1385,6 +1385,42 @@ async def test_an_empty_db_value_removes_a_stale_disk_file_and_resets_the_cache(
     assert eng.agents["su"].private_profile == "No private instructions yet."
 
 
+async def test_a_missing_researcher_profile_row_leaves_a_stale_disk_file_alone(
+    db_session, tmp_path, monkeypatch,
+):
+    """L-2 (opus review, audit 2026-09-10): a MISSING `ResearcherProfile` row
+    (the agent's linked user has never had a profile row created at all) is
+    NOT the same event as a PI clearing their standing instruction —
+    `db_content` was computed as `""` in both cases, so the cleared-branch's
+    disk unlink ran for a row that was simply never created, permanently
+    destroying a disk file with no way to recover it. Only a REAL row whose
+    `private_profile_md` is empty/NULL is an authoritative clear; a missing
+    row must leave disk untouched.
+    """
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("still here")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    # Deliberately no factories.make_profile(...) call — no ResearcherProfile
+    # row exists for this user at all.
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert (tmp_path / "private" / "su.md").read_text() == "still here", (
+        "a missing ResearcherProfile row must not be treated as a PI-cleared "
+        "instruction — the disk file must survive untouched"
+    )
+
+
 async def test_a_roster_re_add_also_resyncs_the_private_profile(
     db_session, tmp_path, monkeypatch,
 ):

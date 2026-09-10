@@ -5740,7 +5740,15 @@ class SimulationEngine:
                         ResearcherProfile.user_id == agent_reg.user_id
                     )
                 )).scalar_one_or_none()
-            db_content = (profile.private_profile_md or "").strip() if profile else ""
+            # L-2 (opus review, audit 2026-09-10): a MISSING ResearcherProfile
+            # row is NOT the same event as a PI clearing their standing
+            # instruction — both used to compute db_content == "", so the
+            # cleared branch below ran (and unrecoverably unlinked the disk
+            # file) for a user who simply never had a profile row created.
+            # Only a REAL row whose content is empty/NULL authorizes that.
+            if profile is None:
+                return
+            db_content = (profile.private_profile_md or "").strip()
             if db_content:
                 if agent.private_profile.strip() == db_content:
                     return
