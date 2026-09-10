@@ -1312,6 +1312,79 @@ async def test_rebuild_keeps_the_db_content_cached_even_if_disk_is_unwritable(
     assert eng.agents["su"].private_profile == "fresh DB instruction"
 
 
+async def test_a_steady_state_trailing_newline_does_not_trigger_a_rewrite(
+    db_session, tmp_path, monkeypatch, caplog,
+):
+    """K-4 follow-up (opus review, audit 2026-09-10): update_private_profile
+    (and export_private_profile) always write ``content + "\\n"`` to disk but
+    cache the argument WITHOUT that trailing newline — an exact comparison
+    between a freshly-loaded disk read and the DB value never matches even
+    when nothing has changed, rewriting the file (and logging "was stale")
+    on every single startup. Comparing `.strip()`ped content must treat this
+    as the steady state: no rewrite, no log.
+    """
+    import logging
+
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("steady instruction\n")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+    write_calls: list = []
+    monkeypatch.setattr(
+        agent_module, "atomic_write_text",
+        lambda *a, **k: write_calls.append(a),
+    )
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(
+        db_session, user=user, private_profile_md="steady instruction",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    with caplog.at_level(logging.INFO):
+        await eng._rebuild_state_from_db()
+        await eng._rebuild_agent_state()
+
+    assert write_calls == [], (
+        "disk must not be rewritten when content is identical modulo whitespace"
+    )
+    assert "was stale" not in caplog.text
+
+
+async def test_an_empty_db_value_removes_a_stale_disk_file_and_resets_the_cache(
+    db_session, tmp_path, monkeypatch,
+):
+    """K-4 follow-up (opus review, audit 2026-09-10): a PI clearing their
+    standing instruction (DB value empty/NULL) is authoritative too, exactly
+    like a real edit — a stale non-empty disk file left over from before the
+    clear must be removed, and the agent's cache must fall back to the same
+    in-code default a never-written agent would see."""
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(db_session, user=user, private_profile_md=None)
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert not (tmp_path / "private" / "su.md").exists()
+    assert eng.agents["su"].private_profile == "No private instructions yet."
+
+
 # ---------------------------------------------------------------
 # K-6 follow-up (opus review, audit 2026-09-10): a roster re-add must restore
 # subscribed_channels, or K-6's own-private-channel new_post gate wrongly

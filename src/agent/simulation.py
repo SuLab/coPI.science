@@ -5649,11 +5649,29 @@ class SimulationEngine:
         and swallowed, matching ``update_private_profile``'s own contract) and
         set the in-memory cache to the DB content either way, so the engine
         never runs even one tick a stale on-disk file.
+
+        Two follow-ups from an opus review (same-day, 2026-09-10):
+
+        1. Compares ``.strip()``ped content. ``update_private_profile`` (and
+           ``export_private_profile``) always write ``content + "\\n"`` to
+           disk, but cache the argument WITHOUT that trailing newline — so an
+           exact (non-stripped) comparison between a freshly-loaded disk read
+           and the DB value never matches even when nothing has actually
+           changed, rewriting the file (and logging a "was stale" message)
+           on every single startup.
+        2. A DB value that is empty/NULL is authoritative too — a PI clearing
+           their standing instruction is a real edit, not "nothing to sync".
+           If disk still holds a stale (non-default) file in that case, it is
+           removed (mirroring ``export_private_profile``'s
+           ``remove_if_empty=True`` path) and the cache is invalidated so the
+           next read falls back to the same in-code default text a brand-new
+           agent would see.
         """
         if not self.session_factory:
             return
         from sqlalchemy import select as sa_select
 
+        from src.agent.agent import _profiles_dir
         from src.models import AgentRegistry, ResearcherProfile
 
         for agent in self.agents.values():
@@ -5671,15 +5689,32 @@ class SimulationEngine:
                             ResearcherProfile.user_id == agent_reg.user_id
                         )
                     )).scalar_one_or_none()
-                if not profile or not profile.private_profile_md:
+                db_content = (profile.private_profile_md or "").strip() if profile else ""
+                if db_content:
+                    if agent.private_profile.strip() == db_content:
+                        continue
+                    agent.update_private_profile(profile.private_profile_md)
+                    logger.info(
+                        "[%s] Private profile disk file was stale relative to the "
+                        "DB at startup — resynced from ResearcherProfile.private_profile_md",
+                        agent.agent_id,
+                    )
                     continue
-                db_content = profile.private_profile_md
-                if agent.private_profile == db_content:
+                # DB says "cleared" — only act if a real (stale) file exists
+                # on disk; a never-written agent already reads the same
+                # in-code default `Agent.private_profile` falls back to.
+                # Path constructed exactly like `update_private_profile`'s own
+                # (agent.py's `_profiles_dir()`, not profile_export.py's
+                # separately-configurable one) so both branches of this
+                # method honour the same override.
+                profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
+                if not profile_path.exists():
                     continue
-                agent.update_private_profile(db_content)
+                profile_path.unlink()
+                agent.reload_private_profile()
                 logger.info(
-                    "[%s] Private profile disk file was stale relative to the "
-                    "DB at startup — resynced from ResearcherProfile.private_profile_md",
+                    "[%s] DB private profile is cleared but disk held a stale "
+                    "file at startup — removed it",
                     agent.agent_id,
                 )
             except Exception as exc:
