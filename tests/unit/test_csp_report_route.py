@@ -110,6 +110,54 @@ async def test_csp_report_endpoint_does_not_500_on_malformed_json():
     assert r.status_code == 204
 
 
+async def test_csp_report_endpoint_rejects_a_chunked_oversized_body_with_413(
+    monkeypatch,
+):
+    """REV3-4 (opus review, audit 2026-09-08): a chunked POST with no
+    Content-Length skips the header-based size check entirely, and
+    `await request.body()` buffers the WHOLE body before the len() check
+    after it ever runs -- so a chunked body could push an unbounded amount
+    into memory first. Read via the stream and abort once more than
+    CSP_REPORT_MAX_BODY_BYTES have arrived, without ever buffering the
+    whole thing.
+
+    ``Request.body()`` is monkeypatched to fail the test if called at all --
+    that pins the "never fully materialize the body" behavior, since a
+    status-code-only assertion can't otherwise tell a streaming read apart
+    from a buffered read followed by the same len() check.
+    """
+    from starlette.requests import Request
+
+    def _must_not_be_called(self):
+        raise AssertionError(
+            "request.body() must not be called -- it buffers the whole body "
+            "before any size check can reject it"
+        )
+
+    monkeypatch.setattr(Request, "body", _must_not_be_called)
+
+    async def _chunked_body():
+        # 100 KB, well over CSP_REPORT_MAX_BODY_BYTES (8 KB), in small chunks
+        # so more than one iteration of the stream loop is exercised.
+        for _ in range(100):
+            yield b"a" * 1024
+
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post(
+            "/api/csp-report",
+            content=_chunked_body(),
+            headers={"Content-Type": "application/csp-report"},
+        )
+    assert "content-length" not in {k.lower() for k in r.request.headers.keys()}, (
+        "the request must actually be chunked (no Content-Length) for this "
+        "test to exercise the stream-based size check"
+    )
+    assert r.status_code == 413
+
+
 class _ExplodingSessionFactory:
     """Raises if the badge middleware ever tries to open a DB session for this
     request -- proves /api/csp-report is excluded the same way /api/health is

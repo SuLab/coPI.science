@@ -349,9 +349,22 @@ def create_app() -> FastAPI:
                     raise HTTPException(status_code=413, detail="report too large")
             except ValueError:
                 pass  # malformed header; the actual-length check below still applies
-        body = await request.body()
-        if len(body) > CSP_REPORT_MAX_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="report too large")
+
+        # REV3-4 (opus review, audit 2026-09-08): `request.body()` buffers the
+        # WHOLE body before this handler ever sees it, so a chunked POST with
+        # no Content-Length (the size check above never fires) could push an
+        # unbounded amount into memory before the len() check after it ever
+        # ran. Read via the stream instead and abort as soon as more than
+        # CSP_REPORT_MAX_BODY_BYTES have arrived, so at most one chunk over
+        # the cap is ever held in memory.
+        chunks = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > CSP_REPORT_MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="report too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
 
         document_uri = violated_directive = blocked_uri = "unknown"
         try:
