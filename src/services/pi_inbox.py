@@ -122,7 +122,10 @@ async def pi_may_reply_in_thread(
     participant clause to also accept ``is_bot IS FALSE`` rows whose
     ``sender_name == f"{pi_name} (PI)"``. The participant clause is deliberately
     ts-only (no ``sender_name``/user check) to mirror how ``MessageLog.get_thread_history``
-    resolves a thread's membership.
+    resolves a thread's membership, but IS scoped to ``channel_name`` (SEC-F5, opus
+    review, audit 2026-09-08) — the same scoping the root-existence check above
+    uses — so an agent_id that happens to share this ``thread_ts`` value via an
+    unrelated thread in a DIFFERENT channel cannot authorize a reply here.
     """
     root = (await db.execute(
         select(AgentMessage.id)
@@ -139,6 +142,7 @@ async def pi_may_reply_in_thread(
         select(AgentMessage.id)
         .where(
             AgentMessage.simulation_run_id == run_id,
+            AgentMessage.channel_name == channel_name,
             AgentMessage.agent_id == agent_id,
             or_(AgentMessage.message_ts == thread_ts, AgentMessage.thread_ts == thread_ts),
         )

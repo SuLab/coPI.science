@@ -15,6 +15,7 @@ from sqlalchemy import select
 from src.models import AgentMessage, PiDmMessage
 from src.services.pi_inbox import (
     get_latest_run_id,
+    pi_may_reply_in_thread,
     record_pi_dm,
     record_pi_message,
     web_pi_user_id,
@@ -111,3 +112,43 @@ async def test_record_pi_dm_inbound_and_outbound(db_session):
     assert rows[0].content == "always cc me on proposals"
     assert rows[1].agent_id == "su"
     assert all(r.ts and r.posted_at > 0 for r in rows)
+
+
+async def test_pi_may_reply_in_thread_true_for_a_real_participant(db_session):
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", channel_name="general",
+        message_ts="1.0", thread_ts=None,
+    )
+    assert await pi_may_reply_in_thread(
+        db_session, run_id=run.id, channel_name="general", thread_ts="1.0", agent_id="su",
+    ) is True
+
+
+async def test_pi_may_reply_in_thread_false_for_unknown_thread(db_session):
+    run = await factories.make_simulation_run(db_session)
+    assert await pi_may_reply_in_thread(
+        db_session, run_id=run.id, channel_name="general", thread_ts="missing", agent_id="su",
+    ) is False
+
+
+async def test_pi_may_reply_in_thread_false_when_the_participant_is_in_another_channel(
+    db_session,
+):
+    """SEC-F5 (opus review, audit 2026-09-08): the root-existence check is scoped to
+    `channel_name`, but the participant check previously was not -- an agent_id that
+    happens to share the same `thread_ts` value in a DIFFERENT channel's (unrelated)
+    thread must not authorize a reply against this channel's root."""
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="wiseman", channel_name="general",
+        message_ts="2.0", thread_ts=None,
+    )
+    # Same thread_ts value, but the participating agent posted in a DIFFERENT channel.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", channel_name="random",
+        message_ts="2.1", thread_ts="2.0",
+    )
+    assert await pi_may_reply_in_thread(
+        db_session, run_id=run.id, channel_name="general", thread_ts="2.0", agent_id="su",
+    ) is False
