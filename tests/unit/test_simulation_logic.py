@@ -2132,10 +2132,16 @@ class TestAgentIdsOwnedByUser:
         assert "agents.user_id" in sql
 
     @pytest.mark.asyncio
-    async def test_a_db_failure_fails_closed_to_the_empty_set(self):
+    async def test_a_db_failure_raises_instead_of_failing_closed(self):
+        """K-1 (audit 2026-09-10): a DB error is NOT the same as "nothing to
+        authorize against" (a NULL user id) — it must raise so the caller
+        retries the row instead of the poller stamping it HANDLED after a
+        single transient blip. See test_none_user_id_short_circuits_without_a_db_call
+        for the genuinely-empty case, which still returns set()."""
         import uuid as uuid_mod
 
         from src.agent.agent import Agent
+        from src.agent.simulation import PiOwnershipLookupFailed
 
         class _RaisingDB:
             async def __aenter__(self):
@@ -2147,9 +2153,8 @@ class TestAgentIdsOwnedByUser:
         engine = SimulationEngine(agents=[Agent("su", "SuBot", "Andrew Su")], slack_clients={})
         engine.session_factory = lambda: _RaisingDB()
 
-        result = await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
-
-        assert result == set()
+        with pytest.raises(PiOwnershipLookupFailed):
+            await engine._agent_ids_owned_by_user(uuid_mod.uuid4())
 
 
 class TestPersistImplicitProposalReview:
