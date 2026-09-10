@@ -141,21 +141,41 @@ _POOL_LOCK = threading.Lock()
 _SLACK_EXECUTOR: ThreadPoolExecutor | None = None
 _CURRENT_SHUTDOWN_EVENT: threading.Event | None = None
 
+# N-2 (opus review, audit 2026-09-10): set ONLY by `shutdown_slack_executor()`,
+# never by a bare `slack_client.signal_shutdown()` call made directly by some
+# other caller. `_get_executor()` used to clear the fallback unconditionally
+# whenever it lazily minted a fresh pool -- which is correct for "a pool
+# shutdown/re-create cycle just happened" (M-2's case) but wrong for "someone
+# set the fallback directly and a Slack call that never goes through this
+# pool at all is relying on it staying set" (e.g. a caller that signals
+# shutdown without ever calling `shutdown_slack_executor()`): a `run_slack_call`
+# made afterwards would silently clear a REAL, currently-active shutdown
+# signal out from under that other caller. Gating the clear on this flag
+# means it only ever fires immediately after `shutdown_slack_executor()`
+# itself set the fallback, which is exactly the case M-2 was fixing.
+_pool_shutdown_pending = False
+
 
 def _get_executor() -> ThreadPoolExecutor:
-    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
+    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT, _pool_shutdown_pending
     with _POOL_LOCK:
         if _SLACK_EXECUTOR is None:
             # M-2 (opus review, audit 2026-09-10): clear the fallback event
-            # (slack_client.SHUTTING_DOWN) whenever a fresh pool is minted.
-            # Nothing else in src/ ever clears it once signal_shutdown() sets
-            # it, so an off-pool caller (e.g. AgentSlackClient calls made
-            # directly on src/agent/main.py's event-loop thread) would find it
-            # permanently SET after any shutdown/re-create cycle and abort its
-            # very next retry sleep instantly forever after. Safe for an OLD
-            # pool's still-sleeping worker thread: that thread is bound to its
-            # OWN per-pool event via the thread-local, never to this fallback.
-            clear_shutdown()
+            # (slack_client.SHUTTING_DOWN) whenever a fresh pool is minted
+            # AFTER a shutdown_slack_executor() call (N-2, audit 2026-09-10:
+            # gated on `_pool_shutdown_pending`, see its definition above, so
+            # a fallback set by some OTHER caller via signal_shutdown() alone
+            # is never cleared out from under it). Nothing else in src/ ever
+            # clears the fallback once shutdown_slack_executor() sets it, so
+            # an off-pool caller (e.g. AgentSlackClient calls made directly on
+            # src/agent/main.py's event-loop thread) would find it permanently
+            # SET after any shutdown/re-create cycle and abort its very next
+            # retry sleep instantly forever after. Safe for an OLD pool's
+            # still-sleeping worker thread: that thread is bound to its OWN
+            # per-pool event via the thread-local, never to this fallback.
+            if _pool_shutdown_pending:
+                _pool_shutdown_pending = False
+                clear_shutdown()
             _CURRENT_SHUTDOWN_EVENT = threading.Event()
             _SLACK_EXECUTOR = ThreadPoolExecutor(
                 max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io",
@@ -225,10 +245,16 @@ def shutdown_slack_executor() -> None:
     caller had no abort signal set anywhere in production, since nothing else
     in this process calls it either.
     """
-    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
+    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT, _pool_shutdown_pending
     with _POOL_LOCK:
         executor, _SLACK_EXECUTOR = _SLACK_EXECUTOR, None
         event, _CURRENT_SHUTDOWN_EVENT = _CURRENT_SHUTDOWN_EVENT, None
+        # N-2 (opus review, audit 2026-09-10): mark that the fallback was set
+        # BY THIS FUNCTION, so `_get_executor()`'s next lazy pool creation
+        # knows it is safe (and correct, per M-2) to clear it -- as opposed to
+        # a fallback some other caller set directly via signal_shutdown(),
+        # which must survive a pool re-create untouched.
+        _pool_shutdown_pending = True
     if event is not None:
         event.set()
     # L-1 (opus review, audit 2026-09-10): also set the module-level fallback

@@ -316,3 +316,47 @@ async def test_an_old_pools_sleeper_still_aborts_after_a_new_pool_is_created():
     assert isinstance(outcome.get("exc"), SlackShuttingDown), (
         f"the old pool's sleeper must still abort promptly, got {outcome!r}"
     )
+
+
+async def test_get_executor_does_not_clear_a_fallback_set_directly_by_signal_shutdown(monkeypatch):
+    """N-2 (opus review, audit 2026-09-10): `_get_executor()` used to clear
+    the fallback (`slack_client.SHUTTING_DOWN`) unconditionally whenever it
+    lazily minted a fresh pool. That is correct immediately after
+    `shutdown_slack_executor()` itself set the fallback (M-2's case), but
+    wrong when some OTHER caller set it directly via `signal_shutdown()` --
+    a `run_slack_call` made afterwards (which always goes through
+    `_get_executor()`) would silently clear a REAL, currently-active
+    shutdown signal out from under that other caller, even though no pool
+    shutdown/re-create cycle happened at all.
+    """
+    from src.agent.slack_client import SHUTTING_DOWN, signal_shutdown
+
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", None)
+    monkeypatch.setattr(slack_executor_module, "_pool_shutdown_pending", False)
+    signal_shutdown()
+    assert SHUTTING_DOWN.is_set()
+
+    result = await run_slack_call(lambda: 1)
+
+    assert result == 1
+    assert SHUTTING_DOWN.is_set(), (
+        "a fallback set directly via signal_shutdown() must survive a lazy "
+        "pool creation that was not preceded by shutdown_slack_executor()"
+    )
+
+
+async def test_get_executor_clears_the_fallback_only_after_shutdown_slack_executor(monkeypatch):
+    """N-2 counterpart: the clear DOES still happen, but only when
+    `_pool_shutdown_pending` was set by `shutdown_slack_executor()` itself."""
+    from src.agent.slack_client import SHUTTING_DOWN
+
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    shutdown_slack_executor()  # sets the fallback AND _pool_shutdown_pending
+    assert SHUTTING_DOWN.is_set()
+    assert slack_executor_module._pool_shutdown_pending is True
+
+    await run_slack_call(lambda: 1)
+
+    assert not SHUTTING_DOWN.is_set()
+    assert slack_executor_module._pool_shutdown_pending is False
