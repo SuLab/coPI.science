@@ -12,8 +12,21 @@ logger = logging.getLogger(__name__)
 
 # See src/agent/agent.py's PROFILES_DIR — same setting, same defaults (audit
 # 2026-09-08 RC-13).
-PROFILES_DIR = Path(get_settings().profiles_dir) / "public"
-PRIVATE_PROFILES_DIR = Path(get_settings().profiles_dir) / "private"
+# REV3-6 (audit 2026-09-08): None by default, resolved lazily via the
+# accessors below — see agent.py's own accessor for the full rationale.
+PROFILES_DIR: Path | None = None
+PRIVATE_PROFILES_DIR: Path | None = None
+
+
+def _public_profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir) / "public"
+
+
+def _private_profiles_dir() -> Path:
+    return (
+        PRIVATE_PROFILES_DIR if PRIVATE_PROFILES_DIR is not None
+        else Path(get_settings().profiles_dir) / "private"
+    )
 
 
 def export_profile_to_markdown(
@@ -116,9 +129,10 @@ def export_profile_to_markdown(
             lines.append(f"- {g}")
         lines.append("")
 
-    path = PROFILES_DIR / f"{agent_id}.md"
+    public_dir = _public_profiles_dir()
+    path = public_dir / f"{agent_id}.md"
     try:
-        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        public_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, "\n".join(lines), encoding="utf-8")
         logger.info("Exported profile for %s to %s", user.name, path)
         return path
@@ -156,7 +170,8 @@ def export_private_profile(
     if not agent_id:
         return None
     content = profile.private_profile_md or profile.private_profile_seed
-    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+    private_dir = _private_profiles_dir()
+    path = private_dir / f"{agent_id}.md"
     if not content:
         if remove_if_empty:
             try:
@@ -168,7 +183,7 @@ def export_private_profile(
         return None
 
     try:
-        PRIVATE_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        private_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, content + "\n", encoding="utf-8")
         logger.info("Exported private profile for %s to %s", user.name, path)
         return path

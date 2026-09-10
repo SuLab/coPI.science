@@ -12,7 +12,13 @@ from src.services.pubmed import fetch_abstract, fetch_full_text
 logger = logging.getLogger(__name__)
 
 # See src/agent/agent.py's PROFILES_DIR — same setting, same default (RC-13).
-PROFILES_DIR = Path(get_settings().profiles_dir)
+# REV3-6 (audit 2026-09-08): None by default, resolved lazily via
+# _profiles_dir() — see agent.py's own accessor for the full rationale.
+PROFILES_DIR: Path | None = None
+
+
+def _profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 
 # Anthropic tool-use schema definitions
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -206,7 +212,7 @@ async def _execute_retrieve_foa(foa_number: str) -> str:
 
 async def _execute_retrieve_profile(agent_id: str) -> str:
     """Read a public profile from disk."""
-    profile_path = PROFILES_DIR / "public" / f"{agent_id}.md"
+    profile_path = _profiles_dir() / "public" / f"{agent_id}.md"
     try:
         # Profiles are user-editable text — fence as untrusted data (SEC-14).
         return delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")

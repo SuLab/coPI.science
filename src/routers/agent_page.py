@@ -39,7 +39,13 @@ templates = Jinja2Templates(directory="templates")
 
 # See src/agent/agent.py's PROFILES_DIR — same setting, same default (audit
 # 2026-09-08 RC-13).
-PROFILES_DIR = Path(get_settings().profiles_dir)
+# REV3-6 (audit 2026-09-08): None by default, resolved lazily via
+# _profiles_dir() — see agent.py's own accessor for the full rationale.
+PROFILES_DIR: Path | None = None
+
+
+def _profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"
@@ -316,7 +322,7 @@ async def agent_dashboard(
             unreviewed.append(entry)
 
     # Private profile path
-    private_profile_path = PROFILES_DIR / "private" / f"{aid}.md"
+    private_profile_path = _profiles_dir() / "private" / f"{aid}.md"
     has_private_profile = private_profile_path.exists()
 
     # Resolve delegate display names (legacy Slack-only delegates)
@@ -1528,7 +1534,7 @@ async def view_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
     content = profile_path.read_text() if profile_path.exists() else ""
 
     return templates.TemplateResponse(
@@ -1553,7 +1559,7 @@ async def edit_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
     content = profile_path.read_text() if profile_path.exists() else ""
 
     return templates.TemplateResponse(
@@ -1630,7 +1636,7 @@ async def save_private_profile(
     # falls back to "No private instructions yet." only when the file is
     # absent, so a stale file left behind after clearing would keep the agent
     # honouring instructions the PI just deleted.
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
     if stripped:
         profile_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(profile_path, content, encoding="utf-8")

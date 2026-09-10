@@ -8,9 +8,10 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from src.agent.agent import PROFILES_DIR, Agent
+from src.agent.agent import Agent
 from src.agent.authorship_rules import (
     LabPublicationRecord,
     lab_self_names,
@@ -158,6 +159,18 @@ SELECTION_RATIO_LOG_EVERY = 100
 # (no override)". A plain dict.get() default cannot tell those apart, so the
 # cache would re-read role.toml from disk on every tick for every default role.
 _UNSET = object()
+
+# REV3-6 (opus review, audit 2026-09-08): a module attribute of THIS module,
+# independent from src.agent.agent's own PROFILES_DIR — `from ... import
+# PROFILES_DIR` would otherwise capture agent.py's value once at import time,
+# which is exactly the staleness REV3-6 closes there. None by default
+# (existing tests monkeypatch this attribute directly to a tmp_path); the
+# accessor re-reads get_settings() on every call unless overridden.
+PROFILES_DIR: Path | None = None
+
+
+def _profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 
 # The DB inbox pollers bound their query to recent rows for performance, but the
 # timestamp is stamped at row *creation*, not commit. A row written by another
@@ -6203,7 +6216,7 @@ class SimulationEngine:
         for agent in self.agents.values():
             agent_sigs = self._profile_mtimes.setdefault(agent.agent_id, {})
             for sub in ("private", "public"):
-                path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
+                path = _profiles_dir() / sub / f"{agent.agent_id}.md"
                 try:
                     mtime: float | None = path.stat().st_mtime
                 except OSError:

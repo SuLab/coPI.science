@@ -19,7 +19,18 @@ logger = logging.getLogger(__name__)
 # Root for public/private/memory profile files on disk. Resolved from `profiles_dir`
 # (env COPI_PROFILES_DIR, default "profiles" — audit 2026-09-08 RC-13) so a host where
 # profiles/ is not writable from the CWD can point this elsewhere.
-PROFILES_DIR = Path(get_settings().profiles_dir)
+#
+# REV3-6 (opus review, audit 2026-09-08): kept as a module attribute — many tests
+# monkeypatch it directly to a tmp_path — but None by default rather than resolved
+# once at import time, so a later COPI_PROFILES_DIR + get_settings.cache_clear()
+# (what scripts/live_slack_preflight.py's runtime check does) is honored. Every
+# call site below goes through _profiles_dir() instead of the constant directly.
+PROFILES_DIR: Path | None = None
+
+
+def _profiles_dir() -> Path:
+    """Resolve the profiles directory, live, unless a test has overridden it."""
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets and the
@@ -116,7 +127,7 @@ class Agent:
     def public_profile(self) -> str:
         if self._public_profile is None:
             self._public_profile = self._load_file(
-                PROFILES_DIR / "public" / f"{self.agent_id}.md",
+                _profiles_dir() / "public" / f"{self.agent_id}.md",
                 f"# {self.pi_name} Lab\n\nProfile not yet available.",
             )
         return self._public_profile
@@ -125,7 +136,7 @@ class Agent:
     def private_profile(self) -> str:
         if self._private_profile is None:
             self._private_profile = self._load_file(
-                PROFILES_DIR / "private" / f"{self.agent_id}.md",
+                _profiles_dir() / "private" / f"{self.agent_id}.md",
                 "No private instructions yet.",
             )
         return self._private_profile
@@ -142,8 +153,8 @@ class Agent:
         See specs/privacy-and-channel-visibility.md §G2.
         """
         if self._public_working_memory is None:
-            new_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
-            legacy_path = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+            new_path = _profiles_dir() / "memory" / self.agent_id / "public.md"
+            legacy_path = _profiles_dir() / "memory" / f"{self.agent_id}.md"
             if new_path.exists():
                 self._public_working_memory = self._load_file(new_path, "")
             else:
@@ -157,7 +168,7 @@ class Agent:
         channel. Not cached — files are small and read only when the agent
         acts in the channel.
         """
-        path = PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+        path = _profiles_dir() / "memory" / self.agent_id / "private" / f"{channel_id}.md"
         return self._load_file(path, "")
 
     # Back-compat alias: internal callers that don't yet thread a visibility
@@ -726,10 +737,10 @@ Use these to reference other labs' work in conversations. Include links when cit
                 logger.error("[%s] Private memory update missing channel_id", self.agent_id)
                 return
             memory_path = (
-                PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+                _profiles_dir() / "memory" / self.agent_id / "private" / f"{channel_id}.md"
             )
         else:
-            memory_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
+            memory_path = _profiles_dir() / "memory" / self.agent_id / "public.md"
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(memory_path, new_memory + "\n", encoding="utf-8")
@@ -737,7 +748,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             # loads go through the new path — only on public writes, and only
             # if we just wrote to the partitioned location.
             if visibility == VISIBILITY_PUBLIC:
-                legacy = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+                legacy = _profiles_dir() / "memory" / f"{self.agent_id}.md"
                 if legacy.exists():
                     try:
                         legacy.unlink()
@@ -771,7 +782,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         same content afterward (never with `self.private_profile` — see that
         method's docstring).
         """
-        profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
+        profile_path = _profiles_dir() / "private" / f"{self.agent_id}.md"
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(profile_path, new_profile + "\n", encoding="utf-8")
