@@ -25,7 +25,7 @@ AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE = ("active", "pending")
 
 
 async def agent_blocking_account_delete(
-    db: AsyncSession, user: User
+    db: AsyncSession, user: User, *, for_update: bool = True
 ) -> AgentRegistry | None:
     """The agent this user owns that account deletion would orphan, if any.
 
@@ -34,19 +34,26 @@ async def agent_blocking_account_delete(
     ``ondelete="CASCADE"``, so deleting a delegate removes the delegation and
     leaves the agent's owner alone.
 
-    ``with_for_update()`` (SEC-F3, opus review, audit 2026-09-08) locks the row
-    this reads for the rest of the caller's transaction, so the check and the
-    delete it gates cannot race an admin's concurrent ``UPDATE ... SET
-    status='active'`` on the same row -- without the lock, that update could
-    commit between this read and the delete, orphaning the agent this guard
-    exists to prevent.
+    ``with_for_update()`` (SEC-F3, opus review, audit 2026-09-08; keyed on
+    ``user_id`` alone as of SEC2-2, audit 2026-09-08) locks the row this reads
+    for the rest of the caller's transaction, so the check and the delete it
+    gates cannot race an admin's concurrent ``UPDATE ... SET status='active'``
+    on the same row. The status predicate has to be evaluated in Python
+    rather than in the WHERE clause: a WHERE that also filters on
+    ``status IN (...)`` locks nothing when the agent is currently inactive,
+    so a concurrent activation of that same row is free to commit and slip
+    past this guard entirely. Locking by owner instead means every delete
+    attempt takes the row lock regardless of its current status, which is
+    what actually blocks the race.
+
+    ``for_update=False`` is for read-only callers (the GET confirmation page)
+    that must not hold a row lock outside a delete transaction.
     """
-    result = await db.execute(
-        select(AgentRegistry)
-        .where(
-            AgentRegistry.user_id == user.id,
-            AgentRegistry.status.in_(AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE),
-        )
-        .with_for_update()
-    )
-    return result.scalar_one_or_none()
+    query = select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+    if for_update:
+        query = query.with_for_update()
+    result = await db.execute(query)
+    agent = result.scalar_one_or_none()
+    if agent is None or agent.status not in AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE:
+        return None
+    return agent

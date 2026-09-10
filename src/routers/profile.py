@@ -266,7 +266,9 @@ async def delete_account_confirm(
         _template_context(
             request,
             current_user,
-            blocking_agent=await agent_blocking_account_delete(db, current_user),
+            blocking_agent=await agent_blocking_account_delete(
+                db, current_user, for_update=False,
+            ),
         ),
     )
 
