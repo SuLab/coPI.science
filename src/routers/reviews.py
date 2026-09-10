@@ -1,6 +1,9 @@
 """All review writes. Router-level gate = get_review_user; handlers that are
 staff-only or admin-only declare a NARROWER singleton, which is the real gate
-for them. Every handler refuses impersonated sessions.
+for them. Feedback/status writes now ALLOW an impersonated session (F4,
+2026-09-10) and attribute the write to the impersonated user, with the real
+admin recorded via ``recorded_by``; assign/unassign and suggestion-status
+still refuse impersonation outright.
 
 Dependencies are module-level singletons (``_DB``/``_REVIEW``/``_STAFF``/
 ``_ADMIN``) rather than inline ``Depends(...)`` calls in argument defaults,
@@ -50,6 +53,20 @@ def _refuse_impersonation(current_user: User) -> None:
         raise HTTPException(
             status_code=403, detail="Review actions are disabled while impersonating."
         )
+
+
+def _recorded_by(current_user: User) -> User | None:
+    """The real admin when the session is impersonating, else None. Review
+    writes are attributed to the impersonated user (operator decision
+    2026-09-10); this is the second signature on the row."""
+    if getattr(current_user, "_is_impersonated", False):
+        real = getattr(current_user, "_real_admin", None)
+        logger.warning(
+            "Review action by admin %s while impersonating %s",
+            getattr(real, "id", None), current_user.id,
+        )
+        return real
+    return None
 
 
 def _assessments_redirect(
@@ -170,7 +187,6 @@ async def submit_review_feedback(
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    _refuse_impersonation(current_user)
     assessment = await _load_assessment(db, assessment_id)
     dimension_scores = _parse_dimension_scores(await request.form())
     try:
@@ -182,6 +198,7 @@ async def submit_review_feedback(
             comment=comment,
             feedback_mode=feedback_mode,
             dimension_scores=dimension_scores,
+            recorded_by=_recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -205,7 +222,6 @@ async def edit_review_feedback(
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    _refuse_impersonation(current_user)
     review = await _load_review(db, feedback_id)
     if review.reviewer_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the author may edit this feedback")
@@ -222,6 +238,7 @@ async def edit_review_feedback(
             comment=comment,
             feedback_mode=feedback_mode,
             dimension_scores=dimension_scores,
+            recorded_by=_recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -241,7 +258,6 @@ async def delete_review_feedback(
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
-    _refuse_impersonation(current_user)
     review = await _load_review(db, feedback_id)
     assessment_id = review.assessment_id
     await db.delete(review)
@@ -260,11 +276,11 @@ async def set_review_status(
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    _refuse_impersonation(current_user)
     assessment = await _load_assessment(db, assessment_id)
     try:
         await record_status_event(
-            db, assessment=assessment, actor=current_user, action=action
+            db, assessment=assessment, actor=current_user, action=action,
+            recorded_by=_recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

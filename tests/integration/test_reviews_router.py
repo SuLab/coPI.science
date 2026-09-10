@@ -357,7 +357,7 @@ async def test_only_an_admin_can_delete(client, db_session):
     assert rows == []
 
 
-async def test_an_impersonating_admin_is_refused(client, db_session):
+async def test_an_impersonating_admin_reviews_as_the_impersonated_user(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     assessment = await _seed_assessment(db_session)
@@ -367,6 +367,35 @@ async def test_an_impersonating_admin_is_refused(client, db_session):
     r = await client.post(
         f"/reviews/assessments/{assessment.id}/feedback",
         data={"score": "3", "comment": "x", "feedback_mode": "log_only"},
+        headers=headers,
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    row = (await db_session.execute(select(AssessmentReview))).scalar_one()
+    assert row.reviewer_user_id == mgr.id
+    assert row.reviewer_name == mgr.name
+    assert row.recorded_by_user_id == admin.id
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/status",
+        data={"action": "approved"},
+        headers=headers,
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    ev = (await db_session.execute(select(AssessmentReviewEvent))).scalar_one()
+    assert ev.actor_user_id == mgr.id and ev.recorded_by_user_id == admin.id
+
+
+async def test_an_impersonating_admin_still_cannot_assign(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(mgr.id)},
         headers=headers,
         follow_redirects=False,
     )

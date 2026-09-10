@@ -180,12 +180,18 @@ async def submit_feedback(
     comment: str,
     feedback_mode: str,
     dimension_scores: dict[str, int] | None = None,
+    recorded_by: User | None = None,
 ) -> AssessmentReview:
     """Create one ``AssessmentReview`` row. Caller commits.
 
     Raises ``ValueError`` on an out-of-range score or an unrecognized mode.
     ``reviewer_name`` is denormalized at write time (A-3) so the review stays
     attributable after the reviewer's account is deleted.
+
+    ``recorded_by`` is the real admin when this write happened while
+    impersonating (F4, 2026-09-10) — the review is still attributed to
+    ``reviewer`` (the impersonated user), and ``recorded_by`` is the second
+    signature on the row. ``None`` for an ordinary, non-impersonated write.
     """
     _validate(score, feedback_mode, dimension_scores)
     review = AssessmentReview(
@@ -205,6 +211,7 @@ async def submit_feedback(
         # so the row is always stamped with the live document either way.
         rubric_version=RUBRIC_VERSION,
         rubric_content_hash=RUBRIC_CONTENT_HASH,
+        recorded_by_user_id=recorded_by.id if recorded_by else None,
     )
     db.add(review)
     await db.flush()
@@ -223,12 +230,16 @@ async def edit_feedback(
     comment: str,
     feedback_mode: str,
     dimension_scores: dict[str, int] | None = None,
+    recorded_by: User | None = None,
 ) -> AssessmentReview:
     """Mutate an existing review in place. Caller commits.
 
     Author-only is the router's check, not this function's. Resets
     ``consumed_at`` to ``None`` so an edited row is picked back up by the
     next analysis job even if the original had already been consumed.
+
+    ``recorded_by`` is the real admin when this edit happened while
+    impersonating (F4, 2026-09-10) — same semantics as ``submit_feedback``.
 
     ``dimension_scores`` REPLACES the stored set rather than merging into it —
     the form re-posts every dimension, so a field the reviewer cleared must
@@ -259,6 +270,7 @@ async def edit_feedback(
     review.rubric_content_hash = RUBRIC_CONTENT_HASH
     review.edited = True
     review.consumed_at = None
+    review.recorded_by_user_id = recorded_by.id if recorded_by else None
     if feedback_mode == "learn":
         await enqueue_analysis_if_absent(
             db, assessment_id=review.assessment_id, user_id=review.reviewer_user_id
@@ -272,6 +284,7 @@ async def record_status_event(
     assessment: OpportunityAssessment,
     actor: User,
     action: str,
+    recorded_by: User | None = None,
 ) -> AssessmentReviewEvent:
     """Append one ``AssessmentReviewEvent`` row. Caller commits.
 
@@ -280,6 +293,9 @@ async def record_status_event(
     table is the history, not the current status. ``actor_name`` is
     denormalized at write time (A-3), same as ``reviewer_name`` above, so
     the event stays attributable after the actor's account is deleted.
+
+    ``recorded_by`` is the real admin when this write happened while
+    impersonating (F4, 2026-09-10) — same semantics as ``submit_feedback``.
     """
     if action not in VALID_STATUS_ACTIONS:
         raise ValueError(f"action must be one of {VALID_STATUS_ACTIONS}")
@@ -288,6 +304,7 @@ async def record_status_event(
         action=action,
         actor_user_id=actor.id,
         actor_name=actor.name,
+        recorded_by_user_id=recorded_by.id if recorded_by else None,
     )
     db.add(event)
     await db.flush()

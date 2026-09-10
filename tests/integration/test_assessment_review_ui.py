@@ -265,12 +265,13 @@ async def test_delete_button_renders_only_for_admin(
     assert f"/reviews/feedback/{review.id}/delete" not in reviewer_html
 
 
-async def test_impersonating_admin_sees_read_only_card(client, db_session, admin, manager):
-    """The write half stays suppressed under impersonation (F6) — but it now
-    SAYS so. The silent blank was read as "managers and reviewers have no
-    permission to review at all", which is what prompted the 2026-09-09 change
-    (design doc §0.1); every /manager/assessments/{id} view in the ten days
-    before that report was made while impersonating."""
+async def test_impersonating_admin_sees_write_forms_and_the_reviewing_as_notice(
+    client, db_session, admin, manager
+):
+    """F4 (2026-09-10) reverses F6: impersonated review writes are now
+    allowed, attributed to the impersonated user, with the admin recorded as
+    `recorded_by_user_id`. The notice stays, reworded to say so rather than
+    to explain an absence. Assign/unassign remain refused regardless."""
     assessment = await _seed_assessment(db_session)
     headers = auth_headers(admin.id)
     headers["Cookie"] += f"; copi-impersonate={manager.id}"
@@ -279,11 +280,9 @@ async def test_impersonating_admin_sees_read_only_card(client, db_session, admin
     assert resp.status_code == 200
     html = resp.text
     assert "Human review" in html
-    assert 'action="/reviews/assessments/' not in html
-    assert 'action="/reviews/feedback/' not in html
-    # The notice is the point: an absence must explain itself.
-    assert "review-impersonation-notice" in html
-    assert "stop impersonating to review as yourself" in html
+    assert 'action="/reviews/assessments/' in html
+    assert f"/reviews/assessments/{assessment.id}/assign" not in html
+    assert "You are reviewing as" in html
 
 
 async def test_a_real_manager_sees_no_impersonation_notice(client, db_session, manager):

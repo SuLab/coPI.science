@@ -724,3 +724,9 @@ DataError the row out of existence.
   link (A6) — both are worth doing and both are separate changes.
 - A reveal-after-scoring interaction for the bot's dimension scores (A9).
 - Pagination of the assessments list (A10).
+
+## Amendment 2026-09-10 — N1/A15 reversed
+
+Impersonated review writes are allowed and recorded under the impersonated
+user with `recorded_by_user_id` = the admin. Assign/unassign and suggestion
+status remain refused.

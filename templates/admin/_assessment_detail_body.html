@@ -559,7 +559,7 @@
 {% endmacro %}
 
 {% set effective_user = impersonation_banner or current_user %}
-{% set can_write = not impersonation_banner %}
+{% set can_write = true %}
 <div id="review" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
     <p class="review-rubric-instructions text-xs text-gray-500 mb-3">
@@ -576,17 +576,15 @@
         explain the score and to flag anything the assessment got wrong.
     </p>
 
-    {# N1. `can_write` suppresses the entire write half under impersonation
-       (F6: a live-looking control that 403s on submit is worse than none —
-       every /reviews handler is behind `_refuse_impersonation`). That is
-       correct and stays. What was wrong was doing it SILENTLY: the blank card
-       reads as "this role cannot review", and that is exactly how it was read
-       (design doc §0.1). Say what happened and how to undo it. #}
-    {% if not can_write %}
-    <p class="review-impersonation-notice mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-        Review actions are hidden while you are impersonating another account.
-        A review is recorded against the person who wrote it, so
-        stop impersonating to review as yourself.
+    {# F4 (2026-09-10) reverses F6/N1: impersonated review writes are now
+       allowed rather than suppressed. The write half stays visible; the
+       notice now explains what happens on submit, rather than explaining an
+       absence — the review is attributed to the impersonated user, with the
+       real admin recorded as the person who entered it. #}
+    {% if impersonation_banner %}
+    <p class="review-impersonation-notice mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+        You are reviewing as <strong>{{ impersonation_banner.name }}</strong>. The review is
+        recorded under their name; your own account is recorded as the person who entered it.
     </p>
     {% endif %}
 
@@ -667,6 +665,7 @@
             <li class="review-feedback-row border border-gray-100 rounded-lg p-3">
                 <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
                     <span class="font-semibold text-gray-700">{{ review.reviewer_name }}</span>
+                    {% if review.recorded_by_user_id %}<span class="text-sm text-gray-600">(entered by an admin while impersonating)</span>{% endif %}
                     <span class="font-medium text-gray-700">{{ review.score }}/5</span>
                     {% if review.feedback_mode == 'learn' %}
                         <span class="review-mode-chip px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">Learn</span>
@@ -774,7 +773,7 @@
             {% for assignment in review_assignments %}
             <li class="flex items-center gap-2">
                 <span class="text-gray-700">{{ assignment.assignee_name }}</span>
-                {% if can_write and effective_user.is_staff %}
+                {% if can_write and effective_user.is_staff and not impersonation_banner %}
                 <form method="post" action="/reviews/assessments/{{ a.id }}/unassign" class="inline">
                     <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
                     <input type="hidden" name="assignee_user_id" value="{{ assignment.assignee_user_id }}">
@@ -787,7 +786,7 @@
         {% else %}
         <p class="text-sm text-gray-400 mt-1">No one assigned.</p>
         {% endif %}
-        {% if can_write and effective_user.is_staff %}
+        {% if can_write and effective_user.is_staff and not impersonation_banner %}
         <form method="post" action="/reviews/assessments/{{ a.id }}/assign" class="mt-2 flex items-center gap-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
             <select name="assignee_user_id" class="border rounded px-1 py-0.5 text-xs">
