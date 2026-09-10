@@ -21,10 +21,11 @@ from src.models import (
 )
 from src.models.agent_activity import VISIBILITY_PUBLIC
 from src.services.email_notifications import (
-    _send_html_email,
+    SendOutcome,
     build_reply_address,
     mark_notification_responded,
     record_engagement,
+    send_html_email_outcome,
 )
 
 logger = logging.getLogger(__name__)
@@ -1336,17 +1337,22 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         "reminder instead, or use the dashboard.</p>"
         "<p>Replies to this address are not monitored.</p>"
     )
-    # REV4-6 + follow-up (audit 2026-09-08): an allowlist-suppressed recipient
-    # never reaches SES, so it must not consume the budget; anything that DOES
-    # reach SES is charged before the call, because _send_html_email also returns
-    # False for a post-dispatch failure (read timeout) where the mail left — and
-    # not charging those would let an autoresponder ping-pong past the cap.
+    # REV4-6 + follow-up (audit 2026-09-08), and R-3 (audit 2026-09-10): an
+    # allowlist-suppressed recipient never reaches SES, so it must not consume
+    # the budget — and neither does a NOT_DISPATCHED outcome (a boto3-client or
+    # MIME-construction error before send_raw_email was ever called; R-3's fix
+    # for the pre-dispatch/post-dispatch conflation this budget used to charge
+    # identically). FAILED and SENT both mean send_raw_email was actually
+    # invoked — a post-dispatch failure (e.g. a read timeout) may still have
+    # left mail in flight, and not charging those would let an autoresponder
+    # ping-pong past the cap.
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(to_email):
         logger.info("Stale-token bounce to %s suppressed by outbound allowlist", to_email)
         return
-    _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
-    _send_html_email(to_email, subject, text_body, html_body)
+    outcome = send_html_email_outcome(to_email, subject, text_body, html_body)
+    if outcome in (SendOutcome.SENT, SendOutcome.FAILED):
+        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:

@@ -3,6 +3,7 @@
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta, timezone
+from enum import Enum
 
 from itsdangerous import URLSafeTimedSerializer
 from sqlalchemy import select
@@ -788,15 +789,39 @@ async def mark_notification_responded(
 # ---------------------------------------------------------------------------
 
 
-def _send_html_email(
+class SendOutcome(Enum):
+    """The four distinguishable outcomes of ``send_html_email_outcome`` (R-3).
+
+    ``_send_html_email``'s single bool return conflated three different things a
+    caller might want to react to differently: suppressed before any SES call
+    was attempted (no recipient / allowlist), a dispatch attempted but never
+    reaching ``send_raw_email`` (a boto3 client or MIME-construction error),
+    and ``send_raw_email`` itself raising. A budget consumer like
+    ``_maybe_send_stale_token_bounce`` needs exactly this distinction: charging
+    an address's bounce budget for a suppression it never caused would let an
+    allowlist change (or a bug) burn the budget with nothing ever reaching SES.
+    """
+
+    SUPPRESSED = "suppressed"       # no recipient, or blocked by the outbound allowlist
+    NOT_DISPATCHED = "not_dispatched"  # client/message construction failed before send_raw_email
+    FAILED = "failed"                # send_raw_email raised
+    SENT = "sent"
+
+
+def send_html_email_outcome(
     to_email: str | None,
     subject: str,
     text_body: str,
     html_body: str,
     reply_to: str | None = None,
     unsubscribe_url: str | None = None,
-) -> bool:
-    """Send a multipart text+HTML email via SES. Honors the outbound allowlist."""
+) -> SendOutcome:
+    """Send a multipart text+HTML email via SES. Honors the outbound allowlist.
+
+    Returns the specific ``SendOutcome`` rather than a bool — see that class's
+    docstring. ``_send_html_email`` below is a thin bool wrapper kept so its four
+    existing callers, which only ever cared about "did it go out", stay unchanged.
+    """
     settings = get_settings()
     from src.services.email import is_allowed_recipient
 
@@ -806,12 +831,12 @@ def _send_html_email(
     # Same shape as _notify_instruction_failure (e700dac).
     if not to_email:
         logger.info("Email suppressed: no recipient address on record (subject=%r)", subject)
-        return False
+        return SendOutcome.SUPPRESSED
     if not is_allowed_recipient(to_email):
         logger.info(
             "Email to %s suppressed by outbound allowlist (subject=%r)", to_email, subject
         )
-        return False
+        return SendOutcome.SUPPRESSED
     try:
         import boto3
         import email.mime.multipart
@@ -829,15 +854,41 @@ def _send_html_email(
             raw_msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
         raw_msg.attach(email.mime.text.MIMEText(text_body, "plain", "utf-8"))
         raw_msg.attach(email.mime.text.MIMEText(html_body, "html", "utf-8"))
+    except Exception as exc:
+        # Never reached send_raw_email -- nothing was dispatched to SES, so a
+        # budget keyed on "did this hit SES" must not charge for it.
+        logger.error("Failed to construct email to %s: %s", to_email, exc)
+        return SendOutcome.NOT_DISPATCHED
+    try:
         client.send_raw_email(
             Source=settings.ses_sender_email,
             Destinations=[to_email],
             RawMessage={"Data": raw_msg.as_string()},
         )
-        return True
+        return SendOutcome.SENT
     except Exception as exc:
         logger.error("Failed to send email to %s: %s", to_email, exc)
-        return False
+        return SendOutcome.FAILED
+
+
+def _send_html_email(
+    to_email: str | None,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    reply_to: str | None = None,
+    unsubscribe_url: str | None = None,
+) -> bool:
+    """Send a multipart text+HTML email via SES. Honors the outbound allowlist.
+
+    Thin bool wrapper over ``send_html_email_outcome`` — "did it go out",
+    collapsing SUPPRESSED/NOT_DISPATCHED/FAILED into the same False every
+    caller already treated them as.
+    """
+    return send_html_email_outcome(
+        to_email, subject, text_body, html_body,
+        reply_to=reply_to, unsubscribe_url=unsubscribe_url,
+    ) is SendOutcome.SENT
 
 
 async def _get_user_agent_records(user: User, db: AsyncSession) -> list[AgentRegistry]:
