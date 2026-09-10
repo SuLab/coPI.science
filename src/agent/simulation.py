@@ -5769,13 +5769,30 @@ class SimulationEngine:
             profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
             if not profile_path.exists():
                 return
-            profile_path.unlink()
-            agent.reload_private_profile()
-            logger.info(
-                "[%s] DB private profile is cleared but disk held a stale "
-                "file at startup — removed it",
-                agent.agent_id,
-            )
+            try:
+                profile_path.unlink()
+                logger.info(
+                    "[%s] DB private profile is cleared but disk held a stale "
+                    "file at startup — removed it",
+                    agent.agent_id,
+                )
+                agent.reload_private_profile()
+            except OSError as exc:
+                # L-3 (opus review, audit 2026-09-10): the disk removal is
+                # best-effort, but the cache must NOT keep serving the stale
+                # content just because the removal failed. `reload_private_profile()`
+                # alone is not enough here — the next read would just re-load
+                # the SAME file `unlink()` failed to remove, right back to
+                # the stale instruction. Setting the cache directly to the
+                # same default `Agent.private_profile`'s own fallback would
+                # use for a missing file forces the agent to actually behave
+                # as "cleared", regardless of what disk still holds.
+                logger.warning(
+                    "[%s] DB private profile is cleared but removing the "
+                    "stale disk file failed (cache invalidated anyway): %s",
+                    agent.agent_id, exc,
+                )
+                agent.force_clear_private_profile()
         except Exception as exc:
             logger.warning(
                 "[%s] Failed to sync private profile from DB at startup: %s",

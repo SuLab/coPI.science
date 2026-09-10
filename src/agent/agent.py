@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # call site below goes through _profiles_dir() instead of the constant directly.
 PROFILES_DIR: Path | None = None
 
+# L-3 (opus review, audit 2026-09-10): named so a caller that needs to force
+# an agent's cache to "cleared" WITHOUT going through a disk read (e.g. when
+# the disk file could not be removed) can do so without duplicating this
+# literal — see SimulationEngine._sync_one_agent_private_profile_from_db.
+DEFAULT_PRIVATE_PROFILE_TEXT = "No private instructions yet."
+
 
 def _profiles_dir() -> Path:
     """Resolve the profiles directory, live, unless a test has overridden it."""
@@ -137,7 +143,7 @@ class Agent:
         if self._private_profile is None:
             self._private_profile = self._load_file(
                 _profiles_dir() / "private" / f"{self.agent_id}.md",
-                "No private instructions yet.",
+                DEFAULT_PRIVATE_PROFILE_TEXT,
             )
         return self._private_profile
 
@@ -221,6 +227,21 @@ class Agent:
         ``SimulationEngine._sync_profiles_from_disk``.
         """
         self._private_profile = None
+        self._own_publication_dois = None  # derived from both profiles
+
+    def force_clear_private_profile(self) -> None:
+        """Set the private-profile cache directly to the default "cleared"
+        text, WITHOUT going through a disk read (L-3, opus review, audit
+        2026-09-10).
+
+        For when the caller already knows the profile is cleared (e.g. the
+        DB row says so) but could not remove the stale on-disk file — unlike
+        ``reload_private_profile()``, which invalidates the cache to ``None``
+        and lets the NEXT read re-load whatever is still on disk, this
+        forces the in-memory value itself so a file that could not be
+        deleted does not keep being served for the rest of the session.
+        """
+        self._private_profile = DEFAULT_PRIVATE_PROFILE_TEXT
         self._own_publication_dois = None  # derived from both profiles
 
     def reload_public_profile(self) -> None:

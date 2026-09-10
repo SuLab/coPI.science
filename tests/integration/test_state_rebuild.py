@@ -1421,6 +1421,50 @@ async def test_a_missing_researcher_profile_row_leaves_a_stale_disk_file_alone(
     )
 
 
+async def test_an_unlink_failure_on_a_real_clear_still_invalidates_the_cache(
+    db_session, tmp_path, monkeypatch,
+):
+    """L-3 (opus review, audit 2026-09-10): if the disk `unlink()` in the
+    genuinely-cleared branch (a real row whose `private_profile_md` is
+    empty/NULL) raises, the whole per-agent sync is wrapped in a bare
+    `except Exception` that only logs — leaving `agent.private_profile`
+    still cached at the stale, pre-clear content for the rest of the
+    session. The cache must be invalidated (falling back to the same
+    in-code default a never-written agent sees) even when the disk write
+    itself fails, mirroring `update_private_profile`'s own
+    best-effort-disk/always-update-cache contract.
+    """
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+    real_unlink = type(tmp_path / "private" / "su.md").unlink
+
+    def _raising_unlink(self, *a, **k):
+        if self.name == "su.md":
+            raise OSError("Permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(type(tmp_path), "unlink", _raising_unlink)
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(db_session, user=user, private_profile_md=None)
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert eng.agents["su"].private_profile == "No private instructions yet.", (
+        "an unlink() failure must still invalidate the in-memory cache so a "
+        "stale, cleared instruction is not used for the rest of the session"
+    )
+
+
 async def test_a_roster_re_add_also_resyncs_the_private_profile(
     db_session, tmp_path, monkeypatch,
 ):
