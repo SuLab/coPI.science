@@ -790,20 +790,28 @@ async def mark_notification_responded(
 
 
 class SendOutcome(Enum):
-    """The four distinguishable outcomes of ``send_html_email_outcome`` (R-3).
+    """The distinguishable outcomes of ``send_html_email_outcome`` (R-3, split
+    further by an opus-review follow-up, audit 2026-09-10).
 
-    ``_send_html_email``'s single bool return conflated three different things a
-    caller might want to react to differently: suppressed before any SES call
-    was attempted (no recipient / allowlist), a dispatch attempted but never
-    reaching ``send_raw_email`` (a boto3 client or MIME-construction error),
-    and ``send_raw_email`` itself raising. A budget consumer like
+    ``_send_html_email``'s single bool return conflated several different things
+    a caller might want to react to differently: suppressed before any SES call
+    was attempted (no recipient / allowlist), ``boto3.client(...)`` construction
+    failing (a persistent misconfiguration — bad/missing AWS credentials, a bad
+    region — that will keep failing for every message until an operator fixes
+    it), MIME/message construction failing (a property of THIS message, e.g. a
+    header that can't be encoded — the next message can still succeed), and
+    ``send_raw_email`` itself raising. A budget consumer like
     ``_maybe_send_stale_token_bounce`` needs exactly this distinction: charging
     an address's bounce budget for a suppression it never caused would let an
-    allowlist change (or a bug) burn the budget with nothing ever reaching SES.
+    allowlist change (or a bug) burn the budget with nothing ever reaching SES —
+    but CLIENT_UNAVAILABLE is different from NOT_DISPATCHED in that respect: a
+    persistently broken SES client is worth capping bounce attempts over (it is
+    not going to start working mid-flood), where a one-off MIME failure is not.
     """
 
     SUPPRESSED = "suppressed"       # no recipient, or blocked by the outbound allowlist
-    NOT_DISPATCHED = "not_dispatched"  # client/message construction failed before send_raw_email
+    CLIENT_UNAVAILABLE = "client_unavailable"  # boto3.client(...) itself raised (persistent misconfig)
+    NOT_DISPATCHED = "not_dispatched"  # MIME/message construction failed before send_raw_email
     FAILED = "failed"                # send_raw_email raised
     SENT = "sent"
 
@@ -839,10 +847,22 @@ def send_html_email_outcome(
         return SendOutcome.SUPPRESSED
     try:
         import boto3
+
+        client = boto3.client("ses", region_name=settings.aws_region)
+    except Exception as exc:
+        # boto3.client(...) itself failing is a persistent misconfiguration (bad
+        # or missing AWS credentials, a bad region) — it will keep failing for
+        # every message until an operator fixes it, unlike a one-off MIME error
+        # below. One ERROR log per call (no separate dedup/throttling here: the
+        # bounce budget this feeds is itself a per-address cap, so a broken
+        # client cannot spam more than MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS logs
+        # for any one sender).
+        logger.error("SES client unavailable, could not send email to %s: %s", to_email, exc)
+        return SendOutcome.CLIENT_UNAVAILABLE
+    try:
         import email.mime.multipart
         import email.mime.text
 
-        client = boto3.client("ses", region_name=settings.aws_region)
         raw_msg = email.mime.multipart.MIMEMultipart("alternative")
         raw_msg["From"] = settings.ses_sender_email
         raw_msg["To"] = to_email
@@ -856,7 +876,9 @@ def send_html_email_outcome(
         raw_msg.attach(email.mime.text.MIMEText(html_body, "html", "utf-8"))
     except Exception as exc:
         # Never reached send_raw_email -- nothing was dispatched to SES, so a
-        # budget keyed on "did this hit SES" must not charge for it.
+        # budget keyed on "did this hit SES" must not charge for it. Unlike
+        # CLIENT_UNAVAILABLE, this is a property of THIS message (e.g. a header
+        # that can't be encoded) -- the next message can still succeed.
         logger.error("Failed to construct email to %s: %s", to_email, exc)
         return SendOutcome.NOT_DISPATCHED
     try:
@@ -882,8 +904,8 @@ def _send_html_email(
     """Send a multipart text+HTML email via SES. Honors the outbound allowlist.
 
     Thin bool wrapper over ``send_html_email_outcome`` — "did it go out",
-    collapsing SUPPRESSED/NOT_DISPATCHED/FAILED into the same False every
-    caller already treated them as.
+    collapsing SUPPRESSED/CLIENT_UNAVAILABLE/NOT_DISPATCHED/FAILED into the
+    same False every caller already treated them as.
     """
     return send_html_email_outcome(
         to_email, subject, text_body, html_body,

@@ -1337,15 +1337,21 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         "reminder instead, or use the dashboard.</p>"
         "<p>Replies to this address are not monitored.</p>"
     )
-    # REV4-6 + follow-up (audit 2026-09-08), and R-3 (audit 2026-09-10): an
-    # allowlist-suppressed recipient never reaches SES, so it must not consume
-    # the budget — and neither does a NOT_DISPATCHED outcome (a boto3-client or
-    # MIME-construction error before send_raw_email was ever called; R-3's fix
-    # for the pre-dispatch/post-dispatch conflation this budget used to charge
-    # identically). FAILED and SENT both mean send_raw_email was actually
-    # invoked — a post-dispatch failure (e.g. a read timeout) may still have
-    # left mail in flight, and not charging those would let an autoresponder
-    # ping-pong past the cap.
+    # REV4-6 + follow-up (audit 2026-09-08), R-3, and an opus-review follow-up
+    # (both audit 2026-09-10): an allowlist-suppressed recipient never reaches
+    # SES, so it must not consume the budget — and neither does a
+    # NOT_DISPATCHED outcome (a MIME/message-construction error before
+    # send_raw_email was ever called: a property of THIS message, so the next
+    # bounce attempt is not doomed to repeat it). CLIENT_UNAVAILABLE (the SES
+    # client itself failed to construct) DOES consume the budget despite also
+    # never reaching SES: unlike NOT_DISPATCHED it is a persistent
+    # misconfiguration (bad/missing AWS credentials, a bad region) that will
+    # keep failing for every retry, so leaving it unbudgeted would let a
+    # broken client retry unboundedly instead of being capped like a real
+    # failure. FAILED and SENT both mean send_raw_email was actually invoked —
+    # a post-dispatch failure (e.g. a read timeout) may still have left mail
+    # in flight, and not charging those would let an autoresponder ping-pong
+    # past the cap.
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(to_email):
         logger.info("Stale-token bounce to %s suppressed by outbound allowlist", to_email)

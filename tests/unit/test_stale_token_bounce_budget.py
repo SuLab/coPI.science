@@ -1,10 +1,16 @@
-"""REV4-6 (audit 2026-09-08) and its follow-up, extended by R-3 (audit
-2026-09-10): _maybe_send_stale_token_bounce's per-address budget is consumed
-only by an outcome that actually reached ``send_raw_email`` (SENT or FAILED —
-a post-dispatch failure still means a mail may have left, so an autoresponder
-ping-pong stays capped), and NOT by SUPPRESSED (no recipient / allowlist) or
-NOT_DISPATCHED (a boto3-client or MIME-construction error before
-``send_raw_email`` was ever called) — neither of those ever reached SES.
+"""REV4-6 (audit 2026-09-08) and its follow-up, extended by R-3 and its own
+opus-review follow-up (both audit 2026-09-10): _maybe_send_stale_token_bounce's
+per-address budget is consumed by SENT, FAILED (send_raw_email was actually
+invoked -- a post-dispatch failure still means a mail may have left, so an
+autoresponder ping-pong stays capped) and CLIENT_UNAVAILABLE (the SES client
+itself failed to construct -- a persistent misconfiguration that will keep
+failing every retry, so it must be capped too even though it never reached
+SES). It is NOT consumed by SUPPRESSED (no recipient / allowlist) or
+NOT_DISPATCHED (a one-off MIME/message-construction error before
+``send_raw_email`` was ever called -- a property of THIS message, not a
+persistent one) -- neither of those is worth capping retries over. The slot
+is reserved before dispatch and refunded only for SUPPRESSED/NOT_DISPATCHED,
+closing a check-then-act race a future threaded send could otherwise open.
 """
 
 import pytest
@@ -59,6 +65,28 @@ async def test_a_not_dispatched_outcome_does_not_consume_the_budget(monkeypatch)
         await inbound._maybe_send_stale_token_bounce("real@example.com")
 
     assert inbound._STALE_TOKEN_BOUNCES_SENT.get("real@example.com", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_client_unavailable_outcome_consumes_the_budget(monkeypatch):
+    """Opus review follow-up, audit 2026-09-10: CLIENT_UNAVAILABLE (the SES
+    client itself failed to construct) is a persistent misconfiguration that
+    will keep failing every retry -- unlike NOT_DISPATCHED (a one-off
+    MIME/message error), it must count against the cap or a broken client
+    lets bounce attempts retry unboundedly."""
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
+    monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: True)
+    monkeypatch.setattr(
+        inbound, "send_html_email_outcome", lambda *a, **k: SendOutcome.CLIENT_UNAVAILABLE,
+    )
+
+    for _ in range(inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS + 3):
+        await inbound._maybe_send_stale_token_bounce("real@example.com")
+
+    assert (
+        inbound._STALE_TOKEN_BOUNCES_SENT["real@example.com"]
+        == inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS
+    )
 
 
 @pytest.mark.asyncio
