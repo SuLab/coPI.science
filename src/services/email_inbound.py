@@ -7,7 +7,7 @@ import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import get_settings
@@ -21,6 +21,7 @@ from src.models import (
 )
 from src.models.agent_activity import VISIBILITY_PUBLIC
 from src.services.email_notifications import (
+    _send_html_email,
     build_reply_address,
     mark_notification_responded,
     record_engagement,
@@ -52,6 +53,12 @@ _MAX_S3_LIST_PAGES = 20
 # forever. Replies keep being processed past the cap — only the help emails stop.
 MAX_HELP_EMAILS_PER_NOTIFICATION = 3
 
+# REV3-3 (opus review, audit 2026-09-08): stale-token bounces per From
+# address. Same shape as MAX_HELP_EMAILS_PER_NOTIFICATION -- without a
+# ceiling, a PI who keeps replying to an old, superseded reminder (or an
+# autoresponder the RFC 3834 gate misses) trades bounces with us forever.
+MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS = 3
+
 # notification id (str) -> recent reply timestamps (monotonic-ish epoch
 # seconds). SEC2-5 (audit 2026-09-08): keyed by notification.id, not the
 # reply token -- the token now rotates on resend (RC-4), so a token-keyed
@@ -64,6 +71,12 @@ _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 # limiter: the worker is a single long-lived process and a restart merely
 # resets the count). Also keyed by notification.id for the same reason.
 _HELP_EMAILS_SENT: dict[str, int] = {}
+
+# From address (lowercased) -> stale-token bounces sent (REV3-3, in-memory
+# like the help-email cap above). There is no notification id to key on here
+# -- the whole point is that the token did not resolve to one -- so this is
+# keyed on the sender's address instead.
+_STALE_TOKEN_BOUNCES_SENT: dict[str, int] = {}
 
 # notification id -> instruction-failure emails sent (in-memory, like the help-email rate
 # limiter above). Caps the PI-facing email at one per notification. _handle_instruction's
@@ -331,6 +344,20 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
     notification = result.scalar_one_or_none()
     if not notification:
         logger.warning("No notification found for token: %s...", token[:8])
+        # REV3-3 (opus review, audit 2026-09-08): after F1's token rotation, a
+        # PI who replies to a superseded reminder now gets silence instead of
+        # a stale-but-answerable notification. If the From address matches a
+        # KNOWN user, say so with one short bounce (never to an unknown
+        # address -- that would make this an oracle for guessing registered
+        # emails).
+        from_addr = _extract_email_address(msg.get("From", ""))
+        if from_addr:
+            user_result = await db.execute(
+                select(User).where(func.lower(User.email) == from_addr.lower())
+            )
+            user = user_result.scalar_one_or_none()
+            if user:
+                await _maybe_send_stale_token_bounce(from_addr)
         return
 
     if not _reply_rate_ok(str(notification.id)):
@@ -1280,6 +1307,37 @@ async def _send_instruction_confirmation(
     )
 
     _send_simple_email(user.email, subject, text_body)
+
+
+async def _maybe_send_stale_token_bounce(to_email: str) -> None:
+    """REV3-3 (opus review, audit 2026-09-08): tell a KNOWN sender their reply
+    landed on a token that no longer resolves to a notification -- most often
+    because F1's rotation superseded it with a newer reminder. Rate-limited
+    per address (same shape as MAX_HELP_EMAILS_PER_NOTIFICATION) so a PI
+    stuck replying to an old thread (or an autoresponder the RFC 3834 gate
+    misses) cannot trade bounces with us forever.
+    """
+    key = to_email.lower()
+    sent_so_far = _STALE_TOKEN_BOUNCES_SENT.get(key, 0)
+    if sent_so_far >= MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS:
+        logger.warning(
+            "Stale-token bounce cap (%d) reached for %s — not replying",
+            MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS, key,
+        )
+        return
+    _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
+    subject = "CoPI - This review link is no longer valid"
+    text_body = (
+        "This review link is no longer valid — reply to the most recent "
+        "reminder instead, or use the dashboard.\n\n"
+        "Replies to this address are not monitored."
+    )
+    html_body = (
+        "<p>This review link is no longer valid — reply to the most recent "
+        "reminder instead, or use the dashboard.</p>"
+        "<p>Replies to this address are not monitored.</p>"
+    )
+    _send_html_email(to_email, subject, text_body, html_body)
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:

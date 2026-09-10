@@ -241,6 +241,68 @@ async def test_reply_for_a_null_email_user_files_nothing(
     assert sent_emails == []  # and no help email to a user with no address
 
 
+async def test_a_reply_to_an_unknown_token_from_a_registered_user_gets_a_bounce(
+    db_session, monkeypatch
+):
+    """REV3-3 (opus review, audit 2026-09-08): F1's token rotation means a PI
+    answering a superseded reminder now hits an unknown token and previously
+    got silence. If the From address matches a KNOWN user, send one short
+    bounce explaining the link is stale."""
+    bounces = []
+
+    def _record(to_email, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
+        bounces.append({"to": to_email, "subject": subject})
+        return True
+
+    monkeypatch.setattr(inbound, "_send_html_email", _record)
+    recipient = await factories.make_user(db_session, email="pi.stale@scripps.edu")
+
+    await process_inbound_email(
+        _raw_reply("nosuchtoken" + "z" * 39, recipient.email, "1"), db_session
+    )
+
+    assert len(bounces) == 1
+    assert bounces[0]["to"] == recipient.email
+    assert "no longer valid" in bounces[0]["subject"].lower()
+
+
+async def test_a_reply_to_an_unknown_token_from_an_unknown_address_gets_no_bounce(
+    db_session, monkeypatch
+):
+    """Never bounce to an address that does not match a registered user --
+    that would turn this into an oracle for guessing registered emails."""
+    bounces = []
+    monkeypatch.setattr(
+        inbound, "_send_html_email",
+        lambda *a, **k: bounces.append(a) or True,
+    )
+
+    await process_inbound_email(
+        _raw_reply("nosuchtoken" + "y" * 39, "nobody@example.com", "1"), db_session
+    )
+
+    assert bounces == []
+
+
+async def test_stale_token_bounces_are_capped_per_address(db_session, monkeypatch):
+    bounces = []
+
+    def _record(to_email, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
+        bounces.append(to_email)
+        return True
+
+    monkeypatch.setattr(inbound, "_send_html_email", _record)
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
+    recipient = await factories.make_user(db_session, email="pi.capped@scripps.edu")
+
+    for i in range(inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS + 2):
+        await process_inbound_email(
+            _raw_reply(f"nosuchtoken{i}".ljust(48, "w"), recipient.email, "1"), db_session
+        )
+
+    assert len(bounces) == inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS
+
+
 async def test_matching_sender_still_files_a_review_case_insensitively(
     db_session, monkeypatch, sent_emails
 ):
