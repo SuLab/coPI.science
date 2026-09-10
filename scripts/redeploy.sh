@@ -124,13 +124,23 @@ compose stop -t 30 app worker
 
 echo "==> [3/6] running migrate"
 compose up -d migrate
-MIGRATE_CID="$(compose ps -aq migrate)"
+# REV3-5 (opus review, audit 2026-09-08): `compose ps -aq migrate` can return SEVERAL
+# ids -- a stale one-off `migrate` container from an earlier `docker compose run`
+# left alongside the one `up -d migrate` just created. Verified empirically: compose
+# lists them OLDEST-first, so the newest (the one this run actually produced) is the
+# LAST line, not the first -- `tail -n1`, not `head -n1`. Passing the whole
+# newline-joined blob to `docker wait "$MIGRATE_CID"` as a single argument is exactly
+# what real `docker wait` rejects (no parseable exit code, non-zero exit), tripping
+# the "failed to report an exit code" abort below even after a SUCCESSFUL migration.
+MIGRATE_CID="$(compose ps -aq migrate | tail -n1)"
 if [ -z "$MIGRATE_CID" ]; then
   die "no migrate container found after \`up -d migrate\` -- cannot verify its exit code.
   app/worker remain stopped. See docs/production-migration.md section 10.6."
 fi
 set +e
-MIGRATE_EXIT="$(docker wait "$MIGRATE_CID")"
+# `tail -n1` here too: `docker wait` on a single valid id always prints exactly one
+# line, but this stays defensive against the same multi-line hazard above.
+MIGRATE_EXIT="$(docker wait "$MIGRATE_CID" | tail -n1)"
 WAIT_RC=$?
 set -e
 if [ "$WAIT_RC" -ne 0 ] || [ -z "$MIGRATE_EXIT" ]; then

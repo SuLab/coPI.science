@@ -254,6 +254,73 @@ def test_aborts_when_migrate_container_id_cannot_be_resolved(tmp_path):
     assert "wait \"\"" not in log.read_text()
 
 
+# --- REV3-5 (opus review, audit 2026-09-08) ----------------------------------------
+# `compose ps -aq migrate` can return SEVERAL ids when a stale one-off `migrate`
+# container from an earlier `docker compose run` is still present alongside the
+# `up -d migrate` container this run just created -- compose lists them oldest-first
+# (verified empirically), so a naive `head -n1` would grab the STALE id, and passing
+# the whole newline-joined blob to `docker wait "$MIGRATE_CID"` as a single argument
+# is exactly what real `docker wait` rejects with a non-zero exit and no parseable
+# exit code on stdout -- tripping the "failed to report an exit code" abort under
+# `set -e` even after a SUCCESSFUL migration.
+
+OLD_MIGRATE_CID = "stale-migrate-cid"
+NEW_MIGRATE_CID = "fresh-migrate-cid"
+
+
+def _shim_with_two_migrate_containers(tmp_path: Path, *, migrate_exit: int = 0) -> tuple[Path, Path]:
+    """`ps -aq migrate` prints the stale id THEN the fresh one (oldest-first, matching
+    real `docker compose ps` ordering). `docker wait` on the newline-joined pair (what a
+    naive `"$MIGRATE_CID"` without `tail -n1` would pass) fails like the real CLI does
+    on a malformed id; `wait` on the fresh id alone succeeds."""
+    log = tmp_path / "argv.log"
+    shim = tmp_path / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> {log}\n'
+        'case "$*" in\n'
+        f'  *"ps -aq migrate"*) printf \'%s\\n%s\\n\' {OLD_MIGRATE_CID} {NEW_MIGRATE_CID} ;;\n'
+        f'  "wait {NEW_MIGRATE_CID}") echo {migrate_exit} ;;\n'
+        # Anything else `wait` is called with (the stale id alone, or the
+        # newline-joined blob bash would pass as one word) fails like the real
+        # CLI does on an id it cannot resolve -- no stdout, non-zero exit.
+        '  "wait "*) exit 1 ;;\n'
+        f'  *"ps -q app"*) echo {APP_CID} ;;\n'
+        f'  *"inspect -f "*"{APP_CID}"*) echo healthy ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    return shim, log
+
+
+def test_a_stale_leftover_migrate_container_does_not_abort_a_successful_migration(tmp_path):
+    _shim_with_two_migrate_containers(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "APP_HEALTH_TIMEOUT_SECONDS": "1",
+        "APP_HEALTH_POLL_INTERVAL_SECONDS": "0",
+    }
+    env.pop("COMPOSE_FILE", None)
+    proc = subprocess.run(
+        [str(REDEPLOY_SH), "-f", PROD_FILE, "-f", OVERRIDE_FILE],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    log = tmp_path / "argv.log"
+    assert any(
+        line.strip() == f"wait {NEW_MIGRATE_CID}" for line in log.read_text().splitlines()
+    ), (
+        "redeploy.sh must resolve the SINGLE newest migrate container id and wait on "
+        f"it alone, not on every id `ps -aq migrate` returns:\n{log.read_text()}"
+    )
+
+
 def test_app_worker_are_stopped_gracefully_with_a_30s_timeout(tmp_path):
     proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
     assert proc.returncode == 0, proc.stdout + proc.stderr
