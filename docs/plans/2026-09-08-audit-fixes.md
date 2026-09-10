@@ -1176,3 +1176,101 @@ unaffected. Test (red first, `tests/unit/test_simulation_logic.py`,
 `TestPostMessageSerializesPerAgent`): two concurrent calls for one agent record
 non-interleaved enter/exit timestamps; two concurrent calls for different agents still
 overlap in time, pinning that the fix does not accidentally serialize across agents too.
+
+## O — replacing the per-pool shutdown machinery and two remaining M-8/N-follow-up defects (2026-09-10)
+
+The Slack shutdown signal (K-2, M-2, N-2) had regressed in three consecutive review
+rounds — each fix layered more state (a per-pool `threading.Event`, a thread-local
+binding, a `_pool_shutdown_pending` flag) onto a design that kept finding a new edge
+case. O-1 replaces the whole thing with one process-wide, sticky event instead of
+patching it again. O-2 through O-4 are unrelated smaller defects found in the same
+review pass.
+
+**O-1 (HIGH — design simplification) — one sticky process-wide shutdown event replaces
+the per-pool event / thread-local / pending-flag machinery.** The prior design gave
+every `slack_executor` pool generation its own `threading.Event`, bound into each worker
+thread via a `ThreadPoolExecutor(initializer=bind_shutdown_event)`, with a module-level
+`SHUTTING_DOWN` fallback for off-pool callers, a `clear_shutdown()` to un-stick that
+fallback after a lazy pool re-create, and a `_pool_shutdown_pending` flag gating exactly
+when that clear was allowed to fire. Three review rounds (K-2, M-2, N-2) each found a
+real bug in the previous round's fix; the design itself — trying to let a shutdown signal
+be un-set safely mid-process — was the recurring source. Replaced with
+`slack_client.SHUTDOWN_REQUESTED`, a single `threading.Event` checked by every caller
+regardless of thread or pool, that is STICKY for the rest of the process's life: nothing
+in `src/` ever clears it once set, because a process that received SIGTERM or ran its
+lifespan/worker shutdown is exiting anyway — there is no "shut down without exiting" case
+to accommodate in production, only in a test process sharing one interpreter across many
+independent lifespans, and those tests now clear it themselves in a fixture.
+`bind_shutdown_event`, the thread-local, `clear_shutdown()`, and
+`_pool_shutdown_pending` are gone; `_get_executor()` never touches the event in either
+direction. `shutdown_slack_executor()` = `signal_shutdown()` +
+`pool.shutdown(wait=False, cancel_futures=False)` (deliberately NOT `cancel_futures=True`
+— a queued `run_slack_call` must still run and abort quickly via the event, not raise
+`CancelledError` into whatever in-flight turn is awaiting it) + drop the pool reference.
+The agent-run process (`src/agent/main.py`) no longer calls `shutdown_slack_executor()`
+at all — it doesn't own that pool's lifecycle, and its own worker threads exit with the
+process once their sleeps become interruptible — its shutdown handler now calls
+`slack_client.signal_shutdown()` directly on the first signal (after the existing grace
+delay) and immediately on a second. `SHUTTING_DOWN` remains as a backward-compatible
+alias for `SHUTDOWN_REQUESTED`. Tests
+(`tests/unit/test_slack_executor.py`, rewritten; `test_agent_main_shutdown_grace.py`,
+updated to call `signal_shutdown` instead of `shutdown_slack_executor`;
+`test_slack_client_contract.py`, `test_agent_main_shutdown.py`, `test_main_lifespan.py`,
+`test_worker_shutdown.py`, unchanged — already compatible with the new contract): a
+sleeper run via `run_slack_call` and one on the main thread both abort within ~1s of
+`signal_shutdown()`/`shutdown_slack_executor()`; a pool created after
+`shutdown_slack_executor()` does not clear the event; a `run_slack_call` already queued
+(not yet started) when `shutdown_slack_executor()` fires still runs to completion rather
+than being cancelled.
+
+**O-2 (MEDIUM) — `_deferred_implicit_reviews` recorded a pair even when nothing was
+actually queued to replay it against.** `_check_pi_proposal_review` appended
+`(agent_id, thread_id)` to `_deferred_implicit_reviews` whenever
+`proposal.thread_decision_id` was `None`, regardless of whether a matching payload was
+ever queued in `_pending_thread_decisions`. With `session_factory=None`, `_close_thread`
+never enqueues a ThreadDecision write at all (guarded on
+`if self.session_factory and self.simulation_run_id`), so `thread_decision_id` stays
+`None` forever and the pair would leak into the list for the rest of the run, never
+matched by `_flush_pending_thread_decisions`. Fixed: the pair is now only appended when
+`_pending_thread_decisions` actually contains an entry for that `thread_id`; matching
+pairs are also dropped from `_deferred_implicit_reviews` when N-6's cap evicts a payload
+that can never be replayed either. Test (`tests/unit/test_simulation_logic.py`,
+`TestDeferredImplicitProposalReview::test_no_session_factory_never_records_a_deferred_review`):
+calling `_check_pi_proposal_review` five times with no `session_factory` leaves
+`_deferred_implicit_reviews` empty; the existing "recorded for replay" tests were updated
+to pre-queue a matching `_pending_thread_decisions` entry, matching the real ordering
+where `_close_thread` queues the payload before a later PI message reaches
+`_check_pi_proposal_review`.
+
+**O-3 (LOW) — `test_force_cleared_private_profile_is_not_resurrected_by_the_watcher`
+was vacuous after N-3.** N-3 moved the watcher's force-cleared branch to defer to
+`_sync_one_agent_private_profile_from_db`, which early-returns immediately when
+`session_factory` is `None` — the `setup` fixture's default for this test class. The test
+therefore passed regardless of whether the force-cleared guard it was meant to pin
+actually worked, since nothing ran at all. Fixed: the test now stubs a session
+confirming `ResearcherProfile.private_profile_md == ""` so the DB-empty path executes,
+and keeps the retry unlink failing (matching the real L-3 "still un-removable" scenario)
+so it doesn't collide with the already-covered "retry succeeds" test. Verified red by
+temporarily disabling the guard and confirming the test failed, then restored.
+
+**O-4 (LOW) — the watcher's mtime-signature bookkeeping around the DB resync could
+either lose a retry or log a spurious edit.** In the force-cleared branch of
+`_sync_profiles_from_disk`, the signature was advanced to the just-observed value
+unconditionally after calling `_sync_one_agent_private_profile_from_db`, regardless of
+whether that call actually resolved anything. When it couldn't (no linked
+`AgentRegistry.user_id`, no `ResearcherProfile` row, or an exception), advancing the
+signature anyway made that bump look "already handled" forever — a later tick's stat()
+would just match the now-recorded signature, and the "nothing changed" fast path would
+never call back into the helper again, permanently losing the retry. Separately, when the
+helper actually rewrote the file (DB had content, disk was stale), the signature recorded
+was the one captured BEFORE the helper ran, which the helper's own write then made
+stale — so the very next tick's real stat() looked like a fresh external edit and
+triggered a second, spurious reload. Fixed:
+`_sync_one_agent_private_profile_from_db` now returns whether it reached a definitive
+verdict; the watcher only advances `agent_sigs[sub]` when it did, and re-stats the file
+(rather than reusing the pre-call signature) when it does. Tests
+(`tests/unit/test_simulation_logic.py`, `TestSyncProfilesFromDisk`):
+a helper call that cannot reach a verdict leaves the signature unadvanced, so a later
+tick with no further external bump still retries once the DB becomes reachable; a helper
+call that rewrites the file from DB content does not cause a spurious reload on the
+following tick. Both verified red before the fix.
