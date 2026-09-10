@@ -150,7 +150,10 @@ MIGRATE_CID=""
 while IFS= read -r cid; do
   [ -z "$cid" ] && continue
   ONEOFF="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid" 2>/dev/null || echo "")"
-  if [ "$ONEOFF" != "True" ]; then
+  # Accept only an explicit "False": an empty/unknown label (inspect failed, or the
+  # container vanished between `ps` and `inspect`) must not elect a dead id, or
+  # `docker wait` on it aborts the deploy after a migration that succeeded.
+  if [ "$ONEOFF" = "False" ]; then
     MIGRATE_CID="$cid"
   fi
 done <<EOF
