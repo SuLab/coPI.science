@@ -658,6 +658,16 @@ doc's §8.
   admit a reviewer; the review-scoped predicate is a separate dependency,
   **`get_review_user`** (admin OR manager OR reviewer), gating the `/reviews`
   router and the manager router's reviewer-visible GETs.
+  **Review WRITES are allowed while impersonating** (operator decision
+  2026-09-10, reversing the earlier blanket refusal): feedback submit/edit and
+  the approve/disapprove status writes go through, attributed to the
+  *impersonated* user, with the real admin recorded in the new
+  `recorded_by_user_id` second signature (`assessment_reviews` and
+  `assessment_review_events`, migration `0044`; NULL means the named user acted
+  in person). The three non-review actions on that router —
+  reviewer assign, unassign, and prompt-suggestion status — still refuse an
+  impersonated session outright (`_refuse_impersonation`,
+  `src/routers/reviews.py`).
 - **Admin** — everything, including `/admin/*` and impersonation.
 
 `is_manager` means exactly `user_role == 'manager'`. The "may see the manager views"
@@ -1138,7 +1148,82 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > record, almost exactly like the pages they replaced; the narrative half
 > arrives with the first interview a rebuilt agent concludes.
 >
-> Production is stamped `0042`, so this box applies to the next deploy.
+> Production is stamped `0042`, so this box applies to the next deploy — as
+> does the combined `0044`/`0045`/`0046` box immediately below it, which ships
+> in the same deploy.
+
+> **Deploy order for `0044` + `0045` + `0046` — migrate BEFORE the new code
+> serves.** These three land together (2026-09-10, the seven-feature branch) and
+> are all additive nullable columns, so *old code against the new schema* is
+> safe in every case: nothing is backfilled, nothing is NOT NULL, and every
+> read path treats NULL as the pre-migration answer. **Note the numbering: the
+> plan documents assigned `0045` to F2 and `0046` to F1; execution swapped
+> them.** What each one adds:
+>
+> * **`0044_review_recorded_by`** — `assessment_reviews.recorded_by_user_id`
+>   and `assessment_review_events.recorded_by_user_id` (UUID FK `users`, ON
+>   DELETE SET NULL). The second signature on a review written while an admin
+>   was impersonating; NULL means the named reviewer/actor acted in person.
+> * **`0045_llm_call_logs_thread_phase`** — `llm_call_logs.thread_phase`
+>   (String(20): `explore`/`decide`/`conclude`) and `.message_ordinal`
+>   (Integer). Stamped by the engine from the same `phase4_guidance()` call
+>   that built the prompt. NULL on every pre-`0045` row and on
+>   `new_post`/memory turns, deliberately never backfilled.
+> * **`0046_slack_provision_initiated_by`** —
+>   `slack_app_provisions.initiated_by_user_id` (UUID FK `users`, ON DELETE SET
+>   NULL). Records the staff account that clicked "Install Slack bot", so
+>   `complete_provisioning` can refuse to land a bot token for an install a
+>   DIFFERENT account started — the Slack OAuth callback is a third-party
+>   redirect and can carry no CSRF token, and its gate is now staff-wide rather
+>   than admin-only. NULL reads as "unknown initiator — allow", which is
+>   exactly the pre-`0046` behaviour.
+>
+> The reverse direction — new code against the old schema — breaks all three
+> ways, and the `0046` failure is the one that will reach you first:
+>
+> * pre-`0044`: the new code **maps both `recorded_by_user_id` columns**, so
+>   every `select(AssessmentReview)` and `select(AssessmentReviewEvent)` raises
+>   `UndefinedColumn` — both assessment detail pages' feedback lists and
+>   `review_bot`'s own load — and `submit_feedback` / `edit_feedback` /
+>   the status write (`src/services/assessment_reviews.py`) assign the column
+>   unconditionally, so every human review submission, edit and
+>   approve/disapprove 500s out of the route handler. Loud, not silent.
+> * pre-`0045`: the new code **maps `llm_call_logs.thread_phase` and
+>   `.message_ordinal`**, so `/admin/activity/{run_id}/llm-calls`
+>   (`select(LlmCallLog)`, `src/routers/admin.py`) and the
+>   `src/services/simulation_stats.py` aggregates raise `UndefinedColumn`, and
+>   on the engine side the `_llm_log_record` INSERT names both columns — so
+>   **every `llm_call_logs` flush of a running simulation fails**, which the
+>   flush path reports as LOST with a row count.
+> * pre-`0046`: `start_provisioning`'s INSERT names
+>   `initiated_by_user_id` and `complete_provisioning`'s select reads it
+>   (`src/services/admin_provisioning.py`), so **ALL Slack bot provisioning
+>   breaks** — both the start of an install and the callback that lands the
+>   token.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0046)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> **The agent rebuild is REQUIRED, not optional**, for two independent reasons.
+> First, `0045`'s producers live in the engine (`src/agent/agent.py`,
+> `src/agent/simulation.py`, `src/agent/tools.py`) and `src/` is BAKED into the
+> agent image — an app-only deploy migrates the two columns and then writes
+> NULL into them forever. Second, this deploy bumps the **scout_hub prompt set
+> to `1.3.0`**, whose `key_points` is a three-group object rather than a flat
+> list; `prompts/` is bind-mounted and `src/` is baked, so the prompt and the
+> image must ship TOGETHER. Prompt without image means the hub emits the
+> three-group object and the old parser mangles or discards it; image without
+> prompt means the new parser is fed the flat 1.2.x shape. Same pairing
+> hazard the `0043` box describes, for the same reason.
+>
+> Per the control-plane section, `$DC up -d agent` brings the supervisor back
+> **IDLE**: starting a run afterwards is a separate, explicit operator action
+> from `/admin/simulation`.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >

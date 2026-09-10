@@ -182,18 +182,21 @@ class CallKindCost:
 
     ``kind`` is ``round | final | forced_final | retry`` as written by
     ``src/services/llm.py``'s ``_call_stat``. This is the ONLY aggregate here
-    that prices individual API calls rather than whole turns, and it is
-    therefore **excluding cache tokens**: ``call_stats`` elements carry
-    ``input_tokens``/``output_tokens``/``thinking_tokens`` only, so the
-    cache-read and cache-write halves of the bill are simply not recorded per
-    call and cannot be apportioned. Thinking tokens bill at the output rate
-    and are added to ``output_tokens`` before pricing.
+    that prices individual API calls rather than whole turns, and it prices
+    the FULL bill: ``_call_stat`` records ``cache_read_input_tokens`` and
+    ``cache_creation_input_tokens`` per element (llm.py:779-782) alongside
+    ``input_tokens``/``output_tokens``, so all four halves are available here.
+
+    ``thinking_tokens`` is deliberately NOT added to ``output_tokens``: it is
+    a DECOMPOSITION of it (llm.py:112 — "the thinking/text split of
+    ``output_tokens``"), so summing the two would bill every thinking token
+    twice.
 
     ``is_floor`` means the same thing it means on ``CostSummary``: at least
-    one row of this run carries NULL ``call_stats`` (every row written before
-    migration 0032), so its calls are invisible to this breakdown entirely
-    and the numbers here are a floor. Independently of the flag, the panel is
-    labelled "excl. cache" because of the paragraph above.
+    one row of this run carries no usable ``call_stats`` array — SQL NULL
+    (every row written before migration 0032) or the legacy JSONB scalar
+    ``null`` — so its calls are invisible to this breakdown entirely and the
+    numbers here are a floor.
     """
 
     kind: str
@@ -525,6 +528,13 @@ async def cost_by_specialist(db: AsyncSession, run_id: uuid.UUID) -> list[Specia
     (thread, domain) pair was consulted more than once — which is the normal
     case across a long interview — and would then count the same API call's
     tokens once per consult row.
+
+    The subquery takes the NEWEST consult written at or before the call
+    (`created_at <= LlmCallLog.created_at`), which is the one that call most
+    plausibly produced. `llm_call_logs` carries no consult id, so this is an
+    attribution CHOICE, not a measurement: a thread/domain pair consulted
+    several times within one clock tick can be labelled with a sibling's
+    signal.
     """
     domain_col = func.substr(LlmCallLog.phase, 9)
     signal_sub = (
@@ -533,6 +543,7 @@ async def cost_by_specialist(db: AsyncSession, run_id: uuid.UUID) -> list[Specia
             SpecialistConsult.simulation_run_id == run_id,
             SpecialistConsult.thread_id == LlmCallLog.thread_ts,
             SpecialistConsult.domain == domain_col,
+            SpecialistConsult.created_at <= LlmCallLog.created_at,
         )
         .order_by(SpecialistConsult.created_at.desc())
         .limit(1)
@@ -550,7 +561,7 @@ async def cost_by_specialist(db: AsyncSession, run_id: uuid.UUID) -> list[Specia
         )
         .where(
             LlmCallLog.simulation_run_id == run_id,
-            LlmCallLog.phase.like("consult_%"),
+            LlmCallLog.phase.like(r"consult\_%", escape="\\"),
         )
         .subquery()
     )
@@ -577,11 +588,17 @@ async def cost_by_specialist(db: AsyncSession, run_id: uuid.UUID) -> list[Specia
 async def cost_by_call_kind(db: AsyncSession, run_id: uuid.UUID) -> list[CallKindCost]:
     """Cost of the run's individual API calls split by call kind.
 
-    Prices each `call_stats[]` element, so a row with NULL `call_stats` (every
-    row written before migration 0032) contributes nothing at all — hence
-    `is_floor`. Cache tokens are not recorded per call and are therefore
-    excluded; see `CallKindCost`.
+    Prices each `call_stats[]` element — input, output and both cache halves,
+    all four of which `_call_stat` records per call — so a row with no usable
+    array contributes nothing at all, which is what `is_floor` reports. See
+    `CallKindCost` for why `thinking_tokens` is not added to `output_tokens`.
+
+    `jsonb_typeof(...) == 'array'` is not belt-and-braces: `call_stats` has a
+    second physical encoding of "absent", the JSONB scalar `null` that
+    migration 0031 documents, and `jsonb_array_elements` RAISES on it rather
+    than returning zero rows.
     """
+    is_array = func.jsonb_typeof(LlmCallLog.call_stats) == "array"
     elem = func.jsonb_array_elements(LlmCallLog.call_stats).table_valued(
         column("value", JSONB)
     )
@@ -596,27 +613,30 @@ async def cost_by_call_kind(db: AsyncSession, run_id: uuid.UUID) -> list[CallKin
             LlmCallLog.model,
             func.count(),
             func.coalesce(func.sum(_tok("input_tokens")), 0),
-            func.coalesce(
-                func.sum(_tok("output_tokens") + _tok("thinking_tokens")), 0
-            ),
+            func.coalesce(func.sum(_tok("output_tokens")), 0),
+            func.coalesce(func.sum(_tok("cache_read_input_tokens")), 0),
+            func.coalesce(func.sum(_tok("cache_creation_input_tokens")), 0),
         )
         .select_from(LlmCallLog)
         .join(elem, true())
-        .where(LlmCallLog.simulation_run_id == run_id)
+        .where(LlmCallLog.simulation_run_id == run_id, is_array)
         .group_by(kind_col, LlmCallLog.model)
     )
     rows = (await db.execute(stmt)).all()
 
+    # `IS DISTINCT FROM` rather than `IS NULL`: jsonb_typeof is NULL for a SQL
+    # NULL and 'null' for the scalar-null encoding, and BOTH are rows whose
+    # calls this breakdown cannot see.
     is_floor = (
         await db.execute(
             select(func.count()).select_from(LlmCallLog).where(
                 LlmCallLog.simulation_run_id == run_id,
-                LlmCallLog.call_stats.is_(None),
+                func.jsonb_typeof(LlmCallLog.call_stats).is_distinct_from("array"),
             )
         )
     ).scalar_one() > 0
 
-    agg = _reduce_priced([(k, m, n, inp, out, 0, 0) for k, m, n, inp, out in rows])
+    agg = _reduce_priced(rows)
     return [
         CallKindCost(
             kind=kind, cost=v["cost"], call_count=v["calls"], is_floor=is_floor,

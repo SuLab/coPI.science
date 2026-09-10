@@ -644,7 +644,7 @@ async def test_live_tab_renders_the_three_f1_cost_panels(client, db_session):
     assert resp.status_code == 200
     assert "Cost by interview stage" in resp.text
     assert "Cost by specialist consult" in resp.text
-    assert "Cost by call kind (excl. cache)" in resp.text
+    assert "Cost by call kind" in resp.text
     assert "scout_hub · decide" in resp.text
     assert "chemistry · unmatched" in resp.text
     assert "$2.00 (1 turns)" in resp.text
@@ -661,4 +661,5 @@ async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(cl
     assert resp.status_code == 200
     assert "Cost by interview stage" in resp.text
     assert "No classified turns yet" in resp.text
+    assert "No per-call breakdown yet" in resp.text
     assert "Internal Server Error" not in resp.text

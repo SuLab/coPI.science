@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 
 from src.agent.roles import prompt_set_stamp
 from src.models import (
@@ -830,26 +831,36 @@ async def test_cost_by_call_kind_prices_each_call_stats_element(db_session):
              "output_tokens": 100_000, "thinking_tokens": 100_000},
         ],
     )
-    # round: 1_000_000 * 5 / 1e6            = $5.00
-    # final: (100_000 + 100_000) * 25 / 1e6 = $5.00
+    # round: 1_000_000 * 5 / 1e6  = $5.00
+    # final:   100_000 * 25 / 1e6 = $2.50 — `thinking_tokens` is a
+    #   DECOMPOSITION of `output_tokens` (src/services/llm.py:112), so adding
+    #   the two would bill those 100k thinking tokens twice.
     await factories.make_llm_call_log(
         db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",
         input_tokens=0, output_tokens=0, **common,
         call_stats=[
             {"seq": 0, "kind": "round", "input_tokens": 500_000,
              "output_tokens": 0, "thinking_tokens": 0},
+            # sonnet-5 cache: read $0.20/MTok, 5m write $2.50/MTok.
+            {"seq": 1, "kind": "retry", "input_tokens": 0, "output_tokens": 0,
+             "thinking_tokens": 0, "cache_read_input_tokens": 1_000_000,
+             "cache_creation_input_tokens": 1_000_000},
         ],
-    )  # round: 500_000 * 2 / 1e6 = $1.00
+    )
+    # round: 500_000 * 2 / 1e6 = $1.00
+    # retry: 1_000_000 * 0.20 / 1e6 + 1_000_000 * 2.50 / 1e6 = 0.20 + 2.50 = $2.70
     await db_session.commit()
 
     rows = await stats.cost_by_call_kind(db_session, run.id)
     by = {r.kind: r for r in rows}
 
-    assert set(by) == {"round", "final"}
+    assert set(by) == {"round", "final", "retry"}
     assert by["round"].cost == Decimal("6.00")   # 5.00 + 1.00
     assert by["round"].call_count == 2
-    assert by["final"].cost == Decimal("5.00")
+    assert by["final"].cost == Decimal("2.50")
     assert by["final"].call_count == 1
+    assert by["retry"].cost == Decimal("2.70")
+    assert by["retry"].call_count == 1
     assert all(r.is_floor is False for r in rows)
 
 
@@ -875,6 +886,42 @@ async def test_cost_by_call_kind_is_a_floor_when_a_row_has_no_call_stats(db_sess
     assert len(rows) == 1
     assert rows[0].kind == "round"
     assert rows[0].cost == Decimal("5.00")  # the NULL-call_stats row is invisible here
+    assert rows[0].is_floor is True
+
+
+async def test_cost_by_call_kind_survives_the_legacy_jsonb_null_scalar(db_session):
+    """`call_stats` has TWO encodings of "absent" and only one is SQL NULL.
+
+    Migration 0031 documents the other: the JSONB scalar `null`, which
+    `jsonb_array_elements` RAISES on rather than skipping — so this row would
+    500 the whole Live tab if the query did not filter on `jsonb_typeof`. It
+    is also a floor cause, exactly like a SQL NULL.
+    """
+    run = await factories.make_simulation_run(db_session)
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common,
+        call_stats=[
+            {"seq": 0, "kind": "round", "input_tokens": 1_000_000,
+             "output_tokens": 0, "thinking_tokens": 0},
+        ],
+    )
+    scalar_null_row = await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=0, **common, call_stats=None,
+    )
+    await db_session.execute(
+        text("UPDATE llm_call_logs SET call_stats = 'null'::jsonb WHERE id = :id"),
+        {"id": scalar_null_row.id},
+    )
+    await db_session.commit()
+
+    rows = await stats.cost_by_call_kind(db_session, run.id)
+
+    assert len(rows) == 1
+    assert rows[0].kind == "round"
+    assert rows[0].cost == Decimal("5.00")
     assert rows[0].is_floor is True
 
 

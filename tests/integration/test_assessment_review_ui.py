@@ -555,6 +555,7 @@ async def test_the_form_renders_for_a_reviewer_on_the_manager_surface(
     assert f'name="dim_{first.key}"' in html
     assert "review-rubric-instructions" in html
 
+
 async def test_every_select_on_the_detail_page_has_an_external_label(
     client, db_session, manager
 ):
