@@ -263,6 +263,44 @@ The actual message.
 # _sync_profiles_from_disk
 # ---------------------------------------------------------------
 
+class _FakeDbResult:
+    """Scripts `db.execute(...)` by call order for
+    `_sync_one_agent_private_profile_from_db`'s two sequential selects
+    (AgentRegistry, then ResearcherProfile) -- N-3 (opus review, audit
+    2026-09-10)."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _FakeProfileDb:
+    def __init__(self, agent_reg, profile):
+        self._results = [_FakeDbResult(agent_reg), _FakeDbResult(profile)]
+        self._call = 0
+
+    async def execute(self, *a, **k):
+        result = self._results[self._call]
+        self._call += 1
+        return result
+
+    async def commit(self):
+        pass
+
+
+class _StubProfileSessionCtx:
+    def __init__(self, db):
+        self._db = db
+
+    async def __aenter__(self):
+        return self._db
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class TestSyncProfilesFromDisk:
     """Per-turn reload of profiles edited from the web app (separate process).
 
@@ -280,6 +318,7 @@ class TestSyncProfilesFromDisk:
 
     @pytest.fixture
     def setup(self, tmp_path, monkeypatch):
+        import src.agent.agent as agent_module
         import src.agent.simulation as sim
         from src.agent.agent import Agent
 
@@ -288,8 +327,15 @@ class TestSyncProfilesFromDisk:
         priv = tmp_path / "private" / "su.md"
         priv.write_text("Focus on aging.")
 
-        # Point the sync method at the temp profiles tree.
+        # Point the sync method at the temp profiles tree. N-3 (opus review,
+        # audit 2026-09-10): `_sync_profiles_from_disk`'s force-cleared
+        # branch now defers to `_sync_one_agent_private_profile_from_db`,
+        # which imports `_profiles_dir` from src.agent.agent (a DIFFERENT
+        # module-level `PROFILES_DIR` than this one) -- both must point at
+        # the same temp tree or that helper's unlink()/read acts on the real
+        # profiles/ directory instead of tmp_path.
         monkeypatch.setattr(sim, "PROFILES_DIR", tmp_path)
+        monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
 
         agent = Agent("su", "SuBot", "Andrew Su")
         # Count reload_private_profile()/reload_public_profile() calls
@@ -312,22 +358,22 @@ class TestSyncProfilesFromDisk:
         engine = SimulationEngine(agents=[agent], slack_clients={})
         return engine, agent, priv, calls
 
-    def test_first_observation_records_baseline_without_reload(self, setup):
+    async def test_first_observation_records_baseline_without_reload(self, setup):
         engine, agent, _priv, calls = setup
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [], "public": []}       # no reload on first pass
         assert "su" in engine._profile_mtimes              # baseline recorded
 
-    def test_unchanged_files_do_not_reload(self, setup):
+    async def test_unchanged_files_do_not_reload(self, setup):
         engine, agent, _priv, calls = setup
-        engine._sync_profiles_from_disk()  # baseline
-        engine._sync_profiles_from_disk()  # nothing changed
+        await engine._sync_profiles_from_disk()  # baseline
+        await engine._sync_profiles_from_disk()  # nothing changed
         assert calls == {"private": [], "public": []}
 
-    def test_external_edit_triggers_reload(self, setup):
+    async def test_external_edit_triggers_reload(self, setup):
         import os
         engine, agent, priv, calls = setup
-        engine._sync_profiles_from_disk()  # baseline
+        await engine._sync_profiles_from_disk()  # baseline
 
         # Simulate the web app rewriting the file. Bump mtime explicitly so the
         # test is robust to sub-second filesystem timestamp resolution.
@@ -335,38 +381,38 @@ class TestSyncProfilesFromDisk:
         future = priv.stat().st_mtime + 10
         os.utime(priv, (future, future))
 
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}      # reloaded exactly once, private only
         assert engine._profile_mtimes["su"]["private"] == (True, future)  # signature advanced
 
         # A subsequent pass with no further change must not reload again.
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}
 
-    def test_missing_profile_files_are_tolerated(self, setup, tmp_path):
+    async def test_missing_profile_files_are_tolerated(self, setup, tmp_path):
         engine, agent, priv, calls = setup
         priv.unlink()  # no profile files on disk at all
-        engine._sync_profiles_from_disk()  # must not raise
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()  # must not raise
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [], "public": []}
 
-    def test_created_private_file_triggers_reload(self, setup):
+    async def test_created_private_file_triggers_reload(self, setup):
         """Mirror of the deletion case below: a file appearing for the first
         time after a baseline of "absent" is also a signature change."""
         engine, agent, priv, calls = setup
         priv.unlink()  # start from a baseline where the private file is absent
-        engine._sync_profiles_from_disk()  # baseline: private absent, public absent
+        await engine._sync_profiles_from_disk()  # baseline: private absent, public absent
         assert calls == {"private": [], "public": []}
 
         priv.write_text("Focus on aging.")
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}
 
         # A subsequent pass with no further change must not reload again.
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}
 
-    def test_deleted_private_file_triggers_reload(self, setup):
+    async def test_deleted_private_file_triggers_reload(self, setup):
         """Task H3's clear-after-write behaviour (commit a080900) unlinks
         profiles/private/{id}.md when a PI blanks their private instructions.
         The pre-fix scalar-mtime-max algorithm missed this: deleting the file
@@ -376,18 +422,18 @@ class TestSyncProfilesFromDisk:
         was never called — the live agent kept serving the cached private
         instructions until restart (#22 COR-23, #29)."""
         engine, agent, priv, calls = setup
-        engine._sync_profiles_from_disk()  # baseline: private present
+        await engine._sync_profiles_from_disk()  # baseline: private present
 
         priv.unlink()  # the web UI's clear-after-write behaviour
 
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}  # reloaded despite mtime "decreasing" to absent
 
         # A subsequent pass with no further change must not reload again.
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [1], "public": []}
 
-    def test_public_mtime_bump_still_triggers_reload(self, setup, tmp_path):
+    async def test_public_mtime_bump_still_triggers_reload(self, setup, tmp_path):
         """An edit to the public profile alone (no change to private) still
         reloads — but now reloads only the public cache, not the private one
         (see TestPrivateReloadIsolatedFromPublicChange)."""
@@ -395,21 +441,21 @@ class TestSyncProfilesFromDisk:
         engine, agent, _priv, calls = setup
         pub = tmp_path / "public" / "su.md"
         pub.write_text("Public profile body.")
-        engine._sync_profiles_from_disk()  # baseline: private + public present
+        await engine._sync_profiles_from_disk()  # baseline: private + public present
 
         pub.write_text("Updated public profile body.")
         future = pub.stat().st_mtime + 10
         os.utime(pub, (future, future))
 
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [], "public": [1]}
 
         # A subsequent pass with no further change must not reload again.
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
         assert calls == {"private": [], "public": [1]}
 
 
-    def test_force_cleared_private_profile_is_not_resurrected_by_the_watcher(self, setup):
+    async def test_force_cleared_private_profile_is_not_resurrected_by_the_watcher(self, setup):
         """M-3 (opus review, audit 2026-09-10): once `force_clear_private_profile()`
         has run (an unlink() failure on a genuine clear, L-3), the cache holds
         the default "cleared" text directly, NOT `None` — a subsequent mtime
@@ -422,7 +468,7 @@ class TestSyncProfilesFromDisk:
         from src.agent.agent import DEFAULT_PRIVATE_PROFILE_TEXT
 
         engine, agent, priv, calls = setup
-        engine._sync_profiles_from_disk()  # baseline
+        await engine._sync_profiles_from_disk()  # baseline
 
         # Simulate L-3's failed-unlink path: the cache is force-cleared but
         # the stale file is still on disk.
@@ -432,7 +478,7 @@ class TestSyncProfilesFromDisk:
         future = priv.stat().st_mtime + 10
         os.utime(priv, (future, future))
 
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
 
         assert calls == {"private": [], "public": []}, (
             "the watcher must not call reload_private_profile() for a "
@@ -440,23 +486,74 @@ class TestSyncProfilesFromDisk:
         )
         assert agent.private_profile == DEFAULT_PRIVATE_PROFILE_TEXT
 
-    def test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds(self, setup):
-        """Once the watcher's retried unlink() actually removes the file, the
-        agent is no longer tracked as force-cleared -- a later external
-        rewrite of the (now nonexistent) path should reload normally again."""
+    async def test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds(self, setup):
+        """N-3 (opus review, audit 2026-09-10): once the DB-authoritative
+        recheck confirms ResearcherProfile.private_profile_md is STILL empty,
+        the retried unlink() actually removes the file and the agent is no
+        longer tracked as force-cleared -- a later external rewrite of the
+        (now nonexistent) path should reload normally again."""
+        import os
+        import uuid
+        from types import SimpleNamespace
+
         engine, agent, priv, calls = setup
-        engine._sync_profiles_from_disk()  # baseline
+
+        agent_reg = SimpleNamespace(user_id=uuid.uuid4())
+        profile = SimpleNamespace(private_profile_md="")  # DB still empty
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(agent_reg, profile)
+        )
+
+        await engine._sync_profiles_from_disk()  # baseline
 
         agent.force_clear_private_profile()
         engine._force_cleared_private.add(agent.agent_id)
 
-        import os
         future = priv.stat().st_mtime + 10
         os.utime(priv, (future, future))
 
-        engine._sync_profiles_from_disk()  # retries the unlink; file is removable this time
+        await engine._sync_profiles_from_disk()  # DB confirms empty; retries the unlink
 
         assert not priv.exists()
+        assert agent.agent_id not in engine._force_cleared_private
+
+    async def test_a_later_legitimate_edit_after_a_force_clear_is_kept_not_reunlinked(
+        self, setup,
+    ):
+        """N-3 (opus review, audit 2026-09-10): the watcher's mtime signature
+        cannot distinguish "still the same un-removable stale file" from "a
+        legitimate later web edit landing after the clear" (a PI writes new
+        instructions after having cleared them) -- both look like a bump on
+        the same path. The DB is authoritative: once
+        ResearcherProfile.private_profile_md is non-empty again, the new file
+        must be kept and the cache updated from it, not deleted."""
+        import os
+        import uuid
+        from types import SimpleNamespace
+
+        engine, agent, priv, calls = setup
+
+        await engine._sync_profiles_from_disk()  # baseline
+
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        new_content = "New instructions the PI wrote after clearing."
+        priv.write_text(new_content)
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        agent_reg = SimpleNamespace(user_id=uuid.uuid4())
+        profile = SimpleNamespace(private_profile_md=new_content)
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(agent_reg, profile)
+        )
+
+        await engine._sync_profiles_from_disk()
+
+        assert priv.exists(), "a legitimate later edit must not be re-unlinked"
+        assert priv.read_text().strip() == new_content
+        assert agent.private_profile.strip() == new_content
         assert agent.agent_id not in engine._force_cleared_private
 
 
@@ -476,7 +573,7 @@ class TestPrivateReloadIsolatedFromPublicChange:
     stale on-disk file, silently discarding the PI's accepted instruction.
     """
 
-    def test_a_failed_private_write_survives_an_unrelated_public_change(
+    async def test_a_failed_private_write_survives_an_unrelated_public_change(
         self, tmp_path, monkeypatch,
     ):
         import os
@@ -497,7 +594,7 @@ class TestPrivateReloadIsolatedFromPublicChange:
 
         agent = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(agents=[agent], slack_clients={})
-        engine._sync_profiles_from_disk()  # baseline signatures
+        await engine._sync_profiles_from_disk()  # baseline signatures
 
         # A DB-first-then-disk write (RC-7) whose DB half succeeded but whose
         # disk half failed: the in-memory cache holds the new content, the
@@ -517,7 +614,7 @@ class TestPrivateReloadIsolatedFromPublicChange:
         future = pub.stat().st_mtime + 10
         os.utime(pub, (future, future))
 
-        engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
 
         # The public cache reloads from disk as expected...
         assert agent.public_profile == "new public bio"

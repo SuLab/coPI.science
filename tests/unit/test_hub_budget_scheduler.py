@@ -83,7 +83,10 @@ def _drive_loop(eng, monkeypatch, *, stop_after=4):
 
     for name in _TICK_IO:
         monkeypatch.setattr(eng, name, _noop)
-    monkeypatch.setattr(eng, "_sync_profiles_from_disk", lambda *a, **kw: None)
+    # N-3 (opus review, audit 2026-09-10): _sync_profiles_from_disk is now
+    # async (it awaits the DB-authoritative per-agent helper for a
+    # force-cleared private profile), so the stub must be a coroutine too.
+    monkeypatch.setattr(eng, "_sync_profiles_from_disk", _noop)
 
     sleeps: list[int] = []
     turns: list[str] = []

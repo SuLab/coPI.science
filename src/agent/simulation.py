@@ -965,7 +965,7 @@ class SimulationEngine:
             await self._sync_roster_from_db()
 
             # Pick up profile edits made from the web app (separate process).
-            self._sync_profiles_from_disk()
+            await self._sync_profiles_from_disk()
 
             # Retry any ThreadDecision writes _close_thread could not commit
             # even after its own in-call retry budget (M-7, audit 2026-09-10).
@@ -5959,6 +5959,16 @@ class SimulationEngine:
                 return
             db_content = (profile.private_profile_md or "").strip()
             if db_content:
+                # N-3 (opus review, audit 2026-09-10): the DB now holds real
+                # content, so this is no longer "the same un-removable stale
+                # file" a prior force-clear (L-3) left behind -- even if this
+                # call was only reached because a MTIME BUMP on that file
+                # looked identical to the stale-file case from
+                # `_sync_profiles_from_disk`'s point of view (it only ever
+                # compares (exists, mtime), never content). Drop the marker
+                # unconditionally here so a later bump is treated as a normal
+                # edit again.
+                self._force_cleared_private.discard(agent.agent_id)
                 if agent.private_profile.strip() == db_content:
                     return
                 # M-4 (opus review, audit 2026-09-10): update_private_profile()
@@ -6791,7 +6801,7 @@ class SimulationEngine:
                     LLM_LOG_REQUEUE_MAX_ROWS, overflow,
                 )
 
-    def _sync_profiles_from_disk(self) -> None:
+    async def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose profile files changed on disk since last turn.
 
         Private and public profiles can be edited from the web app, which runs
@@ -6841,28 +6851,21 @@ class SimulationEngine:
                     continue
                 if new_sig != prev_sig:
                     if sub == "private" and agent.agent_id in self._force_cleared_private:
-                        # M-3 (opus review, audit 2026-09-10): this agent's
-                        # private profile was force-cleared because an earlier
-                        # unlink() of THIS SAME file failed (L-3) -- a mtime
-                        # bump on it is not a legitimate new edit to load, it
-                        # is the still-un-removed stale file. Reloading here
-                        # would resurrect exactly the instruction the PI
-                        # cleared. Retry the removal instead of reloading.
-                        try:
-                            path.unlink()
-                            self._force_cleared_private.discard(agent.agent_id)
-                            logger.info(
-                                "[%s] Removed the private profile file that a "
-                                "prior clear could not delete",
-                                agent.agent_id,
-                            )
-                        except OSError as exc:
-                            logger.warning(
-                                "[%s] Private profile is force-cleared but the "
-                                "stale file still cannot be removed: %s",
-                                agent.agent_id, exc,
-                            )
-                        agent.force_clear_private_profile()
+                        # N-3 (opus review, audit 2026-09-10): this method has
+                        # no DB session of its own and only ever compares
+                        # (exists, mtime) signatures, never content -- so it
+                        # cannot tell "still the same un-removable stale file
+                        # from a prior force-clear (L-3)" apart from "a
+                        # LEGITIMATE later web edit that landed after the
+                        # clear" (a PI writes new instructions after having
+                        # cleared them). Blindly re-unlinking on every bump
+                        # (the pre-fix behaviour) silently discarded that kind
+                        # of real edit. Defer to the existing DB-authoritative
+                        # per-agent helper instead: it keeps the new content
+                        # when ResearcherProfile.private_profile_md is now
+                        # non-empty, and only retries the unlink when the DB
+                        # confirms it is still empty.
+                        await self._sync_one_agent_private_profile_from_db(agent)
                         agent_sigs[sub] = new_sig
                         continue
                     if sub == "private":
