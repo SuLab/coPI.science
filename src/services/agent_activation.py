@@ -15,11 +15,12 @@ The override is an explicit form field and is logged by the caller.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import AgentRegistry, Job, ResearcherProfile
+from src.models import AgentRegistry, Job, ResearcherProfile, User
 
 logger = logging.getLogger(__name__)
 
@@ -69,3 +70,32 @@ async def activation_blockers(db: AsyncSession, agent: AgentRegistry) -> list[st
             f"{(latest_job.last_error or 'no error recorded')[:120]}"
         )
     return blockers
+
+
+async def activate_agent(
+    db: AsyncSession, agent: AgentRegistry, *, actor: User, override: bool
+) -> list[str]:
+    """Check the gate and flip ``agent`` to ``active``, or refuse.
+
+    Refusal leaves ``agent`` untouched and returns the blocker list. Success
+    sets ``status``/``approved_at``/``approved_by`` (NOT committed — the
+    caller owns the transaction) and returns ``[]``. The single call site for
+    both branches of ``admin_approve_agent``, and for any future caller (e.g.
+    the manager surface) that needs the same gate-then-activate sequence.
+    """
+    blockers = await activation_blockers(db, agent)
+    if blockers and not override:
+        logger.warning(
+            "Refused activation of agent %s (%s): %s",
+            agent.agent_id, agent.id, "; ".join(blockers),
+        )
+        return blockers
+    if blockers:
+        logger.warning(
+            "Activation OVERRIDE by %s for agent %s (%s) despite: %s",
+            actor.id, agent.agent_id, agent.id, "; ".join(blockers),
+        )
+    agent.status = "active"
+    agent.approved_at = datetime.now(UTC)
+    agent.approved_by = actor.id
+    return []

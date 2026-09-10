@@ -52,7 +52,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.agent_activation import activation_blockers
+from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
 from src.services.cohorts import (
     compute_gates,
@@ -1067,31 +1067,21 @@ async def admin_approve_agent(
         agent.status != "active" and agent_status == "active"
     )
     if activating:
-        blockers = await activation_blockers(db, agent)
-        if blockers and not activation_override.strip():
-            logger.warning(
-                "Refused activation of agent %s (%s): %s",
-                agent.agent_id, agent.id, "; ".join(blockers),
-            )
+        blockers = await activate_agent(
+            db, agent, actor=current_user,
+            override=bool(activation_override.strip()),
+        )
+        if blockers:
             return RedirectResponse(
                 url=f"/admin/agents/{agent_id}?activation_blocked=1",
                 status_code=302,
-            )
-        if blockers:
-            logger.warning(
-                "Activation OVERRIDE by admin %s for agent %s (%s) despite: %s",
-                current_user.id, agent.agent_id, agent.id, "; ".join(blockers),
             )
 
     agent.agent_id = agent_slug.strip().lower()
     agent.bot_name = bot_name.strip()
     agent.slack_bot_token = slack_bot_token.strip() or None
 
-    if agent.status == "pending":
-        agent.status = "active"
-        agent.approved_at = datetime.now(UTC)
-        agent.approved_by = current_user.id
-    elif agent_status in VALID_AGENT_STATUSES:
+    if not activating and agent_status in VALID_AGENT_STATUSES:
         agent.status = agent_status
 
     await db.commit()
