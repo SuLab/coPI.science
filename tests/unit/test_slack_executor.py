@@ -211,7 +211,11 @@ def test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event(monkeypat
             else:
                 outcome["completed"] = True
 
-        t = threading.Thread(target=run)
+        # M-6 (opus review, audit 2026-09-10): daemon=True so a THIS test's
+        # own failure (the sleeper never aborting) cannot hold up interpreter
+        # exit for the rest of the 30s sleep -- a plain non-daemon thread
+        # would otherwise be joined by the interpreter's own atexit handling.
+        t = threading.Thread(target=run, daemon=True)
         start = time.monotonic()
         t.start()
         time.sleep(0.05)  # let the main-thread-bound sleeper start
@@ -225,6 +229,14 @@ def test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event(monkeypat
         assert elapsed < 2.0, f"took {elapsed:.2f}s to abort"
         assert isinstance(outcome.get("exc"), SlackApiError)
     finally:
+        # M-6: re-set and fully join BEFORE clearing, rather than clearing
+        # unconditionally. If the assertions above already failed, `t` may
+        # still be alive and sleeping through `_sleep_interruptibly`'s
+        # <=1s-sliced checks of THIS event -- clearing it immediately would
+        # silence its only abort signal and leave it to sleep out the full
+        # 30s in the background instead of exiting promptly right here.
+        slack_client_module.SHUTTING_DOWN.set()
+        t.join(timeout=30.0)
         slack_client_module.SHUTTING_DOWN.clear()
 
 
