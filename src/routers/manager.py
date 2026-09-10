@@ -171,6 +171,11 @@ async def manager_pis(
             user_data=user_data,
             status_filter=status_filter,
             claimed_filter=claimed_filter,
+            # The Slack callback's manager-surface error redirects land here
+            # (`/manager/pis?slack_error=…`), not on the PI detail page — an
+            # unknown state or a refused initiator has no PI to return to.
+            # Without this the message is dropped and the refusal is silent.
+            slack_error=request.query_params.get("slack_error"),
         ),
     )
 

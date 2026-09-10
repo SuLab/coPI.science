@@ -647,7 +647,7 @@ async def test_live_tab_renders_the_three_f1_cost_panels(client, db_session):
     assert "Cost by call kind" in resp.text
     assert "scout_hub · decide" in resp.text
     assert "chemistry · unmatched" in resp.text
-    assert "$2.00 (1 turns)" in resp.text
+    assert "$2.00 (1 calls)" in resp.text
     assert "≥ $5.00 (1 calls)" in resp.text
 
 

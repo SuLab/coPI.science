@@ -64,7 +64,8 @@ class SlackAppProvision(Base):
     #: that carries no CSRF token, so this is what stops a second staff
     #: account from landing someone else's bot token — and what tells the
     #: callback whether to return to /admin/agents or /manager/pis. NULL on
-    #: pre-0046 rows, read as "unknown initiator, allow".
+    #: pre-0046 rows and on bulk CLI rows (scripts/make_install_links.py),
+    #: read as "unknown initiator — admin only may complete it".
     initiated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

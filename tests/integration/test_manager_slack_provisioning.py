@@ -9,6 +9,7 @@ migration 0046) so a second staff account cannot land someone else's token.
 """
 
 import pytest
+from sqlalchemy import select
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -303,3 +304,105 @@ async def test_the_callback_refuses_an_impersonated_session(
     assert r.status_code == 403
     await db_session.refresh(agent)
     assert agent.slack_bot_token is None
+
+
+async def test_callback_refuses_a_null_initiator_row_for_a_non_admin(
+    client, db_session, monkeypatch
+):
+    """A NULL ``initiated_by_user_id`` is the bulk-CLI bridge row
+    (``scripts/make_install_links.py``), which mints install links for an
+    ADMIN to open later. It is not "unknown initiator, allow": with the
+    callback's gate now staff-wide, allowing it would let any manager who
+    guessed or intercepted a state land a live bot token from a link an
+    admin was issued. Only an admin may complete one; the row is left in
+    place so the admin still can.
+    """
+    manager = await _manager(db_session)
+    _pi, agent = await _pending_pi(db_session, agent_id="cbnullmgr")
+    db_session.add(SlackAppProvision(
+        agent_registry_id=agent.id, state="s4",
+        client_id="cid", client_secret="secret",
+        initiated_by_user_id=None,
+    ))
+    await db_session.flush()
+
+    def _never(*a, **k):
+        raise AssertionError("a NULL-initiator row must not be exchanged by a manager")
+
+    monkeypatch.setattr("src.services.admin_provisioning.exchange_code", _never)
+    r = await client.get(
+        "/admin/agents/slack/callback?code=c&state=s4",
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/manager/pis?slack_error=")
+    await db_session.refresh(agent)
+    assert agent.slack_bot_token is None
+    # The bridge row survives, so the admin the link was minted for can finish.
+    surviving = (
+        await db_session.execute(
+            select(SlackAppProvision).where(SlackAppProvision.state == "s4")
+        )
+    ).scalar_one_or_none()
+    assert surviving is not None
+
+
+async def test_callback_completes_a_null_initiator_row_for_an_admin(
+    client, db_session, monkeypatch
+):
+    """The other half: the bulk install-links path still works, for an admin."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    _pi, agent = await _pending_pi(db_session, agent_id="cbnulladm")
+    db_session.add(SlackAppProvision(
+        agent_registry_id=agent.id, state="s5",
+        client_id="cid", client_secret="secret",
+        initiated_by_user_id=None,
+    ))
+    await db_session.flush()
+    monkeypatch.setattr(
+        "src.services.admin_provisioning.exchange_code",
+        lambda *a, **k: "xoxb-bulk",
+    )
+
+    r = await client.get(
+        "/admin/agents/slack/callback?code=c&state=s5",
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == f"/admin/agents/{agent.id}?slack_ok=1"
+    await db_session.refresh(agent)
+    assert agent.slack_bot_token == "xoxb-bulk"
+
+
+async def test_the_pi_directory_renders_a_slack_error_banner(client, db_session):
+    """The callback's manager-surface error redirects land on /manager/pis
+    with ``?slack_error=…``. Without a banner there the message is dropped
+    silently and a refused install looks like nothing happened at all.
+    """
+    manager = await _manager(db_session)
+    r = await client.get(
+        "/manager/pis?slack_error=This+install+was+started+by+a+different+account.",
+        headers=auth_headers(manager.id),
+    )
+    assert r.status_code == 200
+    assert "Slack provisioning failed" in r.text
+    assert "This install was started by a different account." in r.text
+
+
+async def test_a_reviewer_cannot_render_a_fake_success_banner(client, db_session):
+    """The four status banners on the PI detail page are staff-only. A
+    reviewer can load the page read-only, so an unguarded banner lets any
+    reviewer manufacture "Slack bot installed" out of a query string.
+    """
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    pi, _agent = await _pending_pi(db_session, agent_id="revbanner")
+    r = await client.get(
+        f"/manager/pis/{pi.id}?slack_ok=1&activated=1"
+        "&slack_error=nope&activation_blocked=1",
+        headers=auth_headers(reviewer.id),
+    )
+    assert r.status_code == 200
+    assert "Slack bot installed" not in r.text
+    assert "Slack provisioning failed" not in r.text
+    assert "Agent activated" not in r.text
+    assert "Activation refused" not in r.text

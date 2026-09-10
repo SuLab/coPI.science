@@ -7,6 +7,17 @@
     <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
 </div>
 
+{# Same markup as manager/pi_detail.html's: the callback redirects staff here
+   on any error it cannot attribute to one PI (an unknown state, or an
+   initiator mismatch). Staff-gated for the same reason the detail page's
+   banners are: a reviewer never reaches the callback, so a banner they can
+   summon from a query string could only ever be a fake. #}
+{% if slack_error and effective_user.is_staff and not impersonation_banner %}
+<div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+    ⚠️ Slack provisioning failed: {{ slack_error }}
+</div>
+{% endif %}
+
 <!-- Add PI -->
 {% if effective_user.is_staff and not impersonation_banner %}
 <form method="post" action="/manager/pis" class="mb-6 flex items-end gap-2">

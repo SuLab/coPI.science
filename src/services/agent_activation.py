@@ -78,8 +78,15 @@ async def activate_agent(
     """Check the gate and flip ``agent`` to ``active``, or refuse.
 
     Refusal leaves ``agent`` untouched and returns the blocker list. Success
-    sets ``status``/``approved_at``/``approved_by`` (NOT committed — the
-    caller owns the transaction) and returns ``[]``. The single call site for
+    sets ``status`` (NOT committed — the caller owns the transaction) and
+    returns ``[]``.
+
+    ``approved_at``/``approved_by`` are stamped ONLY on the pending→active
+    transition, which is what the pre-refactor ``admin_approve_agent`` did.
+    They record who first vouched for this agent; re-activating from
+    ``inactive`` (a manager unmute) or ``suspended`` must not overwrite that
+    provenance with whoever happened to flip the switch back on. The single
+    call site for
     both branches of ``admin_approve_agent``, and for any future caller (e.g.
     the manager surface) that needs the same gate-then-activate sequence.
     """
@@ -95,7 +102,9 @@ async def activate_agent(
             "Activation OVERRIDE by %s for agent %s (%s) despite: %s",
             actor.id, agent.agent_id, agent.id, "; ".join(blockers),
         )
+    was_pending = agent.status == "pending"
     agent.status = "active"
-    agent.approved_at = datetime.now(UTC)
-    agent.approved_by = actor.id
+    if was_pending:
+        agent.approved_at = datetime.now(UTC)
+        agent.approved_by = actor.id
     return []

@@ -841,10 +841,29 @@ async def _load_review_feedback(
         )
     ).scalars().all()
     rows = list(rows)
+
+    # F4: the impersonation note NAMES the admin who entered the review.
+    # "an admin" alone is not an attribution anyone can act on — with several
+    # admins it identifies nobody. One lookup for the whole page rather than
+    # one per row; a missing id (the FK is ON DELETE SET NULL, but a stale
+    # read can still miss) falls back to "an admin" in the template.
+    recorder_ids = {r.recorded_by_user_id for r in rows if r.recorded_by_user_id}
+    names: dict[uuid.UUID, str] = {}
+    if recorder_ids:
+        names = {
+            uid: name
+            for uid, name in (
+                await db.execute(
+                    select(User.id, User.name).where(User.id.in_(recorder_ids))
+                )
+            ).all()
+        }
+
     for row in rows:
         # Not mapped columns — ordinary instance attributes on read-only rows
         # handed straight to a template. Nothing is persisted.
         row.dimension_rows, row.dimension_provenance = _review_dimension_rows(row)
+        row.recorded_by_name = names.get(row.recorded_by_user_id)
     return rows
 
 

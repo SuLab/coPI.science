@@ -43,8 +43,9 @@
 >   `slack_app_provisions.initiated_by_user_id` (nullable, FK users SET NULL) and
 >   `complete_provisioning` refuses a state whose initiator is some *other* account. NULL
 >   (a pre-`0046` row, or the bulk `scripts/make_install_links.py` path, which has no
->   request user) is read as "unknown initiator, allow" — exactly the pre-`0046`
->   behaviour.
+>   request user) is completable by an **admin only** — allowing anyone staff would be a
+>   *widening* of the pre-`0046` admin-only callback, not a restoration of it, and would
+>   let a manager finish an install link minted for an admin.
 >
 > Both routes are impersonation-refused (403), matching the other manager writes.
 

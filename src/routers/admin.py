@@ -2403,7 +2403,7 @@ async def _live_tab_context(
     cost_by_stage_html = (
         hbar_list([
             (f"{r.role} · {r.thread_phase}", float(r.cost),
-             f"${r.cost:.2f} ({r.call_count} turns)")
+             f"${r.cost:.2f} ({r.call_count} calls)")
             for r in stage_costs
         ])
         if stage_costs
@@ -2412,7 +2412,7 @@ async def _live_tab_context(
     cost_by_specialist_html = (
         hbar_list([
             (f"{r.domain} · {r.verdict_signal}", float(r.cost),
-             f"${r.cost:.2f} ({r.call_count} turns)")
+             f"${r.cost:.2f} ({r.call_count} calls)")
             for r in specialist_costs
         ])
         if specialist_costs

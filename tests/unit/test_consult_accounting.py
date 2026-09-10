@@ -19,7 +19,7 @@ from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.specialists import DEFAULTED_TALLY_LABEL
 from src.agent.state import ThreadState
-from src.agent.tools import _execute_consult_specialist
+from src.agent.tools import _execute_consult_specialist, execute_tool
 from tests.fakes import FakeAnthropic, FakeSlackClient
 
 _OPINION = """VERDICT SIGNAL: proceed
@@ -529,3 +529,44 @@ async def test_the_hub_reads_the_opinion_before_it_reads_the_label(monkeypatch):
         "the label must come after the body"
     )
     assert "read: parsed" in out
+
+
+@pytest.mark.asyncio
+async def test_a_consult_stamps_the_thread_phase_and_message_ordinal(monkeypatch):
+    """The consult's own `llm_call_logs` row carries the same phase band AND
+    the same message ordinal `_reply_to_thread` stamps on the reply that
+    triggered it (`message_count + 1`) — without the ordinal the two rows
+    cannot be lined up inside a single interview turn.
+    """
+    seen: dict = {}
+
+    async def _fake_opinion(**kwargs):
+        seen.update(kwargs.get("log_meta") or {})
+        return _OPINION
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
+
+    thread = ThreadState(
+        thread_id="t9", channel="general", other_agent_id="wang", message_count=5,
+    )
+    await execute_tool(
+        "consult_specialist",
+        {"domain": "chemistry", "question": "q", "context": "c"},
+        "blackbird",
+        thread_state=thread,
+        role="scout_hub",
+    )
+    assert seen["thread_phase"] is not None
+    assert seen["message_ordinal"] == 6
+
+    # A direct caller with no thread has no ordinal to claim — None, the same
+    # convention `thread_ts` and `thread_phase` already use, not 0 or 1.
+    seen.clear()
+    await execute_tool(
+        "consult_specialist",
+        {"domain": "chemistry", "question": "q", "context": "c"},
+        "blackbird",
+        thread_state=None,
+        role="scout_hub",
+    )
+    assert seen["message_ordinal"] is None

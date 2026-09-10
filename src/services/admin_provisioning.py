@@ -136,9 +136,10 @@ async def start_provisioning(
     ``initiated_by`` is required but may be ``None`` for the bulk CLI path
     (``scripts/make_install_links.py``), which mints links for an admin to
     open later and has no request user to attribute them to. A NULL initiator
-    is the pre-0046 "anyone staff may finish this" behaviour, so the keyword
-    is deliberately explicit rather than defaulted: a web caller that forgets
-    it is a TypeError, not a silently unattributed install.
+    is completable by an ADMIN ONLY (see ``complete_provisioning``), which is
+    what that path wants, so the keyword is deliberately explicit rather than
+    defaulted: a web caller that forgets it mints an install only an admin can
+    finish — a TypeError, not a silently unattributed install.
     """
     redirect_uri = _redirect_uri()
 
@@ -216,9 +217,16 @@ async def complete_provisioning(
     The callback is a third-party redirect and carries no CSRF token, and its
     gate widened from admin-only to staff with F2 — so the initiator recorded
     at ``start_provisioning`` is what stops a second staff account from
-    landing a token for an install it did not start. A NULL
-    ``initiated_by_user_id`` is a pre-0046 row and is allowed, which is
-    exactly the pre-0046 behaviour.
+    landing a token for an install it did not start.
+
+    A NULL ``initiated_by_user_id`` is a pre-0046 row or a bulk CLI row
+    (``scripts/make_install_links.py``), and is completable by an ADMIN ONLY.
+    That is deliberately NOT the pre-0046 behaviour: pre-0046 the whole
+    callback was admin-gated, so "allow anyone" for a NULL row would be a
+    widening, not a restoration — it would let any manager who obtained a
+    state finish an install link minted for an admin and land a live bot
+    token. The bulk path mints links for an admin to open, so admin-only
+    costs it nothing.
     """
     prov = (
         await db.execute(
@@ -228,9 +236,14 @@ async def complete_provisioning(
     if not prov:
         raise ProvisioningError("Unknown or expired provisioning state.")
 
-    if prov.initiated_by_user_id not in (None, completing_user.id):
-        # Deliberately NOT deleting the bridge row: the account that started
-        # the install must still be able to finish it.
+    if prov.initiated_by_user_id is None:
+        allowed = bool(completing_user.is_admin)
+    else:
+        allowed = prov.initiated_by_user_id == completing_user.id
+    if not allowed:
+        # Deliberately NOT deleting the bridge row, and refused BEFORE the
+        # token exchange: the account that started the install (or, for an
+        # unattributed row, an admin) must still be able to finish it.
         logger.warning(
             "Rejected provisioning callback for provision %s: started by %s, "
             "completed by %s",

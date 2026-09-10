@@ -239,6 +239,18 @@ def _consult_thread_phase(role: str, thread_state: Any | None) -> str | None:
     return "conclude" if phase == CONCLUDE else phase.lower()
 
 
+def _consult_message_ordinal(thread_state: Any | None) -> int | None:
+    """The ordinal of the reply this consult is being made for — the same
+    ``message_count + 1`` ``_consult_thread_phase`` bands, kept as the raw
+    number so a consult row can be joined to the exact turn that made it.
+    ``None`` for a direct caller with no ``thread_state``.
+    """
+    message_count = getattr(thread_state, "message_count", None)
+    if message_count is None:
+        return None
+    return message_count + 1
+
+
 async def execute_tool(
     tool_name: str,
     tool_input: dict[str, Any],
@@ -351,6 +363,14 @@ async def execute_tool(
                 # thread reason.
                 thread_ts=getattr(thread_state, "thread_id", None),
                 thread_phase=_consult_thread_phase(role, thread_state),
+                # The ordinal of the reply this consult was made for
+                # (`message_count + 1`, the same arithmetic `_reply_to_thread`
+                # and `_consult_thread_phase` use). Without it the consult's
+                # log row cannot be lined up with the turn it belongs to
+                # inside an interview — the phase band alone spans several
+                # turns. None for a direct caller with no thread_state, same
+                # convention as `thread_ts`/`thread_phase` above.
+                message_ordinal=_consult_message_ordinal(thread_state),
                 on_consult=on_consult,
                 on_consult_record=on_consult_record,
                 on_api_call=on_api_call,
@@ -570,6 +590,7 @@ async def _execute_consult_specialist(
     channel: str | None = None,
     thread_ts: str | None = None,
     thread_phase: str | None = None,
+    message_ordinal: int | None = None,
     on_consult: Callable[[str, str], None] | None = None,
     on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
@@ -698,6 +719,7 @@ async def _execute_consult_specialist(
                 "channel": channel,
                 "thread_ts": thread_ts,
                 "thread_phase": thread_phase,
+                "message_ordinal": message_ordinal,
             },
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.

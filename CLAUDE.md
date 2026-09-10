@@ -1175,8 +1175,10 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >   `complete_provisioning` can refuse to land a bot token for an install a
 >   DIFFERENT account started — the Slack OAuth callback is a third-party
 >   redirect and can carry no CSRF token, and its gate is now staff-wide rather
->   than admin-only. NULL reads as "unknown initiator — allow", which is
->   exactly the pre-`0046` behaviour.
+>   than admin-only. NULL (a pre-`0046` row, or a bulk
+>   `scripts/make_install_links.py` row) is completable by an **admin only** —
+>   allowing anyone staff would be a *widening* of the pre-`0046` admin-only
+>   callback rather than a restoration of it.
 >
 > The reverse direction — new code against the old schema — breaks all three
 > ways, and the `0046` failure is the one that will reach you first:
@@ -1210,16 +1212,19 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >     $DC up -d agent                                 # supervisor returns IDLE
 >
 > **The agent rebuild is REQUIRED, not optional**, for two independent reasons.
-> First, `0045`'s producers live in the engine (`src/agent/agent.py`,
-> `src/agent/simulation.py`, `src/agent/tools.py`) and `src/` is BAKED into the
+> First, `0045`'s producers live in the engine (`src/agent/simulation.py`, which
+> stamps the reply's own row, and `src/agent/tools.py`, which stamps a
+> specialist consult's) and `src/` is BAKED into the
 > agent image — an app-only deploy migrates the two columns and then writes
 > NULL into them forever. Second, this deploy bumps the **scout_hub prompt set
 > to `1.3.0`**, whose `key_points` is a three-group object rather than a flat
 > list; `prompts/` is bind-mounted and `src/` is baked, so the prompt and the
 > image must ship TOGETHER. Prompt without image means the hub emits the
 > three-group object and the old parser mangles or discards it; image without
-> prompt means the new parser is fed the flat 1.2.x shape. Same pairing
-> hazard the `0043` box describes, for the same reason.
+> prompt means the new parser is fed the flat 1.2.x shape, which is benign —
+> `normalize_key_points` still accepts a flat list and passes it through. So
+> the hazardous half of this pairing is prompt-without-image, not the reverse.
+> Same pairing hazard the `0043` box describes, for the same reason.
 >
 > Per the control-plane section, `$DC up -d agent` brings the supervisor back
 > **IDLE**: starting a run afterwards is a separate, explicit operator action

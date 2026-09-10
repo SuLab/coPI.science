@@ -448,8 +448,9 @@ async def test_recorded_by_renders_the_impersonation_note_only_when_set(
     client, db_session, admin, reviewer
 ):
     """A review written while impersonating (`recorded_by_user_id` set) shows
-    the "(entered by an admin while impersonating)" note beside the
-    reviewer's name; an ordinary review does not."""
+    the "(entered by <admin> while impersonating)" note — NAMING the admin,
+    since "an admin" alone is not an attribution anyone can act on — beside
+    the reviewer's name; an ordinary review does not."""
     assessment = await _seed_assessment(db_session)
     db_session.add_all(
         [
@@ -485,12 +486,13 @@ async def test_recorded_by_renders_the_impersonation_note_only_when_set(
             f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
-    assert html.count("(entered by an admin while impersonating)") == 1
+    marker = f"(entered by {admin.name} while impersonating)"
+    assert html.count(marker) == 1
     rows = html.split("review-feedback-row")
-    impersonated_row = next(r for r in rows if reviewer.name in r)
-    in_person_row = next(r for r in rows if admin.name in r)
-    assert "(entered by an admin while impersonating)" in impersonated_row
-    assert "(entered by an admin while impersonating)" not in in_person_row
+    impersonated_row = next(r for r in rows if "via impersonation" in r)
+    in_person_row = next(r for r in rows if "in person" in r)
+    assert marker in impersonated_row
+    assert "while impersonating" not in in_person_row
 
 
 async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(

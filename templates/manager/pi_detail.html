@@ -65,6 +65,14 @@
         {% endif %}
     </div>
 
+    {# The four status banners are STAFF-ONLY, and gated on the same
+       `effective_user.is_staff and not impersonation_banner` the controls
+       above use. Every one of them is driven purely by a query parameter the
+       caller supplies, so ungated a reviewer — who may load this page
+       read-only — could summon "Slack bot installed" or "Agent activated"
+       out of a URL and produce a screenshot of something that never
+       happened. #}
+    {% if effective_user.is_staff and not impersonation_banner %}
     {% if slack_ok %}
     <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
         ✅ Slack bot installed — the token is saved on this PI's agent. Click
@@ -89,6 +97,7 @@
         </ul>
         <p class="mt-1">Fix the profile, or ask an admin to override on /admin/agents.</p>
     </div>
+    {% endif %}
     {% endif %}
 
     {% if request.query_params.get('error') %}
