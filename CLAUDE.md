@@ -96,7 +96,11 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 # 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
 #    skips the shutdown flush and permanently loses the in-flight turn's
 #    messages (the DB, not Slack, is the durable store). `docker stop` sends
-#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
+#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish. One
+#    SIGTERM stops after the current turn and aborts Slack retry sleeps 20 s
+#    later; a SECOND signal aborts Slack immediately (the DB flush still
+#    runs); a THIRD terminates the process at once and can lose the flush --
+#    never send a third unless the process is wedged.
 docker stop -t 30 agent-run
 docker rm agent-run
 

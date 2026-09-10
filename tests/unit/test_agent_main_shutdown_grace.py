@@ -214,6 +214,36 @@ def test_a_second_signal_restores_the_default_action_for_a_third(monkeypatch):
         handler(_signal.SIGINT, None)
         assert restored == []
         handler(_signal.SIGINT, None)
-        assert (_signal.SIGINT, _signal.SIG_DFL) in restored
+        assert (_signal.SIGINT, _signal.default_int_handler) in restored
     finally:
         loop.close()
+
+
+def test_signal_defaults_are_restored_only_after_the_run_status_commit():
+    """U-1 (opus review of T): restoring SIG_DFL before the SimulationRun status
+    update let a signal during teardown kill the process with the run row stuck
+    at status='running'. The restore must be the last thing in the finally."""
+    import inspect
+
+    from src.agent.main import _run_simulation
+
+    src = inspect.getsource(_run_simulation)
+    assert src.index('run.status = "stopped"') < src.index("_restore_signal_default(sig)")
+    assert src.index('"Summary: %s"') < src.index("_restore_signal_default(sig)")
+
+
+def test_sigint_is_restored_to_the_raising_default_handler(monkeypatch):
+    """U-2: SIG_DFL for SIGINT is the OS default (terminate, no unwinding); the
+    Python-level default_int_handler raises KeyboardInterrupt instead."""
+    import signal as _signal
+
+    from src.agent.main import _restore_signal_default
+
+    recorded = []
+    monkeypatch.setattr(_signal, "signal", lambda sig, h: recorded.append((sig, h)))
+    _restore_signal_default(_signal.SIGINT)
+    _restore_signal_default(_signal.SIGTERM)
+    assert recorded == [
+        (_signal.SIGINT, _signal.default_int_handler),
+        (_signal.SIGTERM, _signal.SIG_DFL),
+    ]

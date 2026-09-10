@@ -41,6 +41,24 @@ app = typer.Typer()
 SHUTDOWN_SLACK_ABORT_GRACE_SECONDS = 20
 
 
+
+def _restore_signal_default(signum: int) -> None:
+    """Hand ``signum`` back to its default disposition (T-2 / U-2).
+
+    SIGTERM -> ``SIG_DFL`` (the OS default: terminate). SIGINT ->
+    ``signal.default_int_handler`` -- CPython's own handler that raises
+    ``KeyboardInterrupt`` -- NOT ``SIG_DFL``, which would be the OS default
+    and would kill the process without unwinding a single ``finally``.
+    """
+    try:
+        if signum == signal.SIGINT:
+            signal.signal(signum, signal.default_int_handler)
+        else:
+            signal.signal(signum, signal.SIG_DFL)
+    except (ValueError, OSError):  # not on the main thread / bad signum
+        pass
+
+
 def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> callable:
     """Build the SIGTERM/SIGINT handler for ``_run_simulation``.
 
@@ -94,14 +112,17 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
     touches the loop's timer heap) is never called directly from inside this
     handler. It is scheduled via ``loop.call_soon_threadsafe`` instead --
     documented by asyncio as safe to call from a signal handler -- so the
-    heap is only ever touched on the loop's own turn. ``request_stop()`` has
-    no such hazard (it only flips a plain flag, and is documented safe to
-    call from a signal handler already), so it still runs synchronously and
-    immediately, taking effect for the blocked loop's own book-keeping the
-    moment it next checks ``self._running`` -- it does not need the loop to
-    be free first. The second signal likewise calls ``signal_shutdown()``
-    directly rather than through the loop, since it exists specifically to
-    still work when the loop is the thing that is stuck.
+    heap is only ever touched on the loop's own turn. T-3: for the same
+    reason ``request_stop()`` -- which may wake an ``asyncio.Event`` waiter
+    and therefore call ``loop.call_soon`` -- is NOT run from signal context
+    either; only the plain ``sim_engine._running = False`` attribute write
+    happens synchronously (safe, and honoured the moment a blocked loop next
+    checks the flag), and the full ``request_stop()`` is deferred to the
+    loop's turn via ``call_soon_threadsafe``. The second signal calls
+    ``signal_shutdown()`` directly (a ``threading.Event``), since it exists
+    specifically to still work when the loop is the thing that is stuck, and
+    then hands the signal back to its default disposition so a THIRD signal
+    terminates the process.
     """
     state = {"signals_received": 0, "timer_handle": None}
 
@@ -150,17 +171,15 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
             loop.call_soon_threadsafe(sim_engine.request_stop)
         except RuntimeError:
             pass
-        # T-2: a THIRD signal falls through to the default action
-        # (SIGTERM terminates, SIGINT raises KeyboardInterrupt), so an
-        # operator is never left with an inert Ctrl-C against a wedged flush.
+        # T-2: a THIRD signal falls through to the default disposition
+        # (SIGTERM terminates; SIGINT -> default_int_handler, which raises
+        # KeyboardInterrupt), so an operator is never left with an inert
+        # Ctrl-C against a wedged flush.
         _restore_default(signum)
 
     def _restore_default(signum) -> None:
         if signum is not None:
-            try:
-                signal.signal(signum, signal.SIG_DFL)
-            except (ValueError, OSError):  # not on the main thread / bad signum
-                pass
+            _restore_signal_default(signum)
 
     shutdown.state = state
     return shutdown
@@ -505,15 +524,6 @@ async def _run_simulation(
             _finalize_shutdown(shutdown)
         except Exception:  # Q-4: never skip the run-status update below
             logger.exception("Shutdown finalisation failed")
-        # T-1: the loop is about to close; hand SIGTERM/SIGINT back to their
-        # default actions so a signal during the post-loop teardown terminates
-        # the process instead of hitting a closed loop.
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                signal.signal(sig, signal.SIG_DFL)
-            except (ValueError, OSError):
-                pass
-
         # Update simulation run status
         if session_factory and simulation_run_id:
             async with session_factory() as db:
@@ -536,6 +546,12 @@ async def _run_simulation(
             {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
              for a in agents},
         )
+        # T-1 / U-1: only NOW -- after the flush, the SimulationRun status
+        # commit and the summary -- hand SIGTERM/SIGINT back to their default
+        # dispositions, so a signal during that teardown could not kill the
+        # process with the run row stuck at status='running'.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            _restore_signal_default(sig)
 
 
 if __name__ == "__main__":

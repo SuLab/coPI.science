@@ -1497,6 +1497,15 @@ of 1) before the fix.
   from an arbitrary bytecode nor gets swallowed: the handler sets `SHUTDOWN_REQUESTED` and hands the
   signal back to `SIG_DFL`; `_run_simulation`'s finally restores the default actions.
 - **T-2** the second signal restores `SIG_DFL` for that signal, so a third terminates the process
-  (SIGTERM) or raises `KeyboardInterrupt` (SIGINT) against a wedged flush.
+  (SIGTERM) or raises `KeyboardInterrupt` via `default_int_handler` (SIGINT) against a wedged flush.
 - **T-3** only the plain `_running` flag flip runs in signal context; `request_stop()` (which may wake
   an `asyncio.Event` waiter) is deferred to the loop via `call_soon_threadsafe`.
+
+## U — opus review of T (2026-09-10)
+
+- **U-1** `SIG_DFL`/`default_int_handler` are restored only at the very end of `_run_simulation`'s
+  finally (after the `SimulationRun` status commit and summary), so a signal during teardown cannot
+  leave the run row at `status='running'`.
+- **U-2** SIGINT is restored to `signal.default_int_handler` (raises `KeyboardInterrupt`), not `SIG_DFL`.
+- **U-3** the handler docstring now describes the deferred `request_stop()`; CLAUDE.md's stop section
+  documents the first/second/third-signal semantics.
