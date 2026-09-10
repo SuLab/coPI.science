@@ -228,6 +228,11 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
         "private_channel_members",
         "FOREIGN KEY (added_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
     ),
+    # 0030 (A6, opus review, audit 2026-09-08)
+    "agent_messages_sender_user_id_fkey": (
+        "agent_messages",
+        "FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE SET NULL",
+    ),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {

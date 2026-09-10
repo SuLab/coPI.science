@@ -227,6 +227,9 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0029", "column", "pi_inbound_state", "agent_messages"),
     # 0030_pi_ownership_and_dm_handled
     PlannedObject("0030", "column", "sender_user_id", "agent_messages"),
+    # A6 (opus review, audit 2026-09-08): 0030 also creates this named FK
+    # constraint (_SENDER_USER_ID_FK in the migration) -- it was missing here.
+    PlannedObject("0030", "constraint", "agent_messages_sender_user_id_fkey", "agent_messages"),
     PlannedObject("0030", "index", "ix_agent_messages_sender_user_id", "agent_messages"),
     PlannedObject("0030", "column", "handled_at", "pi_dm_messages"),
 )

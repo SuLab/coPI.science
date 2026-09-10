@@ -1270,8 +1270,13 @@ def test_postflight_keeps_the_partial_predicate_in_the_expected_index_definition
 
 
 def test_postflight_expects_an_index_for_every_index_the_chain_creates():
+    """Every planned index/constraint must be checked by postflight somewhere. A
+    UNIQUE constraint gets a Postgres-backed index (EXPECTED_INDEXES); a FOREIGN
+    KEY constraint (A6, opus review, audit 2026-09-08 -- e.g.
+    agent_messages_sender_user_id_fkey) does not, and is instead checked by
+    definition in EXPECTED_CONSTRAINTS."""
     planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind in {"index", "constraint"}}
-    assert planned <= set(po.EXPECTED_INDEXES)
+    assert planned <= set(po.EXPECTED_INDEXES) | set(po.EXPECTED_CONSTRAINTS)
 
 
 def test_postflight_expects_a_table_for_every_table_the_chain_creates():
