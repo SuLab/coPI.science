@@ -14,13 +14,27 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import src.services.slack_executor as slack_executor_module
-from src.services.slack_executor import _SLACK_EXECUTOR, run_slack_call, shutdown_slack_executor
+from src.services.slack_executor import (
+    _SLACK_EXECUTOR,
+    SLACK_IO_MAX_WORKERS,
+    run_slack_call,
+    shutdown_slack_executor,
+)
 
 
 def test_the_slack_pool_is_a_bounded_dedicated_executor():
     assert isinstance(_SLACK_EXECUTOR, ThreadPoolExecutor)
-    assert _SLACK_EXECUTOR._max_workers == 8
+    assert _SLACK_EXECUTOR._max_workers == SLACK_IO_MAX_WORKERS
     assert _SLACK_EXECUTOR._thread_name_prefix == "slack-io"
+
+
+def test_slack_io_max_workers_exceeds_one_reopen_flows_sequential_call_count():
+    """Opus review follow-up, audit 2026-09-10: sized to comfortably exceed the
+    ~8 sequential run_slack_call's one migrate_public_thread_to_private reopen
+    makes by itself, so a second concurrent flow is not left queuing behind the
+    first for every worker thread."""
+    ONE_REOPEN_FLOWS_SEQUENTIAL_CALL_COUNT = 8
+    assert SLACK_IO_MAX_WORKERS >= 2 * ONE_REOPEN_FLOWS_SEQUENTIAL_CALL_COUNT
 
 
 async def test_run_slack_call_executes_off_the_event_loop_on_a_slack_io_thread():

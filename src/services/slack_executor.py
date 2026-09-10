@@ -43,6 +43,24 @@ not a silently re-created pool. Every caller here already treats an unhandled
 exception from a Slack call as a real failure (see e.g. `private_channels.py`'s
 try/except around the Slack side-effects), so this fails the same way a live
 Slack error would, rather than needing a new failure mode of its own.
+
+**Sizing / queuing bound (opus review follow-up, audit 2026-09-10).** A single
+`private_channels.migrate_public_thread_to_private` call ("reopen a public
+thread into a private channel") makes up to ~8 sequential `run_slack_call`s by
+itself (two `_make_client`s, `create_private_channel`, two `invite_to_channel`s,
+`_resolve_channel_id`, 2+ handover `post_message`s, a close-marker
+`post_message`, and an other-PI invite + DM) — sequential, not concurrent,
+because each `await`s the last. ``SLACK_IO_MAX_WORKERS`` therefore has to
+comfortably exceed the call count of one flow, not just be "more than one": a
+pool sized at exactly one flow's call count leaves zero headroom for a SECOND
+concurrent reopen (or a GrantBot post, or a delegate-name lookup) to make
+Slack calls at all — those would simply queue behind whichever calls are
+already using every worker, indistinguishable from a Slack throttle from the
+caller's point of view. 16 gives roughly 2x one flow's sequential call count,
+so two whole reopens (or one reopen plus several smaller flows) can be
+in-flight without one starving the other for a worker thread; anything queued
+beyond that still eventually runs — the pool is a queue, not a hard cap on
+concurrency — but waits for a free worker like any bounded pool.
 """
 
 import asyncio
@@ -54,10 +72,17 @@ from typing import Any, TypeVar
 
 _T = TypeVar("_T")
 
-# 8 workers: comfortably more than the number of Slack calls any single turn or
-# request makes concurrently, small enough that a sustained throttle across the
-# whole pool is a Slack-specific incident rather than a process-wide one.
-_SLACK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="slack-io")
+# See "Sizing / queuing bound" above: sized to comfortably exceed the ~8
+# sequential Slack calls one private-channel reopen flow makes by itself, so a
+# second concurrent flow (another reopen, a GrantBot post, a delegate-name
+# lookup) is not left queuing behind the first for a worker thread. Still
+# small enough that a sustained throttle across the whole pool reads as a
+# Slack-specific incident rather than a process-wide one.
+SLACK_IO_MAX_WORKERS = 16
+
+_SLACK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io"
+)
 
 
 async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
