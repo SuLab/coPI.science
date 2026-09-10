@@ -496,3 +496,84 @@ stays refunded (the next message can still succeed). Tests (red first):
 `test_a_client_construction_failure_is_client_unavailable`,
 `test_a_mime_construction_failure_is_not_dispatched`,
 `test_a_client_unavailable_outcome_consumes_the_budget`.
+
+## SEC3: opus review, audit 2026-09-10 — five findings, all landed
+
+**SEC3-1 (MEDIUM) — `_extract_email_address` trusted the FIRST angle-bracketed token.**
+`re.search(r"<([^>]+)>", from_header)` returns the first bracketed token in a From header, so a
+display name that itself contains an address literal —
+`"Alice <pi@univ.edu>" <attacker@evil.com>` — yielded the PI's address while the real envelope
+sender (and the domain that legitimately passed SPF/DKIM) was `attacker@evil.com`. The
+downstream sender-identity check then matched a known PI even though authentication aligned to
+the attacker's domain. Fixed by parsing with
+`email.utils.getaddresses(msg.get_all("From", []))`, which resolves RFC 5322 address syntax
+correctly, and requiring exactly one resolved address (multiple From headers or group syntax are
+now refused as ambiguous rather than picked arbitrarily). The function's signature changed from
+`(from_header: str)` to `(msg: email.message.Message)` so it can see every From header, not just
+the first; both call sites in `process_inbound_email` updated. Tests (red first, all in
+`tests/unit/test_email_inbound_security.py`): `test_display_name_with_embedded_bracketed_address_is_not_fooled`,
+`test_two_from_headers_rejected`, `test_group_syntax_rejected`, plus the pre-existing bracketed/bare/
+unparseable cases updated to pass a `Message` instead of a bare string.
+
+**SEC3-2 (MEDIUM-LOW) — `dmarc=none` plus a lone `spf=pass` on an unrelated domain satisfied
+the "one strong pass" rule.** `_authentication_results_ok` treated any single passing
+spf/dkim/dmarc verdict as sufficient once explicit failures were ruled out. But SES reports
+`spf=pass` for whatever domain the envelope sender actually used, with no relation to the From
+header — so for a PI domain that publishes no DMARC policy (`dmarc=none`), an attacker sending
+from their own domain (which legitimately passes SPF/DKIM for itself) with a forged
+`From: pi@that-domain` satisfied the rule outright. Fixed by requiring, when `dmarc=pass` is
+absent, that the domain which actually passed (`smtp.mailfrom=` for SPF, `header.d=`/`header.i=`
+for DKIM) align with the From address's domain — equal, or one a subdomain of the other (relaxed
+alignment via a new `_domains_aligned` helper). `dmarc=pass` remains sufficient on its own since
+it already encodes alignment. Tests (red first, `tests/unit/test_email_inbound_security.py`):
+`test_unaligned_spf_pass_on_attacker_domain_rejected`, `test_aligned_spf_pass_accepted`,
+`test_aligned_dkim_header_d_accepted`, `test_unaligned_dkim_header_d_rejected`,
+`test_dmarc_pass_accepted_regardless_of_alignment`, `test_subdomain_alignment_accepted`; the
+pre-existing `test_dmarc_none_with_spf_pass_accepted` renamed/updated to carry an aligned
+`smtp.mailfrom=`/From pair.
+
+**SEC3-3 (LOW) — the DSN redaction regex leaked a password containing `@`.**
+`scripts/live_slack_preflight.py`'s `check_no_operator_supplied_database` redacted
+`TEST_DATABASE_URL` with `re.sub(r"//[^@/]*@", "//<redacted>@", dsn)`, which matches up to the
+FIRST `@` after the scheme — a password containing a literal `@` (`user:hun@ter2@host`) only
+redacted the prefix up to that first `@`, leaking the rest of the password (and the real host)
+into the printed detail. Fixed by parsing with `urllib.parse.urlsplit`, which resolves
+hostname/port by splitting the authority section on the LAST `@`, and printing only
+`scheme://<redacted>@hostname[:port]/path`. Removed the now-unused `re` import. Test (red first):
+`test_check_five_never_echoes_a_dsn_password_containing_an_at_sign` in
+`tests/unit/test_live_slack_preflight.py`.
+
+**SEC3-4 (LOW) — four in-memory rate-limit/dedup maps in `email_inbound.py` grew without
+bound.** `_RECENT_REPLY_TIMES`, `_HELP_EMAILS_SENT`, `_STALE_TOKEN_BOUNCES_SENT` and
+`_INSTRUCTION_FAILURE_EMAILS_SENT` are keyed by notification id or sender address and never drop
+a key — not even when a per-notification list empties out to `[]` — so a long-lived worker
+process accumulates one entry per notification/address ever seen for as long as it runs. Fixed
+by adding a companion "last touched" timestamp dict for each map (`_RECENT_REPLY_TOUCHED`,
+`_HELP_EMAILS_TOUCHED`, `_STALE_BOUNCES_TOUCHED`, `_INSTRUCTION_FAILURE_TOUCHED`), stamped on
+every write, and a new `_prune_stale_entries()` that drops any key not touched in the last 24h
+from both the data dict and its touched dict — called at the top of every `poll_inbound_emails`
+run. Tests (red first, `tests/unit/test_email_inbound_hardening.py`):
+`test_prune_drops_an_entry_untouched_for_over_24_hours`, `test_prune_keeps_a_fresh_entry`,
+`test_poll_inbound_emails_prunes_stale_entries`.
+
+**SEC3-5 (LOW) — `pi_may_post_to_channel` let a PI write into any invented channel name.**
+An unknown `(run_id, channel_name)` pair returned `True`, matching `_resolve_channel`'s
+documented fallback of minting a `local:<name>` public row for any name at all — but that
+fallback exists so `record_pi_message` never chokes on an unrecognized name, and using the same
+"unknown means public" rule for AUTHORIZATION let an authenticated PI write into any channel
+name they invented, including the real name of another run's private collab channel
+(`channel_name` is only unique per run, so it carries no row in THIS run). Fixed by refusing
+when there is no `agent_channels` row for this run, UNLESS the name is one of the app's own
+`SEEDED_CHANNELS` (`src/agent/channels.py`: `general`, `funding-opportunities`, and the seeded
+topic channels) — that exemption is required because those channels' `agent_channels` row is
+only materialized lazily on first join/post within a run, and the web message form's own
+`"general"` default would otherwise be refused on a brand-new run (caught immediately by
+`tests/integration/test_agent_page.py`'s existing message-route tests). Any other unknown name
+is now refused; known public channels and the private-membership check are unchanged. Tests (red
+first, `tests/integration/test_pi_inbox.py`):
+`test_pi_may_post_to_channel_false_for_a_channel_with_no_agent_channels_row`,
+`test_pi_may_post_to_channel_true_for_a_known_public_channel`,
+`test_pi_may_post_to_channel_true_for_a_private_member`,
+`test_pi_may_post_to_channel_false_for_a_private_non_member`; the full
+`tests/integration/test_pi_inbox.py` (11) and `tests/integration/test_agent_page.py` (111)
+suites re-run green as a regression control given the SEEDED_CHANNELS carve-out.
