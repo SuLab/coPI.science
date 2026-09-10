@@ -357,7 +357,11 @@ with Slack.
 
 **Fix.** New `src/services/slack_executor.py` exposes `run_slack_call(fn, *args, **kwargs)`,
 which runs on a module-level `ThreadPoolExecutor(max_workers=8, thread_name_prefix="slack-io")`
-dedicated to Slack I/O. Replaced every Slack `to_thread` call site (9 in `private_channels.py`,
+dedicated to Slack I/O. **D8 correction (S-8, audit 2026-09-10):** `max_workers=8` was this
+round's initial value; "R-2 follow-up #2" below raised it to `SLACK_IO_MAX_WORKERS = 16` the
+same day, and the shipped module has carried 16 ever since — this paragraph and the "Tests"
+paragraph's `max_workers == 8` are historical (what R-2 shipped with), not what is running
+today. Replaced every Slack `to_thread` call site (9 in `private_channels.py`,
 5 in `slack_web.py`, 4 in `slack_provisioning.py`, 1 each in `grantbot.py` and `agent_page.py`)
 with `run_slack_call`; removed the now-unused `import asyncio` from the four files where it had
 no other use. Non-Slack `to_thread` sites are unaffected — there were none of Slack's shape in
@@ -365,7 +369,9 @@ these files to begin with; `grantbot.py`'s other `asyncio.run(...)` calls and `a
 FastAPI route bodies are untouched.
 
 **Tests (red first).** New `tests/unit/test_slack_executor.py`: the pool is a bounded
-`ThreadPoolExecutor` with `max_workers == 8` and the `"slack-io"` thread-name prefix;
+`ThreadPoolExecutor` with `max_workers == 8` (at the time this round landed; see the D8
+correction above — the assertion itself was updated to `SLACK_IO_MAX_WORKERS` by "R-2 follow-up
+#2" and now reads 16) and the `"slack-io"` thread-name prefix;
 `run_slack_call` actually executes off the event-loop thread on a `slack-io`-prefixed thread;
 args/kwargs are forwarded and the result is returned; an exception raised inside the call
 propagates by identity (`exc_info.value is marker`), not merely by type — reusing the
@@ -1397,3 +1403,90 @@ of 1) before the fix.
 - **R-3** `_deferred_review_replayable()` is the single pair-level predicate used by both the record
   site and the overflow purge.
 - **R-4** `_finalize_shutdown` cancels the grace timer inside its own try and always signals.
+
+## S — final opus audit, eight findings (2026-09-10)
+
+- **S-1 (HIGH)** `_sync_roster_from_db`'s roster add/remove/reconnect connect() calls, the
+  `_resolve_service_bot_uids` grantbot probe's connect(), and the per-turn
+  `_phase1_channel_discovery`'s join_channel() all ran synchronously on the event loop instead of
+  through `run_slack_call` — able to block the process's ONE event loop for up to
+  `RATE_LIMIT_WAIT_BUDGET_SECONDS` (180s) under a throttle. Because `src/agent/main.py` installed
+  its SIGTERM/SIGINT handler with `loop.add_signal_handler` (whose self-pipe is only drained by
+  the loop's own select/poll wait), a blocked loop silently swallowed the signal entirely: no
+  `request_stop()`, no grace timer, no `signal_shutdown()`, until the blocking call happened to
+  return on its own. Fixed both halves: every connect()/join_channel() call in those paths now
+  goes through `run_slack_call`; the handler is installed with `signal.signal` instead (invoked
+  via CPython's EINTR-retry machinery, so it still fires while the loop is blocked) —
+  `request_stop()` runs synchronously and immediately (already documented signal-handler-safe),
+  the `loop.call_later` grace-timer installation is deferred onto the loop via
+  `loop.call_soon_threadsafe` (must never run inside a true signal-handler context), and the
+  second signal calls `signal_shutdown()` directly without depending on the loop ever becoming
+  free. `_ensure_seeded_channels`'s list_channels/create_channel/join_channel calls (also direct
+  on the loop, per the grep the audit item names) are deliberately left out of scope: they run
+  exactly once, before the turn loop's steady state begins, and converting them would cascade an
+  async signature change into several Docker-only integration tests for a much smaller
+  starvation window. Tests: `tests/unit/test_roster_sync.py::TestRosterSyncDoesNotBlockTheLoop`
+  (confirmed red — 0 ticks recorded during a 0.5s blocking connect() — before the fix),
+  `tests/unit/test_agent_main_shutdown_grace.py`'s new second-signal/non-loop-thread test.
+- **S-2 (MEDIUM)** `scripts/redeploy.sh`'s `_known_files` guard unconditionally unioned
+  `$COMPOSE_FILE` with every `-f` argument before checking for both prod files — but `docker
+  compose` ignores `$COMPOSE_FILE` entirely once ANY `-f` is passed, so
+  `COMPOSE_FILE=prod:override ./scripts/redeploy.sh -f docker-compose.prod.yml` passed the guard
+  (the override came from `$COMPOSE_FILE`) even though the real invocation never sees it,
+  starting every service on the prod file's bare `awslogs` driver (AccessDeniedException). Fixed:
+  `_known_files` now falls back to `$COMPOSE_FILE` only when NO `-f`/`--file` was given at all.
+  Test reproduces the exact scenario — confirmed red (exit 0, non-empty docker log) before the
+  fix, green (non-zero exit, empty docker log) after.
+- **S-3 (LOW-MED)** `_flush_pending_thread_decisions`'s `if not a: continue` (agent since removed
+  from the live roster) skipped the deferred-implicit-review replay AND removal too, even though
+  the replay needs only `aid` + the now-known `decision_id`, not a live `Agent` object — dropping
+  the queued PI engagement permanently and leaking the pair in `_deferred_implicit_reviews`
+  forever. Moved the deferred-review lookup/replay/removal out from under the agent-presence
+  guard. Test (`TestCloseThreadDecisionWriteRetriesAndParks::
+  test_deferred_review_replays_even_for_an_agent_off_the_live_roster`): confirmed red (pair never
+  cleared, replay never called) before the fix.
+- **S-4 (LOW-MED)** `PiOwnershipLookupFailed` (a transient DB failure resolving PI ownership)
+  counted toward the same `PI_INBOUND_MAX_ATTEMPTS == 3` cap a deterministically-failing handler
+  uses, so a 30s DB blip spanning three unlucky polls could permanently drop a genuine PI
+  directive. Added a dedicated `except PiOwnershipLookupFailed` branch (ordered before the
+  generic handler) with its own counter (`_pi_inbound_lookup_failures`) against a new, much
+  larger `PI_INBOUND_MAX_LOOKUP_FAILURES = 30` (`src/agent/inbound_state.py`); the main attempt
+  counter is never charged for a lookup failure. Tests (`TestPollInboundFromDb
+  SeparatesLookupFailuresFromHandlerAttempts`): confirmed red (row stamped HANDLED after
+  `PI_INBOUND_MAX_ATTEMPTS + 2` lookup failures) before the fix.
+- **S-5 (LOW)** the authserv-id compare in `_authentication_results_ok` used a naive
+  `header.split(";", 1)[0]` (not quote-aware, unlike `_split_auth_results_segments` already used
+  for the resinfo segments) and required an exact match against bare `"amazonses.com"` — RFC 8601
+  §2.2 permits a trailing version token (`amazonses.com 1`), which SES may stamp, and every such
+  message was rejected outright. Fixed: extract the authserv-id from
+  `_split_auth_results_segments()[0]`, then split on whitespace and compare only the authserv-id
+  token itself. Test: `test_authserv_id_with_rfc_8601_version_token_is_accepted` — confirmed red
+  before the fix.
+- **S-6 (LOW)** `process_inbound_email` only ever looked for the `review+TOKEN@` reply address in
+  `To`, so a PI who Ccs it instead (or a forwarding rule that moves it out of `To` entirely, with
+  a downstream MTA recording it in `Delivered-To`/`X-Original-To` instead) had their reply
+  silently dropped. Fixed: falls back to `Cc`, then `Delivered-To`, then `X-Original-To` before
+  giving up. Tests (`tests/unit/test_email_inbound_hardening.py`): one per fallback header plus a
+  negative case — confirmed red (three fallback tests never reached the token-lookup db call)
+  before the fix.
+- **S-7** `email_inbound.py`'s `_send_*` helpers and `email_notifications.py`'s
+  `send_html_email_outcome`/`_send_html_email` construct a `boto3` SES client and call
+  send_email/send_raw_email synchronously; every async call site invoked one directly, blocking
+  the worker's single event loop for however long SES takes to respond. Added
+  `src/services/io_executor.py` (`run_blocking(fn, *args)`, an `IO_MAX_WORKERS=8` pool separate
+  from `slack_executor`'s 16-worker pool, same `shutdown_*`/`atexit` wiring), wired into
+  `src/main.py`'s lifespan and `src/worker/main.py`'s shutdown path. Every async call site
+  (`_notify_instruction_failure`, `_notify_reply_expired`, `_handle_instruction`,
+  `_send_review_confirmation`, `_send_instruction_confirmation`,
+  `_maybe_send_stale_token_bounce`, `_send_help_email`, `_send_paused_email`,
+  `_send_status_overview`, `_send_new_proposal_email`) now awaits its send through
+  `run_blocking`; the sync helper signatures are unchanged (`_notify_instruction_failure`/
+  `_notify_reply_expired` became async wrappers so their callers can await it). Tests
+  (`tests/unit/test_io_executor.py`, `tests/unit/test_email_send_off_loop.py`): confirmed red
+  (send ran on the test's own thread) for every converted call site before the fix.
+- **S-8** this section, plus a **D8 correction** in the R-2 writeup above: R-2's original text
+  said the Slack executor shipped with `max_workers=8` and pinned that value in its own tests —
+  true only for the moment R-2 itself landed. "R-2 follow-up #2" (same day) raised it to
+  `SLACK_IO_MAX_WORKERS = 16`, and the module has carried 16 ever since; the R-2 section's
+  "Fix"/"Tests" paragraphs were never updated to say so and read as though 8 were still current.
+  Annotated both paragraphs in place rather than rewriting history.
