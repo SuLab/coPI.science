@@ -302,14 +302,19 @@ async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
 
 
 async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
-    # Seeding the seen-set (not just the cursor) means the first poll's lookback
-    # re-scan doesn't replay recent history through handle_dm after a restart.
+    """RC-2 (audit 2026-09-08): replay protection across a restart is the durable
+    ``handled_at`` marker, not the in-memory seen-set. A DM that was already
+    handled (or backfilled by migration 0030) is not re-run after a restart; the
+    seed no longer populates ``_pi_dm_seen`` from the DB."""
+    from datetime import UTC, datetime
+
     run = await factories.make_simulation_run(db_session)
     ts = "1700000150.000000"
     db_session.add(PiDmMessage(
         simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
         direction="inbound", content="old directive",
         sender_name="PI", ts=ts, posted_at=float(ts),
+        handled_at=datetime.now(UTC),
     ))
     await db_session.flush()
 
@@ -319,7 +324,7 @@ async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
     engine._pi_handler = handler
 
     await engine._seed_pi_dm_cursor()
-    assert ts in engine._pi_dm_seen
+    assert engine._pi_dm_seen == {}
     await engine._poll_pi_dms_from_db()
     assert handler.calls == []
 
