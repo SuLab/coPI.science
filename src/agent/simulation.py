@@ -3446,6 +3446,15 @@ class SimulationEngine:
                 # fallback — the engine itself appended and flushed it, or a
                 # prior poll ingested it) — skip re-processing, but the cursor
                 # still advances: this row is fully accounted for.
+                #
+                # A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row
+                # can only land in THIS branch via `not r.message_ts` (state
+                # None/HANDLED already fall out of the cursor-independent
+                # disjunct or the dedup check above) — stamp it HANDLED so it
+                # stops being cursor-independently re-selected every tick for a
+                # message_ts it can never resolve.
+                if not r.is_bot and state in (PI_INBOUND_PENDING, PI_INBOUND_INGESTED):
+                    await self._mark_pi_inbound_row_handled(r.id)
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
                     self._pi_inbox_cursor = r.created_at
                 continue
@@ -3460,6 +3469,14 @@ class SimulationEngine:
                 # thread whose Slack parent is gone — a resurrection loop. See
                 # COR-1c fix round 1 (C1). Nothing will ever process this row,
                 # so the cursor advances past it too.
+                #
+                # A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row
+                # for a now-dead thread is otherwise re-selected via the
+                # cursor-independent disjunct forever, since nothing will ever
+                # process it — stamp HANDLED (terminal) to drop it out of that
+                # recovery query.
+                if not r.is_bot and state in (PI_INBOUND_PENDING, PI_INBOUND_INGESTED):
+                    await self._mark_pi_inbound_row_handled(r.id)
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
                     self._pi_inbox_cursor = r.created_at
                 continue
@@ -3577,6 +3594,37 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning(
                 "Inbound marker write failed for %s (%s): %s", message_ts, state, exc
+            )
+            return False
+
+    async def _mark_pi_inbound_row_handled(self, row_id: uuid.UUID) -> bool:
+        """Stamp HANDLED on a PI row by primary key (A4, opus review, audit
+        2026-09-08).
+
+        A terminal skip branch in ``_poll_inbound_from_db`` (a falsy
+        ``message_ts``, or a thread already tombstoned) has nothing left to do
+        with a 'pending'/'ingested' row — but without this, that row keeps
+        matching the cursor-independent recovery disjunct and is re-selected
+        every tick forever. Keyed on ``id`` rather than ``message_ts`` (unlike
+        ``_mark_pi_inbound_state``) because a falsy ``message_ts`` is exactly
+        one of the two cases this exists for. Same write-failure handling as
+        ``_mark_pi_inbound_state``: logged and swallowed.
+        """
+        if not self.session_factory:
+            return False
+        from sqlalchemy import update as sa_update
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(AgentMessage)
+                    .where(AgentMessage.id == row_id)
+                    .values(pi_inbound_state=PI_INBOUND_HANDLED)
+                )
+                await db.commit()
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Inbound marker write failed for row %s (handled): %s", row_id, exc
             )
             return False
 

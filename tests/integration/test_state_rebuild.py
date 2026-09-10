@@ -1063,6 +1063,46 @@ async def test_a_failed_ingested_mark_skips_the_handler_and_retries_next_tick(
 
 
 # ---------------------------------------------------------------
+# A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row that a
+# terminal skip branch `continue`s (tombstoned thread) must be stamped
+# HANDLED there too, or it keeps matching the cursor-independent recovery
+# disjunct and is re-selected every tick forever, since nothing will ever
+# process it.
+# ---------------------------------------------------------------
+
+async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled(db_session):
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    thread_ts = f"{base:.6f}"
+    pi_ts = f"{base + 1:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C1", channel_name="general", message_ts=pi_ts,
+        thread_ts=thread_ts, posted_at=base + 1, content="please look at this",
+        sender_name="PI su", pi_inbound_state="pending",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    eng._dead_thread_ids.add(thread_ts)  # the thread this row replies to is gone
+
+    async def _handler(entry):
+        raise AssertionError("the handler must never run for a tombstoned thread's row")
+
+    eng._handle_pi_inbound_entry = _handler
+
+    await eng._poll_inbound_from_db()
+
+    row = (await db_session.execute(
+        select(AgentMessage).where(AgentMessage.message_ts == pi_ts)
+    )).scalar_one()
+    assert row.pi_inbound_state == "handled", (
+        "a 'pending' row for a tombstoned thread must be stamped HANDLED so it "
+        "stops matching the cursor-independent recovery disjunct forever"
+    )
+
+
+# ---------------------------------------------------------------
 # RC-9b (#20 audit 2026-09-08): post_failure_count is reconstructed on
 # rebuild from trailing DB-only rows, but only when Slack is actually
 # connected for this agent.
