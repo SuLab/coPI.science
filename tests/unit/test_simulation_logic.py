@@ -1652,6 +1652,44 @@ class TestPendingThreadDecisionsCap:
 
         assert len(engine._pending_thread_decisions) == PENDING_THREAD_DECISIONS_MAX - 1
 
+    def test_overflow_purge_keeps_a_deferred_review_if_another_pending_payload_shares_its_thread_id(
+        self,
+    ):
+        """P-5 (opus review, audit 2026-09-10): the overflow purge used to
+        drop a `_deferred_implicit_reviews` pair whenever ANY payload for its
+        thread_id was among the dropped (oldest) entries -- even when a
+        SECOND, still-pending payload for that SAME thread_id survives the
+        purge. That pair could still be legitimately replayed against the
+        surviving payload once it flushes, so dropping it lost a real
+        PI-engagement review for no reason. Only purge a pair when NO
+        remaining payload has its thread_id.
+        """
+        from src.agent.simulation import PENDING_THREAD_DECISIONS_MAX
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        # Fill to one below the ceiling with distinct thread_ids...
+        for i in range(PENDING_THREAD_DECISIONS_MAX - 1):
+            engine._pending_thread_decisions.append({"thread_id": f"kept-{i}"})
+        # ...then add a SECOND payload for the oldest (about-to-be-dropped)
+        # thread_id, so "shared-thread" survives the purge even though its
+        # first payload does not.
+        engine._pending_thread_decisions.append({"thread_id": "shared-thread"})
+        engine._deferred_implicit_reviews.append(("agent_a", "shared-thread"))
+        engine._deferred_implicit_reviews.append(("agent_b", "kept-1"))
+
+        # Overflow by exactly one: the oldest entry (kept-0) is dropped, but
+        # "shared-thread" has another payload still queued after that drop.
+        engine._pending_thread_decisions.insert(0, {"thread_id": "shared-thread"})
+
+        engine._enqueue_pending_thread_decision({"thread_id": "overflow"})
+
+        assert ("agent_a", "shared-thread") in engine._deferred_implicit_reviews, (
+            "a deferred review must survive if ANY remaining pending payload "
+            "still shares its thread_id, even though an older payload for "
+            "that same thread_id was dropped"
+        )
+        assert ("agent_b", "kept-1") in engine._deferred_implicit_reviews
+
 
 class TestFlushSkipsInCallRetryBudget:
     """N-6 (opus review, audit 2026-09-10): _flush_pending_thread_decisions

@@ -2177,10 +2177,24 @@ class SimulationEngine:
             # `_deferred_implicit_reviews` entry recorded against it would
             # otherwise sit in that list forever, never matching a
             # decision_id. Drop the matching entries too.
+            #
+            # P-5 (opus review, audit 2026-09-10): only purge a pair when NO
+            # remaining (i.e. NOT dropped) payload still shares its
+            # thread_id. A thread_id can appear on more than one queued
+            # payload (e.g. two closed sub-threads under the same logical
+            # thread, or a retry that re-enqueued before the original was
+            # flushed) -- purging by "this thread_id appeared somewhere in
+            # the dropped set" discarded a deferred review that could still
+            # be legitimately replayed against a SURVIVING payload for the
+            # same thread_id.
             dropped_thread_ids = {d["thread_id"] for d in dropped}
+            remaining_thread_ids = {
+                p["thread_id"] for p in self._pending_thread_decisions
+            }
+            purge_thread_ids = dropped_thread_ids - remaining_thread_ids
             self._deferred_implicit_reviews = [
                 pair for pair in self._deferred_implicit_reviews
-                if pair[1] not in dropped_thread_ids
+                if pair[1] not in purge_thread_ids
             ]
 
     async def _flush_pending_thread_decisions(self) -> None:
