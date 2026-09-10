@@ -5533,6 +5533,64 @@ class SimulationEngine:
                 break
         return count
 
+    async def _sync_private_profiles_from_db(self) -> None:
+        """DB ``private_profile_md`` is authoritative over the on-disk private
+        profile file at every engine startup (K-4, audit 2026-09-10 — RC-7
+        residual).
+
+        ``Agent.update_private_profile``/``persist_private_profile_to_db``
+        apply a standing instruction to disk and DB independently, each
+        best-effort (RC-7, audit 2026-09-08): a DB-succeeded/disk-failed write
+        leaves the DB row — the one that survives a restart — ahead of the
+        stale on-disk file that ``Agent.private_profile`` reads on a cache
+        miss. Every subsequent restart re-loads that stale file via
+        ``_rebuild_agent_state`` and the mismatch persists until some later
+        edit happens to write disk successfully. Reconcile once here, right
+        after agents are built (before anything reads ``private_profile``):
+        for every agent with a linked user, if the DB content differs from
+        what is on disk, rewrite disk (best effort — a write failure is logged
+        and swallowed, matching ``update_private_profile``'s own contract) and
+        set the in-memory cache to the DB content either way, so the engine
+        never runs even one tick a stale on-disk file.
+        """
+        if not self.session_factory:
+            return
+        from sqlalchemy import select as sa_select
+
+        from src.models import AgentRegistry, ResearcherProfile
+
+        for agent in self.agents.values():
+            try:
+                async with self.session_factory() as db:
+                    agent_reg = (await db.execute(
+                        sa_select(AgentRegistry).where(
+                            AgentRegistry.agent_id == agent.agent_id
+                        )
+                    )).scalar_one_or_none()
+                    if not agent_reg or not agent_reg.user_id:
+                        continue
+                    profile = (await db.execute(
+                        sa_select(ResearcherProfile).where(
+                            ResearcherProfile.user_id == agent_reg.user_id
+                        )
+                    )).scalar_one_or_none()
+                if not profile or not profile.private_profile_md:
+                    continue
+                db_content = profile.private_profile_md
+                if agent.private_profile == db_content:
+                    continue
+                agent.update_private_profile(db_content)
+                logger.info(
+                    "[%s] Private profile disk file was stale relative to the "
+                    "DB at startup — resynced from ResearcherProfile.private_profile_md",
+                    agent.agent_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Failed to sync private profile from DB at startup: %s",
+                    agent.agent_id, exc,
+                )
+
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
@@ -5540,6 +5598,8 @@ class SimulationEngine:
         behaves identically with Slack on or off. Reads only self.message_log,
         thread_decisions, proposal_reviews and llm_call_logs — no Slack calls.
         """
+        await self._sync_private_profiles_from_db()
+
         # Rebuild active_threads per agent.
         # Get all closed thread IDs and prior thread summaries from thread_decisions
         closed_thread_ids: set[str] = set()

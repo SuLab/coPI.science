@@ -1247,3 +1247,66 @@ async def test_post_failure_count_stays_zero_for_a_db_origin_root_even_when_conn
         "a DB-origin root (no Slack presence) must not have its trailing "
         "slack_ts-IS-NULL replies misread as post failures"
     )
+
+
+# ---------------------------------------------------------------
+# K-4 (RC-7 residual, audit 2026-09-10): a restart must not keep serving a
+# stale on-disk private profile file when the DB row is newer.
+# ---------------------------------------------------------------
+
+async def test_rebuild_resyncs_a_stale_disk_private_profile_from_the_db(
+    db_session, tmp_path, monkeypatch,
+):
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale disk instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(
+        db_session, user=user, private_profile_md="fresh DB instruction",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    su = eng.agents["su"]
+    assert su.private_profile == "fresh DB instruction"
+    assert (tmp_path / "private" / "su.md").read_text().strip() == "fresh DB instruction"
+
+
+async def test_rebuild_keeps_the_db_content_cached_even_if_disk_is_unwritable(
+    db_session, tmp_path, monkeypatch,
+):
+    """Best-effort disk rewrite: an unwritable profiles dir must not stop the
+    in-memory cache from being resynced to the DB content."""
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale disk instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+    monkeypatch.setattr(
+        agent_module, "atomic_write_text",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("Permission denied")),
+    )
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(
+        db_session, user=user, private_profile_md="fresh DB instruction",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert eng.agents["su"].private_profile == "fresh DB instruction"
