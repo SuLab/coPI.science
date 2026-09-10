@@ -1143,35 +1143,57 @@ class TestCloseThreadIsIdempotent:
 class _FakeDecisionSession:
     """Minimal async-session double for a ThreadDecision insert.
 
-    Real sessions assign `.id` via the model's client-side `default=uuid.uuid4`
-    at flush/commit time (see ThreadDecision's mapped_column) -- this mirrors
-    that so `decision_id` is readable after `commit()`, matching the real
-    session's `expire_on_commit=False` contract these tests are standing in
-    for.
+    N-4 (opus review, audit 2026-09-10): `_insert_thread_decision_row` now
+    issues an `INSERT ... ON CONFLICT (id) DO NOTHING` (a `pg_insert`
+    statement, not `db.add()`) followed by a re-select confirming the id
+    landed. This double recognizes the pg_insert by type, extracts its bound
+    `id` param (the id `_write_thread_decision_with_retry` pre-computed) to
+    fake "the row now exists", and answers the confirming re-select with
+    that same id -- mirroring how a real DB session, with
+    `expire_on_commit=False`, would let a caller read the id back regardless
+    of whether the INSERT or a prior attempt's already-committed one is what
+    actually satisfies the ON CONFLICT clause.
 
     Also answers `_update_agent_memory`'s own (unrelated) profile-revision
     query with "no AgentRegistry row found" -- `_close_thread` opens its OWN
     session for that AFTER the ThreadDecision write, through this same
-    `session_factory`, and these tests are not exercising that path at all.
+    `session_factory` (a FRESH instance of this class, whose `_pending_id`
+    starts `None`), and these tests are not exercising that path at all.
     """
 
     def __init__(self, sink: list):
         self._sink = sink
-        self._added = None
+        self._pending_id = None
+        self._pending_stmt = None
 
-    def add(self, obj):
-        self._added = obj
+    async def execute(self, stmt):
+        from sqlalchemy.dialects.postgresql.dml import Insert as _PgInsert
 
-    async def execute(self, _stmt):
-        class _NoRowResult:
+        if isinstance(stmt, _PgInsert):
+            params = stmt.compile().params
+            self._pending_id = params["id"]
+            self._pending_stmt = stmt
+
+        class _Result:
+            def __init__(self, value):
+                self._value = value
+
             def scalar_one_or_none(self):
-                return None
-        return _NoRowResult()
+                return self._value
+
+        # The confirming re-select (and any other query on a fresh instance
+        # that never saw an INSERT) reads back whatever id this instance's
+        # own INSERT staged, or None.
+        return _Result(self._pending_id if not isinstance(stmt, _PgInsert) else None)
 
     async def commit(self):
-        import uuid as uuid_mod
-        self._added.id = uuid_mod.uuid4()
-        self._sink.append(self._added)
+        from types import SimpleNamespace
+
+        if self._pending_id is not None:
+            params = self._pending_stmt.compile().params
+            self._sink.append(SimpleNamespace(id=self._pending_id, **{
+                k: v for k, v in params.items() if k != "id"
+            }))
 
     async def __aenter__(self):
         return self
@@ -1359,6 +1381,113 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
             "a successful flush must retroactively stamp the ref"
         )
         assert b_ref.thread_decision_id == written[0].id
+
+    @pytest.mark.asyncio
+    async def test_a_commit_that_lands_server_side_but_raises_client_side_is_not_duplicated(
+        self, monkeypatch,
+    ):
+        """N-4 (opus review, audit 2026-09-10): a commit that actually landed
+        server-side but raised on the CLIENT side (e.g. the connection dying
+        right after COMMIT, before the ack reaches this process) must not
+        insert a second row when the caller retries -- the retry has to be
+        able to tell "did my last attempt already succeed?" apart from "it
+        never ran", which requires the id to be stable across attempts and
+        the insert to be conflict-tolerant.
+        """
+        import uuid as uuid_mod
+
+        import src.agent.simulation as sim
+
+        # No in-call retry -- this test exercises retrying via a SEPARATE
+        # call (mirroring _flush_pending_thread_decisions re-passing the
+        # same, still-pending payload dict on a later tick), not the
+        # in-call attempt loop.
+        monkeypatch.setattr(sim, "THREAD_DECISION_WRITE_MAX_ATTEMPTS", 1)
+
+        server_rows: dict[uuid_mod.UUID, dict] = {}  # stands in for the real table
+
+        class _ConnectionDropsAfterCommitSession:
+            """First attempt: the INSERT lands (recorded in `server_rows`) and
+            `commit()` returns normally from Postgres's point of view, but
+            THIS call raises on the very next statement (the confirming
+            re-select) -- simulating the connection dying right after COMMIT,
+            before this process could confirm anything."""
+
+            async def execute(self, stmt):
+                from sqlalchemy.dialects.postgresql.dml import Insert as _PgInsert
+                if isinstance(stmt, _PgInsert):
+                    params = stmt.compile().params
+                    server_rows.setdefault(params["id"], params)
+                    class _NoRow:
+                        def scalar_one_or_none(self):
+                            return None
+                    return _NoRow()
+                raise RuntimeError("connection reset (simulated post-COMMIT drop)")
+
+            async def commit(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _NormalSession:
+            """A later, healthy attempt: ON CONFLICT DO NOTHING against the
+            row the first attempt already committed, then a re-select that
+            actually completes and confirms it."""
+
+            async def execute(self, stmt):
+                from sqlalchemy.dialects.postgresql.dml import Insert as _PgInsert
+                if isinstance(stmt, _PgInsert):
+                    params = stmt.compile().params
+                    server_rows.setdefault(params["id"], params)
+                    class _NoRow:
+                        def scalar_one_or_none(self):
+                            return None
+                    return _NoRow()
+                class _Result:
+                    def scalar_one_or_none(self):
+                        return next(iter(server_rows))
+                return _Result()
+
+            async def commit(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        sessions = [_ConnectionDropsAfterCommitSession(), _NormalSession()]
+
+        def factory():
+            return sessions.pop(0)
+
+        engine = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory,
+            simulation_run_id=uuid_mod.uuid4(),
+        )
+        payload = {
+            "thread_id": "1.0", "channel": "general",
+            "agent_a": "a", "agent_b": "b",
+            "outcome": "no_proposal", "summary_text": None,
+        }
+
+        first = await engine._write_thread_decision_with_retry(payload)
+        assert first is None, "the client-side failure must still report as a failed attempt"
+        assert len(server_rows) == 1, "the INSERT landed server-side despite the client error"
+
+        second = await engine._write_thread_decision_with_retry(payload)
+
+        assert second is not None
+        assert len(server_rows) == 1, (
+            "retrying with the SAME payload (same pre-computed id) must not "
+            "insert a second row"
+        )
+        assert second == next(iter(server_rows)) == payload["id"]
 
 
 # ---------------------------------------------------------------

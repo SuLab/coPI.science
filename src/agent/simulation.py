@@ -1982,23 +1982,62 @@ class SimulationEngine:
     async def _insert_thread_decision_row(self, payload: dict) -> uuid.UUID:
         """One DB attempt to insert a ThreadDecision row from ``payload``.
 
-        Raises on any failure (caller retries); returns the new row's id on
+        Raises on any failure (caller retries); returns the row's id on
         success. Split out of ``_write_thread_decision_with_retry`` (M-7,
         opus review, audit 2026-09-10) so the retry loop stays readable.
+
+        N-4 (opus review, audit 2026-09-10): idempotent by ``payload["id"]``
+        (pre-computed once per payload by the caller and stable across every
+        retry, including a later ``_flush_pending_thread_decisions`` pass —
+        see that pre-computation for the full rationale). A plain INSERT here
+        would double the row on a retry that follows a commit which actually
+        landed server-side but raised client-side (e.g. the connection dying
+        right after COMMIT, before the ACK reaches this process) --
+        ``INSERT ... ON CONFLICT (id) DO NOTHING`` (the pattern established
+        for a different table by
+        ``profile_pipeline._insert_publication_tolerating_conflict``) makes a
+        retry of an already-landed insert a no-op instead of a duplicate.
         """
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        decision_id: uuid.UUID = payload["id"]
         async with self.session_factory() as db:
-            decision = ThreadDecision(
-                simulation_run_id=self.simulation_run_id,
-                thread_id=payload["thread_id"],
-                channel=payload["channel"],
-                agent_a=payload["agent_a"],
-                agent_b=payload["agent_b"],
-                outcome=payload["outcome"],
-                summary_text=payload["summary_text"],
+            stmt = (
+                pg_insert(ThreadDecision)
+                .values(
+                    id=decision_id,
+                    simulation_run_id=self.simulation_run_id,
+                    thread_id=payload["thread_id"],
+                    channel=payload["channel"],
+                    agent_a=payload["agent_a"],
+                    agent_b=payload["agent_b"],
+                    outcome=payload["outcome"],
+                    summary_text=payload["summary_text"],
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            db.add(decision)
+            await db.execute(stmt)
             await db.commit()
-            return decision.id
+            # Re-select to confirm the row exists regardless of whether THIS
+            # call's own INSERT landed or a prior attempt's already-committed
+            # one did — either way the id this function was asked to write is
+            # now durably present.
+            confirmed = (
+                await db.execute(
+                    sa_select(ThreadDecision.id).where(ThreadDecision.id == decision_id)
+                )
+            ).scalar_one_or_none()
+            if confirmed is None:
+                # Nothing to retry against -- the row this call was asked to
+                # write is not there. Treat like any other failed attempt so
+                # the caller's retry loop runs again rather than returning a
+                # bogus id nothing backs.
+                raise RuntimeError(
+                    f"ThreadDecision id {decision_id} not found after INSERT "
+                    "... ON CONFLICT DO NOTHING + re-select"
+                )
+            return confirmed
 
     async def _write_thread_decision_with_retry(self, payload: dict) -> uuid.UUID | None:
         """Insert a ThreadDecision row, retrying transient failures in-call
@@ -2017,7 +2056,21 @@ class SimulationEngine:
         is exhausted; the caller (``_close_thread`` or
         ``_flush_pending_thread_decisions``) is responsible for queuing or
         re-queuing the payload rather than losing it.
+
+        N-4 (opus review, audit 2026-09-10): mints ``payload["id"]`` ONCE, the
+        first time this payload is seen, and reuses it for every retry
+        thereafter -- including retries across separate calls to this method
+        for the SAME payload dict (``_close_thread``'s in-call attempts here,
+        then ``_flush_pending_thread_decisions`` re-passing the identical,
+        still-queued dict on a later tick). Without a stable id, a commit that
+        actually landed server-side but raised client-side (e.g. the
+        connection dying right after COMMIT) would insert a SECOND row on the
+        next retry, since a plain auto-generated primary key gives the retry
+        no way to tell "did my last attempt already succeed?" from "it never
+        ran". ``_insert_thread_decision_row``'s ``ON CONFLICT (id) DO NOTHING``
+        + re-select makes a retry of an already-landed insert a no-op instead.
         """
+        payload["id"] = payload.get("id") or uuid.uuid4()
         last_exc: Exception | None = None
         for attempt in range(1, THREAD_DECISION_WRITE_MAX_ATTEMPTS + 1):
             try:
