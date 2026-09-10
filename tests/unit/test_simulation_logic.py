@@ -4704,6 +4704,69 @@ class TestPollInboundFromDbGuardsTheHandler:
         )
 
 
+class TestPollInboundFromDbSeparatesLookupFailuresFromHandlerAttempts(
+    TestPollInboundFromDbGuardsTheHandler,
+):
+    """S-4 (audit 2026-09-10): PiOwnershipLookupFailed (a transient DB
+    failure resolving PI ownership) used to share `_pi_inbound_attempts`
+    with a deterministically-failing handler, capped at
+    PI_INBOUND_MAX_ATTEMPTS == 3 -- a 30s DB blip spanning 3 unlucky polls
+    could permanently drop a genuine PI directive. It must instead spend its
+    own, much larger PI_INBOUND_MAX_LOOKUP_FAILURES budget.
+
+    Inherits `_Row`/`_FakeDB`/`_engine` from
+    TestPollInboundFromDbGuardsTheHandler.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_lookup_failure_survives_past_the_small_handler_attempt_cap(self):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.inbound_state import PI_INBOUND_HANDLED, PI_INBOUND_MAX_ATTEMPTS
+        from src.agent.simulation import PiOwnershipLookupFailed
+
+        rows = [self._Row(datetime(2026, 1, 1, tzinfo=UTC))]
+        handler = AsyncMock(side_effect=PiOwnershipLookupFailed("DB blip"))
+        engine = self._engine(rows, handler)
+
+        # Poll more times than PI_INBOUND_MAX_ATTEMPTS would tolerate for an
+        # ordinary handler failure -- a lookup failure must not be given up
+        # on this early.
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS + 2):
+            await engine._poll_inbound_from_db()
+
+        assert rows[0].pi_inbound_state != PI_INBOUND_HANDLED, (
+            "a PiOwnershipLookupFailed run must not be stamped HANDLED "
+            "(terminal) within the small PI_INBOUND_MAX_ATTEMPTS budget"
+        )
+        assert rows[0].message_ts not in engine._pi_inbound_attempts, (
+            "PiOwnershipLookupFailed must not charge the main "
+            "_pi_inbound_attempts counter at all"
+        )
+        assert rows[0].message_ts in engine._pi_inbound_lookup_failures
+
+    @pytest.mark.asyncio
+    async def test_a_lookup_failure_is_eventually_given_up_on_its_own_cap(self):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.inbound_state import PI_INBOUND_HANDLED, PI_INBOUND_MAX_LOOKUP_FAILURES
+        from src.agent.simulation import PiOwnershipLookupFailed
+
+        rows = [self._Row(datetime(2026, 1, 1, tzinfo=UTC))]
+        handler = AsyncMock(side_effect=PiOwnershipLookupFailed("DB down"))
+        engine = self._engine(rows, handler)
+
+        for _ in range(PI_INBOUND_MAX_LOOKUP_FAILURES):
+            await engine._poll_inbound_from_db()
+
+        assert rows[0].pi_inbound_state == PI_INBOUND_HANDLED, (
+            "a sustained lookup-failure outage must still eventually give up "
+            "on its own, larger cap"
+        )
+
+
 # ---------------------------------------------------------------
 # _flush_llm_logs re-queue on failure (COR-11)
 # ---------------------------------------------------------------

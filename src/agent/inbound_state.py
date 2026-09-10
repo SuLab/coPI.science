@@ -50,3 +50,14 @@ PI_INBOUND_PENDING = "pending"
 # stamped HANDLED (terminal) so it stops being re-selected. See
 # src.agent.simulation._poll_inbound_from_db.
 PI_INBOUND_MAX_ATTEMPTS = 3
+
+# S-4 (audit 2026-09-10): PiOwnershipLookupFailed (a transient DB failure
+# resolving which agents a PI's Slack/user id owns) used to count toward the
+# same PI_INBOUND_MAX_ATTEMPTS cap as a deterministically-failing handler --
+# a 30s DB blip during a run of unlucky polls could exhaust the cap and get a
+# genuine PI directive stamped HANDLED (terminal) after as little as
+# PI_INBOUND_MAX_ATTEMPTS attempts, permanently dropping it. A lookup failure
+# is retried on its own, much larger budget instead, so it takes a sustained
+# outage (not a blip) to give up on the row. See
+# src.agent.simulation._poll_inbound_from_db.
+PI_INBOUND_MAX_LOOKUP_FAILURES = 30

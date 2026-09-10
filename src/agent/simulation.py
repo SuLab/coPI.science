@@ -33,6 +33,7 @@ from src.agent.inbound_state import (
     PI_INBOUND_HANDLED,
     PI_INBOUND_INGESTED,
     PI_INBOUND_MAX_ATTEMPTS,
+    PI_INBOUND_MAX_LOOKUP_FAILURES,
     PI_INBOUND_PENDING,
 )
 from src.agent.mentions import BOT_TAG_RE, extract_bot_mentions
@@ -576,6 +577,14 @@ class SimulationEngine:
         # _prune_stale_pi_inbound_attempts drop entries nobody has touched
         # recently, so this dict cannot grow without bound.
         self._pi_inbound_attempts: dict[str, tuple[int, float]] = {}
+        # S-4 (audit 2026-09-10): a SEPARATE, much larger budget for
+        # PiOwnershipLookupFailed (a transient DB failure resolving PI
+        # ownership, not a deterministic handler bug) so a 30s DB blip
+        # cannot exhaust the same PI_INBOUND_MAX_ATTEMPTS cap a genuinely
+        # broken handler uses and get a real PI directive dropped after only
+        # PI_INBOUND_MAX_ATTEMPTS attempts. Same (count, last_attempt_
+        # monotonic) shape and pruning lifecycle as `_pi_inbound_attempts`.
+        self._pi_inbound_lookup_failures: dict[str, tuple[int, float]] = {}
         # message_ts values whose handler has already run successfully but
         # whose HANDLED marker write has not yet committed (K-2 follow-up #2 /
         # simulation-poller review, audit 2026-09-10). Without this,
@@ -3816,6 +3825,20 @@ class SimulationEngine:
         self._pi_inbound_attempts[message_ts] = (attempts, time.monotonic())
         return attempts
 
+    def _record_pi_inbound_lookup_failure(self, message_ts: str) -> int:
+        """Increment the SEPARATE PiOwnershipLookupFailed counter for
+        ``message_ts`` (S-4, audit 2026-09-10).
+
+        Deliberately its own dict/cap, not `_record_pi_inbound_attempt`'s:
+        a transient DB failure resolving PI ownership must not spend the
+        same small PI_INBOUND_MAX_ATTEMPTS budget a deterministically
+        failing handler uses, or a 30s DB blip can drop a genuine PI
+        directive after only PI_INBOUND_MAX_ATTEMPTS attempts.
+        """
+        attempts = self._pi_inbound_lookup_failures.get(message_ts, (0, 0.0))[0] + 1
+        self._pi_inbound_lookup_failures[message_ts] = (attempts, time.monotonic())
+        return attempts
+
     def _prune_stale_pi_inbound_attempts(self, current_batch: set[str]) -> None:
         """Drop attempt-counter entries for rows no longer in the polled batch.
 
@@ -3824,6 +3847,9 @@ class SimulationEngine:
         bounds the dict for every other exit path without any time window."""
         for ts in [ts for ts in self._pi_inbound_attempts if ts not in current_batch]:
             del self._pi_inbound_attempts[ts]
+        # S-4 (audit 2026-09-10): same bounding for the lookup-failure counter.
+        for ts in [ts for ts in self._pi_inbound_lookup_failures if ts not in current_batch]:
+            del self._pi_inbound_lookup_failures[ts]
         self._pi_inbound_handled_pending_mark &= current_batch
         # M-5 (opus review, audit 2026-09-10): same bounding for the
         # fallback-stamp attempt counter.
@@ -4085,6 +4111,38 @@ class SimulationEngine:
                         # own, since the counter is left alone on every
                         # subsequent already_applied=True poll.
                         self._pi_inbound_attempts.pop(r.message_ts, None)
+                        self._pi_inbound_lookup_failures.pop(r.message_ts, None)
+                    except PiOwnershipLookupFailed as exc:
+                        # S-4 (audit 2026-09-10): a transient DB failure
+                        # resolving PI ownership must not spend the same
+                        # small PI_INBOUND_MAX_ATTEMPTS budget a
+                        # deterministically failing handler uses — a 30s DB
+                        # blip during a run of unlucky polls could otherwise
+                        # exhaust that cap and stamp a genuine PI directive
+                        # HANDLED (terminal) after only PI_INBOUND_MAX_ATTEMPTS
+                        # attempts. Counted and capped separately, at a much
+                        # larger budget, so only a sustained outage gives up
+                        # on the row.
+                        lookup_attempts = self._record_pi_inbound_lookup_failure(r.message_ts)
+                        if lookup_attempts >= PI_INBOUND_MAX_LOOKUP_FAILURES:
+                            logger.error(
+                                "[%s] Giving up on PI inbound side effects for %s "
+                                "— ownership lookup failed %d times: %s",
+                                entry.channel, entry.thread_ts or entry.ts,
+                                lookup_attempts, exc,
+                            )
+                            if await self._mark_pi_inbound_row_handled(r.id):
+                                self._pi_inbound_lookup_failures.pop(r.message_ts, None)
+                            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                                self._pi_inbox_cursor = r.created_at
+                            continue
+                        logger.warning(
+                            "[%s] PI ownership lookup failed for %s (attempt "
+                            "%d/%d) — will retry next poll: %s",
+                            entry.channel, entry.thread_ts or entry.ts,
+                            lookup_attempts, PI_INBOUND_MAX_LOOKUP_FAILURES, exc,
+                        )
+                        continue
                     except Exception as exc:
                         attempts = self._record_pi_inbound_attempt(r.message_ts)
                         if attempts >= PI_INBOUND_MAX_ATTEMPTS:
