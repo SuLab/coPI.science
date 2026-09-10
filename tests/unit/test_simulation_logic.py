@@ -455,25 +455,55 @@ class TestSyncProfilesFromDisk:
         assert calls == {"private": [], "public": [1]}
 
 
-    async def test_force_cleared_private_profile_is_not_resurrected_by_the_watcher(self, setup):
+    async def test_force_cleared_private_profile_is_not_resurrected_by_the_watcher(
+        self, setup, monkeypatch,
+    ):
         """M-3 (opus review, audit 2026-09-10): once `force_clear_private_profile()`
         has run (an unlink() failure on a genuine clear, L-3), the cache holds
         the default "cleared" text directly, NOT `None` — a subsequent mtime
         bump on the file that could not be removed must not send the watcher
         back through `reload_private_profile()`, which would re-read that
         same stale file and resurrect the very instruction the PI cleared.
+
+        O-3 (audit 2026-09-10): this test used to be vacuous after N-3, which
+        made the watcher's force-cleared branch defer to
+        `_sync_one_agent_private_profile_from_db` — that helper early-returns
+        immediately when `session_factory` is `None` (the `setup` fixture's
+        default), so nothing ran regardless of whether the guard this test
+        pins actually worked. Stub a session confirming
+        `ResearcherProfile.private_profile_md == ""` so the DB-empty path
+        actually executes, and keep the unlink retry failing (as the real
+        L-3 scenario requires) so this exercises the "still un-removable"
+        branch rather than the "retry succeeded" one already covered by
+        `test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds`.
         """
         import os
+        import pathlib
+        import uuid
+        from types import SimpleNamespace
 
         from src.agent.agent import DEFAULT_PRIVATE_PROFILE_TEXT
 
         engine, agent, priv, calls = setup
+
+        agent_reg = SimpleNamespace(user_id=uuid.uuid4())
+        profile = SimpleNamespace(private_profile_md="")  # DB confirms cleared
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(agent_reg, profile)
+        )
+
         await engine._sync_profiles_from_disk()  # baseline
 
         # Simulate L-3's failed-unlink path: the cache is force-cleared but
-        # the stale file is still on disk.
+        # the stale file is still on disk (and stays un-removable for the
+        # DB-authoritative recheck below too).
         agent.force_clear_private_profile()
         engine._force_cleared_private.add(agent.agent_id)
+
+        def _raise_unlink(self, *a, **k):
+            raise OSError("simulated: cannot remove")
+
+        monkeypatch.setattr(pathlib.Path, "unlink", _raise_unlink)
 
         future = priv.stat().st_mtime + 10
         os.utime(priv, (future, future))
@@ -485,6 +515,9 @@ class TestSyncProfilesFromDisk:
             "force-cleared agent — that would re-read the un-removable file"
         )
         assert agent.private_profile == DEFAULT_PRIVATE_PROFILE_TEXT
+        assert agent.agent_id in engine._force_cleared_private, (
+            "the marker must survive a still-failing unlink retry"
+        )
 
     async def test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds(self, setup):
         """N-3 (opus review, audit 2026-09-10): once the DB-authoritative
