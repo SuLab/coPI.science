@@ -48,12 +48,23 @@ async def agent_blocking_account_delete(
 
     ``for_update=False`` is for read-only callers (the GET confirmation page)
     that must not hold a row lock outside a delete transaction.
+
+    REV4-3 (audit 2026-09-08): locking only the ``agents`` row is not enough --
+    when the user owns no agent yet, that SELECT returns no rows, so it locks
+    nothing. A concurrent self-service signup inserting a brand-new ``agents``
+    row with ``user_id`` pointing at this same user (the FK the delete is
+    trying to protect) can still commit between this guard's read and the
+    caller's ``DELETE``. Locking the ``users`` row itself makes that INSERT's
+    FK reference block on (or fail against) this transaction instead of
+    racing it.
     """
     query = select(AgentRegistry).where(AgentRegistry.user_id == user.id)
     if for_update:
         query = query.with_for_update()
     result = await db.execute(query)
     agent = result.scalar_one_or_none()
+    if for_update:
+        await db.execute(select(User).where(User.id == user.id).with_for_update())
     if agent is None or agent.status not in AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE:
         return None
     return agent

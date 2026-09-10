@@ -63,7 +63,9 @@ async def test_the_agent_lookup_locks_the_row_for_update():
 
     await agent_blocking_account_delete(session, _U())
 
-    assert len(session.statements) == 1
+    # REV4-3 (audit 2026-09-08): a second statement now locks the users row too --
+    # the agent lookup stays first and unchanged.
+    assert len(session.statements) == 2
     compiled = _compiled(session.statements[0])
     assert "FOR UPDATE" in compiled.upper(), (
         f"expected the agent lookup to lock the row it reads, got: {compiled}"
@@ -110,7 +112,48 @@ async def test_for_update_false_skips_the_lock_for_the_read_only_confirmation_pa
 
     await agent_blocking_account_delete(session, _U(), for_update=False)
 
-    compiled = _compiled(session.statements[0]).upper()
-    assert "FOR UPDATE" not in compiled, (
-        f"the GET confirmation page must not hold a row lock: {compiled}"
+    for stmt in session.statements:
+        compiled = _compiled(stmt).upper()
+        assert "FOR UPDATE" not in compiled, (
+            f"the GET confirmation page must not hold a row lock: {compiled}"
+        )
+
+
+# --- REV4-3 (audit 2026-09-08) ------------------------------------------------------
+# FOR UPDATE on `agents` locks nothing when the user owns no agent row at all -- the
+# SELECT simply returns no rows, so there is nothing to lock. A concurrent self-service
+# signup inserting a brand-new `agents` row with `user_id` pointing at this user (the
+# FK the delete is trying to protect) can still commit between this guard's read and
+# the caller's DELETE. Locking the `users` row itself makes that INSERT's FK reference
+# wait on (or fail against) this transaction instead of racing it.
+
+
+@pytest.mark.asyncio
+async def test_the_users_row_itself_is_locked_for_update():
+    session = _CapturingSession()
+
+    await agent_blocking_account_delete(session, _U())
+
+    users_locks = [
+        stmt
+        for stmt in session.statements
+        if "FOR UPDATE" in _compiled(stmt).upper() and " USERS" in _compiled(stmt).upper()
+    ]
+    assert users_locks, (
+        "expected a SELECT ... FOR UPDATE against the users table (not just "
+        f"agents) so a concurrent signup cannot race the delete; got statements: "
+        f"{[_compiled(s) for s in session.statements]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_users_row_lock_is_skipped_for_the_read_only_confirmation_page():
+    session = _CapturingSession()
+
+    await agent_blocking_account_delete(session, _U(), for_update=False)
+
+    for stmt in session.statements:
+        compiled = _compiled(stmt).upper()
+        assert "FOR UPDATE" not in compiled, (
+            f"the GET confirmation page must not hold any row lock: {compiled}"
+        )
