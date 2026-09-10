@@ -5752,12 +5752,24 @@ class SimulationEngine:
             if db_content:
                 if agent.private_profile.strip() == db_content:
                     return
-                agent.update_private_profile(profile.private_profile_md)
-                logger.info(
-                    "[%s] Private profile disk file was stale relative to the "
-                    "DB at startup — resynced from ResearcherProfile.private_profile_md",
-                    agent.agent_id,
-                )
+                # M-4 (opus review, audit 2026-09-10): update_private_profile()
+                # returns False when the disk write itself failed (the cache
+                # is still updated to new_profile either way, per its own
+                # docstring) -- an unconditional "resynced" INFO here claimed
+                # the disk was updated when it wasn't.
+                write_ok = agent.update_private_profile(profile.private_profile_md)
+                if write_ok:
+                    logger.info(
+                        "[%s] Private profile disk file was stale relative to the "
+                        "DB at startup — resynced from ResearcherProfile.private_profile_md",
+                        agent.agent_id,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Private profile resync from DB: cache updated, "
+                        "disk write failed",
+                        agent.agent_id,
+                    )
                 return
             # DB says "cleared" — only act if a real (stale) file exists
             # on disk; a never-written agent already reads the same

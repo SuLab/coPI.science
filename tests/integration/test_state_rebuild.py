@@ -1465,6 +1465,52 @@ async def test_an_unlink_failure_on_a_real_clear_still_invalidates_the_cache(
     )
 
 
+async def test_a_failed_resync_write_logs_a_warning_not_the_resynced_info(
+    db_session, tmp_path, monkeypatch, caplog,
+):
+    """M-4 (opus review, audit 2026-09-10): the DB-is-stale-relative-to-disk
+    branch calls `agent.update_private_profile(...)` and unconditionally logs
+    an INFO "resynced" line, even though `update_private_profile` returns
+    False (and only logs its own ERROR) when the disk write itself fails.
+    The cache is updated either way (see `update_private_profile`'s own
+    docstring), so the sync must not claim a clean "resynced" outcome when
+    the disk write didn't actually happen -- log a WARNING instead.
+    """
+    import logging
+
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale disk instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+    monkeypatch.setattr(
+        agent_module, "atomic_write_text",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(
+        db_session, user=user, private_profile_md="fresh DB instruction",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    with caplog.at_level(logging.INFO):
+        await eng._rebuild_state_from_db()
+        await eng._rebuild_agent_state()
+
+    # Cache updated regardless of the write outcome (update_private_profile's
+    # own contract).
+    assert eng.agents["su"].private_profile == "fresh DB instruction"
+    assert "cache updated, disk write failed" in caplog.text
+    assert "resynced from ResearcherProfile" not in caplog.text
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("cache updated, disk write failed" in r.message for r in warning_records)
+
+
 async def test_a_roster_re_add_also_resyncs_the_private_profile(
     db_session, tmp_path, monkeypatch,
 ):
