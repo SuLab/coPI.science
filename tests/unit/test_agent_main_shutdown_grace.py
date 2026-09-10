@@ -27,12 +27,20 @@ import pytest
 
 from src.agent import main as _main_module
 from src.agent.slack_client import SHUTTING_DOWN, SlackShuttingDown, _sleep_interruptibly
+from src.services.slack_executor import run_slack_call, shutdown_slack_executor
 
 
 @pytest.fixture(autouse=True)
 def _clear_shutting_down():
     SHUTTING_DOWN.clear()
     yield
+    # N-1 (opus review, audit 2026-09-10): tests below make _make_shutdown_handler
+    # call the REAL shutdown_slack_executor(), which shuts down the process-wide
+    # Slack I/O pool singleton. Re-run it at teardown too (idempotent, safe with
+    # no pool created) so a test that fails before reaching its own cleanup does
+    # not leave the singleton's threads dangling for a later test.
+    shutdown_slack_executor()
+    SHUTTING_DOWN.clear()
     SHUTTING_DOWN.clear()
 
 
@@ -94,3 +102,42 @@ async def test_a_second_signal_aborts_immediately_without_waiting_for_the_grace_
 def test_shutdown_slack_abort_grace_seconds_is_documented_under_the_stop_grace():
     # docker stop -t 30 (see docs/README.md / runbook) leaves 10s of headroom.
     assert _main_module.SHUTDOWN_SLACK_ABORT_GRACE_SECONDS == 20
+
+
+async def test_a_pool_bound_slack_call_aborts_promptly_after_the_second_signal():
+    """N-1 (opus review, audit 2026-09-10): after M-8, this process's hottest
+    per-tick Slack calls (_post_message, the channel/DM/proposal-thread
+    pollers) run through src.services.slack_executor's dedicated pool, not
+    directly on this event-loop thread. Before this fix, the shutdown handler
+    only ever called slack_client.signal_shutdown() (the module-level
+    fallback), which a pool-bound sleeper is NOT bound to -- it would sleep
+    out its full Retry-After budget (up to 180s) regardless of shutdown,
+    forcing `docker stop -t 30` to SIGKILL the process. The handler must call
+    shutdown_slack_executor() instead, which sets both the pool's own event
+    and the fallback.
+    """
+    loop = asyncio.get_running_loop()
+    fake_engine = SimpleNamespace(request_stop=lambda: None)
+    shutdown = _main_module._make_shutdown_handler(loop, fake_engine)
+
+    outcome: dict = {}
+
+    def sleeper():
+        try:
+            _sleep_interruptibly(30.0)
+        except Exception as exc:
+            outcome["exc"] = exc
+        else:
+            outcome["completed"] = True
+
+    task = asyncio.ensure_future(run_slack_call(sleeper))
+    await asyncio.sleep(0.05)  # let the worker thread get into its first slice
+
+    shutdown()  # first signal: schedules the abort 20s out, does not fire yet
+    shutdown()  # second signal: aborts immediately
+
+    await asyncio.wait_for(task, timeout=3.0)
+
+    assert isinstance(outcome.get("exc"), SlackShuttingDown), (
+        f"a pool-bound sleeper must abort promptly after the second signal, got {outcome!r}"
+    )
