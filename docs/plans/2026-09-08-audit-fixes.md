@@ -307,6 +307,140 @@ discarded (REV3-1); the lazy profiles-dir accessor's two missed consumers (REV4-
 review); label-based migrate-container selection in `redeploy.sh` (REV4-2); owner- and users-row locks in the delete
 guard (SEC2-2/REV4-3).
 
-Recorded, not fixed: the Slack client's per-page wait budget × `MAX_PAGES` on a throttled startup history fetch
-(bounded but long); the default executor shared by the `to_thread` Slack calls; a superseded reply token's bounce
-requires the sender to be a known user (by design).
+A superseded reply token's bounce requires the sender to be a known user, by design (recorded,
+not fixed). The other three items previously recorded here — the Slack client's per-page wait
+budget × `MAX_PAGES`, the default executor shared by the `to_thread` Slack calls, and the
+pre-dispatch/post-dispatch conflation in the stale-token bounce budget — are fixed below
+(R-1, R-2, R-3), along with two independent findings (R-4, R-5) from the same 2026-09-10 pass.
+
+## R-1 — MEDIUM — Slack pagination's wait budget was per-page, not per-listing
+
+**Root cause.** `RATE_LIMIT_WAIT_BUDGET_SECONDS` (`src/agent/slack_client.py`) bounds how long
+`_call_with_retry` will sleep on **one** Slack call, but `_paginate` can issue up to
+`MAX_PAGES = 200` of them to walk a single cursor-paginated listing. Each page got the full
+180s budget independently, so a listing that stayed throttled across many pages could block the
+synchronous engine loop for up to `MAX_PAGES * RATE_LIMIT_WAIT_BUDGET_SECONDS` — 200 × 180s —
+even though the per-call budget was sized (RC-3) around a single call's worst case, not a whole
+listing's.
+
+**Fix.** `_call_with_retry`/`_api` accept an optional private `_wait_budget: float | None`,
+consumed as a keyword-only parameter before the slack_sdk call is made — it is therefore never
+present in the kwargs the slack_sdk method itself receives. `_paginate` now owns a
+listing-level wall-clock deadline, `PAGINATION_WAIT_BUDGET_SECONDS = 600.0`, tracked via
+`time.monotonic()` from the start of the listing; each page's `_api` call is given only
+whatever remains of that deadline. A page whose remaining budget is already exhausted is asked
+to wait none at all, so it either succeeds immediately or fails immediately — surfacing through
+the existing "a page after the first failed" path as `SlackListingIncomplete`. A single-call
+caller that never touches `_wait_budget` is unaffected: `_call_with_retry` falls back to
+`RATE_LIMIT_WAIT_BUDGET_SECONDS` exactly as before.
+
+**Tests (red first).** `tests/unit/test_slack_client_contract.py`:
+`test_the_private_wait_budget_kwarg_never_reaches_the_slack_method` asserts the kwarg is absent
+from what a fake slack_sdk method receives; `test_a_single_call_with_no_wait_budget_override_is_unchanged`
+pins the pre-existing single-call behaviour; `test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page`
+drives an endlessly-throttled fake cursor listing with a fake monotonic clock (advanced only by
+`time.sleep`, since the file's `_no_real_sleep` fixture makes real `time.sleep` free) and asserts
+the listing gives up within roughly the listing budget rather than walking towards `MAX_PAGES`.
+All three failed pre-fix (`ImportError`/`AttributeError` for the not-yet-existing seam and
+constant, then `fake.page_n == MAX_PAGES` for the budget test) and pass post-fix.
+
+## R-2 — MEDIUM — every Slack `to_thread` call shared the process-wide default executor
+
+**Root cause.** Every `asyncio.to_thread` wrapper around a synchronous `AgentSlackClient`/httpx
+Slack call (`src/services/private_channels.py`, `slack_web.py`, `slack_provisioning.py`,
+`src/agent/grantbot.py`, `src/routers/agent_page.py`) ran on the event loop's *default*
+executor — `ThreadPoolExecutor(max_workers=min(32, os.cpu_count() + 4))`, shared by every other
+`to_thread` caller in the process. Each Slack call can block for up to
+`RATE_LIMIT_WAIT_BUDGET_SECONDS` (180s) under a sustained throttle, so enough concurrent Slack
+calls could occupy the shared pool and starve unrelated `to_thread` work that has nothing to do
+with Slack.
+
+**Fix.** New `src/services/slack_executor.py` exposes `run_slack_call(fn, *args, **kwargs)`,
+which runs on a module-level `ThreadPoolExecutor(max_workers=8, thread_name_prefix="slack-io")`
+dedicated to Slack I/O. Replaced every Slack `to_thread` call site (9 in `private_channels.py`,
+5 in `slack_web.py`, 4 in `slack_provisioning.py`, 1 each in `grantbot.py` and `agent_page.py`)
+with `run_slack_call`; removed the now-unused `import asyncio` from the four files where it had
+no other use. Non-Slack `to_thread` sites are unaffected — there were none of Slack's shape in
+these files to begin with; `grantbot.py`'s other `asyncio.run(...)` calls and `agent_page.py`'s
+FastAPI route bodies are untouched.
+
+**Tests (red first).** New `tests/unit/test_slack_executor.py`: the pool is a bounded
+`ThreadPoolExecutor` with `max_workers == 8` and the `"slack-io"` thread-name prefix;
+`run_slack_call` actually executes off the event-loop thread on a `slack-io`-prefixed thread;
+args/kwargs are forwarded and the result is returned; an exception raised inside the call
+propagates by identity (`exc_info.value is marker`), not merely by type — reusing the
+exception-identity pattern from `tests/unit/test_private_channel_migration.py`'s
+`TestSlackCallsRunOffTheEventLoop`. All four tests failed with `ModuleNotFoundError` before
+`slack_executor.py` existed and pass post-fix. `tests/unit/test_private_channel_migration.py`'s
+own `TestSlackCallsRunOffTheEventLoop` (DB-backed, requires Docker) and the rest of that file's
+offline classes (25 tests) were re-run to confirm the swap didn't change observable behaviour.
+
+## R-3 — MEDIUM — the stale-token bounce budget charged suppressed/never-dispatched sends
+
+**Root cause.** `_send_html_email` (`src/services/email_notifications.py`) returned one `bool`
+for three different outcomes: suppressed before any SES call was attempted (no recipient, or
+blocked by the outbound allowlist), a dispatch attempted but never reaching `send_raw_email`
+(a `boto3.client(...)` or MIME-construction error), and `send_raw_email` itself raising.
+`_maybe_send_stale_token_bounce` (`src/services/email_inbound.py`) charged its per-address
+budget for anything that got past its own allowlist pre-check, which meant a `NOT_DISPATCHED`-
+shaped failure (nothing ever reached SES) was charged identically to a real send — burning the
+cap without ever having sent, or risked sending, a second bounce.
+
+**Fix.** Added `send_html_email_outcome(...) -> SendOutcome`, an `Enum` of `SUPPRESSED`,
+`NOT_DISPATCHED`, `FAILED`, `SENT`. `_send_html_email` is now a thin bool wrapper
+(`is SendOutcome.SENT`) so its four existing callers are unchanged. `_maybe_send_stale_token_bounce`
+now calls `send_html_email_outcome` directly and charges the budget only when the outcome is
+`FAILED` or `SENT` — both mean `send_raw_email` was actually invoked, so a post-dispatch failure
+(e.g. a read timeout) still counts, since mail may have left regardless.
+
+**Tests (red first).** New `tests/unit/test_send_html_email_outcome.py` exercises all four
+outcomes of `send_html_email_outcome` directly (no recipient, allowlist-blocked, a `boto3.client`
+construction failure, `send_raw_email` raising, and a successful send) plus
+`_send_html_email`'s thin-wrapper behaviour over each. Rewrote
+`tests/unit/test_stale_token_bounce_budget.py` to monkeypatch `send_html_email_outcome` (not
+`_send_html_email`) and assert the budget is charged for `FAILED`/`SENT` and not for
+`SUPPRESSED`/`NOT_DISPATCHED`. Both files failed with `ImportError: cannot import name
+'SendOutcome'` before the fix and pass post-fix (11 tests total).
+
+## R-4 — MEDIUM — `redeploy.sh` left the old `grantbot` image serving during a redeploy
+
+**Root cause.** `grantbot` declares the identical `depends_on: migrate: condition:
+service_completed_successfully` shape as `app`/`worker` in `docker-compose.prod.yml` — the
+exact condition RC-6 already established is insufficient on an already-running stack — but
+`scripts/redeploy.sh` only ever built, stopped and started `app` and `worker`. A redeploy left
+the OLD `grantbot` container running (and posting to Slack) against the newly migrated schema
+for as long as the process kept running, unaffected by the very ordering fix RC-6 built for
+exactly this race. `docs/production-migration.md` §10.1 had already recorded this as a known
+gap ("`redeploy.sh`'s current scope is `app`/`worker`; `grantbot` still relies on `depends_on`
+ordering... by hand until it is folded into the script").
+
+**Fix.** Added `grantbot` to all three of `redeploy.sh`'s steps: `compose build migrate app
+worker grantbot`, `compose stop -t 30 app worker grantbot`, `compose up -d app worker grantbot`.
+`agent` stays excluded — it is a one-off (`docker compose --profile agent run`), not a
+long-running service `up -d` would ever recreate, with its own restart runbook in `CLAUDE.md`.
+Updated `CLAUDE.md`'s step-3 comment and `docs/production-migration.md` §10.1 (which now states
+the fold-in instead of describing it as an open gap) to match.
+
+**Tests (red first).** Extended `tests/unit/test_redeploy_sh.py`'s existing
+`test_step_order_builds_stops_migrates_then_starts_then_reloads` predicates to also require
+`grantbot` in the build/stop/start lines, and added
+`test_grantbot_is_built_stopped_and_started_alongside_app_worker` (also asserts `agent` never
+appears in any of these steps) and `test_aborts_and_does_not_start_grantbot_when_migrate_fails`.
+Both new/strengthened assertions failed against the pre-fix script (`grantbot` absent from
+every logged `docker compose` invocation) and pass post-fix (19 tests total in the file).
+
+## R-5 — LOW — the preflight `chown` remedy wasn't shell-quoted
+
+**Root cause.** `check_profiles_dir_writable` (`scripts/live_slack_preflight.py`) interpolated
+the raw `profiles_dir` path into a copy-paste `sudo chown -R $(id -u):$(id -g) <dir>`
+suggestion. A path containing a space or shell metacharacter would render a command that either
+chowns the wrong (truncated) path or does something else entirely if pasted as-is.
+
+**Fix.** Wrapped the interpolated path in `shlex.quote(str(profiles_dir))`.
+
+**Tests (red first).** Added `test_check_six_quotes_a_profiles_dir_containing_a_space_in_the_remedy`
+to `tests/unit/test_live_slack_preflight.py`, using a `tmp_path` subdirectory with a literal
+space in its name; asserts the exact quoted `chown` command line is present and the unquoted
+form is not (while still permitting the unquoted path to appear in the unrelated "does not
+exist" prefix). Failed pre-fix on the missing quoting, passes post-fix (34 tests total in the
+file).
