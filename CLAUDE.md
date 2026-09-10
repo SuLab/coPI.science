@@ -78,9 +78,11 @@ docker compose $C --profile agent run -d --name agent-run agent python -m src.ag
 
 On resume the sim fetches Slack history for each bot in roster order before reaching
 turn 1. Slack throttles this hard — expect ~10 minutes of
-`[<first-agent>] Rate limited, retrying in 10s (attempt 1/3)` before the first
-`=== Turn 1: <agent> ===`. Repeated `attempt 1/3` (never `2/3`) means each call 429s once then
-succeeds on retry — that is forward progress, not a hang.
+`[<first-agent>] Rate limited, retrying in 10s (attempt 1/8, 10.0s/180.0s of wait
+budget used)` before the first `=== Turn 1: <agent> ===`. Repeated `attempt 1/8`
+(never `2/8`) means each call 429s once then succeeds on retry — that is forward
+progress, not a hang (RC-3 on this branch raised the ceiling from 3 attempts to 8 and
+added the 180s cumulative wait-budget figure logged alongside it).
 
 **Before restarting**, always save logs and rebuild containers:
 
