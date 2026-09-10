@@ -15,6 +15,7 @@ from sqlalchemy import select
 from src.models import AgentMessage, PiDmMessage
 from src.services.pi_inbox import (
     get_latest_run_id,
+    pi_may_post_to_channel,
     pi_may_reply_in_thread,
     record_pi_dm,
     record_pi_message,
@@ -151,4 +152,64 @@ async def test_pi_may_reply_in_thread_false_when_the_participant_is_in_another_c
     )
     assert await pi_may_reply_in_thread(
         db_session, run_id=run.id, channel_name="general", thread_ts="2.0", agent_id="su",
+    ) is False
+
+
+# --- pi_may_post_to_channel (SEC3-5, audit 2026-09-10) ----------------------
+#
+# An unknown channel name previously resolved to True (the "unknown channel
+# names are public" fallback) and _resolve_channel then mints a `local:<name>`
+# public row for it -- an authenticated PI could write into an arbitrary
+# channel name they invented, including another run's real private channel
+# name (which has no agent_channels row IN THIS run, since channel_name is
+# only unique per run).
+
+
+async def test_pi_may_post_to_channel_false_for_a_channel_with_no_agent_channels_row(
+    db_session,
+):
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="made-up-channel",
+        user_id=user.id, agent_id="su",
+    ) is False
+
+
+async def test_pi_may_post_to_channel_true_for_a_known_public_channel(db_session):
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_channel(
+        db_session, run=run, channel_name="general", visibility="public",
+    )
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="general",
+        user_id=user.id, agent_id="su",
+    ) is True
+
+
+async def test_pi_may_post_to_channel_true_for_a_private_member(db_session):
+    run = await factories.make_simulation_run(db_session)
+    channel = await factories.make_agent_channel(
+        db_session, run=run, channel_name="collab-1", visibility="collab_private",
+    )
+    user = await factories.make_user(db_session)
+    await factories.make_private_channel_member(
+        db_session, channel=channel, agent_id=None, user_id=user.id,
+    )
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="collab-1",
+        user_id=user.id, agent_id="su",
+    ) is True
+
+
+async def test_pi_may_post_to_channel_false_for_a_private_non_member(db_session):
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_channel(
+        db_session, run=run, channel_name="collab-1", visibility="collab_private",
+    )
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="collab-1",
+        user_id=user.id, agent_id="su",
     ) is False

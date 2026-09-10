@@ -12,6 +12,7 @@ import uuid
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.channels import SEEDED_CHANNELS
 from src.agent.ids import mint_local_ts
 from src.agent.inbound_state import PI_INBOUND_PENDING
 from src.models import (
@@ -68,9 +69,20 @@ async def pi_may_post_to_channel(
     through their bot (``agent_id``); ``removed_at`` is honoured so revoking
     membership revokes write access.
 
-    Unknown channel names resolve to public (``_resolve_channel``'s documented
-    fallback), so they are allowed and land in a ``local:`` channel — the same
-    behaviour as before this check existed.
+    A channel name with no ``agent_channels`` row for this run is refused
+    UNLESS it is one of the app's own ``SEEDED_CHANNELS`` (SEC3-5, audit
+    2026-09-10): ``_resolve_channel``'s fallback mints a ``local:<name>``
+    public row for any name at all, which previously let an authenticated PI
+    write into an arbitrary invented channel name -- including the real name
+    of another run's private channel, which has no row IN THIS run since
+    ``channel_name`` is only unique per run. Seeded channels (``general`` and
+    friends) are exempted from the refusal because an ``agent_channels`` row
+    for them is only materialized lazily, on first join/post within a run —
+    e.g. the web message form's own default ("general") — so a brand-new run
+    that has not posted there yet must not be refused for a channel the app
+    itself considers public by construction. Any other known public channel
+    remains open to any PI in the run; known ``collab_private`` channels
+    still require membership below.
     """
     row = (await db.execute(
         select(AgentChannel.id, AgentChannel.visibility)
@@ -81,7 +93,7 @@ async def pi_may_post_to_channel(
         .limit(1)
     )).first()
     if not row:
-        return True
+        return channel_name in SEEDED_CHANNELS
     channel_pk, visibility = row
     if visibility != VISIBILITY_COLLAB_PRIVATE:
         return True
