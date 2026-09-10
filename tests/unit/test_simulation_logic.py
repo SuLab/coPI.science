@@ -3096,6 +3096,54 @@ class TestPollInboundFromDbGuardsTheHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_a_persistently_failing_handled_write_does_not_rerun_the_handler(self):
+        """K-2 follow-up #2 (opus review, audit 2026-09-10): the success path
+        used to pop the attempt counter unconditionally BEFORE even trying the
+        HANDLED write — a persistently failing write left the counter forever
+        empty, so SEC2-1's cap never engaged and the handler re-ran (repeating
+        any non-idempotent side effect, e.g. a DM) every tick forever. It must
+        instead run the handler once, then only retry the WRITE on later
+        ticks, giving up (terminal, via the id-based path) once
+        PI_INBOUND_MAX_ATTEMPTS is reached."""
+        from datetime import UTC, datetime
+
+        from src.agent.simulation import (
+            PI_INBOUND_HANDLED,
+            PI_INBOUND_MAX_ATTEMPTS,
+        )
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]  # pi_inbound_state=None by default
+        handler_calls = []
+
+        async def handler(entry):
+            handler_calls.append(entry)
+
+        engine = self._engine(rows, handler)
+        real_mark = engine._mark_pi_inbound_state
+
+        async def _flaky_mark(message_ts, state):
+            if state == PI_INBOUND_HANDLED:
+                return False
+            return await real_mark(message_ts, state)
+
+        engine._mark_pi_inbound_state = _flaky_mark
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS + 1):
+            await engine._poll_inbound_from_db()
+
+        assert len(handler_calls) == 1, (
+            "the handler must not be re-run once it has already succeeded — "
+            f"got {len(handler_calls)} calls"
+        )
+        assert rows[0].pi_inbound_state == PI_INBOUND_HANDLED, (
+            "past the attempt cap the row must still end up stamped HANDLED, "
+            "via the id-based give-up path"
+        )
+        assert engine._pi_inbound_attempts == {}
+        assert engine._pi_inbound_handled_pending_mark == set()
+
+    @pytest.mark.asyncio
     async def test_attempt_entries_for_rows_no_longer_in_the_batch_are_pruned(self, monkeypatch):
         """The per-message_ts attempt dict is bounded by the polled batch: an
         entry whose row no longer appears (stamped terminal, superseded) is

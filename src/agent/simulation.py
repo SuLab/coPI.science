@@ -544,6 +544,19 @@ class SimulationEngine:
         # _prune_stale_pi_inbound_attempts drop entries nobody has touched
         # recently, so this dict cannot grow without bound.
         self._pi_inbound_attempts: dict[str, tuple[int, float]] = {}
+        # message_ts values whose handler has already run successfully but
+        # whose HANDLED marker write has not yet committed (K-2 follow-up #2 /
+        # simulation-poller review, audit 2026-09-10). Without this,
+        # `_poll_inbound_from_db` cannot tell "the handler hasn't run yet"
+        # apart from "the handler already ran; only the write is failing" —
+        # both look identical as `pi_inbound_state == 'ingested'` on the next
+        # poll — and would re-invoke `_handle_pi_inbound_entry`, repeating a
+        # non-idempotent side effect (e.g. a DM), every tick the write keeps
+        # failing. A message_ts in this set skips straight to retrying the
+        # write; it is discarded on a successful write or once the row is
+        # given up terminal, and pruned alongside `_pi_inbound_attempts` for
+        # rows no longer in the polled batch.
+        self._pi_inbound_handled_pending_mark: set[str] = set()
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -3453,6 +3466,7 @@ class SimulationEngine:
         bounds the dict for every other exit path without any time window."""
         for ts in [ts for ts in self._pi_inbound_attempts if ts not in current_batch]:
             del self._pi_inbound_attempts[ts]
+        self._pi_inbound_handled_pending_mark &= current_batch
 
     async def _poll_inbound_from_db(self) -> None:
         """Ingest messages written to the DB by other processes.
@@ -3660,47 +3674,87 @@ class SimulationEngine:
                 # docs/plans/2026-09-04-decisions/task-7.md.
                 if not in_log:
                     self.message_log.append(entry)
-                try:
-                    await self._handle_pi_inbound_entry(entry)
-                except Exception as exc:
+                # K-2 follow-up #2 (opus review, audit 2026-09-10): if the
+                # handler already succeeded on a prior tick and only the
+                # HANDLED write below kept failing, this row's message_ts is
+                # in `_pi_inbound_handled_pending_mark` — skip straight to
+                # retrying the write rather than re-running the handler and
+                # repeating a non-idempotent side effect (e.g. a DM).
+                already_applied = r.message_ts in self._pi_inbound_handled_pending_mark
+                if not already_applied:
+                    try:
+                        await self._handle_pi_inbound_entry(entry)
+                    except Exception as exc:
+                        attempts = self._record_pi_inbound_attempt(r.message_ts)
+                        if attempts >= PI_INBOUND_MAX_ATTEMPTS:
+                            logger.error(
+                                "[%s] Giving up on PI inbound side effects for %s "
+                                "after %d attempts: %s",
+                                entry.channel, entry.thread_ts or entry.ts, attempts, exc,
+                            )
+                            # Terminal: stop the cursor-independent 'ingested'
+                            # disjunct from re-selecting this row forever (SEC2-1).
+                            # The PI's text is already in the log either way.
+                            # K-7 (audit 2026-09-10): only forget the attempt
+                            # count once the HANDLED write actually commits — a
+                            # failed write leaves the row retryable, so popping
+                            # unconditionally would reset the cap to zero on the
+                            # very next poll of the same row.
+                            if await self._mark_pi_inbound_row_handled(r.id):
+                                self._pi_inbound_attempts.pop(r.message_ts, None)
+                            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                                self._pi_inbox_cursor = r.created_at
+                            continue
+                        logger.error(
+                            "[%s] Failed to apply PI inbound side effects for %s "
+                            "(attempt %d/%d): %s",
+                            entry.channel, entry.thread_ts or entry.ts, attempts,
+                            PI_INBOUND_MAX_ATTEMPTS, exc,
+                        )
+                        # 'ingested' is durable, so the next poll re-runs the
+                        # handler for as long as the row stays inside
+                        # PI_INBOX_LOOKBACK_S — capped at PI_INBOUND_MAX_ATTEMPTS
+                        # in-process retries, past which the row is stamped
+                        # HANDLED above regardless of the lookback window. The
+                        # cursor stays put so a retry within the window is
+                        # re-scanned. At-least-once: a retry can repeat a
+                        # non-idempotent side effect (e.g. a DM) that the failed
+                        # attempt already ran.
+                        continue
+                # K-2 follow-up #2 (opus review, audit 2026-09-10): the
+                # attempt counter used to be popped here unconditionally,
+                # before even trying this write — a persistently failing
+                # HANDLED write left the counter permanently empty, so the
+                # SEC2-1 cap never engaged and (pre `already_applied`, above)
+                # the handler re-ran every tick forever. Now the counter (and
+                # the pending-mark set) are only cleared on a write that
+                # actually commits; a failing write records an attempt and,
+                # past the cap, gives up the same way the handler-exception
+                # branch does.
+                marked = await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_HANDLED)
+                if marked:
+                    self._pi_inbound_attempts.pop(r.message_ts, None)
+                    self._pi_inbound_handled_pending_mark.discard(r.message_ts)
+                else:
+                    self._pi_inbound_handled_pending_mark.add(r.message_ts)
                     attempts = self._record_pi_inbound_attempt(r.message_ts)
                     if attempts >= PI_INBOUND_MAX_ATTEMPTS:
                         logger.error(
-                            "[%s] Giving up on PI inbound side effects for %s "
-                            "after %d attempts: %s",
-                            entry.channel, entry.thread_ts or entry.ts, attempts, exc,
+                            "[%s] Giving up on marking %s HANDLED after %d attempts "
+                            "— side effects already applied; stamping terminal by id",
+                            entry.channel, entry.thread_ts or entry.ts, attempts,
                         )
-                        # Terminal: stop the cursor-independent 'ingested'
-                        # disjunct from re-selecting this row forever (SEC2-1).
-                        # The PI's text is already in the log either way.
-                        # K-7 (audit 2026-09-10): only forget the attempt
-                        # count once the HANDLED write actually commits — a
-                        # failed write leaves the row retryable, so popping
-                        # unconditionally would reset the cap to zero on the
-                        # very next poll of the same row.
                         if await self._mark_pi_inbound_row_handled(r.id):
                             self._pi_inbound_attempts.pop(r.message_ts, None)
-                        if r.created_at and r.created_at > self._pi_inbox_cursor:
-                            self._pi_inbox_cursor = r.created_at
-                        continue
-                    logger.error(
-                        "[%s] Failed to apply PI inbound side effects for %s "
-                        "(attempt %d/%d): %s",
-                        entry.channel, entry.thread_ts or entry.ts, attempts,
-                        PI_INBOUND_MAX_ATTEMPTS, exc,
-                    )
-                    # 'ingested' is durable, so the next poll re-runs the
-                    # handler for as long as the row stays inside
-                    # PI_INBOX_LOOKBACK_S — capped at PI_INBOUND_MAX_ATTEMPTS
-                    # in-process retries, past which the row is stamped
-                    # HANDLED above regardless of the lookback window. The
-                    # cursor stays put so a retry within the window is
-                    # re-scanned. At-least-once: a retry can repeat a
-                    # non-idempotent side effect (e.g. a DM) that the failed
-                    # attempt already ran.
-                    continue
-                self._pi_inbound_attempts.pop(r.message_ts, None)
-                await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_HANDLED)
+                            self._pi_inbound_handled_pending_mark.discard(r.message_ts)
+                    else:
+                        logger.warning(
+                            "[%s] HANDLED marker write failed for %s after the "
+                            "handler already succeeded (attempt %d/%d); will retry "
+                            "the write next poll without re-running the handler",
+                            entry.channel, entry.thread_ts or entry.ts, attempts,
+                            PI_INBOUND_MAX_ATTEMPTS,
+                        )
             else:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
                 self.message_log.append(entry)
