@@ -31,18 +31,13 @@ import threading
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from src.agent import main as _main_module
-from src.agent.slack_client import SHUTDOWN_REQUESTED, SlackShuttingDown, _sleep_interruptibly
+from src.agent.slack_client import SlackShuttingDown, _sleep_interruptibly
 from src.services.slack_executor import run_slack_call
 
-
-@pytest.fixture(autouse=True)
-def _clear_shutdown_requested():
-    SHUTDOWN_REQUESTED.clear()
-    yield
-    SHUTDOWN_REQUESTED.clear()
+# P-4 (opus review, audit 2026-09-10): SHUTDOWN_REQUESTED is cleared before
+# and after every test by tests/conftest.py's autouse
+# `_clear_slack_shutdown_requested` fixture; no per-file fixture needed here.
 
 
 async def test_a_single_signal_does_not_abort_a_sleep_shorter_than_the_grace_period(monkeypatch):

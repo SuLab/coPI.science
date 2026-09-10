@@ -34,19 +34,23 @@ from src.services.slack_executor import (
 
 @pytest.fixture(autouse=True)
 def _reset_shutdown_state():
-    """Several tests in this file force a REAL pool into existence or set the
-    process-wide shutdown event — reset both so tests stay order-independent
-    within this file and do not leak state into other test files sharing the
-    same pytest process.
+    """Several tests in this file force a REAL pool into existence — shut it
+    down so tests stay order-independent within this file and do not leak a
+    live pool into other test files sharing the same pytest process.
 
     A ``ThreadPoolExecutor`` that is never ``.shutdown()``ed leaks up to
     ``SLACK_IO_MAX_WORKERS`` (16) live, non-daemon worker threads, so this
-    also shuts down whatever pool a test leaves assigned to the module
-    global (real or a throwaway substituted via ``monkeypatch``).
+    shuts down whatever pool a test leaves assigned to the module global
+    (real or a throwaway substituted via ``monkeypatch``).
+
+    P-4 (opus review, audit 2026-09-10): does NOT also clear
+    ``SHUTDOWN_REQUESTED`` any more — ``shutdown_slack_executor()`` sets it as
+    a side effect, but tests/conftest.py's autouse
+    ``_clear_slack_shutdown_requested`` fixture clears it after every test
+    regardless, so doing it again here was redundant.
     """
     yield
     shutdown_slack_executor()
-    SHUTDOWN_REQUESTED.clear()
 
 
 def test_the_slack_pool_is_a_bounded_dedicated_executor():

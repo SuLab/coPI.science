@@ -25,6 +25,32 @@ from testcontainers.postgres import PostgresContainer
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _clear_slack_shutdown_requested():
+    """Clear `slack_client.SHUTDOWN_REQUESTED` before AND after every test
+    (P-4, opus review, audit 2026-09-10).
+
+    It is process-wide and sticky by design (see its definition in
+    src/agent/slack_client.py) -- nothing in src/ ever clears it once set,
+    because a real process that set it is exiting anyway. Several test files
+    (test_slack_client_contract.py, test_slack_executor.py,
+    test_agent_main_shutdown_grace.py, ...) set it deliberately to exercise
+    shutdown behaviour, and previously relied on their own per-file
+    teardown (or a manual clear inside the test) to reset it before the next
+    test ran. That made every file implicitly depend on every other file's
+    cleanup discipline: one file forgetting to clear it, or a test failing
+    before its own `finally`/fixture teardown ran, would silently poison
+    every later test in the same pytest process with "shutdown already
+    requested". A single autouse fixture here removes that ordering
+    dependency regardless of which file runs next or in what order.
+    """
+    from src.agent.slack_client import SHUTDOWN_REQUESTED
+
+    SHUTDOWN_REQUESTED.clear()
+    yield
+    SHUTDOWN_REQUESTED.clear()
+
+
 @pytest.fixture(scope="session")
 def _pg_container():
     # Allow pointing the suite at an already-running Postgres via TEST_DATABASE_URL
