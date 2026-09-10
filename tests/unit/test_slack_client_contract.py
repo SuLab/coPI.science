@@ -652,6 +652,87 @@ def test_the_page_walk_is_bounded_even_if_slack_never_repeats_a_cursor():
     assert len(exc.value.partial) == MAX_PAGES
 
 
+def test_the_private_wait_budget_kwarg_never_reaches_the_slack_method():
+    """`_wait_budget` is `_call_with_retry`/`_api`'s own seam for `_paginate` — it must
+    never be forwarded into the kwargs a slack_sdk method receives."""
+    seen: dict = {}
+
+    def fake_method(**kwargs):
+        seen.update(kwargs)
+        return {"ok": True}
+
+    c = _client(RecordingSlackClient())
+    c._call_with_retry(fake_method, _wait_budget=5.0, channel="C_GENERAL")
+    assert "_wait_budget" not in seen
+    assert seen == {"channel": "C_GENERAL"}
+
+
+def test_a_single_call_with_no_wait_budget_override_is_unchanged(monkeypatch):
+    """A caller that never touches `_wait_budget` (i.e. everything except
+    `_paginate`) keeps using the module default, exactly as before this seam
+    existed."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
+    )
+    _client(fake).post_message("general", "hi")
+    assert slept == [17.0]
+    assert len(fake.calls_to("chat_postMessage")) == 2
+
+
+def test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page(monkeypatch):
+    """Root cause of R-1: before this fix, every page got its own full
+    `RATE_LIMIT_WAIT_BUDGET_SECONDS`, so a listing that stayed throttled across
+    many pages could block for MAX_PAGES * that budget. `_paginate` now owns one
+    listing-level budget shared across all its pages.
+
+    Uses a fake monotonic clock that only advances on `time.sleep` (which the
+    module-level `_no_real_sleep` fixture would otherwise make free) so the
+    listing deadline is exercised deterministically and fast, without a real
+    multi-second sleep.
+    """
+    monkeypatch.setattr(slack_client_module, "PAGINATION_WAIT_BUDGET_SECONDS", 0.2)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+
+    class _RateLimitedEveryOtherPage:
+        """Two 429s (0.05s Retry-After each) before every page's success, forever —
+        an endless cursor that never stops on its own, standing in for a
+        listing Slack keeps throttling."""
+
+        def __init__(self):
+            self.calls = 0
+            self._fails_left = 2
+            self.page_n = 0
+
+        def conversations_list(self, **kwargs):
+            self.calls += 1
+            if self._fails_left > 0:
+                self._fails_left -= 1
+                raise slack_error("ratelimited", retry_after=0.05)
+            self._fails_left = 2
+            self.page_n += 1
+            return _SlackResponse({
+                "ok": True,
+                "channels": [{"name": f"c{self.page_n}", "id": f"C{self.page_n}"}],
+                "response_metadata": {"next_cursor": f"cur{self.page_n}"},
+            })
+
+    fake = _RateLimitedEveryOtherPage()
+    c = _client(fake)
+    with pytest.raises(SlackListingIncomplete):
+        c._paginate("conversations_list", "channels")
+    # If the bug were still here, exhausting this fake's endless throttle would take
+    # up to MAX_PAGES pages, each independently allowed to sleep up to its own
+    # (unrelated, much larger) per-call budget — clock["t"] would climb well past the
+    # listing budget. Bounding it near the listing budget confirms the budget is
+    # shared across pages, not reset per page.
+    assert clock["t"] < 2 * 0.2
+    assert fake.page_n < MAX_PAGES
+
+
 def test_exclude_archived_defaults_to_false_because_an_archived_channel_owns_its_name():
     """Both callers ask this question to learn whether a *name* is in use, and Slack
     keeps an archived channel's name reserved. Hiding archived channels would send

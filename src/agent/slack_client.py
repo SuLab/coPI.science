@@ -150,6 +150,16 @@ SLACK_PAGE_LIMIT = 200
 # repeating one. 200 pages x 200 items is far past anything this system holds.
 MAX_PAGES = 200
 
+# Listing-level wall-clock deadline for `_paginate`. `RATE_LIMIT_WAIT_BUDGET_SECONDS`
+# bounds one Slack call, but `_paginate` can issue up to MAX_PAGES of them — a
+# throttled listing that let every page use the full per-call budget could block
+# the synchronous engine loop for 200 * 180s. This is the ceiling on the *whole*
+# listing instead: each page's retry gets whatever remains of it, so total time
+# blocked on one listing cannot exceed this regardless of page count. Sized well
+# above a single call's budget (180s) so an ordinary listing that hits one bad
+# page still gets a full retry budget for it.
+PAGINATION_WAIT_BUDGET_SECONDS = 600.0
+
 # chat.postMessage splits a longer `text` into several messages *and returns only
 # the last chunk's ts*. Measured against the live workspace: 4000 and 4001
 # characters arrive as one message; 4050 arrives as two of 4000 + 50 and the
@@ -309,7 +319,7 @@ class AgentSlackClient:
     # The chokepoint
     # ------------------------------------------------------------------
 
-    def _api(self, method: str, **kwargs) -> Any:
+    def _api(self, method: str, *, _wait_budget: float | None = None, **kwargs) -> Any:
         """Call one Slack Web API endpoint. **Every** call in this class comes here.
 
         Takes the slack_sdk method *name* rather than a bound callable, which is
@@ -318,14 +328,20 @@ class AgentSlackClient:
         source-level test in ``tests/unit/test_slack_client_contract.py`` fails if
         a second one appears. A new endpoint therefore inherits the retry/backoff
         path by construction instead of by the author remembering.
+
+        ``_wait_budget`` is a private seam for ``_paginate``, which needs to cap a
+        single page's retry budget to whatever remains of the *listing's* budget
+        rather than the full per-call default. It is keyword-only on this method
+        (and on ``_call_with_retry``) precisely so it is consumed here and never
+        forwarded into ``kwargs`` — it can never reach the slack_sdk method.
         """
         if self._client is None:
             raise SlackNotConnected(
                 f"[{self.agent_id}] {method} called with no authenticated client"
             )
-        return self._call_with_retry(getattr(self._client, method), **kwargs)
+        return self._call_with_retry(getattr(self._client, method), _wait_budget=_wait_budget, **kwargs)
 
-    def _call_with_retry(self, method, **kwargs) -> Any:
+    def _call_with_retry(self, method, *, _wait_budget: float | None = None, **kwargs) -> Any:
         """Call a Slack API method with retry on rate limiting.
 
         The retry primitive behind ``_api``. Kept as a separate public-ish seam
@@ -333,14 +349,14 @@ class AgentSlackClient:
         (``conversations_archive``) and must still get the backoff.
 
         Bounded by two independent limits rather than a fixed attempt count
-        (#23 V7): a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS``),
-        so a legitimate ``Retry-After: 60`` gets several real waits rather than
-        being exhausted by attempt count alone, and a hard attempt ceiling
-        (``MAX_RETRIES``), so a short or zero Retry-After cannot spin through
-        hundreds of near-instant retries while staying "within budget". Giving
-        up is decided *before* sleeping — a wait that would push the cumulative
-        total over budget is not taken at all, so the total time actually slept
-        never exceeds the budget.
+        (#23 V7): a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS`` by
+        default, or ``_wait_budget`` when a caller supplies one), so a legitimate
+        ``Retry-After: 60`` gets several real waits rather than being exhausted by
+        attempt count alone, and a hard attempt ceiling (``MAX_RETRIES``), so a
+        short or zero Retry-After cannot spin through hundreds of near-instant
+        retries while staying "within budget". Giving up is decided *before*
+        sleeping — a wait that would push the cumulative total over budget is not
+        taken at all, so the total time actually slept never exceeds the budget.
 
         ``last_exc`` exists because Python unbinds an ``except ... as exc`` name at the
         end of the except block. Referring to ``exc`` after the loop raised
@@ -349,6 +365,7 @@ class AgentSlackClient:
         handler entirely and crashed the turn. That happens precisely when Slack is
         throttling us, i.e. when the system is busiest.
         """
+        wait_budget = RATE_LIMIT_WAIT_BUDGET_SECONDS if _wait_budget is None else _wait_budget
         last_exc: SlackApiError | None = None
         total_slept = 0.0
         attempts_made = 0
@@ -365,11 +382,11 @@ class AgentSlackClient:
                     default=5.0,
                     cap=MAX_RETRY_AFTER,
                 )
-                if total_slept + retry_after > RATE_LIMIT_WAIT_BUDGET_SECONDS:
+                if total_slept + retry_after > wait_budget:
                     logger.warning(
                         "[%s] Rate limit wait budget exhausted after %.1fs/%.1fs "
                         "(attempt %d/%d) — giving up rather than sleeping %.1fs more",
-                        self.agent_id, total_slept, RATE_LIMIT_WAIT_BUDGET_SECONDS,
+                        self.agent_id, total_slept, wait_budget,
                         attempts_made, MAX_RETRIES, retry_after,
                     )
                     break
@@ -377,13 +394,13 @@ class AgentSlackClient:
                     "[%s] Rate limited, retrying in %.1fs (attempt %d/%d, "
                     "%.1fs/%.1fs of wait budget used)",
                     self.agent_id, retry_after, attempts_made, MAX_RETRIES,
-                    total_slept, RATE_LIMIT_WAIT_BUDGET_SECONDS,
+                    total_slept, wait_budget,
                 )
                 time.sleep(retry_after)
                 total_slept += retry_after
         raise SlackApiError(
             f"Rate limit retries exhausted after {attempts_made} attempt(s), "
-            f"waited {total_slept:.1f}s (budget {RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s)",
+            f"waited {total_slept:.1f}s (budget {wait_budget:.0f}s)",
             response=last_exc.response if last_exc else None,
         )
 
@@ -412,17 +429,28 @@ class AgentSlackClient:
 
         An empty page carrying a cursor is followed, not treated as the end —
         Slack does return those.
+
+        Owns a listing-level wall-clock deadline (``PAGINATION_WAIT_BUDGET_SECONDS``)
+        independent of any single page's retry budget: each page's ``_api`` call is
+        given only what remains of the deadline, so a sustained throttle that keeps
+        producing fresh cursors is cut off by the listing budget long before
+        ``MAX_PAGES`` * ``RATE_LIMIT_WAIT_BUDGET_SECONDS`` of blocking is reached. A
+        page whose remaining budget is exhausted before it even starts is asked for
+        no wait at all — it either succeeds immediately or fails immediately — which
+        surfaces as the same "a page after the first failed" path below.
         """
         items: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
         cursor = ""
+        listing_started = time.monotonic()
         for page in range(MAX_PAGES):
             call = dict(kwargs)
             call["limit"] = limit
             if cursor:
                 call["cursor"] = cursor
+            remaining = PAGINATION_WAIT_BUDGET_SECONDS - (time.monotonic() - listing_started)
             try:
-                result = self._api(method, **call)
+                result = self._api(method, _wait_budget=max(remaining, 0.0), **call)
             except SlackApiError as exc:
                 if page == 0:
                     raise
