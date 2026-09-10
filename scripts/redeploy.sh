@@ -126,13 +126,42 @@ echo "==> [3/6] running migrate"
 compose up -d migrate
 # REV3-5 (opus review, audit 2026-09-08): `compose ps -aq migrate` can return SEVERAL
 # ids -- a stale one-off `migrate` container from an earlier `docker compose run`
-# left alongside the one `up -d migrate` just created. Verified empirically: compose
-# lists them OLDEST-first, so the newest (the one this run actually produced) is the
-# LAST line, not the first -- `tail -n1`, not `head -n1`. Passing the whole
+# left alongside the one `up -d migrate` just created. Passing the whole
 # newline-joined blob to `docker wait "$MIGRATE_CID"` as a single argument is exactly
 # what real `docker wait` rejects (no parseable exit code, non-zero exit), tripping
 # the "failed to report an exit code" abort below even after a SUCCESSFUL migration.
-MIGRATE_CID="$(compose ps -aq migrate | tail -n1)"
+#
+# REV4-2 (audit 2026-09-08): selecting by list POSITION (`tail -n1`, on the assumption
+# compose always lists them oldest-first) is not reliable -- a stale one-off
+# `<proj>-migrate-run-<hash>` container can sort AFTER the persistent
+# `<proj>-migrate-1` service container this run actually cares about. Select by the
+# `com.docker.compose.oneoff` label instead (`False` on the service container `up -d`
+# creates, `True` on every `docker compose run`/`exec`-style one-off) -- that is what
+# actually distinguishes them, not creation order. Kept dependency-free (no jq, no
+# project-name derivation): `compose ps -aq migrate` already scopes the id list to
+# this project's `migrate` service, so only the oneoff label needs checking, via
+# `docker inspect` (already used below for the app healthcheck).
+MIGRATE_CIDS="$(compose ps -aq migrate)"
+if [ -z "$MIGRATE_CIDS" ]; then
+  die "no migrate container found after \`up -d migrate\` -- cannot verify its exit code.
+  app/worker remain stopped. See docs/production-migration.md section 10.6."
+fi
+MIGRATE_CID=""
+while IFS= read -r cid; do
+  [ -z "$cid" ] && continue
+  ONEOFF="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid" 2>/dev/null || echo "")"
+  if [ "$ONEOFF" != "True" ]; then
+    MIGRATE_CID="$cid"
+  fi
+done <<EOF
+$MIGRATE_CIDS
+EOF
+if [ -z "$MIGRATE_CID" ]; then
+  # Nothing was recognizably non-oneoff (e.g. every candidate was itself a one-off, or
+  # `docker inspect` could not resolve the label) -- fall back to the last id in list
+  # order, matching REV3-5's original behaviour, rather than refusing outright.
+  MIGRATE_CID="$(printf '%s\n' "$MIGRATE_CIDS" | tail -n1)"
+fi
 if [ -z "$MIGRATE_CID" ]; then
   die "no migrate container found after \`up -d migrate\` -- cannot verify its exit code.
   app/worker remain stopped. See docs/production-migration.md section 10.6."

@@ -321,6 +321,76 @@ def test_a_stale_leftover_migrate_container_does_not_abort_a_successful_migratio
     )
 
 
+# --- REV4-2 (audit 2026-09-08) ------------------------------------------------------
+# REV3-5's `tail -n1` assumed `ps -aq migrate` always lists containers OLDEST-first, so
+# the newest (the one this run's `up -d migrate` just created) is the last line. That
+# ordering is not guaranteed: a stale one-off `<proj>-migrate-run-<hash>` container from
+# an earlier `docker compose run migrate` can sort AFTER the persistent
+# `<proj>-migrate-1` service container this run actually cares about, so `tail -n1`
+# grabs the STALE one-off instead. redeploy.sh must select by the
+# `com.docker.compose.oneoff` label instead of by list position.
+
+REAL_MIGRATE_CID = "real-migrate-service-cid"
+STALE_ONEOFF_CID = "stale-migrate-oneoff-cid"
+
+
+def _shim_with_stale_oneoff_sorting_after_the_real_container(
+    tmp_path: Path, *, migrate_exit: int = 0
+) -> tuple[Path, Path]:
+    """`ps -aq migrate` lists the REAL service container first and the STALE one-off
+    SECOND -- the reverse of REV3-5's assumed ordering. `docker inspect` distinguishes
+    them by the `com.docker.compose.oneoff` label, exactly like the real CLI."""
+    log = tmp_path / "argv.log"
+    shim = tmp_path / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> {log}\n'
+        'case "$*" in\n'
+        f'  *"ps -aq migrate"*) printf \'%s\\n%s\\n\' {REAL_MIGRATE_CID} {STALE_ONEOFF_CID} ;;\n'
+        f'  *"inspect -f "*"oneoff"*"{REAL_MIGRATE_CID}"*) echo False ;;\n'
+        f'  *"inspect -f "*"oneoff"*"{STALE_ONEOFF_CID}"*) echo True ;;\n'
+        f'  "wait {REAL_MIGRATE_CID}") echo {migrate_exit} ;;\n'
+        # The stale one-off must never be waited on -- if it is, fail loudly with no
+        # parseable exit code, exactly like the real CLI does on the wrong/malformed id.
+        f'  "wait {STALE_ONEOFF_CID}") exit 1 ;;\n'
+        f'  *"ps -q app"*) echo {APP_CID} ;;\n'
+        f'  *"inspect -f "*"{APP_CID}"*) echo healthy ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    return shim, log
+
+
+def test_a_stale_oneoff_container_sorting_after_the_real_one_is_not_selected(tmp_path):
+    _shim_with_stale_oneoff_sorting_after_the_real_container(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "APP_HEALTH_TIMEOUT_SECONDS": "1",
+        "APP_HEALTH_POLL_INTERVAL_SECONDS": "0",
+    }
+    env.pop("COMPOSE_FILE", None)
+    proc = subprocess.run(
+        [str(REDEPLOY_SH), "-f", PROD_FILE, "-f", OVERRIDE_FILE],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    log = tmp_path / "argv.log"
+    text = log.read_text()
+    assert any(line.strip() == f"wait {REAL_MIGRATE_CID}" for line in text.splitlines()), (
+        "redeploy.sh must select the migrate container by the "
+        f"com.docker.compose.oneoff label, not by list position:\n{text}"
+    )
+    assert not any(
+        line.strip() == f"wait {STALE_ONEOFF_CID}" for line in text.splitlines()
+    ), f"redeploy.sh waited on the stale one-off container instead of the real one:\n{text}"
+
+
 def test_app_worker_are_stopped_gracefully_with_a_30s_timeout(tmp_path):
     proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
     assert proc.returncode == 0, proc.stdout + proc.stderr
