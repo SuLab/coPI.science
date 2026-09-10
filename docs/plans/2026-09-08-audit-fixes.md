@@ -910,3 +910,136 @@ query's result with `self._channel_id_map`. Test (red first):
 `tests/integration/test_state_rebuild.py`.
 
 **L-7 — this doc.**
+
+## M — opus review of the L follow-ups (2026-09-10)
+
+A further opus review of the L-1/L-2/L-3 follow-ups above found six residual defects,
+all fixed on this branch.
+
+**M-1 (LOW-MEDIUM) — the SIGTERM/SIGINT abort fired at t=0, aborting even a
+short, otherwise-survivable Slack retry sleep.** L-1 made the agent-run process's
+`shutdown()` call `slack_client.signal_shutdown()` immediately on the first signal —
+but a typical Slack `Retry-After` backoff (~10s) would have finished naturally well
+inside the runbook's `docker stop -t 30` grace window. Aborting it anyway makes
+`_post_message` record that post DB-only (`slack_ts=None`), permanently breaking that
+thread's Slack mirror on an ordinary throttle, not just a genuinely stuck call. Fixed:
+factored the handler into `_make_shutdown_handler`, which schedules the abort via
+`loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)` on the first
+signal (20s, comfortably under the 30s stop grace) instead of calling it immediately; a
+second signal still aborts right away. Test (red first):
+`tests/unit/test_agent_main_shutdown_grace.py` — a single signal does not abort a sleep
+shorter than the grace period; a second signal aborts immediately without waiting for
+`call_later`.
+
+**M-2 (LOW) — the fallback shutdown event was never cleared, permanently killing
+every later off-pool retry in a shared interpreter.** L-1's `slack_client.SHUTTING_DOWN`
+(the fallback event for a caller never bound to a pool, e.g. `AgentSlackClient` calls
+made directly on `src/agent/main.py`'s event-loop thread) is set by `signal_shutdown()`
+but nothing in `src/` ever cleared it — K-9's lazy pool re-creation cleared the
+per-pool event but not this one, so any off-pool caller in a process that shuts the
+pool down and later re-creates it without exiting (most concretely the test suite,
+sharing one interpreter across many independent lifespans) would find the fallback
+permanently SET and abort its very next retry sleep instantly, forever after. Fixed:
+added `slack_client.clear_shutdown()`, called from `_get_executor()` whenever it mints
+a fresh pool, mirroring the per-pool event's own re-creation semantics. Test (red
+first): `test_get_executor_clears_the_fallback_event_when_it_creates_a_new_pool` in
+`tests/unit/test_slack_executor.py`.
+
+**M-3 (LOW) — the profile mtime watcher could resurrect a force-cleared private
+profile.** L-3's `force_clear_private_profile()` path runs when a genuine clear's
+`unlink()` fails — the cache is forced to the default text, but the stale file stays on
+disk. `_sync_profiles_from_disk`'s per-tick mtime watcher has no way to distinguish
+that file from a legitimate external edit: if anything later touches its mtime, the
+watcher calls `reload_private_profile()`, silently re-reading and resurrecting the very
+instruction the PI cleared. Fixed: added `self._force_cleared_private: set[str]`,
+populated at the L-3 call site and consulted by the watcher, which now retries the
+unlink and re-applies `force_clear_private_profile()` for a marked agent instead of
+reloading, dropping the marker once a retry actually removes the file. Test (red
+first): `test_force_cleared_private_profile_is_not_resurrected_by_the_watcher` in
+`tests/unit/test_simulation_logic.py`.
+
+**M-4 (LOW) — the DB-resync branch logged "resynced" even when the disk write
+failed.** `_sync_one_agent_private_profile_from_db`'s DB-is-stale-relative-to-disk
+branch called `agent.update_private_profile(...)` and unconditionally logged an INFO
+"resynced" line, ignoring its bool return value — `update_private_profile()` returns
+`False` (cache still updated) when the disk write itself fails, so the log was
+claiming a clean disk write that never happened. Fixed: branch on the return value;
+log the WARNING "cache updated, disk write failed" instead of the "resynced" INFO when
+it's `False`. Test (red first):
+`test_a_failed_resync_write_logs_a_warning_not_the_resynced_info` in
+`tests/integration/test_state_rebuild.py`.
+
+**M-5 (LOW) — a persistently failing PI-inbound fallback stamp retried forever with
+no terminal state.** Once `_poll_inbound_from_db`'s HANDLED-marker-write give-up branch
+falls back to `_mark_pi_inbound_row_handled(r.id)`, a failure of THAT write was not
+accounted for at all: the row stayed in `_pi_inbound_handled_pending_mark`, and since
+`_pi_inbound_attempts` was already at `PI_INBOUND_MAX_ATTEMPTS`, the very next poll hit
+the same give-up branch again — forever, one WARNING and one fallback-write attempt per
+poll, unlike every other give-up path in this poller, which all reach a terminal
+outcome. Fixed: added `self._pi_inbound_fallback_attempts` (a separate budget for the
+fallback stamp) and `self._pi_inbound_parked` (rows whose fallback budget is also
+exhausted); `_poll_inbound_from_db` now skips any parked row unconditionally, and logs
+a single ERROR (more severe than the write's own WARNING, since both durable write
+paths are now dead ends) the moment a row is parked. Test (red first):
+`test_a_persistently_failing_fallback_stamp_is_parked_after_the_write_gives_up` in
+`tests/unit/test_simulation_logic.py`.
+
+**M-6 (LOW) — a test's own sleeper thread could hang pytest for 30s on a failed
+assertion.** `test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event`
+(`tests/unit/test_slack_executor.py`) spins a plain, non-daemon thread sleeping through
+`_sleep_interruptibly(30.0)` and unconditionally clears `SHUTTING_DOWN` in `finally` —
+if the abort assertion ever failed, the thread would still be alive and sleeping, and
+clearing its only abort signal right then would leave it running for the remaining
+~27s with nothing checking it, while a non-daemon thread would still hold up the
+interpreter (and thus the test run) at exit. Fixed: made the thread `daemon=True` and,
+in `finally`, re-set the event and joined with a generous timeout before clearing it,
+guaranteeing the thread observes the signal and exits before its dependency is reset
+out from under it. No new behavioral test — this only hardens the harness against a
+hypothetical future regression; the existing passing-case assertions are unchanged.
+
+M-7 and M-8 below come from a real-LLM live-run finding rather than the same-day opus
+review; kept in this section since they continue the same M numbering.
+
+A live full-run test (`test_full_run_live::test_a_full_run_keeps_both_stores_in_bijection`)
+surfaced two further defects under real Slack throttling that the mocked unit/integration
+suites cannot reach.
+
+**M-7 (HIGH, data loss) — a ThreadDecision write that fails is dropped, not retried.**
+`_close_thread`'s `ThreadDecision` insert is wrapped in a single try/except that logs and
+gives up — the live run's captured log showed `Failed to log thread decision: ` with an
+EMPTY exception message (a bare `TimeoutError()`), following a 30s blocking
+`time.sleep` inside a Slack retry — and the decision (the product of the whole
+conversation) was silently lost forever, with no retry and no record of the row ever
+having existed. Fixed: log with `%r`/`type(exc).__name__` so the exception is never
+silently empty; retry the write up to 3 times with a short backoff inside
+`_close_thread`; if it still fails, append the payload to
+`self._pending_thread_decisions` and flush that list (with the same retry) at the start
+of every main-loop tick and in the shutdown flush, logging ERROR while a decision stays
+pending. The in-memory close still proceeds regardless of the write's fate. Tests (red
+first, `tests/unit/test_simulation_logic.py`): a session_factory that raises twice then
+succeeds writes the row with exactly one warning; one that always raises leaves the
+decision in the pending list, which the next tick's flush drains once the factory
+recovers; `decision_id` propagation onto the corresponding `ProposalRef` is verified for
+both the immediate-success and the flushed-later cases.
+
+**M-8 (MEDIUM, root cause of M-7's trigger) — synchronous Slack calls block the event
+loop, starving asyncpg mid-turn.** The engine awaits `AgentSlackClient` calls directly on
+the event loop in several hot paths (`_post_message`, the per-tick channel/thread/DM
+pollers), so a Slack `Retry-After` sleep of up to 30s (or the 180s wait budget) blocks
+every coroutine, timer, and asyncpg connection in the process — exactly what produced
+M-7's `TimeoutError()` on the DB write that immediately followed a 30s throttled retry
+in the live log. Fixed the hot path first: `_post_message`'s `client.post_message(...)`
+call and the per-tick pollers' `client.poll_*`/`conversations_*` calls now run through
+`src.services.slack_executor.run_slack_call`, which already guarantees identical
+exception propagation (`ThreadNotFound`, `BotNotInvitedToPrivateChannel`,
+`SlackApiError` identity) for a synchronous callable. Startup-only paths
+(`_ensure_seeded_channels`, `_rebuild_state_from_slack`) are left as direct calls — they
+run once, before the turn loop is under load, and converting them is out of scope for
+this fix. Test (red first, `tests/unit/test_simulation_logic.py`): `_post_message` with
+a `client.post_message` that sleeps synchronously — another coroutine now ticks
+concurrently instead of the loop stalling. Existing `_post_message`/poller unit tests
+(most of which monkeypatch `client.post_message`/`poll_*` with a synchronous
+lambda/Mock) continue to pass unchanged, since `run_slack_call` accepts a plain
+synchronous callable. `tests/unit/test_private_channel_migration.py`,
+`tests/integration/test_state_rebuild.py`, and `test_message_persistence.py` stay
+green.
