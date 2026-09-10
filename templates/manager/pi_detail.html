@@ -42,11 +42,19 @@
                 {% else %}
                     <span class="text-xs text-gray-500">Agent pending — Awaiting Slack install.</span>
                 {% endif %}
-                {% if current_user.is_admin %}
-                    <a href="/admin/agents/{{ target_user.agent.id }}"
-                       class="text-xs text-indigo-600 hover:underline block mt-1">Provision on /admin/agents →</a>
+                {# F2 (2026-09-10): provisioning stopped being admin-only.
+                   Gated by the enclosing `effective_user.is_staff and not
+                   impersonation_banner`, never on `current_user` — an admin
+                   impersonating a reviewer must not be shown a control that
+                   403s on submit. #}
+                {% if not target_user.agent.slack_bot_token %}
+                <form method="post" action="/manager/pis/{{ target_user.id }}/slack/provision" class="mt-1">
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90">Install Slack bot</button>
+                </form>
                 {% else %}
-                    <span class="text-xs text-gray-400 block mt-1">Slack install is admin-only — ask an admin.</span>
+                <form method="post" action="/manager/pis/{{ target_user.id }}/activate" class="mt-1">
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">Activate agent</button>
+                </form>
                 {% endif %}
             </div>
         {% elif target_user.agent %}
@@ -56,6 +64,32 @@
         {% endif %}
         {% endif %}
     </div>
+
+    {% if slack_ok %}
+    <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
+        ✅ Slack bot installed — the token is saved on this PI's agent. Click
+        <b>Activate agent</b> above to bring it live.
+    </div>
+    {% endif %}
+    {% if slack_error %}
+    <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+        ⚠️ Slack provisioning failed: {{ slack_error }}
+    </div>
+    {% endif %}
+    {% if activated %}
+    <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
+        ✅ Agent activated — the running simulation picks it up on its next roster sync (~30s).
+    </div>
+    {% endif %}
+    {% if activation_blocked %}
+    <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+        <p class="font-medium">Activation refused — this PI's profile is not ready:</p>
+        <ul class="list-disc list-inside mt-1">
+            {% for blocker in blockers %}<li>{{ blocker }}</li>{% endfor %}
+        </ul>
+        <p class="mt-1">Fix the profile, or ask an admin to override on /admin/agents.</p>
+    </div>
+    {% endif %}
 
     {% if request.query_params.get('error') %}
     <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">

@@ -94,7 +94,10 @@ async def _run(only: set[str] | None, dry_run: bool) -> int:
         failures = 0
         for agent in rows:
             try:
-                url = await start_provisioning(db, agent)
+                # initiated_by=None: this script mints links for an admin to
+                # open later, so there is no request user to attribute the
+                # install to and any staff account may finish it (0046).
+                url = await start_provisioning(db, agent, initiated_by=None)
             except ProvisioningError as exc:
                 failures += 1
                 print(f"### {agent.bot_name} ({agent.agent_id})\n    FAILED: {exc}\n")

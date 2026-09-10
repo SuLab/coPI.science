@@ -221,7 +221,9 @@ class TestAdminProvisioning:
 
         db = _FakeDB([])  # no SlackAppProvision row matches the state
         with pytest.raises(ProvisioningError):
-            await complete_provisioning(db, state="bogus", code="abc")
+            await complete_provisioning(
+                db, state="bogus", code="abc", completing_user=object(),
+            )
 
 
 # ---------------------------------------------------------------

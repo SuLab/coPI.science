@@ -14,6 +14,40 @@
 > missing/ungrounded/dead job ⇒ refuse unless a logged override is checked).
 > See `docs/plans/2026-08-24-manager-add-pi-autoflow-plan.md`.
 
+> **Amended 2026-09-10 (F2 — managers provision and activate):** D1's allowlist
+> grows from four POST paths to **six**: `POST /manager/pis/{user_id}/slack/provision`
+> and `POST /manager/pis/{user_id}/activate`. The 2026-08-24 note above ("provisioning/
+> activation stays admin-only") is superseded — an admin round-trip in the middle of a
+> manager's own onboarding flow was the friction this reverses. D1's *shape* is
+> unchanged and deliberately so: these are two more named exceptions on a
+> mechanically-enumerated allowlist, not a capability system, and
+> `test_manager_router_mutations_are_an_explicit_allowlist` now fails loudly on a
+> seventh.
+>
+> Four constraints that came out of the same review:
+>
+> * **The activation gate is not relaxed, and the manager gets no override.**
+>   `activate_agent(…, override=False)` is the only call; the logged "activate anyway"
+>   escape hatch stays on `/admin/agents`. A refusal re-renders the PI page with the
+>   blocker list and a pointer to an admin.
+> * **Both routes are pending-only** (404 otherwise), so they cannot become a second,
+>   unguarded path into the active/inactive transitions D4 assigns to mute/unmute, or
+>   into `suspended` (which only `delete_user_account` sets).
+> * **The Slack OAuth callback path does not move.** `/admin/agents/slack/callback` is
+>   baked into the `redirect_uri` of every Slack app manifest already issued; only its
+>   gate widened (`get_admin_user` → `get_staff_user`) and every redirect out of it —
+>   success and all three error paths — now branches on the caller's role, so a manager
+>   is never dropped on an `/admin` page they cannot load.
+> * **A staff-wide callback needs an owner.** The callback is a third-party redirect and
+>   can carry no CSRF token, so migration `0046` adds
+>   `slack_app_provisions.initiated_by_user_id` (nullable, FK users SET NULL) and
+>   `complete_provisioning` refuses a state whose initiator is some *other* account. NULL
+>   (a pre-`0046` row, or the bulk `scripts/make_install_links.py` path, which has no
+>   request user) is read as "unknown initiator, allow" — exactly the pre-`0046`
+>   behaviour.
+>
+> Both routes are impersonation-refused (403), matching the other manager writes.
+
 **Context:** three requested features, bundled because they share the PI/assessment
 data model even though they touch different surfaces:
 

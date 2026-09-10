@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
-from src.models import AgentRegistry, AppSetting, SlackAppProvision
+from src.models import AgentRegistry, AppSetting, SlackAppProvision, User
 from src.services.slack_provisioning import (
     create_app,
     exchange_code,
@@ -124,11 +124,21 @@ def _redirect_uri() -> str:
     return f"{get_settings().base_url.rstrip('/')}{CALLBACK_PATH}"
 
 
-async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
+async def start_provisioning(
+    db: AsyncSession, agent: AgentRegistry, *, initiated_by: User | None
+) -> str:
     """Create a Slack app for ``agent`` and return the OAuth authorize URL.
 
     Persists a ``SlackAppProvision`` row keyed by a random ``state`` so the
-    callback can finish the exchange.
+    callback can finish the exchange, stamped with ``initiated_by`` so
+    ``complete_provisioning`` can refuse a stranger's callback (F2, 0046).
+
+    ``initiated_by`` is required but may be ``None`` for the bulk CLI path
+    (``scripts/make_install_links.py``), which mints links for an admin to
+    open later and has no request user to attribute them to. A NULL initiator
+    is the pre-0046 "anyone staff may finish this" behaviour, so the keyword
+    is deliberately explicit rather than defaulted: a web caller that forgets
+    it is a TypeError, not a silently unattributed install.
     """
     redirect_uri = _redirect_uri()
 
@@ -181,6 +191,7 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
         client_id=app["client_id"],
         client_secret=app["client_secret"],
         app_id=app.get("app_id"),
+        initiated_by_user_id=initiated_by.id if initiated_by else None,
     ))
     await db.commit()
 
@@ -196,9 +207,19 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     return app["oauth_url"] + "&" + urlencode(extra)
 
 
-async def complete_provisioning(db: AsyncSession, state: str, code: str) -> AgentRegistry:
+async def complete_provisioning(
+    db: AsyncSession, state: str, code: str, *, completing_user: User
+) -> AgentRegistry:
     """Finish the OAuth round-trip: exchange the code, save the token on the
-    agent, and delete the bridge row. Returns the updated agent."""
+    agent, and delete the bridge row. Returns the updated agent.
+
+    The callback is a third-party redirect and carries no CSRF token, and its
+    gate widened from admin-only to staff with F2 — so the initiator recorded
+    at ``start_provisioning`` is what stops a second staff account from
+    landing a token for an install it did not start. A NULL
+    ``initiated_by_user_id`` is a pre-0046 row and is allowed, which is
+    exactly the pre-0046 behaviour.
+    """
     prov = (
         await db.execute(
             select(SlackAppProvision).where(SlackAppProvision.state == state)
@@ -206,6 +227,16 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
     ).scalar_one_or_none()
     if not prov:
         raise ProvisioningError("Unknown or expired provisioning state.")
+
+    if prov.initiated_by_user_id not in (None, completing_user.id):
+        # Deliberately NOT deleting the bridge row: the account that started
+        # the install must still be able to finish it.
+        logger.warning(
+            "Rejected provisioning callback for provision %s: started by %s, "
+            "completed by %s",
+            prov.id, prov.initiated_by_user_id, completing_user.id,
+        )
+        raise ProvisioningError("This install was started by a different account.")
 
     agent = (
         await db.execute(

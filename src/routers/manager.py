@@ -37,6 +37,7 @@ import hashlib
 import logging
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -48,6 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_review_user, get_staff_user
 from src.models import USER_ROLE_PI, AgentRegistry, PromptChangeSuggestion, User
+from src.services.admin_provisioning import ProvisioningError, start_provisioning
+from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
 from src.services.directory import (
@@ -188,6 +191,13 @@ async def manager_pi_detail(
     tenure_start = await get_tenure_start(
         db, user_id, agent_id=agent.agent_id if agent else None
     )
+    # The activation gate's reasons are only computed when the page is
+    # actually rendering a refusal, so a plain page view costs no extra
+    # queries.
+    blocked = request.query_params.get("activation_blocked")
+    blockers = (
+        await activation_blockers(db, agent) if blocked and agent is not None else []
+    )
     return templates.TemplateResponse(
         request,
         "manager/pi_detail.html",
@@ -200,6 +210,11 @@ async def manager_pi_detail(
             publications=detail["publications"],
             jobs=detail["jobs"],
             tenure_start=tenure_start,
+            slack_ok=request.query_params.get("slack_ok"),
+            slack_error=request.query_params.get("slack_error"),
+            activation_blocked=blocked,
+            activated=request.query_params.get("activated"),
+            blockers=blockers,
         ),
     )
 
@@ -337,6 +352,90 @@ async def manager_unmute_pi(
     user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
     return await _manager_set_mute(user_id, db, current_user, muted=False)
+
+
+async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegistry:
+    """The pending ``pi_lab`` agent of a PI account, or 404.
+
+    404 rather than a redirect for a non-PI target, matching
+    ``manager_pi_detail``: a manager must not be able to probe an admin's row
+    by guessing a UUID. Also 404 for an agent that is not ``pending`` — the
+    two routes below are the pending-agent onboarding path, and mute/unmute
+    (design D4) already own the active/inactive transitions.
+    """
+    target = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if target is None or target.user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+    agent = (
+        await db.execute(
+            select(AgentRegistry).where(AgentRegistry.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if agent is None or agent.status != "pending":
+        raise HTTPException(status_code=404, detail="No pending agent for this PI")
+    return agent
+
+
+@router.post("/pis/{user_id}/slack/provision")
+async def manager_provision_slack(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Create this PI's Slack app and bounce to Slack's install screen.
+
+    Slack redirects back to ``/admin/agents/slack/callback`` — the path is
+    baked into every issued manifest and cannot move — which branches its own
+    redirect back to /manager/pis for a manager caller.
+    """
+    if getattr(current_user, "_is_impersonated", False):
+        raise HTTPException(status_code=403, detail="Disabled while impersonating.")
+    agent = await _pending_pi_agent(db, user_id)
+    try:
+        url = await start_provisioning(db, agent, initiated_by=current_user)
+    except ProvisioningError as exc:
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?slack_error={quote(str(exc)[:200])}",
+            status_code=302,
+        )
+    return RedirectResponse(url=url, status_code=302)
+
+
+@router.post("/pis/{user_id}/activate")
+async def manager_activate_agent(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Flip this PI's pending agent to ``active``, subject to the same gate
+    ``admin_approve_agent`` applies.
+
+    There is deliberately NO override here: the admin's "activate anyway"
+    checkbox is a logged, admin-only escape hatch, and offering it on the
+    manager surface would make the gate advisory for the role most likely to
+    be working through a bulk onboarding list.
+    """
+    if getattr(current_user, "_is_impersonated", False):
+        raise HTTPException(status_code=403, detail="Disabled while impersonating.")
+    agent = await _pending_pi_agent(db, user_id)
+    if not agent.slack_bot_token:
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?slack_error={quote('Install the Slack bot first.')}",
+            status_code=302,
+        )
+    blockers = await activate_agent(db, agent, actor=current_user, override=False)
+    if blockers:
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?activation_blocked=1", status_code=302
+        )
+    await db.commit()
+    return RedirectResponse(
+        url=f"/manager/pis/{user_id}?activated=1", status_code=302
+    )
 
 
 @router.get("/assessments", response_class=HTMLResponse)

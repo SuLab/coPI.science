@@ -628,13 +628,21 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly four write routes — `POST
+  original all-GET guarantee (design D1) adds exactly six write routes — `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
-  profile fields), and `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent) —
-  and nothing else; `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a fifth.
-  **Still cannot impersonate**, set roles, or provision Slack bots (all three stay
-  admin-only), and there is deliberately no LLM-call drill-down and no export.
+  profile fields), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent), and
+  `/manager/pis/{id}/slack/provision` / `/activate` (install a pending PI's Slack
+  bot and bring the agent live) — and nothing else;
+  `tests/integration/test_manager_views.py`'s
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a seventh.
+  **Still cannot impersonate** or set roles (both stay admin-only), and there is
+  deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
+  bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —
+  subject to the same `activate_agent` gate an admin faces but with **no** override,
+  which stays admin-only; the Slack OAuth callback keeps its baked-in
+  `/admin/agents/slack/callback` path and only widened its gate to staff, refusing
+  any install a different account started (`slack_app_provisions.initiated_by_user_id`,
+  migration `0046`).
   Managers *do* see private (`collab_private`) discussion threads — a policy
   decision, recorded in the design doc.
 - **Reviewer** — read+review only, no write outside review: read-only PI directory

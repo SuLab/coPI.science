@@ -26,7 +26,7 @@ from src.agent.run_marker import _template_body, parse_announce_channels, valida
 from src.agent.specialists import parse_opinion
 from src.config import get_settings
 from src.database import get_db
-from src.dependencies import get_admin_user, get_current_user
+from src.dependencies import get_admin_user, get_current_user, get_staff_user
 from src.models import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
@@ -1128,7 +1128,7 @@ async def admin_provision_slack(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     try:
-        oauth_url = await start_provisioning(db, agent)
+        oauth_url = await start_provisioning(db, agent, initiated_by=current_user)
     except ProvisioningError as exc:
         return RedirectResponse(
             url=f"/admin/agents/{agent_id}?slack_error={str(exc)[:200]}",
@@ -1144,29 +1144,50 @@ async def admin_provision_slack_callback(
     state: str | None = Query(None),
     error: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_staff_user),
 ):
     """OAuth redirect target: exchange the code for a bot token and store it on
-    the agent, then return to the agent's approve page with the token filled."""
+    the agent, then return to the caller's own surface.
+
+    The path stays under /admin even though a manager may now reach it: it is
+    baked into the ``redirect_uri`` of every Slack app manifest already issued,
+    and moving it would break every install link in flight. Only the GATE
+    widened (admin -> staff, F2), and every redirect out of here branches on
+    the caller's role so a manager is never dropped on an /admin page they
+    cannot load. ``complete_provisioning`` separately refuses to finish an
+    install a different account started (migration 0046).
+    """
     from src.services.admin_provisioning import ProvisioningError, complete_provisioning
 
-    if error:
+    is_admin = bool(current_user.is_admin)
+
+    def surface_error(msg: str) -> RedirectResponse:
+        base = "/admin/agents" if is_admin else "/manager/pis"
         return RedirectResponse(
-            url=f"/admin/agents?slack_error=Slack returned: {error}", status_code=302
-        )
-    if not code or not state:
-        return RedirectResponse(
-            url="/admin/agents?slack_error=Missing code or state from Slack",
-            status_code=302,
+            url=f"{base}?slack_error={quote(msg[:200])}", status_code=302
         )
 
+    if error:
+        return surface_error(f"Slack returned: {error}")
+    if not code or not state:
+        return surface_error("Missing code or state from Slack")
+
     try:
-        agent = await complete_provisioning(db, state, code)
-    except ProvisioningError as exc:
-        return RedirectResponse(
-            url=f"/admin/agents?slack_error={str(exc)[:200]}", status_code=302
+        agent = await complete_provisioning(
+            db, state, code, completing_user=current_user
         )
-    return RedirectResponse(url=f"/admin/agents/{agent.id}?slack_ok=1", status_code=302)
+    except ProvisioningError as exc:
+        return surface_error(str(exc))
+
+    if is_admin:
+        return RedirectResponse(
+            url=f"/admin/agents/{agent.id}?slack_ok=1", status_code=302
+        )
+    if agent.user_id is None:
+        return RedirectResponse(url="/manager/pis?slack_ok=1", status_code=302)
+    return RedirectResponse(
+        url=f"/manager/pis/{agent.user_id}?slack_ok=1", status_code=302
+    )
 
 
 @router.post("/agents/{agent_id}/link")

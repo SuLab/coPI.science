@@ -329,13 +329,14 @@ async def test_a_collision_race_rolls_back_cleanly_instead_of_500ing(
     assert ghost is None, "the User row must roll back with the agent row"
 
 
-async def test_pi_detail_shows_agent_state_and_the_admin_deep_link_to_admins_only(
+async def test_pi_detail_shows_agent_state_and_the_manager_provision_button(
     client, db_session
 ):
     """The pending-agent header: job-state-aware copy (a dead generation job
-    must not read as 'awaiting Slack install'), with the /admin/agents/{uuid}
-    deep link rendered only when the viewer is an admin — a manager gets told
-    to ask one, since provisioning is admin-only by design (FD-6)."""
+    must not read as 'awaiting Slack install'), plus the manager's own
+    Provision button. Provisioning stopped being admin-only with F2
+    (2026-09-10), so the "ask an admin" copy and the /admin/agents deep link
+    are gone: a manager installs the bot from this page."""
     from src.models import USER_ROLE_ADMIN, Job
 
     manager = await _manager(db_session)
@@ -356,8 +357,8 @@ async def test_pi_detail_shows_agent_state_and_the_admin_deep_link_to_admins_onl
     r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
     assert r.status_code == 200
     assert "Profile generating" in r.text
-    assert f"/admin/agents/{agent.id}" not in r.text
-    assert "ask an admin" in r.text.lower()
+    assert f'action="/manager/pis/{pi.id}/slack/provision"' in r.text
+    assert "ask an admin" not in r.text.lower()
 
     job.status = "dead"
     await db_session.flush()
@@ -369,8 +370,15 @@ async def test_pi_detail_shows_agent_state_and_the_admin_deep_link_to_admins_onl
     await db_session.flush()
     r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(admin.id))
     assert "Awaiting Slack install" in r.text
-    assert f"/admin/agents/{agent.id}" in r.text, (
-        "an admin viewer gets the provisioning deep link"
+    assert f'action="/manager/pis/{pi.id}/slack/provision"' in r.text, (
+        "an admin viewer gets the same button"
+    )
+
+    agent.slack_bot_token = "xoxb-installed"
+    await db_session.flush()
+    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/manager/pis/{pi.id}/activate"' in r.text, (
+        "with the bot installed the button becomes Activate"
     )
 
 

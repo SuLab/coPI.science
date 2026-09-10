@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0045"
+DEFAULT_TARGET = "0046"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -114,7 +114,10 @@ DEFAULT_TARGET = "0045"
 #: 0042 is the starting point and must be a supported start, not a BLOCK.
 #: 0043 joins now for the identical reason: production is stamped 0043, so
 #: with DEFAULT_TARGET moved to 0044, 0043 is the starting point and must be
-#: a supported start, not a BLOCK.
+#: a supported start, not a BLOCK. 0044 and 0045 join for the identical
+#: reason as DEFAULT_TARGET moved to 0045 and then to 0046: the revision
+#: immediately behind the target is the most likely real starting point and
+#: must never be a BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -131,7 +134,7 @@ DEFAULT_TARGET = "0045"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041", "0042", "0043", "0044",
+    "0041", "0042", "0043", "0044", "0045",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -403,12 +406,14 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0045_llm_call_logs_thread_phase
     PlannedObject("0045", "column", "thread_phase", "llm_call_logs"),
     PlannedObject("0045", "column", "message_ordinal", "llm_call_logs"),
+    # 0046_slack_provision_initiated_by
+    PlannedObject("0046", "column", "initiated_by_user_id", "slack_app_provisions"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041", "0042", "0043", "0044", "0045",
+    "0040", "0041", "0042", "0043", "0044", "0045", "0046",
 )
 
 

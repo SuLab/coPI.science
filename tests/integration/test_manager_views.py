@@ -1,6 +1,6 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of four write routes (design
-D1)."""
+an explicit, mechanically-enumerated allowlist of six write routes (design
+D1, amended 2026-09-10 by F2)."""
 
 import re
 import uuid
@@ -54,13 +54,18 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these four, named exactly. A future
-    accidental fifth write route still fails this test loudly."""
+    have non-GET routes now, but only these six, named exactly. A future
+    accidental seventh write route still fails this test loudly. The two
+    provisioning routes joined the list with F2 (2026-09-10): a manager may
+    install a PI's Slack bot and activate the agent from /manager/pis/{id}.
+    """
     allowed_post_paths = {
         "/pis",
         "/pis/{user_id}/profile",
         "/pis/{user_id}/mute",
         "/pis/{user_id}/unmute",
+        "/pis/{user_id}/slack/provision",
+        "/pis/{user_id}/activate",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
@@ -237,6 +242,16 @@ async def test_pi_detail_has_no_delete_or_impersonate_control(client, db_session
     assert "Danger Zone" not in body
 
 
+#: The one /admin GET a manager may reach, named exactly so a second one cannot
+#: be added silently. ``/admin/agents/slack/callback`` is a Slack OAuth redirect
+#: target whose path is baked into the ``redirect_uri`` of every Slack app
+#: manifest already issued, so it could not move to /manager when managers
+#: gained provisioning (F2, 2026-09-10); its gate widened to ``get_staff_user``
+#: and it role-branches every redirect instead. It renders nothing — every exit
+#: is a 302 — so admitting a manager leaks no admin surface.
+_ADMIN_ROUTES_OPEN_TO_STAFF = frozenset({"/agents/slack/callback"})
+
+
 async def test_manager_is_denied_every_admin_route(client, db_session):
     from src.routers import admin as admin_router
 
@@ -244,6 +259,8 @@ async def test_manager_is_denied_every_admin_route(client, db_session):
     checked = 0
     for route in admin_router.router.routes:
         if "GET" not in getattr(route, "methods", ()) or "{" in route.path:
+            continue
+        if route.path in _ADMIN_ROUTES_OPEN_TO_STAFF:
             continue
         r = await client.get(
             f"/admin{route.path}", headers=auth_headers(mgr.id), follow_redirects=False

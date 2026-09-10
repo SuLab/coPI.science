@@ -59,6 +59,17 @@ class SlackAppProvision(Base):
     client_id: Mapped[str] = mapped_column(String(100), nullable=False)
     client_secret: Mapped[str] = mapped_column(Text, nullable=False)
     app_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    #: The staff account that started this install (migration 0046). The
+    #: callback's gate is staff-wide, and its redirect is a third-party one
+    #: that carries no CSRF token, so this is what stops a second staff
+    #: account from landing someone else's bot token — and what tells the
+    #: callback whether to return to /admin/agents or /manager/pis. NULL on
+    #: pre-0046 rows, read as "unknown initiator, allow".
+    initiated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

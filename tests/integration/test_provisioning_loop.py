@@ -67,7 +67,7 @@ async def test_start_provisioning_does_not_block_the_loop(engine, monkeypatch):
         # Verified empirically both ways in scratch repros before adding
         # this line.
         await asyncio.sleep(0)
-        url = await ap.start_provisioning(db, agent)
+        url = await ap.start_provisioning(db, agent, initiated_by=None)
         stop.set()
         await hb
         assert url.startswith("https://slack.test/oauth")
