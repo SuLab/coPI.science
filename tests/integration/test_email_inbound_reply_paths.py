@@ -248,13 +248,15 @@ async def test_a_reply_to_an_unknown_token_from_a_registered_user_gets_a_bounce(
     answering a superseded reminder now hits an unknown token and previously
     got silence. If the From address matches a KNOWN user, send one short
     bounce explaining the link is stale."""
+    from src.services.email_notifications import SendOutcome
+
     bounces = []
 
-    def _record(to_email, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
+    def _record(to_email, subject, text_body, html_body):
         bounces.append({"to": to_email, "subject": subject})
-        return True
+        return SendOutcome.SENT
 
-    monkeypatch.setattr(inbound, "_send_html_email", _record)
+    monkeypatch.setattr(inbound, "send_html_email_outcome", _record)
     recipient = await factories.make_user(db_session, email="pi.stale@scripps.edu")
 
     await process_inbound_email(
@@ -271,10 +273,12 @@ async def test_a_reply_to_an_unknown_token_from_an_unknown_address_gets_no_bounc
 ):
     """Never bounce to an address that does not match a registered user --
     that would turn this into an oracle for guessing registered emails."""
+    from src.services.email_notifications import SendOutcome
+
     bounces = []
     monkeypatch.setattr(
-        inbound, "_send_html_email",
-        lambda *a, **k: bounces.append(a) or True,
+        inbound, "send_html_email_outcome",
+        lambda *a, **k: bounces.append(a) or SendOutcome.SENT,
     )
 
     await process_inbound_email(
@@ -285,13 +289,15 @@ async def test_a_reply_to_an_unknown_token_from_an_unknown_address_gets_no_bounc
 
 
 async def test_stale_token_bounces_are_capped_per_address(db_session, monkeypatch):
+    from src.services.email_notifications import SendOutcome
+
     bounces = []
 
-    def _record(to_email, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
+    def _record(to_email, subject, text_body, html_body):
         bounces.append(to_email)
-        return True
+        return SendOutcome.SENT
 
-    monkeypatch.setattr(inbound, "_send_html_email", _record)
+    monkeypatch.setattr(inbound, "send_html_email_outcome", _record)
     monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
     recipient = await factories.make_user(db_session, email="pi.capped@scripps.edu")
 
