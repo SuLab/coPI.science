@@ -645,3 +645,146 @@ Tests (red first, `tests/unit/test_email_inbound_hardening.py`):
 `test_prune_drops_a_short_window_entry_untouched_for_over_24_hours` (now covers
 `_S3_FAILURE_COUNTS` too), `test_poll_inbound_emails_prunes_stale_entries` updated to
 assert `_S3_FAILURE_COUNTS`/`_S3_FAILURE_TOUCHED` are pruned.
+## K — final opus closure audit (2026-09-10)
+
+**K-1 (MEDIUM) — a transient ownership-lookup DB error was fail-closed identically to
+"nothing to authorize against."** `_agent_ids_owned_by_user` caught every exception from its DB
+query (a NULL `sender_user_id` and a genuine DB outage) and returned the same empty set for
+both, so `_handle_pi_inbound_entry` returned normally on a DB blip and `_poll_inbound_from_db`
+stamped the row HANDLED, permanently discarding the PI's ownership-gated side effects. Added
+`PiOwnershipLookupFailed`, raised on a genuine DB error so it propagates to the existing
+per-row try/except (records an attempt, leaves the row `ingested` for retry). The empty-set
+fail-closed return is now reserved for a NULL user id only. Test (red first, integration):
+`test_a_transient_ownership_lookup_failure_retries_instead_of_discarding` in
+`tests/integration/test_message_persistence.py`, using a session-factory wrapper that fails
+only the ownership SELECT once. Also updated a pre-existing unit test
+(`test_a_db_failure_fails_closed_to_the_empty_set` -> `test_a_db_failure_raises_instead_of_failing_closed`)
+that pinned the old contract.
+
+**K-2 (MEDIUM) — a retry sleep was not interruptible on shutdown.** `shutdown_slack_executor()`'s
+`shutdown(wait=False, ...)` does not stop a worker thread already inside
+`time.sleep(retry_after)` — `ThreadPoolExecutor` worker threads are ordinary non-daemon threads
+still joined by the interpreter's own atexit machinery, so a call mid-throttle could hold up
+exit for up to `RATE_LIMIT_WAIT_BUDGET_SECONDS` (180s). Added `slack_client.SHUTTING_DOWN`
+(`threading.Event`); `_call_with_retry` now sleeps via `_sleep_interruptibly`, in <=1s slices,
+aborting with `SlackApiError("shutting down")` as soon as the event is set.
+`shutdown_slack_executor()` sets it before shutting the pool down. Docstrings corrected: only
+the retry *sleep* is interruptible, not an in-flight HTTP request. Existing retry tests that
+asserted an exact single `time.sleep()` call were updated to assert on the sum (and a <=1s
+per-slice bound) instead. Test (red first): `test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set`
+in `tests/unit/test_slack_client_contract.py` (a background thread sleeping through a 30s
+Retry-After aborts within ~1s of `SHUTTING_DOWN.set()`).
+
+**K-3 (MEDIUM) — a non-numeric migrate exit code was silently treated as success.**
+`[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value prints "integer expression expected" and
+returns exit status 2, which `if` treats identically to a clean "false" — the script fell
+through and proceeded as though migrate had exited 0. Added a `case "$MIGRATE_EXIT" in
+''|*[!0-9]*) die ...` guard before the numeric comparison. Test (red first):
+`test_a_non_numeric_migrate_exit_code_aborts_the_deploy` in `tests/unit/test_redeploy_sh.py`
+(a `docker wait` stub printing `abc`).
+
+**K-4 (MEDIUM) — RC-7 residual: a restart re-loaded a stale on-disk private profile.** A
+DB-succeeded/disk-failed standing-instruction write left the DB row (the one that survives a
+restart) ahead of the stale on-disk file, and `Agent.private_profile` only reads disk on a
+cache miss — every restart re-loaded the stale file via `_rebuild_agent_state`. Added
+`_sync_private_profiles_from_db()`, called at the top of `_rebuild_agent_state`: for every
+agent with a linked user, if `ResearcherProfile.private_profile_md` differs from the agent's
+current private profile, rewrite disk (best effort, via `update_private_profile`) and set the
+in-memory cache to the DB content regardless of whether the disk write succeeds. Tests (red
+first, integration, DB-backed): `test_rebuild_resyncs_a_stale_disk_private_profile_from_the_db`
+and `test_rebuild_keeps_the_db_content_cached_even_if_disk_is_unwritable` in
+`tests/integration/test_state_rebuild.py`.
+
+**K-5 (LOW) — the stale-token bounce refund overwrote the counter instead of decrementing
+it.** `_maybe_send_stale_token_bounce`'s refund wrote back `sent_so_far` (the pre-reservation
+snapshot) rather than decrementing the counter's current value — two reservations interleaved
+around the reserve-then-send window let the first call's refund clobber the second call's
+legitimate charge back to zero. Fixed to `max(0, current - 1)`, reading `current` fresh at
+refund time. Test (red first): `test_refunding_one_of_two_interleaved_reservations_leaves_the_other_charged`
+in `tests/unit/test_stale_token_bounce_budget.py`.
+
+**K-6 (LOW) — RC-15 residual: the known-channel check trusted another pair's private
+channel.** `_channel_visibility` is a single process-wide map holding every collab_private
+channel discovered for every agent pair this run, not just ones the checking agent belongs to
+— bare membership let an agent name another pair's private channel in a `new_post` and pass the
+gate. Fixed: a channel only counts as known via `_channel_visibility` when its entry is
+`VISIBILITY_PUBLIC`; a private channel this agent actually belongs to is covered separately by
+`agent.state.subscribed_channels`. Tests (red first):
+`test_a_new_post_naming_another_pairs_private_channel_is_refused` and
+`test_a_new_post_naming_the_agents_own_private_channel_is_allowed` in
+`tests/unit/test_simulation_logic.py::TestPhase5NewPostNeverDefaultsToGeneral`.
+
+**K-7 (LOW) — a PI-inbound attempt count was forgotten even when the terminal HANDLED write
+failed.** Both give-up branches in `_poll_inbound_from_db` popped `_pi_inbound_attempts`
+unconditionally, regardless of whether `_mark_pi_inbound_row_handled`'s write actually
+committed — a failed write left the row retryable but with its attempt count forgotten, so
+SEC2-1's cap restarted from zero on the next poll. Fixed: only pop the attempt entry when the
+write returns `True`. Tests (red first):
+`test_a_failed_handled_write_keeps_the_attempt_count_for_a_tombstoned_row` and
+`test_a_failed_handled_write_keeps_the_attempt_count_after_giving_up` in
+`tests/unit/test_simulation_logic.py`.
+
+**K-8 (LOW) — a persistently failing INGESTED-marker write had no attempt accounting at
+all.** Unlike every other give-up path in this poller, a row whose INGESTED marker write kept
+failing `continue`d with no attempt recorded, retrying silently and unboundedly, never engaging
+SEC2-1's cap. Fixed: record an attempt on each failed write, and once
+`PI_INBOUND_MAX_ATTEMPTS` is reached, stamp the row HANDLED via the same terminal path (K-7's
+fix applies here too). Test (red first): `test_a_persistently_failing_ingested_marker_write_is_capped`
+in `tests/unit/test_simulation_logic.py`.
+
+**K-9 (HIGH, coordinator-added) — the process-global Slack executor was shut down by any
+lifespan/atexit/test, permanently, for the rest of the interpreter.** The Slack I/O
+`ThreadPoolExecutor` was a single module-level singleton created once at import time;
+`shutdown_slack_executor()` (called from every real shutdown path AND from any test that drives
+`create_app()`'s ASGI lifespan, unrelated to Slack) shut it down with no way to come back. Any
+one test doing this broke every LATER `run_slack_call` in the same pytest process with
+`RuntimeError: cannot schedule new futures after shutdown` — 16 tests across
+`test_slack_executor.py`, `test_slack_provisioning.py`, `test_slack_web.py`,
+`test_admin_provisioning.py`, `test_private_channel_migration.py`. Fixed: the pool is now
+created lazily by `_get_executor()` (lock-guarded); `shutdown_slack_executor()` drops the
+reference (sets it to `None`) instead of leaving callers pointed at a dead singleton;
+`run_slack_call` transparently creates a fresh pool on its next call. `SHUTTING_DOWN` (K-2)
+stays set across the shutdown itself (so an old pool's in-flight retry sleep still aborts) but
+is cleared only when a NEW pool is actually created, not immediately — clearing it right away
+would give an old pool's still-sleeping thread no realistic chance to observe it. Tests (red
+first): `test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool` and
+`test_a_fresh_pool_clears_the_shutting_down_event` in `tests/unit/test_slack_executor.py`
+(replacing the old `test_run_slack_call_after_shutdown_raises_a_clear_runtimeerror`, whose
+"never re-create" contract this deliberately reverses); a full-app-lifespan regression test,
+`test_a_real_lifespan_shutdown_does_not_permanently_kill_run_slack_call`, in
+`tests/unit/test_main_lifespan.py`.
+
+**K-10 (MEDIUM, coordinator-added) — three tests still monkeypatched the retired
+`_send_html_email`.** R-3 switched `_maybe_send_stale_token_bounce` to
+`send_html_email_outcome` (a `SendOutcome`-returning function), but
+`test_a_reply_to_an_unknown_token_from_a_registered_user_gets_a_bounce`,
+`..._from_an_unknown_address_gets_no_bounce`, and `test_stale_token_bounces_are_capped_per_address`
+in `tests/integration/test_email_inbound_reply_paths.py` still monkeypatched the old name,
+failing with `AttributeError`. Fixed by monkeypatching `inbound.send_html_email_outcome`
+instead (matching its 4-positional-arg call signature) and returning `SendOutcome.SENT`.
+Verified against a real migrated Postgres via testcontainers (offline, cached images) — 38/38
+tests in the file pass.
+
+**K-11 (MEDIUM, coordinator-added) — root cause identical to K-9, no separate fix needed.**
+`test_the_retry_split_follows_the_slack_mutation_not_the_exception_type[after-False]` failed
+with `InstructionApplyFailed: ... failed before any irreversible side effect` on the merged
+tree. Reproduced by running `test_main_lifespan.py`'s real (unmocked) lifespan-shutdown test
+ahead of it in one process: pre-K-9, the dead singleton makes `run_slack_call(_make_client, ...)`
+raise `RuntimeError: cannot schedule new futures after shutdown` at the very first Slack call in
+`migrate_public_thread_to_private` — before `progress.safe_to_retry` is ever set to `False` —
+so the "after channel creation" failure the test intends (`invite_to_channel` raising once a
+channel already exists) never happens; the migration fails at the client-creation stage
+instead, which the code correctly classifies as retryable (no Slack side effect occurred),
+but the test expects terminal for that parametrization. `private_channels.py`'s
+retry/terminal split (`progress.safe_to_retry`) is correct as written — this is purely K-9's
+executor-singleton bug surfacing through a different call site. Confirmed the K-9 fix alone
+makes both parametrizations pass in the same combined run; no change to
+`test_email_inbound_hardening.py` or `private_channels.py` was needed or made.
+
+**Full-suite verification (this worktree).** `tests/unit` (excluding `test_ci_gate.py` /
+`test_dependencies_lock.py`, which need `.venv-test` at the repo root and are not present in
+this worktree): 2137 passed, 5 known-environmental failures. Combined with
+`tests/integration/test_email_inbound_reply_paths.py`, `tests/unit/test_private_channel_migration.py`,
+`tests/integration/test_state_rebuild.py`, and `tests/integration/test_message_persistence.py`:
+113 passed. `ruff check` on every file touched: no new findings (three pre-existing,
+unrelated `simulation.py` findings noted and left alone, outside scope).
