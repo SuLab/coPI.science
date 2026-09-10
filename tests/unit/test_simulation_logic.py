@@ -630,16 +630,23 @@ class TestSyncProfilesFromDisk:
         await engine._sync_profiles_from_disk()
         assert calls == {"private": [], "public": []}
 
-    async def test_a_non_verdict_does_not_advance_the_signature_so_the_next_tick_retries(
+    async def test_a_transient_non_verdict_does_not_advance_the_signature_so_the_next_tick_retries(
         self, setup,
     ):
-        """O-4 (audit 2026-09-10): when the helper cannot reach a verdict (no
-        `AgentRegistry.user_id` / no `ResearcherProfile` row), the watcher
-        must not advance its mtime signature for this bump — advancing it
+        """P-6 (opus review, audit 2026-09-10): a TRANSIENT non-verdict (an
+        exception talking to the DB, or no `session_factory`) must not
+        advance the watcher's mtime signature for this bump — advancing it
         anyway would make the bump look already-handled forever, since a
         later tick's stat() would just match the now-recorded signature and
         the "nothing changed" fast path would never call back into the
-        helper again."""
+        helper again, permanently losing the retry.
+
+        This supersedes O-4's original version of this test, which used "no
+        linked user_id" as its non-verdict case — P-6 reclassifies that as a
+        DEFINITIVE non-verdict that DOES advance (see
+        ``test_a_definitive_non_verdict_advances_the_signature_and_does_not_retry_every_tick``
+        below); only a genuinely transient failure belongs here.
+        """
         from types import SimpleNamespace
 
         engine, agent, priv, calls = setup
@@ -649,12 +656,16 @@ class TestSyncProfilesFromDisk:
         agent.force_clear_private_profile()
         engine._force_cleared_private.add(agent.agent_id)
 
-        # No linked user_id -> _sync_one_agent_private_profile_from_db cannot
-        # reach a verdict.
-        agent_reg = SimpleNamespace(user_id=None)
-        engine.session_factory = lambda: _StubProfileSessionCtx(
-            _FakeProfileDb(agent_reg, None)
-        )
+        class _RaisingProfileDb:
+            async def execute(self, *a, **k):
+                raise RuntimeError("simulated: DB unreachable")
+
+            async def commit(self):
+                pass
+
+        # A DB call that raises -> _sync_one_agent_private_profile_from_db's
+        # outer except Exception catches it and reports no verdict.
+        engine.session_factory = lambda: _StubProfileSessionCtx(_RaisingProfileDb())
 
         import os
         future = priv.stat().st_mtime + 10
@@ -678,6 +689,57 @@ class TestSyncProfilesFromDisk:
 
         assert agent.private_profile.strip() == new_content
         assert agent.agent_id not in engine._force_cleared_private
+
+    async def test_a_definitive_non_verdict_advances_the_signature_and_does_not_retry_every_tick(
+        self, setup,
+    ):
+        """P-6 (opus review, audit 2026-09-10): "no linked `AgentRegistry.user_id`"
+        and "no `ResearcherProfile` row" are DEFINITIVE answers, not transient
+        failures — a real query ran and came back conclusively empty. Unlike
+        a transient failure, this state will not resolve itself without
+        another disk edit (there is nothing "in flight" to retry), so the
+        watcher must advance its signature and stop re-querying the DB on
+        every subsequent tick for the SAME bump. If the DB later gets a real
+        row WITHOUT a further mtime bump on this file, that is not observable
+        to a disk-mtime watcher at all — the next resync only happens when
+        the file changes again."""
+        from types import SimpleNamespace
+
+        engine, agent, priv, calls = setup
+
+        await engine._sync_profiles_from_disk()  # baseline
+
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        # No linked user_id -> a definitive non-verdict.
+        agent_reg = SimpleNamespace(user_id=None)
+        query_count = 0
+        real_ctx = _StubProfileSessionCtx(_FakeProfileDb(agent_reg, None))
+
+        def _session_factory():
+            nonlocal query_count
+            query_count += 1
+            return real_ctx
+
+        engine.session_factory = _session_factory
+
+        import os
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        await engine._sync_profiles_from_disk()
+        assert calls == {"private": [], "public": []}
+        assert agent.agent_id in engine._force_cleared_private
+        assert query_count == 1
+
+        # Same disk state (no further mtime bump) on the next tick — the
+        # signature already matches, so the DB must not be queried again.
+        await engine._sync_profiles_from_disk()
+        assert query_count == 1, (
+            "a definitive non-verdict must advance the signature so a "
+            "later tick with no further disk change does not re-query the DB"
+        )
 
 
 class TestPrivateReloadIsolatedFromPublicChange:

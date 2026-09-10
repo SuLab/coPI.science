@@ -6176,17 +6176,33 @@ class SimulationEngine:
         loop over every agent, and ``_rebuild_one_agent_state``'s single
         re-added agent — share it exactly.
 
-        O-4 (audit 2026-09-10): returns whether this call reached a
-        DEFINITIVE verdict (a real ``AgentRegistry``/``ResearcherProfile`` row
-        was actually consulted) as opposed to bailing out early with nothing
-        resolved (no ``session_factory``, no linked ``user_id``, no
-        ``ResearcherProfile`` row, or an exception). The watcher's
-        force-cleared branch (``_sync_profiles_from_disk``) uses this to
-        decide whether it is safe to advance its mtime signature — advancing
-        it after a non-verdict would silence any FUTURE retry of this same
-        bump until another edit happens, since the signature would already
-        match and the watcher's own "nothing changed" fast path would never
-        call back in here again.
+        O-4 (audit 2026-09-10): returns whether this call reached a verdict.
+        The watcher's force-cleared branch (``_sync_profiles_from_disk``)
+        uses this to decide whether it is safe to advance its mtime
+        signature — advancing it after a non-verdict would silence any
+        FUTURE retry of this same bump until another edit happens, since the
+        signature would already match and the watcher's own "nothing
+        changed" fast path would never call back in here again.
+
+        P-6 (opus review, audit 2026-09-10): "reached a verdict" splits into
+        two cases that this method used to conflate as a single ``False``:
+
+        - DEFINITIVE non-verdict — no linked ``AgentRegistry.user_id``, or no
+          ``ResearcherProfile`` row. A real query ran and conclusively found
+          nothing to sync; that fact will not change without another disk
+          edit (there is nothing "in flight" to wait out), so this returns
+          ``True`` — advance the signature and stop re-querying the DB on
+          every subsequent tick for the same bump.
+        - TRANSIENT non-verdict — no ``session_factory``, or an exception
+          talking to the DB. The DB may become reachable on the very next
+          tick with no further disk change, so this returns ``False`` — do
+          NOT advance the signature, so the watcher keeps retrying every
+          tick until it actually succeeds.
+
+        A real ``AgentRegistry``/``ResearcherProfile`` row being consulted
+        and yielding actual content (or a confirmed-empty row that triggers
+        the cleared-file branch) is of course also a verdict and returns
+        ``True``.
         """
         if not self.session_factory:
             return False
@@ -6202,8 +6218,13 @@ class SimulationEngine:
                         AgentRegistry.agent_id == agent.agent_id
                     )
                 )).scalar_one_or_none()
+                # P-6 (opus review, audit 2026-09-10): no AgentRegistry row /
+                # no linked user_id is a DEFINITIVE answer -- the query ran
+                # and conclusively found nothing to link, not a transient
+                # failure -- so this returns True (reached a verdict) even
+                # though there is nothing to sync. See the docstring above.
                 if not agent_reg or not agent_reg.user_id:
-                    return False
+                    return True
                 profile = (await db.execute(
                     sa_select(ResearcherProfile).where(
                         ResearcherProfile.user_id == agent_reg.user_id
@@ -6215,8 +6236,13 @@ class SimulationEngine:
             # cleared branch below ran (and unrecoverably unlinked the disk
             # file) for a user who simply never had a profile row created.
             # Only a REAL row whose content is empty/NULL authorizes that.
+            #
+            # P-6 (opus review, audit 2026-09-10): still a DEFINITIVE
+            # non-verdict, same reasoning as the no-user_id branch above —
+            # the query ran and conclusively found no row, so this returns
+            # True (reached a verdict) rather than False.
             if profile is None:
-                return False
+                return True
             db_content = (profile.private_profile_md or "").strip()
             if db_content:
                 # N-3 (opus review, audit 2026-09-10): the DB now holds real
@@ -7130,10 +7156,15 @@ class SimulationEngine:
                         #
                         # O-4 (audit 2026-09-10): only advance this
                         # sub-profile's signature when the helper actually
-                        # reached a verdict. If it bailed out early (no
-                        # session_factory, no linked user_id, no
-                        # ResearcherProfile row, or an exception), advancing
-                        # the signature anyway would make THIS tick's bump
+                        # reached a verdict. P-6 (audit 2026-09-10): a
+                        # DEFINITIVE non-verdict (no linked user_id, no
+                        # ResearcherProfile row) counts as a verdict here and
+                        # DOES advance the signature -- that fact will not
+                        # change without another disk edit. Only a TRANSIENT
+                        # non-verdict (no session_factory, or an exception)
+                        # bails out without advancing, since those may
+                        # resolve on their own by the next tick. Advancing
+                        # the signature after a transient failure would make THIS tick's bump
                         # look already-handled forever — the next tick's stat()
                         # would match the now-recorded new_sig and the "nothing
                         # changed" fast path above would never call back in
