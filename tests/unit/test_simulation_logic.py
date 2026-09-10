@@ -3144,6 +3144,79 @@ class TestPollInboundFromDbGuardsTheHandler:
         assert engine._pi_inbound_handled_pending_mark == set()
 
     @pytest.mark.asyncio
+    async def test_a_write_that_starts_failing_only_after_the_handler_retried_gets_its_own_full_budget(
+        self, caplog,
+    ):
+        """L-5 (opus review, audit 2026-09-10): the handler and the HANDLED
+        write share one counter keyed on ``message_ts``. Before this fix, a
+        handler that failed a few times before succeeding left that counter
+        already part-spent, so a persistently-failing write (a DIFFERENT
+        failure than the handler's) hit ``PI_INBOUND_MAX_ATTEMPTS`` far
+        sooner than a write whose handler had succeeded on the first try —
+        starving the write's own retry budget for reasons that have nothing
+        to do with the write itself. The counter must be popped the moment
+        the handler succeeds (or is skipped via ``already_applied``), before
+        the write is even attempted, so the write always gets the full cap.
+        """
+        import logging
+        from datetime import UTC, datetime
+
+        from src.agent.simulation import PI_INBOUND_HANDLED, PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler_calls = []
+
+        HANDLER_FAILURES = PI_INBOUND_MAX_ATTEMPTS - 1
+
+        async def handler(entry):
+            handler_calls.append(entry)
+            if len(handler_calls) <= HANDLER_FAILURES:
+                raise ConnectionError("boom")
+
+        engine = self._engine(rows, handler)
+        real_mark = engine._mark_pi_inbound_state
+        write_attempts = []
+
+        async def _flaky_mark(message_ts, state):
+            if state == PI_INBOUND_HANDLED:
+                write_attempts.append(1)
+                return False
+            return await real_mark(message_ts, state)
+
+        engine._mark_pi_inbound_state = _flaky_mark
+
+        with caplog.at_level(logging.WARNING):
+            # HANDLER_FAILURES polls to get the handler to succeed, then the
+            # write's own full PI_INBOUND_MAX_ATTEMPTS budget before it must
+            # give up.
+            for _ in range(HANDLER_FAILURES + PI_INBOUND_MAX_ATTEMPTS):
+                await engine._poll_inbound_from_db()
+
+        assert len(handler_calls) == HANDLER_FAILURES + 1, (
+            "the handler must not be re-run once it has already succeeded"
+        )
+        assert len(write_attempts) == PI_INBOUND_MAX_ATTEMPTS, (
+            f"the write must get its own FULL {PI_INBOUND_MAX_ATTEMPTS}-attempt "
+            f"budget regardless of how many attempts the handler already "
+            f"spent, got {len(write_attempts)}"
+        )
+        assert rows[0].pi_inbound_state == PI_INBOUND_HANDLED, (
+            "the write must eventually give up (terminal, via the id-based "
+            "path) rather than retry forever"
+        )
+        give_up_records = [
+            r for r in caplog.records
+            if "Giving up on marking" in r.message
+        ]
+        assert len(give_up_records) == 1
+        assert give_up_records[0].levelno == logging.WARNING, (
+            "giving up on the WRITE (side effects already applied) is a "
+            "lesser event than the handler itself failing, and must be "
+            "logged as a WARNING, not an ERROR"
+        )
+
+    @pytest.mark.asyncio
     async def test_attempt_entries_for_rows_no_longer_in_the_batch_are_pruned(self, monkeypatch):
         """The per-message_ts attempt dict is bounded by the polled batch: an
         entry whose row no longer appears (stamped terminal, superseded) is

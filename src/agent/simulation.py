@@ -3684,6 +3684,23 @@ class SimulationEngine:
                 if not already_applied:
                     try:
                         await self._handle_pi_inbound_entry(entry)
+                        # L-5 (opus review, audit 2026-09-10): pop the
+                        # counter the MOMENT the handler succeeds, before the
+                        # HANDLED write below is even attempted. The handler
+                        # and the write share this same message_ts-keyed
+                        # counter; without popping here, a handler that had
+                        # to retry a few times before succeeding leaves the
+                        # write starting from whatever the handler already
+                        # spent — a write failure unrelated to the handler's
+                        # own transient errors could then hit
+                        # PI_INBOUND_MAX_ATTEMPTS on its very first attempt.
+                        # Popping only on this success path (not on a later
+                        # already-applied poll, which never reaches this
+                        # line) still preserves K-2 follow-up #2's guarantee
+                        # that a persistently-failing write is capped on its
+                        # own, since the counter is left alone on every
+                        # subsequent already_applied=True poll.
+                        self._pi_inbound_attempts.pop(r.message_ts, None)
                     except Exception as exc:
                         attempts = self._record_pi_inbound_attempt(r.message_ts)
                         if attempts >= PI_INBOUND_MAX_ATTEMPTS:
@@ -3726,11 +3743,18 @@ class SimulationEngine:
                 # before even trying this write — a persistently failing
                 # HANDLED write left the counter permanently empty, so the
                 # SEC2-1 cap never engaged and (pre `already_applied`, above)
-                # the handler re-ran every tick forever. Now the counter (and
-                # the pending-mark set) are only cleared on a write that
+                # the handler re-ran every tick forever. It is now popped
+                # exactly once, on the success path above (L-5, same-day
+                # follow-up) — BEFORE this write is attempted, so the write
+                # gets its own full budget rather than whatever the handler's
+                # own retries already spent — and left alone on every
+                # subsequent already_applied=True poll, so the pending-mark
+                # set and this counter are only cleared here on a write that
                 # actually commits; a failing write records an attempt and,
                 # past the cap, gives up the same way the handler-exception
-                # branch does.
+                # branch does (WARNING rather than ERROR, since the side
+                # effects themselves already succeeded — only this marker
+                # write is exhausted).
                 marked = await self._mark_pi_inbound_state(r.message_ts, PI_INBOUND_HANDLED)
                 if marked:
                     self._pi_inbound_attempts.pop(r.message_ts, None)
@@ -3739,7 +3763,15 @@ class SimulationEngine:
                     self._pi_inbound_handled_pending_mark.add(r.message_ts)
                     attempts = self._record_pi_inbound_attempt(r.message_ts)
                     if attempts >= PI_INBOUND_MAX_ATTEMPTS:
-                        logger.error(
+                        # L-5 (opus review, audit 2026-09-10): WARNING, not
+                        # ERROR — the PI's side effects already ran
+                        # successfully; only the durable marker write is
+                        # exhausted, and the id-based fallback below still
+                        # gets the row to terminal. That is strictly less
+                        # severe than the handler-exception give-up above
+                        # (still ERROR), where the side effects themselves
+                        # never completed.
+                        logger.warning(
                             "[%s] Giving up on marking %s HANDLED after %d attempts "
                             "— side effects already applied; stamping terminal by id",
                             entry.channel, entry.thread_ts or entry.ts, attempts,
