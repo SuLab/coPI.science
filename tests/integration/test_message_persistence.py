@@ -179,6 +179,7 @@ async def test_concurrent_writers_both_persist_at_the_same_instant(db_session, m
     pi_msg = await record_pi_message(
         db_session, run_id=run.id, channel_name="general",
         content="PI: please pivot to aging biology", sender_name="Dr Human (PI)",
+        sender_user_id=None,
     )
     await db_session.flush()
 
