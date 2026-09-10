@@ -52,14 +52,34 @@ def test_permerror_rejected():
     assert _authentication_results_ok(_msg(h)) is False
 
 
-# --- From parsing ----------------------------------------------------------
+# --- From parsing (SEC3-1, audit 2026-09-10) --------------------------------
 
 
 def test_unparseable_from_returns_none():
-    assert _extract_email_address("") is None
-    assert _extract_email_address("No Address Here") is None
+    assert _extract_email_address(_msg("")) is None
+    assert _extract_email_address(_msg("From: No Address Here")) is None
 
 
 def test_from_bracketed_and_bare():
-    assert _extract_email_address("Jim <jim@scripps.edu>") == "jim@scripps.edu"
-    assert _extract_email_address("jim@scripps.edu") == "jim@scripps.edu"
+    assert _extract_email_address(_msg("From: Jim <jim@scripps.edu>")) == "jim@scripps.edu"
+    assert _extract_email_address(_msg("From: jim@scripps.edu")) == "jim@scripps.edu"
+
+
+def test_display_name_with_embedded_bracketed_address_is_not_fooled():
+    # The first `<...>` token belongs to the ATTACKER-controlled display
+    # name, not the real address -- a naive regex would return the PI's
+    # address here and pass the sender-identity check while the real
+    # envelope/DKIM domain is evil.com.
+    h = 'From: "Alice <pi@univ.edu>" <attacker@evil.com>'
+    assert _extract_email_address(_msg(h)) == "attacker@evil.com"
+
+
+def test_two_from_headers_rejected():
+    # Ambiguous identity -- refuse rather than pick one arbitrarily.
+    h = "From: pi@scripps.edu\nFrom: attacker@evil.com"
+    assert _extract_email_address(_msg(h)) is None
+
+
+def test_group_syntax_rejected():
+    h = "From: Group: a@b.com, c@d.com;"
+    assert _extract_email_address(_msg(h)) is None

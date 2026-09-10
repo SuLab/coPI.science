@@ -1,6 +1,7 @@
 """Inbound email processing for proposal review via email reply."""
 
 import email
+import email.utils
 import json
 import logging
 import re
@@ -351,7 +352,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         # KNOWN user, say so with one short bounce (never to an unknown
         # address -- that would make this an oracle for guessing registered
         # emails).
-        from_addr = _extract_email_address(msg.get("From", ""))
+        from_addr = _extract_email_address(msg)
         if from_addr:
             user_result = await db.execute(
                 select(User).where(func.lower(User.email) == from_addr.lower())
@@ -373,7 +374,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         return
 
     # Verify sender
-    from_addr = _extract_email_address(msg.get("From", ""))
+    from_addr = _extract_email_address(msg)
     # Reject an unparseable/empty From outright — previously a missing address
     # short-circuited the identity check below and let the reply through.
     if not from_addr:
@@ -552,15 +553,28 @@ def _extract_reply_token(to_address: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _extract_email_address(from_header: str) -> str | None:
-    """Extract bare email from a From header like 'Name <email@example.com>'."""
-    match = re.search(r"<([^>]+)>", from_header)
-    if match:
-        return match.group(1)
-    # Maybe it's just a bare email
-    if "@" in from_header:
-        return from_header.strip()
-    return None
+def _extract_email_address(msg: email.message.Message) -> str | None:
+    """Extract the single bare address from a message's From header(s).
+
+    SEC3-1 (audit 2026-09-10): a naive ``re.search(r"<([^>]+)>", ...)`` over a
+    single From header returns the FIRST angle-bracketed token, which is the
+    display name's problem when the display name itself contains a bracketed
+    address literal -- ``"Alice <pi@univ.edu>" <attacker@evil.com>`` yields the
+    PI's address and passes the sender-identity check while the real
+    envelope/DKIM domain is attacker-controlled. ``email.utils.getaddresses``
+    parses RFC 5322 address syntax properly and returns the real address.
+
+    Also refuses (returns None) unless there is EXACTLY one address: multiple
+    From headers or group syntax (``Group: a@b.com, c@d.com;``) are ambiguous
+    identities, not a single sender to trust.
+    """
+    addresses = email.utils.getaddresses(msg.get_all("From", []))
+    if len(addresses) != 1:
+        return None
+    addr = addresses[0][1]
+    if not addr or "@" not in addr:
+        return None
+    return addr
 
 
 def _decode_part(part: email.message.Message) -> str:
