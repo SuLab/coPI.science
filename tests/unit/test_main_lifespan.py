@@ -49,11 +49,27 @@ async def test_a_real_lifespan_shutdown_does_not_permanently_kill_run_slack_call
     integration tests do, for reasons that have nothing to do with Slack) then
     broke run_slack_call for every OTHER test sharing that interpreter,
     regardless of whether that test ever touched shutdown itself. The pool
-    must now be lazily re-created on the next call instead."""
+    must now be lazily re-created on the next call instead.
+
+    L-1 (opus review, audit 2026-09-10): this drives the REAL
+    ``shutdown_slack_executor()``, which now also sets
+    ``slack_client.SHUTTING_DOWN`` (the module-level fallback) as a side
+    effect — leaving that Event set for the rest of this pytest process
+    would abort every OTHER test's retry sleep bound to it (any
+    ``AgentSlackClient`` call made on a thread never bound to a pool, e.g.
+    ``tests/unit/test_slack_client_contract.py``'s own tests). Clear it back
+    afterward, the same way ``test_slack_executor.py``'s autouse fixture
+    does for that file's tests.
+    """
+    from src.agent.slack_client import SHUTTING_DOWN
+
     app = create_app()
-    async with app.router.lifespan_context(app):
-        pass  # real shutdown_slack_executor() runs here, unmocked
+    try:
+        async with app.router.lifespan_context(app):
+            pass  # real shutdown_slack_executor() runs here, unmocked
 
-    result = await run_slack_call(lambda: 42)
+        result = await run_slack_call(lambda: 42)
 
-    assert result == 42
+        assert result == 42
+    finally:
+        SHUTTING_DOWN.clear()
