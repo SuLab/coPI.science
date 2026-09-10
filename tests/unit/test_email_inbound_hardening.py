@@ -639,33 +639,39 @@ async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type
 
 # --- Unbounded in-memory dedup/rate-limit maps are pruned (SEC3-4, audit 2026-09-10) ----
 #
-# _RECENT_REPLY_TIMES, _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT and
-# _INSTRUCTION_FAILURE_EMAILS_SENT are keyed by notification id / sender address and
-# never removed, so a long-lived worker process accumulates one entry per
-# notification/address forever.
+# _RECENT_REPLY_TIMES, _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT,
+# _INSTRUCTION_FAILURE_EMAILS_SENT and _S3_FAILURE_COUNTS are keyed by
+# notification id / sender address / S3 key and never removed, so a
+# long-lived worker process accumulates one entry per key forever.
+#
+# Opus review follow-up (audit 2026-09-10): the original fix used one 24h
+# window for all four maps, but _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT
+# and _INSTRUCTION_FAILURE_EMAILS_SENT are documented, deliberate LIFETIME
+# caps (MAX_HELP_EMAILS_PER_NOTIFICATION etc. — "per notification"/"per
+# address", not "per day") — pruning them on a 24h clock silently turned them
+# into 24h ROLLING caps, letting a sender who keeps a notification's reply
+# window open (or keeps retrying the same stale token) simply wait out the
+# day and get a fresh budget. Only _RECENT_REPLY_TIMES (an explicitly hourly
+# rate limit) and _S3_FAILURE_COUNTS (bounded in value by
+# MAX_S3_PROCESS_ATTEMPTS and reset on every processing attempt) are safe to
+# prune on a short clock. The three lifetime caps get a 30-day window instead
+# — long enough that no real notification/address exchange is still "live"
+# when it fires, but still eventually reclaims memory for abandoned ones.
 
 
-def test_prune_drops_an_entry_untouched_for_over_24_hours(monkeypatch):
+def test_prune_drops_a_short_window_entry_untouched_for_over_24_hours(monkeypatch):
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [100.0]})
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 100.0})
-    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"stale": 3})
-    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"stale": 100.0})
-    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"stale@x.com": 3})
-    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"stale@x.com": 100.0})
-    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"stale": 1})
-    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"stale": 100.0})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {"s3/stale": 1})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {"s3/stale": 100.0})
 
     now = 100.0 + 24 * 3600 + 1
     inbound._prune_stale_entries(now=now)
 
     assert inbound._RECENT_REPLY_TIMES == {}
     assert inbound._RECENT_REPLY_TOUCHED == {}
-    assert inbound._HELP_EMAILS_SENT == {}
-    assert inbound._HELP_EMAILS_TOUCHED == {}
-    assert inbound._STALE_TOKEN_BOUNCES_SENT == {}
-    assert inbound._STALE_BOUNCES_TOUCHED == {}
-    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {}
-    assert inbound._INSTRUCTION_FAILURE_TOUCHED == {}
+    assert inbound._S3_FAILURE_COUNTS == {}
+    assert inbound._S3_FAILURE_TOUCHED == {}
 
 
 def test_prune_keeps_a_fresh_entry(monkeypatch):
@@ -677,6 +683,8 @@ def test_prune_keeps_a_fresh_entry(monkeypatch):
     monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {})
     monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {})
     monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {})
 
     now = 100.0 + 3600  # well within the 24h window
     inbound._prune_stale_entries(now=now)
@@ -687,10 +695,48 @@ def test_prune_keeps_a_fresh_entry(monkeypatch):
     assert inbound._HELP_EMAILS_TOUCHED == {"fresh": 100.0}
 
 
+def test_prune_keeps_a_lifetime_cap_entry_older_than_24h_but_within_30_days(monkeypatch):
+    """The three lifetime caps must NOT be weakened into 24h rolling caps: an
+    entry untouched for 2 days (well past 24h, well within 30 days) survives."""
+    two_days = 2 * 24 * 3600
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"live": 3})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"live": 0.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"live@x.com": 3})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"live@x.com": 0.0})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"live": 1})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"live": 0.0})
+
+    inbound._prune_stale_entries(now=float(two_days))
+
+    assert inbound._HELP_EMAILS_SENT == {"live": 3}
+    assert inbound._STALE_TOKEN_BOUNCES_SENT == {"live@x.com": 3}
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {"live": 1}
+
+
+def test_prune_drops_a_lifetime_cap_entry_untouched_for_over_30_days(monkeypatch):
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"stale": 3})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"stale": 0.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"stale@x.com": 3})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"stale@x.com": 0.0})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"stale": 1})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"stale": 0.0})
+
+    now = 30 * 24 * 3600 + 1
+    inbound._prune_stale_entries(now=float(now))
+
+    assert inbound._HELP_EMAILS_SENT == {}
+    assert inbound._HELP_EMAILS_TOUCHED == {}
+    assert inbound._STALE_TOKEN_BOUNCES_SENT == {}
+    assert inbound._STALE_BOUNCES_TOUCHED == {}
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {}
+    assert inbound._INSTRUCTION_FAILURE_TOUCHED == {}
+
+
 async def test_poll_inbound_emails_prunes_stale_entries(monkeypatch):
     fake = _FakeS3([])
     monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
-    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {"s3/stale": 1})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {"s3/stale": 1.0})
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [1.0]})
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 1.0})
 
@@ -701,3 +747,5 @@ async def test_poll_inbound_emails_prunes_stale_entries(monkeypatch):
 
     assert inbound._RECENT_REPLY_TIMES == {}
     assert inbound._RECENT_REPLY_TOUCHED == {}
+    assert inbound._S3_FAILURE_COUNTS == {}
+    assert inbound._S3_FAILURE_TOUCHED == {}

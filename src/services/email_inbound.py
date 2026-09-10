@@ -106,23 +106,37 @@ _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 _S3_FAILURE_COUNTS: dict[str, int] = {}
 
 # SEC3-4 (audit 2026-09-10): companion "last touched" timestamp dicts for the
-# four bounded-in-name-only maps above. None of _RECENT_REPLY_TIMES,
+# bounded-in-name-only maps above. None of _RECENT_REPLY_TIMES,
 # _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT, _INSTRUCTION_FAILURE_EMAILS_SENT
-# ever drop a key once created -- they are keyed by notification id or sender
-# address, both unbounded over the life of a long-lived worker process. Each
-# write also stamps the matching *_TOUCHED dict; _prune_stale_entries (called
-# at the top of every poll) drops anything not touched in the last 24h from
-# both the data dict and its touched dict.
+# or _S3_FAILURE_COUNTS ever drop a key once created -- they are keyed by
+# notification id, sender address, or S3 key, all unbounded over the life of
+# a long-lived worker process. Each write also stamps the matching *_TOUCHED
+# dict; _prune_stale_entries (called at the top of every poll) drops anything
+# not touched within its window from both the data dict and its touched dict.
 _RECENT_REPLY_TOUCHED: dict[str, float] = {}
 _HELP_EMAILS_TOUCHED: dict[str, float] = {}
 _STALE_BOUNCES_TOUCHED: dict[str, float] = {}
 _INSTRUCTION_FAILURE_TOUCHED: dict[str, float] = {}
+_S3_FAILURE_TOUCHED: dict[str, float] = {}
 
-_PRUNE_WINDOW_SECONDS = 24 * 3600
+# Opus review follow-up (audit 2026-09-10): a single 24h window for every map
+# silently turned three documented LIFETIME caps (MAX_HELP_EMAILS_PER_NOTIFICATION,
+# MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS, the one-per-notification instruction-failure
+# email) into 24h ROLLING caps -- a sender who keeps a notification's reply window
+# open, or keeps retrying the same stale token, could simply wait out the day and
+# get a fresh budget. Only _RECENT_REPLY_TIMES (an explicitly hourly rate limit)
+# and _S3_FAILURE_COUNTS (small-integer-valued, bounded by MAX_S3_PROCESS_ATTEMPTS
+# and reset on every processing attempt or quarantine) are safe to prune on a
+# short clock. The three lifetime caps get a 30-day window instead: long enough
+# that no real notification/address exchange is still "live" when it fires, but
+# still eventually reclaims memory for entries whose notification/address is
+# never touched again.
+_PRUNE_WINDOW_SHORT_SECONDS = 24 * 3600
+_PRUNE_WINDOW_LIFETIME_SECONDS = 30 * 24 * 3600
 
 
 def _prune_stale_entries(now: float | None = None) -> None:
-    """Drop entries not touched in the last 24h from the rate-limit/dedup maps.
+    """Drop stale entries from the rate-limit/dedup/failure-count maps.
 
     Called at the top of every poll_inbound_emails run. Safe to call with an
     empty or partially-populated touched dict: an entry with no touched-dict
@@ -130,12 +144,14 @@ def _prune_stale_entries(now: float | None = None) -> None:
     is next written, which stamps its touch time).
     """
     ts = time.time() if now is None else now
-    cutoff = ts - _PRUNE_WINDOW_SECONDS
-    for data, touched in (
-        (_RECENT_REPLY_TIMES, _RECENT_REPLY_TOUCHED),
-        (_HELP_EMAILS_SENT, _HELP_EMAILS_TOUCHED),
-        (_STALE_TOKEN_BOUNCES_SENT, _STALE_BOUNCES_TOUCHED),
-        (_INSTRUCTION_FAILURE_EMAILS_SENT, _INSTRUCTION_FAILURE_TOUCHED),
+    short_cutoff = ts - _PRUNE_WINDOW_SHORT_SECONDS
+    lifetime_cutoff = ts - _PRUNE_WINDOW_LIFETIME_SECONDS
+    for data, touched, cutoff in (
+        (_RECENT_REPLY_TIMES, _RECENT_REPLY_TOUCHED, short_cutoff),
+        (_S3_FAILURE_COUNTS, _S3_FAILURE_TOUCHED, short_cutoff),
+        (_HELP_EMAILS_SENT, _HELP_EMAILS_TOUCHED, lifetime_cutoff),
+        (_STALE_TOKEN_BOUNCES_SENT, _STALE_BOUNCES_TOUCHED, lifetime_cutoff),
+        (_INSTRUCTION_FAILURE_EMAILS_SENT, _INSTRUCTION_FAILURE_TOUCHED, lifetime_cutoff),
     ):
         stale_keys = [key for key, touched_at in touched.items() if touched_at < cutoff]
         for key in stale_keys:
@@ -385,6 +401,7 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
                 # Delete processed email from S3
                 s3.delete_object(Bucket=bucket, Key=key)
                 _S3_FAILURE_COUNTS.pop(key, None)
+                _S3_FAILURE_TOUCHED.pop(key, None)
                 processed += 1
 
             except Exception as exc:
@@ -395,6 +412,7 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
                 # manual inspection. The counter is in-memory, so a restart
                 # grants a fresh round of attempts — acceptable.
                 _S3_FAILURE_COUNTS[key] = _S3_FAILURE_COUNTS.get(key, 0) + 1
+                _S3_FAILURE_TOUCHED[key] = time.time()
                 if _S3_FAILURE_COUNTS[key] >= MAX_S3_PROCESS_ATTEMPTS:
                     # Minor 3 (fix round A): quarantining ends the retry loop an
                     # InstructionApplyFailed(will_retry=True) site was counting on to
@@ -415,6 +433,7 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
                         )
                         s3.delete_object(Bucket=bucket, Key=key)
                         _S3_FAILURE_COUNTS.pop(key, None)
+                        _S3_FAILURE_TOUCHED.pop(key, None)
                         logger.error(
                             "Quarantined inbound email %s to %s after %d failed attempts",
                             key, failed_key, MAX_S3_PROCESS_ATTEMPTS,
