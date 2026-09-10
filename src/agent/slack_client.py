@@ -100,6 +100,26 @@ def signal_shutdown() -> None:
     SHUTTING_DOWN.set()
 
 
+def clear_shutdown() -> None:
+    """Clear the fallback shutdown event (M-2, opus review, audit 2026-09-10).
+
+    ``SHUTTING_DOWN`` is never cleared anywhere in ``src/`` once
+    ``signal_shutdown()`` sets it -- only tests reach in and clear it
+    directly. In a process that shuts the Slack pool down and later
+    lazily re-creates it (K-9's "shut down without exiting" case, e.g. a test
+    process sharing one interpreter across many independent lifespans),
+    every subsequent off-pool caller (the main thread, or any thread never
+    bound to a pool via ``bind_shutdown_event``) is bound to this fallback by
+    ``_current_shutdown_event`` and would find it permanently SET, aborting
+    its very first retry sleep instantly forever after. ``_get_executor``
+    calls this whenever it creates a fresh pool, mirroring K-9's own
+    "re-creation means we are live again" signal for the per-pool event --
+    safe for any OLD pool's still-sleeping worker thread, which is bound to
+    its OWN event via the thread-local, never to this fallback.
+    """
+    SHUTTING_DOWN.clear()
+
+
 class SlackShuttingDown(SlackApiError):
     """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown
     (K-2 follow-up, audit 2026-09-10).

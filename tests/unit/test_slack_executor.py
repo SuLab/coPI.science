@@ -228,6 +228,50 @@ def test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event(monkeypat
         slack_client_module.SHUTTING_DOWN.clear()
 
 
+async def test_get_executor_clears_the_fallback_event_when_it_creates_a_new_pool(monkeypatch):
+    """M-2 (opus review, audit 2026-09-10): SHUTTING_DOWN (the fallback event
+    for off-pool callers, e.g. AgentSlackClient calls made directly on
+    src/agent/main.py's event-loop thread) is never cleared anywhere in
+    src/ -- only tests reach in and clear it directly. In a process that
+    shuts the pool down and later lazily re-creates it without exiting the
+    interpreter (K-9), every later off-pool retry sleep would be bound to a
+    permanently-SET fallback and abort instantly forever after. `_get_executor`
+    must clear it when it mints a fresh pool.
+    """
+    from src.agent import slack_client as slack_client_module
+
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    shutdown_slack_executor()  # sets the fallback (L-1) as a side effect
+    assert slack_client_module.SHUTTING_DOWN.is_set()
+
+    # Force _get_executor() to mint a fresh pool (this is what run_slack_call
+    # does lazily on any call after a shutdown) BEFORE starting the sleeper --
+    # this test is about a sleeper that starts after re-creation, not one
+    # already mid-sleep across it (that scenario is covered separately below).
+    await run_slack_call(lambda: 1)
+    assert not slack_client_module.SHUTTING_DOWN.is_set()
+
+    outcome: dict = {}
+
+    def sleeper():
+        try:
+            slack_client_module._sleep_interruptibly(0.2)
+        except Exception as exc:
+            outcome["exc"] = exc
+        else:
+            outcome["completed"] = True
+
+    t = threading.Thread(target=sleeper, daemon=True)
+    t.start()
+    t.join(timeout=2.0)
+
+    assert outcome.get("completed") is True, (
+        "an off-pool sleeper started AFTER a new pool was created must not be "
+        f"aborted by the stale fallback event, got {outcome!r}"
+    )
+
+
 async def test_an_old_pools_sleeper_still_aborts_after_a_new_pool_is_created():
     """K-2 follow-up #3 (opus review, audit 2026-09-10): the abort signal must
     be bound per pool, not shared. Reproduces the reviewer's exact scenario

@@ -100,7 +100,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
-from src.agent.slack_client import bind_shutdown_event, signal_shutdown
+from src.agent.slack_client import bind_shutdown_event, clear_shutdown, signal_shutdown
 
 _T = TypeVar("_T")
 
@@ -146,6 +146,16 @@ def _get_executor() -> ThreadPoolExecutor:
     global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
     with _POOL_LOCK:
         if _SLACK_EXECUTOR is None:
+            # M-2 (opus review, audit 2026-09-10): clear the fallback event
+            # (slack_client.SHUTTING_DOWN) whenever a fresh pool is minted.
+            # Nothing else in src/ ever clears it once signal_shutdown() sets
+            # it, so an off-pool caller (e.g. AgentSlackClient calls made
+            # directly on src/agent/main.py's event-loop thread) would find it
+            # permanently SET after any shutdown/re-create cycle and abort its
+            # very next retry sleep instantly forever after. Safe for an OLD
+            # pool's still-sleeping worker thread: that thread is bound to its
+            # OWN per-pool event via the thread-local, never to this fallback.
+            clear_shutdown()
             _CURRENT_SHUTDOWN_EVENT = threading.Event()
             _SLACK_EXECUTOR = ThreadPoolExecutor(
                 max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io",
