@@ -1,12 +1,7 @@
-"""REV4-6 (audit 2026-09-08): _maybe_send_stale_token_bounce's per-address budget
-must only be consumed by a bounce that was ACTUALLY sent. `_send_html_email`
-returns False (without raising) for an allowlist-suppressed recipient -- see
-its own docstring, "Honors the outbound allowlist" -- and previously the
-counter was incremented unconditionally before that call, silently burning
-the budget on sends that never left the process. In an allowlist-restricted
-environment (dev/test) every reply from an address outside the allowlist would
-exhaust MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS after a handful of calls that sent
-nothing at all.
+"""REV4-6 (audit 2026-09-08) and its follow-up: _maybe_send_stale_token_bounce's
+per-address budget is consumed by every bounce that reaches SES (a post-dispatch
+failure still means a mail may have left, so an autoresponder ping-pong stays
+capped), and NOT by an allowlist-suppressed recipient, which never reaches SES.
 """
 
 import pytest
@@ -15,21 +10,29 @@ import src.services.email_inbound as inbound
 
 
 @pytest.mark.asyncio
-async def test_a_suppressed_send_does_not_consume_the_budget(monkeypatch):
+async def test_an_allowlist_suppressed_recipient_does_not_consume_the_budget(monkeypatch):
     monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
-    monkeypatch.setattr(inbound, "_send_html_email", lambda *a, **k: False)
+    monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: False)
+    sends = []
+    monkeypatch.setattr(inbound, "_send_html_email", lambda *a, **k: sends.append(a) or True)
 
     for _ in range(inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS + 3):
         await inbound._maybe_send_stale_token_bounce("suppressed@example.com")
 
     assert inbound._STALE_TOKEN_BOUNCES_SENT.get("suppressed@example.com", 0) == 0
+    assert sends == []
 
 
 @pytest.mark.asyncio
-async def test_a_successful_send_still_consumes_the_budget(monkeypatch):
+async def test_a_send_that_reached_ses_consumes_the_budget_even_if_it_reported_failure(monkeypatch):
     monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
-    monkeypatch.setattr(inbound, "_send_html_email", lambda *a, **k: True)
+    monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: True)
+    monkeypatch.setattr(inbound, "_send_html_email", lambda *a, **k: False)
 
-    await inbound._maybe_send_stale_token_bounce("real@example.com")
+    for _ in range(inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS + 3):
+        await inbound._maybe_send_stale_token_bounce("real@example.com")
 
-    assert inbound._STALE_TOKEN_BOUNCES_SENT.get("real@example.com", 0) == 1
+    assert (
+        inbound._STALE_TOKEN_BOUNCES_SENT["real@example.com"]
+        == inbound.MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS
+    )

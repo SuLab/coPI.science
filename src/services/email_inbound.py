@@ -1336,12 +1336,17 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         "reminder instead, or use the dashboard.</p>"
         "<p>Replies to this address are not monitored.</p>"
     )
-    # REV4-6 (audit 2026-09-08): only count this against the per-address budget
-    # if it actually sent -- _send_html_email returns False without raising for
-    # an allowlist-suppressed recipient, and incrementing unconditionally
-    # burned the whole budget on sends that never left the process.
-    if _send_html_email(to_email, subject, text_body, html_body):
-        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
+    # REV4-6 + follow-up (audit 2026-09-08): an allowlist-suppressed recipient
+    # never reaches SES, so it must not consume the budget; anything that DOES
+    # reach SES is charged before the call, because _send_html_email also returns
+    # False for a post-dispatch failure (read timeout) where the mail left — and
+    # not charging those would let an autoresponder ping-pong past the cap.
+    from src.services.email import is_allowed_recipient
+    if not is_allowed_recipient(to_email):
+        logger.info("Stale-token bounce to %s suppressed by outbound allowlist", to_email)
+        return
+    _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
+    _send_html_email(to_email, subject, text_body, html_body)
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:
