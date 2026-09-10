@@ -36,6 +36,17 @@ explicitly; ``atexit.register`` below is a backstop for anything that exits
 without running either (a crash path, a script that imports this module
 directly, etc.) so the pool is never the reason interpreter shutdown hangs.
 
+**Interpreter-exit ordering (P-1, opus review, audit 2026-09-10).** A plain
+``atexit.register`` callback runs too late to help a pool worker that is
+mid-sleep at exit: ``threading._shutdown()`` (which the interpreter runs
+before any ``atexit`` callback) already joins every non-daemon thread —
+including this pool's workers — to completion first, so a sleeping worker
+would run out its full sleep before ``shutdown_slack_executor`` ever fires.
+``threading._register_atexit`` hooks run BEFORE that join instead, so
+``signal_shutdown`` is registered there too (guarded by ``hasattr`` with an
+``atexit.register`` fallback), letting an in-flight sleeper see
+``SHUTDOWN_REQUESTED`` and abort in time.
+
 **The agent-run process (src/agent/main.py) does NOT call this.** Its worker
 threads exit with the process once their sleeps become interruptible via the
 shared event; there is no separate pool lifecycle to tear down there. It
@@ -167,8 +178,33 @@ def shutdown_slack_executor() -> None:
         executor.shutdown(wait=False, cancel_futures=False)
 
 
+# P-1 (opus review, audit 2026-09-10): a plain `atexit.register` callback
+# runs AFTER `threading._shutdown()` has already joined every non-daemon
+# thread to completion -- including this pool's workers. A worker sleeping
+# through `_sleep_interruptibly` at interpreter exit therefore runs out its
+# FULL sleep (nothing has set SHUTDOWN_REQUESTED yet) before the atexit
+# callback below ever gets a chance to fire; reviewer measured a 5s sleeper
+# completing in full rather than aborting.
+#
+# `threading._register_atexit` hooks run BEFORE that join, so registering
+# `signal_shutdown` there sets the event in time for an in-flight sleeper to
+# actually abort. It is a private/underscore CPython API (no public
+# equivalent exists for "run before thread join"), so it is guarded with
+# `hasattr` and falls back to the plain `atexit.register` below on any
+# interpreter that lacks it -- on that fallback interpreter a sleeper still
+# runs to completion, but the pool itself is at least shut down cleanly
+# rather than leaking.
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(signal_shutdown)
+else:  # pragma: no cover - defensive fallback for non-CPython interpreters
+    atexit.register(signal_shutdown)
+
 # Backstop for any exit path that does not run the FastAPI lifespan or the
 # worker's own shutdown call (a crash, a one-off script that imports this
 # module directly, a signal neither of those handles) — so this pool is never
 # the reason interpreter shutdown hangs waiting to join its worker threads.
+# This still runs (in normal atexit order, i.e. AFTER the thread join and
+# AFTER the `_register_atexit` hook above), so it is what actually shuts the
+# pool down/drops the module reference; the hook above only exists to set the
+# shutdown event early enough for a sleeper to see it before that join.
 atexit.register(shutdown_slack_executor)
