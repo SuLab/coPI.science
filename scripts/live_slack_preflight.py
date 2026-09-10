@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -307,9 +308,13 @@ def check_profiles_dir_writable(profiles_dir: Path) -> Check:
     the stale file), and the live tier should refuse up front rather than discover it
     mid-run with a PI told their instruction was saved when it was not.
     """
+    # shlex.quote (R-5, audit 2026-09-10): profiles_dir is interpolated into a
+    # copy-paste `sudo chown -R ...` suggestion. Unquoted, a path containing a
+    # space or shell metacharacter renders a command that either chowns the wrong
+    # (truncated) path or does something else entirely if pasted as-is.
     remedy = (
-        f"Fix with either: `sudo chown -R $(id -u):$(id -g) {profiles_dir}` (or the "
-        "deploy image's UID 10001 -- see CLAUDE.md's UID 10001 precondition), or "
+        f"Fix with either: `sudo chown -R $(id -u):$(id -g) {shlex.quote(str(profiles_dir))}` "
+        "(or the deploy image's UID 10001 -- see CLAUDE.md's UID 10001 precondition), or "
         f"point elsewhere with `COPI_PROFILES_DIR=<a-writable-directory>`."
     )
     if not profiles_dir.is_dir():

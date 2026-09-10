@@ -453,6 +453,25 @@ def test_check_six_refuses_a_nonexistent_profiles_dir_with_the_exact_remedy(tmp_
     assert "COPI_PROFILES_DIR" in check.detail
 
 
+def test_check_six_quotes_a_profiles_dir_containing_a_space_in_the_remedy(tmp_path):
+    """R-5 (audit 2026-09-10): the remedy interpolates `profiles_dir` raw into a
+    `sudo chown -R ... <dir>` suggestion. Unquoted, a path with a space (or shell
+    metacharacters) renders as a copy-paste line that runs `chown` against the wrong
+    (truncated) path, or worse. `shlex.quote` makes the suggested command safe to
+    paste regardless of what's in the path."""
+    import shlex
+
+    target = tmp_path / "typo-ed profiles dir"
+    assert not target.exists()
+    check = check_profiles_dir_writable(target)
+    assert not check.ok
+    quoted = shlex.quote(str(target))
+    assert f"chown -R $(id -u):$(id -g) {quoted}" in check.detail, check.detail
+    # The unquoted path is fine to appear elsewhere (e.g. the "does not exist"
+    # prefix) — only the copy-paste `chown` command itself must be quoted.
+    assert f"chown -R $(id -u):$(id -g) {target}" not in check.detail
+
+
 @pytest.mark.skipif(
     os.geteuid() == 0,
     reason="root ignores directory permission bits, so the read-only probe can't fail",
