@@ -362,6 +362,12 @@ async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegist
     by guessing a UUID. Also 404 for an agent that is not ``pending`` — the
     two routes below are the pending-agent onboarding path, and mute/unmute
     (design D4) already own the active/inactive transitions.
+
+    ``role == "pi_lab"`` is required for a third, sharper reason:
+    ``activation_blockers`` short-circuits to ``[]`` for any other role (the
+    hub and the specialists have no PI profile by design), so a `pi` user
+    hand-linked on /admin/agents to a hub or specialist row would sail past
+    the gate here with no profile check at all. 404 instead.
     """
     target = (
         await db.execute(select(User).where(User.id == user_id))
@@ -373,7 +379,7 @@ async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegist
             select(AgentRegistry).where(AgentRegistry.user_id == user_id)
         )
     ).scalar_one_or_none()
-    if agent is None or agent.status != "pending":
+    if agent is None or agent.status != "pending" or agent.role != "pi_lab":
         raise HTTPException(status_code=404, detail="No pending agent for this PI")
     return agent
 

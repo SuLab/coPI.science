@@ -250,3 +250,56 @@ async def test_a_non_pending_agent_is_not_provisionable_from_the_manager_page(
             headers=auth_headers(manager.id), follow_redirects=False,
         )
         assert r.status_code == 404, path
+
+
+async def test_a_non_pi_lab_agent_is_not_reachable_from_the_manager_page(
+    client, db_session
+):
+    """A `pi` user hand-linked on /admin/agents to a hub or specialist row must
+    not be activatable here: `activation_blockers` short-circuits to [] for any
+    role but `pi_lab`, so the gate would wave it through with no profile check
+    at all."""
+    manager = await _manager(db_session)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_agent(
+        db_session, user=pi, agent_id="hublike", bot_name="HubLikeBot",
+        status="pending", role="scout_hub", slack_bot_token="xoxb-hub",
+    )
+    await db_session.flush()
+    for path in ("slack/provision", "activate"):
+        r = await client.post(
+            f"/manager/pis/{pi.id}/{path}",
+            headers=auth_headers(manager.id), follow_redirects=False,
+        )
+        assert r.status_code == 404, path
+
+
+async def test_the_callback_refuses_an_impersonated_session(
+    client, db_session, monkeypatch
+):
+    """Landing a live bot token on someone else's agent is a write, and the
+    manager POSTs already refuse an impersonated session — the callback does
+    too, rather than recording the install against whoever is being worn."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    manager = await _manager(db_session)
+    _pi, agent = await _pending_pi(db_session, agent_id="cbimperson")
+    db_session.add(SlackAppProvision(
+        agent_registry_id=agent.id, state="s4",
+        client_id="cid", client_secret="secret",
+        initiated_by_user_id=manager.id,
+    ))
+    await db_session.flush()
+
+    def _never(*a, **k):
+        raise AssertionError("the code must not be exchanged while impersonating")
+
+    monkeypatch.setattr("src.services.admin_provisioning.exchange_code", _never)
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    r = await client.get(
+        "/admin/agents/slack/callback?code=c&state=s4",
+        headers=headers, follow_redirects=False,
+    )
+    assert r.status_code == 403
+    await db_session.refresh(agent)
+    assert agent.slack_bot_token is None
