@@ -2729,10 +2729,6 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: No message text in response", agent.agent_id)
                 return
 
-            # Real action — reset skip backoff
-            agent.state.consecutive_phase5_skips = 0
-            agent.state.last_phase5_action_time = time.time()
-
             channel = str(action_data.get("channel") or "").lstrip("#")
             target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
@@ -2744,7 +2740,11 @@ class SimulationEngine:
             # roster is collapsed to one probe channel). Missing or unknown is
             # unparseable, exactly like a missing `action` above. Replies are
             # not gated here: their channel comes from the target post (COR-9b).
-            # See audit 2026-09-08 RC-15.
+            # See audit 2026-09-08 RC-15. This check runs BEFORE the skip-backoff
+            # reset below (REV4-4) so a refused new_post increments
+            # consecutive_phase5_skips and leaves last_phase5_action_time alone,
+            # exactly like every sibling rejection further down this method,
+            # instead of being counted as a real action that never happened.
             if action == "new_post":
                 known = (
                     channel in self._channel_visibility
@@ -2758,7 +2758,12 @@ class SimulationEngine:
                         "omitted `channel`" if not channel
                         else f"named unknown channel #{channel}",
                     )
+                    agent.state.consecutive_phase5_skips += 1
                     return
+
+            # Real action — reset skip backoff
+            agent.state.consecutive_phase5_skips = 0
+            agent.state.last_phase5_action_time = time.time()
 
             # A reply's channel is the target post's real channel, never the
             # LLM's free-form field — trusting the LLM here let a reply

@@ -5067,6 +5067,34 @@ class TestPhase5NewPostNeverDefaultsToGeneral:
         assert [e for e in engine.message_log._entries if e.sender_agent_id == "a"] == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("action_json", [
+        '{"action": "new_post", "post_type": "idea"}',
+        '{"action": "new_post", "channel": "general", "post_type": "idea"}',
+        '{"action": "new_post", "channel": "#made-up", "post_type": "idea"}',
+    ])
+    async def test_the_refusal_increments_the_skip_streak_without_resetting_it(
+        self, monkeypatch, action_json,
+    ):
+        """REV4-4 (audit 2026-09-08): the RC-15 refusal branch must behave like every
+        sibling rejection below it (back-to-back private post, blocked-for-regular,
+        daily cap, authorship guard, funding-thread validators) -- increment
+        consecutive_phase5_skips, not silently reset the backoff streak to 0 as if a
+        real action had gone out. (`last_phase5_action_time` is stamped unconditionally
+        at the top of `_phase5_new_post` regardless of outcome -- that part is
+        unaffected and not under test here; what must NOT happen is the *second*,
+        "real action" stamp/reset a few lines below the refusal check.)"""
+        from unittest.mock import AsyncMock
+
+        engine, a = self._engine(monkeypatch)
+        a.state.consecutive_phase5_skips = 3
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._response(action_json)),
+        )
+        await engine._phase5_new_post(a)
+        assert a.state.consecutive_phase5_skips == 4
+
+    @pytest.mark.asyncio
     async def test_a_new_post_into_a_known_channel_still_posts(self, monkeypatch):
         from unittest.mock import AsyncMock
 
