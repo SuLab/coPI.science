@@ -6356,9 +6356,25 @@ class SimulationEngine:
                         PrivateChannelMember.role == "bot",
                         PrivateChannelMember.removed_at.is_(None),
                         AgentChannel.archived_at.is_(None),
+                        # L-6 (opus review, audit 2026-09-10): mirror
+                        # `_sync_private_channels_from_db`'s own gate — only a
+                        # collab_private channel is ever subscribed this way.
+                        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE,
                     )
                 )).scalars().all()
-                agent.state.subscribed_channels.update(member_channel_names)
+                # L-6 (opus review, audit 2026-09-10): intersect with
+                # `_channel_id_map`, the same restriction
+                # `_sync_private_channels_from_db` applies (it only
+                # integrates a channel this ENGINE has actually discovered).
+                # Without it, a channel this process has never seen ends up
+                # in `subscribed_channels` with no corresponding
+                # `_channel_id_map`/`_channel_visibility` entry — breaking
+                # every lookup keyed on those maps for that name (poll
+                # cursor, channel id resolution, visibility check).
+                agent.state.subscribed_channels.update(
+                    name for name in member_channel_names
+                    if name in self._channel_id_map
+                )
 
             # active_threads from the in-memory message_log (already loaded
             # at startup and kept live since) — mirrors _rebuild_agent_state's

@@ -1554,3 +1554,38 @@ async def test_a_roster_flip_restores_subscribed_channels_for_a_known_private_ch
         "a roster re-add must restore membership in a private channel this "
         "agent already belongs to, not just ones newly discovered this tick"
     )
+
+
+async def test_a_roster_flip_never_subscribes_an_undiscovered_channel(db_session):
+    """L-6 (opus review, audit 2026-09-10): the subscribed_channels restore
+    query joined `agent_channels`/`private_channel_members` with NO
+    visibility filter and no intersection against `self._channel_id_map` —
+    unlike `_sync_private_channels_from_db`, which only ever integrates a
+    channel this process has actually discovered (added to `_channel_id_map`/
+    `_channel_visibility` first). Subscribing a re-added agent to a channel
+    the engine itself has never discovered leaves `subscribed_channels`
+    naming a channel with no entry in either map, which breaks every lookup
+    (poll cursor, channel id resolution, visibility check) keyed on those
+    maps for that name.
+    """
+    run = await factories.make_simulation_run(db_session)
+    channel = await factories.make_agent_channel(
+        db_session, run=run, channel_name="su-priv", channel_id="C-SU-PRIV",
+        visibility="collab_private",
+    )
+    await factories.make_private_channel_member(
+        db_session, channel=channel, role="bot", agent_id="su",
+    )
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    # Deliberately do NOT prime `_channel_id_map`/`_channel_visibility` —
+    # this process has never discovered "su-priv" at all.
+
+    readded = Agent(agent_id="su", bot_name="SuBot", pi_name="PI su")
+    eng.agents["su"] = readded
+    await eng._rebuild_one_agent_state("su")
+
+    assert "su-priv" not in readded.state.subscribed_channels, (
+        "a channel this engine process has never discovered "
+        "(_channel_id_map has no entry for it) must never be subscribed"
+    )
