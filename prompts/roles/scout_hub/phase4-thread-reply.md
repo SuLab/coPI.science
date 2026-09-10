@@ -233,12 +233,14 @@ of it may appear anywhere in `<slack_message>` above:
    fundable — the whole story in one line. This is NOT the project label;
    `company_or_project` already carries that, and both are stored.
    Record it in `headline`.
-7. **Key points.** Three to five bullets, each at most 160 characters and each
-   a complete claim rather than a topic — "the classifier does not exist yet;
-   no AUC was ever computed", not "classifier status". Together they must let a
-   reviewer who reads nothing else say what the idea is, what is actually
-   established, and what the deciding risk is. Record them in `key_points` as
-   an array of strings.
+7. **Key points.** Three labelled groups, in this order, each holding ONE or
+   TWO bullets of at most 160 characters, each a complete claim rather than a
+   topic: `significance` (why the problem matters and for whom),
+   `innovation` (what is genuinely new versus the state of the art), and
+   `commercial_potential` (path to a product, IP, market or partner). Together
+   they must let a reviewer who reads nothing else state what the idea is, what
+   is established, and the deciding risk. Record them in `key_points` as an
+   object with exactly those three keys, each an array of strings.
 8. **Elevator pitch.** Three to five sentences of plain language, for a
    scientifically literate reader who is not a specialist in this field. State
    what exists today, what the money would buy, and why the answer matters.
@@ -291,7 +293,7 @@ every proposal.
   "company_or_project": "",
   "subject_agent_id": "",
   "headline": "",
-  "key_points": [],
+  "key_points": {"significance": [], "innovation": [], "commercial_potential": []},
   "elevator_pitch": "",
   "gating": {
     "life_sciences_domain": "met",

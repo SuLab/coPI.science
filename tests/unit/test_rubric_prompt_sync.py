@@ -31,6 +31,7 @@ tests/unit/test_stage_bars.py.
 """
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -275,9 +276,16 @@ def test_skeleton_carries_the_three_narrative_fields():
     skeleton = _skeleton()
     for key in ("headline", "key_points", "elevator_pitch"):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
-    assert skeleton["key_points"] == []
+    assert skeleton["key_points"] == {
+        "significance": [], "innovation": [], "commercial_potential": []
+    }
     assert skeleton["headline"] == ""
     assert skeleton["elevator_pitch"] == ""
+
+
+def test_the_scout_hub_prompt_set_version_is_1_3_0_or_later():
+    manifest = tomllib.loads(Path("prompts/roles/scout_hub/role.toml").read_text())
+    assert tuple(int(x) for x in manifest["version"].split(".")) >= (1, 3, 0)
 
 
 def test_phase4_binds_the_rationale_to_a_bolded_summary_sentence():
