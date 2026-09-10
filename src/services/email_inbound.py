@@ -533,9 +533,24 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         logger.info("Ignoring auto-submitted inbound mail (Auto-Submitted header)")
         return
 
-    # Extract reply token from To header
+    # Extract reply token from To, falling back to Cc, Delivered-To, then
+    # X-Original-To (S-6, audit 2026-09-10): the review+TOKEN@ address is not
+    # always the primary recipient — a PI can Cc the reply address, or a
+    # forwarding rule can move it out of To entirely, in which case a
+    # downstream MTA typically records the ORIGINAL envelope recipient in
+    # Delivered-To/X-Original-To. Checked in this order (most to least
+    # authoritative for "what the PI actually addressed").
     to_addr = msg.get("To", "")
     token = _extract_reply_token(to_addr)
+    if not token:
+        for header_name in ("Cc", "Delivered-To", "X-Original-To"):
+            for header_value in msg.get_all(header_name, []):
+                token = _extract_reply_token(header_value)
+                if token:
+                    to_addr = header_value
+                    break
+            if token:
+                break
     if not token:
         logger.warning("No reply token found in To address: %s", to_addr)
         return

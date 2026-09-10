@@ -241,6 +241,65 @@ async def test_auto_submitted_no_is_not_treated_as_an_auto_reply():
         await process_inbound_email(raw, db=None)
 
 
+# --- Reply token falls back through Cc/Delivered-To/X-Original-To (S-6) -----
+
+
+async def test_reply_token_falls_back_to_cc_when_absent_from_to():
+    """S-6 (audit 2026-09-10): a PI who Ccs the reply address instead of (or
+    in addition to) putting it in To must still be recognized -- reaching the
+    token-lookup db.execute (the AttributeError on db=None) is the evidence
+    the fallback found the token, not the early "no token" return.
+    """
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Cc: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_reply_token_falls_back_to_delivered_to_when_absent_from_to_and_cc():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Delivered-To: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_reply_token_falls_back_to_x_original_to_as_a_last_resort():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "X-Original-To: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_no_reply_token_anywhere_is_still_dropped_without_touching_the_db():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Cc: also-not-it@scripps.edu\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    await process_inbound_email(raw, db=None)  # must not raise
+
+
 # --- The declared per-token rate limit is enforced ---------------------------
 
 
