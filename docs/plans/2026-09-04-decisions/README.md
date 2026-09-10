@@ -158,6 +158,32 @@ Phase-3 activation, which is done), the in-process-only dead-thread tombstone, E
 overshoot, COR-9b's missing-target fallback, COR-6's data-dependent cursor. Follow-ups **F1**, **F2**,
 **F3**.
 
+**Added by the 2026-09-08 audit fix wave (`docs/plans/2026-09-08-audit-fixes.md`) — the closing
+comment must state these too.**
+
+8. **COR-5's DB/web path was still authorized by thread membership** at `bc03917`
+   (`_handle_pi_inbound_entry` used every agent that had posted in the thread), so PI A's web
+   message or e-mail reply in a shared A/B thread cleared B's block, set B's `pi_context` and wrote a
+   rating=-1 review attributed to B's PI. **RC-1** adds `agent_messages.sender_user_id` (migration
+   `0030`), stamped by every writer, and gates review clearing (owned ∩ participants), `pi_context`,
+   `has_pi_directive`, the reopen target and the `@Bot` route on the agents the sender owns or is a
+   delegate for. A NULL-sender row (pre-0030) gets no ownership-gated side effect. The carrier is
+   `sender_user_id` + a registry/delegate lookup, which is how the Slack path already worked; it is
+   the issue's "require the sender be the owning PI" by a different column.
+9. **PI messages written while `agent-run` was down lost every side effect** (pre-existing; 0029
+   stopped one step short). **RC-2**: writers stamp `pi_inbound_state='pending'`, the poller recovers
+   `pending`/`ingested` rows independently of the cursor and marks INGESTED before the handler (one
+   attempt per row), and `pi_dm_messages.handled_at` (0030, backfilled for existing inbound rows)
+   replaces the in-memory seen-set as the DM replay guard.
+10. **RC-9**: a parked thread is dropped from `active_threads` after `PARKED_THREAD_MAX_TURNS`
+    (no decision, no DM), and `post_failure_count` is re-derived on rebuild from trailing DB-only
+    rows of Slack-rooted threads only.
+11. **RC-3 (#23 V7)**: the Slack rate-limit retry is a 180 s wait budget with an 8-attempt ceiling,
+    not 3 × 30 s; the runbook's `attempt 1/3` signal is now `attempt 1/8 … of wait budget used`.
+12. **RC-7**: a PI standing instruction is persisted to the DB first; a failed disk write no longer
+    clobbers the DB copy, and the acknowledgement reports a DB failure truthfully. Found live on
+    copi-test (permission denied on `profiles/private`).
+
 ---
 
 ### #21 — Worker & background jobs
@@ -219,6 +245,15 @@ neither is a doubt about the work:
    `tests/unit/test_ids.py:101::test_five_writer_slots_are_distinct_residues`.
 6. **Task 14's 409 is a user-visible response-code change** shared with #24 (see below); it is
    reached from the same review path this issue's e-mail sweeps feed.
+
+
+7. **RC-4 (V4-3)**: reply tokens now expire at the consumer — `process_inbound_email` refuses a reply
+   older than `email_notification_expiry_days` (14) and marks the row `expired`; the sweep expires
+   lapsed rows on the no-proposals/allowlist paths; every (re)send mints a fresh `reply_token` so a
+   superseded e-mail's token is unfindable. Applies to `new_proposal` tokens too.
+8. **RC-14**: every Slack call in `migrate_public_thread_to_private` runs via `asyncio.to_thread`,
+   so a Slack throttle no longer freezes the single-worker app or the worker (cancellation caveat
+   recorded in the plan).
 
 Follow-ups: **F4**, **F5**, **F6**, **F7**.
 
