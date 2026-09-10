@@ -589,6 +589,96 @@ class TestSyncProfilesFromDisk:
         assert agent.private_profile.strip() == new_content
         assert agent.agent_id not in engine._force_cleared_private
 
+    async def test_a_reached_verdict_that_rewrites_the_file_does_not_log_a_spurious_later_edit(
+        self, setup,
+    ):
+        """O-4 (audit 2026-09-10): when the DB has content and
+        `_sync_one_agent_private_profile_from_db` rewrites the disk file, the
+        watcher must re-stat afterward rather than record the pre-write mtime
+        it captured before calling the helper — otherwise the NEXT tick's
+        real stat() (reflecting the helper's own write) looks like a fresh
+        external edit and triggers a second, spurious reload."""
+        import os
+        import uuid
+        from types import SimpleNamespace
+
+        engine, agent, priv, calls = setup
+
+        await engine._sync_profiles_from_disk()  # baseline
+
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        new_content = "New instructions the PI wrote after clearing."
+        agent_reg = SimpleNamespace(user_id=uuid.uuid4())
+        profile = SimpleNamespace(private_profile_md=new_content)
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(agent_reg, profile)
+        )
+
+        await engine._sync_profiles_from_disk()  # helper rewrites priv from the DB
+        assert calls == {"private": [], "public": []}, (
+            "the DB-authoritative resync writes disk + cache directly; it "
+            "must not also go through the watcher's own reload_private_profile()"
+        )
+
+        # A subsequent pass with no further external change must not treat
+        # the helper's own write as a fresh edit.
+        await engine._sync_profiles_from_disk()
+        assert calls == {"private": [], "public": []}
+
+    async def test_a_non_verdict_does_not_advance_the_signature_so_the_next_tick_retries(
+        self, setup,
+    ):
+        """O-4 (audit 2026-09-10): when the helper cannot reach a verdict (no
+        `AgentRegistry.user_id` / no `ResearcherProfile` row), the watcher
+        must not advance its mtime signature for this bump — advancing it
+        anyway would make the bump look already-handled forever, since a
+        later tick's stat() would just match the now-recorded signature and
+        the "nothing changed" fast path would never call back into the
+        helper again."""
+        from types import SimpleNamespace
+
+        engine, agent, priv, calls = setup
+
+        await engine._sync_profiles_from_disk()  # baseline
+
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        # No linked user_id -> _sync_one_agent_private_profile_from_db cannot
+        # reach a verdict.
+        agent_reg = SimpleNamespace(user_id=None)
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(agent_reg, None)
+        )
+
+        import os
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        await engine._sync_profiles_from_disk()
+        assert calls == {"private": [], "public": []}
+        assert agent.agent_id in engine._force_cleared_private
+
+        # DB becomes available with real content on the NEXT tick, with no
+        # further mtime bump — the retry must still happen because the
+        # signature was never advanced past the original bump.
+        new_content = "PI instructions, now that the DB is reachable."
+        real_agent_reg = SimpleNamespace(user_id=__import__("uuid").uuid4())
+        profile = SimpleNamespace(private_profile_md=new_content)
+        engine.session_factory = lambda: _StubProfileSessionCtx(
+            _FakeProfileDb(real_agent_reg, profile)
+        )
+
+        await engine._sync_profiles_from_disk()
+
+        assert agent.private_profile.strip() == new_content
+        assert agent.agent_id not in engine._force_cleared_private
+
 
 class TestPrivateReloadIsolatedFromPublicChange:
     """RC-7 follow-up (audit 2026-09-08, reviewer-reproduced): a failed

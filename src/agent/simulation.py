@@ -6153,7 +6153,7 @@ class SimulationEngine:
         for agent in self.agents.values():
             await self._sync_one_agent_private_profile_from_db(agent)
 
-    async def _sync_one_agent_private_profile_from_db(self, agent: "Agent") -> None:
+    async def _sync_one_agent_private_profile_from_db(self, agent: "Agent") -> bool:
         """Reconcile ONE agent's private profile against the DB (L-4 split
         of ``_sync_private_profiles_from_db``, opus review, audit 2026-09-10).
 
@@ -6161,9 +6161,21 @@ class SimulationEngine:
         holds the actual per-agent logic so both rebuild paths — startup's
         loop over every agent, and ``_rebuild_one_agent_state``'s single
         re-added agent — share it exactly.
+
+        O-4 (audit 2026-09-10): returns whether this call reached a
+        DEFINITIVE verdict (a real ``AgentRegistry``/``ResearcherProfile`` row
+        was actually consulted) as opposed to bailing out early with nothing
+        resolved (no ``session_factory``, no linked ``user_id``, no
+        ``ResearcherProfile`` row, or an exception). The watcher's
+        force-cleared branch (``_sync_profiles_from_disk``) uses this to
+        decide whether it is safe to advance its mtime signature — advancing
+        it after a non-verdict would silence any FUTURE retry of this same
+        bump until another edit happens, since the signature would already
+        match and the watcher's own "nothing changed" fast path would never
+        call back in here again.
         """
         if not self.session_factory:
-            return
+            return False
         from sqlalchemy import select as sa_select
 
         from src.agent.agent import _profiles_dir
@@ -6177,7 +6189,7 @@ class SimulationEngine:
                     )
                 )).scalar_one_or_none()
                 if not agent_reg or not agent_reg.user_id:
-                    return
+                    return False
                 profile = (await db.execute(
                     sa_select(ResearcherProfile).where(
                         ResearcherProfile.user_id == agent_reg.user_id
@@ -6190,7 +6202,7 @@ class SimulationEngine:
             # file) for a user who simply never had a profile row created.
             # Only a REAL row whose content is empty/NULL authorizes that.
             if profile is None:
-                return
+                return False
             db_content = (profile.private_profile_md or "").strip()
             if db_content:
                 # N-3 (opus review, audit 2026-09-10): the DB now holds real
@@ -6204,7 +6216,7 @@ class SimulationEngine:
                 # edit again.
                 self._force_cleared_private.discard(agent.agent_id)
                 if agent.private_profile.strip() == db_content:
-                    return
+                    return True
                 # M-4 (opus review, audit 2026-09-10): update_private_profile()
                 # returns False when the disk write itself failed (the cache
                 # is still updated to new_profile either way, per its own
@@ -6223,7 +6235,7 @@ class SimulationEngine:
                         "disk write failed",
                         agent.agent_id,
                     )
-                return
+                return True
             # DB says "cleared" — only act if a real (stale) file exists
             # on disk; a never-written agent already reads the same
             # in-code default `Agent.private_profile` falls back to.
@@ -6233,7 +6245,7 @@ class SimulationEngine:
             # method honour the same override.
             profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
             if not profile_path.exists():
-                return
+                return True
             try:
                 profile_path.unlink()
                 logger.info(
@@ -6266,11 +6278,13 @@ class SimulationEngine:
                 # `reload_private_profile()` from the very file we could not
                 # remove — that would resurrect the cleared instruction.
                 self._force_cleared_private.add(agent.agent_id)
+            return True
         except Exception as exc:
             logger.warning(
                 "[%s] Failed to sync private profile from DB at startup: %s",
                 agent.agent_id, exc,
             )
+            return False
 
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
@@ -7099,8 +7113,35 @@ class SimulationEngine:
                         # when ResearcherProfile.private_profile_md is now
                         # non-empty, and only retries the unlink when the DB
                         # confirms it is still empty.
-                        await self._sync_one_agent_private_profile_from_db(agent)
-                        agent_sigs[sub] = new_sig
+                        #
+                        # O-4 (audit 2026-09-10): only advance this
+                        # sub-profile's signature when the helper actually
+                        # reached a verdict. If it bailed out early (no
+                        # session_factory, no linked user_id, no
+                        # ResearcherProfile row, or an exception), advancing
+                        # the signature anyway would make THIS tick's bump
+                        # look already-handled forever — the next tick's stat()
+                        # would match the now-recorded new_sig and the "nothing
+                        # changed" fast path above would never call back in
+                        # here again, permanently losing the retry.
+                        #
+                        # When a verdict WAS reached and the DB had content
+                        # (the helper may have rewritten the file), re-stat
+                        # rather than reuse the pre-write `new_sig`: the write
+                        # happens strictly after `new_sig` was captured, so
+                        # reusing it would record a signature already stale
+                        # by the time this method returns, and the NEXT tick's
+                        # real stat() would then look like an "external edit"
+                        # of a file this method itself just wrote.
+                        reached_verdict = await self._sync_one_agent_private_profile_from_db(
+                            agent
+                        )
+                        if reached_verdict:
+                            try:
+                                fresh_mtime: float | None = path.stat().st_mtime
+                            except OSError:
+                                fresh_mtime = None
+                            agent_sigs[sub] = (fresh_mtime is not None, fresh_mtime)
                         continue
                     if sub == "private":
                         agent.reload_private_profile()
