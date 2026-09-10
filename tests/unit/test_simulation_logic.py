@@ -1606,6 +1606,66 @@ class TestPostMessageSuppressesEmptyText:
 
 
 # ---------------------------------------------------------------
+# _post_message — a synchronous Slack call must not block the event loop
+# (M-8, opus review, audit 2026-09-10)
+# ---------------------------------------------------------------
+
+class TestPostMessageDoesNotBlockTheEventLoop:
+    """A live full-run test showed a 30s blocking Retry-After sleep inside a
+    directly-awaited AgentSlackClient call starve the whole event loop —
+    every coroutine, timer, and asyncpg connection in the process stalls for
+    as long as the synchronous call takes. `_post_message`'s
+    `client.post_message(...)` now runs through
+    `src.services.slack_executor.run_slack_call`, moving it off the loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_another_coroutine_keeps_ticking_while_the_post_is_in_flight(self):
+        import asyncio
+        import time
+        from unittest.mock import MagicMock
+
+        from src.agent.agent import Agent
+        from src.agent.slack_client import AgentSlackClient
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = AgentSlackClient(agent_id="su", bot_token="xoxb-real-token")
+        client._client = MagicMock()  # is_connected -> True
+
+        def slow_post(*_a, **_k):
+            time.sleep(0.5)  # synchronous — the whole point of the test
+            return {"ts": "999.000001"}
+
+        client.post_message = slow_post
+        engine = SimulationEngine(agents=[agent], slack_clients={"su": client})
+
+        start = time.monotonic()
+        ticks: list = []
+
+        async def ticker():
+            # Runs CONCURRENTLY with _post_message via gather below. If the
+            # post's synchronous 0.5s sleep runs directly on this thread (the
+            # pre-fix behaviour), this coroutine cannot get scheduled again
+            # until that sleep returns — every tick would land >=0.5s after
+            # start. Off-loaded via run_slack_call, this keeps ticking on its
+            # own ~0.05s cadence throughout.
+            while time.monotonic() - start < 0.6:
+                ticks.append(time.monotonic() - start)
+                await asyncio.sleep(0.05)
+
+        posted, _ = await asyncio.gather(
+            engine._post_message("su", "general", "a real message"), ticker(),
+        )
+
+        assert posted is True
+        mid_flight_ticks = [t for t in ticks if t < 0.4]
+        assert len(mid_flight_ticks) >= 3, (
+            f"the event loop must keep ticking while the synchronous post is "
+            f"in flight, not stall for its whole 0.5s duration; got ticks={ticks!r}"
+        )
+
+
+# ---------------------------------------------------------------
 # _post_message — a connected client's genuinely failed post must not be
 # confused with the disconnected/MOCK path (#20 COR-1b).
 # ---------------------------------------------------------------

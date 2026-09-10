@@ -58,6 +58,7 @@ from src.services.llm import (
     generate_with_tools,
     set_call_log_callback,
 )
+from src.services.slack_executor import run_slack_call
 
 logger = logging.getLogger(__name__)
 
@@ -3460,7 +3461,9 @@ class SimulationEngine:
                 continue
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
-                messages = client.poll_channel_messages(ch_id, oldest=oldest)
+                # M-8 (opus review, audit 2026-09-10): off the event loop —
+                # see the identical note on _post_message's post_message call.
+                messages = await run_slack_call(client.poll_channel_messages, ch_id, oldest=oldest)
                 # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
                 # a parent once it has replies, and the transport nulls that at ingest
                 # (slack_client.normalize_inbound_message). Copying it verbatim, as
@@ -4466,7 +4469,9 @@ class SimulationEngine:
                 # blip. Both sibling pollers already guard per-item; this one
                 # didn't. See COR-10(1).
                 try:
-                    messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
+                    # M-8 (opus review, audit 2026-09-10): off the event loop
+                    # — see the identical note on _post_message's call.
+                    messages = await run_slack_call(client.poll_dm_messages, pi_slack_id, oldest=oldest)
                 except Exception as exc:
                     logger.error("[%s] Failed to poll PI DMs: %s", agent_id, exc)
                     continue
@@ -4733,7 +4738,9 @@ class SimulationEngine:
                 continue
 
             try:
-                replies = client.get_thread_replies(ch_id, slack_ts, oldest=oldest)
+                # M-8 (opus review, audit 2026-09-10): off the event loop —
+                # see the identical note on _post_message's call.
+                replies = await run_slack_call(client.get_thread_replies, ch_id, slack_ts, oldest=oldest)
             except ThreadNotFound:
                 self._evict_dead_thread(thread_id)
                 continue
@@ -4894,7 +4901,15 @@ class SimulationEngine:
             )
         elif client and client.is_connected:
             try:
-                result = client.post_message(channel, text, thread_ts=slack_parent)
+                # M-8 (opus review, audit 2026-09-10): routed through
+                # run_slack_call rather than called directly on the event
+                # loop -- a synchronous chat.postMessage blocked on a Slack
+                # Retry-After backoff (up to RATE_LIMIT_WAIT_BUDGET_SECONDS)
+                # used to stall every coroutine, timer, and asyncpg
+                # connection in the process for its whole duration. Exception
+                # identity/propagation is unchanged (run_slack_call
+                # guarantees this for a synchronous callable).
+                result = await run_slack_call(client.post_message, channel, text, thread_ts=slack_parent)
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts
