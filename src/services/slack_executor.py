@@ -22,20 +22,36 @@ in-flight Slack call blocked on a sustained throttle (up to
 ``RATE_LIMIT_WAIT_BUDGET_SECONDS`` — 180s) can hold the whole process open past
 ``docker stop -t 30``'s grace period, which then SIGKILLs it — losing whatever
 that thread was doing mid-flight rather than letting it finish or fail cleanly.
-``shutdown_slack_executor()`` sets ``slack_client.SHUTTING_DOWN`` and then calls
-``.shutdown(wait=False, cancel_futures=True)``: queued-but-not-yet-started work is
-dropped immediately. ``wait=False`` on its own does NOT stop an already-running
-call — ``ThreadPoolExecutor`` worker threads are ordinary (non-daemon) threads,
-and the interpreter's own atexit machinery still joins them after this module's
-``atexit`` backstop runs, so a thread genuinely still blocked would hold up exit
-regardless of what this function does (K-2, opus review, audit 2026-09-10, fixing
-an inaccurate claim in an earlier version of this docstring). What actually makes
-shutdown prompt is ``slack_client._call_with_retry`` sleeping a Retry-After
-backoff in <=1s slices and checking ``SHUTTING_DOWN`` between slices, aborting
-with a ``SlackApiError`` as soon as it is set — so a call that is mid-throttle
-gives up within about a second. A call that is NOT currently sleeping on a
-throttle (e.g. blocked on the underlying HTTP request itself) is not
-interrupted by this at all; it still runs to completion or times out on its own.
+``shutdown_slack_executor()`` sets the CURRENT pool's own shutdown event (a
+per-pool ``threading.Event``, not a single shared one — see the K-2 follow-up
+note below) and then calls ``.shutdown(wait=False, cancel_futures=True)``:
+queued-but-not-yet-started work is dropped immediately. ``wait=False`` on its
+own does NOT stop an already-running call — ``ThreadPoolExecutor`` worker
+threads are ordinary (non-daemon) threads, and the interpreter's own atexit
+machinery still joins them after this module's ``atexit`` backstop runs, so a
+thread genuinely still blocked would hold up exit regardless of what this
+function does (K-2, opus review, audit 2026-09-10, fixing an inaccurate claim
+in an earlier version of this docstring). What actually makes shutdown prompt
+is ``slack_client._call_with_retry`` sleeping a Retry-After backoff in <=1s
+slices and checking its bound shutdown event between slices, aborting with a
+``SlackApiError`` (``SlackShuttingDown``) as soon as it is set — so a call
+that is mid-throttle gives up within about a second. A call that is NOT
+currently sleeping on a throttle (e.g. blocked on the underlying HTTP request
+itself) is not interrupted by this at all; it still runs to completion or
+times out on its own.
+
+**Per-pool shutdown event (K-2 follow-up, opus review, audit 2026-09-10).** A
+single shared shutdown ``Event`` cannot survive a shutdown/re-create cycle
+(K-9, below) correctly: clearing it the moment a fresh pool is created — so
+that new pool's OWN retries do not abort instantly — would also silence the
+signal for an OLD pool's worker thread still sleeping through a backoff right
+now. Each pool generation gets its own ``threading.Event``
+(``_CURRENT_SHUTDOWN_EVENT``), bound into every worker thread's thread-local
+at thread start via ``ThreadPoolExecutor(initializer=bind_shutdown_event,
+initargs=(event,))``, so a call always checks the event for the SPECIFIC pool
+it is running on — a fresh pool's fresh event, or an old pool's already-set
+one — never whatever pool happens to be "current" module-wide by the time the
+check runs.
 
 Call this from every process's shutdown path: the FastAPI app's lifespan
 (``src/main.py``) and the worker's shutdown path (``src/worker/main.py``) call it
@@ -84,7 +100,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
-from src.agent.slack_client import SHUTTING_DOWN
+from src.agent.slack_client import bind_shutdown_event
 
 _T = TypeVar("_T")
 
@@ -109,22 +125,31 @@ SLACK_IO_MAX_WORKERS = 16
 # becomes, after a shutdown) `None`; `_get_executor()` lazily creates a fresh
 # pool on demand, guarded by `_POOL_LOCK` so two concurrent callers cannot
 # each create and orphan one.
+#
+# K-2 follow-up #3 (opus review, audit 2026-09-10): a shared shutdown Event
+# cannot survive a shutdown/re-create cycle correctly -- clearing it the
+# moment a new pool is created (so the NEW pool's retries do not abort
+# instantly) would also silence the abort signal for an OLD pool's worker
+# thread still sleeping through a backoff right now, defeating K-2 for
+# exactly the thread it exists to interrupt. `_CURRENT_SHUTDOWN_EVENT` is a
+# fresh `threading.Event` per pool generation, bound into each worker
+# thread's thread-local via `initializer=bind_shutdown_event` at thread
+# start (see slack_client.py) -- so a call keeps checking the event for the
+# SPECIFIC pool it started on, regardless of what "current" means by the
+# time the check runs.
 _POOL_LOCK = threading.Lock()
 _SLACK_EXECUTOR: ThreadPoolExecutor | None = None
+_CURRENT_SHUTDOWN_EVENT: threading.Event | None = None
 
 
 def _get_executor() -> ThreadPoolExecutor:
-    global _SLACK_EXECUTOR
+    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
     with _POOL_LOCK:
         if _SLACK_EXECUTOR is None:
-            # A fresh pool's threads must not immediately abort their first
-            # retry sleep because a PRIOR pool's shutdown left this set —
-            # clearing here, at the moment a new pool actually comes into
-            # existence, is what keeps K-2's SHUTTING_DOWN check meaningful
-            # across a shutdown/re-create cycle instead of latching permanently.
-            SHUTTING_DOWN.clear()
+            _CURRENT_SHUTDOWN_EVENT = threading.Event()
             _SLACK_EXECUTOR = ThreadPoolExecutor(
-                max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io"
+                max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io",
+                initializer=bind_shutdown_event, initargs=(_CURRENT_SHUTDOWN_EVENT,),
             )
         return _SLACK_EXECUTOR
 
@@ -154,17 +179,21 @@ async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
 def shutdown_slack_executor() -> None:
     """Shut the Slack I/O pool down without blocking on in-flight calls.
 
-    Sets ``slack_client.SHUTTING_DOWN`` FIRST (K-2, opus review, audit
-    2026-09-10): ``_call_with_retry`` sleeps a Retry-After backoff in <=1s
-    slices and checks this event between slices, so an in-flight call that is
-    mid-throttle aborts within about a second instead of finishing out
-    whatever it had left of the (up to 180s) wait budget. This does NOT make
-    an in-flight *HTTP request* interruptible — only the retry sleep — so a
-    call that is not currently throttled still runs to completion; only
-    something already sleeping on a 429 is cut short. The event stays set
-    until a NEW pool is actually created (see ``_get_executor``), not cleared
-    here — clearing it immediately would give an old pool's still-sleeping
-    thread no realistic chance to observe it before the next slice check.
+    Sets the CURRENT pool's own shutdown event FIRST (K-2, opus review, audit
+    2026-09-10; made per-pool by a K-2 follow-up, same day):
+    ``_call_with_retry`` sleeps a Retry-After backoff in <=1s slices and
+    checks this thread's bound event between slices, so an in-flight call
+    that is mid-throttle aborts within about a second instead of finishing
+    out whatever it had left of the (up to 180s) wait budget. This does NOT
+    make an in-flight *HTTP request* interruptible — only the retry sleep —
+    so a call that is not currently throttled still runs to completion; only
+    something already sleeping on a 429 is cut short. Setting THIS pool's own
+    event (rather than a single shared one) means a subsequent
+    ``_get_executor()`` call can safely start the next pool with a fresh,
+    unset event of its own — the old pool's worker threads keep whatever
+    event they were bound to at their own start, so this shutdown's signal
+    reaches them regardless of what pool is "current" by the time they next
+    check it.
 
     ``wait=False``: does not block the caller (a FastAPI lifespan or the
     worker's shutdown path) on however long an in-flight Slack call has left to
@@ -179,10 +208,12 @@ def shutdown_slack_executor() -> None:
     ``Event`` is a no-op; shutting down with no pool currently created is a
     no-op).
     """
-    global _SLACK_EXECUTOR
-    SHUTTING_DOWN.set()
+    global _SLACK_EXECUTOR, _CURRENT_SHUTDOWN_EVENT
     with _POOL_LOCK:
         executor, _SLACK_EXECUTOR = _SLACK_EXECUTOR, None
+        event, _CURRENT_SHUTDOWN_EVENT = _CURRENT_SHUTDOWN_EVENT, None
+    if event is not None:
+        event.set()
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
 
