@@ -4172,6 +4172,12 @@ class SimulationEngine:
             if r.ts and r.ts in self._pi_dm_seen:
                 continue  # in-process dedup (same tick/lookback re-scan)
             if r.agent_id not in self.agents:
+                # A5 (opus review, audit 2026-09-08): this agent is not (or no
+                # longer) on the roster, so nothing will ever process this
+                # row — mark it handled (terminal) rather than leave
+                # handled_at NULL, or it keeps matching the durable-marker
+                # recovery clause above and is re-fetched every tick forever.
+                await self._mark_pi_dm_handled(r.id)
                 continue
             if r.ts:
                 self._pi_dm_seen[r.ts] = r.created_at or EPOCH_UTC
