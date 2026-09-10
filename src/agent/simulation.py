@@ -479,6 +479,17 @@ class SimulationEngine:
         # unrelated public edit resurrect a stale private file.
         self._profile_mtimes: dict[str, dict[str, tuple[bool, float | None]]] = {}
 
+        # Agent ids whose private-profile cache was last set via
+        # `Agent.force_clear_private_profile()` because a genuine clear's
+        # `unlink()` failed (L-3, audit 2026-09-10) — the stale file is still
+        # on disk. `_sync_profiles_from_disk` (M-3, opus review, audit
+        # 2026-09-10) consults this so a later mtime bump on that same
+        # un-removable file re-applies the force-clear (and retries the
+        # unlink) instead of calling `reload_private_profile()`, which would
+        # re-read the file and resurrect the very instruction that was
+        # supposed to be cleared.
+        self._force_cleared_private: set[str] = set()
+
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
         self._last_llm_caller: str | None = None
@@ -5789,6 +5800,9 @@ class SimulationEngine:
                     agent.agent_id,
                 )
                 agent.reload_private_profile()
+                # M-3: a prior force-clear for this agent (if any) is moot
+                # now that the file is actually gone.
+                self._force_cleared_private.discard(agent.agent_id)
             except OSError as exc:
                 # L-3 (opus review, audit 2026-09-10): the disk removal is
                 # best-effort, but the cache must NOT keep serving the stale
@@ -5805,6 +5819,11 @@ class SimulationEngine:
                     agent.agent_id, exc,
                 )
                 agent.force_clear_private_profile()
+                # M-3 (opus review, audit 2026-09-10): mark this agent so
+                # _sync_profiles_from_disk's mtime watcher does not later
+                # `reload_private_profile()` from the very file we could not
+                # remove — that would resurrect the cleared instruction.
+                self._force_cleared_private.add(agent.agent_id)
         except Exception as exc:
             logger.warning(
                 "[%s] Failed to sync private profile from DB at startup: %s",
@@ -6623,6 +6642,31 @@ class SimulationEngine:
                     agent_sigs[sub] = new_sig
                     continue
                 if new_sig != prev_sig:
+                    if sub == "private" and agent.agent_id in self._force_cleared_private:
+                        # M-3 (opus review, audit 2026-09-10): this agent's
+                        # private profile was force-cleared because an earlier
+                        # unlink() of THIS SAME file failed (L-3) -- a mtime
+                        # bump on it is not a legitimate new edit to load, it
+                        # is the still-un-removed stale file. Reloading here
+                        # would resurrect exactly the instruction the PI
+                        # cleared. Retry the removal instead of reloading.
+                        try:
+                            path.unlink()
+                            self._force_cleared_private.discard(agent.agent_id)
+                            logger.info(
+                                "[%s] Removed the private profile file that a "
+                                "prior clear could not delete",
+                                agent.agent_id,
+                            )
+                        except OSError as exc:
+                            logger.warning(
+                                "[%s] Private profile is force-cleared but the "
+                                "stale file still cannot be removed: %s",
+                                agent.agent_id, exc,
+                            )
+                        agent.force_clear_private_profile()
+                        agent_sigs[sub] = new_sig
+                        continue
                     if sub == "private":
                         agent.reload_private_profile()
                     else:
