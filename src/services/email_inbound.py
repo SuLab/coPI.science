@@ -321,8 +321,22 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     # merging verdicts across all headers ("a pass wins") let a self-stamped
     # spf=pass override SES's spf=fail. The topmost header must also carry
     # SES's authserv-id: anything else did not transit our SES receipt path.
+    # Split into resinfo segments (respecting quoting) FIRST — segments[0] is
+    # the authserv-id (+ optional RFC 8601 version token), the rest are
+    # resinfo segments read below. A naive `header.split(";", 1)` here (S-5,
+    # audit 2026-09-10) is not quote-aware, same hazard
+    # _split_auth_results_segments already guards the resinfo segments
+    # against: a quoted identity containing a literal `;` could fabricate a
+    # fake authserv-id boundary.
     header = headers[0]
-    authserv_id = header.split(";", 1)[0].strip().lower()
+    segments = _split_auth_results_segments(header)
+
+    # RFC 8601 §2.2: `authserv-id [ SP authres-version ]` -- SES may stamp
+    # `amazonses.com 1` (a trailing version token), not just bare
+    # `amazonses.com`. S-5 (audit 2026-09-10): comparing the whole segment
+    # verbatim rejected every genuine SES message once a version token was
+    # present. Split on whitespace and compare only the authserv-id itself.
+    authserv_id = segments[0].strip().lower().split()[0] if segments[0].strip() else ""
     if authserv_id != "amazonses.com":
         logger.warning(
             "Rejecting inbound reply: topmost Authentication-Results is from %r, "
@@ -330,11 +344,6 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
             authserv_id,
         )
         return False
-
-    # Split into resinfo segments (respecting quoting) and read each
-    # mechanism's verdict only from the segment it actually opens -- not from
-    # anywhere else in the header text (see _split_auth_results_segments).
-    segments = _split_auth_results_segments(header)
     verdicts: dict[str, str] = {}
     verdict_segments: dict[str, str] = {}
     for seg in segments[1:]:

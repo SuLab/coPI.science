@@ -26,6 +26,16 @@ def test_all_pass_accepted():
     assert _authentication_results_ok(_msg(h)) is True
 
 
+def test_authserv_id_with_rfc_8601_version_token_is_accepted():
+    # S-5 (audit 2026-09-10): RFC 8601 §2.2 permits a trailing
+    # `authres-version` token on the authserv-id (`amazonses.com 1`). A
+    # comparison that requires an exact match against bare `amazonses.com`
+    # rejects every genuine SES message once it stamps a version.
+    h = ("Authentication-Results: amazonses.com 1; spf=pass smtp.mailfrom=b.com; "
+         "dkim=pass header.d=b.com; dmarc=pass header.from=b.com")
+    assert _authentication_results_ok(_msg(h)) is True
+
+
 def test_dmarc_fail_rejected():
     h = "Authentication-Results: amazonses.com; spf=pass; dkim=pass; dmarc=fail"
     assert _authentication_results_ok(_msg(h)) is False
