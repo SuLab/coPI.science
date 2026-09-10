@@ -295,6 +295,29 @@ def test_exhaustion_error_states_how_long_was_waited(monkeypatch):
     assert "s" in str(exc_info.value)  # a seconds figure is present
 
 
+def test_call_with_retry_aborts_before_attempt_zero_when_already_shutting_down(monkeypatch):
+    """P-3 (opus review, audit 2026-09-10): a call that is still queued (or
+    just hasn't started yet) when shutdown is signalled used to always make
+    its first attempt regardless — `_call_with_retry` only ever checked
+    `SHUTTING_DOWN` inside the `except SlackApiError` retry-sleep branch, so
+    attempt 0 always ran a full network round trip even when the process had
+    already decided to exit. Checking the event before attempt 0 means that
+    work aborts immediately with zero Slack calls made.
+    """
+    SHUTTING_DOWN.set()
+    try:
+        fake = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
+        c = _client(fake)
+        with pytest.raises(SlackApiError) as exc_info:
+            c._call_with_retry(fake.chat_postMessage)
+        assert exc_info.value.response.get("error") == "shutting_down"
+        assert fake.calls_to("chat_postMessage") == [], (
+            "no network round trip should be made once shutdown was already signalled"
+        )
+    finally:
+        SHUTTING_DOWN.clear()
+
+
 def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch):
     """K-2 (opus review, audit 2026-09-10): a worker thread sleeping through a
     Retry-After backoff must not hold interpreter shutdown open for the whole

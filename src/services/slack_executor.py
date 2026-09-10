@@ -23,12 +23,18 @@ rest of the process's life — see that module) and then calls
 ``pool.shutdown(wait=False, cancel_futures=False)``: queued-but-not-yet-started
 work still runs (it is NOT dropped — a queued ``run_slack_call`` must
 execute and abort quickly via the event rather than raise ``CancelledError``
-into an in-flight turn), and an in-flight call already sleeping through a
-Retry-After backoff aborts within about a second because
-``slack_client._sleep_interruptibly`` checks the event between <=1s slices.
-A call that is NOT currently sleeping on a throttle (e.g. blocked on the
-underlying HTTP request itself) is not interrupted by this at all; it still
-runs to completion or times out on its own.
+into an in-flight turn). Exit bound (P-3, audit 2026-09-10):
+``slack_client._call_with_retry`` checks the event BEFORE attempt 0, so
+queued-but-unstarted work aborts immediately with no network round trip at
+all once the event is already set by the time it gets a worker thread. A
+call whose attempt 0 was already in flight when the event was set is bounded
+by one in-flight HTTP call plus <=1s: it either fails with a real
+``ratelimited`` response (in which case the NEXT check, in the retry-sleep
+branch, aborts within about a second via
+``slack_client._sleep_interruptibly``'s <=1s slices) or succeeds/fails
+outright on its own. A call blocked on the underlying HTTP request itself
+(not sleeping on a throttle) is not interrupted mid-request by any of this;
+it still runs to completion or times out on its own.
 
 Call this from every process's shutdown path: the FastAPI app's lifespan
 (``src/main.py``) and the worker's shutdown path (``src/worker/main.py``) call it
@@ -148,13 +154,17 @@ def shutdown_slack_executor() -> None:
     """Shut the Slack I/O pool down without blocking on in-flight calls.
 
     Sets the process-wide ``slack_client.SHUTDOWN_REQUESTED`` event FIRST:
-    ``_call_with_retry``/``_sleep_interruptibly`` sleeps a Retry-After backoff
-    in <=1s slices and checks this event between slices, so an in-flight call
-    that is mid-throttle aborts within about a second instead of finishing
-    out whatever it had left of the (up to 180s) wait budget. This does NOT
-    make an in-flight *HTTP request* interruptible — only the retry sleep —
-    so a call that is not currently throttled still runs to completion; only
-    something already sleeping on a 429 is cut short.
+    ``_call_with_retry`` checks it before attempt 0 (P-3, audit 2026-09-10),
+    so a queued-but-unstarted call aborts with no network round trip at all,
+    and again inside the retry-sleep branch — ``_sleep_interruptibly`` sleeps
+    a Retry-After backoff in <=1s slices and checks the event between slices,
+    so an in-flight call that is mid-throttle aborts within about a second
+    instead of finishing out whatever it had left of the (up to 180s) wait
+    budget. This does NOT make an in-flight *HTTP request* interruptible —
+    only the pre-attempt check and the retry sleep — so a call whose attempt
+    is already in flight when the event is set still runs that one attempt to
+    completion; only something not yet started or already sleeping on a 429
+    is cut short.
 
     ``wait=False``: does not block the caller (a FastAPI lifespan or the
     worker's shutdown path) on however long an in-flight Slack call has left

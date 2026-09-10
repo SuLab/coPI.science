@@ -419,6 +419,15 @@ class AgentSlackClient:
         because test teardown reaches for endpoints the client has no wrapper for
         (``conversations_archive``) and must still get the backoff.
 
+        P-3 (opus review, audit 2026-09-10): checks ``SHUTDOWN_REQUESTED``
+        before attempt 0, not just inside the retry-sleep branch below, so a
+        call that is still queued (or simply hasn't started) when shutdown is
+        signalled aborts with zero network round trips instead of always
+        paying for one full HTTP attempt regardless. Exit bound once attempt
+        0 has actually started: one in-flight HTTP call plus <=1s (the retry
+        sleep's slice size) — see ``shutdown_slack_executor``'s docstring in
+        ``src/services/slack_executor.py``.
+
         Bounded by two independent limits rather than a fixed attempt count
         (#23 V7): a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS`` by
         default, or ``_wait_budget`` when a caller supplies one), so a legitimate
@@ -436,6 +445,13 @@ class AgentSlackClient:
         handler entirely and crashed the turn. That happens precisely when Slack is
         throttling us, i.e. when the system is busiest.
         """
+        # P-3 (opus review, audit 2026-09-10): checked BEFORE attempt 0, not
+        # just inside the retry-sleep branch below, so queued-but-unstarted
+        # work aborts without issuing a network round trip at all once
+        # shutdown has already been signalled -- rather than always paying
+        # for one full HTTP call regardless.
+        if SHUTDOWN_REQUESTED.is_set():
+            raise SlackShuttingDown()
         wait_budget = RATE_LIMIT_WAIT_BUDGET_SECONDS if _wait_budget is None else _wait_budget
         last_exc: SlackApiError | None = None
         total_slept = 0.0
