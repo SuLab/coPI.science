@@ -281,6 +281,10 @@ def _shim_with_two_migrate_containers(tmp_path: Path, *, migrate_exit: int = 0) 
         'case "$*" in\n'
         f'  *"ps -aq migrate"*) printf \'%s\\n%s\\n\' {OLD_MIGRATE_CID} {NEW_MIGRATE_CID} ;;\n'
         f'  "wait {NEW_MIGRATE_CID}") echo {migrate_exit} ;;\n'
+        # Real compose always labels its containers; the fresh `up -d` one is the
+        # service container, the leftover is a one-off.
+        f'  *"inspect -f "*"oneoff"*"{NEW_MIGRATE_CID}"*) echo False ;;\n'
+        f'  *"inspect -f "*"oneoff"*"{OLD_MIGRATE_CID}"*) echo True ;;\n'
         # Anything else `wait` is called with (the stale id alone, or the
         # newline-joined blob bash would pass as one word) fails like the real
         # CLI does on an id it cannot resolve -- no stdout, non-zero exit.
@@ -434,3 +438,33 @@ def test_aborts_if_the_app_container_never_becomes_healthy_within_the_bound(tmp_
     assert not any("nginx" in line and "reload" in line for line in argv.splitlines()), (
         f"nginx was reloaded even though the app container never reported healthy:\n{argv}"
     )
+
+
+def test_several_candidates_and_an_unreadable_oneoff_label_fail_closed(tmp_path):
+    """REV5-1 follow-up: with two migrate containers and `docker inspect` unable to
+    read the oneoff label on either, guessing by list position could elect the stale
+    one-off, whose old exit code would start app/worker against an un-migrated
+    schema. The script must refuse and leave app/worker stopped."""
+    log = tmp_path / "argv.log"
+    shim = tmp_path / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> {log}\n'
+        'case "$*" in\n'
+        f'  *"ps -aq migrate"*) printf \'%s\\n%s\\n\' {OLD_MIGRATE_CID} {NEW_MIGRATE_CID} ;;\n'
+        '  *"inspect -f "*"oneoff"*) exit 1 ;;\n'
+        '  "wait "*) echo 0 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    env.pop("COMPOSE_FILE", None)
+    proc = subprocess.run(
+        [str(REDEPLOY_SH), "-f", PROD_FILE, "-f", OVERRIDE_FILE],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "none carries com.docker.compose.oneoff=False" in proc.stdout + proc.stderr
+    text = log.read_text()
+    assert "up -d app worker" not in text, text

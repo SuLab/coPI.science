@@ -160,9 +160,16 @@ done <<EOF
 $MIGRATE_CIDS
 EOF
 if [ -z "$MIGRATE_CID" ]; then
-  # Nothing was recognizably non-oneoff (e.g. every candidate was itself a one-off, or
-  # `docker inspect` could not resolve the label) -- fall back to the last id in list
-  # order, matching REV3-5's original behaviour, rather than refusing outright.
+  # No candidate carried an explicit oneoff=False. With a SINGLE candidate that is
+  # the container `up -d migrate` just made, so use it. With several, guessing by
+  # list position could elect a stale one-off whose old exit code (usually 0) would
+  # green-light app/worker against an un-migrated schema -- fail closed instead
+  # (REV5-1 follow-up).
+  if [ "$(printf '%s\n' "$MIGRATE_CIDS" | grep -c .)" -gt 1 ]; then
+    die "several migrate containers exist and none carries com.docker.compose.oneoff=False
+  (docker inspect could not read the label). Refusing to guess which one this deploy ran.
+  app/worker remain stopped. Remove stale one-off migrate containers and re-run."
+  fi
   MIGRATE_CID="$(printf '%s\n' "$MIGRATE_CIDS" | tail -n1)"
 fi
 if [ -z "$MIGRATE_CID" ]; then
