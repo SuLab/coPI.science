@@ -745,6 +745,36 @@ class TestSyncProfilesFromDisk:
 
 
     @pytest.mark.asyncio
+    async def test_a_missing_registry_row_is_definitive_and_is_not_re_queried_every_tick(
+        self, setup,
+    ):
+        """R-1 (opus review of Q-2): no AgentRegistry row at all is definitive —
+        the roster is registry-derived, so the row will not appear for a
+        running agent — and must advance the signature (one query, not one per
+        tick)."""
+        engine, agent, priv, calls = setup
+        await engine._sync_profiles_from_disk()  # baseline
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        query_count = 0
+        real_ctx = _StubProfileSessionCtx(_FakeProfileDb(None, None))
+
+        def _session_factory():
+            nonlocal query_count
+            query_count += 1
+            return real_ctx
+
+        engine.session_factory = _session_factory
+        import os
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        await engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
+        assert query_count == 1
+
+    @pytest.mark.asyncio
     async def test_an_unlinked_registry_row_is_transient_and_is_re_queried_on_the_next_bump(
         self, setup,
     ):
@@ -3043,6 +3073,25 @@ class TestDeferredImplicitProposalReview:
         assert a.state.pending_proposals[0].reviewed is True
         engine._persist_implicit_proposal_review.assert_awaited_once_with("a", None)
         assert ("a", "1.0") in engine._deferred_implicit_reviews
+
+    @pytest.mark.asyncio
+    async def test_a_queued_payload_for_a_different_pair_does_not_record_a_deferred_review(self):
+        """R-3 (opus review of Q-1): the record site must use the SAME pair-level
+        predicate as the flush — a queued payload for this thread_id whose
+        agent_a/agent_b do not include this agent can never replay the pair."""
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_deferred_proposal()
+        engine._pending_thread_decisions.append({
+            "thread_id": "1.0", "channel": "general",
+            "agent_a": "other1", "agent_b": "other2",
+            "outcome": "proposal", "summary_text": "x",
+        })
+        engine._persist_implicit_proposal_review = AsyncMock()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
+
+        assert ("a", "1.0") not in engine._deferred_implicit_reviews
 
     @pytest.mark.asyncio
     async def test_no_session_factory_never_records_a_deferred_review(self):

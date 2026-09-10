@@ -106,9 +106,12 @@ def _finalize_shutdown(shutdown: callable) -> None:
     moot — this call supersedes it) before setting the event, so it does not
     fire spuriously against a loop that may already be closing.
     """
-    timer_handle = shutdown.state.get("timer_handle")
-    if timer_handle is not None:
-        timer_handle.cancel()
+    try:
+        timer_handle = shutdown.state.get("timer_handle")
+        if timer_handle is not None:
+            timer_handle.cancel()
+    except Exception:  # R-4: cancelling is best-effort; the signal is not
+        logger.exception("Could not cancel the shutdown grace timer")
     signal_shutdown()
 
 

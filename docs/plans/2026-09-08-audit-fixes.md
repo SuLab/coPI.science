@@ -1389,3 +1389,11 @@ of 1) before the fix.
   with the `atexit` fallback (import during interpreter shutdown must not fail).
 - **Q-4** `src/agent/main.py`: `_finalize_shutdown` wrapped so an exception there cannot skip the
   `SimulationRun.status='stopped'` update.
+
+## R — opus review of the Q round (2026-09-10)
+
+- **R-1** no `AgentRegistry` row is definitive (advances the watcher signature); only an unlinked
+  `user_id` stays transient. Comments rewritten to say what the code does.
+- **R-3** `_deferred_review_replayable()` is the single pair-level predicate used by both the record
+  site and the overflow purge.
+- **R-4** `_finalize_shutdown` cancels the grace timer inside its own try and always signals.

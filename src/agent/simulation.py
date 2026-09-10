@@ -2192,18 +2192,24 @@ class SimulationEngine:
             # against a payload's agent_a/agent_b, so a surviving payload for
             # the same thread_id but a different agent pair can never replay
             # this pair -- keeping it would leak forever.
-            def _still_replayable(pair: tuple[str, str]) -> bool:
-                aid, tid = pair
-                return any(
-                    p["thread_id"] == tid and aid in (p.get("agent_a"), p.get("agent_b"))
-                    for p in self._pending_thread_decisions
-                )
-
             dropped_thread_ids = {d["thread_id"] for d in dropped}
             self._deferred_implicit_reviews = [
                 pair for pair in self._deferred_implicit_reviews
-                if pair[1] not in dropped_thread_ids or _still_replayable(pair)
+                if pair[1] not in dropped_thread_ids
+                or self._deferred_review_replayable(pair)
             ]
+
+    def _deferred_review_replayable(self, pair: tuple[str, str]) -> bool:
+        """True while some queued ThreadDecision payload could replay ``pair``
+        -- the SAME predicate ``_flush_pending_thread_decisions`` uses
+        (``thread_id`` match AND the agent is ``agent_a``/``agent_b``). Used by
+        both the record site and the overflow purge (Q-1/R-3) so they cannot
+        drift apart again."""
+        aid, tid = pair
+        return any(
+            p["thread_id"] == tid and aid in (p.get("agent_a"), p.get("agent_b"))
+            for p in self._pending_thread_decisions
+        )
 
     async def _flush_pending_thread_decisions(self) -> None:
         """Retry any ThreadDecision rows queued by ``_close_thread`` after
@@ -4461,9 +4467,9 @@ class SimulationEngine:
                         # for the rest of the run, never matched by
                         # `_flush_pending_thread_decisions`.
                         pair = (agent.agent_id, proposal.thread_id)
-                        if pair not in self._deferred_implicit_reviews and any(
-                            p["thread_id"] == proposal.thread_id
-                            for p in self._pending_thread_decisions
+                        if (
+                            pair not in self._deferred_implicit_reviews
+                            and self._deferred_review_replayable(pair)
                         ):
                             self._deferred_implicit_reviews.append(pair)
                     await self._persist_implicit_proposal_review(
@@ -6195,9 +6201,11 @@ class SimulationEngine:
         P-6 (opus review, audit 2026-09-10): "reached a verdict" splits into
         two cases that this method used to conflate as a single ``False``:
 
-        - DEFINITIVE non-verdict — no linked ``AgentRegistry.user_id``, or no
-          ``ResearcherProfile`` row. A real query ran and conclusively found
-          nothing to sync; that fact will not change without another disk
+        - DEFINITIVE non-verdict — no ``AgentRegistry`` row at all (the roster
+          is registry-derived; a running agent's row is not going to appear
+          later), or a linked user with no ``ResearcherProfile`` row. A real
+          query ran and conclusively found nothing to sync; that fact will
+          not change without another disk
           edit (there is nothing "in flight" to wait out), so this returns
           ``True`` — advance the signature and stop re-querying the DB on
           every subsequent tick for the same bump.
@@ -6226,16 +6234,17 @@ class SimulationEngine:
                         AgentRegistry.agent_id == agent.agent_id
                     )
                 )).scalar_one_or_none()
-                # P-6 (opus review, audit 2026-09-10): no AgentRegistry row /
-                # no linked user_id is a DEFINITIVE answer -- the query ran
-                # and conclusively found nothing to link, not a transient
-                # failure -- so this returns True (reached a verdict) even
-                # though there is nothing to sync. See the docstring above.
-                if not agent_reg or not agent_reg.user_id:
-                    # Q-2: an unlinked registry row is NOT definitive -- user_id
-                    # is populated later by the signup/activation flow while
-                    # the sim is live -- so keep re-consulting the DB on the
-                    # next bump rather than freezing the signature.
+                # P-6 / Q-2 / R-1 (opus reviews, audit 2026-09-10): no
+                # AgentRegistry row at all is DEFINITIVE -- the roster is
+                # registry-derived, so a running agent's missing row will not
+                # appear later; returning True lets the watcher advance its
+                # signature instead of re-querying every tick. A row whose
+                # user_id is still NULL is TRANSIENT -- signup/activation fills
+                # it in while the sim runs -- so that case returns False and is
+                # re-consulted on the next bump.
+                if agent_reg is None:
+                    return True
+                if not agent_reg.user_id:
                     return False
                 profile = (await db.execute(
                     sa_select(ResearcherProfile).where(
@@ -7168,14 +7177,14 @@ class SimulationEngine:
                         #
                         # O-4 (audit 2026-09-10): only advance this
                         # sub-profile's signature when the helper actually
-                        # reached a verdict. P-6 (audit 2026-09-10): a
-                        # DEFINITIVE non-verdict (no linked user_id, no
+                        # reached a verdict. P-6/Q-2 (audit 2026-09-10): a
+                        # DEFINITIVE non-verdict (no registry row, or no
                         # ResearcherProfile row) counts as a verdict here and
                         # DOES advance the signature -- that fact will not
-                        # change without another disk edit. Only a TRANSIENT
-                        # non-verdict (no session_factory, or an exception)
-                        # bails out without advancing, since those may
-                        # resolve on their own by the next tick. Advancing
+                        # change without another disk edit. A TRANSIENT
+                        # non-verdict (registry row with no user_id yet, no
+                        # session_factory, or an exception) bails out without
+                        # advancing, since those resolve on their own. Advancing
                         # the signature after a transient failure would make THIS tick's bump
                         # look already-handled forever — the next tick's stat()
                         # would match the now-recorded new_sig and the "nothing
