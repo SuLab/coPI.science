@@ -240,6 +240,8 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("POST", "/manager/pis/{user_id}/profile"): 403,
     ("POST", "/manager/pis/{user_id}/mute"): 403,
     ("POST", "/manager/pis/{user_id}/unmute"): 403,
+    ("POST", "/manager/pis/{user_id}/slack/provision"): 403,
+    ("POST", "/manager/pis/{user_id}/activate"): 403,
 }
 
 # What each write route needs in its POST body to get PAST FastAPI's own
@@ -251,6 +253,8 @@ _REVIEWER_POST_BODIES = {
     "/manager/pis/{user_id}/profile": {},
     "/manager/pis/{user_id}/mute": None,
     "/manager/pis/{user_id}/unmute": None,
+    "/manager/pis/{user_id}/slack/provision": None,
+    "/manager/pis/{user_id}/activate": None,
 }
 
 

@@ -46,7 +46,15 @@ async def test_container_is_migrated(engine):
         #      assessment_reviews.dimension_scores/.rubric_version/
         #      .rubric_content_hash (assessment narrative fields + per-dimension
         #      human review scores)
-        assert v == "0043"
+        # 0044 assessment_reviews.recorded_by_user_id +
+        #      assessment_review_events.recorded_by_user_id (the second
+        #      signature on a review entered while impersonating)
+        # 0045 llm_call_logs.thread_phase/.message_ordinal (the phase-4
+        #      interview stage and reply ordinal of a thread_reply turn)
+        # 0046 slack_app_provisions.initiated_by_user_id (which staff account
+        #      started an install, so the OAuth callback can refuse to land a
+        #      token for an install someone else began)
+        assert v == "0046"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
