@@ -454,15 +454,22 @@ async def send_proposal_notification(
         )
         return False
 
-    # I2 (#21 fix round B): look up any existing row for this (user, proposal,
-    # category) BEFORE minting a reply_token, and reuse its token when one exists.
-    # uq_email_notification_user_thread_category means a re-send (e.g. after this
-    # task's expiry fix) reconciles this SAME row rather than inserting a new one;
-    # minting a fresh token on that reconcile rotated the earlier e-mail's
-    # reply+<token>@... address out from under it, so a PI answering the FIRST
-    # reminder after a second one had already gone out hit "No notification found
-    # for token" and silently lost their rating/instruction. Reusing the old token
-    # is safe precisely because the new e-mail carries that same token.
+    # Look up any existing row for this (user, proposal, category) —
+    # uq_email_notification_user_thread_category means a re-send (e.g. a lapsed
+    # reminder, or a resend of an expired row) reconciles this SAME row rather
+    # than inserting a new one.
+    #
+    # SEC-F1 (opus review, audit 2026-09-08): every (re)send mints a FRESH
+    # reply_token, written onto the reconciled row below. I2 (#21 fix round B)
+    # used to REUSE the existing token here so a PI who answered the first
+    # reminder after a second had gone out wasn't told "No notification found
+    # for token" — but that left the first e-mail's reply address permanently
+    # redeemable (process_inbound_email looks up purely by token, with no
+    # per-send identity) and let an `expired` row flip back to `sent` carrying
+    # its already-superseded token, defeating RC-4's 14-day expiry window
+    # (measured from `sent_at`). Only the most-recently-sent e-mail's token may
+    # be valid; a reply to a stale token now fails the same "No notification
+    # found" lookup that an unrelated stranger's token would.
     result = await db.execute(
         select(EmailNotification).where(
             EmailNotification.user_id == user.id,
@@ -471,7 +478,7 @@ async def send_proposal_notification(
         )
     )
     notification = result.scalar_one_or_none()
-    reply_token = notification.reply_token if notification else secrets.token_urlsafe(48)  # 64-char base64
+    reply_token = secrets.token_urlsafe(48)  # 64-char base64
 
     # Build email. Soliciting a reply is only honest when the inbound pipeline
     # is actually on — otherwise PIs answer a dead reply domain and get
@@ -630,9 +637,9 @@ async def send_proposal_notification(
         # sweep just marked 'expired', or one an earlier _handle_instruction failure
         # already marked 'responded' for a still-unreviewed proposal (M1) — makes a plain
         # INSERT fail. Reconcile that row instead of blindly inserting. `notification`
-        # was already looked up above (before minting reply_token, I2) — reuse it rather
-        # than re-querying, and leave its reply_token alone on the reconcile branch: the
-        # e-mail that was just sent carries that SAME (reused) token.
+        # was already looked up above — reuse it rather than re-querying, and (SEC-F1)
+        # write the freshly minted `reply_token` onto it: the e-mail that was just sent
+        # carries THIS token, and the row's previous token (if any) must stop working.
         if notification is None:
             db.add(EmailNotification(
                 user_id=user.id,
@@ -647,6 +654,7 @@ async def send_proposal_notification(
             notification.status = "sent"
             notification.response_type = None
             notification.responded_at = None
+            notification.reply_token = reply_token
             notification.sent_at = datetime.now(UTC)
         await db.flush()
         return True
@@ -1191,10 +1199,11 @@ async def _send_new_proposal_email(
     """Compose and send a single new-proposal email; logs an EmailNotification."""
     settings = get_settings()
 
-    # I2 (#21 fix round B): same shape as send_proposal_notification above — look up
-    # any existing row for this (user, proposal, category) BEFORE minting a
-    # reply_token, and reuse its token when one exists, so a re-send does not rotate
-    # a still-answerable reply address out from under an earlier e-mail.
+    # Same shape as send_proposal_notification above — look up any existing row for
+    # this (user, proposal, category). SEC-F1 (opus review, audit 2026-09-08): every
+    # (re)send mints a FRESH reply_token (written onto the reconciled row below)
+    # rather than reusing the old one — see send_proposal_notification's comment for
+    # why reuse was wrong.
     result = await db.execute(
         select(EmailNotification).where(
             EmailNotification.user_id == user.id,
@@ -1203,7 +1212,7 @@ async def _send_new_proposal_email(
         )
     )
     notification = result.scalar_one_or_none()
-    reply_token = notification.reply_token if notification else secrets.token_urlsafe(48)
+    reply_token = secrets.token_urlsafe(48)
 
     summary = td.summary_text or "(No summary available)"
     channel = td.channel or "unknown"
@@ -1275,9 +1284,9 @@ async def _send_new_proposal_email(
         # phantom row that would block a resend once the allowlist is widened. Same
         # reconcile-not-insert shape as send_proposal_notification, and for the same reason
         # (uq_email_notification_user_thread_category, B3/M1). `notification` was already
-        # looked up above (before minting reply_token, I2) — reuse it rather than
-        # re-querying, and leave its reply_token alone on the reconcile branch: the
-        # e-mail that was just sent carries that SAME (reused) token.
+        # looked up above — reuse it rather than re-querying, and (SEC-F1) write the
+        # freshly minted `reply_token` onto it, retiring whatever token the row carried
+        # before.
         if notification is None:
             db.add(EmailNotification(
                 user_id=user.id,
@@ -1292,6 +1301,7 @@ async def _send_new_proposal_email(
             notification.status = "sent"
             notification.response_type = None
             notification.responded_at = None
+            notification.reply_token = reply_token
             notification.sent_at = datetime.now(UTC)
         await db.flush()
         logger.info(

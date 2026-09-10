@@ -426,21 +426,23 @@ async def test_expiring_then_resending_does_not_violate_the_uniqueness_constrain
         f"found {len(rows)} row(s) for this (user, proposal, category): {[r.status for r in rows]}"
     )
     assert rows[0].status == "sent"
-    assert rows[0].reply_token == old_token, (
-        "I2 (#21 fix round B): the reconciled row rotated to a NEW reply token — a PI "
-        "who replies to the EARLIER (still-inboxed) e-mail is validated against a token "
-        "nobody sent, hits 'No notification found for token', and silently loses their "
-        "rating/instruction. Reusing the old token is safe precisely because the new "
-        "e-mail carries that same token."
+    assert rows[0].reply_token != old_token, (
+        "SEC-F1 (opus review, audit 2026-09-08): expiring then re-sending must mint a "
+        "FRESH reply_token — reusing the old one (I2, #21 fix round B) left the FIRST "
+        "e-mail's reply address permanently redeemable, since process_inbound_email "
+        "looks up purely by token with no per-send identity."
     )
 
 
-async def test_a_reply_to_the_superseded_email_still_files_after_a_resend(
+async def test_a_reply_to_the_superseded_email_is_refused_after_a_resend(
     db_session, monkeypatch,
 ):
-    """I2 (#21 fix round B), the inbound half: a PI who never saw the SECOND (re-sent)
-    reminder and instead replies to the FIRST one must still have that reply resolve --
-    the token is reused across the resend precisely so this works."""
+    """SEC-F1 (opus review, audit 2026-09-08), the inbound half: I2 (#21 fix round B)
+    reused the token across a resend so a PI replying to the SUPERSEDED (pre-resend)
+    e-mail still resolved -- but that meant the first e-mail's reply address stayed
+    redeemable forever. A resend now mints a fresh token, so a reply quoting the old
+    one must be refused (the same "No notification found for token" path a stranger's
+    token hits) rather than silently applied against the now-current row."""
     monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
     monkeypatch.setattr(inbound, "_send_simple_email", lambda *a, **k: True)
 
@@ -483,14 +485,25 @@ async def test_a_reply_to_the_superseded_email_still_files_after_a_resend(
     ).encode()
     await process_inbound_email(raw, db_session)
 
-    row = (
+    # The old token was retired by the resend, so it no longer resolves to any row.
+    stale = (
         await db_session.execute(
             select(EmailNotification).where(EmailNotification.reply_token == old_token)
         )
+    ).scalar_one_or_none()
+    assert stale is None, "the superseded token must not still be attached to a row"
+
+    current = (
+        await db_session.execute(
+            select(EmailNotification).where(
+                EmailNotification.user_id == user.id,
+                EmailNotification.thread_decision_id == td.id,
+            )
+        )
     ).scalar_one()
-    assert row.status == "responded", (
-        "a reply quoting the token from the SUPERSEDED (pre-resend) e-mail must still "
-        "resolve, because the resend reuses that same token"
+    assert current.status == "sent", (
+        "a reply quoting the SUPERSEDED (pre-resend) token must be refused, leaving the "
+        "current row's status untouched"
     )
 
 
