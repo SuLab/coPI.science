@@ -1043,3 +1043,136 @@ lambda/Mock) continue to pass unchanged, since `run_slack_call` accepts a plain
 synchronous callable. `tests/unit/test_private_channel_migration.py`,
 `tests/integration/test_state_rebuild.py`, and `test_message_persistence.py` stay
 green.
+
+## N — opus review of the M-8 follow-ups (2026-09-10)
+
+A further opus review of the M-8 hot-path pool routing found eight residual defects,
+all fixed on this branch.
+
+**N-1 (HIGH) — the agent-run shutdown handler never signaled the Slack pool M-8
+routed its hot paths through.** After M-8, `_post_message` and the per-tick pollers run
+their Slack calls through `src.services.slack_executor`'s dedicated pool on `slack-io`
+worker threads, bound to that pool's own shutdown event — but `_make_shutdown_handler`
+still only ever called `slack_client.signal_shutdown()` (the module-level fallback), which
+a pool-bound call is never bound to. An in-flight pool call sleeping through a Retry-After
+backoff had no abort signal at all and would sleep out its full budget (up to
+`RATE_LIMIT_WAIT_BUDGET_SECONDS`, 180s), comfortably outlasting the runbook's
+`docker stop -t 30` grace and forcing a SIGKILL that loses whatever that thread was doing
+mid-flight. Fixed: the handler now calls `shutdown_slack_executor()` (sets both the
+current pool's own event and the fallback) at the same grace point `signal_shutdown()`
+used to fire at; also fixed the now-false claim in `_run_simulation`'s shutdown comment
+that no `AgentSlackClient` calls in this process go through the pool. Test (red first):
+`tests/unit/test_agent_main_shutdown_grace.py` — a sleeper submitted through
+`run_slack_call` aborts within ~1s of the second (immediate) handler invocation;
+confirmed red (TimeoutError after 3s) against the pre-fix handler.
+
+**N-2 (MEDIUM) — a lazily-minted Slack pool could clear a shutdown signal it didn't
+set.** `_get_executor()` cleared the module-level fallback (`slack_client.SHUTTING_DOWN`)
+unconditionally whenever it lazily minted a fresh pool (M-2's fix) — correct immediately
+after `shutdown_slack_executor()` itself set the fallback, but wrong when some OTHER
+caller set it directly via `signal_shutdown()` with no pool shutdown involved at all: a
+`run_slack_call` made afterwards (which always goes through `_get_executor()`) would
+silently clear that caller's real, currently-active shutdown signal out from under it.
+Fixed: `_pool_shutdown_pending`, a module flag set only inside `shutdown_slack_executor()`,
+gates the clear — it only fires immediately after that specific function set the
+fallback, never for one some other caller raised directly. Test (red first):
+`tests/unit/test_slack_executor.py` — setting the fallback via `signal_shutdown()` then
+calling `run_slack_call` leaves it set; going through `shutdown_slack_executor()` first
+still clears it on the next call, as before.
+
+**N-3 (MEDIUM) — a force-cleared private profile's mtime watcher could discard a
+legitimate later edit.** `_sync_profiles_from_disk`'s `(exists, mtime)` signature cannot
+distinguish "still the same un-removable stale file from a prior force-clear (L-3)" from
+"a legitimate later web edit landing after the clear" (a PI writes new instructions after
+having cleared them) — both look identical, a bump on the same path. The pre-fix code
+treated every bump on a force-cleared agent's file as the former and unconditionally
+re-unlinked it, silently discarding a real edit. Fixed: `_sync_profiles_from_disk` is now
+async and, on a bump for a force-cleared agent, defers to the existing DB-authoritative
+per-agent helper (`_sync_one_agent_private_profile_from_db`) instead of unlinking
+directly — that helper keeps new content when `ResearcherProfile.private_profile_md` is
+non-empty and only retries the unlink when the DB confirms it is still empty; it now also
+drops the force-cleared marker whenever the DB has real content, not just on a successful
+unlink. Test (red first, `tests/unit/test_simulation_logic.py`,
+`TestSyncProfilesFromDisk`): a force-clear followed by a legitimate rewrite with matching
+DB content is kept, not re-unlinked, and the cache reflects the new content; the existing
+"retry unlink succeeds" test is updated to supply a DB-empty stub session_factory, since
+the retry is now DB-gated rather than unconditional.
+
+**N-4 (MEDIUM) — the ThreadDecision write was not idempotent across retries.**
+`_write_thread_decision_with_retry`'s retry loop had no way to tell "did my last attempt
+already succeed?" from "it never ran" — a commit that landed server-side but raised on the
+client side (e.g. the connection dying right after COMMIT) would insert a SECOND row on
+the next retry, since `ThreadDecision.id` was a plain client-side
+`default=uuid.uuid4()` minted fresh by each new ORM instance. Fixed:
+`_write_thread_decision_with_retry` pre-computes `payload["id"]` once and reuses it
+across every retry of the same payload, including a later `_flush_pending_thread_decisions`
+pass; `_insert_thread_decision_row` now issues `INSERT ... ON CONFLICT (id) DO NOTHING`
+(the pattern established for a different table by
+`profile_pipeline._insert_publication_tolerating_conflict`) instead of `db.add()`, then
+re-selects by id to confirm the row exists regardless of whether this attempt's own INSERT
+or a prior attempt's already-committed one satisfied the conflict. Test (red first,
+`tests/unit/test_simulation_logic.py`, `TestCloseThreadDecisionWriteRetriesAndParks`): a
+session that lands its INSERT server-side but raises on the confirming re-select is
+followed by a second, healthy attempt with the SAME payload — asserts exactly one row
+exists across both attempts and the second call returns the row's id.
+
+**N-5 (MEDIUM) — a PI engagement review was lost when its ThreadDecision write was
+still deferred.** `_check_pi_proposal_review` sets `proposal.reviewed = True` before
+calling `_persist_implicit_proposal_review`, which no-ops when
+`proposal.thread_decision_id` is `None` (the write is queued in
+`_pending_thread_decisions` per M-7). Because `reviewed` is already `True`,
+`_check_pi_proposal_review`'s own guard never calls the persist again for that thread —
+the engagement was silently and permanently lost once the deferred write eventually
+landed. Fixed: `_check_pi_proposal_review` records the `(agent_id, thread_id)` pair in a
+new `_deferred_implicit_reviews` list whenever it fires against a `None` decision id;
+`_flush_pending_thread_decisions` re-runs the persist for any matching pair once it
+assigns that thread's real decision id, then drops the pair. Test (red first,
+`tests/unit/test_simulation_logic.py`, `TestDeferredImplicitProposalReview`): an
+engagement against a deferred decision is recorded; the next successful flush replays the
+persist with the newly-assigned id and removes the pair; a subsequent flush with nothing
+pending does not replay it again.
+
+**N-6 (LOW) — the pending ThreadDecision queue was unbounded and the flush paid the
+full in-call retry budget every tick.** `_pending_thread_decisions` had no ceiling, so a
+sustained DB outage buffered one entry per closed thread in RAM for as long as the outage
+lasted. Separately, `_flush_pending_thread_decisions` reused
+`_write_thread_decision_with_retry`'s full in-call retry budget
+(`THREAD_DECISION_WRITE_MAX_ATTEMPTS` attempts, each with a blocking backoff sleep) for
+every still-failing entry on every single tick — since the flush itself already IS the
+retry mechanism, this turned one blocked tick into queue-size-proportional main-loop
+stall time on top of the DB outage itself. Fixed: `PENDING_THREAD_DECISIONS_MAX` (500)
+caps the queue via a new `_enqueue_pending_thread_decision` helper, dropping the OLDEST
+entries with one ERROR per overflowing enqueue (mirrors `LLM_LOG_REQUEUE_MAX_ROWS`'s
+pattern); `_write_thread_decision_with_retry` takes an optional `max_attempts` override,
+and the flush passes `max_attempts=1` so each queued entry gets exactly one attempt per
+tick. Test (red first, `tests/unit/test_simulation_logic.py`,
+`TestPendingThreadDecisionsCap` / `TestFlushSkipsInCallRetryBudget`): the drop-oldest cap
+behavior at and below the ceiling; a persistently failing flush entry makes exactly one
+`session_factory()` call per tick, not `THREAD_DECISION_WRITE_MAX_ATTEMPTS`.
+
+**N-7 (LOW) — `_pi_inbound_parked` grew without bound.** M-5's original comment reasoned
+that a parked row stays skipped for as long as it keeps appearing in the batch and "once
+it ages out of the batch entirely there is nothing left to prune it FOR" — but a parked
+row means both its durable write paths are already dead ends, so nothing ever moves it to
+HANDLED; if it keeps satisfying the cursor-independent PENDING/INGESTED branch of
+`_poll_inbound_from_db`'s query it never leaves the batch at all, and the set grows by one
+entry per newly-parked row for the life of the process. Fixed:
+`_prune_stale_pi_inbound_attempts` now also intersects `_pi_inbound_parked` with the
+current polled batch, the same pattern already used for `_pi_inbound_attempts` and
+`_pi_inbound_fallback_attempts`. Test (red first, `tests/unit/test_simulation_logic.py`,
+`TestPollInboundFromDbGuardsTheHandler`): a pre-seeded parked entry for a `message_ts` not
+present in an empty polled batch is dropped after one poll.
+
+**N-8 (LOW) — concurrent `_post_message` calls for one agent were unordered.** After
+M-8, two `_post_message` calls for the SAME agent run their Slack call on separate
+`slack-io` worker threads concurrently, on the same `AgentSlackClient`, with nothing
+serializing them once they left the event loop — this could land two replies from one
+agent on Slack out of order, and let a `_resolve_channel_id` cache miss inside
+`client.post_message` fan out into one Slack call per concurrent post instead of
+resolving once. Fixed: a lazily-created, per-agent `asyncio.Semaphore(1)`
+(`_get_post_message_semaphore`) now guards the `run_slack_call` site in `_post_message`,
+keyed by `agent_id` so cross-agent parallelism (the whole point of the M-8 pool) is
+unaffected. Test (red first, `tests/unit/test_simulation_logic.py`,
+`TestPostMessageSerializesPerAgent`): two concurrent calls for one agent record
+non-interleaved enter/exit timestamps; two concurrent calls for different agents still
+overlap in time, pinning that the fix does not accidentally serialize across agents too.
