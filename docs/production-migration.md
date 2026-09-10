@@ -583,21 +583,25 @@ which change application code but no schema), alembic prints that there is nothi
 and the container still exits 0, so this step never blocks a code-only deploy.
 
 That `depends_on` condition is enough on a **cold start**: `migrate` has to be created
-(and therefore run) before `app`/`worker` can be created at all. It is **not** enough on
-an **already-running** stack, which is what a redeploy actually is: `docker compose $C up
--d --build app worker` can find `migrate`'s existing container from the LAST deploy
-already `Exited (0)` and treat that as satisfying the condition without re-running it
-against the newly built image, so the OLD app/worker containers (running old code)
-keep serving requests for however long the new migration takes to apply — exactly the
-window this section exists to close (audit 2026-09-08 RC-6, #27 I2).
+(and therefore run) before `app`/`worker`/`grantbot` can be created at all. It is **not**
+enough on an **already-running** stack, which is what a redeploy actually is: `docker
+compose $C up -d --build app worker grantbot` can find `migrate`'s existing container
+from the LAST deploy already `Exited (0)` and treat that as satisfying the condition
+without re-running it against the newly built image, so the OLD app/worker/grantbot
+containers (running old code) keep serving requests (and, for grantbot, posting to
+Slack) for however long the new migration takes to apply — exactly the window this
+section exists to close (audit 2026-09-08 RC-6, #27 I2; audit 2026-09-10 R-4 folded
+`grantbot` into the script, which has the identical `depends_on` shape and was
+previously left out of it).
 
-Use `scripts/redeploy.sh` for `app`/`worker` instead of a raw compose invocation. It
-enforces the ordering explicitly rather than relying on `depends_on`: build
-`migrate`+`app`+`worker`, **stop** `app`/`worker` first (so old code cannot serve during
-the window), start `migrate` and check its exit code, only then start the new
-`app`/`worker`, then `nginx -s reload` (the recreated `app` container gets a new IP —
-see the nginx-stale-upstream-ip memory note). It refuses to run unless both prod compose
-files are visible (via `$COMPOSE_FILE` or `-f`) and never asks for orphan removal:
+Use `scripts/redeploy.sh` for `app`/`worker`/`grantbot` instead of a raw compose
+invocation. It enforces the ordering explicitly rather than relying on `depends_on`:
+build `migrate`+`app`+`worker`+`grantbot`, **stop** `app`/`worker`/`grantbot` first (so
+old code cannot serve during the window), start `migrate` and check its exit code, only
+then start the new `app`/`worker`/`grantbot`, then `nginx -s reload` (the recreated
+`app` container gets a new IP — see the nginx-stale-upstream-ip memory note). It refuses
+to run unless both prod compose files are visible (via `$COMPOSE_FILE` or `-f`) and
+never asks for orphan removal:
 
 ```bash
 export COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml
@@ -610,14 +614,10 @@ should never contain a traceback or `AccessDeniedException` (that error means
 `docker-compose.override.yml` is missing the `migrate` service's `json-file` logging
 entry — see the "Compose file set" section of `CLAUDE.md`).
 
-`redeploy.sh`'s current scope is `app`/`worker`; `grantbot` still relies on `depends_on`
-ordering as described above, which is exactly the condition this section warns is
-insufficient on a running stack. Stop and restart `grantbot` in the same explicit order
-(`build`, `stop`, `up -d migrate` + verify exit 0, `up -d`) by hand until it is folded
-into the script.
-
-`agent` is not gated on `migrate`: it is started later, via `docker compose --profile
-agent run`, well after `redeploy.sh` has already driven `migrate` to completion.
+`agent` is deliberately NOT part of `redeploy.sh`'s scope: it is a one-off
+(`docker compose --profile agent run`), not a long-running service `up -d` would ever
+recreate, and it is started later — well after `redeploy.sh` has already driven
+`migrate` to completion — via its own restart runbook in `CLAUDE.md`.
 
 ### 10.2 The gated path: `run_migration.sh --via-run`
 

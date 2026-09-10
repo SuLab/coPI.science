@@ -100,17 +100,20 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 docker stop -t 30 agent-run
 docker rm agent-run
 
-# 3. Redeploy app + worker against the migrated schema — via scripts/redeploy.sh,
-#    NOT a bare `up -d --build`. `depends_on: migrate: condition:
+# 3. Redeploy app + worker + grantbot against the migrated schema — via
+#    scripts/redeploy.sh, NOT a bare `up -d --build`. `depends_on: migrate: condition:
 #    service_completed_successfully` only orders container CREATION: on an
 #    already-running stack, an existing exited `migrate` container from the last
 #    deploy can satisfy that condition without being re-run against the freshly
 #    built image, so old code can keep serving requests against a schema the new
-#    migration hasn't applied yet (audit 2026-09-08 RC-6, #27 I2). redeploy.sh
-#    builds migrate+app+worker, STOPS app/worker first, runs migrate and checks
-#    its exit code, only then starts the new app/worker, then reloads nginx (the
-#    recreated app container gets a new IP — see the nginx-stale-upstream-ip
-#    memory note). It refuses to run unless both prod compose files are visible
+#    migration hasn't applied yet (audit 2026-09-08 RC-6, #27 I2; audit 2026-09-10
+#    R-4 added grantbot, which has the identical depends_on shape and was
+#    otherwise left running the old image). redeploy.sh builds
+#    migrate+app+worker+grantbot, STOPS app/worker/grantbot first, runs migrate
+#    and checks its exit code, only then starts the new app/worker/grantbot, then
+#    reloads nginx (the recreated app container gets a new IP — see the
+#    nginx-stale-upstream-ip memory note). `agent` is NOT part of this — it is a
+#    one-off with its own restart runbook above. It refuses to run unless both prod compose files are visible
 #    (via $COMPOSE_FILE or -f) and never passes an orphan-removal flag. The image
 #    runs as UID 10001, so profiles/ and data/ on the host must already be owned
 #    by 10001:10001 (never prompts/ — see docs/production-migration.md §10.8 and

@@ -156,9 +156,17 @@ def test_step_order_builds_stops_migrates_then_starts_then_reloads(tmp_path):
         raise AssertionError(f"no matching docker compose call found in:\n{argv}")
 
     i_build = first_index(
-        lambda line: "build" in line and "migrate" in line and "app" in line and "worker" in line
+        lambda line: (
+            "build" in line and "migrate" in line and "app" in line
+            and "worker" in line and "grantbot" in line
+        )
     )
-    i_stop = first_index(lambda line: line.split()[0:1] == ["stop"] or " stop " in f" {line} ")
+    i_stop = first_index(
+        lambda line: (
+            (line.split()[0:1] == ["stop"] or " stop " in f" {line} ")
+            and "app" in line and "worker" in line and "grantbot" in line
+        )
+    )
     i_up_migrate = first_index(
         lambda line: "up" in line and "-d" in line and "migrate" in line and "app" not in line
     )
@@ -169,6 +177,7 @@ def test_step_order_builds_stops_migrates_then_starts_then_reloads(tmp_path):
             and "-d" in line
             and "app" in line
             and "worker" in line
+            and "grantbot" in line
             and "migrate" not in line
         )
     )
@@ -195,6 +204,47 @@ def test_aborts_and_does_not_start_app_worker_when_migrate_fails(tmp_path):
     )
     assert not started_new_app_worker, (
         "redeploy.sh started app/worker on the new image after migrate failed:\n" + argv
+    )
+
+
+def test_grantbot_is_built_stopped_and_started_alongside_app_worker(tmp_path):
+    """R-4 (audit 2026-09-10): grantbot has the same `depends_on: migrate:
+    service_completed_successfully` shape as app/worker in docker-compose.prod.yml,
+    so a redeploy that omits it leaves the OLD grantbot image serving against the
+    newly migrated schema. `agent` (a one-off with its own runbook) must NOT appear
+    in these steps."""
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = [line for line in log.read_text().splitlines() if line.strip()]
+
+    def any_line(predicate):
+        return any(predicate(line) for line in lines)
+
+    assert any_line(lambda line: "build" in line and "grantbot" in line)
+    assert any_line(
+        lambda line: (
+            (line.split()[0:1] == ["stop"] or " stop " in f" {line} ") and "grantbot" in line
+        )
+    )
+    assert any_line(
+        lambda line: "up" in line and "-d" in line and "grantbot" in line and "migrate" not in line
+    )
+    assert not any_line(lambda line: "agent" in line.split()), (
+        "redeploy.sh must never build/stop/start the `agent` one-off service:\n"
+        + "\n".join(lines)
+    )
+
+
+def test_aborts_and_does_not_start_grantbot_when_migrate_fails(tmp_path):
+    proc, log = _run(tmp_path, ["-f", PROD_FILE, "-f", OVERRIDE_FILE], migrate_exit=1)
+    assert proc.returncode != 0
+    argv = log.read_text()
+    started_new_grantbot = any(
+        "up" in line and "-d" in line and "grantbot" in line and "migrate" not in line
+        for line in argv.splitlines()
+    )
+    assert not started_new_grantbot, (
+        "redeploy.sh started grantbot on the new image after migrate failed:\n" + argv
     )
 
 
