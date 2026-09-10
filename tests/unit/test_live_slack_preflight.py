@@ -421,11 +421,25 @@ def test_check_five_gates_check_three_so_no_token_is_sent():
 
 def test_check_six_creates_and_accepts_a_writable_profiles_dir(tmp_path):
     target = tmp_path / "profiles"
-    assert not target.exists()
+    target.mkdir()
     check = check_profiles_dir_writable(target)
     assert check.ok, check.detail
     for sub in ("public", "private", "memory"):
         assert (target / sub).is_dir(), f"{sub} was not created"
+
+
+def test_check_six_refuses_a_nonexistent_profiles_dir_with_the_exact_remedy(tmp_path):
+    """A mistyped/nonexistent COPI_PROFILES_DIR (audit 2026-09-08, opus review): the
+    old behaviour created `profiles_dir` itself via `mkdir(parents=True)`, which
+    silently created an arbitrary directory tree instead of refusing a typo. Only the
+    three subdirs are created; profiles_dir itself must already exist."""
+    target = tmp_path / "typo-ed-profiles-dir"
+    assert not target.exists()
+    check = check_profiles_dir_writable(target)
+    assert not check.ok
+    assert not target.exists(), "a mistyped profiles_dir must not be silently created"
+    assert "chown" in check.detail
+    assert "COPI_PROFILES_DIR" in check.detail
 
 
 def test_check_six_refuses_a_read_only_profiles_dir_with_the_exact_remedy(tmp_path):

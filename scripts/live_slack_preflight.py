@@ -296,9 +296,10 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
 
 
 def check_profiles_dir_writable(profiles_dir: Path) -> Check:
-    """Check 6 (audit 2026-09-08 RC-13) — the resolved
-    `profiles/{public,private,memory}` directories exist and are writable by the
-    current process, creating them if missing.
+    """Check 6 (audit 2026-09-08 RC-13) — `profiles_dir` itself must already exist
+    (refuse a mistyped/nonexistent `COPI_PROFILES_DIR` rather than silently creating
+    an arbitrary directory tree), and the `public`/`private`/`memory` subdirectories
+    are created (if missing) and confirmed writable by the current process.
 
     Runs before any Slack call (see `run_checks`): a `profiles_dir` that turns out to
     be read-only is exactly the failure mode RC-7 traced to a silent DB clobber
@@ -306,23 +307,30 @@ def check_profiles_dir_writable(profiles_dir: Path) -> Check:
     the stale file), and the live tier should refuse up front rather than discover it
     mid-run with a PI told their instruction was saved when it was not.
     """
+    remedy = (
+        f"Fix with either: `sudo chown -R $(id -u):$(id -g) {profiles_dir}` (or the "
+        "deploy image's UID 10001 -- see CLAUDE.md's UID 10001 precondition), or "
+        f"point elsewhere with `COPI_PROFILES_DIR=<a-writable-directory>`."
+    )
+    if not profiles_dir.is_dir():
+        return _verdict(
+            "6. profiles/ is writable",
+            [f"{profiles_dir} does not exist (mistyped COPI_PROFILES_DIR?). {remedy}"],
+            [],
+        )
+
     problems: list[str] = []
     evidence: list[str] = []
     for sub in ("public", "private", "memory"):
         target = profiles_dir / sub
         try:
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(exist_ok=True)
             probe = target / ".preflight-write-probe"
             probe.write_text("")
             probe.unlink()
             evidence.append(f"{target} is writable")
         except OSError as exc:
-            problems.append(
-                f"{target} is not writable ({exc.strerror or exc}). Fix with either: "
-                f"`sudo chown -R $(id -u):$(id -g) {profiles_dir}` (or the deploy "
-                "image's UID 10001 -- see CLAUDE.md's UID 10001 precondition), or "
-                f"point elsewhere with `COPI_PROFILES_DIR=<a-writable-directory>`."
-            )
+            problems.append(f"{target} is not writable ({exc.strerror or exc}). {remedy}")
     return _verdict("6. profiles/ is writable", problems, evidence)
 
 
