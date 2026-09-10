@@ -577,3 +577,71 @@ first, `tests/integration/test_pi_inbox.py`):
 `test_pi_may_post_to_channel_false_for_a_private_non_member`; the full
 `tests/integration/test_pi_inbox.py` (11) and `tests/integration/test_agent_page.py` (111)
 suites re-run green as a regression control given the SEEDED_CHANNELS carve-out.
+
+## Opus review of SEC3-1..SEC3-5 (same day, 2026-09-10) — five follow-ups, all landed
+
+**Follow-up to SEC3-5 (MEDIUM) — the SEEDED_CHANNELS exemption still 403'd legitimate
+non-seeded public channels.** `agent_channels` rows are only ever written for seeded
+channels and `collab_private` channels (`record_channel_created`) -- an ordinary topic
+channel an agent created on its own and posted public messages into had no
+`agent_channels` row at all, even though it is exactly what `_visible_channels`
+(`src/routers/agent_page.py`) already offers the PI in the conversations UI's channel
+dropdown. Fixed by also allowing a channel with no row when at least one PUBLIC
+(`visibility != collab_private`) `AgentMessage` row already exists for it in this run.
+Tests (red first, `tests/integration/test_pi_inbox.py`):
+`test_pi_may_post_to_channel_true_for_a_non_seeded_channel_with_a_public_message`,
+`test_pi_may_post_to_channel_false_for_a_non_seeded_channel_with_no_rows_at_all`,
+`test_pi_may_post_to_channel_false_when_only_a_private_message_exists`.
+
+**Follow-up to SEC3-3 (MEDIUM) — `urlsplit`-based redaction crashed or leaked on a
+malformed DSN.** `urlsplit(dsn).port` raises `ValueError` for a non-numeric port
+(crashing a REFUSAL check instead of failing safe), and a password containing `/` or
+`#` makes `urlsplit` attribute part of the password to `.path` instead of `.netloc`,
+leaking it into the printed detail. Fixed by splitting the authority on the LAST `@` by
+hand (`str.rpartition`, which never raises) and printing everything after it verbatim.
+Tests: `test_check_five_never_echoes_a_dsn_with_a_non_numeric_port`,
+`test_check_five_never_echoes_a_dsn_password_containing_a_slash`,
+`test_check_five_never_echoes_a_dsn_password_containing_at_and_the_rest_intact`.
+
+**Follow-up to SEC3-2 (MEDIUM) — the SPF/DKIM domain-tag regexes scanned the whole
+header, ignoring quoting.** A quoted MAIL FROM local part
+(`smtp.mailfrom="header.d=scripps.edu;"@evil.com`) contains a literal `;` that is only a
+delimiter INSIDE the quotes, not a real segment boundary -- but
+`_DKIM_D_RE.search(header)` had no notion of quoting, so it picked up the injected
+`header.d=scripps.edu` tag ahead of the real `header.d=evil.com` in DKIM's own segment,
+fabricating alignment with the PI's domain. Fixed with a new
+`_split_auth_results_segments` that splits on `;` respecting quoted strings, plus an
+anchored per-segment verdict match (`mech=verdict` must open the segment); the SPF/DKIM
+domain tags are now searched only within that mechanism's own segment. Test (red first,
+the reviewer's exact attack shape):
+`test_quoted_mailfrom_local_part_cannot_inject_a_fake_domain_tag`, plus
+`test_quoted_injection_in_a_non_topmost_header_is_still_ignored`.
+
+**Follow-up to SEC3-2/SEC3-1 (LOW) — alignment was bidirectional; a docstring
+overstated group-syntax rejection.** `_domains_aligned` accepted a PARENT domain of the
+From domain as "aligned", which would let a broad platform domain (e.g. a shared email
+provider) that legitimately passes SPF/DKIM for itself authenticate any of its tenants'
+subdomains -- letting one tenant spoof another. Made alignment one-directional: the
+authenticated domain must equal the From domain or be a SUBdomain of it, never the
+reverse. Test (red first): `test_parent_domain_of_the_from_domain_is_not_aligned`
+(`provider.com` authenticated vs `pi@pi.provider.com` From, now rejected). Also
+corrected `_extract_email_address`'s docstring, which overstated that group syntax is
+rejected outright -- a group naming exactly one member resolves unambiguously and IS
+accepted; added `test_single_member_group_syntax_is_accepted` to pin the existing
+(correct) behavior.
+
+**Follow-up to SEC3-4 (LOW) — pruning silently weakened three lifetime caps into 24h
+rolling caps; `_S3_FAILURE_COUNTS` was never pruned.** `_HELP_EMAILS_SENT`,
+`_STALE_TOKEN_BOUNCES_SENT` and `_INSTRUCTION_FAILURE_EMAILS_SENT` are documented,
+deliberate LIFETIME caps -- pruning them on the same 24h clock as the hourly
+`_RECENT_REPLY_TIMES` limiter let a sender simply wait out the day for a fresh budget.
+Separately, `_S3_FAILURE_COUNTS` (a poison-message counter) was never included in
+pruning at all. Fixed with two windows: 24h for `_RECENT_REPLY_TIMES` and
+`_S3_FAILURE_COUNTS` (both reset/bounded on their own terms already), 30 days for the
+three lifetime caps. Added `_S3_FAILURE_TOUCHED`, stamped on every failure increment.
+Tests (red first, `tests/unit/test_email_inbound_hardening.py`):
+`test_prune_keeps_a_lifetime_cap_entry_older_than_24h_but_within_30_days`,
+`test_prune_drops_a_lifetime_cap_entry_untouched_for_over_30_days`,
+`test_prune_drops_a_short_window_entry_untouched_for_over_24_hours` (now covers
+`_S3_FAILURE_COUNTS` too), `test_poll_inbound_emails_prunes_stale_entries` updated to
+assert `_S3_FAILURE_COUNTS`/`_S3_FAILURE_TOUCHED` are pruned.
