@@ -46,8 +46,13 @@ CSP_REPORT_LOG_FIELD_MAX_CHARS = 200
 
 
 def _sanitize_csp_log_field(value: object) -> str:
+    # SEC2-3 (audit 2026-09-08): \n/\r were not the only way to forge a fake
+    # log line or corrupt a terminal/log viewer — ANSI escapes (\x1b[...) and
+    # Unicode line/paragraph separators (U+2028/U+2029) are non-printable
+    # too. Strip every non-printable character rather than special-casing
+    # CR/LF.
     text = str(value)[:CSP_REPORT_LOG_FIELD_MAX_CHARS]
-    return text.replace("\n", " ").replace("\r", " ")
+    return "".join(c if c.isprintable() else " " for c in text)
 
 # Bounds the /api/health DB probe (#27 I2 review): without this, a stalled
 # Postgres (TCP open, no query response) piles orphaned probe coroutines and

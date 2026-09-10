@@ -192,6 +192,30 @@ async def test_csp_report_endpoint_sanitizes_an_embedded_newline_in_logged_field
     assert len(msg.splitlines()) == 1
 
 
+async def test_csp_report_endpoint_strips_non_printable_chars_from_logged_fields(caplog):
+    # SEC2-3 (audit 2026-09-08): \n/\r were not the only way to forge a fake
+    # log line or corrupt a terminal/log viewer -- an ANSI escape sequence and
+    # Unicode's U+2028 LINE SEPARATOR are both non-printable and neither was
+    # stripped by the old CR/LF-only replace().
+    injected = json.dumps(
+        {
+            "csp-report": {
+                "document-uri": "https://copi.science/x\x1b[31mFAKE\x1b[0m",
+                "violated-directive": "script-src-elem",
+                "blocked-uri": "https://evil.example/y\u2028injected",
+            }
+        }
+    ).encode()
+    with caplog.at_level(logging.WARNING):
+        r = await _post(injected, "application/csp-report")
+    assert r.status_code == 204
+    [record] = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    msg = record.getMessage()
+    assert "\x1b" not in msg
+    assert "\u2028" not in msg
+    assert len(msg.splitlines()) == 1
+
+
 async def test_csp_report_endpoint_truncates_an_oversized_logged_field(caplog):
     long_uri = "https://copi.science/" + "a" * 5000
     injected = json.dumps({"csp-report": {"document-uri": long_uri}}).encode()
