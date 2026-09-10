@@ -169,7 +169,10 @@ comment must state these too.**
    `has_pi_directive`, the reopen target and the `@Bot` route on the agents the sender owns or is a
    delegate for. A NULL-sender row (pre-0030) gets no ownership-gated side effect. The carrier is
    `sender_user_id` + a registry/delegate lookup, which is how the Slack path already worked; it is
-   the issue's "require the sender be the owning PI" by a different column.
+   the issue's "require the sender be the owning PI" by a different column. Two caveats: rows with a
+   NULL sender (pre-0030, or after the sender's account was deleted) get no side effects, fail-closed;
+   and the ownership lookup does not filter `AgentRegistry.status` or a delegate-revocation state
+   (`AgentDelegate` has none — revocation is row deletion).
 9. **PI messages written while `agent-run` was down lost every side effect** (pre-existing; 0029
    stopped one step short). **RC-2**: writers stamp `pi_inbound_state='pending'`, the poller recovers
    `pending`/`ingested` rows independently of the cursor and marks INGESTED before the handler (one

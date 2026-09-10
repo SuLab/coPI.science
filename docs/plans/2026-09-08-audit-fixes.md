@@ -283,3 +283,30 @@ call) standing in for both bots' clients, and asserts none of those calls — no
   #21; add RC-5/RC-6 to #27.
 - `docs/plans/2026-09-04-decisions/task-35.md`: the live-tier run record (coordinator writes it).
 - Handoff gate figures: replaced by the coordinator after the final gate.
+
+---
+
+## RC-15 — MEDIUM — a new post with no channel was defaulted to `#general` (found live)
+
+**Root cause.** `_phase5_new_post` used `action_data.get("channel", "general")`, so a model response that omitted
+`channel` (observed in the real-LLM copi-test run of 2026-09-10) posted into a channel the model never named and that
+need not exist in the workspace.
+
+**Fix.** A `new_post` whose channel is missing or not in `_channel_visibility ∪ SEEDED_CHANNELS ∪
+agent.state.subscribed_channels` is refused as unparseable (skip streak incremented); replies keep COR-9b's
+target-derived channel. Tests: `TestPhase5NewPostNeverDefaultsToGeneral`.
+
+## Post-implementation review rounds (all landed on this branch)
+
+Each fix group was reviewed by an opus pass before merge; the findings and their fixes are the commits tagged
+`SEC-F1..F5`, `A1..A6`, `SEC2-1..5`, `REV3-1..7`, `REV4-1..6` in `git log 4f0e284..HEAD`. The material ones:
+reply-token rotation on resend (SEC-F1); `ingested` rows recovered after a restart with a bounded, lookback-aware
+attempt counter (SEC-F2/A1/SEC2-1/REV4-5); INGESTED marked for `pending` rows before the handler (A1); no
+false-positive parking for DB-only-rooted threads (A3); DMs for an agent that merely left the live roster are not
+discarded (REV3-1); the lazy profiles-dir accessor's two missed consumers (REV4-1, a release blocker caught in
+review); label-based migrate-container selection in `redeploy.sh` (REV4-2); owner- and users-row locks in the delete
+guard (SEC2-2/REV4-3).
+
+Recorded, not fixed: the Slack client's per-page wait budget × `MAX_PAGES` on a throttled startup history fetch
+(bounded but long); the default executor shared by the `to_thread` Slack calls; a superseded reply token's bounce
+requires the sender to be a known user (by design).

@@ -17,6 +17,36 @@ reviewer hashed the prompt strings in the files it touched before and after).
 - **#26 docs + roster (26.1–26.13):** posthog `tojson`; spec/README/AGENT.md/CLAUDE.md factual corrections; lab count from `/admin/agents`; one-time `backfill_slack_ts.py` paragraph; live roster sync (rename, token rotation, removal, uid-map flush); numeric-suffix agent-id fallback with 409 on the request race; `backfill_agents.py` + `generate_sparsedata_user.py` parity; public `extract_json`.
 - **#27 deploy (27.1–27.14) + M.1–M.3:** `.dockerignore` closes the secret/bloat hole (`backups/`, `.env*`, `profiles`, tests, `.git`); `/api/health` probes the DB (503) with a bounded timeout; `migrate` one-shot service gates app/worker/grantbot; hash-pinned `requirements.lock` with upper caps, gate fails on lock drift; deps-before-src, multi-stage build, non-root UID 10001, bytecode baked; nginx comment/cache cleanup, devel/blackbird rate limits, CSP-Report-Only, 300 s provisioning timeout; resource limits (postgres uncapped, D24); mypy ceiling ratchet; preflight/postflight know the 0025–0028 chain; `run_migration.sh --via-run`; `docs/production-migration.md` §10 routine path.
 
+## What (2026-09-08 audit fix wave — `docs/plans/2026-09-08-audit-fixes.md`)
+
+An adversarial audit of this branch (five sonnet passes confirmed by opus, live copi-test runs) found
+defects the closure paperwork had missed. Root causes and fixes, each with a red-first test:
+
+- **RC-1 (#20 COR-5, HIGH).** The DB/web PI path authorized by thread membership. `agent_messages.sender_user_id`
+  (migration `0030`) is stamped by every writer; review clearing, `pi_context`, `has_pi_directive`, the reopen target
+  and the `@Bot` route are gated on the agents the sender owns or is a delegate for. NULL-sender rows get no side effect.
+- **RC-2 (HIGH).** PI messages/DMs written while `agent-run` was down lost every side effect. `pi_inbound_state='pending'`
+  is stamped on insert; `pending`/`ingested` rows are recovered independently of the cursor with a bounded attempt count;
+  `pi_dm_messages.handled_at` (`0030`, backfilled) replaces the in-memory seen-set.
+- **RC-3 (#23 V7).** Slack rate-limit retry is a 180 s wait budget with an 8-attempt ceiling.
+- **RC-4 (#21 V4-3).** Reply tokens expire at the consumer (14 days from the latest send), every resend rotates the token,
+  a superseded token gets a bounce to a known user only.
+- **RC-5 (#27 I5).** Enforcing CSP subset (`frame-ancestors/base-uri/object-src`) + Report-Only with `report-uri
+  /api/csp-report` (sanitised, size-capped, own nginx rate zone); json-file log rotation in the override file.
+- **RC-6 (#27 I2).** `scripts/redeploy.sh` stops app/worker, runs migrate, checks its exit code by container label, then
+  restarts and reloads nginx; runbooks point at it.
+- **RC-7.** PI standing instructions persist DB-first; a failed disk write no longer clobbers the DB or lies in the ack.
+- **RC-8 (#25 D1).** Admin user delete refuses to orphan an active/pending agent (owner + users-row locks).
+- **RC-9.** Parked threads are evicted after `PARKED_THREAD_MAX_TURNS`; `post_failure_count` re-derived on rebuild for
+  Slack-rooted threads.
+- **RC-10 (#27 I2).** `/api/health`'s retry is bounded by the remaining deadline.
+- **RC-11 (#22).** ORCID present-but-null containers no longer raise.
+- **RC-13.** `COPI_PROFILES_DIR` setting, lazily resolved; live-tier preflight check 6 refuses an unwritable or
+  nonexistent profiles dir.
+- **RC-14.** `migrate_public_thread_to_private`'s Slack calls run via `asyncio.to_thread`.
+- **RC-15.** A new post whose channel the model omitted or that the engine does not know is refused instead of being
+  defaulted to `#general` (found by the real-LLM live run).
+
 ## What NOT (deliberately not planned — reasons in each Part's coverage matrix in the plan doc)
 
 - **#20:** COR-1a, COR-10(2), COR-9c (already fixed / agreed no-op / hygiene-only); E6(3) cosmetic; in-process `_dead_thread_ids` tombstone rather than a durable eviction marker; restart residual on a capped thread's late joiner (20.8); D25 single-loss of PI triggers on a handler failure (logged at ERROR).
@@ -176,7 +206,7 @@ The chain runs in ONE transaction, so its locks are additive — R.6 now carries
 - `.superpowers/sdd/2026-09-02-close-issues-20-27/` holds the ledger (`progress.md`), every brief, review and audit; it is
   git-ignored and not part of this PR.
 
-Closes #22, #23, #24, #25
+Closes #20, #22, #23, #24, #25
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
