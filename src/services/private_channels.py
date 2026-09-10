@@ -31,7 +31,10 @@ synchronous and can block for as long as
 throttle. This module is called from async code — the web reopen route and
 the e-mail inbound worker — so calling straight in would freeze the single
 ASGI worker (or the worker process) for that whole retry loop, not just the
-one request. Every such call therefore runs via ``asyncio.to_thread``. The
+one request. Every such call therefore runs via ``run_slack_call``, which
+moves it to a thread pool dedicated to Slack I/O rather than the process-wide
+default ``asyncio.to_thread`` pool everything else shares (audit 2026-09-10
+R-2). The
 engine's own ``_post_message`` (``src/agent/simulation.py``) is intentionally
 NOT threaded — the main-loop is synchronous by design and already isolated
 in its own process.
@@ -39,7 +42,6 @@ in its own process.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -63,6 +65,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.slack_executor import run_slack_call
 
 logger = logging.getLogger(__name__)
 
@@ -522,12 +525,12 @@ async def migrate_public_thread_to_private(
     simulation_run_id = await _latest_simulation_run_id(db)
 
     # --- Slack side-effects ------------------------------------------------
-    # asyncio.to_thread everywhere below (RC-14): _make_client calls
+    # run_slack_call everywhere below (RC-14, R-2): _make_client calls
     # AgentSlackClient.connect(), a blocking Slack API call.
     creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
     other_token = await _get_or_fail_bot_token(db, other_agent_id)
-    creator_client = await asyncio.to_thread(_make_client, creator_agent_id, creator_token)
-    other_client = await asyncio.to_thread(_make_client, other_agent_id, other_token)
+    creator_client = await run_slack_call(_make_client, creator_agent_id, creator_token)
+    other_client = await run_slack_call(_make_client, other_agent_id, other_token)
 
     other_bot_user_id = other_client.bot_user_id
     if not other_bot_user_id:
@@ -542,7 +545,7 @@ async def migrate_public_thread_to_private(
     # colliding on name_taken. Unknown must read as "irreversible".
     if progress is not None:
         progress.safe_to_retry = False
-    new_channel = await asyncio.to_thread(creator_client.create_private_channel, slug)
+    new_channel = await run_slack_call(creator_client.create_private_channel, slug)
     if not new_channel:
         # Slack answered and refused: no channel exists, so this one is clean again.
         if progress is not None:
@@ -560,7 +563,7 @@ async def migrate_public_thread_to_private(
     )).scalar_one_or_none()
     if creator_pi_slack_id:
         invitees.append(creator_pi_slack_id)
-    if not await asyncio.to_thread(creator_client.invite_to_channel, new_channel_id, invitees):
+    if not await run_slack_call(creator_client.invite_to_channel, new_channel_id, invitees):
         logger.warning(
             "Some invites to %s failed — channel exists but membership may be incomplete",
             new_channel_id,
@@ -569,7 +572,7 @@ async def migrate_public_thread_to_private(
     # Resolve origin channel ID: we need it to close the origin thread.
     # creator_client caches channel IDs from any earlier lookups, but the
     # web app is short-lived, so just look it up fresh.
-    origin_channel_id = await asyncio.to_thread(
+    origin_channel_id = await run_slack_call(
         creator_client._resolve_channel_id, origin_channel_name,
     )
 
@@ -588,7 +591,7 @@ async def migrate_public_thread_to_private(
     # store — a handover that existed only on Slack would be invisible to a
     # Slack-off restart and to the web conversation view.
     handover_results: list[tuple[str, dict | None]] = [
-        (post, await asyncio.to_thread(creator_client.post_message, new_channel_id, post))
+        (post, await run_slack_call(creator_client.post_message, new_channel_id, post))
         for post in handover_posts
     ]
 
@@ -608,7 +611,7 @@ async def migrate_public_thread_to_private(
         )
     else:
         try:
-            close_result = await asyncio.to_thread(
+            close_result = await run_slack_call(
                 creator_client.post_message,
                 origin_channel_id, _CLOSE_MARKER_TEXT, thread_ts=slack_parent,
             )
@@ -630,7 +633,7 @@ async def migrate_public_thread_to_private(
         try:
             # Also invite them to the channel first (so when they click the
             # link they can see the history). Tolerant of already_in_channel.
-            await asyncio.to_thread(
+            await run_slack_call(
                 other_client.invite_to_channel, new_channel_id, [other_reg.slack_user_id],
             )
             dm_text = _build_other_pi_dm(
@@ -639,7 +642,7 @@ async def migrate_public_thread_to_private(
                 origin_channel_name=origin_channel_name,
                 new_channel_name=new_channel_name,
             )
-            await asyncio.to_thread(other_client.send_dm, other_reg.slack_user_id, dm_text)
+            await run_slack_call(other_client.send_dm, other_reg.slack_user_id, dm_text)
             invited_other_pi = True
         except Exception as exc:
             logger.warning(

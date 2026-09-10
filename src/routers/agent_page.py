@@ -1,6 +1,5 @@
 """My Agent page router."""
 
-import asyncio
 import logging
 import re
 import uuid
@@ -328,12 +327,13 @@ async def agent_dashboard(
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
+        from src.services.slack_executor import run_slack_call
         from src.services.slack_tokens import get_any_bot_token
-        # to_thread because _resolve_delegate_names is sync and calls
+        # run_slack_call because _resolve_delegate_names is sync and calls
         # slack_web.get_user_info once per delegate, each of which can retry with
         # backoff. Run inline it would block the event loop for every other
         # request the process is serving, not just this dashboard render.
-        delegates = await asyncio.to_thread(
+        delegates = await run_slack_call(
             _resolve_delegate_names,
             agent.delegate_slack_ids, await get_any_bot_token(db),
         )

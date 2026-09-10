@@ -35,6 +35,7 @@ from src.config import get_settings
 from src.database import make_engine  # noqa: E402
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
+from src.services.slack_executor import run_slack_call  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -581,10 +582,12 @@ async def _run_grantbot_with_session(
                 )
             if candidate:
                 bot_token = candidate
-                # to_thread: the helper is sync and makes paginated Slack calls
-                # with backoff, and this caller is async. Run inline it would hold
-                # the event loop for the whole listing plus any retry.
-                await asyncio.to_thread(
+                # run_slack_call: the helper is sync and makes paginated Slack
+                # calls with backoff, and this caller is async. Run inline it
+                # would hold the event loop for the whole listing plus any
+                # retry; the dedicated Slack executor (R-2) also keeps it off
+                # the process-wide default to_thread pool.
+                await run_slack_call(
                     _ensure_channel_membership,
                     bot_token, {item.get("channel", channel) for item in to_post},
                 )

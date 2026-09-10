@@ -17,13 +17,13 @@ this module, not the sync functions** — ``create_app``'s retry loop alone can
 block for minutes on a rate-limited response (issue #24 C2).
 """
 
-import asyncio
 import logging
 import time
 
 import httpx
 
 from src.agent.retry_after import parse_retry_after
+from src.services.slack_executor import run_slack_call
 
 logger = logging.getLogger(__name__)
 
@@ -216,19 +216,19 @@ def exchange_code(
 # from an `async def` route (admin_provisioning.py), that blocks the whole
 # event loop -- the single uvicorn worker has nothing else to run -- so every
 # other request the process is serving freezes for as long as Slack keeps
-# rate-limiting. asyncio.to_thread moves the whole call (including its
-# internal time.sleep) to a worker thread; mirrors slack_web.py:267-300.
+# rate-limiting. run_slack_call moves the whole call (including its internal
+# time.sleep) to the dedicated Slack I/O executor; mirrors slack_web.py:267-300.
 # ---------------------------------------------------------------------------
 
 
 async def lookup_team_id_async(bot_token: str) -> str | None:
     """``lookup_team_id`` off the event loop."""
-    return await asyncio.to_thread(lookup_team_id, bot_token)
+    return await run_slack_call(lookup_team_id, bot_token)
 
 
 async def rotate_config_token_async(refresh_token: str) -> tuple[str, str, int]:
     """``rotate_config_token`` off the event loop."""
-    return await asyncio.to_thread(rotate_config_token, refresh_token)
+    return await run_slack_call(rotate_config_token, refresh_token)
 
 
 async def create_app_async(
@@ -241,7 +241,7 @@ async def create_app_async(
     scopes: list[str] | None = None,
 ) -> dict:
     """``create_app`` off the event loop, including its internal retry sleeps."""
-    return await asyncio.to_thread(
+    return await run_slack_call(
         create_app, config_token, agent_id, bot_name, pi_name, redirect_uri,
         max_rate_limit_retries=max_rate_limit_retries, scopes=scopes,
     )
@@ -254,6 +254,6 @@ async def exchange_code_async(
     redirect_uri: str,
 ) -> str:
     """``exchange_code`` off the event loop."""
-    return await asyncio.to_thread(
+    return await run_slack_call(
         exchange_code, client_id, client_secret, code, redirect_uri
     )
