@@ -64,19 +64,52 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
     the NEXT turn from starting, so there is no need to also abort an
     in-flight retry sleep immediately. A second call (repeated signal) aborts
     right away, in case the operator or a slow shutdown needs it sooner.
+
+    P-2 (opus review, audit 2026-09-10): the scheduled ``call_later`` handle
+    is stashed on ``shutdown.state["timer_handle"]`` so ``_finalize_shutdown``
+    can cancel it once it is moot (the DB flush finished, so signal_shutdown()
+    is about to be called unconditionally anyway) rather than leaving it
+    pending against a loop that is about to close.
     """
-    state = {"signals_received": 0}
+    state = {"signals_received": 0, "timer_handle": None}
 
     def shutdown() -> None:
         logger.info("Received shutdown signal")
         sim_engine.request_stop()
         state["signals_received"] += 1
         if state["signals_received"] == 1:
-            loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)
+            state["timer_handle"] = loop.call_later(
+                SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown
+            )
         else:
             signal_shutdown()
 
+    shutdown.state = state
     return shutdown
+
+
+def _finalize_shutdown(shutdown: callable) -> None:
+    """Unconditionally signal Slack shutdown once teardown has flushed (P-2,
+    opus review, audit 2026-09-10).
+
+    Call this from ``_run_simulation``'s ``finally`` block, AFTER
+    ``sim_engine.stop()``'s DB flush has run.
+
+    Root cause: the first SIGTERM/SIGINT only *scheduled* the abort via
+    ``loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)``.
+    If ``sim_engine.start()`` returned before that timer fired — a
+    ``--max-runtime`` run finishing on schedule, a clean stop, or a flush
+    simply faster than the 20s grace — the timer was dropped when the event
+    loop closed and ``SHUTDOWN_REQUESTED`` was never set at all, even though
+    the process has already committed to exiting and the DB flush this
+    function runs after is complete. Cancels the pending timer handle (now
+    moot — this call supersedes it) before setting the event, so it does not
+    fire spuriously against a loop that may already be closing.
+    """
+    timer_handle = shutdown.state.get("timer_handle")
+    if timer_handle is not None:
+        timer_handle.cancel()
+    signal_shutdown()
 
 
 @app.command()
@@ -365,6 +398,13 @@ async def _run_simulation(
             await sim_engine.stop()
         except Exception:
             logger.exception("Final flush on shutdown failed")
+
+        # P-2 (opus review, audit 2026-09-10): set SHUTDOWN_REQUESTED
+        # unconditionally now that the flush above is done, regardless of
+        # whether a signal was ever received or its grace timer had fired —
+        # see _finalize_shutdown's docstring for why relying on that timer
+        # alone drops the event on a run that exits before it fires.
+        _finalize_shutdown(shutdown)
 
         # Update simulation run status
         if session_factory and simulation_run_id:
