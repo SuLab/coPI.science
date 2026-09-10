@@ -404,7 +404,10 @@ async def _run_simulation(
         # whether a signal was ever received or its grace timer had fired —
         # see _finalize_shutdown's docstring for why relying on that timer
         # alone drops the event on a run that exits before it fires.
-        _finalize_shutdown(shutdown)
+        try:
+            _finalize_shutdown(shutdown)
+        except Exception:  # Q-4: never skip the run-status update below
+            logger.exception("Shutdown finalisation failed")
 
         # Update simulation run status
         if session_factory and simulation_run_id:

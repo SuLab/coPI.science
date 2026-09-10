@@ -1375,3 +1375,17 @@ failure still does not advance the signature (retries every tick), and a new one
 that a no-linked-`user_id` verdict DOES advance the signature and does not re-query the
 DB on a second tick with no further disk change. The new test was red (2 queries instead
 of 1) before the fix.
+
+## Q — opus review of the P round (2026-09-10)
+
+- **Q-1** `_enqueue_pending_thread_decision`'s overflow purge keeps a deferred implicit-review pair only
+  while a surviving payload shares its `thread_id` AND names its agent (the flush matches
+  `(agent_id, thread_id)` against `agent_a`/`agent_b`), so a same-thread payload for a different pair can
+  no longer keep a never-replayable pair alive. Test: `test_overflow_purge_drops_a_deferred_review_whose_surviving_payload_has_a_different_pair`.
+- **Q-2** `_sync_one_agent_private_profile_from_db`: an unlinked `AgentRegistry` row is transient (user_id is
+  set later by signup/activation), so it no longer freezes the watcher signature; only "no
+  ResearcherProfile row" stays definitive. Tests adjusted.
+- **Q-3** `slack_executor`: `threading._register_atexit` wrapped in `try/except (AttributeError, RuntimeError)`
+  with the `atexit` fallback (import during interpreter shutdown must not fail).
+- **Q-4** `src/agent/main.py`: `_finalize_shutdown` wrapped so an exception there cannot skip the
+  `SimulationRun.status='stopped'` update.

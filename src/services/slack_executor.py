@@ -204,9 +204,11 @@ def shutdown_slack_executor() -> None:
 # interpreter that lacks it -- on that fallback interpreter a sleeper still
 # runs to completion, but the pool itself is at least shut down cleanly
 # rather than leaking.
-if hasattr(threading, "_register_atexit"):
-    threading._register_atexit(signal_shutdown)
-else:  # pragma: no cover - defensive fallback for non-CPython interpreters
+try:
+    threading._register_atexit(signal_shutdown)  # type: ignore[attr-defined]
+except (AttributeError, RuntimeError):  # pragma: no cover - non-CPython, or
+    # imported during interpreter shutdown ("can't register atexit after
+    # shutdown"); fall back rather than failing the import (Q-3).
     atexit.register(signal_shutdown)
 
 # Backstop for any exit path that does not run the FastAPI lifespan or the
