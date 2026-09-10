@@ -12,6 +12,14 @@ from src.agent.simulation import (
     _strip_llm_preamble,
 )
 
+
+async def _async_noop(*_args, **_kwargs) -> None:
+    """Stand-in for _phase1_channel_discovery, now an async method (S-1,
+    audit 2026-09-10): its join_channel Slack call was moved onto
+    run_slack_call so it can no longer block the event loop.
+    """
+    return None
+
 # ---------------------------------------------------------------
 # _extract_slack_message
 # ---------------------------------------------------------------
@@ -2660,7 +2668,7 @@ class TestRunTurnAdvancesCursorFromTheLog:
         ))
         # Stub every phase so _run_turn completes with no LLM/Slack/DB calls —
         # this task is only about the cursor line at the end of the method.
-        engine._phase1_channel_discovery = lambda a: None
+        engine._phase1_channel_discovery = _async_noop
         engine._phase2_scan_filter = AsyncMock(return_value=None)
         engine._phase3_activate_threads = lambda a: None
         engine._phase4_reply_threads = AsyncMock(return_value=set())
@@ -6062,7 +6070,7 @@ class TestHasPiDirectiveClearedOnlyWhenActedOn:
         agent = Agent("a", "ABot", "A PI")
         engine = SimulationEngine(agents=[agent], slack_clients={})
         agent.state.has_pi_directive = True
-        engine._phase1_channel_discovery = lambda a: None
+        engine._phase1_channel_discovery = _async_noop
         engine._phase2_scan_filter = AsyncMock(return_value=None)
         engine._phase3_activate_threads = lambda a: None
         engine._phase4_reply_threads = AsyncMock(return_value=set())
@@ -6516,7 +6524,7 @@ class TestEvictStaleParkedThreads:
         agent.state.active_threads[thread.thread_id] = thread
         # Stub out everything else _run_turn does so this exercises only the
         # eviction step, not a full turn's phases.
-        engine._phase1_channel_discovery = lambda a: None
+        engine._phase1_channel_discovery = _async_noop
         engine._phase2_scan_filter = AsyncMock()
         engine._phase3_activate_threads = lambda a: None
         engine._phase4_reply_threads = AsyncMock(return_value=set())

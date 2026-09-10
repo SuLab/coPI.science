@@ -70,18 +70,63 @@ def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> calla
     can cancel it once it is moot (the DB flush finished, so signal_shutdown()
     is about to be called unconditionally anyway) rather than leaving it
     pending against a loop that is about to close.
+
+    S-1 (audit 2026-09-10): this handler is now installed with
+    ``signal.signal`` (see ``_run_simulation``), not
+    ``loop.add_signal_handler``. ``loop.add_signal_handler`` delivers a
+    signal by writing to a self-pipe that the loop only reads from its own
+    ``select``/``poll`` wait -- if the loop thread is blocked inside a
+    *synchronous* call that never returns control to that wait (e.g.
+    ``AgentSlackClient.connect()``'s blocking ``auth.test``, which can sit in
+    Slack's retry/backoff loop for up to
+    ``RATE_LIMIT_WAIT_BUDGET_SECONDS`` == 180s), the self-pipe is never
+    drained and the signal is never delivered at all: no ``request_stop()``,
+    no grace timer, no ``signal_shutdown()``, until that one blocking call
+    happens to return on its own. ``signal.signal`` handlers are instead
+    invoked by CPython's own EINTR-retry machinery (PEP 475) the moment a
+    blocking call is interrupted, so they still fire while the loop itself is
+    stuck -- the actual bound is one in-flight Slack HTTP request plus <=1s
+    of that call's own interruptible retry-sleep slicing, not the previous
+    "up to 180s, or never, if the loop is what's blocked" bound.
+
+    Because a true ``signal.signal`` handler can interrupt code that is
+    itself mid-mutation of the loop's internals, ``loop.call_later`` (which
+    touches the loop's timer heap) is never called directly from inside this
+    handler. It is scheduled via ``loop.call_soon_threadsafe`` instead --
+    documented by asyncio as safe to call from a signal handler -- so the
+    heap is only ever touched on the loop's own turn. ``request_stop()`` has
+    no such hazard (it only flips a plain flag, and is documented safe to
+    call from a signal handler already), so it still runs synchronously and
+    immediately, taking effect for the blocked loop's own book-keeping the
+    moment it next checks ``self._running`` -- it does not need the loop to
+    be free first. The second signal likewise calls ``signal_shutdown()``
+    directly rather than through the loop, since it exists specifically to
+    still work when the loop is the thing that is stuck.
     """
     state = {"signals_received": 0, "timer_handle": None}
 
-    def shutdown() -> None:
+    def _schedule_grace_timer() -> None:
+        # Runs as a loop callback (queued below via call_soon_threadsafe),
+        # never directly inside the signal handler -- see the docstring
+        # above for why loop.call_later must only ever run on the loop's own
+        # turn.
+        state["timer_handle"] = loop.call_later(
+            SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown
+        )
+
+    def shutdown(signum=None, frame=None) -> None:
         logger.info("Received shutdown signal")
+        # Safe (and immediate) even if the loop is currently blocked inside a
+        # synchronous Slack call: this only flips a flag, no loop access.
         sim_engine.request_stop()
         state["signals_received"] += 1
         if state["signals_received"] == 1:
-            state["timer_handle"] = loop.call_later(
-                SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown
-            )
+            loop.call_soon_threadsafe(_schedule_grace_timer)
         else:
+            # SECOND signal: abort immediately, WITHOUT depending on the loop
+            # ever becoming free -- that is exactly what a blocked loop can
+            # no longer guarantee (S-1, audit 2026-09-10). signal_shutdown()
+            # only sets a threading.Event, safe to call directly here.
             signal_shutdown()
 
     shutdown.state = state
@@ -366,12 +411,28 @@ async def _run_simulation(
     # delayed by SHUTDOWN_SLACK_ABORT_GRACE_SECONDS on the first signal (see
     # _make_shutdown_handler) instead of firing at t=0, so a typical ~10s
     # backoff can finish naturally within docker stop -t 30's grace instead
-    # of being aborted and leaving that post DB-only.
+    # of being aborted and leaving that post DB-only. This bound is on the
+    # RETRY-SLEEP path only -- see _make_shutdown_handler's docstring for the
+    # separate, tighter bound (one in-flight HTTP call plus <=1s) on the
+    # signal actually being *delivered* while the loop is blocked.
+    #
+    # S-1 (audit 2026-09-10): installed with signal.signal, NOT
+    # loop.add_signal_handler. add_signal_handler's self-pipe is only ever
+    # drained by the loop's own select/poll wait, so it silently never fires
+    # while the loop thread is stuck inside a synchronous Slack call (e.g.
+    # SimulationEngine._sync_roster_from_db's roster-sync connect() calls,
+    # measured able to block up to RATE_LIMIT_WAIT_BUDGET_SECONDS == 180s
+    # under a sustained throttle before this fix routed them through
+    # run_slack_call) -- no request_stop(), no grace timer, no
+    # signal_shutdown() until that call happens to return on its own.
+    # signal.signal handlers are instead invoked via CPython's EINTR-retry
+    # machinery (PEP 475), so they still fire on the main thread even while
+    # it is blocked in that call.
     loop = asyncio.get_event_loop()
     shutdown = _make_shutdown_handler(loop, sim_engine)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown)
+        signal.signal(sig, shutdown)
 
     try:
         if budget > 0:

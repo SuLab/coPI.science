@@ -515,6 +515,71 @@ class TestSyncRosterFromDb:
         assert "wiseman" in engine.slack_clients
 
 
+class TestRosterSyncDoesNotBlockTheLoop:
+    """S-1 (audit 2026-09-10): AgentSlackClient.connect() is a blocking Slack
+    Web API call that can sit in a retry/backoff loop for up to
+    RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under a sustained throttle. Calling
+    it directly (not through run_slack_call) inside _sync_roster_from_db
+    blocks the whole process's single event loop for that long, starving
+    every other coroutine on it -- including the SIGTERM-driven shutdown
+    logic in main.py, which never gets scheduled until the blocking call
+    happens to return.
+    """
+
+    async def test_a_slow_connect_does_not_block_other_coroutines(self, monkeypatch):
+        import asyncio
+        import time as time_mod
+
+        _patch_client(monkeypatch)
+
+        SLEEP_SECONDS = 0.5
+        connect_window: dict[str, float] = {}
+
+        class _SlowConnectClient(_FakeSlackClient):
+            def connect(self):
+                connect_window["start"] = time_mod.monotonic()
+                time_mod.sleep(SLEEP_SECONDS)
+                connect_window["end"] = time_mod.monotonic()
+                return self._connect_result
+
+        monkeypatch.setattr("src.agent.slack_client.AgentSlackClient", _SlowConnectClient)
+
+        engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
+
+        ticks: list[float] = []
+        stop = asyncio.Event()
+
+        async def ticker():
+            while not stop.is_set():
+                ticks.append(time_mod.monotonic())
+                await asyncio.sleep(0.02)
+
+        sync_task = asyncio.ensure_future(engine._sync_roster_from_db())
+        tick_task = asyncio.ensure_future(ticker())
+        await asyncio.wait_for(sync_task, timeout=3.0)
+        stop.set()
+        await asyncio.wait_for(tick_task, timeout=1.0)
+
+        assert "start" in connect_window and "end" in connect_window
+        # The regression: a direct (non-run_slack_call) client.connect() call
+        # runs synchronously on the loop for the whole SLEEP_SECONDS, so the
+        # ticker cannot record ANY tick between connect_window's start/end.
+        # Fixed (run_slack_call), connect() runs on a worker thread and the
+        # loop keeps servicing the ticker every ~0.02s throughout that
+        # window.
+        ticks_during_connect = [
+            t for t in ticks if connect_window["start"] < t < connect_window["end"]
+        ]
+        assert len(ticks_during_connect) >= 3, (
+            "the event loop must keep servicing other coroutines while a "
+            f"roster-sync connect() is in flight, got only "
+            f"{len(ticks_during_connect)} tick(s) during the "
+            f"{SLEEP_SECONDS}s blocking connect() call — the loop was "
+            "blocked for that call"
+        )
+        assert "wiseman" in engine.agents
+
+
 # ---------------------------------------------------------------
 # Admin self-service provisioning callback (src.services.admin_provisioning)
 # ---------------------------------------------------------------

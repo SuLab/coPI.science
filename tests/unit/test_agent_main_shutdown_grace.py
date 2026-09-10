@@ -32,7 +32,7 @@ import time
 from types import SimpleNamespace
 
 from src.agent import main as _main_module
-from src.agent.slack_client import SlackShuttingDown, _sleep_interruptibly
+from src.agent.slack_client import SHUTDOWN_REQUESTED, SlackShuttingDown, _sleep_interruptibly
 from src.services.slack_executor import run_slack_call
 
 # P-4 (opus review, audit 2026-09-10): SHUTDOWN_REQUESTED is cleared before
@@ -133,4 +133,35 @@ async def test_a_pool_bound_slack_call_aborts_promptly_after_the_second_signal()
 
     assert isinstance(outcome.get("exc"), SlackShuttingDown), (
         f"a pool-bound sleeper must abort promptly after the second signal, got {outcome!r}"
+    )
+
+
+async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
+    """S-1 (audit 2026-09-10): the handler is now installed via
+    ``signal.signal`` rather than ``loop.add_signal_handler`` precisely so it
+    still runs (and the second-signal branch still fires) even when the
+    calling thread is not the loop's own thread -- the scenario that matters
+    is the loop thread being blocked inside a synchronous Slack call, which
+    is indistinguishable, from the handler's point of view, from being
+    invoked off-thread. ``request_stop()`` and the second signal's
+    ``signal_shutdown()`` call must not depend on the loop being free.
+    """
+    loop = asyncio.get_running_loop()
+    stop_calls: list[None] = []
+    fake_engine = SimpleNamespace(request_stop=lambda: stop_calls.append(None))
+    shutdown = _main_module._make_shutdown_handler(loop, fake_engine)
+
+    def call_from_thread():
+        shutdown()  # first signal
+        shutdown()  # second signal: must set the event synchronously, here
+
+    t = threading.Thread(target=call_from_thread)
+    t.start()
+    t.join(timeout=2.0)
+
+    assert not t.is_alive()
+    assert len(stop_calls) == 2, "request_stop() must run for every signal, even off-thread"
+    assert SHUTDOWN_REQUESTED.is_set(), (
+        "a second signal must set SHUTDOWN_REQUESTED synchronously even when "
+        "delivered from a thread other than the event loop's own"
     )

@@ -66,6 +66,11 @@ async def test_finalize_shutdown_cancels_the_pending_grace_timer():
     shutdown = _main_module._make_shutdown_handler(loop, fake_engine)
 
     shutdown()  # first signal: schedules the grace-delay timer
+    # S-1 (audit 2026-09-10): the timer is now installed via
+    # loop.call_soon_threadsafe (not directly inside the handler, which may
+    # run as a true signal.signal callback) — give the loop one tick to run
+    # that queued callback before reading the handle back.
+    await asyncio.sleep(0)
     timer_handle = shutdown.state["timer_handle"]
     assert timer_handle is not None
     assert not timer_handle.cancelled()

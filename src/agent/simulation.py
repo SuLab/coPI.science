@@ -1292,7 +1292,7 @@ class SimulationEngine:
         self._evict_stale_parked_threads(agent)
 
         # Phase 1: Channel discovery
-        self._phase1_channel_discovery(agent)
+        await self._phase1_channel_discovery(agent)
 
         # Phase 2: Scan & filter new posts
         await self._phase2_scan_filter(agent)
@@ -1377,7 +1377,7 @@ class SimulationEngine:
     # Phase 1: Channel Discovery
     # ------------------------------------------------------------------
 
-    def _phase1_channel_discovery(self, agent: Agent) -> None:
+    async def _phase1_channel_discovery(self, agent: Agent) -> None:
         """Join new channels based on profile keyword matching."""
         profile_text = agent.public_profile.lower()
         channels_to_join = set(_UNIVERSAL_CHANNELS)
@@ -1393,7 +1393,12 @@ class SimulationEngine:
                 if ch_id:
                     client = self.slack_clients.get(agent.agent_id)
                     if client:
-                        client.join_channel(ch_id)
+                        # run_slack_call: join_channel is a blocking Slack Web
+                        # API call and this coroutine runs on the process's
+                        # single event loop every turn — a direct call here
+                        # can starve shutdown handling exactly like the
+                        # roster-sync connect() calls (S-1, audit 2026-09-10).
+                        await run_slack_call(client.join_channel, ch_id)
             agent.state.subscribed_channels.update(new_channels)
             logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
 
@@ -5866,7 +5871,13 @@ class SimulationEngine:
         # it were an agent.
         probe = AgentSlackClient(agent_id="grantbot", bot_token=token)
         try:
-            connected = probe.connect()
+            # run_slack_call: this coroutine is awaited from
+            # _sync_roster_from_db, which runs on the process's single event
+            # loop — a synchronous connect() here can block that loop for up
+            # to RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under a throttle,
+            # starving shutdown handling the same way the roster add/remove
+            # connect() calls did (S-1, audit 2026-09-10).
+            connected = await run_slack_call(probe.connect)
         except Exception as exc:
             # connect() only handles SlackApiError; DNS/SSL/socket errors escape it.
             # Record the attempted token even on failure (see the dict's comment
@@ -7400,7 +7411,14 @@ class SimulationEngine:
                     if existing is not None and getattr(existing, "bot_token", None) == token:
                         continue  # already connected with the current token
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    if not client.connect():
+                    # run_slack_call, not a direct call: connect() does a
+                    # blocking auth.test that can sit in Slack's retry/backoff
+                    # loop for up to RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under
+                    # a sustained throttle. Calling it synchronously here blocks
+                    # THIS event loop for that long — starving every other
+                    # coroutine on it, including the SIGTERM-driven shutdown
+                    # logic in main.py (S-1, audit 2026-09-10).
+                    if not await run_slack_call(client.connect):
                         logger.warning(
                             "[roster] Slack %s failed for %s — will retry",
                             "reconnect" if existing is not None else "connect adopting",
@@ -7496,7 +7514,10 @@ class SimulationEngine:
                         )
                         continue
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    if not client.connect():
+                    # See the run_slack_call comment on the reconnect branch
+                    # above — same 180s-blocking-call/SIGTERM-starvation
+                    # concern applies to a brand-new agent's first connect().
+                    if not await run_slack_call(client.connect):
                         logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
                         continue
                 else:
