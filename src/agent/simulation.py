@@ -6209,6 +6209,37 @@ class SimulationEngine:
                 for r in window_rows:
                     agent.state.call_times.append(r.created_at.timestamp())
 
+                # K-6 follow-up (opus review, audit 2026-09-10): a re-added
+                # agent gets a fresh `Agent()` with an EMPTY
+                # `subscribed_channels`, and `_sync_private_channels_from_db`
+                # only populates it for a channel the engine has never seen
+                # before — it `continue`s past any channel already in
+                # `_channel_id_map`, which every collab_private channel this
+                # agent belonged to before the flip already is. Without this,
+                # K-6's `new_post` gate (which now trusts `_channel_visibility`
+                # only for a PUBLIC entry, exactly because it cannot tell one
+                # pair's private channel from another's) rejects a legitimate
+                # post to this agent's OWN, already-discovered private
+                # channel — restoring the membership this agent actually has,
+                # scoped to `agent_id` alone, same shape as every other query
+                # in this method.
+                from src.models import AgentChannel, PrivateChannelMember
+
+                member_channel_names = (await db.execute(
+                    sa_select(AgentChannel.channel_name)
+                    .join(
+                        PrivateChannelMember,
+                        PrivateChannelMember.agent_channel_id == AgentChannel.id,
+                    )
+                    .where(
+                        PrivateChannelMember.agent_id == agent_id,
+                        PrivateChannelMember.role == "bot",
+                        PrivateChannelMember.removed_at.is_(None),
+                        AgentChannel.archived_at.is_(None),
+                    )
+                )).scalars().all()
+                agent.state.subscribed_channels.update(member_channel_names)
+
             # active_threads from the in-memory message_log (already loaded
             # at startup and kept live since) — mirrors _rebuild_agent_state's
             # own reconstruction loop (:4190-4243), scoped to this agent only.

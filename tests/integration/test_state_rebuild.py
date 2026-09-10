@@ -1310,3 +1310,47 @@ async def test_rebuild_keeps_the_db_content_cached_even_if_disk_is_unwritable(
     await eng._rebuild_agent_state()
 
     assert eng.agents["su"].private_profile == "fresh DB instruction"
+
+
+# ---------------------------------------------------------------
+# K-6 follow-up (opus review, audit 2026-09-10): a roster re-add must restore
+# subscribed_channels, or K-6's own-private-channel new_post gate wrongly
+# rejects a legitimate post to a channel this agent already belongs to.
+# ---------------------------------------------------------------
+
+async def test_a_roster_flip_restores_subscribed_channels_for_a_known_private_channel(
+    db_session,
+):
+    """`_sync_private_channels_from_db` only populates `subscribed_channels`
+    for a channel the ENGINE has never seen before — it skips anything
+    already in `_channel_id_map`, which every collab_private channel this
+    agent belonged to before a roster flip already is. Without restoring it
+    in `_rebuild_one_agent_state`, K-6's `new_post` gate (audit 2026-09-10)
+    — which trusts `_channel_visibility` only for a PUBLIC entry, precisely
+    because it cannot otherwise tell one pair's private channel from
+    another's — wrongly refuses a re-added agent's post to its own,
+    already-discovered private channel.
+    """
+    run = await factories.make_simulation_run(db_session)
+    channel = await factories.make_agent_channel(
+        db_session, run=run, channel_name="su-priv", channel_id="C-SU-PRIV",
+        visibility="collab_private",
+    )
+    await factories.make_private_channel_member(
+        db_session, channel=channel, role="bot", agent_id="su",
+    )
+
+    eng = _engine_for(db_session, run.id, agent_ids=("su",))
+    # Mirror the engine already having discovered this channel (it is not
+    # brand new to the process — only to the re-added agent).
+    eng._channel_id_map["su-priv"] = "C-SU-PRIV"
+    eng._channel_visibility["su-priv"] = "collab_private"
+
+    readded = Agent(agent_id="su", bot_name="SuBot", pi_name="PI su")
+    eng.agents["su"] = readded
+    await eng._rebuild_one_agent_state("su")
+
+    assert "su-priv" in readded.state.subscribed_channels, (
+        "a roster re-add must restore membership in a private channel this "
+        "agent already belongs to, not just ones newly discovered this tick"
+    )

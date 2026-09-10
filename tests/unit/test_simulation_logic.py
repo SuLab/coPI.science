@@ -4315,6 +4315,7 @@ class TestRebuildOneAgentState:
             [],
             2,
             [_LLM(created_at=now - timedelta(seconds=10))],
+            [],  # K-6 follow-up: this agent's private-channel-member rows
         ]
         FakeDB = self._ordered_fake_db(responses)
 
@@ -4377,6 +4378,7 @@ class TestRebuildOneAgentState:
             [],
             2,
             [_LLM(created_at=now - timedelta(seconds=10))],
+            [],  # K-6 follow-up: this agent's private-channel-member rows
         ]
         FakeDB = self._ordered_fake_db(responses)
 
@@ -4422,9 +4424,10 @@ class TestRebuildOneAgentState:
         from src.agent.agent import Agent
         from src.agent.message_log import LogEntry
 
-        # 6 reads: decisions, reviews, this agent's AgentRegistry.user_id,
-        # reopened, count, window.
-        FakeDB = self._ordered_fake_db([[], [], uuid_mod.uuid4(), [], 0, []])
+        # 7 reads: decisions, reviews, this agent's AgentRegistry.user_id,
+        # reopened, count, window, this agent's private-channel-member rows
+        # (K-6 follow-up).
+        FakeDB = self._ordered_fake_db([[], [], uuid_mod.uuid4(), [], 0, [], []])
 
         su = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(agents=[su], slack_clients={})
@@ -4471,6 +4474,7 @@ class TestRebuildOneAgentState:
                 [_Row(thread_id="100.0", reopened_at=now)],  # reopened rows
                 0,   # call_count
                 [],  # window_rows
+                [],  # K-6 follow-up: this agent's private-channel-member rows
             ]
 
         for sender_name, expected in (("Andrew Su", "please revisit"), ("randomlurker", None)):
