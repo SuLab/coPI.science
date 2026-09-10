@@ -14,6 +14,7 @@ import pytest
 
 import src.main as main_module
 from src.main import create_app, lifespan
+from src.services.slack_executor import run_slack_call
 
 
 @pytest.mark.asyncio
@@ -38,3 +39,21 @@ async def test_create_app_actually_drives_the_lifespan_shutdown(monkeypatch):
     async with app.router.lifespan_context(app):
         assert calls == []
     assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_real_lifespan_shutdown_does_not_permanently_kill_run_slack_call():
+    """K-9 (audit 2026-09-10): the REAL (unmocked) shutdown_slack_executor()
+    used to leave the module-level pool permanently shut down. Any pytest
+    process that drives this app's real ASGI lifespan even once (many
+    integration tests do, for reasons that have nothing to do with Slack) then
+    broke run_slack_call for every OTHER test sharing that interpreter,
+    regardless of whether that test ever touched shutdown itself. The pool
+    must now be lazily re-created on the next call instead."""
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        pass  # real shutdown_slack_executor() runs here, unmocked
+
+    result = await run_slack_call(lambda: 42)
+
+    assert result == 42

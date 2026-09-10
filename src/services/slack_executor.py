@@ -43,13 +43,19 @@ explicitly; ``atexit.register`` below is a backstop for anything that exits
 without running either (a crash path, a script that imports this module
 directly, etc.) so the pool is never the reason interpreter shutdown hangs.
 
-**Contract after shutdown**: ``run_slack_call`` is not re-entrant across a
-shutdown — a call after ``shutdown_slack_executor()`` raises ``RuntimeError``
-(``ThreadPoolExecutor``'s own "cannot schedule new futures after shutdown"),
-not a silently re-created pool. Every caller here already treats an unhandled
-exception from a Slack call as a real failure (see e.g. `private_channels.py`'s
-try/except around the Slack side-effects), so this fails the same way a live
-Slack error would, rather than needing a new failure mode of its own.
+**Contract after shutdown (revised by K-9, audit 2026-09-10)**: ``run_slack_call``
+IS re-entrant across a shutdown — the pool is created lazily, so a call after
+``shutdown_slack_executor()`` transparently creates a fresh pool rather than
+raising. The pre-K-9 contract (raise ``RuntimeError``, never re-create) broke
+any process that shares one interpreter across more than one lifespan, most
+concretely the test suite: many unrelated integration tests spin up
+``create_app()``'s ASGI lifespan via ``httpx.ASGITransport`` for reasons that
+have nothing to do with Slack, and its shutdown path calls
+``shutdown_slack_executor()`` -- permanently killing the process-wide
+singleton for every OTHER test in the same pytest process. A real process's
+shutdown path (SIGTERM in main.py/worker/main.py) still exits the interpreter
+shortly after calling this, so the lazy re-create is mostly invisible there;
+it exists for exactly the shared-interpreter case above.
 
 **Sizing / queuing bound (opus review follow-up, audit 2026-09-10).** A single
 `private_channels.migrate_public_thread_to_private` call ("reopen a public
@@ -73,6 +79,7 @@ concurrency — but waits for a free worker like any bounded pool.
 import asyncio
 import atexit
 import functools
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
@@ -89,9 +96,37 @@ _T = TypeVar("_T")
 # Slack-specific incident rather than a process-wide one.
 SLACK_IO_MAX_WORKERS = 16
 
-_SLACK_EXECUTOR = ThreadPoolExecutor(
-    max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io"
-)
+# K-9 (audit 2026-09-10): the pool used to be created once at import time and
+# never re-created. `shutdown_slack_executor()` is called from every
+# lifespan/worker shutdown path (src/main.py, src/worker/main.py) AND from
+# this module's own atexit backstop, so any test process that spins up
+# `create_app()`'s ASGI lifespan even once (most of the httpx-ASGITransport
+# integration tests do, incidentally, for reasons unrelated to Slack)
+# permanently shut this singleton down for the rest of that interpreter --
+# every later `run_slack_call` anywhere else in the same pytest process then
+# raised "cannot schedule new futures after shutdown", regardless of whether
+# THAT test ever touched shutdown itself. `_SLACK_EXECUTOR` now starts (and
+# becomes, after a shutdown) `None`; `_get_executor()` lazily creates a fresh
+# pool on demand, guarded by `_POOL_LOCK` so two concurrent callers cannot
+# each create and orphan one.
+_POOL_LOCK = threading.Lock()
+_SLACK_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _SLACK_EXECUTOR
+    with _POOL_LOCK:
+        if _SLACK_EXECUTOR is None:
+            # A fresh pool's threads must not immediately abort their first
+            # retry sleep because a PRIOR pool's shutdown left this set —
+            # clearing here, at the moment a new pool actually comes into
+            # existence, is what keeps K-2's SHUTTING_DOWN check meaningful
+            # across a shutdown/re-create cycle instead of latching permanently.
+            SHUTTING_DOWN.clear()
+            _SLACK_EXECUTOR = ThreadPoolExecutor(
+                max_workers=SLACK_IO_MAX_WORKERS, thread_name_prefix="slack-io"
+            )
+        return _SLACK_EXECUTOR
 
 
 async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -101,9 +136,19 @@ async def run_slack_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
     Slack call site — same signature, same "runs in a worker thread and awaits
     the result" behaviour, same exception propagation. The only difference is
     *which* thread pool it runs on.
+
+    Contract after a shutdown (K-9, audit 2026-09-10): this does NOT raise —
+    a shut-down pool is lazily replaced with a fresh one on the next call, the
+    same way a fresh ``asyncio.to_thread`` default executor would be. A
+    process's *real* shutdown path (SIGTERM handling in main.py/worker/main.py)
+    exits the interpreter shortly after calling ``shutdown_slack_executor()``
+    regardless, so this only matters for a long-lived process that shuts the
+    pool down without exiting (or a test process sharing one interpreter
+    across many independent lifespans).
     """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_SLACK_EXECUTOR, functools.partial(fn, *args, **kwargs))
+    executor = _get_executor()
+    return await loop.run_in_executor(executor, functools.partial(fn, *args, **kwargs))
 
 
 def shutdown_slack_executor() -> None:
@@ -116,17 +161,30 @@ def shutdown_slack_executor() -> None:
     whatever it had left of the (up to 180s) wait budget. This does NOT make
     an in-flight *HTTP request* interruptible — only the retry sleep — so a
     call that is not currently throttled still runs to completion; only
-    something already sleeping on a 429 is cut short.
+    something already sleeping on a 429 is cut short. The event stays set
+    until a NEW pool is actually created (see ``_get_executor``), not cleared
+    here — clearing it immediately would give an old pool's still-sleeping
+    thread no realistic chance to observe it before the next slice check.
 
     ``wait=False``: does not block the caller (a FastAPI lifespan or the
     worker's shutdown path) on however long an in-flight Slack call has left to
     run. ``cancel_futures=True``: drops anything still queued (not yet
-    started) rather than starting it during shutdown. Safe to call more than
-    once (``ThreadPoolExecutor.shutdown`` is idempotent; setting an already-set
-    ``Event`` is a no-op).
+    started) rather than starting it during shutdown.
+
+    K-9 (audit 2026-09-10): drops the reference to the now-shut-down pool
+    (setting the module global to ``None``) instead of leaving callers pointed
+    at a permanently-dead singleton — ``run_slack_call`` lazily creates a
+    fresh pool on its next invocation. Safe to call more than once
+    (``ThreadPoolExecutor.shutdown`` is idempotent; setting an already-set
+    ``Event`` is a no-op; shutting down with no pool currently created is a
+    no-op).
     """
+    global _SLACK_EXECUTOR
     SHUTTING_DOWN.set()
-    _SLACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    with _POOL_LOCK:
+        executor, _SLACK_EXECUTOR = _SLACK_EXECUTOR, None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 # Backstop for any exit path that does not run the FastAPI lifespan or the

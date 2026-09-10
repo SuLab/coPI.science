@@ -15,17 +15,22 @@ import pytest
 
 import src.services.slack_executor as slack_executor_module
 from src.services.slack_executor import (
-    _SLACK_EXECUTOR,
     SLACK_IO_MAX_WORKERS,
+    _get_executor,
     run_slack_call,
     shutdown_slack_executor,
 )
 
 
 def test_the_slack_pool_is_a_bounded_dedicated_executor():
-    assert isinstance(_SLACK_EXECUTOR, ThreadPoolExecutor)
-    assert _SLACK_EXECUTOR._max_workers == SLACK_IO_MAX_WORKERS
-    assert _SLACK_EXECUTOR._thread_name_prefix == "slack-io"
+    # K-9 (audit 2026-09-10): the pool is now created lazily (see
+    # `_get_executor`'s docstring/module docstring), so `_SLACK_EXECUTOR`
+    # itself may be `None` at import time — force creation the same way
+    # `run_slack_call` does before asserting on its shape.
+    pool = _get_executor()
+    assert isinstance(pool, ThreadPoolExecutor)
+    assert pool._max_workers == SLACK_IO_MAX_WORKERS
+    assert pool._thread_name_prefix == "slack-io"
 
 
 def test_slack_io_max_workers_exceeds_one_reopen_flows_sequential_call_count():
@@ -111,11 +116,38 @@ def test_shutdown_slack_executor_sets_the_shutting_down_event(monkeypatch):
     assert SHUTTING_DOWN.is_set()
 
 
-async def test_run_slack_call_after_shutdown_raises_a_clear_runtimeerror(monkeypatch):
-    """Documented contract (see module docstring): once shut down, `run_slack_call`
-    raises rather than silently re-creating the pool or hanging."""
+async def test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool(monkeypatch):
+    """K-9 (audit 2026-09-10): the old contract (see module docstring history)
+    had `run_slack_call` raise RuntimeError after a shutdown. That broke any
+    process sharing one interpreter across more than one lifespan — most
+    concretely the test suite, where an unrelated integration test's
+    `create_app()` ASGI lifespan shutdown permanently killed this singleton
+    for every later test in the same pytest process. `run_slack_call` must now
+    succeed on a freshly created pool instead."""
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
     monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
     shutdown_slack_executor()
-    with pytest.raises(RuntimeError, match="shutdown"):
-        await run_slack_call(lambda: 1)
+
+    result = await run_slack_call(lambda: 1)
+
+    assert result == 1
+    new_pool = slack_executor_module._SLACK_EXECUTOR
+    assert new_pool is not None and new_pool is not fresh
+    assert not new_pool._shutdown
+
+
+async def test_a_fresh_pool_clears_the_shutting_down_event(monkeypatch):
+    """K-9/K-2 interaction: SHUTTING_DOWN must stay set across the shutdown (so
+    an old pool's in-flight retry sleep still aborts promptly) but must be
+    cleared once a NEW pool actually comes into existence, or every retry on
+    the new pool would abort instantly too."""
+    from src.agent.slack_client import SHUTTING_DOWN
+
+    fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
+    monkeypatch.setattr(slack_executor_module, "_SLACK_EXECUTOR", fresh)
+    shutdown_slack_executor()
+    assert SHUTTING_DOWN.is_set()
+
+    await run_slack_call(lambda: 1)
+
+    assert not SHUTTING_DOWN.is_set()
