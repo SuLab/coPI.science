@@ -93,6 +93,42 @@ def test_unaligned_dkim_header_d_rejected():
     assert _authentication_results_ok(_msg(h)) is False
 
 
+def test_quoted_mailfrom_local_part_cannot_inject_a_fake_domain_tag():
+    # Opus review follow-up (audit 2026-09-10): the domain-tag regexes
+    # (_SPF_MAILFROM_RE/_DKIM_D_RE/_DKIM_I_RE) used to `.search()` the WHOLE
+    # Authentication-Results header, ignoring RFC 5322 quoting -- so a
+    # quoted MAIL FROM local part containing the literal text
+    # `header.d=scripps.edu;` (a fake DKIM domain tag, closed with a `;` that
+    # is only a delimiter INSIDE the quotes, not a real segment boundary)
+    # was picked up by `_DKIM_D_RE.search(header)` ahead of the REAL
+    # `header.d=evil.com` that appears later in the header, because `.search`
+    # scans the raw string with no notion of quoting or segment boundaries.
+    # The real DKIM identity here is evil.com; the forged tag falsely aligned
+    # it with the PI's own domain.
+    h = (
+        'Authentication-Results: amazonses.com; spf=none '
+        'smtp.mailfrom="header.d=scripps.edu;"@evil.com; '
+        'dkim=pass header.d=evil.com; dmarc=none\n'
+        'From: pi@scripps.edu'
+    )
+    assert _authentication_results_ok(_msg(h)) is False
+
+
+def test_quoted_injection_in_a_non_topmost_header_is_still_ignored():
+    # Only the topmost (SES-stamped) Authentication-Results header is ever
+    # parsed at all -- a second, sender-supplied header carrying the same
+    # quoted-injection payload must not matter, whether or not the topmost
+    # header is itself vulnerable.
+    h = (
+        'Authentication-Results: amazonses.com; spf=none; '
+        'dkim=pass header.d=evil.com; dmarc=none\n'
+        'Authentication-Results: evil.example; spf=none '
+        'smtp.mailfrom="header.d=scripps.edu;"@evil.com; dmarc=none\n'
+        'From: pi@scripps.edu'
+    )
+    assert _authentication_results_ok(_msg(h)) is False
+
+
 def test_dmarc_pass_accepted_regardless_of_alignment():
     # dmarc=pass is sufficient on its own -- it already encodes alignment.
     h = (

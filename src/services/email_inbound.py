@@ -208,7 +208,6 @@ def _is_auto_submitted(msg: email.message.Message) -> bool:
 # primary gate; operators wanting stricter From-spoofing protection can tighten
 # this to require dmarc=pass.)
 _AUTH_FAIL_VERDICTS = {"fail", "softfail", "temperror", "permerror"}
-_AUTH_VERDICT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*(\w+)", re.IGNORECASE)
 
 # SEC3-2 (audit 2026-09-10): the domain tags carried alongside a passing spf/
 # dkim verdict, used to check alignment with the From address when dmarc!=pass
@@ -216,6 +215,49 @@ _AUTH_VERDICT_RE = re.compile(r"\b(spf|dkim|dmarc)\s*=\s*(\w+)", re.IGNORECASE)
 _SPF_MAILFROM_RE = re.compile(r"smtp\.mailfrom=([^\s;]+)", re.IGNORECASE)
 _DKIM_D_RE = re.compile(r"header\.d=([^\s;]+)", re.IGNORECASE)
 _DKIM_I_RE = re.compile(r"header\.i=([^\s;]+)", re.IGNORECASE)
+
+# Opus review follow-up (audit 2026-09-10): a mechanism's verdict and its
+# domain tag(s) must be read from that mechanism's OWN resinfo segment, not
+# `.search()`ed/`.findall()`ed across the whole raw header text. RFC 5322
+# quoted-strings (e.g. a `smtp.mailfrom=` value with a quoted local part) can
+# contain a literal `;` that is not a real segment boundary, and can contain
+# arbitrary text like `header.d=scripps.edu` -- a whole-header regex search
+# has no notion of quoting, so it can pick up that INJECTED tag from inside
+# one mechanism's segment (e.g. spf's mailfrom) ahead of the REAL tag in a
+# different mechanism's own segment (e.g. dkim's header.d=), fabricating
+# alignment with a domain the message never actually authenticated as.
+_MECH_VERDICT_RE = re.compile(r"^\s*(spf|dkim|dmarc)\s*=\s*(\w+)", re.IGNORECASE)
+
+
+def _split_auth_results_segments(header: str) -> list[str]:
+    """Split an Authentication-Results value into resinfo segments on ``;``,
+    respecting RFC 5322 double-quoted strings (and their ``\\``-escapes) so a
+    quoted identity containing a literal ``;`` cannot fabricate a fake segment
+    boundary. ``segments[0]`` is the authserv-id (+ version); the rest are
+    resinfo segments, each of which SHOULD -- but for a hostile message may
+    not -- open with ``mech=verdict``.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    escaped = False
+    for ch in header:
+        if escaped:
+            current.append(ch)
+            escaped = False
+        elif ch == "\\" and in_quotes:
+            current.append(ch)
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+            current.append(ch)
+        elif ch == ";" and not in_quotes:
+            segments.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    segments.append("".join(current))
+    return segments
 
 
 def _domain_of(value: str) -> str:
@@ -289,11 +331,23 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
         )
         return False
 
+    # Split into resinfo segments (respecting quoting) and read each
+    # mechanism's verdict only from the segment it actually opens -- not from
+    # anywhere else in the header text (see _split_auth_results_segments).
+    segments = _split_auth_results_segments(header)
     verdicts: dict[str, str] = {}
-    for mech, result in _AUTH_VERDICT_RE.findall(header):
-        # First occurrence wins: the leading verdict is the mechanism's result;
-        # later matches can come from propagated or commented values.
-        verdicts.setdefault(mech.lower(), result.lower())
+    verdict_segments: dict[str, str] = {}
+    for seg in segments[1:]:
+        m = _MECH_VERDICT_RE.match(seg)
+        if not m:
+            continue
+        mech = m.group(1).lower()
+        if mech in verdicts:
+            # First occurrence wins: the leading verdict is the mechanism's
+            # result; later matches can come from propagated/commented values.
+            continue
+        verdicts[mech] = m.group(2).lower()
+        verdict_segments[mech] = seg
 
     for mech in ("spf", "dkim", "dmarc"):
         if verdicts.get(mech) in _AUTH_FAIL_VERDICTS:
@@ -318,11 +372,17 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     aligned = False
     if from_domain:
         if verdicts.get("spf") == "pass":
-            m = _SPF_MAILFROM_RE.search(header)
+            # Domain tag read from SPF's OWN segment only (see
+            # _split_auth_results_segments) -- never from the raw header, which
+            # could contain a same-named tag injected into a different
+            # mechanism's (e.g. DKIM's) quoted identity.
+            spf_segment = verdict_segments.get("spf", "")
+            m = _SPF_MAILFROM_RE.search(spf_segment)
             if m and _domains_aligned(_domain_of(m.group(1)), from_domain):
                 aligned = True
         if not aligned and verdicts.get("dkim") == "pass":
-            m = _DKIM_D_RE.search(header) or _DKIM_I_RE.search(header)
+            dkim_segment = verdict_segments.get("dkim", "")
+            m = _DKIM_D_RE.search(dkim_segment) or _DKIM_I_RE.search(dkim_segment)
             if m and _domains_aligned(_domain_of(m.group(1)), from_domain):
                 aligned = True
 
