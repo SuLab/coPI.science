@@ -22,6 +22,9 @@
   .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
   .md-content strong { font-weight: 600; }
   .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .assessment-prose { max-width: 65ch; font-size: 1rem; line-height: 1.625; color: #1f2937; }
+  .assessment-prose p + p { margin-top: 1em; }
+  .assessment-prose li { margin: .35em 0; }
 </style>
 {% endblock %}
 
@@ -33,7 +36,7 @@
    is worse than no control (F6), so every link on this page stays inside
    /manager. #}
 <div class="max-w-5xl mx-auto">
-    <a href="/manager/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
+    <a href="/manager/assessments" class="text-sm text-gray-600 hover:text-gray-700">&larr; Opportunity Assessments</a>
     <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
 
     {# The manager surface's own copy of pi_link — see the twin comment in
@@ -42,7 +45,7 @@
     {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="/manager/pis/{{ pi_user_id }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
     {% include "admin/_assessment_detail_body.html" %}
 
-    <p class="text-xs text-gray-400 mb-6">
+    <p class="text-sm text-gray-600 mb-6">
         Read-only view. The raw model output and the hub's per-call LLM record are
         admin-only; the panel's findings above (domain, signal, confidence,
         concerns, questions) are the substance of what each specialist said.

@@ -22,6 +22,9 @@
   .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
   .md-content strong { font-weight: 600; }
   .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .assessment-prose { max-width: 65ch; font-size: 1rem; line-height: 1.625; color: #1f2937; }
+  .assessment-prose p + p { margin-top: 1em; }
+  .assessment-prose li { margin: .35em 0; }
 </style>
 {% endblock %}
 
@@ -31,7 +34,7 @@
    verdict block, which is ADMIN ONLY and therefore must not sit anywhere the
    manager wrapper can reach. #}
 <div class="max-w-5xl mx-auto">
-    <a href="/admin/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
+    <a href="/admin/assessments" class="text-sm text-gray-600 hover:text-gray-700">&larr; Opportunity Assessments</a>
     <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
 
     {# Out to the raw calls behind this interview, prefiltered to the hub and
@@ -53,7 +56,7 @@
        cleared. #}
     <div class="mb-4">
         <a href="/admin/activity/{{ assessment.simulation_run_id }}/llm-calls?agent={{ assessment.agent_id | urlencode }}&amp;channel={{ assessment.channel_name | urlencode }}"
-           class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700">
+           class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
             LLM calls for this interview
         </a>
     </div>
@@ -75,15 +78,15 @@
             Raw verdict JSON
         </summary>
         {% if assessment.raw_verdict %}
-        <pre class="raw-verdict mt-3 text-xs bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ assessment.raw_verdict | tojson(indent=2) }}</pre>
-        <p class="text-xs text-gray-400 mt-2">
+        <pre class="raw-verdict mt-3 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ assessment.raw_verdict | tojson(indent=2) }}</pre>
+        <p class="text-sm text-gray-600 mt-2">
             As emitted. <span class="font-mono">weighted_score</span> here is the
             model's own arithmetic and is deliberately NOT what the page shows —
             that number is recomputed from the dimension scores and the rubric
             weights (src/services/blackbird_rubric.py).
         </p>
         {% else %}
-        <p class="text-sm text-gray-400 mt-3">
+        <p class="text-sm text-gray-600 mt-3">
             No raw verdict stored for this assessment.
         </p>
         {% endif %}

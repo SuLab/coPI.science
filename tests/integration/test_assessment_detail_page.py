@@ -1584,3 +1584,23 @@ async def test_a_grouped_key_points_sidecar_renders_the_three_labels_in_order(
         html.index("Commercial potential"),
     )
     assert i < j < k
+
+
+async def test_the_detail_body_uses_readable_type_sizes(client, db_session, manager):
+    """F5: prose at 16px (`text-base`), metadata at 14px (`text-sm`), 12px
+    (`text-xs`) reserved for chips; no `text-gray-400` on running text."""
+    _, assessment = await _seed(db_session)
+    html = (
+        await client.get(
+            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        )
+    ).text
+    # Scoped to `<main>...</main>`: base.html's footer ("Blackbird
+    # Laboratories") is site-wide chrome this task does not own and
+    # legitimately carries its own `text-gray-400`.
+    body = html.split("Assessment detail", 1)[1].split("</main>", 1)[0]
+    # Measured after the sweep: 11 `text-xs` remain, all inside `rounded-full`
+    # chip spans (the reserved exception). +2 slack.
+    assert body.count("text-xs") <= 13, body.count("text-xs")
+    assert 'class="assessment-prose' in body
+    assert "text-gray-400" not in body

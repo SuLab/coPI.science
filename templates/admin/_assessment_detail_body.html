@@ -50,7 +50,7 @@
    conditional and the headline falls back to the short label. A pre-0043 row
    must render exactly as informative as it did before, with no empty states.
    --------------------------------------------------------------------------- #}
-<nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-xs text-gray-500 backdrop-blur border-b border-gray-100">
+<nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="hover:text-indigo-600" href="#brief">Brief</a>
     {% if a.rationale %}<a class="hover:text-indigo-600" href="#rationale">Rationale</a>{% endif %}
     <a class="hover:text-indigo-600" href="#panel">Panel</a>
@@ -69,34 +69,36 @@
                here (Task 10 fix round 1) from the verdict-header card
                below, which used to duplicate the project name in its own
                <h2> right under this one. #}
-            <span class="text-sm font-normal text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
+            <span class="text-sm font-normal text-gray-600">[{{ a.confidence.strip("[]") }}]</span>
         {% endif %}
     </h2>
     {% if a.headline and a.company_or_project %}
-    <div class="assessment-brief-label text-sm text-gray-500 mt-1">{{ a.company_or_project }}</div>
+    <div class="assessment-brief-label text-sm text-gray-600 mt-1">{{ a.company_or_project }}</div>
     {% endif %}
     {% if a.elevator_pitch %}
     <div class="mt-4">
-        <div class="text-xs font-semibold text-gray-500 uppercase">In one minute</div>
+        <div class="text-sm font-semibold text-gray-600 uppercase">In one minute</div>
         {# Same write-time `prose_format` stamp and the same safe fallback as
            Rationale below: NULL means legacy plain text, which may contain a
            literal `*` in a scientific identifier that a markdown pass would
            corrupt by reading as emphasis. #}
+        <div class="assessment-prose mt-1">
         {% if a.prose_format == 'markdown' %}
-        <div class="assessment-brief-pitch md-content mt-1 text-sm text-gray-700" data-markdown="{{ a.elevator_pitch | e }}"></div>
+        <div class="assessment-brief-pitch md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
         {% else %}
-        <p class="assessment-brief-pitch mt-1 text-sm text-gray-700 whitespace-pre-line">{{ a.elevator_pitch }}</p>
+        <p class="assessment-brief-pitch whitespace-pre-line">{{ a.elevator_pitch }}</p>
         {% endif %}
+        </div>
     </div>
     {% endif %}
     {% if a.key_points is mapping %}
     <div class="mt-4">
-        <div class="text-xs font-semibold text-gray-500 uppercase">Key points</div>
-        <div class="assessment-brief-points mt-1 space-y-2">
+        <div class="text-sm font-semibold text-gray-600 uppercase">Key points</div>
+        <div class="assessment-brief-points assessment-prose mt-1 space-y-2">
             {% for key, label in key_point_groups %}
             {% if a.key_points.get(key) %}
-            <div><span class="font-semibold text-gray-800 text-sm">{{ label }}</span>
-                <ul class="list-disc list-inside text-sm text-gray-700">
+            <div><span class="font-semibold">{{ label }}</span>
+                <ul class="list-disc list-inside">
                 {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
                 </ul></div>
             {% endif %}
@@ -105,8 +107,8 @@
     </div>
     {% elif a.key_points %}
     <div class="mt-4">
-        <div class="text-xs font-semibold text-gray-500 uppercase">Key points</div>
-        <ul class="assessment-brief-points mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
+        <div class="text-sm font-semibold text-gray-600 uppercase">Key points</div>
+        <ul class="assessment-brief-points assessment-prose mt-1 list-disc list-inside space-y-0.5">
             {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
         </ul>
     </div>
@@ -122,11 +124,13 @@
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">The ask</h3>
     {# Same write-time stamp and same safe fallback as Rationale below. #}
+    <div class="assessment-prose">
     {% if a.prose_format == 'markdown' %}
-    <div class="assessment-next-experiment md-content text-sm text-gray-700" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
+    <div class="assessment-next-experiment md-content" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
     {% else %}
-    <p class="assessment-next-experiment text-sm text-gray-700 whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
+    <p class="assessment-next-experiment whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
     {% endif %}
+    </div>
 </div>
 {% endif %}
 
@@ -140,45 +144,45 @@
    chip is what makes the old corpus read like the new one. #}
 {% macro tool_turn(turn, signal_chip) %}
 <div class="mb-2">
-    <div class="text-xs text-gray-400 mb-1">
+    <div class="text-sm text-gray-600 mb-1">
         tool round &middot; <span data-utc="{{ turn.created_at.isoformat() }}" data-utc-fmt="time">{{ turn.created_at.strftime('%H:%M:%S') }}</span>
         &middot; {{ turn.chips | length }} call{{ '' if turn.chips | length == 1 else 's' }}
     </div>
     <div class="space-y-1.5">
         {% for chip in turn.chips %}
         <details class="tool-chip rounded border {% if chip.is_consult %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 bg-gray-50{% endif %} px-2 py-1">
-            <summary class="cursor-pointer text-xs flex items-center gap-2 flex-wrap">
+            <summary class="cursor-pointer text-sm flex items-center gap-2 flex-wrap">
                 <span class="font-mono font-medium {% if chip.is_consult %}text-indigo-800{% else %}text-gray-700{% endif %}">{{ chip.tool }}</span>
                 {% if chip.is_consult %}
                     <span class="px-1.5 rounded bg-indigo-100 text-indigo-700">panel consult</span>
                     {% if chip.opinion %}
-                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(chip.opinion.verdict_signal, 'bg-gray-100 text-gray-600') }}">{{ chip.opinion.verdict_signal }}</span>
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(chip.opinion.verdict_signal, 'bg-gray-100 text-gray-600') }}">{{ chip.opinion.verdict_signal }}</span>
                         {# Same reason as the recorded cards below: the label
                            alone overstates itself, and this is the COLLAPSED
                            view — the concerns list is inside the details. #}
-                        <span class="panel-concern-count text-gray-400">{{ chip.opinion.concern_count }} concern{{ '' if chip.opinion.concern_count == 1 else 's' }}</span>
-                        {% if chip.opinion.confidence %}<span class="text-gray-400">confidence: {{ chip.opinion.confidence }}</span>{% endif %}
+                        <span class="panel-concern-count text-gray-600">{{ chip.opinion.concern_count }} concern{{ '' if chip.opinion.concern_count == 1 else 's' }}</span>
+                        {% if chip.opinion.confidence %}<span class="text-gray-600">confidence: {{ chip.opinion.confidence }}</span>{% endif %}
                     {% else %}
                         {# No signal line in the result: the consult FAILED
                            (unknown domain, missing persona, API error, empty
                            reply). It must never read as an opinion, and least
                            of all as an `adequate`. #}
-                        <span class="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">no opinion returned</span>
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">no opinion returned</span>
                     {% endif %}
                 {% endif %}
-                <span class="text-gray-500">{{ chip.summary or "(no input)" }}</span>
+                <span class="text-gray-600">{{ chip.summary or "(no input)" }}</span>
             </summary>
-            <div class="mt-1 text-xs text-gray-600">
+            <div class="mt-1 text-sm text-gray-600">
                 {% if chip.is_consult and chip.opinion %}
                     {% if chip.opinion.concerns %}
-                    <div><span class="font-medium text-gray-500">Concerns:</span>
+                    <div><span class="font-medium text-gray-600">Concerns:</span>
                         <ul class="list-disc list-inside">
                             {% for concern in chip.opinion.concerns %}<li>{{ concern }}</li>{% endfor %}
                         </ul>
                     </div>
                     {% endif %}
                     {% if chip.opinion.questions_to_ask %}
-                    <div class="mt-1"><span class="font-medium text-gray-500">Questions to ask the PI:</span>
+                    <div class="mt-1"><span class="font-medium text-gray-600">Questions to ask the PI:</span>
                         <ul class="list-disc list-inside">
                             {% for q in chip.opinion.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
                         </ul>
@@ -186,9 +190,9 @@
                     {% endif %}
                 {% endif %}
                 <div class="mt-1">
-                    <span class="font-medium text-gray-500">Result:</span>
+                    <span class="font-medium text-gray-600">Result:</span>
                     {% if chip.no_result %}
-                        <span class="text-gray-400">(no result recorded — the turn ended before the tool returned)</span>
+                        <span class="text-gray-600">(no result recorded — the turn ended before the tool returned)</span>
                     {% else %}
                         <span class="tool-chip-excerpt">{{ chip.result_excerpt }}</span>
                         {# The full text only when it says something the excerpt
@@ -216,7 +220,7 @@
                (Task 10 fix round 1 / design doc §5's "fold in rather than
                duplicate"). The name is gone from here; confidence moved up
                into the brief card's own heading rather than being lost. #}
-            <div class="text-sm text-gray-500 mt-1">
+            <div class="text-sm text-gray-600 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
                 &middot; Screened by {{ a.agent_id }}
                 &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
@@ -233,24 +237,24 @@
                 } %}
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
             {% else %}
-                <span class="text-sm text-gray-400">no recommendation</span>
+                <span class="text-sm text-gray-600">no recommendation</span>
             {% endif %}
             <div class="mt-2">
                 <span class="text-2xl font-bold
                     {% if a.band == 'advance' %}text-green-600
                     {% elif a.band == 'conditional' %}text-amber-600
-                    {% else %}text-gray-400{% endif %}">
+                    {% else %}text-gray-600{% endif %}">
                     {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
                 </span>
                 {# Same vocabulary as the list page: the stored band value is
                    "pass", and unlabelled it reads as the opposite of the
                    decline it records. #}
-                <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
+                <span class="band-label ml-1.5 text-sm font-medium uppercase tracking-wide align-middle
                     {% if a.band == 'advance' %}text-green-600
                     {% elif a.band == 'conditional' %}text-amber-600
-                    {% else %}text-gray-400{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
+                    {% else %}text-gray-600{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
             </div>
-            <div class="text-xs text-gray-400 mt-1">
+            <div class="text-sm text-gray-600 mt-1">
                 computed, not taken from the model &middot;
                 {% if revision and revision.advance_min is not none %}
                     &ge;{{ revision.advance_min }} advance,
@@ -266,7 +270,7 @@
     {# Which rubric revision scored THIS row. NULL means the row predates
        stamping, which is not the same as "scored by the current document" —
        so the two cases read differently. #}
-    <div class="mt-4 text-xs text-gray-400 border-t border-gray-100 pt-3">
+    <div class="mt-4 text-sm text-gray-600 border-t border-gray-100 pt-3">
         {% if a.rubric_version %}
             Scored against rubric <span class="font-mono">{{ a.rubric_version }}</span>{% if a.rubric_content_hash %} (<span class="font-mono">{{ a.rubric_content_hash }}</span>){% endif %}.
             {% if rubric_version and a.rubric_version != rubric_version %}
@@ -275,7 +279,7 @@
                 directly comparable across revisions.</span>
             {% endif %}
             {% if revision_provenance == 'archived' %}
-                <span class="text-gray-500">Dimension names, weights and band lines above
+                <span class="text-gray-600">Dimension names, weights and band lines above
                 are that revision's, from prompts/rubric/revisions.toml.</span>
             {% elif revision_provenance == 'unknown' %}
                 <span class="text-amber-700">This stamp matches no entry in the revision registry —
@@ -396,17 +400,17 @@
             {% elif gate_state == 'unconfirmed' %}
                 <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
             {% else %}
-                <span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
+                <span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
             {% endif %}
             {{ key.replace("_", " ") }}
         </div>
         {% endfor %}
-        <p class="text-xs text-gray-400 mt-2">
+        <p class="text-sm text-gray-600 mt-2">
             "not met" (asked and failed) and "unconfirmed" (never asked) are
             different answers; only the first can license discounting an idea.
         </p>
     {% else %}
-        <p class="text-sm text-gray-400">No gating recorded.</p>
+        <p class="text-sm text-gray-600">No gating recorded.</p>
     {% endif %}
 </div>
 </details>
@@ -421,7 +425,7 @@
             {% for flag in a.red_flags %}<li>{{ flag }}</li>{% endfor %}
         </ul>
     {% else %}
-        <p class="text-sm text-gray-400">None recorded.</p>
+        <p class="text-sm text-gray-600">None recorded.</p>
     {% endif %}
 </div>
 
@@ -436,11 +440,13 @@
        text, which may contain a literal `*` in a scientific identifier a
        markdown pass would corrupt) or a future unknown value — falls back to
        the existing plain rendering, which is always safe. #}
+    <div class="assessment-prose">
     {% if a.prose_format == 'markdown' %}
-    <div class="assessment-rationale md-content text-sm text-gray-700" data-markdown="{{ a.rationale | e }}"></div>
+    <div class="assessment-rationale md-content" data-markdown="{{ a.rationale | e }}"></div>
     {% else %}
-    <p class="assessment-rationale text-sm text-gray-700 whitespace-pre-line">{{ a.rationale }}</p>
+    <p class="assessment-rationale whitespace-pre-line">{{ a.rationale }}</p>
     {% endif %}
+    </div>
 </div>
 </details>
 {% endif %}
@@ -463,11 +469,11 @@
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
     <div class="space-y-1.5">
         {% for d in dimensions %}
-        <div class="score-{{ d.key }} flex items-center gap-3 text-xs">
-            <span class="w-56 shrink-0 {% if d.score is none %}text-gray-400{% else %}text-gray-700{% endif %}">
+        <div class="score-{{ d.key }} flex items-center gap-3 text-sm">
+            <span class="w-56 shrink-0 {% if d.score is none %}text-gray-600{% else %}text-gray-700{% endif %}">
                 {{ d.title }}
             </span>
-            <span class="w-10 shrink-0 text-right font-semibold {% if d.score is none %}text-gray-400{% else %}text-gray-800{% endif %}">
+            <span class="w-10 shrink-0 text-right font-semibold {% if d.score is none %}text-gray-600{% else %}text-gray-800{% endif %}">
                 {% if d.score is none %}—{% else %}{{ "%g"|format(d.score) }}{% endif %}
             </span>
             <span class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden" title="{{ d.title }}{% if d.weight_note %} — {{ d.weight_note }} of the weighted score{% endif %}{% if d.score is none %} (not scored: counts as zero){% endif %}">
@@ -475,13 +481,13 @@
                 <span class="block h-2 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>
                 {% endif %}
             </span>
-            <span class="w-24 shrink-0 text-gray-400">
+            <span class="w-24 shrink-0 text-gray-600">
                 {% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}
             </span>
         </div>
         {% endfor %}
     </div>
-    <p class="text-xs text-gray-400 mt-3">
+    <p class="text-sm text-gray-600 mt-3">
         {% if scale_max %}Bars are the score on the {{ revision.scale_min }}&ndash;{{ scale_max }} scale.{% else %}This row's revision is not in the registry, so its scale is unknown and no bars are drawn.{% endif %}
         The weighted score above was computed at write time from these dimension
         values and the weights of the revision that scored them
@@ -530,28 +536,28 @@
     {% for d in review_rubric.dimensions %}
     {% set sid = prefix ~ 'dim-' ~ d.key %}
     <div class="review-dimension-row review-dim-{{ d.key }} flex items-start gap-2">
-        <select id="{{ sid }}" name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-xs shrink-0">
+        <select id="{{ sid }}" name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-sm shrink-0">
             <option value="">&mdash;</option>
             {% for n in range(review_rubric.scale_min, review_rubric.scale_max + 1) %}
             <option value="{{ n }}" {% if selected.get(d.key) == n %}selected{% endif %}>{{ n }}</option>
             {% endfor %}
         </select>
         <div class="min-w-0">
-            <label for="{{ sid }}" class="text-xs font-medium text-gray-700">
+            <label for="{{ sid }}" class="text-sm font-medium text-gray-700">
                 {{ d.title }}
-                <span class="font-normal text-gray-400">&middot; {{ d.weight }}% weight</span>
+                <span class="font-normal text-gray-600">&middot; {{ d.weight }}% weight</span>
                 {# A9: the bot's own number, muted and explicitly attributed so
                    it reads as its claim, never as a pre-filled default. The
                    human's select above stays empty either way. #}
                 {% if d.bot_score is not none %}
-                <span class="review-bot-score font-normal text-gray-400">&middot; BlackbirdBot scored {{ "%g"|format(d.bot_score) }}</span>
+                <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot scored {{ "%g"|format(d.bot_score) }}</span>
                 {% else %}
-                <span class="review-bot-score font-normal text-gray-400">&middot; BlackbirdBot did not score this</span>
+                <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot did not score this</span>
                 {% endif %}
             </label>
             <details class="mt-0.5">
-                <summary class="cursor-pointer text-xs text-indigo-600">What the scale means here</summary>
-                <p class="mt-1 text-xs text-gray-500">{{ d.anchors }}</p>
+                <summary class="cursor-pointer text-sm text-indigo-600">What the scale means here</summary>
+                <p class="mt-1 text-sm text-gray-600">{{ d.anchors }}</p>
             </details>
         </div>
     </div>
@@ -563,7 +569,7 @@
 {% set can_write = true %}
 <div id="review" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
-    <p class="review-rubric-instructions text-xs text-gray-500 mb-3">
+    <p class="review-rubric-instructions text-sm text-gray-600 mb-3">
         Scores here rate the proposal's own scientific and strategic quality, not
         how well the bot performed. Review it against Blackbird's rubric
         (<span class="font-mono">{{ review_rubric.version }}</span>): read the
@@ -597,30 +603,30 @@
        resets the status back to no verdict, so the two states are the same
        fact from a reader's point of view. #}
     <div class="mb-4">
-        <span class="text-xs font-semibold text-gray-500 uppercase">Status</span>
+        <span class="text-sm font-semibold text-gray-600 uppercase">Status</span>
         <div class="review-status mt-1 text-sm flex items-center gap-2 flex-wrap">
             {% if review_status is none or review_status.action == 'cleared' %}
-                <span class="text-gray-400">Unreviewed</span>
+                <span class="text-gray-600">Unreviewed</span>
             {% elif review_status.action == 'approved' %}
                 <span class="review-status-approved px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Approved</span>
-                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+                <span class="text-gray-600">by {{ review_status.actor_name }}</span>
             {% elif review_status.action == 'disapproved' %}
                 <span class="review-status-disapproved px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">Disapproved</span>
-                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+                <span class="text-gray-600">by {{ review_status.actor_name }}</span>
             {% else %}
                 <span class="review-status-unknown px-2 py-0.5 rounded-full bg-red-200 text-red-900 font-semibold"
                       title="Unrecognized status action — the assessment_review_events CHECK constraint should make this unreachable.">
                     &#9888; Unknown status action: {{ review_status.action }}
                 </span>
-                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+                <span class="text-gray-600">by {{ review_status.actor_name }}</span>
             {% endif %}
         </div>
         {% if review_status_history %}
         <details class="mt-2">
-            <summary class="cursor-pointer text-xs text-gray-400">
+            <summary class="cursor-pointer text-sm text-gray-600">
                 Status history ({{ review_status_history | length }})
             </summary>
-            <ul class="review-status-history mt-1 space-y-1 text-xs text-gray-500">
+            <ul class="review-status-history mt-1 space-y-1 text-sm text-gray-600">
                 {% for event in review_status_history %}
                 <li>
                     {% if event.action == 'approved' %}
@@ -628,7 +634,7 @@
                     {% elif event.action == 'disapproved' %}
                         <span class="text-red-700 font-medium">Disapproved</span>
                     {% elif event.action == 'cleared' %}
-                        <span class="text-gray-500 font-medium">Cleared</span>
+                        <span class="text-gray-600 font-medium">Cleared</span>
                     {% else %}
                         <span class="text-red-900 font-semibold" title="Unrecognized status action">Unknown status action: {{ event.action }}</span>
                     {% endif %}
@@ -645,9 +651,9 @@
     {% if can_write %}
     <form method="post" action="/reviews/assessments/{{ a.id }}/status" class="mb-4 flex items-center gap-2">
         <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-        <button type="submit" name="action" value="approved" class="text-xs font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
-        <button type="submit" name="action" value="disapproved" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
-        <button type="submit" name="action" value="cleared" class="text-xs font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Clear</button>
+        <button type="submit" name="action" value="approved" class="text-sm font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
+        <button type="submit" name="action" value="disapproved" class="text-sm font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
+        <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Clear</button>
     </form>
     {% endif %}
 
@@ -657,35 +663,35 @@
        app renders as markdown elsewhere, and treating it as such would be an
        HTML-injection surface via `{{ }}`'s own escaping being routed around. #}
     <div class="mb-4">
-        <span class="text-xs font-semibold text-gray-500 uppercase">
+        <span class="text-sm font-semibold text-gray-600 uppercase">
             Feedback{% if review_feedback %} ({{ review_feedback | length }}){% endif %}
         </span>
         {% if review_feedback %}
         <ul class="review-feedback-list mt-2 space-y-3">
             {% for review in review_feedback %}
             <li class="review-feedback-row border border-gray-100 rounded-lg p-3">
-                <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                <div class="flex items-center gap-2 text-sm text-gray-600 flex-wrap">
                     <span class="font-semibold text-gray-700">{{ review.reviewer_name }}</span>
-                    {% if review.recorded_by_user_id %}<span class="text-xs text-gray-600">(entered by an admin while impersonating)</span>{% endif %}
+                    {% if review.recorded_by_user_id %}<span class="text-sm text-gray-600">(entered by an admin while impersonating)</span>{% endif %}
                     <span class="font-medium text-gray-700">{{ review.score }}/5</span>
                     {% if review.feedback_mode == 'learn' %}
-                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">Learn</span>
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700 font-medium">Learn</span>
                     {% elif review.feedback_mode == 'log_only' %}
-                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium">Don't learn — log only</span>
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600 font-medium">Don't learn — log only</span>
                     {% else %}
-                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-red-200 text-red-900 font-semibold"
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full text-xs bg-red-200 text-red-900 font-semibold"
                               title="Unrecognized feedback mode — the assessment_reviews CHECK constraint should make this unreachable.">
                             &#9888; Unknown mode: {{ review.feedback_mode }}
                         </span>
                     {% endif %}
-                    {% if review.edited %}<span class="text-gray-400 italic">(edited)</span>{% endif %}
+                    {% if review.edited %}<span class="text-gray-600 italic">(edited)</span>{% endif %}
                     <span data-utc="{{ review.created_at.isoformat() }}" data-utc-fmt="short">{{ review.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
                 </div>
                 {% if review.comment %}
                 <p class="review-comment mt-1 text-sm text-gray-700 whitespace-pre-line">{{ review.comment }}</p>
                 {% endif %}
                 {% if review.dimension_rows %}
-                <ul class="review-dimension-list mt-1 text-xs text-gray-600 space-y-0.5">
+                <ul class="review-dimension-list mt-1 text-sm text-gray-600 space-y-0.5">
                     {% for row in review.dimension_rows %}
                     <li><span class="font-semibold text-gray-700">{{ row.score }}</span> &mdash; {{ row.title }}</li>
                     {% endfor %}
@@ -696,7 +702,7 @@
                    titles or weights. Saying nothing would let them read as
                    today's dimensions, which is the claim this branch exists to
                    avoid making. #}
-                <p class="review-dimension-unknown-revision mt-1 text-xs text-amber-700">
+                <p class="review-dimension-unknown-revision mt-1 text-sm text-amber-700">
                     Scored against an unrecognized rubric revision
                     (<span class="font-mono">{{ review.rubric_version or 'unstamped' }}</span>) —
                     shown as stored, with no dimension titles or weights.
@@ -706,31 +712,31 @@
                 {% if can_write %}
                     {% if effective_user and review.reviewer_user_id == effective_user.id %}
                     <details class="mt-2">
-                        <summary class="cursor-pointer text-xs text-indigo-600">Edit</summary>
+                        <summary class="cursor-pointer text-sm text-indigo-600">Edit</summary>
                         <form method="post" action="/reviews/feedback/{{ review.id }}/edit" class="mt-2 space-y-2">
                             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
                             {% set edit_prefix = 'edit-' ~ review.id ~ '-' %}
-                            <label for="{{ edit_prefix }}score" class="block text-xs font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
-                            <select id="{{ edit_prefix }}score" name="score" class="border rounded px-1 py-0.5 text-xs">
+                            <label for="{{ edit_prefix }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+                            <select id="{{ edit_prefix }}score" name="score" class="border rounded px-1 py-0.5 text-sm">
                                 {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
                             </select>
-                            <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
+                            <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
                             {{ dimension_score_rows(review_rubric, review.dimension_scores or {}, edit_prefix) }}
-                            <label for="{{ edit_prefix }}comment" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Comment</label>
-                            <textarea id="{{ edit_prefix }}comment" name="comment" rows="2" class="w-full border rounded px-2 py-1 text-xs">{{ review.comment }}</textarea>
-                            <label for="{{ edit_prefix }}mode" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
-                            <select id="{{ edit_prefix }}mode" name="feedback_mode" class="border rounded px-1 py-0.5 text-xs">
+                            <label for="{{ edit_prefix }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
+                            <textarea id="{{ edit_prefix }}comment" name="comment" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ review.comment }}</textarea>
+                            <label for="{{ edit_prefix }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+                            <select id="{{ edit_prefix }}mode" name="feedback_mode" class="border rounded px-1 py-0.5 text-sm">
                                 <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
                                 <option value="log_only" {% if review.feedback_mode == 'log_only' %}selected{% endif %}>Don't learn — log only</option>
                             </select>
-                            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save</button>
+                            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save</button>
                         </form>
                     </details>
                     {% endif %}
                     {% if effective_user.is_admin %}
                     <form method="post" action="/reviews/feedback/{{ review.id }}/delete" class="mt-1">
                         <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-                        <button type="submit" class="text-xs text-red-600 hover:text-red-800">Delete</button>
+                        <button type="submit" class="text-sm text-red-600 hover:text-red-800">Delete</button>
                     </form>
                     {% endif %}
                 {% endif %}
@@ -738,31 +744,31 @@
             {% endfor %}
         </ul>
         {% else %}
-        <p class="text-sm text-gray-400 mt-2">No feedback recorded.</p>
+        <p class="text-sm text-gray-600 mt-2">No feedback recorded.</p>
         {% endif %}
     </div>
 
     {% if can_write %}
     <details class="mb-4">
-        <summary class="cursor-pointer text-xs text-indigo-600">Add feedback</summary>
+        <summary class="cursor-pointer text-sm text-indigo-600">Add feedback</summary>
         <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-            <label for="add-score" class="block text-xs font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
-            <select id="add-score" name="score" required class="border rounded px-1 py-0.5 text-xs">
+            <label for="add-score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+            <select id="add-score" name="score" required class="border rounded px-1 py-0.5 text-sm">
                 <option value="" disabled selected>&mdash;</option>
                 {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
             </select>
-            <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
+            <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
             {{ dimension_score_rows(review_rubric, {}, 'add-') }}
-            <label for="add-comment" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Comment</label>
-            <textarea id="add-comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
-            <label for="add-mode" class="block text-xs font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
-            <select id="add-mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-xs">
+            <label for="add-comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
+            <textarea id="add-comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+            <label for="add-mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+            <select id="add-mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm">
                 <option value="" disabled selected>&mdash;</option>
                 <option value="learn">Learn</option>
                 <option value="log_only">Don't learn — log only</option>
             </select>
-            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
         </form>
     </details>
     {% endif %}
@@ -771,7 +777,7 @@
        (never a reviewer — a reviewer may score an assessment but does not
        manage who else is on it). #}
     <div>
-        <span class="text-xs font-semibold text-gray-500 uppercase">
+        <span class="text-sm font-semibold text-gray-600 uppercase">
             Assigned{% if review_assignments %} ({{ review_assignments | length }}){% endif %}
         </span>
         {% if review_assignments %}
@@ -783,23 +789,23 @@
                 <form method="post" action="/reviews/assessments/{{ a.id }}/unassign" class="inline">
                     <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
                     <input type="hidden" name="assignee_user_id" value="{{ assignment.assignee_user_id }}">
-                    <button type="submit" class="text-xs text-red-600 hover:text-red-800">Remove</button>
+                    <button type="submit" class="text-sm text-red-600 hover:text-red-800">Remove</button>
                 </form>
                 {% endif %}
             </li>
             {% endfor %}
         </ul>
         {% else %}
-        <p class="text-sm text-gray-400 mt-1">No one assigned.</p>
+        <p class="text-sm text-gray-600 mt-1">No one assigned.</p>
         {% endif %}
         {% if can_write and effective_user.is_staff and not impersonation_banner %}
         <form method="post" action="/reviews/assessments/{{ a.id }}/assign" class="mt-2 flex items-center gap-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-            <label for="assign-user" class="text-xs text-gray-700">Assign reviewer</label>
-            <select id="assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-xs">
+            <label for="assign-user" class="text-sm text-gray-700">Assign reviewer</label>
+            <select id="assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-sm">
                 {% for u in review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
             </select>
-            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>
         </form>
         {% endif %}
     </div>
@@ -811,7 +817,7 @@
 <details id="timeline" class="mb-6">
 <summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Interview timeline</summary>
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
-    <p class="text-xs text-gray-400 mb-4">
+    <p class="text-sm text-gray-600 mb-4">
         The thread this verdict came out of, interleaved with the specialist panel
         {% if admin_view %}and the hub's tool calls{% endif %}.
         {% if admin_view and retro_consult_count and not consult_count %}
@@ -838,13 +844,13 @@
             {% if entry.kind == 'message' %}
                 {% set m = entry.message %}
                 <div class="rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
-                    <div class="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                    <div class="flex items-center gap-2 text-sm text-gray-600 mb-1">
                         <span class="font-semibold text-gray-700">
                             {% if m.agent_id %}{{ m.agent_id | capitalize }}Bot{% else %}{{ m.sender_name or "(unknown sender)" }}{% endif %}
                         </span>
                         <span>{{ m.phase }}</span>
                         {% if m.is_verdict_message %}
-                        <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700 font-medium">
                             carried this verdict
                         </span>
                         {% endif %}
@@ -869,7 +875,7 @@
                    the retro ones ride along as tool chips under the hub
                    message that made them. #}
                 <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
-                    <div class="flex items-center gap-2 text-xs mb-1">
+                    <div class="flex items-center gap-2 text-sm mb-1">
                         <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
                         {% if c.reply_truncated %}
                         {# See the summary chips above: a cut-off reply has no
@@ -877,11 +883,11 @@
                            suppressed with it for the same reason — it is the
                            same default, and "moderate confidence" attached to
                            nothing reads as an opinion held moderately. #}
-                        <span class="panel-cut-off px-2 py-0.5 rounded-full font-medium bg-gray-200 text-gray-600">
+                        <span class="panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
                             reply cut off
                         </span>
                         {% else %}
-                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                             {{ c.verdict_signal }}
                         </span>
                         {# Beside the label, not only as the list below:
@@ -889,16 +895,16 @@
                            STAGE", not "no concerns". Every `clear` opinion ever
                            emitted carried 4-9 concerns, one of them "Succession
                            risk is high as described" under a ✅. #}
-                        <span class="panel-concern-count text-gray-400"
+                        <span class="panel-concern-count text-gray-600"
                               title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
                             {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
                         </span>
-                        {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
+                        {% if c.confidence %}<span class="text-gray-600">confidence: {{ c.confidence }}</span>{% endif %}
                         {% if c.read_state and c.read_state != 'parsed' %}
                         {# Written from 0038 on; NULL means "never recorded",
                            which is why a missing value shows nothing rather
                            than claiming a clean read. #}
-                        <span class="panel-read-state text-gray-500"
+                        <span class="panel-read-state text-gray-600"
                               title="How this reply stood relative to being READ (specialist_consults.read_state). Anything but `parsed` means the signal is a default, not something the specialist said.">
                             read: {{ c.read_state }}
                         </span>
@@ -906,7 +912,7 @@
                         {% endif %}
                     </div>
                     {% if c.reply_truncated %}
-                    <div class="text-xs text-gray-600 mb-1">
+                    <div class="text-sm text-gray-600 mb-1">
                         The specialist's reply stopped before it finished. Anything
                         below is a partial answer, and this domain does NOT count
                         toward the specialist floor — see
@@ -914,21 +920,21 @@
                     </div>
                     {% endif %}
                     {% if c.question %}
-                    <div class="text-xs text-gray-600 mb-1">
-                        <span class="font-medium text-gray-500">Asked:</span> {{ c.question }}
+                    <div class="text-sm text-gray-600 mb-1">
+                        <span class="font-medium text-gray-600">Asked:</span> {{ c.question }}
                     </div>
                     {% endif %}
                     {% if c.concerns %}
-                    <div class="text-xs text-gray-700">
-                        <span class="font-medium text-gray-500">Concerns:</span>
+                    <div class="text-sm text-gray-700">
+                        <span class="font-medium text-gray-600">Concerns:</span>
                         <ul class="list-disc list-inside">
                             {% for concern in c.concerns %}<li>{{ concern }}</li>{% endfor %}
                         </ul>
                     </div>
                     {% endif %}
                     {% if c.questions_to_ask %}
-                    <div class="text-xs text-gray-700 mt-1">
-                        <span class="font-medium text-gray-500">Questions to ask the PI:</span>
+                    <div class="text-sm text-gray-700 mt-1">
+                        <span class="font-medium text-gray-600">Questions to ask the PI:</span>
                         <ul class="list-disc list-inside">
                             {% for q in c.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
                         </ul>
@@ -936,8 +942,8 @@
                     {% endif %}
                     {% if admin_view and c.raw_opinion %}
                     <details class="mt-2">
-                        <summary class="text-xs text-gray-400 cursor-pointer">Full opinion (raw)</summary>
-                        <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
+                        <summary class="text-sm text-gray-600 cursor-pointer">Full opinion (raw)</summary>
+                        <pre class="mt-1 text-sm bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
                     </details>
                     {% endif %}
                 </div>
@@ -952,10 +958,10 @@
            what the hub did, and silently discarding it would make this page
            look complete when it is not. #}
         <div class="mt-5 pt-4 border-t border-gray-200">
-            <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">
+            <h4 class="text-sm font-semibold text-gray-600 uppercase mb-2">
                 Unplaced turns ({{ unplaced_turns | length }})
             </h4>
-            <p class="text-xs text-gray-400 mb-2">
+            <p class="text-sm text-gray-600 mb-2">
                 Tool activity from this thread's time window whose reply text could not
                 be matched to a message above — not dropped, just unattributed.
             </p>
@@ -966,7 +972,7 @@
         {% endif %}
 
         {% if admin_view and logs_scanned >= log_scan_limit %}
-        <p class="text-xs text-amber-700 mt-3">
+        <p class="text-sm text-amber-700 mt-3">
             Tool activity is capped at the {{ log_scan_limit }} most recent hub calls in
             this thread's time window; older calls in the window are not shown.
         </p>
