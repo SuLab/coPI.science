@@ -145,11 +145,11 @@ class _ReapedThenHangingSession:
 async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeypatch):
     # first_probe_seconds leaves only ~0.05s of the outer deadline remaining before the
     # retry starts. A retry re-armed with a fresh full HEALTH_PROBE_TIMEOUT_SECONDS
-    # budget (today's behaviour) blows well past `timeout`; a retry bounded by what's
-    # left of the deadline does not. The assertion's slack (0.3s) is small relative to
-    # `timeout` on purpose, so a fresh-budget retry (+0.3s) trips it while a
-    # remaining-budget retry (+~0.05s) does not.
-    timeout = 0.5
+    # budget (the pre-fix behaviour) takes ~2x `timeout`; a retry bounded by what's
+    # left of the deadline takes ~1x. The slack (0.5s) is half of `timeout`, so a
+    # fresh-budget retry (+1.0s) always trips it while ASGI/create_app overhead under
+    # a loaded CI host (measured up to ~0.4s) does not.
+    timeout = 1.0
     monkeypatch.setattr("src.main.HEALTH_PROBE_TIMEOUT_SECONDS", timeout)
     session = _ReapedThenHangingSession(first_probe_seconds=timeout - 0.1)
     monkeypatch.setattr("src.main.get_health_engine", lambda: _FakeEngine(session))
@@ -160,7 +160,7 @@ async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeyp
         r = await client.get("/api/health")
     elapsed = time.monotonic() - start
     assert r.status_code == 503
-    assert elapsed <= timeout + 0.3, (
+    assert elapsed <= timeout + 0.5, (
         f"probe took {elapsed:.3f}s against HEALTH_PROBE_TIMEOUT_SECONDS={timeout} — "
         "the retry after a reaped connection is not bounded by what remains of the "
         "outer deadline (it is re-armed with a fresh full budget instead)"
