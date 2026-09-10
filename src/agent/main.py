@@ -29,6 +29,43 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer()
 
+# M-1 (opus review, audit 2026-09-10): the first SIGTERM/SIGINT delays
+# signal_shutdown() by this many seconds instead of firing it at t=0. A typical
+# Slack Retry-After backoff (~10s) would otherwise be aborted mid-sleep,
+# leaving `_post_message` to record that post DB-only (slack_ts=None) and
+# permanently breaking that thread's Slack mirror -- even though the runbook's
+# `docker stop -t 30` grace would have let the sleep finish naturally. 20s
+# comfortably fits inside that 30s grace while covering the common case; a
+# SECOND signal aborts immediately (see `_make_shutdown_handler`).
+SHUTDOWN_SLACK_ABORT_GRACE_SECONDS = 20
+
+
+def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> callable:
+    """Build the SIGTERM/SIGINT handler for ``_run_simulation``.
+
+    Factored out of ``_run_simulation`` so it can be unit-tested without a real
+    DB session factory / agent roster / signal loop (see
+    ``tests/unit/test_agent_main_shutdown_grace.py``).
+
+    The first call only schedules ``signal_shutdown()`` after
+    ``SHUTDOWN_SLACK_ABORT_GRACE_SECONDS`` — request_stop() alone already stops
+    the NEXT turn from starting, so there is no need to also abort an
+    in-flight retry sleep immediately. A second call (repeated signal) aborts
+    right away, in case the operator or a slow shutdown needs it sooner.
+    """
+    state = {"signals_received": 0}
+
+    def shutdown() -> None:
+        logger.info("Received shutdown signal")
+        sim_engine.request_stop()
+        state["signals_received"] += 1
+        if state["signals_received"] == 1:
+            loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)
+        else:
+            signal_shutdown()
+
+    return shutdown
+
 
 @app.command()
 def main(
@@ -263,25 +300,25 @@ async def _run_simulation(
     )
 
     # Handle shutdown signals
+    #
+    # The flush must not run in a fire-and-forget task: the main loop can
+    # return first, and asyncio.run then cancels the still-pending task
+    # mid-await, losing the in-flight turn's messages. It is awaited in the
+    # finally-block below instead (R2).
+    #
+    # L-1 (opus review, audit 2026-09-10): this process's AgentSlackClient
+    # calls (here and in SimulationEngine's roster sync/turn-taking) run
+    # directly on this event-loop thread, never through
+    # src.services.slack_executor's pool — so they are bound to slack_client's
+    # fallback event, not any per-pool one. request_stop() alone only stops
+    # the NEXT turn from starting; it does not abort a call already sleeping
+    # through a Slack Retry-After backoff. M-1 (audit 2026-09-10): the abort
+    # is now delayed by SHUTDOWN_SLACK_ABORT_GRACE_SECONDS on the first
+    # signal (see _make_shutdown_handler) instead of firing at t=0, so a
+    # typical ~10s backoff can finish naturally within docker stop -t 30's
+    # grace instead of being aborted and leaving that post DB-only.
     loop = asyncio.get_event_loop()
-
-    def shutdown():
-        # Only flip the stop flag here. The flush must not run in a
-        # fire-and-forget task: the main loop can return first, and asyncio.run
-        # then cancels the still-pending task mid-await, losing the in-flight
-        # turn's messages. It is awaited in the finally-block below instead (R2).
-        logger.info("Received shutdown signal")
-        sim_engine.request_stop()
-        # L-1 (opus review, audit 2026-09-10): this process's AgentSlackClient
-        # calls (here and in SimulationEngine's roster sync/turn-taking) run
-        # directly on this event-loop thread, never through
-        # src.services.slack_executor's pool — so they are bound to
-        # slack_client's fallback event, not any per-pool one. request_stop()
-        # alone only stops the NEXT turn from starting; it does not abort a
-        # call already sleeping through a Slack Retry-After backoff. Setting
-        # the fallback here aborts that sleep within ~1s instead of letting
-        # it run out its (up to 180s) wait budget and hold up shutdown.
-        signal_shutdown()
+    shutdown = _make_shutdown_handler(loop, sim_engine)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
