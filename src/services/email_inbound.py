@@ -1325,7 +1325,6 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
             MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS, key,
         )
         return
-    _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
     subject = "CoPI - This review link is no longer valid"
     text_body = (
         "This review link is no longer valid — reply to the most recent "
@@ -1337,7 +1336,12 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         "reminder instead, or use the dashboard.</p>"
         "<p>Replies to this address are not monitored.</p>"
     )
-    _send_html_email(to_email, subject, text_body, html_body)
+    # REV4-6 (audit 2026-09-08): only count this against the per-address budget
+    # if it actually sent -- _send_html_email returns False without raising for
+    # an allowlist-suppressed recipient, and incrementing unconditionally
+    # burned the whole budget on sends that never left the process.
+    if _send_html_email(to_email, subject, text_body, html_body):
+        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:
