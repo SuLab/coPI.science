@@ -337,6 +337,47 @@ def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch)
         SHUTTING_DOWN.clear()
 
 
+def test_post_one_handles_a_shutdown_abort_without_an_attributeerror(monkeypatch):
+    """K-2 follow-up (opus review, audit 2026-09-10): every ``except
+    SlackApiError as exc:`` handler in this module reads
+    ``exc.response.get("error")`` unconditionally — a plain
+    ``SlackApiError("shutting down", response=None)`` broke that contract and
+    turned a clean shutdown into an ``AttributeError`` escaping ``_post_one``
+    instead of its documented "returns None on a handled failure" behaviour.
+    ``SlackShuttingDown`` carries a real dict response so the existing handler
+    just falls through to its generic branch."""
+    monkeypatch.setattr(time, "sleep", _REAL_SLEEP)
+    SHUTTING_DOWN.clear()
+    try:
+        fake = RecordingSlackClient(
+            errors={"chat_postMessage": [slack_error("ratelimited", retry_after=30)] * 50})
+        c = _client(fake)
+        outcome: dict = {}
+
+        def run():
+            try:
+                outcome["result"] = c._post_one(
+                    "C_GENERAL", "general", "hello", None,
+                    may_raise_thread_not_found=False,
+                )
+            except Exception as exc:
+                outcome["exc"] = exc
+
+        t = threading.Thread(target=run)
+        t.start()
+        _REAL_SLEEP(0.05)
+        SHUTTING_DOWN.set()
+        t.join(timeout=3.0)
+
+        assert not t.is_alive()
+        assert "exc" not in outcome, (
+            f"_post_one must not let an exception escape, got {outcome.get('exc')!r}"
+        )
+        assert outcome.get("result") is None
+    finally:
+        SHUTTING_DOWN.clear()
+
+
 # --- what actually goes on the wire ------------------------------------------------
 
 

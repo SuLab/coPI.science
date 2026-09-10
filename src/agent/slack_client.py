@@ -49,18 +49,40 @@ logger = logging.getLogger(__name__)
 SHUTTING_DOWN = threading.Event()
 
 
+class SlackShuttingDown(SlackApiError):
+    """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown
+    (K-2 follow-up, audit 2026-09-10).
+
+    Every ``except SlackApiError as exc:`` handler in this module reads
+    ``exc.response.get("error")`` unconditionally (``AgentSlackClient._api``'s
+    contract is that a real ``slack_sdk`` exception always carries a response
+    dict) — plain ``SlackApiError("shutting down", response=None)`` broke that
+    contract and turned a clean shutdown into an ``AttributeError`` at every
+    one of those call sites instead of the handled-failure path they already
+    have. ``response`` here is a real dict, keyed exactly like a Slack error
+    response, with an ``"error"`` value (``"shutting_down"``) that cannot
+    collide with any Slack-issued error string, so it always falls through to
+    each handler's generic "unrecognized error" branch (log-and-return-None/
+    empty, same as any other unrecognized ``SlackApiError``) rather than
+    matching a specific branch like ``"ratelimited"`` or ``"channel_not_found"``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("shutting down", response={"error": "shutting_down"})
+
+
 def _sleep_interruptibly(seconds: float) -> None:
     """Sleep for ``seconds``, in <=1s slices, aborting early if the process is
     shutting down.
 
-    Raises ``SlackApiError`` the moment ``SHUTTING_DOWN`` is set rather than
-    finishing out the sleep, so a worker thread mid-backoff does not hold up
-    interpreter exit for however much of the Retry-After it has left.
+    Raises ``SlackShuttingDown`` the moment ``SHUTTING_DOWN`` is set rather
+    than finishing out the sleep, so a worker thread mid-backoff does not
+    hold up interpreter exit for however much of the Retry-After it has left.
     """
     remaining = seconds
     while remaining > 0:
         if SHUTTING_DOWN.is_set():
-            raise SlackApiError("shutting down", response=None)
+            raise SlackShuttingDown()
         slice_s = min(1.0, remaining)
         time.sleep(slice_s)
         remaining -= slice_s
