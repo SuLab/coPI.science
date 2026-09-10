@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -104,6 +105,43 @@ _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
 _S3_FAILURE_COUNTS: dict[str, int] = {}
 
+# SEC3-4 (audit 2026-09-10): companion "last touched" timestamp dicts for the
+# four bounded-in-name-only maps above. None of _RECENT_REPLY_TIMES,
+# _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT, _INSTRUCTION_FAILURE_EMAILS_SENT
+# ever drop a key once created -- they are keyed by notification id or sender
+# address, both unbounded over the life of a long-lived worker process. Each
+# write also stamps the matching *_TOUCHED dict; _prune_stale_entries (called
+# at the top of every poll) drops anything not touched in the last 24h from
+# both the data dict and its touched dict.
+_RECENT_REPLY_TOUCHED: dict[str, float] = {}
+_HELP_EMAILS_TOUCHED: dict[str, float] = {}
+_STALE_BOUNCES_TOUCHED: dict[str, float] = {}
+_INSTRUCTION_FAILURE_TOUCHED: dict[str, float] = {}
+
+_PRUNE_WINDOW_SECONDS = 24 * 3600
+
+
+def _prune_stale_entries(now: float | None = None) -> None:
+    """Drop entries not touched in the last 24h from the rate-limit/dedup maps.
+
+    Called at the top of every poll_inbound_emails run. Safe to call with an
+    empty or partially-populated touched dict: an entry with no touched-dict
+    counterpart is left alone (it predates this fix and will be pruned once it
+    is next written, which stamps its touch time).
+    """
+    ts = time.time() if now is None else now
+    cutoff = ts - _PRUNE_WINDOW_SECONDS
+    for data, touched in (
+        (_RECENT_REPLY_TIMES, _RECENT_REPLY_TOUCHED),
+        (_HELP_EMAILS_SENT, _HELP_EMAILS_TOUCHED),
+        (_STALE_TOKEN_BOUNCES_SENT, _STALE_BOUNCES_TOUCHED),
+        (_INSTRUCTION_FAILURE_EMAILS_SENT, _INSTRUCTION_FAILURE_TOUCHED),
+    ):
+        stale_keys = [key for key, touched_at in touched.items() if touched_at < cutoff]
+        for key in stale_keys:
+            data.pop(key, None)
+            touched.pop(key, None)
+
 
 def _reply_rate_ok(notification_id: str, now: float | None = None) -> bool:
     """Sliding one-hour window per notification, capped at
@@ -114,17 +152,17 @@ def _reply_rate_ok(notification_id: str, now: float | None = None) -> bool:
     token: the token rotates on resend (RC-4), so a token-keyed limiter
     would reset every time the notification is resent.
     """
-    import time
-
     ts = time.time() if now is None else now
     window = [
         t for t in _RECENT_REPLY_TIMES.get(notification_id, []) if ts - t < 3600
     ]
     if len(window) >= MAX_REPLIES_PER_TOKEN_PER_HOUR:
         _RECENT_REPLY_TIMES[notification_id] = window
+        _RECENT_REPLY_TOUCHED[notification_id] = ts
         return False
     window.append(ts)
     _RECENT_REPLY_TIMES[notification_id] = window
+    _RECENT_REPLY_TOUCHED[notification_id] = ts
     return True
 
 
@@ -275,6 +313,11 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
 
     Returns the number of emails processed.
     """
+    # SEC3-4 (audit 2026-09-10): prune the in-memory rate-limit/dedup maps
+    # before doing anything else this poll, so they don't grow unbounded over
+    # the life of the worker process.
+    _prune_stale_entries()
+
     settings = get_settings()
     processed = 0
 
@@ -597,6 +640,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
     sent_so_far = _HELP_EMAILS_SENT.get(notification_key, 0)
     if sent_so_far < MAX_HELP_EMAILS_PER_NOTIFICATION:
         _HELP_EMAILS_SENT[notification_key] = sent_so_far + 1
+        _HELP_EMAILS_TOUCHED[notification_key] = time.time()
         await _send_help_email(user, notification)
     else:
         logger.warning(
@@ -969,6 +1013,7 @@ def _notify_instruction_failure(
     )
     if sent:
         _INSTRUCTION_FAILURE_EMAILS_SENT[key] = 1
+        _INSTRUCTION_FAILURE_TOUCHED[key] = time.time()
 
 
 def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
@@ -1440,6 +1485,7 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
     # trade more than MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS bounces with us. Reserving
     # first closes that window regardless of how the send is implemented.
     _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
+    _STALE_BOUNCES_TOUCHED[key] = time.time()
     outcome = send_html_email_outcome(to_email, subject, text_body, html_body)
     if outcome in (SendOutcome.SUPPRESSED, SendOutcome.NOT_DISPATCHED):
         # Refund: nothing reached SES, so this attempt must not count against the cap.

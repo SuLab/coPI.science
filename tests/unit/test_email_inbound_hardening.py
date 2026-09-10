@@ -635,3 +635,69 @@ async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type
     (mail,) = mails
     assert ("will not be retried" in mail["body"]) is not retried
     assert ("We'll retry automatically" in mail["body"]) is retried
+
+
+# --- Unbounded in-memory dedup/rate-limit maps are pruned (SEC3-4, audit 2026-09-10) ----
+#
+# _RECENT_REPLY_TIMES, _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT and
+# _INSTRUCTION_FAILURE_EMAILS_SENT are keyed by notification id / sender address and
+# never removed, so a long-lived worker process accumulates one entry per
+# notification/address forever.
+
+
+def test_prune_drops_an_entry_untouched_for_over_24_hours(monkeypatch):
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [100.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 100.0})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"stale": 3})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"stale": 100.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"stale@x.com": 3})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"stale@x.com": 100.0})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"stale": 1})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"stale": 100.0})
+
+    now = 100.0 + 24 * 3600 + 1
+    inbound._prune_stale_entries(now=now)
+
+    assert inbound._RECENT_REPLY_TIMES == {}
+    assert inbound._RECENT_REPLY_TOUCHED == {}
+    assert inbound._HELP_EMAILS_SENT == {}
+    assert inbound._HELP_EMAILS_TOUCHED == {}
+    assert inbound._STALE_TOKEN_BOUNCES_SENT == {}
+    assert inbound._STALE_BOUNCES_TOUCHED == {}
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {}
+    assert inbound._INSTRUCTION_FAILURE_TOUCHED == {}
+
+
+def test_prune_keeps_a_fresh_entry(monkeypatch):
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"fresh": [100.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"fresh": 100.0})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"fresh": 1})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"fresh": 100.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {})
+
+    now = 100.0 + 3600  # well within the 24h window
+    inbound._prune_stale_entries(now=now)
+
+    assert inbound._RECENT_REPLY_TIMES == {"fresh": [100.0]}
+    assert inbound._RECENT_REPLY_TOUCHED == {"fresh": 100.0}
+    assert inbound._HELP_EMAILS_SENT == {"fresh": 1}
+    assert inbound._HELP_EMAILS_TOUCHED == {"fresh": 100.0}
+
+
+async def test_poll_inbound_emails_prunes_stale_entries(monkeypatch):
+    fake = _FakeS3([])
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [1.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 1.0})
+
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 1.0 + 24 * 3600 + 1)
+    await poll_inbound_emails(_NullSessionFactory())
+
+    assert inbound._RECENT_REPLY_TIMES == {}
+    assert inbound._RECENT_REPLY_TOUCHED == {}
