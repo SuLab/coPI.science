@@ -1350,9 +1350,20 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
     if not is_allowed_recipient(to_email):
         logger.info("Stale-token bounce to %s suppressed by outbound allowlist", to_email)
         return
+    # Reserve the slot BEFORE dispatching, refunding it only if the outcome shows
+    # nothing reached SES (opus review follow-up, audit 2026-09-10). Charging
+    # strictly after the call, as before, is a check-then-act race: nothing here
+    # is concurrent today (the send is a synchronous function call), but a
+    # send_html_email_outcome that ever became threaded/concurrent could let two
+    # replies from the same address both read the same `sent_so_far` and both pass
+    # the cap check above before either charged the budget, letting the address
+    # trade more than MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS bounces with us. Reserving
+    # first closes that window regardless of how the send is implemented.
+    _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
     outcome = send_html_email_outcome(to_email, subject, text_body, html_body)
-    if outcome in (SendOutcome.SENT, SendOutcome.FAILED):
-        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far + 1
+    if outcome in (SendOutcome.SUPPRESSED, SendOutcome.NOT_DISPATCHED):
+        # Refund: nothing reached SES, so this attempt must not count against the cap.
+        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:
