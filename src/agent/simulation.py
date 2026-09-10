@@ -29,6 +29,12 @@ from src.agent.funding_rules import (
     summarize_funding_thread,
 )
 from src.agent.ids import WRITER_ENGINE, TsMinter
+from src.agent.inbound_state import (
+    PI_INBOUND_HANDLED,
+    PI_INBOUND_INGESTED,
+    PI_INBOUND_MAX_ATTEMPTS,
+    PI_INBOUND_PENDING,
+)
 from src.agent.mentions import BOT_TAG_RE, extract_bot_mentions
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.prompt_safety import delimit
@@ -194,40 +200,15 @@ def _profiles_dir() -> Path:
 PI_INBOX_LOOKBACK_S = 300.0
 PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 
-# agent_messages.pi_inbound_state (migration 0029) — the DB inbound poller's
-# durable handled-marker, and the only two values anything writes. It exists
-# because _poll_inbound_from_db now appends a PI row to the MessageLog BEFORE it
-# runs the handler (the append is what records the PI's text durably), so the
-# log entry's presence can no longer be the dedup key: MessageLog.append is not
-# idempotent, so keying on it would either skip the retry or duplicate the PI's
-# message. A THIRD state is carried by NULL — "no inbound poller has claimed
-# this row" — which every reader must treat as the pre-0029 behaviour, i.e.
-# dedup on log presence. That covers every legacy row and, crucially, every row
-# _poll_channels appended itself: this poller re-reads those with no origin
-# predicate, so a two-valued marker would re-run handle_channel_tag on every
-# tagged Slack message. See docs/plans/2026-09-04-decisions/task-7.md (which
-# supersedes D25) and task-8.md.
-PI_INBOUND_INGESTED = "ingested"
-PI_INBOUND_HANDLED = "handled"
-# A fourth state, written at INSERT time by record_pi_message (RC-2 / #20
-# blocker): "this row needs a DB inbound poller's attention no matter how far
-# behind the cursor it is". Without it, a PI message written while agent-run
-# was down could age past PI_INBOX_LOOKBACK_S before the process came back —
-# _seed_pi_inbox_cursor jumps the cursor to max(created_at) at startup, so the
-# lookback window never reaches a row older than that. 'pending' rows are
-# fetched by _poll_inbound_from_db regardless of the cursor and are never
-# skipped by the dedup predicate (it only special-cases HANDLED and the
-# NULL-fallback), so they always reach the normal ingest→handle→HANDLED path
-# once a poller is running again. See docs/plans/2026-09-08-audit-fixes.md RC-2.
-PI_INBOUND_PENDING = "pending"
-
-# SEC2-1 (audit 2026-09-08): a handler that raises deterministically (not a
-# transient ConnectionError) would otherwise be re-run forever — the row stays
-# 'ingested' and the cursor-independent disjunct above re-selects it every
-# tick regardless of PI_INBOX_LOOKBACK_S, which only bounds the cursor-based
-# path. This caps in-process retries per message_ts; on the Nth failure the
-# row is stamped HANDLED (terminal) so it stops being re-selected.
-PI_INBOUND_MAX_ATTEMPTS = 3
+# agent_messages.pi_inbound_state (migration 0029) values — PI_INBOUND_INGESTED,
+# PI_INBOUND_HANDLED, PI_INBOUND_PENDING, PI_INBOUND_MAX_ATTEMPTS. REV3-7 (opus
+# review, audit 2026-09-08): moved to the dependency-free src.agent.inbound_state
+# so src.services.pi_inbox (the web/worker request path that writes a PI message
+# row) does not have to import this whole engine module just to read a string
+# constant. Imported at the top of this file and re-exported under their
+# original names, so every existing ``from src.agent.simulation import
+# PI_INBOUND_*`` keeps working unchanged — see inbound_state.py for what each
+# value means.
 
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)

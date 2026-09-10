@@ -13,6 +13,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.ids import mint_local_ts
+from src.agent.inbound_state import PI_INBOUND_PENDING
 from src.models import (
     VISIBILITY_COLLAB_PRIVATE,
     AgentChannel,
@@ -190,8 +191,6 @@ async def record_pi_message(
     ``agent-run`` is down is not silently skipped once the row ages past the
     poller's lookback window.
     """
-    from src.agent.simulation import PI_INBOUND_PENDING
-
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
     ts = mint_local_ts()
     msg = AgentMessage(
