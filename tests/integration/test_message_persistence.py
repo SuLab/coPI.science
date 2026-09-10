@@ -330,11 +330,12 @@ async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
 
 
 async def test_dm_for_an_unknown_agent_is_marked_handled_not_retried_forever(db_session):
-    """A5 (opus review, audit 2026-09-08): a DM for an agent_id not on the
-    roster (never on it, or since removed) used to `continue` before
-    _mark_pi_dm_handled, leaving handled_at NULL — which matches the durable-
-    marker recovery clause forever, re-fetching this row on every poll with no
-    way it will ever be processed."""
+    """A5 (opus review, audit 2026-09-08); REV3-1 tightens the test this
+    guards against a DM for an agent_id that does not exist in AgentRegistry
+    at all (never provisioned, or the row itself was deleted) used to
+    `continue` before _mark_pi_dm_handled, leaving handled_at NULL — which
+    matches the durable-marker recovery clause forever, re-fetching this row
+    on every poll with no way it will ever be processed."""
     run = await factories.make_simulation_run(db_session)
     engine = _engine_for(db_session, run.id, agents=[Agent("su", "SuBot", "Andrew Su")])
     handler = _RecordingPiHandler()
@@ -357,6 +358,49 @@ async def test_dm_for_an_unknown_agent_is_marked_handled_not_retried_forever(db_
         "a DM for an agent not on the roster must be marked handled, or it is "
         "re-fetched by the durable-marker recovery clause on every poll forever"
     )
+
+
+async def test_dm_for_a_registered_but_not_yet_rostered_agent_is_left_unhandled(
+    db_session,
+):
+    """REV3-1 (opus review, audit 2026-09-08): `self.agents` shrinks on
+    deactivation and is only partially populated before the first roster
+    sync, so "not in self.agents" alone must not be treated as "will never
+    be processed" the way A5 originally did — that stamped handled_at on a
+    DM for an agent that legitimately exists (and may be added to the live
+    roster on the very next sync), permanently discarding it. Only an
+    agent_id with NO AgentRegistry row at all may be stamped immediately."""
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="notyetlive", status="pending")
+    engine = _engine_for(db_session, run.id, agents=[Agent("su", "SuBot", "Andrew Su")])
+    handler = _RecordingPiHandler()
+    engine._pi_handler = handler
+
+    ts = "1700000201.000000"
+    dm = PiDmMessage(
+        simulation_run_id=run.id, agent_id="notyetlive", pi_user_id="local:x",
+        direction="inbound", content="hello?", sender_name="PI",
+        ts=ts, posted_at=float(ts),
+    )
+    db_session.add(dm)
+    await db_session.flush()
+    await db_session.refresh(dm)
+
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == []
+    await db_session.refresh(dm)
+    assert dm.handled_at is None, (
+        "a DM for an agent that exists in AgentRegistry but is not yet on the "
+        "live roster must be left unhandled for a later tick, not discarded"
+    )
+
+    # Once the roster catches up (e.g. the next _sync_roster_from_db), the
+    # row is processed normally on the very next poll.
+    engine.agents["notyetlive"] = Agent("notyetlive", "NotYetLiveBot", "PI")
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == [("notyetlive", "local:x", "hello?")]
+    await db_session.refresh(dm)
+    assert dm.handled_at is not None
 
 
 # ---------------------------------------------------------------

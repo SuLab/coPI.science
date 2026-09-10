@@ -4171,7 +4171,7 @@ class SimulationEngine:
         from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
 
-        from src.models import PiDmMessage
+        from src.models import AgentRegistry, PiDmMessage
         floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
         try:
             async with self.session_factory() as db:
@@ -4193,6 +4193,26 @@ class SimulationEngine:
                     )
                     .order_by(PiDmMessage.created_at.asc())
                 )).scalars().all()
+
+                # REV3-1 (opus review, audit 2026-09-08): resolve which
+                # unrostered agent_ids among the fetched rows genuinely have
+                # no AgentRegistry row at all, in the SAME session as the
+                # SELECT above so this stays one round trip per poll. Cheaper
+                # than a query per row, and self.agents alone is not the
+                # right test — it shrinks on deactivation and is partial
+                # before the first roster sync, so an agent that legitimately
+                # exists but is not (yet) on the live roster must NOT be
+                # stamped handled here; it has to wait for a later tick.
+                unrostered_ids = {
+                    r.agent_id for r in rows if r.agent_id not in self.agents
+                }
+                registered_ids: set[str] = set()
+                if unrostered_ids:
+                    registered_ids = set((await db.execute(
+                        sa_select(AgentRegistry.agent_id).where(
+                            AgentRegistry.agent_id.in_(unrostered_ids)
+                        )
+                    )).scalars().all())
         except Exception as exc:
             logger.warning("PI DM inbox poll failed: %s", exc)
             return
@@ -4205,11 +4225,18 @@ class SimulationEngine:
             if r.ts and r.ts in self._pi_dm_seen:
                 continue  # in-process dedup (same tick/lookback re-scan)
             if r.agent_id not in self.agents:
-                # A5 (opus review, audit 2026-09-08): this agent is not (or no
-                # longer) on the roster, so nothing will ever process this
-                # row — mark it handled (terminal) rather than leave
-                # handled_at NULL, or it keeps matching the durable-marker
-                # recovery clause above and is re-fetched every tick forever.
+                if r.agent_id in registered_ids:
+                    # Exists in AgentRegistry but not on the live roster yet
+                    # (deactivated, or not synced in since this poller last
+                    # ran) — leave handled_at NULL so a later tick, once the
+                    # roster catches up, can still process it.
+                    continue
+                # A5 (opus review, audit 2026-09-08); REV3-1 tightens the
+                # test to "no AgentRegistry row at all": this agent_id does
+                # not exist, so nothing will ever process this row — mark it
+                # handled (terminal) rather than leave handled_at NULL, or it
+                # keeps matching the durable-marker recovery clause above and
+                # is re-fetched every tick forever.
                 await self._mark_pi_dm_handled(r.id)
                 continue
             if r.ts:
