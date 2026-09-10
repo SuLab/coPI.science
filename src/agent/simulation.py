@@ -522,9 +522,16 @@ class SimulationEngine:
         # _poll_inbound_from_db.
         self._pi_inbox_cursor: datetime = EPOCH_UTC
         # SEC2-1: in-process attempt counter for _poll_inbound_from_db's
-        # handler, keyed by message_ts. Pruned on give-up (row stamped
-        # HANDLED) or successful handling — see PI_INBOUND_MAX_ATTEMPTS.
-        self._pi_inbound_attempts: dict[str, int] = {}
+        # handler, keyed by message_ts, value (attempts, last_attempt_monotonic).
+        # Pruned on give-up (row stamped HANDLED) or successful handling — see
+        # PI_INBOUND_MAX_ATTEMPTS. REV4-5 (audit 2026-09-08): the monotonic
+        # timestamp lets a failure that recurs only after more than
+        # PI_INBOX_LOOKBACK_S has elapsed be treated as a fresh incident
+        # (attempts reset to 1) rather than accumulate toward the terminal
+        # cap across unrelated, widely-spaced failures — and lets
+        # _prune_stale_pi_inbound_attempts drop entries nobody has touched
+        # recently, so this dict cannot grow without bound.
+        self._pi_inbound_attempts: dict[str, tuple[int, float]] = {}
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -3403,6 +3410,35 @@ class SimulationEngine:
             except Exception as exc:
                 logger.debug("Polling error for #%s: %s", ch_name, exc)
 
+    def _record_pi_inbound_attempt(self, message_ts: str) -> int:
+        """Increment the in-process attempt counter for ``message_ts``, resetting
+        it first if the last attempt was more than PI_INBOX_LOOKBACK_S ago (REV4-5,
+        audit 2026-09-08). Without the reset, failures spread arbitrarily far apart
+        in time — each individually transient — accumulate toward
+        PI_INBOUND_MAX_ATTEMPTS and eventually stamp a row terminal even though no
+        two of them were ever part of the same incident."""
+        now = time.monotonic()
+        prior_attempts, last_attempt = self._pi_inbound_attempts.get(message_ts, (0, now))
+        if now - last_attempt > PI_INBOX_LOOKBACK_S:
+            prior_attempts = 0
+        attempts = prior_attempts + 1
+        self._pi_inbound_attempts[message_ts] = (attempts, now)
+        return attempts
+
+    def _prune_stale_pi_inbound_attempts(self) -> None:
+        """Drop attempt-counter entries untouched for more than PI_INBOX_LOOKBACK_S
+        (REV4-5). Entries are also popped eagerly on give-up/success, but a row
+        that stops reappearing in the polled batch (e.g. superseded upstream)
+        would otherwise leave its counter behind forever — this bounds the dict
+        even for that case."""
+        stale_cutoff = time.monotonic() - PI_INBOX_LOOKBACK_S
+        stale_keys = [
+            ts for ts, (_, last_attempt) in self._pi_inbound_attempts.items()
+            if last_attempt < stale_cutoff
+        ]
+        for ts in stale_keys:
+            del self._pi_inbound_attempts[ts]
+
     async def _poll_inbound_from_db(self) -> None:
         """Ingest messages written to the DB by other processes.
 
@@ -3415,6 +3451,7 @@ class SimulationEngine:
         """
         if not self.session_factory or not self.simulation_run_id:
             return
+        self._prune_stale_pi_inbound_attempts()
         from sqlalchemy import and_ as sa_and
         from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
@@ -3515,8 +3552,7 @@ class SimulationEngine:
                 # is re-selected via the cursor-independent 'pending'/
                 # 'ingested' disjunct forever).
                 if not r.is_bot:
-                    attempts = self._pi_inbound_attempts.get(r.message_ts, 0) + 1
-                    self._pi_inbound_attempts[r.message_ts] = attempts
+                    attempts = self._record_pi_inbound_attempt(r.message_ts)
                     if attempts >= PI_INBOUND_MAX_ATTEMPTS:
                         logger.error(
                             "[%s] Giving up on message %s for a tombstoned "
@@ -3583,8 +3619,7 @@ class SimulationEngine:
                 try:
                     await self._handle_pi_inbound_entry(entry)
                 except Exception as exc:
-                    attempts = self._pi_inbound_attempts.get(r.message_ts, 0) + 1
-                    self._pi_inbound_attempts[r.message_ts] = attempts
+                    attempts = self._record_pi_inbound_attempt(r.message_ts)
                     if attempts >= PI_INBOUND_MAX_ATTEMPTS:
                         logger.error(
                             "[%s] Giving up on PI inbound side effects for %s "

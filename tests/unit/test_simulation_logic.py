@@ -3010,6 +3010,60 @@ class TestPollInboundFromDbGuardsTheHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_failures_spread_beyond_the_lookback_do_not_reach_the_terminal_cap(
+        self, monkeypatch,
+    ):
+        """REV4-5 (audit 2026-09-08): the attempt counter must not accumulate
+        across failures that are spread further apart than PI_INBOX_LOOKBACK_S --
+        each such failure is effectively a fresh incident, not a continuation of
+        the last one, so a row that fails once every few hours over weeks must
+        never hit PI_INBOUND_MAX_ATTEMPTS and get stamped terminal."""
+        import time
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(side_effect=ConnectionError("boom"))
+        engine = self._engine(rows, handler)
+
+        t = [1_000_000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: t[0])
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS):
+            await engine._poll_inbound_from_db()
+            t[0] += PI_INBOX_LOOKBACK_S + 1
+
+        assert rows[0].pi_inbound_state != "handled", (
+            "attempts spread beyond the lookback window must not accumulate "
+            "toward the terminal give-up cap"
+        )
+        assert handler.await_count == PI_INBOUND_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_stale_attempt_entries_are_pruned_on_each_poll(self, monkeypatch):
+        """REV4-5: the per-message_ts attempt dict must not retain entries
+        forever -- one that has not been touched in over PI_INBOX_LOOKBACK_S is
+        pruned the next time the poller runs, regardless of whether that
+        message_ts appears in the current batch of rows."""
+        import time
+        from unittest.mock import AsyncMock
+
+        engine = self._engine([], AsyncMock())
+        now = time.monotonic()
+        engine._pi_inbound_attempts["stale.ts"] = (2, now - PI_INBOX_LOOKBACK_S - 1)
+        engine._pi_inbound_attempts["fresh.ts"] = (1, now)
+
+        await engine._poll_inbound_from_db()
+
+        assert "stale.ts" not in engine._pi_inbound_attempts, (
+            f"stale entry was not pruned: {engine._pi_inbound_attempts}"
+        )
+        assert "fresh.ts" in engine._pi_inbound_attempts
+
+    @pytest.mark.asyncio
     async def test_a_tagged_slack_row_already_in_the_log_does_not_rerun_the_tag_route(
         self,
     ):
