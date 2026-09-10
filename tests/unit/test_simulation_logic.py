@@ -2524,6 +2524,89 @@ class TestCheckPiProposalReviewRequiresAuthorization:
         assert victim.state.pending_proposals[0].reviewed is False
 
 
+class TestDeferredImplicitProposalReview:
+    """N-5 (opus review, audit 2026-09-10): a PI engagement can clear a
+    proposal's block (`proposal.reviewed = True`) WHILE the same thread's
+    ThreadDecision write is still deferred (`proposal.thread_decision_id is
+    None`, queued in `_pending_thread_decisions`) --
+    `_persist_implicit_proposal_review` no-ops on a `None` id, and
+    `proposal.reviewed` is already `True`, so `_check_pi_proposal_review`'s
+    own guard would never call it again for this thread. The engagement must
+    be recorded and replayed once `_flush_pending_thread_decisions` assigns a
+    real id.
+    """
+
+    def _engine_with_deferred_proposal(self):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(
+            agents=[a, b], slack_clients={},
+            session_factory=lambda: None,  # never actually opened, see monkeypatch below
+            simulation_run_id=uuid_mod.uuid4(),
+        )
+        a.state.pending_proposals.append(ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0, thread_decision_id=None,
+        ))
+        return engine, a, b
+
+    def _entry(self):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts="2.0", channel="general", sender_agent_id=None, sender_name="PI",
+            content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_engagement_against_a_deferred_decision_is_recorded_for_replay(self):
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_deferred_proposal()
+        engine._persist_implicit_proposal_review = AsyncMock()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
+
+        assert a.state.pending_proposals[0].reviewed is True
+        engine._persist_implicit_proposal_review.assert_awaited_once_with("a", None)
+        assert ("a", "1.0") in engine._deferred_implicit_reviews
+
+    @pytest.mark.asyncio
+    async def test_the_next_flush_replays_the_deferred_engagement_once_the_id_lands(self):
+        import uuid as uuid_mod
+        from unittest.mock import AsyncMock
+
+        engine, a, b = self._engine_with_deferred_proposal()
+        engine._persist_implicit_proposal_review = AsyncMock()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
+        assert ("a", "1.0") in engine._deferred_implicit_reviews
+        engine._persist_implicit_proposal_review.reset_mock()
+
+        decision_id = uuid_mod.uuid4()
+        engine._pending_thread_decisions.append({
+            "thread_id": "1.0", "channel": "general",
+            "agent_a": "a", "agent_b": "b",
+            "outcome": "proposal", "summary_text": "x",
+        })
+        engine._write_thread_decision_with_retry = AsyncMock(return_value=decision_id)
+
+        await engine._flush_pending_thread_decisions()
+
+        assert a.state.pending_proposals[0].thread_decision_id == decision_id
+        engine._persist_implicit_proposal_review.assert_awaited_once_with("a", decision_id)
+        assert ("a", "1.0") not in engine._deferred_implicit_reviews
+
+        # A second flush with nothing pending must not replay it again.
+        engine._persist_implicit_proposal_review.reset_mock()
+        await engine._flush_pending_thread_decisions()
+        engine._persist_implicit_proposal_review.assert_not_awaited()
+
+
 class TestHandlePiInboundEntryRequiresOwnership:
     """RC-1 / #20 COR-5: ``_handle_pi_inbound_entry`` gates every side effect
     on the set of agents the row's ``sender_user_id`` actually owns

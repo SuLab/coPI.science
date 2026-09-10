@@ -603,6 +603,18 @@ class SimulationEngine:
         # outage longer than _close_thread's own budget still eventually
         # gets the row written instead of losing the decision permanently.
         self._pending_thread_decisions: list[dict] = []
+        # N-5 (opus review, audit 2026-09-10): (agent_id, thread_id) pairs
+        # whose PI-engagement review (`_check_pi_proposal_review`) fired
+        # while the SAME thread's ThreadDecision write was still deferred —
+        # `proposal.thread_decision_id` was `None` at the time, so
+        # `_persist_implicit_proposal_review` no-op'd immediately. Without
+        # this, the review was lost forever: `proposal.reviewed` is already
+        # `True` by the time `_persist_implicit_proposal_review` runs, so
+        # `_check_pi_proposal_review`'s own `not proposal.reviewed` guard
+        # would never call it again for this thread.
+        # `_flush_pending_thread_decisions` re-runs the persist for any entry
+        # here once it assigns that thread's `thread_decision_id`.
+        self._deferred_implicit_reviews: list[tuple[str, str]] = []
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
@@ -2109,6 +2121,15 @@ class SimulationEngine:
         ref was left with ``thread_decision_id=None`` when ``_close_thread``
         itself could not obtain an id (documented behaviour: the ref reads
         as "not yet reviewed against a decision" until this flush succeeds).
+
+        N-5 (opus review, audit 2026-09-10): a PI engagement that reviewed a
+        proposal in this same thread WHILE its decision id was still deferred
+        (`_check_pi_proposal_review` queued it in
+        `_deferred_implicit_reviews`, since `_persist_implicit_proposal_review`
+        no-ops on a `None` id) is re-run here for any matching agent now that
+        a real id exists — otherwise that engagement's review would be lost
+        forever (`proposal.reviewed` is already `True`, so the caller's own
+        guard never calls the persist again for this thread).
         """
         if not self._pending_thread_decisions:
             return
@@ -2125,6 +2146,9 @@ class SimulationEngine:
                 for p in a.state.pending_proposals:
                     if p.thread_id == payload["thread_id"]:
                         p.thread_decision_id = decision_id
+                if (aid, payload["thread_id"]) in self._deferred_implicit_reviews:
+                    self._deferred_implicit_reviews.remove((aid, payload["thread_id"]))
+                    await self._persist_implicit_proposal_review(aid, decision_id)
         self._pending_thread_decisions = still_pending
 
     async def _close_thread(
@@ -4294,6 +4318,18 @@ class SimulationEngine:
                         "[%s] Proposal in thread %s reviewed by PI",
                         agent.agent_id, thread_ts,
                     )
+                    if proposal.thread_decision_id is None:
+                        # N-5 (opus review, audit 2026-09-10): the
+                        # ThreadDecision write for this thread is still
+                        # deferred (queued in `_pending_thread_decisions`) --
+                        # `proposal.reviewed` is already `True` now, so this
+                        # method's own guard above would never call this
+                        # again for this thread. Record the engagement so
+                        # `_flush_pending_thread_decisions` can re-run the
+                        # persist once it assigns a real id.
+                        pair = (agent.agent_id, proposal.thread_id)
+                        if pair not in self._deferred_implicit_reviews:
+                            self._deferred_implicit_reviews.append(pair)
                     await self._persist_implicit_proposal_review(
                         agent.agent_id, proposal.thread_decision_id,
                     )
