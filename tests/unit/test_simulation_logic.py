@@ -2732,11 +2732,24 @@ class TestDeferredImplicitProposalReview:
             content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
         )
 
+    def _queue_pending_decision(self, engine):
+        """A matching `_pending_thread_decisions` entry, as `_close_thread`
+        would have already queued by the time a PI's message reaches
+        `_check_pi_proposal_review` in a real run (O-2, audit 2026-09-10:
+        `_check_pi_proposal_review` only records a deferred-review pair when
+        it can actually find one)."""
+        engine._pending_thread_decisions.append({
+            "thread_id": "1.0", "channel": "general",
+            "agent_a": "a", "agent_b": "b",
+            "outcome": "proposal", "summary_text": "x",
+        })
+
     @pytest.mark.asyncio
     async def test_an_engagement_against_a_deferred_decision_is_recorded_for_replay(self):
         from unittest.mock import AsyncMock
 
         engine, a, b = self._engine_with_deferred_proposal()
+        self._queue_pending_decision(engine)
         engine._persist_implicit_proposal_review = AsyncMock()
 
         await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
@@ -2746,11 +2759,39 @@ class TestDeferredImplicitProposalReview:
         assert ("a", "1.0") in engine._deferred_implicit_reviews
 
     @pytest.mark.asyncio
+    async def test_no_session_factory_never_records_a_deferred_review(self):
+        """O-2 (audit 2026-09-10): with `session_factory=None`, `_close_thread`
+        never enqueues anything into `_pending_thread_decisions` (see its own
+        guard), so `proposal.thread_decision_id` stays `None` forever --
+        recording a pair here would leak into `_deferred_implicit_reviews` for
+        the rest of the run, never matched by `_flush_pending_thread_decisions`.
+        """
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+
+        a = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[a], slack_clients={})  # no session_factory
+        a.state.pending_proposals.append(ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0, thread_decision_id=None,
+        ))
+        engine._persist_implicit_proposal_review = AsyncMock()
+
+        for _ in range(5):
+            a.state.pending_proposals[0].reviewed = False
+            await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
+
+        assert engine._deferred_implicit_reviews == []
+
+    @pytest.mark.asyncio
     async def test_the_next_flush_replays_the_deferred_engagement_once_the_id_lands(self):
         import uuid as uuid_mod
         from unittest.mock import AsyncMock
 
         engine, a, b = self._engine_with_deferred_proposal()
+        self._queue_pending_decision(engine)
         engine._persist_implicit_proposal_review = AsyncMock()
 
         await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"a"})
@@ -2758,11 +2799,6 @@ class TestDeferredImplicitProposalReview:
         engine._persist_implicit_proposal_review.reset_mock()
 
         decision_id = uuid_mod.uuid4()
-        engine._pending_thread_decisions.append({
-            "thread_id": "1.0", "channel": "general",
-            "agent_a": "a", "agent_b": "b",
-            "outcome": "proposal", "summary_text": "x",
-        })
         engine._write_thread_decision_with_retry = AsyncMock(return_value=decision_id)
 
         await engine._flush_pending_thread_decisions()

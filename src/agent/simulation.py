@@ -2172,6 +2172,16 @@ class SimulationEngine:
                 PENDING_THREAD_DECISIONS_MAX, overflow,
                 [d["thread_id"] for d in dropped],
             )
+            # O-2 (audit 2026-09-10): a dropped payload can never be
+            # replayed by `_flush_pending_thread_decisions`, so any
+            # `_deferred_implicit_reviews` entry recorded against it would
+            # otherwise sit in that list forever, never matching a
+            # decision_id. Drop the matching entries too.
+            dropped_thread_ids = {d["thread_id"] for d in dropped}
+            self._deferred_implicit_reviews = [
+                pair for pair in self._deferred_implicit_reviews
+                if pair[1] not in dropped_thread_ids
+            ]
 
     async def _flush_pending_thread_decisions(self) -> None:
         """Retry any ThreadDecision rows queued by ``_close_thread`` after
@@ -4417,8 +4427,22 @@ class SimulationEngine:
                         # again for this thread. Record the engagement so
                         # `_flush_pending_thread_decisions` can re-run the
                         # persist once it assigns a real id.
+                        #
+                        # O-2 (audit 2026-09-10): only when that thread's
+                        # payload is ACTUALLY queued in
+                        # `_pending_thread_decisions` -- e.g. with
+                        # `session_factory=None`, `_close_thread` never
+                        # enqueues anything (see its own `if self.session_factory
+                        # and self.simulation_run_id` guard), so
+                        # `thread_decision_id` stays `None` forever and a pair
+                        # recorded here would sit in `_deferred_implicit_reviews`
+                        # for the rest of the run, never matched by
+                        # `_flush_pending_thread_decisions`.
                         pair = (agent.agent_id, proposal.thread_id)
-                        if pair not in self._deferred_implicit_reviews:
+                        if pair not in self._deferred_implicit_reviews and any(
+                            p["thread_id"] == proposal.thread_id
+                            for p in self._pending_thread_decisions
+                        ):
                             self._deferred_implicit_reviews.append(pair)
                     await self._persist_implicit_proposal_review(
                         agent.agent_id, proposal.thread_decision_id,
