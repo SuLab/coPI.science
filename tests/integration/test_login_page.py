@@ -18,4 +18,4 @@ async def test_login_page_shows_the_blackbird_logo_and_no_collaboration_copy(cli
 async def test_logo_asset_is_served(client):
     r = await client.get("/static/img/blackbird-laboratories.svg")
     assert r.status_code == 200
-    assert 'fill="currentColor"' in r.text
+    assert 'fill="#353A41"' in r.text
