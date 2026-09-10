@@ -645,6 +645,7 @@ Tests (red first, `tests/unit/test_email_inbound_hardening.py`):
 `test_prune_drops_a_short_window_entry_untouched_for_over_24_hours` (now covers
 `_S3_FAILURE_COUNTS` too), `test_poll_inbound_emails_prunes_stale_entries` updated to
 assert `_S3_FAILURE_COUNTS`/`_S3_FAILURE_TOUCHED` are pruned.
+
 ## K — final opus closure audit (2026-09-10)
 
 **K-1 (MEDIUM) — a transient ownership-lookup DB error was fail-closed identically to
@@ -788,3 +789,124 @@ this worktree): 2137 passed, 5 known-environmental failures. Combined with
 `tests/integration/test_state_rebuild.py`, and `tests/integration/test_message_persistence.py`:
 113 passed. `ruff check` on every file touched: no new findings (three pre-existing,
 unrelated `simulation.py` findings noted and left alone, outside scope).
+
+### K follow-ups (same day)
+
+A further opus review of the K fixes above landed several same-day commits (all on this
+branch, ahead of section L below) that supersede parts of the K-2 and K-4 text as written:
+
+- **K-2 is superseded by a per-pool shutdown signal.** The K-2 text above describes
+  `SHUTTING_DOWN` as a single shared `threading.Event`. `1c18003` ("make the
+  shutdown-abort signal per-pool, not one shared event") replaced that with one
+  `threading.Event` per Slack executor pool generation, bound into each worker thread's
+  thread-local at thread start — because a single shared Event could not survive a
+  shutdown/re-create cycle (K-9) correctly: clearing it the moment a new pool is created
+  would also silence the signal for an OLD pool's worker thread still sleeping through a
+  backoff right now. `slack_client.SHUTTING_DOWN` remains as the fallback for a caller
+  never bound to a pool (see L-1 below). `a570521` and `b46ac2b` are further K-2
+  follow-ups (a real Slack-error-shaped response on the shutdown exception; only
+  forgetting a PI-inbound attempt count once the HANDLED write commits).
+- **K-4 is superseded by strip-compare + empty-is-authoritative semantics.** The K-4 text
+  above describes `_sync_private_profiles_from_db` as rewriting disk "if
+  `ResearcherProfile.private_profile_md` differs from the agent's current private
+  profile" — an exact comparison. `3bc8715` ("normalize whitespace and honor a cleared
+  DB profile in the private-profile sync") changed this to a `.strip()`ped comparison
+  (avoiding a spurious rewrite-every-startup from `update_private_profile`'s own
+  trailing-newline-on-disk-only convention) and added the empty/NULL-DB-value branch:
+  a PI clearing their standing instruction is now itself treated as authoritative,
+  removing a stale non-default disk file and invalidating the cache. Section L below
+  (L-2/L-3/L-4) fixes three residual defects in that same empty/NULL branch.
+- **K-6 is superseded by a subscribed_channels restore.** `b8bca06` ("restore
+  subscribed_channels on a roster re-add") added the `_rebuild_one_agent_state` query
+  the K-6 text above does not mention; L-6 below fixes a gap in that query.
+- **K-9 gained a test-fixture follow-up.** `47fc012` shuts down test-created Slack pools
+  in fixture teardown, closing a thread leak the K-9 fix's lazy pool re-creation
+  introduced for any test that forces a fresh pool into existence.
+
+## L — opus review of same-day follow-ups (2026-09-10)
+
+A further opus review of the K-2/K-4/K-6/K-9 follow-ups above found seven residual
+defects, all fixed on this branch.
+
+**L-1 (MEDIUM) — the shutdown-abort signal never reached a caller outside the Slack
+executor pool.** The K-2 follow-up above made the abort signal per-pool
+(`bind_shutdown_event`/`_current_shutdown_event`), with `slack_client.SHUTTING_DOWN`
+kept only as a fallback for a thread never bound to a pool's own event —
+but `shutdown_slack_executor()` only ever set the CURRENT pool's event, so
+`SHUTTING_DOWN` was never set anywhere in production. `AgentSlackClient` calls made
+directly on the agent-run process's event-loop thread (`src/agent/main.py`'s
+`_run_simulation`, and `src/agent/simulation.py`'s roster sync/turn-taking — none of
+which go through `src.services.slack_executor`'s pool) are bound to exactly that
+fallback, so a retry sleep blocked on a sustained Slack throttle could no longer be
+aborted at shutdown at all: it would run out its full (up to 180s) wait budget and hold
+up process exit until SIGKILL. Fixed: `shutdown_slack_executor()` also calls the new
+`slack_client.signal_shutdown()`, which sets `SHUTTING_DOWN`; and the agent-run
+process's own SIGTERM/SIGINT handler (`_run_simulation`'s nested `shutdown()`) calls it
+directly too, since that process never calls `shutdown_slack_executor()` at all. Tests
+(red first): `test_shutdown_slack_executor_also_sets_the_fallback_shutdown_event` in
+`tests/unit/test_slack_executor.py` (a main-thread retry sleep aborts promptly with NO
+monkeypatching of the event), and a source-level pin,
+`test_shutdown_signals_the_slack_client_fallback_event`, in the new
+`tests/unit/test_agent_main_shutdown.py`.
+
+**L-2 (MEDIUM) — a missing `ResearcherProfile` row was treated as a PI-cleared
+instruction.** The K-4 follow-up's empty/NULL branch computed
+`db_content = (profile.private_profile_md or "").strip() if profile else ""` — a
+genuinely MISSING row and a REAL row with empty content both collapsed to
+`db_content == ""`, so a user who simply never had a profile row created had their
+on-disk private profile file unrecoverably unlinked. Fixed: return immediately when
+`profile is None`, before computing `db_content` at all. Test (red first):
+`test_a_missing_researcher_profile_row_leaves_a_stale_disk_file_alone` in
+`tests/integration/test_state_rebuild.py`.
+
+**L-3 (LOW) — an `unlink()` failure on a genuine clear silently kept serving the stale
+content.** If `profile_path.unlink()` raised in the cleared branch, the exception
+escaped to the method's outer bare `except Exception` (log-and-swallow), skipping
+`reload_private_profile()` entirely — and even a bare `reload_private_profile()` call
+would not have been enough, since the next read would just re-load the SAME file
+`unlink()` failed to remove. Fixed: wrap the unlink in its own try/except; on failure,
+call the new `Agent.force_clear_private_profile()`, which sets the cache directly to
+the same default text `Agent.private_profile`'s own fallback uses for a missing file,
+bypassing disk entirely. Test (red first):
+`test_an_unlink_failure_on_a_real_clear_still_invalidates_the_cache` in
+`tests/integration/test_state_rebuild.py` (an unwritable dir).
+
+**L-4 (LOW) — the roster re-add path never ran the private-profile DB/disk
+reconciliation.** `_rebuild_one_agent_state` (the K-6-follow-up rebuild path, an
+inactive->active roster flip) built a fresh `Agent()` and reconstructed
+pending_proposals/active_threads/cursors/call-counts from the DB, but never ran the
+K-4-follow-up reconciliation `_rebuild_agent_state` runs once at startup — a re-added
+agent's `private_profile` cache was whatever a fresh `Agent()` happened to read off a
+possibly-stale disk file. Fixed: extracted the per-agent body of
+`_sync_private_profiles_from_db` into `_sync_one_agent_private_profile_from_db`, called
+from both the startup loop (unchanged behavior) and `_rebuild_one_agent_state`. Test
+(red first): `test_a_roster_re_add_also_resyncs_the_private_profile` in
+`tests/integration/test_state_rebuild.py`.
+
+**L-5 (LOW) — the handler and its HANDLED-write retry shared one attempt budget.**
+`_poll_inbound_from_db`'s handler-retry loop and its HANDLED-write retry loop share one
+counter keyed on `message_ts`; the K-2-follow-up fix that made the counter survive from
+the handler phase into the write phase never reset it at the point it should: a handler
+that failed a few times before succeeding left the counter part-spent, so an unrelated
+write failure could hit `PI_INBOUND_MAX_ATTEMPTS` on its very first attempt. Fixed: pop
+the counter the moment the handler succeeds, before the HANDLED write is even
+attempted, giving the write its own full budget; also downgraded the write's give-up log
+from ERROR to WARNING (the side effects already ran; only the marker write is
+exhausted). Test (red first):
+`test_a_write_that_starts_failing_only_after_the_handler_retried_gets_its_own_full_budget`
+in `tests/unit/test_simulation_logic.py` (handler fails `PI_INBOUND_MAX_ATTEMPTS - 1`
+times then succeeds; the write got exactly 1 attempt before the fix, the full budget
+after).
+
+**L-6 (LOW) — the roster re-add's subscribed_channels restore trusted any channel
+name.** The K-6-follow-up query had no visibility predicate and did not intersect with
+`self._channel_id_map`, unlike `_sync_private_channels_from_db`'s own gate — a channel
+this engine process had never discovered could end up named in `subscribed_channels`
+with no corresponding `_channel_id_map`/`_channel_visibility` entry, breaking every
+lookup keyed on those maps for that name. Fixed: added the
+`AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE` predicate and intersected the
+query's result with `self._channel_id_map`. Test (red first):
+`test_a_roster_flip_never_subscribes_an_undiscovered_channel` in
+`tests/integration/test_state_rebuild.py`.
+
+**L-7 — this doc.**
