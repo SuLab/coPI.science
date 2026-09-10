@@ -213,3 +213,54 @@ async def test_pi_may_post_to_channel_false_for_a_private_non_member(db_session)
         db_session, run_id=run.id, channel_name="collab-1",
         user_id=user.id, agent_id="su",
     ) is False
+
+
+# --- SEC3-5 follow-up (opus review, audit 2026-09-10): agent_channels rows are
+# only ever written for seeded channels and collab_private channels
+# (record_channel_created) -- an ordinary topic channel an agent created on
+# its own and posted public messages into has no agent_channels row at all,
+# even though it is exactly what _visible_channels (src/routers/agent_page.py)
+# already offers the PI in the conversations UI's channel dropdown. The
+# SEEDED_CHANNELS-only exemption 403'd those legitimate channels.
+
+
+async def test_pi_may_post_to_channel_true_for_a_non_seeded_channel_with_a_public_message(
+    db_session,
+):
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", channel_name="cryo-em-methods",
+        message_ts="1.0", thread_ts=None, visibility="public",
+    )
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="cryo-em-methods",
+        user_id=user.id, agent_id="su",
+    ) is True
+
+
+async def test_pi_may_post_to_channel_false_for_a_non_seeded_channel_with_no_rows_at_all(
+    db_session,
+):
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="cryo-em-methods",
+        user_id=user.id, agent_id="su",
+    ) is False
+
+
+async def test_pi_may_post_to_channel_false_when_only_a_private_message_exists(db_session):
+    """A collab_private MESSAGE row (no agent_channels row for it at all -- an
+    inconsistent state that should never occur in practice) must not itself
+    satisfy the public-message exemption."""
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", channel_name="collab-orphan",
+        message_ts="1.0", thread_ts=None, visibility="collab_private",
+    )
+    user = await factories.make_user(db_session)
+    assert await pi_may_post_to_channel(
+        db_session, run_id=run.id, channel_name="collab-orphan",
+        user_id=user.id, agent_id="su",
+    ) is False

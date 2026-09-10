@@ -70,19 +70,31 @@ async def pi_may_post_to_channel(
     membership revokes write access.
 
     A channel name with no ``agent_channels`` row for this run is refused
-    UNLESS it is one of the app's own ``SEEDED_CHANNELS`` (SEC3-5, audit
-    2026-09-10): ``_resolve_channel``'s fallback mints a ``local:<name>``
-    public row for any name at all, which previously let an authenticated PI
-    write into an arbitrary invented channel name -- including the real name
-    of another run's private channel, which has no row IN THIS run since
-    ``channel_name`` is only unique per run. Seeded channels (``general`` and
-    friends) are exempted from the refusal because an ``agent_channels`` row
-    for them is only materialized lazily, on first join/post within a run —
-    e.g. the web message form's own default ("general") — so a brand-new run
-    that has not posted there yet must not be refused for a channel the app
-    itself considers public by construction. Any other known public channel
-    remains open to any PI in the run; known ``collab_private`` channels
-    still require membership below.
+    UNLESS (SEC3-5, audit 2026-09-10; broadened by the follow-up review the
+    same day):
+
+    * it is one of the app's own ``SEEDED_CHANNELS`` -- their
+      ``agent_channels`` row is only materialized lazily, on first
+      join/post within a run (e.g. the web message form's own "general"
+      default), so a brand-new run that has not posted there yet must not
+      be refused for a channel the app itself considers public by
+      construction; or
+    * at least one PUBLIC (``visibility != collab_private``) ``AgentMessage``
+      row already exists for this ``(run_id, channel_name)`` -- ``
+      agent_channels`` rows are only ever written for seeded channels and
+      ``collab_private`` channels (``record_channel_created``), so an
+      ordinary topic channel an agent created and posted in on its own is
+      otherwise invisible to this check even though it is exactly what
+      ``_visible_channels`` (src/routers/agent_page.py) already offers the
+      PI in the conversations UI's channel dropdown.
+
+    Without either exemption, ``_resolve_channel``'s fallback (mints a
+    ``local:<name>`` public row for any name at all) would let an
+    authenticated PI write into an arbitrary invented channel name --
+    including the real name of another run's private channel, which has no
+    row IN THIS run since ``channel_name`` is only unique per run. A known
+    public channel (with a row) remains open to any PI in the run; known
+    ``collab_private`` channels still require membership below.
     """
     row = (await db.execute(
         select(AgentChannel.id, AgentChannel.visibility)
@@ -93,7 +105,18 @@ async def pi_may_post_to_channel(
         .limit(1)
     )).first()
     if not row:
-        return channel_name in SEEDED_CHANNELS
+        if channel_name in SEEDED_CHANNELS:
+            return True
+        has_public_message = (await db.execute(
+            select(AgentMessage.id)
+            .where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.channel_name == channel_name,
+                AgentMessage.visibility != VISIBILITY_COLLAB_PRIVATE,
+            )
+            .limit(1)
+        )).first()
+        return has_public_message is not None
     channel_pk, visibility = row
     if visibility != VISIBILITY_COLLAB_PRIVATE:
         return True
