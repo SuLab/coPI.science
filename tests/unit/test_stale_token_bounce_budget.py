@@ -164,3 +164,35 @@ async def test_a_refunded_reservation_does_not_leak_across_repeated_suppressions
     await inbound._maybe_send_stale_token_bounce("real@example.com")
 
     assert inbound._STALE_TOKEN_BOUNCES_SENT["real@example.com"] == 2
+
+
+@pytest.mark.asyncio
+async def test_refunding_one_of_two_interleaved_reservations_leaves_the_other_charged(
+    monkeypatch,
+):
+    """K-5 (audit 2026-09-10): the refund wrote back the pre-reservation
+    ``sent_so_far`` snapshot instead of decrementing whatever the counter
+    holds NOW. If a second reservation lands while the first call's send is
+    in flight (the exact race "reserve before dispatch" exists to survive),
+    the old code's refund clobbered the counter back to its stale snapshot —
+    silently un-charging the SECOND reservation too, not just the one being
+    refunded.
+    """
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
+    monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: True)
+
+    def _fake_send(*a, **k):
+        # Simulate a second reservation landing while this (the first) call's
+        # send is in flight.
+        current = inbound._STALE_TOKEN_BOUNCES_SENT.get("real@example.com", 0)
+        inbound._STALE_TOKEN_BOUNCES_SENT["real@example.com"] = current + 1
+        return SendOutcome.NOT_DISPATCHED
+
+    monkeypatch.setattr(inbound, "send_html_email_outcome", _fake_send)
+
+    await inbound._maybe_send_stale_token_bounce("real@example.com")
+
+    # First reservation: 0 -> 1. The interleaved second reservation: 1 -> 2.
+    # The first call's refund must decrement (2 -> 1), leaving the second
+    # reservation's charge intact — not reset to 0.
+    assert inbound._STALE_TOKEN_BOUNCES_SENT["real@example.com"] == 1

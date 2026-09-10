@@ -1583,8 +1583,16 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
     _STALE_BOUNCES_TOUCHED[key] = time.time()
     outcome = send_html_email_outcome(to_email, subject, text_body, html_body)
     if outcome in (SendOutcome.SUPPRESSED, SendOutcome.NOT_DISPATCHED):
-        # Refund: nothing reached SES, so this attempt must not count against the cap.
-        _STALE_TOKEN_BOUNCES_SENT[key] = sent_so_far
+        # Refund: nothing reached SES, so this attempt must not count against
+        # the cap. K-5 (audit 2026-09-10): must decrement whatever the counter
+        # holds NOW, not write back the pre-reservation `sent_so_far` — two
+        # interleaved reservations for the same address (this one reserving
+        # sent_so_far+1, another reserving sent_so_far+2) would otherwise have
+        # this refund clobber the OTHER reservation's count back down to
+        # sent_so_far, silently un-charging it too. max(0, ...) keeps the
+        # counter from going negative if it is ever refunded twice.
+        current = _STALE_TOKEN_BOUNCES_SENT.get(key, 0)
+        _STALE_TOKEN_BOUNCES_SENT[key] = max(0, current - 1)
 
 
 async def _send_help_email(user: User, notification: EmailNotification) -> None:
