@@ -1385,6 +1385,53 @@ async def test_an_empty_db_value_removes_a_stale_disk_file_and_resets_the_cache(
     assert eng.agents["su"].private_profile == "No private instructions yet."
 
 
+async def test_a_roster_re_add_also_resyncs_the_private_profile(
+    db_session, tmp_path, monkeypatch,
+):
+    """L-4 (opus review, audit 2026-09-10): `_rebuild_one_agent_state` (the
+    inactive->active roster-flip path, distinct from startup's
+    `_rebuild_agent_state`) built a fresh `Agent()` and never ran the private-
+    profile DB/disk reconciliation `_sync_private_profiles_from_db` runs at
+    startup — so a roster re-add kept serving whatever the freshly-constructed
+    `Agent()`'s cache happened to read from a stale on-disk file, same defect
+    as K-4 but on the OTHER rebuild path.
+    """
+    import src.agent.agent as agent_module
+
+    (tmp_path / "private").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "private" / "su.md").write_text("stale disk instruction")
+    monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+    await factories.make_profile(
+        db_session, user=user, private_profile_md="fresh DB instruction",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id, agent_ids=("wiseman",))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    # Exactly what _sync_roster_from_db's to_add branch does: a fresh Agent()
+    # with an empty AgentState, then _rebuild_one_agent_state.
+    newbie = Agent(agent_id="su", bot_name="SuBot", pi_name="PI su")
+    eng.agents["su"] = newbie
+    eng.slack_clients["su"] = NullTransport("su")
+
+    await eng._rebuild_one_agent_state("su")
+
+    assert newbie.private_profile == "fresh DB instruction", (
+        "a roster re-add must resync the private profile from the DB, not "
+        "just serve whatever a fresh Agent() read from a stale disk file"
+    )
+    assert (tmp_path / "private" / "su.md").read_text().strip() == (
+        "fresh DB instruction"
+    )
+
+
 # ---------------------------------------------------------------
 # K-6 follow-up (opus review, audit 2026-09-10): a roster re-add must restore
 # subscribed_channels, or K-6's own-private-channel new_post gate wrongly

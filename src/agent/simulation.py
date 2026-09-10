@@ -5698,6 +5698,26 @@ class SimulationEngine:
            ``remove_if_empty=True`` path) and the cache is invalidated so the
            next read falls back to the same in-code default text a brand-new
            agent would see.
+
+        L-4 (opus review, audit 2026-09-10, same day): the actual per-agent
+        work now lives in ``_sync_one_agent_private_profile_from_db``, which
+        ``_rebuild_one_agent_state`` (the OTHER rebuild path — an
+        inactive->active roster re-add, not startup) also calls, so a
+        re-added agent gets the same DB-is-authoritative treatment a startup
+        agent does instead of just whatever a fresh ``Agent()`` read from a
+        possibly-stale disk file.
+        """
+        for agent in self.agents.values():
+            await self._sync_one_agent_private_profile_from_db(agent)
+
+    async def _sync_one_agent_private_profile_from_db(self, agent: "Agent") -> None:
+        """Reconcile ONE agent's private profile against the DB (L-4 split
+        of ``_sync_private_profiles_from_db``, opus review, audit 2026-09-10).
+
+        See ``_sync_private_profiles_from_db`` for the full rationale; this
+        holds the actual per-agent logic so both rebuild paths — startup's
+        loop over every agent, and ``_rebuild_one_agent_state``'s single
+        re-added agent — share it exactly.
         """
         if not self.session_factory:
             return
@@ -5706,54 +5726,53 @@ class SimulationEngine:
         from src.agent.agent import _profiles_dir
         from src.models import AgentRegistry, ResearcherProfile
 
-        for agent in self.agents.values():
-            try:
-                async with self.session_factory() as db:
-                    agent_reg = (await db.execute(
-                        sa_select(AgentRegistry).where(
-                            AgentRegistry.agent_id == agent.agent_id
-                        )
-                    )).scalar_one_or_none()
-                    if not agent_reg or not agent_reg.user_id:
-                        continue
-                    profile = (await db.execute(
-                        sa_select(ResearcherProfile).where(
-                            ResearcherProfile.user_id == agent_reg.user_id
-                        )
-                    )).scalar_one_or_none()
-                db_content = (profile.private_profile_md or "").strip() if profile else ""
-                if db_content:
-                    if agent.private_profile.strip() == db_content:
-                        continue
-                    agent.update_private_profile(profile.private_profile_md)
-                    logger.info(
-                        "[%s] Private profile disk file was stale relative to the "
-                        "DB at startup — resynced from ResearcherProfile.private_profile_md",
-                        agent.agent_id,
+        try:
+            async with self.session_factory() as db:
+                agent_reg = (await db.execute(
+                    sa_select(AgentRegistry).where(
+                        AgentRegistry.agent_id == agent.agent_id
                     )
-                    continue
-                # DB says "cleared" — only act if a real (stale) file exists
-                # on disk; a never-written agent already reads the same
-                # in-code default `Agent.private_profile` falls back to.
-                # Path constructed exactly like `update_private_profile`'s own
-                # (agent.py's `_profiles_dir()`, not profile_export.py's
-                # separately-configurable one) so both branches of this
-                # method honour the same override.
-                profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
-                if not profile_path.exists():
-                    continue
-                profile_path.unlink()
-                agent.reload_private_profile()
+                )).scalar_one_or_none()
+                if not agent_reg or not agent_reg.user_id:
+                    return
+                profile = (await db.execute(
+                    sa_select(ResearcherProfile).where(
+                        ResearcherProfile.user_id == agent_reg.user_id
+                    )
+                )).scalar_one_or_none()
+            db_content = (profile.private_profile_md or "").strip() if profile else ""
+            if db_content:
+                if agent.private_profile.strip() == db_content:
+                    return
+                agent.update_private_profile(profile.private_profile_md)
                 logger.info(
-                    "[%s] DB private profile is cleared but disk held a stale "
-                    "file at startup — removed it",
+                    "[%s] Private profile disk file was stale relative to the "
+                    "DB at startup — resynced from ResearcherProfile.private_profile_md",
                     agent.agent_id,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Failed to sync private profile from DB at startup: %s",
-                    agent.agent_id, exc,
-                )
+                return
+            # DB says "cleared" — only act if a real (stale) file exists
+            # on disk; a never-written agent already reads the same
+            # in-code default `Agent.private_profile` falls back to.
+            # Path constructed exactly like `update_private_profile`'s own
+            # (agent.py's `_profiles_dir()`, not profile_export.py's
+            # separately-configurable one) so both branches of this
+            # method honour the same override.
+            profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
+            if not profile_path.exists():
+                return
+            profile_path.unlink()
+            agent.reload_private_profile()
+            logger.info(
+                "[%s] DB private profile is cleared but disk held a stale "
+                "file at startup — removed it",
+                agent.agent_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to sync private profile from DB at startup: %s",
+                agent.agent_id, exc,
+            )
 
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
@@ -6148,6 +6167,15 @@ class SimulationEngine:
         agent = self.agents.get(agent_id)
         if not agent or not self.session_factory or not self.simulation_run_id:
             return
+        # L-4 (opus review, audit 2026-09-10): a roster re-add builds a fresh
+        # `Agent()` whose private_profile cache is whatever it happened to
+        # read off disk at construction — this rebuild path never ran the
+        # DB-is-authoritative reconciliation startup's `_rebuild_agent_state`
+        # does via `_sync_private_profiles_from_db`, so a re-added agent
+        # could keep serving a stale on-disk instruction indefinitely. Run
+        # the same per-agent reconciliation here, before anything below
+        # reads `agent.private_profile`.
+        await self._sync_one_agent_private_profile_from_db(agent)
         try:
             from sqlalchemy import func as sa_func
             from sqlalchemy import or_ as sa_or
