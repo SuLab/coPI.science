@@ -1860,6 +1860,30 @@ class TestTombstonedThreadIsNotResurrected:
         engine._reopen_thread.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_failed_handled_write_keeps_the_attempt_count_for_a_tombstoned_row(
+        self, monkeypatch,
+    ):
+        """K-7 (audit 2026-09-10): if the terminal HANDLED write itself fails,
+        the attempt counter must NOT be popped — popping unconditionally would
+        forget every attempt already spent and let SEC2-1's cap restart from
+        zero on the very next poll of the same still-'ingested'/'pending' row."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
+        dead_ts = "1776900000.000300"
+        engine = self._engine_with_pi_row_on_dead_thread(monkeypatch, dead_ts)
+        engine._mark_pi_inbound_row_handled = AsyncMock(return_value=False)
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS):
+            await engine._poll_inbound_from_db()
+
+        engine._mark_pi_inbound_row_handled.assert_awaited()
+        assert "500.000001" in engine._pi_inbound_attempts, (
+            "a failed HANDLED write must not clear the attempt count"
+        )
+
+    @pytest.mark.asyncio
     async def test_handle_pi_inbound_entry_returns_early_for_a_tombstoned_thread(self, monkeypatch):
         from src.agent.message_log import LogEntry
 
@@ -3012,6 +3036,31 @@ class TestPollInboundFromDbGuardsTheHandler:
         assert len(give_up_records) == 1
         assert engine._pi_inbound_attempts == {}, (
             "the per-message_ts counter must be pruned once the row is terminal"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_handled_write_keeps_the_attempt_count_after_giving_up(self):
+        """K-7 (audit 2026-09-10): the handler-failure give-up branch pops the
+        attempt counter unconditionally today even when the terminal HANDLED
+        write itself fails — losing track of how many attempts were already
+        spent and letting the row's cap restart from zero on the next poll."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(side_effect=ConnectionError("boom"))
+        engine = self._engine(rows, handler)
+        engine._mark_pi_inbound_row_handled = AsyncMock(return_value=False)
+
+        for _ in range(PI_INBOUND_MAX_ATTEMPTS):
+            await engine._poll_inbound_from_db()
+
+        engine._mark_pi_inbound_row_handled.assert_awaited()
+        assert "1.0" in engine._pi_inbound_attempts, (
+            "a failed HANDLED write must not clear the attempt count"
         )
 
     @pytest.mark.asyncio

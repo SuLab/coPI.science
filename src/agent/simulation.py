@@ -3574,8 +3574,14 @@ class SimulationEngine:
                             "thread after %d attempts",
                             r.channel_name, r.message_ts, attempts,
                         )
-                        await self._mark_pi_inbound_row_handled(r.id)
-                        self._pi_inbound_attempts.pop(r.message_ts, None)
+                        # K-7 (audit 2026-09-10): only forget the attempt
+                        # count if the HANDLED write actually committed — a
+                        # failed write leaves the row 'ingested'/'pending', so
+                        # popping unconditionally would forget every attempt
+                        # already spent and let SEC2-1's cap restart from zero
+                        # on the very next poll of the same row.
+                        if await self._mark_pi_inbound_row_handled(r.id):
+                            self._pi_inbound_attempts.pop(r.message_ts, None)
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
                     self._pi_inbox_cursor = r.created_at
                 continue
@@ -3644,8 +3650,13 @@ class SimulationEngine:
                         # Terminal: stop the cursor-independent 'ingested'
                         # disjunct from re-selecting this row forever (SEC2-1).
                         # The PI's text is already in the log either way.
-                        await self._mark_pi_inbound_row_handled(r.id)
-                        self._pi_inbound_attempts.pop(r.message_ts, None)
+                        # K-7 (audit 2026-09-10): only forget the attempt
+                        # count once the HANDLED write actually commits — a
+                        # failed write leaves the row retryable, so popping
+                        # unconditionally would reset the cap to zero on the
+                        # very next poll of the same row.
+                        if await self._mark_pi_inbound_row_handled(r.id):
+                            self._pi_inbound_attempts.pop(r.message_ts, None)
                         if r.created_at and r.created_at > self._pi_inbox_cursor:
                             self._pi_inbox_cursor = r.created_at
                         continue
