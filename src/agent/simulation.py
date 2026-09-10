@@ -3411,32 +3411,26 @@ class SimulationEngine:
                 logger.debug("Polling error for #%s: %s", ch_name, exc)
 
     def _record_pi_inbound_attempt(self, message_ts: str) -> int:
-        """Increment the in-process attempt counter for ``message_ts``, resetting
-        it first if the last attempt was more than PI_INBOX_LOOKBACK_S ago (REV4-5,
-        audit 2026-09-08). Without the reset, failures spread arbitrarily far apart
-        in time — each individually transient — accumulate toward
-        PI_INBOUND_MAX_ATTEMPTS and eventually stamp a row terminal even though no
-        two of them were ever part of the same incident."""
-        now = time.monotonic()
-        prior_attempts, last_attempt = self._pi_inbound_attempts.get(message_ts, (0, now))
-        if now - last_attempt > PI_INBOX_LOOKBACK_S:
-            prior_attempts = 0
-        attempts = prior_attempts + 1
-        self._pi_inbound_attempts[message_ts] = (attempts, now)
+        """Increment the in-process attempt counter for ``message_ts``.
+
+        A plain count with no time decay (REV4-5 was reverted by the follow-up
+        review): a decay keyed on the last attempt made PI_INBOUND_MAX_ATTEMPTS
+        unreachable whenever consecutive polls were further apart than the
+        window — which one throttled agent turn can be — so a deterministically
+        failing row was re-run forever. Entries live until the row is stamped
+        terminal, succeeds, or drops out of the polled batch (see
+        _prune_stale_pi_inbound_attempts)."""
+        attempts = self._pi_inbound_attempts.get(message_ts, (0, 0.0))[0] + 1
+        self._pi_inbound_attempts[message_ts] = (attempts, time.monotonic())
         return attempts
 
-    def _prune_stale_pi_inbound_attempts(self) -> None:
-        """Drop attempt-counter entries untouched for more than PI_INBOX_LOOKBACK_S
-        (REV4-5). Entries are also popped eagerly on give-up/success, but a row
-        that stops reappearing in the polled batch (e.g. superseded upstream)
-        would otherwise leave its counter behind forever — this bounds the dict
-        even for that case."""
-        stale_cutoff = time.monotonic() - PI_INBOX_LOOKBACK_S
-        stale_keys = [
-            ts for ts, (_, last_attempt) in self._pi_inbound_attempts.items()
-            if last_attempt < stale_cutoff
-        ]
-        for ts in stale_keys:
+    def _prune_stale_pi_inbound_attempts(self, current_batch: set[str]) -> None:
+        """Drop attempt-counter entries for rows no longer in the polled batch.
+
+        A row leaves the batch once it is stamped HANDLED (or superseded
+        upstream); its counter is popped eagerly on give-up/success, and this
+        bounds the dict for every other exit path without any time window."""
+        for ts in [ts for ts in self._pi_inbound_attempts if ts not in current_batch]:
             del self._pi_inbound_attempts[ts]
 
     async def _poll_inbound_from_db(self) -> None:
@@ -3451,7 +3445,6 @@ class SimulationEngine:
         """
         if not self.session_factory or not self.simulation_run_id:
             return
-        self._prune_stale_pi_inbound_attempts()
         from sqlalchemy import and_ as sa_and
         from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
@@ -3495,6 +3488,7 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning("Inbound DB poll failed: %s", exc)
             return
+        self._prune_stale_pi_inbound_attempts({r.message_ts for r in rows if r.message_ts})
 
         for r in rows:
             # COR-10(3): dedup for a PI row reads the durable handled-marker,
