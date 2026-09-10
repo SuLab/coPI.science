@@ -1144,3 +1144,46 @@ async def test_post_failure_count_stays_zero_when_slack_is_off_for_the_agent(db_
 
     thread = eng.agents["su"].state.active_threads[root_ts]
     assert thread.post_failure_count == 0
+
+
+async def test_post_failure_count_stays_zero_for_a_db_origin_root_even_when_connected(
+    db_session,
+):
+    """A3/RC-9 (opus review, audit 2026-09-08): `slack_ts IS NULL` is not evidence
+    of a failure for a thread whose ROOT never had Slack presence either -- a
+    thread started with Slack off, a PI-web-rooted thread, or an unrepaired legacy
+    row all leave every reply legitimately `slack_ts IS NULL` even once the agent
+    later gets a CONNECTED client. Without gating on the root, this DB-origin
+    thread would misread its own normal traffic as two strikes and park it on
+    every restart."""
+    run = await factories.make_simulation_run(db_session)
+    base = round(time.time(), 4)
+    root_ts = f"{base:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="wiseman", channel_id="local:general",
+        channel_name="general", message_ts=root_ts, thread_ts=None,
+        posted_at=base, content="root post", sender_name="WisemanBot",
+        is_bot=True,  # slack_ts left NULL: this root was never on Slack
+    )
+    for i in range(2):
+        ts = f"{base + i + 1:.6f}"
+        await factories.make_agent_message(
+            db_session, run=run, agent_id="su", channel_id="local:general",
+            channel_name="general", message_ts=ts, thread_ts=root_ts,
+            posted_at=base + i + 1, content=f"reply {i}",
+            sender_name="SuBot", is_bot=True,
+        )
+    await db_session.flush()
+
+    eng = _engine_for(
+        db_session, run.id,
+        slack_clients={"su": _ConnectedClient(), "wiseman": NullTransport("wiseman")},
+    )
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.post_failure_count == 0, (
+        "a DB-origin root (no Slack presence) must not have its trailing "
+        "slack_ts-IS-NULL replies misread as post failures"
+    )

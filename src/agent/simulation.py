@@ -5287,7 +5287,9 @@ class SimulationEngine:
         """
         return sum(1 for h in history if h.posted_at < reopened_at)
 
-    def _derive_post_failure_count(self, agent_id: str, history: list[LogEntry]) -> int:
+    def _derive_post_failure_count(
+        self, agent_id: str, thread_id: str, history: list[LogEntry]
+    ) -> int:
         """Reconstruct the two-strike post-failure backoff on rebuild (RC-9b,
         #20 audit 2026-09-08).
 
@@ -5307,9 +5309,22 @@ class SimulationEngine:
         misinterpret ordinary traffic as two strikes and park every thread on
         every restart. Only a connected client's refusal is evidence of an
         actual failure.
+
+        Also gated (A3/RC-9, opus review, audit 2026-09-08) on the THREAD's
+        root actually having Slack presence: ``slack_ts IS NULL`` is not
+        evidence of a failure for a thread whose ROOT never had one either —
+        ``_post_message`` writes DB-only rows deliberately (``can_mirror=False``)
+        for a thread started with Slack off, a PI-web-rooted thread, or an
+        unrepaired legacy row, and every reply in such a thread is
+        legitimately ``slack_ts IS NULL`` even with a connected client.
+        ``_slack_parent_ts`` is the same resolution ``_post_message`` itself
+        uses to decide whether to mirror at all, so it is the right check
+        here too: ``None`` means the root has no Slack presence.
         """
         client = self.slack_clients.get(agent_id)
         if not (client and client.is_connected):
+            return 0
+        if self._slack_parent_ts(thread_id) is None:
             return 0
         count = 0
         for entry in reversed(history):
@@ -5493,7 +5508,7 @@ class SimulationEngine:
                     has_pending_reply=has_pending,
                     message_count_offset=offset,
                     pi_context=pi_context,
-                    post_failure_count=self._derive_post_failure_count(aid, history),
+                    post_failure_count=self._derive_post_failure_count(aid, thread_id, history),
                 )
 
         # 3. Rebuild pending_proposals per agent
@@ -5901,7 +5916,7 @@ class SimulationEngine:
                     has_pending_reply=(last_sender is not None and last_sender != agent_id),
                     message_count_offset=offset,
                     pi_context=pi_context,
-                    post_failure_count=self._derive_post_failure_count(agent_id, history),
+                    post_failure_count=self._derive_post_failure_count(agent_id, thread_id, history),
                 )
 
             # Fast-forward the cursor ONLY for an agent that has prior state to
