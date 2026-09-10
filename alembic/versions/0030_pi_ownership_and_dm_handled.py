@@ -56,6 +56,25 @@ of existing inbound ``pi_dm_messages`` rows (small: one per DM ever sent while
 Slack/the web DM path has been live) and runs under the same migration
 transaction as the two ADD COLUMNs.
 
+The sizing note above is only the ADD COLUMNs; the two other statements
+against ``agent_messages`` are not catalogue-only and do not share that
+bound. ``create_foreign_key`` for ``agent_messages_sender_user_id_fkey``
+validates the new constraint by scanning every existing ``agent_messages``
+row (a table scan, done while still holding the ACCESS EXCLUSIVE lock the
+ADD COLUMN took), and ``create_index`` on ``sender_user_id`` (a plain,
+non-``CONCURRENTLY`` index build) blocks writes to ``agent_messages`` for its
+duration. Measured against a local copy of the production database
+(``copi-prodtest-db``, checked 2026-09-10, opus review SEC-F4):
+``SELECT count(*) FROM agent_messages`` = 8,460 rows. At that size both
+statements are sub-second and the lock window is not a practical concern —
+this migration's shape (validate-inline FK + plain index) is fine as written.
+If ``agent_messages`` ever grows past roughly 5 million rows, re-split this
+into ``create_foreign_key(..., postgresql_not_valid=True)`` followed by a
+separate ``VALIDATE CONSTRAINT`` (or just leave it NOT VALID for new rows
+only) and ``create_index(..., postgresql_concurrently=True)`` outside the
+migration's transaction, so neither statement holds an exclusive lock across
+a full-table pass.
+
 Downgrade is idempotent (if_exists) per the 0022+ convention.
 """
 
