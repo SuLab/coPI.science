@@ -733,6 +733,29 @@ def test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page(mon
     assert fake.page_n < MAX_PAGES
 
 
+def test_a_single_pages_wait_budget_is_capped_at_the_per_call_default(monkeypatch):
+    """Opus-review follow-up to R-1: PAGINATION_WAIT_BUDGET_SECONDS (600s) is
+    much larger than RATE_LIMIT_WAIT_BUDGET_SECONDS (180s), and page 0 starts
+    with the *entire* listing budget as its remaining allowance — so, before
+    this fix, a lone first page could be given ~600s instead of the per-call
+    180s default. Each page's `_wait_budget` must be capped at
+    RATE_LIMIT_WAIT_BUDGET_SECONDS regardless of how much listing budget
+    remains."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = SequencedWebClient(sequences={"conversations_list": [
+        slack_error("ratelimited", retry_after=200),
+    ] * 50})
+    c = _client(fake)
+    from slack_sdk.errors import SlackApiError
+    with pytest.raises(SlackApiError):
+        c._paginate("conversations_list", "channels")
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS, (
+        f"a single page slept {sum(slept)}s, above the {RATE_LIMIT_WAIT_BUDGET_SECONDS}s "
+        "per-call cap — the listing's much larger budget leaked into page 0"
+    )
+
+
 def test_exclude_archived_defaults_to_false_because_an_archived_channel_owns_its_name():
     """Both callers ask this question to learn whether a *name* is in use, and Slack
     keeps an archived channel's name reserved. Hiding archived channels would send

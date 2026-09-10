@@ -438,6 +438,14 @@ class AgentSlackClient:
         page whose remaining budget is exhausted before it even starts is asked for
         no wait at all — it either succeeds immediately or fails immediately — which
         surfaces as the same "a page after the first failed" path below.
+
+        Each page's budget is additionally capped at ``RATE_LIMIT_WAIT_BUDGET_SECONDS``
+        (opus review follow-up to R-1, audit 2026-09-10): ``PAGINATION_WAIT_BUDGET_SECONDS``
+        (600s) is larger than the per-call default (180s) precisely so a listing gets
+        more total patience across many pages than one call would — but page 0 starts
+        with the *entire* remaining listing budget, so without this cap a single early
+        page could be handed the full 600s instead of the 180s any other caller gets
+        for one call.
         """
         items: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
@@ -449,8 +457,9 @@ class AgentSlackClient:
             if cursor:
                 call["cursor"] = cursor
             remaining = PAGINATION_WAIT_BUDGET_SECONDS - (time.monotonic() - listing_started)
+            page_budget = min(RATE_LIMIT_WAIT_BUDGET_SECONDS, max(remaining, 0.0))
             try:
-                result = self._api(method, _wait_budget=max(remaining, 0.0), **call)
+                result = self._api(method, _wait_budget=page_budget, **call)
             except SlackApiError as exc:
                 if page == 0:
                     raise
