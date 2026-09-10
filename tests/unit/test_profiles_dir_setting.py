@@ -27,6 +27,16 @@ def test_profiles_dir_honors_copi_profiles_dir_env_var(monkeypatch):
     assert s.profiles_dir == "/var/lib/copi/profiles"
 
 
-def test_profiles_dir_accepts_a_direct_kwarg():
-    s = Settings(_env_file=None, profiles_dir="/tmp/custom-profiles")
+def test_profiles_dir_accepts_a_direct_kwarg(monkeypatch):
+    monkeypatch.setenv("COPI_PROFILES_DIR", "/tmp/custom-profiles")
+    s = Settings(_env_file=None)
     assert s.profiles_dir == "/tmp/custom-profiles"
+
+
+def test_profiles_dir_field_name_is_not_a_second_env_var(monkeypatch):
+    """`populate_by_name=True` on the model would also accept the bare field
+    name (`PROFILES_DIR`) as an environment source alongside the intended
+    `COPI_PROFILES_DIR` alias. Only the alias should be honoured."""
+    monkeypatch.setenv("PROFILES_DIR", "/oops")
+    s = Settings(_env_file=None)
+    assert s.profiles_dir == "profiles"

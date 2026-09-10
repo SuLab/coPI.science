@@ -165,7 +165,15 @@ def _str_field_names():
 
 
 def _sweep_settings(value_for):
-    return Settings(_env_file=None, **{n: value_for(n) for n in _str_field_names()})
+    # A field with a `validation_alias` (e.g. profiles_dir/COPI_PROFILES_DIR) only
+    # accepts that alias as a constructor kwarg now that Settings no longer sets
+    # `populate_by_name=True` (audit 2026-09-08, opus review) — feed it the alias,
+    # not the bare field name.
+    kwargs = {}
+    for n in _str_field_names():
+        alias = Settings.model_fields[n].validation_alias
+        kwargs[alias if isinstance(alias, str) else n] = value_for(n)
+    return Settings(_env_file=None, **kwargs)
 
 
 def test_every_string_field_is_classified_secret_or_not():
