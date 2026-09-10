@@ -892,3 +892,90 @@ async def test_flush_chunks_a_batch_that_exceeds_the_bind_parameter_ceiling(db_s
     # Every row landed, and the buffer drained instead of being re-queued.
     assert await _count_messages(db_session, run.id) == n
     assert engine._pending_persist == []
+
+
+# ---------------------------------------------------------------
+# K-1 — a transient DB failure in _agent_ids_owned_by_user must not get the
+# row stamped HANDLED; it must retry (and apply side effects) next tick.
+# ---------------------------------------------------------------
+
+class _FlakyOwnershipFactory:
+    """Wraps the real (savepoint-rolled-back) test session so exactly the
+    AgentRegistry ownership SELECT fails once — everything else (the poll's
+    own row query, the INGESTED/HANDLED marker writes) behaves normally.
+    Exercises the real ``_agent_ids_owned_by_user`` DB-error path rather than
+    stubbing the method itself.
+    """
+
+    def __init__(self, session):
+        self._s = session
+        self.armed = True
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt, *a, **kw):
+        if self.armed and "agent_registry" in str(stmt).lower():
+            self.armed = False
+            raise RuntimeError("transient DB error")
+        return await self._s.execute(stmt, *a, **kw)
+
+    async def commit(self):
+        return await self._s.commit()
+
+    async def refresh(self, *a, **kw):
+        return await self._s.refresh(*a, **kw)
+
+
+async def test_a_transient_ownership_lookup_failure_retries_instead_of_discarding(
+    db_session,
+):
+    from src.agent.agent import Agent
+    from src.agent.state import ThreadState
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+
+    su = Agent("su", "SuBot", "Andrew Su")
+    su.state.active_threads["100.0"] = ThreadState(
+        thread_id="100.0", channel="general", other_agent_id=None,
+    )
+    engine = _engine_for(db_session, run.id, agents=[su])
+    engine.session_factory = _FlakyOwnershipFactory(db_session)
+    engine.message_log.append(LogEntry(
+        ts="100.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+        content="root post", posted_at=100.0, is_bot=True,
+    ))
+
+    row = await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="local:general", channel_name="general",
+        message_ts="150.000001", thread_ts="100.0", posted_at=150.000001,
+        content="please revisit the panel", sender_name="Andrew Su (PI)",
+        sender_user_id=user.id,
+    )
+    await db_session.refresh(row)
+    engine._pi_inbox_cursor = row.created_at + timedelta(seconds=5)
+
+    # Tick 1: the ownership lookup's SELECT raises, so the handler must raise
+    # (not silently resolve to the empty set) and the row must stay
+    # 'ingested' (retried), not get stamped 'handled' — and the ownership-
+    # gated side effect (pi_context) must NOT have been applied yet.
+    await engine._poll_inbound_from_db()
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "ingested"
+    assert su.state.active_threads["100.0"].pi_context is None
+
+    # Tick 2: the lookup succeeds, so the row is fully handled and the side
+    # effect lands.
+    await engine._poll_inbound_from_db()
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "handled"
+    assert su.state.active_threads["100.0"].pi_context == "please revisit the panel"

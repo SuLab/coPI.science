@@ -62,6 +62,18 @@ from src.services.llm import (
 logger = logging.getLogger(__name__)
 
 
+class PiOwnershipLookupFailed(Exception):
+    """Raised when ``_agent_ids_owned_by_user`` cannot query the DB (audit
+    2026-09-10 K-1).
+
+    Distinct from the fail-closed empty-set return used for a NULL
+    ``sender_user_id`` (nothing to authorize against) so a transient DB
+    outage propagates through ``_handle_pi_inbound_entry`` to the caller's
+    existing retry machinery instead of being silently treated as "PI owns
+    no agents" and having the row stamped HANDLED after one blip.
+    """
+
+
 def _visibility_permits(origin: str, current: str) -> bool:
     """True iff an origin-visibility record may appear in a current-visibility context.
 
@@ -3736,9 +3748,15 @@ class SimulationEngine:
         (``AgentDelegate.agent_registry_id -> AgentRegistry.id`` for this
         user) — instead of trusting whoever else happens to have posted in the
         same thread. Returns the empty set for ``None`` (no sender recorded)
-        or on any DB failure: fail closed, since an empty set makes every
-        ownership-gated side effect in ``_handle_pi_inbound_entry`` a no-op
-        rather than a wrong grant.
+        or when ``session_factory`` is unset: fail closed, since an empty set
+        makes every ownership-gated side effect in
+        ``_handle_pi_inbound_entry`` a no-op rather than a wrong grant.
+
+        A DB *error* (as opposed to a NULL user id) is NOT swallowed into the
+        same empty set — it raises ``PiOwnershipLookupFailed`` so the caller
+        treats this row as a failed attempt and retries it, rather than the
+        handler returning normally and the poller stamping the row HANDLED
+        on what may be a transient DB blip (audit 2026-09-10 K-1).
         """
         if not user_id or not self.session_factory:
             return set()
@@ -3764,8 +3782,9 @@ class SimulationEngine:
                 )).scalars().all()
             return set(rows)
         except Exception as exc:
-            logger.warning("Failed to resolve agents owned by user %s: %s", user_id, exc)
-            return set()
+            raise PiOwnershipLookupFailed(
+                f"Failed to resolve agents owned by user {user_id}: {exc}"
+            ) from exc
 
     async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
         """Apply PI-message side effects, gated to agents the sender owns.
