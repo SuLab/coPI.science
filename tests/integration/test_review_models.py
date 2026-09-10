@@ -263,3 +263,17 @@ async def test_review_dimension_scores_absent_is_sql_null(db_session):
         )
     ).scalar_one_or_none()
     assert found == review.id
+
+
+async def test_recorded_by_columns_exist_and_default_null(db_session):
+    from sqlalchemy import text
+
+    cols = (
+        await db_session.execute(
+            text(
+                "SELECT table_name FROM information_schema.columns "
+                "WHERE column_name='recorded_by_user_id'"
+            )
+        )
+    ).scalars().all()
+    assert sorted(cols) == ["assessment_review_events", "assessment_reviews"]

@@ -99,6 +99,12 @@ class AssessmentReview(Base):
     #: same pair in 0038 for this same reason. NULL on every pre-0043 row.
     rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rubric_content_hash: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    #: Set ONLY when an admin entered this row while impersonating the user
+    #: named in reviewer_user_id (operator decision 2026-09-10, reversing
+    #: N1/A15). NULL = the named user acted in person.
+    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     comment: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     #: 'learn' / 'log_only' — whether the review-feedback-analysis job should
     #: consider this row.
@@ -152,6 +158,12 @@ class AssessmentReviewEvent(Base):
         nullable=True,
     )
     actor_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Set ONLY when an admin entered this row while impersonating the user
+    #: named in actor_user_id (operator decision 2026-09-10, reversing
+    #: N1/A15). NULL = the named user acted in person.
+    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
