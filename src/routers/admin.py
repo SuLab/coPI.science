@@ -53,7 +53,7 @@ from src.models import (
     User,
 )
 from src.services.agent_activation import activation_blockers
-from src.services.assessment_detail import build_assessment_detail
+from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
 from src.services.cohorts import (
     compute_gates,
     record_cohort_audit_event,
@@ -120,6 +120,13 @@ templates = Jinja2Templates(directory="templates")
 # path all read it — so a third stop reason added there reaches this page for
 # free. A test, not a filter or a global: `selectattr` takes a test name.
 templates.env.tests["truncated_stop"] = is_truncated_stop
+
+# `key_points` >= 1.3.0 is the three-group object; the (key, label) pairs also
+# fix the render order on both `_assessments_body.html` and
+# `_assessment_detail_body.html`. Registered as a Jinja global rather than a
+# context key: the admin assessments handler forbids a new one (see the
+# comment on `_assessments_body.html`'s card-list block).
+templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
 
 # Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
 # can move an already-approved agent between these from the edit page; the sim

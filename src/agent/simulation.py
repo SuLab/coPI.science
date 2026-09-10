@@ -63,6 +63,7 @@ from src.models import (
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.assessment_detail import KEY_POINT_GROUPS, normalize_key_points
 from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
@@ -4520,6 +4521,18 @@ class SimulationEngine:
                 "[%s] Assessment carries %d key_points (contract asks for %d-%d)",
                 agent_id, len(key_points), _KEY_POINTS_MIN, _KEY_POINTS_MAX,
             )
+        elif isinstance(key_points, dict):
+            for group_key, _label in KEY_POINT_GROUPS:
+                group = key_points.get(group_key)
+                if isinstance(group, list) and not (
+                    _KEY_POINT_GROUP_MIN <= len(group) <= _KEY_POINT_GROUP_MAX
+                ):
+                    logger.warning(
+                        "[%s] Assessment key_points.%s carries %d bullets "
+                        "(contract asks for %d-%d)",
+                        agent_id, group_key, len(group),
+                        _KEY_POINT_GROUP_MIN, _KEY_POINT_GROUP_MAX,
+                    )
         # Built once, up front, so a failed first attempt has a plain dict —
         # not a session-bound ORM instance — ready to hand straight to
         # _pending_assessments for a later retry.
@@ -4551,9 +4564,7 @@ class SimulationEngine:
             # keeps the original, because a malformed narrative field must never
             # cost the verdict (A20).
             headline=_str_or_none(verdict.get("headline")),
-            key_points=(
-                key_points if isinstance(key_points, list) else None
-            ),
+            key_points=normalize_key_points(key_points),
             elevator_pitch=_str_or_none(verdict.get("elevator_pitch")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
@@ -9114,6 +9125,10 @@ _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 _HEADLINE_SOFT_LIMIT = 200
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
+# Task 7 / F3: the grouped (>= 1.3.0) key_points shape bounds each of the
+# three named groups individually rather than the flat 3-5 total above.
+_KEY_POINT_GROUP_MIN = 1
+_KEY_POINT_GROUP_MAX = 2
 
 
 def _normalize_gating(raw: object) -> dict | None:

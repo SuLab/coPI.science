@@ -170,3 +170,24 @@ async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engi
         assert row.raw_verdict["key_points"] == "not a list at all"
     finally:
         await _delete_run(factory, run_id)
+
+
+def test_normalize_accepts_legacy_list_and_the_three_group_object():
+    from src.services.assessment_detail import normalize_key_points
+
+    assert normalize_key_points(["a", "b", "c"]) == ["a", "b", "c"]
+    obj = {"significance": ["s"], "innovation": ["i1", "i2"], "commercial_potential": ["c"]}
+    assert normalize_key_points(obj) == obj
+
+
+def test_normalize_rejects_wrong_shapes():
+    from src.services.assessment_detail import normalize_key_points
+
+    assert normalize_key_points("not a list") is None
+    assert normalize_key_points({"significance": ["s"]}) is None            # missing keys
+    assert normalize_key_points(
+        {"significance": "s", "innovation": [], "commercial_potential": []}
+    ) is None
+    assert normalize_key_points(
+        {"significance": [], "innovation": [], "commercial_potential": [], "extra": []}
+    ) is None

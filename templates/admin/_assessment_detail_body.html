@@ -89,7 +89,21 @@
         {% endif %}
     </div>
     {% endif %}
-    {% if a.key_points %}
+    {% if a.key_points is mapping %}
+    <div class="mt-4">
+        <div class="text-xs font-semibold text-gray-500 uppercase">Key points</div>
+        <div class="assessment-brief-points mt-1 space-y-2">
+            {% for key, label in key_point_groups %}
+            {% if a.key_points.get(key) %}
+            <div><span class="font-semibold text-gray-800 text-sm">{{ label }}</span>
+                <ul class="list-disc list-inside text-sm text-gray-700">
+                {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                </ul></div>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+    {% elif a.key_points %}
     <div class="mt-4">
         <div class="text-xs font-semibold text-gray-500 uppercase">Key points</div>
         <ul class="assessment-brief-points mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">

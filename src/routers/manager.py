@@ -49,7 +49,7 @@ from src.database import get_db
 from src.dependencies import get_review_user, get_staff_user
 from src.models import USER_ROLE_PI, AgentRegistry, PromptChangeSuggestion, User
 from src.services.agent_mute import set_agent_mute_state
-from src.services.assessment_detail import build_assessment_detail
+from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
 from src.services.directory import (
     build_discussions_view,
     build_run_detail,
@@ -69,6 +69,11 @@ from src.services.thread_panel import panel_cards_by_thread
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_review_user)])
 templates = Jinja2Templates(directory="templates")
+
+# See src/routers/admin.py's identical registration: both routers include the
+# same `_assessments_body.html`/`_assessment_detail_body.html` partials, and
+# each `Jinja2Templates` instance keeps its own globals.
+templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
 
 _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity

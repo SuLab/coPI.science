@@ -104,6 +104,32 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
+#: Task 7 / F3. scout_hub >= 1.3.0 emits `key_points` as three named groups
+#: rather than one flat 3-5 bullet list; the (key, label) order here is also
+#: the render order on both assessment surfaces. Registered as a Jinja global
+#: (see the `templates = Jinja2Templates(...)` site) rather than threaded
+#: through every context dict, per the admin assessments handler's
+#: no-new-context-key rule.
+KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
+    ("significance", "Significance"),
+    ("innovation", "Innovation"),
+    ("commercial_potential", "Commercial potential"),
+)
+_KEY_POINT_KEYS = frozenset(k for k, _ in KEY_POINT_GROUPS)
+
+
+def normalize_key_points(value: object) -> list | dict | None:
+    """Accept the legacy flat list (rows written under scout_hub <= 1.2.0) or
+    the three-group object (>= 1.3.0). Anything else is None: a malformed
+    narrative field never costs the verdict (A20); raw_verdict keeps it."""
+    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+        return value
+    if isinstance(value, dict) and set(value) == _KEY_POINT_KEYS and all(
+        isinstance(v, list) and all(isinstance(x, str) for x in v) for v in value.values()
+    ):
+        return value
+    return None
+
 
 def strip_assessment_sidecar(text: str) -> str:
     """Drop the ``<assessment_json>`` sidecar, closed or truncated.

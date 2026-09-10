@@ -1555,3 +1555,32 @@ async def test_the_jump_nav_omits_rationale_when_there_is_none(
     assert 'href="#rationale"' not in html
     for anchor in ("#brief", "#panel", "#scores", "#review", "#timeline"):
         assert f'href="{anchor}"' in html, anchor
+
+
+async def test_a_grouped_key_points_sidecar_renders_the_three_labels_in_order(
+    client, db_session, admin
+):
+    """Task 7 / F3. The three-group `key_points` object (scout_hub >= 1.3.0)
+    must render its three labels, in order, on the admin detail page."""
+    run, assessment = await _seed(db_session)
+    obj = {
+        "significance": ["Sig point"],
+        "innovation": ["Innov point"],
+        "commercial_potential": ["Comm point"],
+    }
+    assessment.key_points = obj
+    await db_session.flush()
+
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    html = resp.text
+    assert "Significance" in html
+    assert "Innovation" in html
+    assert "Commercial potential" in html
+    i, j, k = (
+        html.index("Significance"),
+        html.index("Innovation"),
+        html.index("Commercial potential"),
+    )
+    assert i < j < k

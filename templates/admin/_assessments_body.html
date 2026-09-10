@@ -291,7 +291,18 @@
             </div>
         </div>
 
-        {% if a.key_points %}
+        {% if a.key_points is mapping %}
+        <div class="assessment-card-points mt-3 space-y-2">
+            {% for key, label in key_point_groups %}
+            {% if a.key_points.get(key) %}
+            <div><span class="font-semibold text-gray-800">{{ label }}</span>
+                <ul class="list-disc list-inside text-sm text-gray-700">
+                {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                </ul></div>
+            {% endif %}
+            {% endfor %}
+        </div>
+        {% elif a.key_points %}
         <ul class="assessment-card-points mt-3 list-disc list-inside text-sm text-gray-700 space-y-0.5">
             {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
         </ul>
