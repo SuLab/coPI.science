@@ -11,7 +11,6 @@ timeouts armed it returns 503 in 3.0s. See the note in src/main.py."""
 
 import asyncio
 import inspect
-import time
 
 import httpx
 from httpx import ASGITransport
@@ -143,25 +142,37 @@ class _ReapedThenHangingSession:
 
 
 async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeypatch):
-    # first_probe_seconds leaves only ~0.05s of the outer deadline remaining before the
-    # retry starts. A retry re-armed with a fresh full HEALTH_PROBE_TIMEOUT_SECONDS
-    # budget (the pre-fix behaviour) takes ~2x `timeout`; a retry bounded by what's
-    # left of the deadline takes ~1x. The slack (0.5s) is half of `timeout`, so a
-    # fresh-budget retry (+1.0s) always trips it while ASGI/create_app overhead under
-    # a loaded CI host (measured up to ~0.4s) does not.
-    timeout = 1.0
+    # Deterministic (audit 2026-09-08 RC-10, REV5): instead of timing the request on
+    # the wall clock -- which flaked under a loaded CI host -- record the `timeout=`
+    # the route hands to asyncio.wait_for. The first probe burns most of the budget
+    # and raises a reaped-connection error; the retry's wait_for must be bounded by
+    # what remains of the outer deadline (~0.1s here), never re-armed with a fresh
+    # full HEALTH_PROBE_TIMEOUT_SECONDS (the pre-fix behaviour, 0.5s).
+    import asyncio as _asyncio
+
+    timeout = 0.5
+    first_probe = timeout - 0.1
     monkeypatch.setattr("src.main.HEALTH_PROBE_TIMEOUT_SECONDS", timeout)
-    session = _ReapedThenHangingSession(first_probe_seconds=timeout - 0.1)
+    session = _ReapedThenHangingSession(first_probe_seconds=first_probe)
     monkeypatch.setattr("src.main.get_health_engine", lambda: _FakeEngine(session))
+    recorded: list[float] = []
+    real_wait_for = _asyncio.wait_for
+
+    async def recording_wait_for(aw, timeout=None, **kw):
+        recorded.append(timeout)
+        return await real_wait_for(aw, timeout=timeout, **kw)
+
+    monkeypatch.setattr("src.main.asyncio.wait_for", recording_wait_for)
     app = create_app()
     transport = ASGITransport(app=app)
-    start = time.monotonic()
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         r = await client.get("/api/health")
-    elapsed = time.monotonic() - start
     assert r.status_code == 503
-    assert elapsed <= timeout + 0.5, (
-        f"probe took {elapsed:.3f}s against HEALTH_PROBE_TIMEOUT_SECONDS={timeout} — "
-        "the retry after a reaped connection is not bounded by what remains of the "
-        "outer deadline (it is re-armed with a fresh full budget instead)"
+    assert len(recorded) == 2, f"expected one probe and one bounded retry, saw {recorded}"
+    assert recorded[0] == timeout
+    assert recorded[1] <= (timeout - first_probe) + 0.05, (
+        f"retry wait_for timeout was {recorded[1]:.3f}s against a remaining budget of "
+        f"~{timeout - first_probe:.2f}s -- the retry is re-armed with a fresh full budget "
+        "instead of what is left of the outer deadline"
     )
+
