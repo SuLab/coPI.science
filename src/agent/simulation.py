@@ -2187,14 +2187,22 @@ class SimulationEngine:
             # the dropped set" discarded a deferred review that could still
             # be legitimately replayed against a SURVIVING payload for the
             # same thread_id.
+            # Survival is PAIR-level (Q-1, opus review of P-5): the replay in
+            # _flush_pending_thread_decisions matches (agent_id, thread_id)
+            # against a payload's agent_a/agent_b, so a surviving payload for
+            # the same thread_id but a different agent pair can never replay
+            # this pair -- keeping it would leak forever.
+            def _still_replayable(pair: tuple[str, str]) -> bool:
+                aid, tid = pair
+                return any(
+                    p["thread_id"] == tid and aid in (p.get("agent_a"), p.get("agent_b"))
+                    for p in self._pending_thread_decisions
+                )
+
             dropped_thread_ids = {d["thread_id"] for d in dropped}
-            remaining_thread_ids = {
-                p["thread_id"] for p in self._pending_thread_decisions
-            }
-            purge_thread_ids = dropped_thread_ids - remaining_thread_ids
             self._deferred_implicit_reviews = [
                 pair for pair in self._deferred_implicit_reviews
-                if pair[1] not in purge_thread_ids
+                if pair[1] not in dropped_thread_ids or _still_replayable(pair)
             ]
 
     async def _flush_pending_thread_decisions(self) -> None:
@@ -6224,7 +6232,11 @@ class SimulationEngine:
                 # failure -- so this returns True (reached a verdict) even
                 # though there is nothing to sync. See the docstring above.
                 if not agent_reg or not agent_reg.user_id:
-                    return True
+                    # Q-2: an unlinked registry row is NOT definitive -- user_id
+                    # is populated later by the signup/activation flow while
+                    # the sim is live -- so keep re-consulting the DB on the
+                    # next bump rather than freezing the signature.
+                    return False
                 profile = (await db.execute(
                     sa_select(ResearcherProfile).where(
                         ResearcherProfile.user_id == agent_reg.user_id

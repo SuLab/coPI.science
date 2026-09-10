@@ -693,9 +693,11 @@ class TestSyncProfilesFromDisk:
     async def test_a_definitive_non_verdict_advances_the_signature_and_does_not_retry_every_tick(
         self, setup,
     ):
-        """P-6 (opus review, audit 2026-09-10): "no linked `AgentRegistry.user_id`"
-        and "no `ResearcherProfile` row" are DEFINITIVE answers, not transient
-        failures — a real query ran and came back conclusively empty. Unlike
+        """P-6 / Q-2 (opus reviews, audit 2026-09-10): "no `ResearcherProfile`
+        row" is a DEFINITIVE answer, not a transient failure — a real query ran
+        and came back conclusively empty. (An UNLINKED registry row is NOT
+        definitive: user_id is populated later by signup/activation while the
+        sim is live, so that case stays transient — see the test below.) Unlike
         a transient failure, this state will not resolve itself without
         another disk edit (there is nothing "in flight" to retry), so the
         watcher must advance its signature and stop re-querying the DB on
@@ -712,8 +714,8 @@ class TestSyncProfilesFromDisk:
         agent.force_clear_private_profile()
         engine._force_cleared_private.add(agent.agent_id)
 
-        # No linked user_id -> a definitive non-verdict.
-        agent_reg = SimpleNamespace(user_id=None)
+        # Linked user but no ResearcherProfile row -> a definitive non-verdict.
+        agent_reg = SimpleNamespace(user_id="user-1")
         query_count = 0
         real_ctx = _StubProfileSessionCtx(_FakeProfileDb(agent_reg, None))
 
@@ -740,6 +742,39 @@ class TestSyncProfilesFromDisk:
             "a definitive non-verdict must advance the signature so a "
             "later tick with no further disk change does not re-query the DB"
         )
+
+
+    @pytest.mark.asyncio
+    async def test_an_unlinked_registry_row_is_transient_and_is_re_queried_on_the_next_bump(
+        self, setup,
+    ):
+        """Q-2 (opus review of P-6): `AgentRegistry.user_id` is filled in later
+        by the signup/activation flow while the sim runs, so "no linked user"
+        must not freeze the watcher's signature — the next tick re-consults
+        the DB."""
+        from types import SimpleNamespace
+
+        engine, agent, priv, calls = setup
+        await engine._sync_profiles_from_disk()  # baseline
+        agent.force_clear_private_profile()
+        engine._force_cleared_private.add(agent.agent_id)
+
+        query_count = 0
+        real_ctx = _StubProfileSessionCtx(_FakeProfileDb(SimpleNamespace(user_id=None), None))
+
+        def _session_factory():
+            nonlocal query_count
+            query_count += 1
+            return real_ctx
+
+        engine.session_factory = _session_factory
+        import os
+        future = priv.stat().st_mtime + 10
+        os.utime(priv, (future, future))
+
+        await engine._sync_profiles_from_disk()
+        await engine._sync_profiles_from_disk()
+        assert query_count == 2, "an unlinked registry row must be re-consulted, not frozen"
 
 
 class TestPrivateReloadIsolatedFromPublicChange:
@@ -1735,22 +1770,50 @@ class TestPendingThreadDecisionsCap:
         # ...then add a SECOND payload for the oldest (about-to-be-dropped)
         # thread_id, so "shared-thread" survives the purge even though its
         # first payload does not.
-        engine._pending_thread_decisions.append({"thread_id": "shared-thread"})
+        engine._pending_thread_decisions.append(
+            {"thread_id": "shared-thread", "agent_a": "agent_a", "agent_b": "x"}
+        )
         engine._deferred_implicit_reviews.append(("agent_a", "shared-thread"))
         engine._deferred_implicit_reviews.append(("agent_b", "kept-1"))
 
         # Overflow by exactly one: the oldest entry (kept-0) is dropped, but
         # "shared-thread" has another payload still queued after that drop.
-        engine._pending_thread_decisions.insert(0, {"thread_id": "shared-thread"})
+        engine._pending_thread_decisions.insert(
+            0, {"thread_id": "shared-thread", "agent_a": "agent_a", "agent_b": "x"}
+        )
 
         engine._enqueue_pending_thread_decision({"thread_id": "overflow"})
 
         assert ("agent_a", "shared-thread") in engine._deferred_implicit_reviews, (
             "a deferred review must survive if ANY remaining pending payload "
-            "still shares its thread_id, even though an older payload for "
-            "that same thread_id was dropped"
+            "still shares its thread_id AND names its agent, even though an "
+            "older payload for that same thread_id was dropped"
         )
         assert ("agent_b", "kept-1") in engine._deferred_implicit_reviews
+
+    def test_overflow_purge_drops_a_deferred_review_whose_surviving_payload_has_a_different_pair(
+        self,
+    ):
+        """Q-1 (opus review of P-5): survival is PAIR-level. A surviving payload
+        for the same thread_id but a disjoint agent pair can never replay the
+        pair (the flush matches agent_id against agent_a/agent_b), so keeping
+        it would leak in _deferred_implicit_reviews forever."""
+        from src.agent.simulation import PENDING_THREAD_DECISIONS_MAX
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        for i in range(PENDING_THREAD_DECISIONS_MAX - 1):
+            engine._pending_thread_decisions.append({"thread_id": f"kept-{i}"})
+        engine._pending_thread_decisions.append(
+            {"thread_id": "shared-thread", "agent_a": "other1", "agent_b": "other2"}
+        )
+        engine._deferred_implicit_reviews.append(("agent_a", "shared-thread"))
+        engine._pending_thread_decisions.insert(
+            0, {"thread_id": "shared-thread", "agent_a": "agent_a", "agent_b": "x"}
+        )
+
+        engine._enqueue_pending_thread_decision({"thread_id": "overflow"})
+
+        assert ("agent_a", "shared-thread") not in engine._deferred_implicit_reviews
 
 
 class TestFlushSkipsInCallRetryBudget:
