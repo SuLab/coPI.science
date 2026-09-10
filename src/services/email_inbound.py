@@ -52,11 +52,17 @@ _MAX_S3_LIST_PAGES = 20
 # forever. Replies keep being processed past the cap — only the help emails stop.
 MAX_HELP_EMAILS_PER_NOTIFICATION = 3
 
-# token -> recent reply timestamps (monotonic-ish epoch seconds).
+# notification id (str) -> recent reply timestamps (monotonic-ish epoch
+# seconds). SEC2-5 (audit 2026-09-08): keyed by notification.id, not the
+# reply token -- the token now rotates on resend (RC-4), so a token-keyed
+# limiter's count resets to zero every time the PI's notification is
+# resent, letting a sender who triggers resends evade the per-notification
+# cap entirely.
 _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 
-# token -> help emails sent (in-memory, like the rate limiter: the worker is a
-# single long-lived process and a restart merely resets the count).
+# notification id (str) -> help emails sent (in-memory, like the rate
+# limiter: the worker is a single long-lived process and a restart merely
+# resets the count). Also keyed by notification.id for the same reason.
 _HELP_EMAILS_SENT: dict[str, int] = {}
 
 # notification id -> instruction-failure emails sent (in-memory, like the help-email rate
@@ -84,19 +90,26 @@ _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 _S3_FAILURE_COUNTS: dict[str, int] = {}
 
 
-def _reply_rate_ok(token: str, now: float | None = None) -> bool:
-    """Sliding one-hour window per reply token, capped at
+def _reply_rate_ok(notification_id: str, now: float | None = None) -> bool:
+    """Sliding one-hour window per notification, capped at
     MAX_REPLIES_PER_TOKEN_PER_HOUR. In-memory: the worker is a single
-    long-lived process, and a restart merely resets the window."""
+    long-lived process, and a restart merely resets the window.
+
+    Keyed by ``notification_id`` (SEC2-5, audit 2026-09-08), not the reply
+    token: the token rotates on resend (RC-4), so a token-keyed limiter
+    would reset every time the notification is resent.
+    """
     import time
 
     ts = time.time() if now is None else now
-    window = [t for t in _RECENT_REPLY_TIMES.get(token, []) if ts - t < 3600]
+    window = [
+        t for t in _RECENT_REPLY_TIMES.get(notification_id, []) if ts - t < 3600
+    ]
     if len(window) >= MAX_REPLIES_PER_TOKEN_PER_HOUR:
-        _RECENT_REPLY_TIMES[token] = window
+        _RECENT_REPLY_TIMES[notification_id] = window
         return False
     window.append(ts)
-    _RECENT_REPLY_TIMES[token] = window
+    _RECENT_REPLY_TIMES[notification_id] = window
     return True
 
 
@@ -309,19 +322,22 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         logger.warning("No reply token found in To address: %s", to_addr)
         return
 
-    if not _reply_rate_ok(token):
-        logger.warning(
-            "Rate limit exceeded for reply token %s... — dropping reply", token[:8]
-        )
-        return
-
-    # Look up notification by token
+    # Look up notification by token. The rate limit below is keyed on the
+    # notification's id, not the token itself (SEC2-5), so the lookup has to
+    # happen first.
     result = await db.execute(
         select(EmailNotification).where(EmailNotification.reply_token == token)
     )
     notification = result.scalar_one_or_none()
     if not notification:
         logger.warning("No notification found for token: %s...", token[:8])
+        return
+
+    if not _reply_rate_ok(str(notification.id)):
+        logger.warning(
+            "Rate limit exceeded for notification %s — dropping reply",
+            notification.id,
+        )
         return
 
     if notification.status != "sent":
@@ -488,9 +504,10 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         return
 
     # Unparseable
-    sent_so_far = _HELP_EMAILS_SENT.get(token, 0)
+    notification_key = str(notification.id)
+    sent_so_far = _HELP_EMAILS_SENT.get(notification_key, 0)
     if sent_so_far < MAX_HELP_EMAILS_PER_NOTIFICATION:
-        _HELP_EMAILS_SENT[token] = sent_so_far + 1
+        _HELP_EMAILS_SENT[notification_key] = sent_so_far + 1
         await _send_help_email(user, notification)
     else:
         logger.warning(

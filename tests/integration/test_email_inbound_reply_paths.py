@@ -25,7 +25,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import src.services.email_inbound as inbound
 from src.config import get_settings
 from src.models import AgentChannel, EmailNotification, ProposalReview
-from src.services.email_inbound import process_inbound_email
+from src.services.email_inbound import (
+    MAX_REPLIES_PER_TOKEN_PER_HOUR,
+    process_inbound_email,
+)
 from tests import factories
 from tests.fakes import FakeSlackClient
 
@@ -343,6 +346,51 @@ async def test_help_emails_are_capped_per_notification(
     )
     (review,) = await _reviews(db_session)
     assert review.rating == 1
+
+
+async def test_the_reply_rate_limit_survives_a_token_rotation(
+    db_session, monkeypatch, sent_emails, caplog
+):
+    """SEC2-5 (audit 2026-09-08): the reply-rate limiter used to be keyed on
+    the reply token itself, but RC-4 made the token rotate on resend — a
+    token-keyed limiter's window resets to empty every time the PI's
+    notification is resent, so a sender who can trigger resends (or who is
+    handed a fresh reminder mid-window) evades the per-notification cap
+    entirely. Keying on notification.id closes that: the cap holds across a
+    token rotation on the SAME underlying notification."""
+    import logging
+
+    token = "rotatecap" + "r" * 39
+    _, _, _, notification = await _world(
+        db_session, recipient_email="pi.rho@scripps.edu", token=token
+    )
+    _classifies_as(monkeypatch, {"category": "unparseable"})
+
+    with caplog.at_level(logging.WARNING):
+        for i in range(MAX_REPLIES_PER_TOKEN_PER_HOUR):
+            await process_inbound_email(
+                _raw_reply(token, "pi.rho@scripps.edu", "still no rating"),
+                db_session,
+            )
+            # Simulate RC-4's token rotation (a resend mints a new token for
+            # the same notification row) without actually resending.
+            token = f"rotatecap{i}" + "s" * 38
+            notification.reply_token = token
+            await db_session.flush()
+
+        await process_inbound_email(
+            _raw_reply(token, "pi.rho@scripps.edu", "still no rating"), db_session
+        )
+
+    rate_limited = [
+        r for r in caplog.records
+        if "Rate limit exceeded" in r.getMessage()
+        and str(notification.id) in r.getMessage()
+    ]
+    assert rate_limited, (
+        "the reply after the token rotated must still be rate-limited by "
+        "the notification's id"
+    )
 
 
 async def test_an_out_of_range_rating_falls_back_to_the_help_email_path(
