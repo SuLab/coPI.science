@@ -1274,3 +1274,104 @@ a helper call that cannot reach a verdict leaves the signature unadvanced, so a 
 tick with no further external bump still retries once the DB becomes reachable; a helper
 call that rewrites the file from DB content does not cause a spurious reload on the
 following tick. Both verified red before the fix.
+
+## P — opus review, six follow-ups (2026-09-10)
+
+**P-1 (MEDIUM) — a plain `atexit.register` callback ran too late to abort a pool
+sleeper.** `shutdown_slack_executor()` was only registered via `atexit.register`, and
+plain `atexit` callbacks run AFTER `threading._shutdown()` has already joined every
+non-daemon thread — including the Slack I/O pool's own workers — to completion. A worker
+thread sleeping through `_sleep_interruptibly` at interpreter exit therefore ran out its
+whole sleep (nothing had set `SHUTDOWN_REQUESTED` yet) before the `atexit` callback ever
+got a chance to fire; reviewer measured a 5s sleeper completing in full rather than
+aborting. Fixed: `slack_client.signal_shutdown` is now also registered via
+`threading._register_atexit`, whose hooks run BEFORE that thread join (guarded with
+`hasattr`, falling back to `atexit.register` on interpreters that lack the private API).
+The existing `atexit.register(shutdown_slack_executor)` backstop is kept — it still does
+the actual pool teardown/reference drop, it just no longer has to be the thing that sets
+the event in time. Corrected the module docstring's exit-bound claims to match. Test
+(`tests/unit/test_slack_executor_atexit_ordering.py`): a real subprocess starts a 5s
+`run_slack_call` sleeper and falls off the end of `__main__` (an unforced interpreter
+exit); asserts wall time < 3s. Was red (5.19s) before the fix.
+
+**P-2 (MEDIUM) — the first SIGTERM only *scheduled* the Slack-abort event, and the
+timer was dropped if the run finished first.** `_make_shutdown_handler`'s first signal
+called `loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)` rather than
+signalling immediately. If `sim_engine.start()` returned before that 20s timer fired — a
+`--max-runtime` run finishing on schedule, a clean stop, or simply a flush faster than the
+grace period — the timer was dropped when the event loop closed and
+`SHUTDOWN_REQUESTED` was never set at all, even though the process had already committed
+to exiting. Fixed: the pending `call_later` handle is now stashed on
+`shutdown.state["timer_handle"]`, and a new `_finalize_shutdown(shutdown)` — called from
+`_run_simulation`'s `finally` block AFTER `sim_engine.stop()`'s DB flush — cancels that
+handle (now moot) and calls `signal_shutdown()` unconditionally. Tests
+(`tests/unit/test_agent_main_finalize_shutdown.py`): a teardown path with a live
+`run_slack_call` sleeper and zero signals ever received (no timer scheduled at all) now
+raises `SlackShuttingDown` once `_finalize_shutdown` runs; a second test pins that the
+pending grace timer is actually cancelled. Both were red (`AttributeError`: no
+`_finalize_shutdown`) before the fix.
+
+**P-3 (LOW) — `_call_with_retry` always paid for one HTTP round trip even when already
+shutting down.** `SHUTDOWN_REQUESTED` was only checked inside the `except SlackApiError`
+retry-sleep branch, i.e. after attempt 0 had already made a full network call — so
+queued-but-unstarted work always issued at least one Slack API call regardless of
+shutdown state. Fixed: check the event before attempt 0 and raise `SlackShuttingDown`
+immediately if already set, so queued work aborts with zero network round trips. Corrected
+the exit-bound claims in `slack_client.py`'s and `slack_executor.py`'s docstrings, which
+described only the retry-sleep's `<=1s` bound and didn't account for the previously
+unavoidable first HTTP attempt; the bound is now "zero round trips if not yet started,
+else one in-flight HTTP call + `<=1s`". Test
+(`tests/unit/test_slack_client_contract.py::test_call_with_retry_aborts_before_attempt_zero_when_already_shutting_down`):
+with `SHUTDOWN_REQUESTED` already set before the call, `_call_with_retry` raises
+`SlackShuttingDown` with zero recorded Slack calls. Was red (`DID NOT RAISE`) before the
+fix.
+
+**P-4 (LOW) — per-file `SHUTDOWN_REQUESTED` cleanup fixtures made every test file
+implicitly depend on every other file's cleanup discipline.** `SHUTDOWN_REQUESTED` is
+process-wide and sticky by design, so any test that sets it had to clear it again itself,
+before and after, or risk poisoning every later test sharing the same pytest process with
+"shutdown already requested" — order-dependent by construction. Fixed: added an autouse
+`_clear_slack_shutdown_requested` fixture to `tests/conftest.py` that clears the event
+before and after every test, regardless of file or order. Removed the now-redundant
+per-file fixtures in `test_agent_main_finalize_shutdown.py` and
+`test_agent_main_shutdown_grace.py` (their entire job was that same clearing);
+simplified `test_slack_executor.py`'s fixture to drop its own now-duplicate clear call
+while keeping the pool-shutdown responsibility the new conftest fixture doesn't cover.
+Verified by running every shutdown-related unit test file together in one pytest process
+(previously order-sensitive state) — all 104 pass.
+
+**P-5 (LOW) — the overflow purge of `_deferred_implicit_reviews` dropped a pair even
+when a surviving payload could still replay it.** O-2's overflow purge in
+`_enqueue_pending_thread_decision` dropped any `_deferred_implicit_reviews` pair whose
+`thread_id` appeared ANYWHERE in the dropped (oldest) payloads — even when a second,
+still-pending payload for that same `thread_id` survives the purge (e.g. two closed
+sub-threads under one logical thread, or a re-enqueued retry). That surviving payload
+could still legitimately flush and be matched against the deferred review, so purging it
+lost a real PI-engagement review for no reason. Fixed: only purge a pair when its
+`thread_id` is in the dropped set AND has no remaining (i.e. not dropped) payload still
+queued. Test
+(`tests/unit/test_simulation_logic.py::TestPendingThreadDecisionsCap::test_overflow_purge_keeps_a_deferred_review_if_another_pending_payload_shares_its_thread_id`):
+two payloads queued for the same `thread_id`, one dropped by the overflow purge and one
+surviving — the deferred review for that `thread_id` must survive too. Was red before
+the fix (the pair was incorrectly dropped).
+
+**P-6 (LOW) — a definitive "nothing to sync" answer was treated the same as a transient
+DB failure.** `_sync_one_agent_private_profile_from_db` returned `False` (no verdict) for
+four distinct cases that O-4's watcher used identically to decide whether to advance its
+mtime signature: no `session_factory`, no `AgentRegistry` row / no linked `user_id`, no
+`ResearcherProfile` row, and an exception talking to the DB. The first and last are
+genuinely transient — the DB may answer differently on the very next tick with no further
+disk change — but "no linked `user_id`" and "no `ResearcherProfile` row" are definitive: a
+real query ran and conclusively found nothing, and that will not change without another
+disk edit. Treating them identically to a transient failure meant the watcher re-queried
+the DB on every single tick, forever, for an agent that structurally has no linked
+profile. Fixed: the no-linked-`user_id` and no-`ResearcherProfile`-row branches now return
+`True` (reached a verdict), so the watcher advances its signature and stops re-querying
+until the file changes again; only the no-`session_factory` and exception-handler paths
+still return `False`. Test (`tests/unit/test_simulation_logic.py::TestSyncProfilesFromDisk`):
+replaced O-4's original "no linked `user_id`" test (which asserted the old, now-wrong
+behaviour) with two — one using a DB call that raises to pin that a genuinely transient
+failure still does not advance the signature (retries every tick), and a new one pinning
+that a no-linked-`user_id` verdict DOES advance the signature and does not re-query the
+DB on a second tick with no further disk change. The new test was red (2 queries instead
+of 1) before the fix.
