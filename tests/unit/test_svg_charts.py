@@ -126,6 +126,9 @@ def test_line_chart_has_axes_ticks_end_label_and_x_labels():
     assert "$31.18" in texts(svg, "sc-point-label")
     assert len(svg.findall(".//{*}circle")) == 3
     assert "<details" in m and "19:00" in m
+    assert 'data-sc-key="US$"' in m   # defaults to the unit
+    keyed = line_chart([("18:00", 4.52)], unit="US$", value_fmt=money, key="cumulative-cost")
+    assert 'data-sc-key="cumulative-cost"' in keyed and 'data-sc-key="US$"' not in keyed
 
 
 def test_line_chart_none_point_is_hollow_marker_at_top_with_labels():

@@ -158,7 +158,11 @@ def _label_anchor(x: float, width: int, *, allow_start: bool = True) -> str:
 
 def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: Callable[[float], str],
                width: int = 560, height: int = 180, none_label: str = "∞",
-               none_table_label: str | None = None) -> str:
+               none_table_label: str | None = None, key: str | None = None) -> str:
+    """`key` names the table twin's `data-sc-key` (what the 30 s refresh keys an
+    open `<details>` on). It defaults to `unit`, which is not stable across a
+    unit relabel and collides between two charts sharing a unit — pass a
+    caller-chosen slug."""
     n = len(points)
     finite = [v for _, v in points if v is not None]
     y_max = max(finite) if finite and max(finite) > 0 else 1.0
@@ -211,7 +215,7 @@ def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: 
     svg = (f'<svg class="sc-line-svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
            f'aria-label="{escape(unit)} over time">{"".join(parts)}</svg>')
     rows = [[xl, value_fmt(v) if v is not None else (none_table_label or none_label)] for xl, v in points]
-    return f'<div class="sc-chart sc-line">{svg}{table_twin(["Hour", unit], rows, caption=unit, key=unit)}</div>'
+    return f'<div class="sc-chart sc-line">{svg}{table_twin(["Hour", unit], rows, caption=unit, key=key or unit)}</div>'
 
 
 def gantt(rows: list[tuple[str, float, float, str, str]], t0: float, t1: float, *,

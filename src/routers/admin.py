@@ -2326,7 +2326,7 @@ async def _live_tab_context(
     elapsed_hours = overview.elapsed_seconds / 3600
     burn_html = stat_tile(
         "Average burn rate",
-        f"{fmt.money(float(cost.total) / elapsed_hours)}/h" if elapsed_hours > 0 else "—",
+        f"{fmt.money(float(cost.total) / elapsed_hours, floor=cost.is_floor)}/h" if elapsed_hours > 0 else "—",
         f"Total cost ÷ run lifetime ({fmt.duration(overview.elapsed_seconds)}); not a current rate.",
     )
     cache_denominator = cost.total_input_tokens + cost.total_cache_read_tokens
@@ -2359,7 +2359,8 @@ async def _live_tab_context(
     for h in hours:
         running += h.cost
         cum_points.append((fmt.hour_label(h.hour), float(running)))
-    cumulative_cost_html = line_chart(cum_points, unit="US$", value_fmt=fmt.money) if cum_points else None
+    cumulative_cost_html = line_chart(cum_points, unit="US$", value_fmt=fmt.money,
+                                      key="cumulative-cost") if cum_points else None
 
     token_classes = [("input", CATEGORICAL_COLORS[0]), ("output", CATEGORICAL_COLORS[1]),
                      ("cache read", CATEGORICAL_COLORS[2]), ("cache write", CATEGORICAL_COLORS[3])]
@@ -2408,7 +2409,7 @@ async def _live_tab_context(
                      ("Terminal (thread closed)", fun.terminal), ("Provisional (still open)", fun.provisional),
                      ("Headline announced", fun.announced), ("Headlines owed", fun.headlines_owed)]
     funnel_html = hbar_list([(lbl, float(v), str(v)) for lbl, v in funnel_counts], unit="interviews",
-                            axis_fmt=fmt.whole, caption="Funnel") if any(v for _, v in funnel_counts) else None
+                            axis_fmt=fmt.whole_mid, caption="Funnel") if any(v for _, v in funnel_counts) else None
     drops_rows = sorted(fun.drops_by_reason.items(), key=lambda kv: kv[1], reverse=True)
 
     # --- specialist mix + fan-out ----------------------------------------------
@@ -2423,12 +2424,12 @@ async def _live_tab_context(
         caption="Specialist mix", key="specialist-mix") if domains else None
     fanout_html = hbar_list(
         [(f"{fmt.plural(b.consult_count, 'consult')} per interview", float(b.interview_count), fmt.plural(b.interview_count, "interview"))
-         for b in fanout], unit="interviews", axis_fmt=fmt.whole, caption="Panel fan-out") if fanout else None
+         for b in fanout], unit="interviews", axis_fmt=fmt.whole_mid, caption="Panel fan-out") if fanout else None
 
     # --- stop reasons + latency ----------------------------------------------------
     taxonomy_html = hbar_list(
         [(lbl, float(n), fmt.count(n)) for lbl, n in sorted(taxonomy.items(), key=lambda kv: kv[1], reverse=True)],
-        unit="API calls", axis_fmt=fmt.whole, caption="Stop-reason taxonomy") if taxonomy else None
+        unit="API calls", axis_fmt=fmt.whole_mid, caption="Stop-reason taxonomy") if taxonomy else None
     latency_rows = [{"phase": phase, "n": fmt.count(p.n),
                      "p50": fmt.count(round(p.p50)) if p.p50 is not None else "—",
                      "p95": fmt.count(round(p.p95)) if p.p95 is not None else "—",
@@ -2468,7 +2469,11 @@ async def _live_tab_context(
         gantt_rows.append((label, start, end, CATEGORICAL_COLORS[1 if s.announced else 0], f"{s.outcome} — {cost_display}"))
         gantt_links.append({"assessment_id": s.assessment_id, "label": label, "outcome": s.outcome, "cost": cost_display,
                             "announced": s.announced, "span": fmt.duration(end - start)})
-    gantt_html = gantt(gantt_rows, t0, t1, tick_fmt=fmt.epoch_hm,
+    # A run longer than a day makes a bare "18:49" ambiguous between two of its
+    # own days — on those, ticks (and the table twin, which shares this
+    # formatter) carry the date too.
+    tick_fmt = fmt.epoch_label if (t1 - t0) > 86400 else fmt.epoch_hm
+    gantt_html = gantt(gantt_rows, t0, t1, tick_fmt=tick_fmt,
                        legend_items=[("headline announced", CATEGORICAL_COLORS[1]), ("not announced", CATEGORICAL_COLORS[0])]) if gantt_rows else None
     unattributed = cost_by_thread.get(None)
     unattributed_note = None
@@ -2484,7 +2489,8 @@ async def _live_tab_context(
     # render that runaway-coordination signal as the CALMEST point on the line.
     burn_line_html = line_chart([(fmt.hour_label(p.hour), p.ratio) for p in burn_points], unit="hub ÷ lab tokens",
                                 value_fmt=lambda v: f"{v:.2f}", none_label="∞",
-                                none_table_label="∞ — no lab tokens this hour") if burn_points else None
+                                none_table_label="∞ — no lab tokens this hour",
+                                key="hub-lab-burn") if burn_points else None
 
     run_facts = {"status": overview.status, "started": fmt.timestamp(overview.started_at), "ended": fmt.timestamp(overview.ended_at),
                  "elapsed": fmt.duration(overview.elapsed_seconds), "total_api_calls": fmt.count(overview.total_api_calls),
@@ -2566,6 +2572,18 @@ async def _simulation_context(
 
     live_tab = await _live_tab_context(db, request, status_row, now)
 
+    # The heartbeat's `tick_at` is an ISO string with microseconds; every other
+    # time on this page is minute-precision UTC. An unparseable value is shown
+    # verbatim rather than hidden — it is then the only clue it is malformed.
+    raw_tick_at = (status_row.detail or {}).get("tick_at") if status_row is not None else None
+    if isinstance(raw_tick_at, str):
+        try:
+            tick_at_display = fmt.timestamp(datetime.fromisoformat(raw_tick_at))
+        except ValueError:
+            tick_at_display = raw_tick_at
+    else:
+        tick_at_display = "—"
+
     return _template_context(
         request,
         current_user,
@@ -2584,6 +2602,7 @@ async def _simulation_context(
         msg=msg,
         error=error,
         template_error=template_error,
+        tick_at_display=tick_at_display,
         **live_tab,
     )
 

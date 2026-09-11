@@ -45,7 +45,10 @@
   .sc-stack-values { grid-area: values; }
   .sc-stack .sc-chart-fallback { grid-area: twin; }
 
-  .sc-line-svg { display: block; width: 100%; max-width: 640px; height: auto; }
+  /* Natural size, never scaled: a percentage width shrinks the SVG's own text
+     below 14px on a narrow card. The wrapper scrolls instead. */
+  .sc-line { overflow-x: auto; }
+  .sc-line-svg { display: block; width: 560px; max-width: none; height: 180px; }
   .sc-line-svg text { font-family: inherit; font-size: 14px; }
   .sc-line-svg .sc-point-label { font-weight: 600; }
 
@@ -136,7 +139,7 @@
         <div><dt class="text-gray-600">Roster size</dt><dd class="font-medium">{{ status_row.detail.roster_size }}</dd></div>
         {% endif %}
         {% if status_row.detail.tick_at is defined %}
-        <div><dt class="text-gray-600">Last tick</dt><dd class="font-medium">{{ status_row.detail.tick_at }}</dd></div>
+        <div><dt class="text-gray-600">Last tick</dt><dd class="font-medium">{{ tick_at_display }}</dd></div>
         {% endif %}
         {% if status_row.detail.fresh is defined %}
         <div><dt class="text-gray-600">Fresh</dt><dd class="font-medium">{{ status_row.detail.fresh }}</dd></div>
@@ -521,7 +524,7 @@
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Specialist mix</h2>
-        <p class="sc-caption">Opinions each specialist domain returned. Bars share one scale, so bar length is the number of consults.</p>
+        <p class="sc-caption">Opinions each specialist domain returned. Bars share one scale; bar length is the number of consults under the three live labels (historical labels are counted in the grey note only).</p>
         {% if specialist_rows %}
         {{ specialist_legend_html | safe }}
         {% for s in specialist_rows %}
@@ -543,7 +546,10 @@
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Stop-reason taxonomy</h2>
-        <p class="sc-caption">Why each API call ended. Truncated is a max_tokens stop; refused is a model refusal.</p>
+        <p class="sc-caption">Why each API call ended (newest 20,000 calls at most). Truncated is a max_tokens stop; refused is a model refusal.</p>
+        {% if latency_capped %}
+        <p class="sc-meta text-yellow-700 mb-2">Newest 20,000 calls only — this run has more.</p>
+        {% endif %}
         {% if taxonomy_html %}{{ taxonomy_html | safe }}{% else %}<p class="text-base text-gray-700">No calls logged yet.</p>{% endif %}
     </div>
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
@@ -583,7 +589,7 @@
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
     <div class="px-5 py-3 border-b border-gray-200">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Per-agent activity</h2>
-        <p class="sc-caption">One row per agent that logged a call this run. Live columns come from the engine heartbeat and read "—" once it is older than {{ heartbeat_stale_seconds }} seconds.</p>
+        <p class="sc-caption">One row per agent that posted a message or logged a call this run. Live columns come from the engine heartbeat and read "—" once it is older than {{ heartbeat_stale_seconds }} seconds.</p>
     </div>
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
@@ -594,7 +600,7 @@
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Muted</th>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Messages</th>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Calls (logged)</th>
-                <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Cost (US$)</th>
+                <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Cost</th>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Last activity (UTC)</th>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Active threads</th>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Calls in window</th>
@@ -672,6 +678,10 @@
 <script>
 const simRefreshTimer = setInterval(() => {
   if (document.getElementById('sim-refresh-pause')?.checked) return;
+  // Never replace #sim-body while the operator is typing inside it: the swap
+  // would discard the in-progress announce-template or channel-list edit.
+  if (document.getElementById('sim-body')?.contains(document.activeElement)
+      && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
   fetch(location.href).then(r => r.text()).then(h => {
     const d = new DOMParser().parseFromString(h, 'text/html');
     const next = d.getElementById('sim-body');

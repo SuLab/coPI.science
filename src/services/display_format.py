@@ -88,3 +88,18 @@ def percent(fraction: float) -> str:
 
 def whole(v: float) -> str:
     return f"{v:g}"
+
+
+def whole_mid(v: float) -> str:
+    """`whole`, but for a COUNT axis: the mid tick of a count chart is half the
+    max, so an odd max printed "3.5" consults — a quantity that cannot exist.
+    Rounds to the nearest integer first."""
+    return whole(round(v))
+
+
+def epoch_label(ts: float) -> str:
+    """`epoch_hm` plus the date, for an axis whose run spans more than a day —
+    where bare "18:49" is ambiguous between two different days of the same run.
+    Same shape as `hour_label`, from an epoch seconds value."""
+    u = datetime.fromtimestamp(ts, UTC)
+    return f"{_MONTHS[u.month - 1]} {u.day} {u.hour:02d}:{u.minute:02d}"

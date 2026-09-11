@@ -60,3 +60,14 @@ def test_plural_percent_whole():
     assert f.percent(0.2894) == "29%"
     assert f.percent(0) == "0%"
     assert f.whole(0.0) == "0" and f.whole(3.0) == "3" and f.whole(12.5) == "12.5"
+
+
+def test_epoch_label_carries_the_date_for_multi_day_runs():
+    assert f.epoch_label(1788979762.728549) == "Sep 9 18:49"  # 2026-09-09T18:49:22Z
+    assert f.epoch_label(1767225600.0) == "Jan 1 00:00"       # 2026-01-01T00:00:00Z
+
+
+def test_whole_mid_rounds_a_count_axis_mid_tick_to_an_integer():
+    assert f.whole_mid(3.5) == "4"
+    assert f.whole_mid(6) == "6"
+    assert f.whole_mid(0.0) == "0"

@@ -770,6 +770,8 @@ async def test_live_tab_refresh_script_preserves_open_details_by_key(client, db_
     admin = await _admin(db_session, "sim-admin-js@example.org")
     html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
     assert "details[open][data-sc-key]" in html and "el.dataset.scKey" in html
+    # ... and never swaps the body out from under an in-progress form edit.
+    assert "contains(document.activeElement)" in html
 
 
 async def test_live_tab_latency_and_progress_render_with_real_data(client, db_session):
