@@ -2,10 +2,15 @@
 admin, without a browser session. Run INSIDE a one-off app container off the
 current image with the working tree's src/ and templates/ mounted read-only:
 
-  docker compose -f docker-compose.prod.yml run --rm -T \
+  docker compose -f docker-compose.prod.yml run --rm -T --no-deps -e PYTHONPATH=/app \
     -v "$PWD/src:/app/src:ro" -v "$PWD/templates:/app/templates:ro" \
     -v "$PWD/scripts:/app/scripts:ro" blackbird-app \
     python scripts/render_admin_simulation.py <run-uuid> [<run-uuid> …] > /tmp/sim.html
+
+PYTHONPATH=/app is not optional: the image installs the package into
+site-packages, which shadows the mounted working tree (`python scripts/...` puts
+/app/scripts, not /app, on sys.path[0]), so without it the new templates render
+against the image's baked src/ and fail on anything the old code lacks.
 
 GET only; nothing is written. Never `exec` this into the live app container.
 """
@@ -28,6 +33,7 @@ async def main(run_ids: list[str]) -> None:
         admin = (await s.execute(
             select(User).where(User.user_role == "admin", User.access_status == "allowed").limit(1)
         )).scalars().first()
+    assert admin is not None, "no allowed admin user"
 
     async def _admin() -> User:
         return admin

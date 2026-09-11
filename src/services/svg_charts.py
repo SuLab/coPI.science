@@ -142,11 +142,16 @@ def diverging_hbar(label: str, neg: float, mid: float, pos: float, labels: tuple
 _ML, _MR, _MT, _MB = 56, 16, 26, 28
 
 
-def _label_anchor(x: float, width: int) -> str:
-    """Anchor a point label so it stays inside the viewBox at either edge."""
+def _label_anchor(x: float, width: int, *, allow_start: bool = True) -> str:
+    """Anchor a point label so it stays inside the viewBox at either edge.
+
+    `allow_start=False` for the FIRST point: the unit caption sits at the plot's
+    top-left, so a start-anchored label on a point at y-max would run into it;
+    centred there is still inside the viewBox (x = _ML).
+    """
     if x > width - _MR - 40:
         return "end"
-    if x < _ML + 40:
+    if allow_start and x < _ML + 40:
         return "start"
     return "middle"
 
@@ -186,19 +191,21 @@ def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: 
             y = y_at(y_max)
             parts.append(f'<circle class="sc-none-marker" cx="{x}" cy="{y}" r="4" fill="none" '
                          f'stroke="{CATEGORICAL_COLORS[0]}" stroke-width="2"><title>{escape(xl)}: {escape(none_label)}</title></circle>')
-            parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="{_label_anchor(x, width)}" '
+            parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" '
+                         f'text-anchor="{_label_anchor(x, width, allow_start=i != 0)}" '
                          f'fill="{TEXT_PRIMARY}">{escape(none_label)}</text>')
         else:
-            coords.append((x, y_at(v), v))
+            coords.append((x, y_at(v), v, i))
     if len(coords) > 1:
-        parts.append(f'<polyline points="{" ".join(f"{x},{y}" for x, y, _ in coords)}" fill="none" '
+        parts.append(f'<polyline points="{" ".join(f"{x},{y}" for x, y, _, _ in coords)}" fill="none" '
                      f'stroke="{CATEGORICAL_COLORS[0]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
-    for (x, y, v), (xl, _) in zip(coords, [p for p in points if p[1] is not None], strict=True):
+    for (x, y, v, _i), (xl, _) in zip(coords, [p for p in points if p[1] is not None], strict=True):
         parts.append(f'<circle cx="{x}" cy="{y}" r="4" fill="{CATEGORICAL_COLORS[0]}" stroke="#ffffff" stroke-width="2">'
                      f"<title>{escape(xl)}: {escape(value_fmt(v))}</title></circle>")
     if coords:
-        x, y, v = coords[-1]
-        parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="{_label_anchor(x, width)}" '
+        x, y, v, i = coords[-1]
+        parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" '
+                     f'text-anchor="{_label_anchor(x, width, allow_start=i != 0)}" '
                      f'fill="{TEXT_PRIMARY}">{escape(value_fmt(v))}</text>')
 
     svg = (f'<svg class="sc-line-svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
