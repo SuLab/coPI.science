@@ -37,16 +37,57 @@ def _oaid(url):
     return (url or "").rsplit("/", 1)[-1]
 
 
+_MIN_COHORT_PEERS = 3
+
+
 async def rescore_user(db: AsyncSession, user_id: uuid.UUID, tenure_start: int | None = None, primary_field: str | None = None) -> PiIndustryScore:
+    """Recompute and store a PI's industry score.
+
+    ``tenure_start``, when omitted (as the veto route does — it has no fresh
+    pipeline-derived value to hand in), is re-read here rather than left
+    NULL, so a post-veto rescore is never indistinguishable from an
+    unscoped one.
+
+    A PI with no live evidence is ``score=None, reason="no_evidence"`` —
+    never a numeric percentile, which a cohort of all-zero peers would
+    otherwise produce (bisect_right always finds the top of an all-[0.0]
+    cohort). A PI who DOES have evidence but fewer than
+    ``_MIN_COHORT_PEERS`` other scored PIs at this scorer version is
+    ``score=None, reason="cohort_too_small"`` — raw_sum/components are still
+    recorded so nothing about the collected evidence is lost.
+    """
     rows = (await db.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id))).scalars().all()
     raw, comps = score_evidence(rows)
+    live = [r for r in rows if r.vetoed_at is None]
+
+    if tenure_start is None:
+        agent = (await db.execute(select(AgentRegistry).where(AgentRegistry.user_id == user_id))).scalar_one_or_none()
+        tenure_start = await get_tenure_start(db, user_id, agent_id=agent.agent_id if agent else None)
+
+    if not live:
+        score = PiIndustryScore(user_id=user_id, score=None, raw_sum=raw, reason="no_evidence",
+                                components=comps, primary_field=primary_field, tenure_start_used=tenure_start,
+                                evidence_count=0, scorer_version=SCORER_VERSION)
+        db.add(score)
+        await db.flush()
+        return score
+
     latest = (await db.execute(
         select(PiIndustryScore.user_id, PiIndustryScore.raw_sum).distinct(PiIndustryScore.user_id)
         .where(PiIndustryScore.raw_sum.isnot(None), PiIndustryScore.user_id != user_id, PiIndustryScore.scorer_version == SCORER_VERSION)
         .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc()))).all()
-    cohort = [r for (_, r) in latest] + [raw]
-    live = [r for r in rows if r.vetoed_at is None]
-    score = PiIndustryScore(user_id=user_id, score=normalise(raw, cohort), raw_sum=raw, reason="ok" if live else "no_evidence",
+    peer_raws = [r for (_, r) in latest]
+
+    if len(peer_raws) < _MIN_COHORT_PEERS:
+        score = PiIndustryScore(user_id=user_id, score=None, raw_sum=raw, reason="cohort_too_small",
+                                components=comps, primary_field=primary_field, tenure_start_used=tenure_start,
+                                evidence_count=len(live), scorer_version=SCORER_VERSION)
+        db.add(score)
+        await db.flush()
+        return score
+
+    cohort = peer_raws + [raw]
+    score = PiIndustryScore(user_id=user_id, score=normalise(raw, cohort), raw_sum=raw, reason="ok",
                             components=comps, primary_field=primary_field, tenure_start_used=tenure_start,
                             evidence_count=len(live), scorer_version=SCORER_VERSION)
     db.add(score)

@@ -39,3 +39,9 @@ def test_normalise_is_percentile_rank():
 
 def test_scorer_version_is_semver():
     assert SCORER_VERSION.count(".") == 2
+
+
+def test_patent_filed_is_exempt_from_the_class_gate():
+    e = EvidenceItem("uspto", "patent_filed", "APP1", None, None, "unknown", 2021, "inventor", True, {})
+    raw, _ = score_evidence([e])
+    assert raw == 4.0

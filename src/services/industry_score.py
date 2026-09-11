@@ -35,11 +35,16 @@ def score_evidence(rows) -> tuple[float, dict]:
     for e in rows:
         if getattr(e, "vetoed_at", None) is not None or not e.in_tenure or e.kind not in WEIGHTS:
             continue
-        if e.company_class not in SCORED_CLASSES:
+        # patent_filed is exempt from the class gate: its only producer
+        # (uspto_inventor.evidence_from_application) always emits
+        # company_class="unknown" (no assignee to classify yet — the patent
+        # was merely filed), so gating it on SCORED_CLASSES would make the
+        # kind permanently dead weight despite its nonzero WEIGHTS entry.
+        if e.company_class not in SCORED_CLASSES and e.kind != "patent_filed":
             continue
         key = (e.kind, (e.company_name or e.external_id).lower())
         per, _ = WEIGHTS[e.kind]
-        val = per * _item_factor(e) * CLASS_FACTOR[e.company_class]
+        val = per * _item_factor(e) * CLASS_FACTOR.get(e.company_class, 1.0)
         best[key] = max(best.get(key, 0.0), val)
     for (kind, _), val in best.items():
         c = components.setdefault(kind, {"distinct_companies": 0, "uncapped": 0.0})
