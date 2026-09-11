@@ -54,12 +54,14 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these seven, named exactly. A future
-    accidental eighth write route still fails this test loudly. The two
+    have non-GET routes now, but only these eight, named exactly. A future
+    accidental ninth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of the PI-external-enrichment
-    plan): a manager may mark one NIH RePORTER grant as "not this PI".
+    plan): a manager may mark one NIH RePORTER grant as "not this PI". The
+    industry-evidence veto joined the same day (Task 9): a manager may mark
+    one industry-evidence row as "not this PI / not industry".
     """
     allowed_post_paths = {
         "/pis",
@@ -69,6 +71,7 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/slack/provision",
         "/pis/{user_id}/activate",
         "/pis/{user_id}/grants/{grant_id}/veto",
+        "/pis/{user_id}/industry/{evidence_id}/veto",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"

@@ -28,6 +28,8 @@ from src.models import (
     AssessmentDrop,
     OpportunityAssessment,
     PiGrant,
+    PiIndustryEvidence,
+    PiIndustryScore,
     Publication,
     SimulationRun,
     ThreadDecision,
@@ -159,6 +161,14 @@ async def list_pi_directory(
     )
     pub_counts = {str(r.user_id): r.count for r in pub_counts_result}
 
+    # Latest industry-interest score per user (Postgres DISTINCT ON).
+    industry_result = await db.execute(
+        select(PiIndustryScore)
+        .distinct(PiIndustryScore.user_id)
+        .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc())
+    )
+    industry_by_user = {row.user_id: row for row in industry_result.scalars().all()}
+
     user_data = []
     for user in users:
         profile = user.profile
@@ -194,12 +204,15 @@ async def list_pi_directory(
         else:
             agent_status = user.agent.status  # "active" or "suspended"
 
+        industry_row = industry_by_user.get(user.id)
         user_data.append({
             "user": user,
             "profile": profile,
             "profile_status": profile_status,
             "pub_count": pub_count,
             "agent_status": agent_status,
+            "industry_score": industry_row.score if industry_row else None,
+            "industry_reason": industry_row.reason if industry_row else None,
         })
 
     return user_data
@@ -229,12 +242,23 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         .order_by(PiGrant.vetoed_at.is_(None).desc(), PiGrant.last_fy.desc().nullslast())
     )).scalars().all()
 
+    industry_score = (await db.execute(
+        select(PiIndustryScore).where(PiIndustryScore.user_id == user_id)
+        .order_by(PiIndustryScore.computed_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    industry_evidence = (await db.execute(
+        select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id)
+        .order_by(PiIndustryEvidence.vetoed_at.is_(None).desc(), PiIndustryEvidence.year.desc().nullslast())
+    )).scalars().all()
+
     return {
         "user": user,
         "profile": user.profile,
         "publications": publications,
         "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
         "grants": grants,
+        "industry_score": industry_score,
+        "industry_evidence": industry_evidence,
     }
 
 

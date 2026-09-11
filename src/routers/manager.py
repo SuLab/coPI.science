@@ -53,6 +53,7 @@ from src.models import (
     USER_ROLE_PI,
     AgentRegistry,
     PiGrant,
+    PiIndustryEvidence,
     PromptChangeSuggestion,
     ResearcherProfile,
     User,
@@ -70,6 +71,7 @@ from src.services.directory import (
     load_user_detail,
 )
 from src.services.grant_resolution import GrantRecord, derive_grant_titles
+from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import (
     create_pending_agent_for,
@@ -228,6 +230,8 @@ async def manager_pi_detail(
             publications=detail["publications"],
             jobs=detail["jobs"],
             grants=detail["grants"],
+            industry_score=detail["industry_score"],
+            industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
             slack_ok=request.query_params.get("slack_ok"),
             slack_error=request.query_params.get("slack_error"),
@@ -398,6 +402,31 @@ async def manager_veto_grant(
         ])
     await db.commit()
     return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
+
+
+@router.post("/pis/{user_id}/industry/{evidence_id}/veto")
+async def manager_veto_industry_evidence(
+    user_id: uuid.UUID, evidence_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """'Not this PI / not industry' veto on one evidence row; persisted and
+    rescored immediately."""
+    row = (await db.execute(
+        select(PiIndustryEvidence).where(
+            PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    row.vetoed_at = datetime.now(UTC)
+    row.vetoed_by_user_id = current_user.id
+    agent = (await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == user_id)
+    )).scalar_one_or_none()
+    tenure = await get_tenure_start(db, user_id, agent_id=agent.agent_id if agent else None)
+    await rescore_user(db, user_id, tenure)
+    await db.commit()
+    return RedirectResponse(url=f"/manager/pis/{user_id}#industry", status_code=302)
 
 
 async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegistry:

@@ -307,6 +307,31 @@
       </ul>
     </section>
 
+    <!-- Industry interest (read-only score; never enters the profile or prompts) -->
+    <section id="industry" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+      <h2 class="font-semibold text-gray-800 mb-1">Industry interest</h2>
+      {% if not industry_score %}<p class="text-sm text-gray-500">Not computed yet.</p>
+      {% elif industry_score.score is none %}<p class="text-sm"><span class="font-medium text-amber-700">Unscored</span> —
+        {% if industry_score.reason == 'no_tenure_start' %}no JHU tenure start recorded; set one above and re-run.{% else %}{{ industry_score.reason }}{% endif %}</p>
+      {% else %}
+      <p class="text-3xl font-semibold">{{ '%.1f' % industry_score.score }}<span class="text-sm text-gray-500 font-normal"> / 100 cohort percentile · raw {{ '%.1f' % industry_score.raw_sum }} · {{ industry_score.evidence_count }} evidence rows · scorer v{{ industry_score.scorer_version }} · tenure ≥ {{ industry_score.tenure_start_used }}</span></p>
+      <dl class="grid grid-cols-2 gap-x-6 text-sm mt-3">
+        {% for kind, c in industry_score.components.items() %}<dt class="text-gray-500">{{ kind.replace('_',' ') }}</dt><dd>{{ c.distinct_companies }} companies → {{ '%.1f' % c.weighted }}</dd>{% endfor %}
+      </dl>
+      {% endif %}
+      <details class="mt-4"><summary class="text-sm text-blue-700 cursor-pointer">Evidence ({{ industry_evidence | length }})</summary>
+        <ul class="divide-y mt-2">
+        {% for e in industry_evidence %}
+          <li class="py-2 flex justify-between gap-4 text-sm {% if e.vetoed_at %}opacity-50{% endif %}">
+            <div><span class="font-medium">{{ e.company_name or '—' }}</span> <span class="text-xs text-gray-500">{{ e.kind.replace('_',' ') }} · {{ e.company_class }} · {{ e.year }} · PI role {{ e.pi_role or '—' }} · {{ e.source }}</span>
+              {% if e.evidence.span %}<div class="text-xs text-gray-600 italic">"{{ e.evidence.span }}"</div>{% endif %}
+              {% if e.evidence.title %}<div class="text-xs text-gray-600">{{ e.evidence.title }}</div>{% endif %}</div>
+            {% if not e.vetoed_at and effective_user.is_staff %}<form method="post" action="/manager/pis/{{ target_user.id }}/industry/{{ e.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI / not industry</button></form>{% elif e.vetoed_at %}<span class="text-xs text-gray-400">vetoed</span>{% endif %}
+          </li>
+        {% endfor %}
+        </ul></details>
+    </section>
+
     <!-- Publications -->
     {% if publications %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
