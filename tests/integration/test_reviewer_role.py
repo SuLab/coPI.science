@@ -243,6 +243,8 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("POST", "/manager/pis/{user_id}/unmute"): 403,
     ("POST", "/manager/pis/{user_id}/slack/provision"): 403,
     ("POST", "/manager/pis/{user_id}/activate"): 403,
+    ("POST", "/manager/pis/{user_id}/grants/{grant_id}/veto"): 403,
+    ("POST", "/manager/pis/{user_id}/industry/{evidence_id}/veto"): 403,
 }
 
 # What each write route needs in its POST body to get PAST FastAPI's own
@@ -256,6 +258,8 @@ _REVIEWER_POST_BODIES = {
     "/manager/pis/{user_id}/unmute": None,
     "/manager/pis/{user_id}/slack/provision": None,
     "/manager/pis/{user_id}/activate": None,
+    "/manager/pis/{user_id}/grants/{grant_id}/veto": {},
+    "/manager/pis/{user_id}/industry/{evidence_id}/veto": {},
 }
 
 
@@ -282,6 +286,8 @@ async def test_reviewer_manager_surface_is_exactly_the_read_slice(client, db_ses
         "run_id": str(run.id),
         "assessment_id": str(assessment.id),
         "suggestion_id": str(uuid.uuid4()),
+        "grant_id": str(uuid.uuid4()),
+        "evidence_id": str(uuid.uuid4()),
     }
 
     live_routes = set()

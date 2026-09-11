@@ -43,10 +43,9 @@
                     <span class="text-xs text-gray-500">Agent pending — Awaiting Slack install.</span>
                 {% endif %}
                 {# F2 (2026-09-10): provisioning stopped being admin-only.
-                   Gated by the enclosing `effective_user.is_staff and not
-                   impersonation_banner`, never on `current_user` — an admin
-                   impersonating a reviewer must not be shown a control that
-                   403s on submit. #}
+                   Gated by the enclosing `effective_user.is_staff`, never on
+                   `current_user` — an admin impersonating a reviewer must not
+                   be shown a control that 403s on submit. #}
                 {% if not target_user.agent.slack_bot_token %}
                 <form method="post" action="/manager/pis/{{ target_user.id }}/slack/provision" class="mt-1">
                     <button type="submit" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90">Install Slack bot</button>
