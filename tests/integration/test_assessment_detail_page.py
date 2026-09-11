@@ -1663,6 +1663,29 @@ async def test_the_brief_is_two_columns_pitch_left_points_right(
     assert "assessment-brief-keypoints" not in body
 
 
+async def test_a_mapping_of_only_empty_lists_renders_no_key_points_column(
+    client, db_session, admin
+):
+    """A `key_points` mapping whose groups are all present but empty is not
+    "there are key points", so the right column and its two-column grid must
+    not render."""
+    run, assessment = await _seed(db_session)
+    assessment.elevator_pitch = "PITCH-MARKER. Hopkins has data on 124 patients."
+    assessment.key_points = {
+        "significance": [],
+        "innovation": [],
+        "commercial_potential": [],
+    }
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    body = _main(html)
+    assert "assessment-brief-keypoints" not in body
+    assert "md:grid-cols-2" not in body
+
+
 async def test_rationale_and_scores_are_open_by_default(client, db_session, admin):
     """Rationale and dimension scores are what a reviewer came for; gating and
     the timeline stay collapsed."""
@@ -1723,5 +1746,8 @@ async def test_gating_legend_is_visible_text(client, db_session, admin):
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "gating-legend" in html
-    assert "met" in html and "not met" in html and "unconfirmed" in html
+    match = re.search(r'<p class="gating-legend[^"]*"[^>]*>.*?</p>', html, re.DOTALL)
+    assert match is not None, "gating-legend <p> element not found"
+    legend = match.group(0)
+    assert "met" in legend and "not met" in legend and "unconfirmed" in legend
     assert 'aria-label="Unconfirmed' in html

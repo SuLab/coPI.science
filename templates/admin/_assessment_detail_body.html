@@ -86,8 +86,9 @@
        column rather than leaving an empty cell, which reads as missing data
        rather than as data that was never asked for. The whole grid is
        skipped when neither half exists. #}
-    {% if a.elevator_pitch or a.key_points %}
-    <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and a.key_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
+    {% set has_points = (a.key_points is mapping and (a.key_points.values() | map('length') | sum) > 0) or (a.key_points is not mapping and a.key_points) %}
+    {% if a.elevator_pitch or has_points %}
+    <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
         {% if a.elevator_pitch %}
         <div class="assessment-brief-pitch">
             <div class="text-sm font-semibold text-gray-600">In one minute</div>
@@ -106,7 +107,7 @@
             </div>
         </div>
         {% endif %}
-        {% if a.key_points is mapping %}
+        {% if has_points and a.key_points is mapping %}
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
             <div class="assessment-brief-points assessment-prose max-w-none mt-1 space-y-2">
@@ -120,7 +121,7 @@
                 {% endfor %}
             </div>
         </div>
-        {% elif a.key_points %}
+        {% elif has_points %}
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
             <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
