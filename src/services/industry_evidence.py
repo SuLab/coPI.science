@@ -2,7 +2,7 @@
 import logging
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import (
@@ -72,11 +72,39 @@ async def rescore_user(db: AsyncSession, user_id: uuid.UUID, tenure_start: int |
         await db.flush()
         return score
 
+    # Pick each OTHER user's LATEST row at this scorer_version FIRST (the
+    # row_number/partition below), THEN decide whether it counts as a peer —
+    # filtering on raw_sum/reason before picking "latest" would let an older,
+    # stale row stand in for a user whose newest row should have won.
+    # "ok" and "cohort_too_small" are the two reasons whose raw_sum reflects
+    # real, live evidence (score_evidence ran); "no_evidence" and
+    # "no_tenure_start" both carry a raw_sum of 0/NULL that is not a genuine
+    # data point and must not pad the cohort — the failure this fix closes
+    # was exactly that: enough "no_evidence" (raw_sum=0.0, so NOT NULL)
+    # peers could satisfy the >=3 minimum and get normalised against an
+    # effectively empty cohort. Requiring raw_sum > 0 in addition to the
+    # reason allowlist is a second, redundant guard against the same class
+    # of degenerate row.
+    ranked = (
+        select(
+            PiIndustryScore.raw_sum,
+            PiIndustryScore.reason,
+            func.row_number().over(
+                partition_by=PiIndustryScore.user_id,
+                order_by=PiIndustryScore.computed_at.desc(),
+            ).label("rn"),
+        )
+        .where(PiIndustryScore.user_id != user_id, PiIndustryScore.scorer_version == SCORER_VERSION)
+        .subquery()
+    )
     latest = (await db.execute(
-        select(PiIndustryScore.user_id, PiIndustryScore.raw_sum).distinct(PiIndustryScore.user_id)
-        .where(PiIndustryScore.raw_sum.isnot(None), PiIndustryScore.user_id != user_id, PiIndustryScore.scorer_version == SCORER_VERSION)
-        .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc()))).all()
-    peer_raws = [r for (_, r) in latest]
+        select(ranked.c.raw_sum).where(
+            ranked.c.rn == 1,
+            ranked.c.reason.in_(("ok", "cohort_too_small")),
+            ranked.c.raw_sum.isnot(None),
+            ranked.c.raw_sum > 0,
+        ))).all()
+    peer_raws = [r for (r,) in latest]
 
     if len(peer_raws) < _MIN_COHORT_PEERS:
         score = PiIndustryScore(user_id=user_id, score=None, raw_sum=raw, reason="cohort_too_small",

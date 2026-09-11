@@ -16,13 +16,15 @@ from src.services.jhu_rules import set_tenure_start
 pytestmark = pytest.mark.integration
 
 
-async def _seed_peers(db_session, n, raw_sum=1.0):
+async def _seed_peers(db_session, n, raw_sum=1.0, reason="ok"):
     for i in range(n):
         peer = User(orcid=f"0000-0009-9999-{i:04d}", name=f"Peer {i}", user_role="pi")
         db_session.add(peer)
         await db_session.flush()
-        db_session.add(PiIndustryScore(user_id=peer.id, score=50.0, raw_sum=raw_sum + i, reason="ok",
-                                        components={}, evidence_count=1, scorer_version=SCORER_VERSION))
+        db_session.add(PiIndustryScore(user_id=peer.id, score=(50.0 if reason == "ok" else None),
+                                        raw_sum=(0.0 if reason == "no_evidence" else raw_sum + i), reason=reason,
+                                        components={}, evidence_count=(0 if reason == "no_evidence" else 1),
+                                        scorer_version=SCORER_VERSION))
     await db_session.flush()
 
 
@@ -115,6 +117,30 @@ async def test_rescore_with_evidence_and_enough_peers_is_scored(db_session):
     await _seed_peers(db_session, 3)
     s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
     assert s.reason == "ok" and s.score is not None and s.raw_sum == 10.0
+
+
+async def test_zero_evidence_peers_do_not_count_toward_the_cohort(db_session):
+    u = User(orcid="0000-0007-7777-8888", name="Guarded PI", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
+                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
+                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
+    await _seed_peers(db_session, 3, reason="no_evidence")
+    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
+    assert s.score is None and s.reason == "cohort_too_small" and s.raw_sum > 0
+
+
+async def test_cohort_too_small_peers_do_count_toward_the_cohort(db_session):
+    u = User(orcid="0000-0008-8888-9999", name="Bootstrapped PI", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
+                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
+                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
+    await _seed_peers(db_session, 3, reason="cohort_too_small")
+    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
+    assert s.reason == "ok" and s.score is not None
 
 
 async def test_rescore_re_reads_tenure_start_when_omitted(db_session):
