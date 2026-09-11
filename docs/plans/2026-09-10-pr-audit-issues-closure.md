@@ -70,9 +70,27 @@ A live adversarial audit of the branch on `copi-test` found further defects, all
 
 `Closes #20, #22, #23, #24, #25`. #21, #26 and #27 are closed by hand after merge with the stated carve-outs in `docs/plans/2026-09-04-decisions/README.md` (#21: the worker coverage clause's premise was already false; #26: needs deploy verification; #27: its definition of done is the gate itself). Residual risks and follow-ups are listed in `docs/plans/2026-09-02-close-issues-20-27-pr-body.md`.
 
-## Deploy notes
+## Migration and deploy
 
-Rebuild the agent image (`--profile agent build agent`) and stop `agent-run` gracefully (`docker stop -t 30`) before the next run. Stop `app`, `worker`, `grantbot` and `agent-run` before migrating 0024→0030 (0025 builds a unique index on `publications` under an exclusive lock). `profiles/` and `data/` on the host must be owned by 10001:10001, never `prompts/`. GrantBot needs its own Slack bot token. Run `scripts/backfill_slack_ts.py --apply` once if the workspace has never had it. Do not squash-merge: the commit sequence is the review trail.
+Schema goes 0024 → 0030 (0025 dedups `publications` and adds a unique index; 0026 cascades; 0027 adds 20 indexes; 0028–0030 add nullable columns). The chain runs as one transaction and takes the web app down for its window, so use the gated path, not a bare `up -d --build`.
+
+**Runbook:** `docs/plans/2026-09-02-close-issues-20-27.md` Part R (steps R.0–R.11, ordered for the prod host), with the command reference in `docs/production-migration.md` §10.2. In outline:
+
+1. R.1–R.3: record current state, take and verify a backup, `git pull` and build the new images without recreating anything.
+2. R.4: stop every writer in order: `docker stop -t 30 agent-run`, then `docker compose $C stop grantbot worker`, then `stop app`. nginx returns 502 for the window; expected.
+3. R.5: `sudo chown -R 10001:10001 profiles data` (never `prompts/`).
+4. R.6: with `DATABASE_URL` exported as the in-network DSN, rehearse then apply:
+   ```bash
+   ./scripts/migrate/run_migration.sh --via-run --backup-verified-elsewhere "<backup ref>"          # rehearsal, writes nothing
+   ./scripts/migrate/run_migration.sh --via-run --apply --backup-verified-elsewhere "<backup ref>"  # expect alembic_version = 0030, postflight 0 FAIL
+   ```
+   Exit 1 is a blocked preflight check: fix and re-run. `LockNotAvailableError` means a writer is still connected.
+5. R.6b: `scripts/backfill_slack_ts.py --apply` once, if the workspace has never had it.
+6. R.7–R.8: `./scripts/redeploy.sh $C` recreates app, worker and grantbot on the new image and reloads nginx.
+7. R.9: `docker compose $C --profile agent build agent`, then start `agent-run` last.
+8. R.10 is the rollback (restore the pre-deploy dump; the chain is one transaction, nothing is half-applied).
+
+GrantBot needs its own Slack bot token before the first run. Do not squash-merge: the commit sequence is the review trail.
 
 Closes #20, #22, #23, #24, #25
 
