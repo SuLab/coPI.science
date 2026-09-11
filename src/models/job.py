@@ -19,6 +19,7 @@ class Job(Base):
     type: Mapped[str] = mapped_column(
         Enum(
             "generate_profile", "monthly_refresh", "review_feedback_analysis",
+            "enrich_grants", "industry_evidence",
             name="job_type_enum",
         ),
         nullable=False,

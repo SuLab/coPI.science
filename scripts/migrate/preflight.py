@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0046"
+DEFAULT_TARGET = "0047"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -134,7 +134,7 @@ DEFAULT_TARGET = "0046"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041", "0042", "0043", "0044", "0045",
+    "0041", "0042", "0043", "0044", "0045", "0046",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -408,12 +408,21 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0045", "column", "message_ordinal", "llm_call_logs"),
     # 0046_slack_provision_initiated_by
     PlannedObject("0046", "column", "initiated_by_user_id", "slack_app_provisions"),
+    # 0047_pi_grants_and_industry_evidence
+    PlannedObject("0047", "table", "pi_grants"),
+    PlannedObject("0047", "constraint", "uq_pi_grants_user_core", "pi_grants"),
+    PlannedObject("0047", "index", "ix_pi_grants_user_id", "pi_grants"),
+    PlannedObject("0047", "table", "pi_industry_evidence"),
+    PlannedObject("0047", "constraint", "uq_pi_industry_evidence_key", "pi_industry_evidence"),
+    PlannedObject("0047", "index", "ix_pi_industry_evidence_user_id", "pi_industry_evidence"),
+    PlannedObject("0047", "table", "pi_industry_scores"),
+    PlannedObject("0047", "index", "ix_pi_industry_scores_user_id", "pi_industry_scores"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041", "0042", "0043", "0044", "0045", "0046",
+    "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047",
 )
 
 
