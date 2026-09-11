@@ -395,6 +395,8 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         record["authors"] = authors
         record["author_count"] = len(authors)
 
+        record["coi_statement"] = article.findtext(".//CoiStatement")
+
         results.append(record)
 
     return results
