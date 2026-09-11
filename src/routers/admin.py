@@ -1162,13 +1162,10 @@ async def admin_provision_slack_callback(
     """
     from src.services.admin_provisioning import ProvisioningError, complete_provisioning
 
-    # Refused for the same reason the two manager POSTs refuse it: landing a
-    # live Slack bot token on someone else's agent is a write, and an
-    # impersonated session must not make one. There is no surface to redirect
-    # to that would be honest about who acted, so this is a hard 403.
-    if getattr(current_user, "_is_impersonated", False):
-        raise HTTPException(status_code=403, detail="Disabled while impersonating.")
-
+    # An impersonated session is admitted (operator decision 2026-09-11:
+    # nothing is hidden or refused while impersonating). `current_user` is
+    # the impersonated account, which is also who `start_provisioning`
+    # recorded as initiator, so the initiator check below still lines up.
     is_admin = bool(current_user.is_admin)
 
     def surface_error(msg: str) -> RedirectResponse:

@@ -234,6 +234,7 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("GET", "/manager/discussions"): 403,
     ("GET", "/manager/activity"): 403,
     ("GET", "/manager/activity/{run_id}"): 403,
+    ("GET", "/manager/slack-bots"): 403,
     ("GET", "/manager/prompt-suggestions"): 403,
     ("GET", "/manager/prompt-suggestions/{suggestion_id}"): 403,
     ("POST", "/manager/pis"): 403,

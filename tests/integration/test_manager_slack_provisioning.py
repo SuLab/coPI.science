@@ -82,11 +82,16 @@ async def test_provisioning_failure_returns_to_the_manager_page(
     assert " " not in loc, "the message must be percent-encoded into the Location"
 
 
-async def test_reviewer_and_impersonating_admin_are_refused(client, db_session):
+async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
+    client, db_session, monkeypatch
+):
+    """Operator decision 2026-09-11: nothing is hidden or refused while
+    impersonating. An admin wearing a manager reaches both provisioning
+    POSTs, attributed to the impersonated manager; a reviewer still cannot."""
     manager = await _manager(db_session)
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    pi, _agent = await _pending_pi(db_session, agent_id="refused")
+    pi, agent = await _pending_pi(db_session, agent_id="refused")
 
     for path in ("slack/provision", "activate"):
         r = await client.post(
@@ -95,12 +100,29 @@ async def test_reviewer_and_impersonating_admin_are_refused(client, db_session):
         )
         assert r.status_code == 403, path
 
-        headers = auth_headers(admin.id)
-        headers["Cookie"] += f"; copi-impersonate={manager.id}"
-        r = await client.post(
-            f"/manager/pis/{pi.id}/{path}", headers=headers, follow_redirects=False,
-        )
-        assert r.status_code == 403, path
+    seen = {}
+
+    async def fake_start(db, a, *, initiated_by):
+        seen["initiated_by"] = initiated_by.id
+        return "https://slack.test/authorize?imp=1"
+
+    monkeypatch.setattr("src.routers.manager.start_provisioning", fake_start)
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    r = await client.post(
+        f"/manager/pis/{pi.id}/slack/provision", headers=headers, follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == "https://slack.test/authorize?imp=1"
+    assert seen == {"initiated_by": manager.id}
+
+    # activate: no token yet, so the route bounces with the "install first"
+    # message rather than 403ing — it was reached.
+    r = await client.post(
+        f"/manager/pis/{pi.id}/activate", headers=headers, follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert "Install" in r.headers["location"]
 
 
 async def test_callback_completes_for_the_initiating_manager(
@@ -275,15 +297,15 @@ async def test_a_non_pi_lab_agent_is_not_reachable_from_the_manager_page(
         assert r.status_code == 404, path
 
 
-async def test_the_callback_refuses_an_impersonated_session(
+async def test_the_callback_admits_an_impersonated_session(
     client, db_session, monkeypatch
 ):
-    """Landing a live bot token on someone else's agent is a write, and the
-    manager POSTs already refuse an impersonated session — the callback does
-    too, rather than recording the install against whoever is being worn."""
+    """Operator decision 2026-09-11: impersonation refuses nothing. The
+    impersonated manager is both the initiator and the completer, so the
+    initiator check (migration 0046) lines up and the token lands."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     manager = await _manager(db_session)
-    _pi, agent = await _pending_pi(db_session, agent_id="cbimperson")
+    pi, agent = await _pending_pi(db_session, agent_id="cbimperson")
     db_session.add(SlackAppProvision(
         agent_registry_id=agent.id, state="s4",
         client_id="cid", client_secret="secret",
@@ -291,19 +313,20 @@ async def test_the_callback_refuses_an_impersonated_session(
     ))
     await db_session.flush()
 
-    def _never(*a, **k):
-        raise AssertionError("the code must not be exchanged while impersonating")
-
-    monkeypatch.setattr("src.services.admin_provisioning.exchange_code", _never)
+    monkeypatch.setattr(
+        "src.services.admin_provisioning.exchange_code",
+        lambda *a, **k: "xoxb-imp-token",
+    )
     headers = auth_headers(admin.id)
     headers["Cookie"] += f"; copi-impersonate={manager.id}"
     r = await client.get(
         "/admin/agents/slack/callback?code=c&state=s4",
         headers=headers, follow_redirects=False,
     )
-    assert r.status_code == 403
+    assert r.status_code == 302
+    assert r.headers["location"] == f"/manager/pis/{pi.id}?slack_ok=1"
     await db_session.refresh(agent)
-    assert agent.slack_bot_token is None
+    assert agent.slack_bot_token == "xoxb-imp-token"
 
 
 async def test_callback_refuses_a_null_initiator_row_for_a_non_admin(
