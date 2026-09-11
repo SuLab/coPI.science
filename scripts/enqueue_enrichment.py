@@ -25,8 +25,12 @@ async def enqueue_for_all(db, *, apply: bool, only: str | None, orcid: str | Non
         print(f"{'ENQUEUE' if apply else 'would enqueue'} {types} for {u.name} ({u.orcid})")
         if apply:
             for t in types:
-                pending = await db.execute(select(Job.id).where(Job.user_id == u.id, Job.type == t, Job.status.in_(("pending", "processing"))))
-                if pending.scalar_one_or_none() is None:
+                pending = await db.execute(
+                    select(Job.id)
+                    .where(Job.user_id == u.id, Job.type == t, Job.status.in_(("pending", "processing")))
+                    .limit(1)
+                )
+                if pending.scalars().first() is None:
                     db.add(Job(type=t, user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid}))
     if apply:
         await db.commit()
