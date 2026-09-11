@@ -1,6 +1,72 @@
 {% extends "base.html" %}
 {% block title %}Admin — Simulation — CoPI{% endblock %}
 
+{% block extra_head %}
+<style>
+  /* Readability scale (docs/audits/2026-09-11-assessment-readability): content 16px,
+     metadata and chart text 14px minimum, nothing lighter than #4b5563, measure ≤ 68ch. */
+  #sim-body { font-size: 1rem; line-height: 1.5; color: #1f2937; }
+  .sc-caption { max-width: 68ch; font-size: 1rem; line-height: 1.5; color: #374151; margin: 0 0 .75rem; }
+  .sc-meta { font-size: .875rem; color: #4b5563; }
+  .sc-num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.sc-num { text-align: right; }
+
+  .sc-tile { display: flex; flex-direction: column; gap: .25rem; padding: 1rem; border: 1px solid #e5e7eb; border-radius: .75rem; background: #fff; min-height: 7.5rem; }
+  .sc-tile--warn { border-color: #f59e0b; background: #fffbeb; }
+  .sc-tile-label { font-size: .875rem; font-weight: 600; color: #4b5563; }
+  .sc-tile-value { font-size: 1.75rem; font-weight: 600; line-height: 1.2; color: #111827; }
+  .sc-tile-note { font-size: .875rem; color: #4b5563; max-width: 34ch; }
+  .sc-meter { display: block; width: 100%; height: 10px; margin: .25rem 0; }
+
+  .sc-legend, .sc-stack-values { display: flex; flex-wrap: wrap; gap: .25rem 1rem; font-size: .875rem; color: #1f2937; font-variant-numeric: tabular-nums; }
+  .sc-legend { margin: 0 0 .5rem; }
+  .sc-legend-item { display: inline-flex; align-items: center; gap: .375rem; }
+  .sc-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; flex: none; }
+
+  .sc-hbar-row, .sc-axis, .sc-gantt-row, .sc-gantt-axis { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr 9rem; align-items: center; gap: .75rem; }
+  .sc-hbar-row, .sc-gantt-row { min-height: 1.75rem; }
+  .sc-hbar-label, .sc-gantt-label { font-size: 1rem; color: #1f2937; overflow-wrap: anywhere; }
+  .sc-hbar-track, .sc-gantt-track { position: relative; height: 14px; background: #f3f4f6; border-radius: 3px; }
+  .sc-hbar-fill { display: block; height: 100%; border-radius: 0 3px 3px 0; }
+  .sc-hbar-value, .sc-gantt-dur { font-size: .9375rem; color: #1f2937; text-align: right; font-variant-numeric: tabular-nums; }
+  .sc-axis { margin-top: .25rem; }
+  .sc-axis-track { position: relative; height: 1.5rem; border-top: 1px solid #6b7280; }
+  .sc-axis .sc-tick, .sc-gantt-axis .sc-tick { position: absolute; top: 3px; font-size: .875rem; color: #4b5563; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .sc-axis .sc-tick::before { content: ""; position: absolute; top: -4px; left: 0; width: 1px; height: 5px; background: #6b7280; }
+  .sc-tick--0 { left: 0; } .sc-tick--mid { left: 50%; transform: translateX(-50%); } .sc-tick--max { right: 0; }
+  .sc-tick--mid::before { left: 50%; } .sc-tick--max::before { left: auto; right: 0; }
+  .sc-axis-unit { font-size: .875rem; color: #4b5563; }
+
+  .sc-stack { display: grid; grid-template-columns: 1fr 6rem; grid-template-areas: "bar total" "values values" "twin twin"; align-items: center; gap: .25rem .75rem; }
+  .sc-stack-bar { grid-area: bar; display: flex; gap: 2px; height: 16px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
+  .sc-stack-seg { display: block; height: 100%; flex: none; }
+  .sc-stack-total { grid-area: total; font-size: .9375rem; color: #1f2937; text-align: right; font-variant-numeric: tabular-nums; }
+  .sc-stack-values { grid-area: values; }
+  .sc-stack .sc-chart-fallback { grid-area: twin; }
+
+  .sc-line-svg { display: block; width: 100%; max-width: 640px; height: auto; }
+  .sc-line-svg text { font-family: inherit; font-size: 14px; }
+  .sc-line-svg .sc-point-label { font-weight: 600; }
+
+  .sc-gantt-bar { position: absolute; top: 0; height: 100%; border-radius: 3px; }
+  .sc-gantt-axis .sc-gantt-track { height: 1.5rem; background: none; border-top: 1px solid #6b7280; }
+  .sc-gantt-axis .sc-tick { transform: translateX(-50%); }
+  .sc-gantt-axis .sc-tick:first-child { transform: none; } .sc-gantt-axis .sc-tick:last-child { transform: translateX(-100%); }
+
+  .sc-chart-fallback { margin-top: .5rem; font-size: .875rem; color: #374151; }
+  .sc-chart-fallback summary { cursor: pointer; color: #4338ca; }
+  .sc-chart-fallback table { margin-top: .5rem; border-collapse: collapse; }
+  .sc-chart-fallback caption { text-align: left; font-weight: 600; margin-bottom: .25rem; }
+  .sc-chart-fallback th, .sc-chart-fallback td { padding: .125rem .75rem .125rem 0; text-align: left; vertical-align: top; }
+  .sc-chart-fallback td { font-variant-numeric: tabular-nums; }
+
+  #sim-body a:focus-visible, #sim-body button:focus-visible, #sim-body summary:focus-visible,
+  #sim-body select:focus-visible, #sim-body input:focus-visible, #sim-body textarea:focus-visible { outline: 2px solid #4338ca; outline-offset: 2px; }
+  #sim-body section[id] { scroll-margin-top: 4rem; }
+  @media print { .sim-jump-nav, form, button, .sc-chart-fallback summary { display: none !important; } }
+</style>
+{% endblock %}
+
 {% block content %}
 <div id="sim-body">
 
