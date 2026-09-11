@@ -494,8 +494,8 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
     assert fresh_resp.status_code == 200
     assert "Active threads" in fresh_resp.text
     assert "Calls in window" in fresh_resp.text
-    assert '<td class="px-4 py-2 text-sm text-gray-500">3</td>' in fresh_resp.text
-    assert '<td class="px-4 py-2 text-sm text-gray-500">5</td>' in fresh_resp.text
+    assert '<td class="px-4 py-2 sc-num">3</td>' in fresh_resp.text
+    assert '<td class="px-4 py-2 sc-num">5</td>' in fresh_resp.text
 
     row = (await db_session.execute(select(SimulationProcessStatus))).scalar_one()
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
@@ -503,8 +503,8 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
 
     stale_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert stale_resp.status_code == 200
-    assert '<td class="px-4 py-2 text-sm text-gray-500">3</td>' not in stale_resp.text
-    assert '<td class="px-4 py-2 text-sm text-gray-500">5</td>' not in stale_resp.text
+    assert '<td class="px-4 py-2 sc-num">3</td>' not in stale_resp.text
+    assert '<td class="px-4 py-2 sc-num">5</td>' not in stale_resp.text
 
 
 async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(client, db_session):
@@ -546,11 +546,11 @@ async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(cli
     assert resp.status_code == 200
 
     section = resp.text[resp.text.index("Hub : lab token burn ratio"):]
-    # The None-ratio hour (11:00) is plotted at 5.0 too — tied for the peak,
-    # at/above every finite hour (2.0 and 5.0) — not at 0.0.
-    assert section.count("<title>5.0</title>") == 2
-    assert "<title>0.0</title>" not in section
-    assert "∞ — no lab tokens this hour" in section
+    # The None-ratio hour (11:00) is drawn as a hollow marker at the top of
+    # the plot — at/above every finite hour (2.0 and 5.0) — not at 0.0.
+    assert section.count('class="sc-none-marker"') == 1     # exactly one hollow ∞ marker
+    assert "∞ — no lab tokens this hour" in section          # table twin row (unchanged wording)
+    assert ">5.00</text>" in section                         # y-max tick reads the peak
 
 
 # ---------------------------------------------------------------------------
@@ -647,8 +647,8 @@ async def test_live_tab_renders_the_three_f1_cost_panels(client, db_session):
     assert "Cost by call kind" in resp.text
     assert "scout_hub · decide" in resp.text
     assert "chemistry · unmatched" in resp.text
-    assert "$2.00 (1 calls)" in resp.text
-    assert "≥ $5.00 (1 calls)" in resp.text
+    assert "$2.00 (1 call)" in resp.text
+    assert "≥ $5.00 (1 call)" in resp.text
 
 
 async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(client, db_session):

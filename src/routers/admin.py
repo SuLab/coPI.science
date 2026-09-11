@@ -52,6 +52,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services import display_format as fmt
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
 from src.services.cohorts import (
@@ -97,13 +98,18 @@ from src.services.simulation_stats import (
 )
 from src.services.svg_charts import (
     CATEGORICAL_COLORS,
+    DIVERGING_MID,
+    DIVERGING_NEG,
+    DIVERGING_POS,
     diverging_hbar,
     gantt,
     hbar_list,
+    legend,
+    line_chart,
     meter,
-    sparkline,
     stacked_hbar,
     stat_tile,
+    table_twin,
 )
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.user_deletion import delete_user_account
@@ -111,6 +117,11 @@ from src.services.user_deletion import delete_user_account
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+# `{{ dt | ts }}` — one UTC datetime rendering for the whole admin surface
+# (src/services/display_format.timestamp). A filter, not a per-call helper, so
+# a template can never accidentally print a raw `datetime.__str__`.
+templates.env.filters["ts"] = fmt.timestamp
 
 # "Did this API call stop before it finished?" — registered as a Jinja TEST so
 # `admin/llm_calls.html` can `selectattr('stop_reason', 'truncated_stop')` and
@@ -2259,7 +2270,7 @@ async def _live_tab_context(
         {
             "id": r.id,
             "status": r.status,
-            "started_at": r.started_at,
+            "started_at": fmt.timestamp(r.started_at),
             "rubric_stamps": rubric_stamps.get(r.id, []),
             "is_selected": selected_run is not None and r.id == selected_run.id,
         }
@@ -2306,303 +2317,198 @@ async def _live_tab_context(
     burn_points = await hub_lab_burn(db, run_id, hub_agent_id) if hub_agent_id else []
 
     # --- KPI row ------------------------------------------------------
-    cost_hero_notes = ["Single-run draw — never aggregated across runs."]
-    if cost.unpriced_models:
-        cost_hero_notes.insert(
-            0,
-            "Unpriced model(s) excluded from this total: " + ", ".join(cost.unpriced_models),
-        )
     cost_hero_html = stat_tile(
-        "Total cost",
-        f"{'≥' if cost.is_floor else ''}${cost.total:.2f}",
-        " ".join(cost_hero_notes),
+        "Total cost", fmt.money(cost.total, floor=cost.is_floor),
+        ("Unpriced model(s) excluded from this total: " + ", ".join(cost.unpriced_models)) if cost.unpriced_models
+        else ("Floor: some rows predate cache-token logging." if cost.is_floor else None),
         warn=bool(cost.unpriced_models),
     )
-
     elapsed_hours = overview.elapsed_seconds / 3600
     burn_html = stat_tile(
-        "Burn rate",
-        f"${(float(cost.total) / elapsed_hours):.2f}/h" if elapsed_hours > 0 else "—",
-        "Single-run draw.",
+        "Average burn rate",
+        f"{fmt.money(float(cost.total) / elapsed_hours)}/h" if elapsed_hours > 0 else "—",
+        f"Total cost ÷ run lifetime ({fmt.duration(overview.elapsed_seconds)}); not a current rate.",
     )
-
     cache_denominator = cost.total_input_tokens + cost.total_cache_read_tokens
-    cache_fraction = (
-        cost.total_cache_read_tokens / cache_denominator if cache_denominator > 0 else 0.0
-    )
-    cache_meter_html = meter(
-        "Cache hit rate",
-        cache_fraction,
-        f"{cost.total_cache_read_tokens:,} of {cache_denominator:,} input tokens served from cache",
-    )
-
-    progress_html = (
-        meter(
-            "Progress",
-            overview.elapsed_seconds / overview.planned_seconds,
-            f"{overview.elapsed_seconds:.0f}s of {overview.planned_seconds}s planned",
+    cache_fraction = cost.total_cache_read_tokens / cache_denominator if cache_denominator > 0 else 0.0
+    cache_meter_html = meter("Cache hit rate", cache_fraction,
+                             f"{cost.total_cache_read_tokens:,} of {cache_denominator:,} input tokens served from cache")
+    if overview.planned_seconds:
+        frac = overview.elapsed_seconds / overview.planned_seconds
+        progress_html = meter(
+            "Progress", frac,
+            f"{fmt.duration(overview.elapsed_seconds)} of {fmt.duration(overview.planned_seconds)} planned"
+            + (" — overran the limit" if frac > 1 else ""),
+            value_text=fmt.percent(frac), warn=frac > 1,
         )
-        if overview.planned_seconds
-        else None
-    )
+    else:
+        progress_html = stat_tile(
+            "Progress", "No time limit",
+            (f"Running {fmt.duration(overview.elapsed_seconds)} so far" if overview.ended_at is None
+             else f"Ran {fmt.duration(overview.elapsed_seconds)}"),
+        )
+    headlines_owed_html = stat_tile("Headlines owed", str(fun.headlines_owed),
+                                    "Terminal verdicts with no #assessments-summary post yet; 0 on a healthy run.",
+                                    warn=fun.headlines_owed > 0)
+    interviews_concluded_html = stat_tile("Interviews concluded", str(fun.terminal),
+                                          f"of {fun.interviews_opened} opened; {fun.provisional} still provisional")
 
-    headlines_owed_html = stat_tile(
-        "Headlines owed", str(fun.headlines_owed), warn=fun.headlines_owed > 0
-    )
-    interviews_concluded_html = stat_tile("Interviews concluded", str(fun.terminal))
-
-    # --- cumulative cost sparkline + hourly token-class stacked bars ---
-    cumulative_points: list[float] = []
-    running_total = Decimal(0)
+    # --- cost over time -------------------------------------------------
+    running = Decimal(0)
+    cum_points: list[tuple[str, float | None]] = []
     for h in hours:
-        running_total += h.cost
-        cumulative_points.append(float(running_total))
-    cumulative_cost_html = sparkline(cumulative_points) if cumulative_points else None
+        running += h.cost
+        cum_points.append((fmt.hour_label(h.hour), float(running)))
+    cumulative_cost_html = line_chart(cum_points, unit="US$", value_fmt=fmt.money) if cum_points else None
 
-    hourly_token_bars = [
-        {
-            "hour": h.hour,
-            "html": stacked_hbar(
-                h.hour.isoformat(),
-                [
-                    ("input", float(h.input_tokens), CATEGORICAL_COLORS[0]),
-                    ("output", float(h.output_tokens), CATEGORICAL_COLORS[1]),
-                    ("cache_read", float(h.cache_read_tokens), CATEGORICAL_COLORS[2]),
-                    ("cache_creation", float(h.cache_creation_tokens), CATEGORICAL_COLORS[3]),
-                ],
-            ),
-        }
-        for h in hours
-    ]
+    token_classes = [("input", CATEGORICAL_COLORS[0]), ("output", CATEGORICAL_COLORS[1]),
+                     ("cache read", CATEGORICAL_COLORS[2]), ("cache write", CATEGORICAL_COLORS[3])]
+    hourly_token_legend_html = legend(token_classes)
+    hour_max = max((h.input_tokens + h.output_tokens + h.cache_read_tokens + h.cache_creation_tokens for h in hours), default=0)
+    hourly_token_bars, hourly_twin_rows = [], []
+    for h in hours:
+        vals = [h.input_tokens, h.output_tokens, h.cache_read_tokens, h.cache_creation_tokens]
+        hourly_token_bars.append({
+            "hour_label": fmt.hour_label(h.hour),
+            "html": stacked_hbar(fmt.hour_label(h.hour), [(n, float(v), c) for (n, c), v in zip(token_classes, vals, strict=True)],
+                                 scale_max=float(hour_max), table=False),
+        })
+        hourly_twin_rows.append([fmt.hour_label(h.hour), *[fmt.count(v) for v in vals], fmt.count(sum(vals))])
+    hourly_token_twin_html = table_twin(["Hour (UTC)", "input", "output", "cache read", "cache write", "total"],
+                                        hourly_twin_rows, caption="Tokens per hour", key="tokens-per-hour") if hours else None
 
-    # --- cost by agent / model / phase ---------------------------------
-    cost_by_agent_html = (
-        hbar_list([(a.agent_id, float(a.cost), f"${a.cost:.2f} ({a.call_count} calls)") for a in cost.by_agent])
-        if cost.by_agent
-        else None
-    )
-    cost_by_model_html = (
-        hbar_list([
-            (m.model, float(m.cost) if m.cost is not None else 0.0,
-             f"${m.cost:.2f}" if m.cost is not None else "unpriced")
-            for m in cost.by_model
-        ])
-        if cost.by_model
-        else None
-    )
-    cost_by_phase_html = (
-        hbar_list([(p.phase, float(p.cost), f"${p.cost:.2f} ({p.call_count} calls)") for p in cost.by_phase])
-        if cost.by_phase
-        else None
-    )
+    # --- cost by … (descending by cost for display) --------------------------
+    def _cost_rows(items, caption, label):
+        return hbar_list(
+            [(label(r), float(r.cost), f"{fmt.money(r.cost)} ({fmt.plural(r.call_count, 'call')})")
+             for r in sorted(items, key=lambda r: float(r.cost), reverse=True)],
+            unit="US$", axis_fmt=fmt.money, caption=caption,
+        )
 
-    # --- cost by interview stage / specialist consult / call kind --------
-    cost_by_stage_html = (
-        hbar_list([
-            (f"{r.role} · {r.thread_phase}", float(r.cost),
-             f"${r.cost:.2f} ({r.call_count} calls)")
-            for r in stage_costs
-        ])
-        if stage_costs
-        else None
-    )
-    cost_by_specialist_html = (
-        hbar_list([
-            (f"{r.domain} · {r.verdict_signal}", float(r.cost),
-             f"${r.cost:.2f} ({r.call_count} calls)")
-            for r in specialist_costs
-        ])
-        if specialist_costs
-        else None
-    )
+    cost_by_agent_html = _cost_rows(cost.by_agent, "Cost by agent", lambda a: a.agent_id) if cost.by_agent else None
+    cost_by_model_html = hbar_list(
+        [(m.model, float(m.cost) if m.cost is not None else 0.0,
+          fmt.money(m.cost) if m.cost is not None else "unpriced — not in the price table")
+         for m in sorted(cost.by_model, key=lambda m: float(m.cost or 0), reverse=True)],
+        unit="US$", axis_fmt=fmt.money, caption="Cost by model") if cost.by_model else None
+    cost_by_phase_html = _cost_rows(cost.by_phase, "Cost by phase", lambda p: p.phase) if cost.by_phase else None
+    cost_by_stage_html = _cost_rows(stage_costs, "Cost by interview stage", lambda r: f"{r.role} · {r.thread_phase}") if stage_costs else None
+    cost_by_specialist_html = _cost_rows(specialist_costs, "Cost by specialist consult",
+                                         lambda r: f"{r.domain} · {r.verdict_signal}") if specialist_costs else None
     # `is_floor` is a property of the RUN (some row has NULL call_stats), so
     # every row carries the same value — read it off the first.
     call_kind_is_floor = bool(call_kind_costs) and call_kind_costs[0].is_floor
-    cost_by_call_kind_html = (
-        hbar_list([
-            (r.kind, float(r.cost),
-             f"{'≥ ' if r.is_floor else ''}${r.cost:.2f} ({r.call_count} calls)")
-            for r in call_kind_costs
-        ])
-        if call_kind_costs
-        else None
-    )
+    cost_by_call_kind_html = hbar_list(
+        [(r.kind, float(r.cost), f"{fmt.money(r.cost, floor=r.is_floor)} ({fmt.plural(r.call_count, 'call')})")
+         for r in sorted(call_kind_costs, key=lambda r: float(r.cost), reverse=True)],
+        unit="US$", axis_fmt=fmt.money, caption="Cost by call kind") if call_kind_costs else None
 
-    # --- funnel + drops --------------------------------------------------
-    funnel_counts = [
-        ("opened", fun.interviews_opened),
-        ("verdicts stored", fun.verdicts_stored),
-        ("terminal", fun.terminal),
-        ("provisional", fun.provisional),
-        ("announced", fun.announced),
-        ("headlines owed", fun.headlines_owed),
-    ]
-    funnel_html = (
-        hbar_list([
-            (label, float(v), str(v))
-            for label, v in sorted(funnel_counts, key=lambda kv: kv[1], reverse=True)
-        ])
-        if any(v for _, v in funnel_counts)
-        else None
-    )
+    # --- funnel (pipeline order) + drops ---------------------------------------
+    funnel_counts = [("Interviews opened", fun.interviews_opened), ("Verdicts stored", fun.verdicts_stored),
+                     ("Terminal (thread closed)", fun.terminal), ("Provisional (still open)", fun.provisional),
+                     ("Headline announced", fun.announced), ("Headlines owed", fun.headlines_owed)]
+    funnel_html = hbar_list([(lbl, float(v), str(v)) for lbl, v in funnel_counts], unit="interviews",
+                            axis_fmt=fmt.whole, caption="Funnel") if any(v for _, v in funnel_counts) else None
     drops_rows = sorted(fun.drops_by_reason.items(), key=lambda kv: kv[1], reverse=True)
 
-    # --- specialist mix + fan-out ----------------------------------------
-    specialist_rows = [
-        {
-            "domain": d.domain,
-            "html": diverging_hbar(d.domain, d.blocking, d.gap, d.adequate, ("blocking", "gap", "adequate")),
-            "historical": d.historical,
-        }
-        for d in domains
-    ]
-    fanout_html = (
-        hbar_list([
-            (f"{b.consult_count} consult(s)", float(b.interview_count), f"{b.interview_count} interview(s)")
-            for b in fanout
-        ])
-        if fanout
-        else None
-    )
+    # --- specialist mix + fan-out ----------------------------------------------
+    specialist_legend_html = legend([("blocking", DIVERGING_NEG), ("gap", DIVERGING_MID), ("adequate", DIVERGING_POS)])
+    mix_max = max((d.blocking + d.gap + d.adequate for d in domains), default=0)
+    specialist_rows = [{"domain": d.domain, "historical": d.historical,
+                        "html": diverging_hbar(d.domain, d.blocking, d.gap, d.adequate, ("blocking", "gap", "adequate"),
+                                               scale_max=float(mix_max), table=False)} for d in domains]
+    specialist_twin_html = table_twin(
+        ["Domain", "blocking", "gap", "adequate", "historical"],
+        [[d.domain, str(d.blocking), str(d.gap), str(d.adequate), str(d.historical)] for d in domains],
+        caption="Specialist mix", key="specialist-mix") if domains else None
+    fanout_html = hbar_list(
+        [(f"{fmt.plural(b.consult_count, 'consult')} per interview", float(b.interview_count), fmt.plural(b.interview_count, "interview"))
+         for b in fanout], unit="interviews", axis_fmt=fmt.whole, caption="Panel fan-out") if fanout else None
 
-    # --- stop-reason taxonomy + latency percentiles ----------------------
-    taxonomy_html = (
-        hbar_list([
-            (label, float(n), str(n))
-            for label, n in sorted(taxonomy.items(), key=lambda kv: kv[1], reverse=True)
-        ])
-        if taxonomy
-        else None
-    )
-    latency_rows = [
-        {"phase": phase, "n": pct.n, "p50": pct.p50, "p95": pct.p95, "p99": pct.p99}
-        for phase, pct in sorted(latency.items(), key=lambda kv: (kv[0] != "overall", kv[0]))
-    ]
+    # --- stop reasons + latency ----------------------------------------------------
+    taxonomy_html = hbar_list(
+        [(lbl, float(n), fmt.count(n)) for lbl, n in sorted(taxonomy.items(), key=lambda kv: kv[1], reverse=True)],
+        unit="API calls", axis_fmt=fmt.whole, caption="Stop-reason taxonomy") if taxonomy else None
+    latency_rows = [{"phase": phase, "n": fmt.count(p.n),
+                     "p50": fmt.count(round(p.p50)) if p.p50 is not None else "—",
+                     "p95": fmt.count(round(p.p95)) if p.p95 is not None else "—",
+                     "p99": fmt.count(round(p.p99)) if p.p99 is not None else "—"}
+                    for phase, p in sorted(latency.items(), key=lambda kv: (kv[0] != "overall", kv[0]))]
 
-    # --- per-agent table (stats + real heartbeat merged) ------------------
+    # --- per-agent table -----------------------------------------------------------
     agents_detail = _agents_detail_map(status_row, now)
     per_agent_rows = []
     for r in agents:
         active_threads, calls_in_window = _agent_live_columns(r.agent_id, agents_detail)
-        per_agent_rows.append({
-            "agent_id": r.agent_id,
-            "role": r.role or "—",
-            "registry_status": r.registry_status or "—",
-            "muted": r.muted,
-            "message_count": r.message_count,
-            "call_count": r.call_count,
-            "cost": f"${r.cost:.4f}",
-            "last_activity": r.last_activity.isoformat() if r.last_activity is not None else "—",
-            "active_threads": active_threads,
-            "calls_in_window": calls_in_window,
-        })
+        per_agent_rows.append({"agent_id": r.agent_id, "role": r.role or "—", "registry_status": r.registry_status or "—",
+                               "muted": r.muted, "message_count": fmt.count(r.message_count), "call_count": fmt.count(r.call_count),
+                               "cost": fmt.money(r.cost), "last_activity": fmt.timestamp(r.last_activity),
+                               "active_threads": active_threads, "calls_in_window": calls_in_window})
 
-    # --- interview gantt --------------------------------------------------
-    # NOTE (F11): `timeline`'s spans (`InterviewSpan.first_message_at` /
-    # `.last_message_at`, from `interview_timeline`) are MIN/MAX over
-    # `agent_messages` rows whose `thread_ts` equals the interview's
-    # `thread_id` — and the thread's own ROOT post never satisfies that: a
-    # root message IS the thing later replies point back to via `thread_ts`,
-    # so the root's own `thread_ts` column is NULL, not its own timestamp.
-    # Every bar drawn below therefore starts at the first REPLY, not the
-    # opening post, and is very slightly narrower than the interview's true
-    # wall-clock span. This is a rendering fact, not a bug to fix here.
+    # --- interview gantt (F11: spans start at the first REPLY, not the root post) ----
+    # `timeline`'s spans (`InterviewSpan.first_message_at` / `.last_message_at`,
+    # from `interview_timeline`) are MIN/MAX over `agent_messages` rows whose
+    # `thread_ts` equals the interview's `thread_id` — and the thread's own ROOT
+    # post never satisfies that: a root message IS the thing later replies point
+    # back to via `thread_ts`, so the root's own `thread_ts` column is NULL, not
+    # its own timestamp. Every bar drawn below therefore starts at the first
+    # REPLY, and is very slightly narrower than the interview's true wall-clock
+    # span. This is a rendering fact, not a bug to fix here — and the card's
+    # caption says so to the operator.
     cost_by_thread = {ic.thread_ts: ic for ic in per_interview}
-    gantt_rows = []
-    gantt_links = []
-    known_times = [
-        t for s in timeline for t in (s.first_message_at, s.last_message_at) if t is not None
-    ]
-    t0 = min(known_times) if known_times else 0.0
-    t1 = max(known_times) if known_times else 0.0
-    for s in timeline:
+    known = [t for s in timeline for t in (s.first_message_at, s.last_message_at) if t is not None]
+    t0, t1 = (min(known), max(known)) if known else (0.0, 0.0)
+    gantt_rows, gantt_links = [], []
+    for s in sorted(timeline, key=lambda s: s.first_message_at if s.first_message_at is not None else t0):
         start = s.first_message_at if s.first_message_at is not None else t0
         end = s.last_message_at if s.last_message_at is not None else start
         ic = cost_by_thread.get(s.thread_id)
-        cost_display = "—"
-        if ic is not None:
-            cost_display = f"{'≥' if ic.is_floor else ''}${ic.cost:.2f}"
+        cost_display = fmt.money(ic.cost, floor=ic.is_floor) if ic is not None else "—"
         label = s.subject_agent_id or s.thread_id
-        gantt_rows.append((label, start, end, CATEGORICAL_COLORS[1 if s.announced else 0],
-                            f"{s.outcome} — {cost_display}"))
-        gantt_links.append({
-            "assessment_id": s.assessment_id,
-            "label": label,
-            "outcome": s.outcome,
-            "cost": cost_display,
-            "announced": s.announced,
-        })
-    gantt_html = gantt(gantt_rows, t0, t1) if gantt_rows else None
+        gantt_rows.append((label, start, end, CATEGORICAL_COLORS[1 if s.announced else 0], f"{s.outcome} — {cost_display}"))
+        gantt_links.append({"assessment_id": s.assessment_id, "label": label, "outcome": s.outcome, "cost": cost_display,
+                            "announced": s.announced, "span": fmt.duration(end - start)})
+    gantt_html = gantt(gantt_rows, t0, t1, tick_fmt=fmt.epoch_hm,
+                       legend_items=[("headline announced", CATEGORICAL_COLORS[1]), ("not announced", CATEGORICAL_COLORS[0])]) if gantt_rows else None
     unattributed = cost_by_thread.get(None)
     unattributed_note = None
     if gantt_rows and unattributed is not None and unattributed.cost > 0:
-        prefix = "≥" if unattributed.is_floor else ""
-        unattributed_note = (
-            f"{prefix}${unattributed.cost:.2f} in LLM calls could not be attributed to a "
-            "specific interview thread (no thread_ts recorded) and is excluded from every "
-            "row above."
-        )
+        unattributed_note = (f"{fmt.money(unattributed.cost, floor=unattributed.is_floor)} in LLM calls could not be attributed to a "
+                             "specific interview thread (no thread_ts recorded) and is excluded from every row above.")
 
-    # --- hub:lab burn sparkline --------------------------------------------
+    # --- hub:lab burn ratio -------------------------------------------------------------
     # A None ratio (BurnPoint.ratio's docstring: hub tokens against zero lab
-    # tokens — genuinely unbounded) is the single most alarming state this
-    # chart exists to surface: pure hub burn with no lab activity to divide
-    # by. Plotting it as 0.0 would render that runaway-coordination signal as
-    # the CALMEST point on the line. Instead it is plotted at the series' own
-    # peak finite ratio (or 1.0 when the whole window has no finite ratio at
-    # all) so it reads as a spike, at or above every finite hour, never a
-    # floor — and the paired table spells out "∞" rather than a number.
-    finite_ratios = [p.ratio for p in burn_points if p.ratio is not None]
-    peak_ratio = max(finite_ratios) if finite_ratios else 1.0
-    burn_sparkline_html = (
-        sparkline([p.ratio if p.ratio is not None else peak_ratio for p in burn_points])
-        if burn_points
-        else None
-    )
-    burn_rows = [
-        {
-            "hour": p.hour,
-            "hub_tokens": p.hub_tokens,
-            "lab_tokens": p.lab_tokens,
-            "ratio": f"{p.ratio:.2f}" if p.ratio is not None else "∞ — no lab tokens this hour",
-        }
-        for p in burn_points
-    ]
+    # tokens — genuinely unbounded) is the single most alarming state this chart
+    # exists to surface. `line_chart` draws it as a HOLLOW marker at the top of
+    # the plot, labelled "∞", rather than as a number: plotting it as 0.0 would
+    # render that runaway-coordination signal as the CALMEST point on the line.
+    burn_line_html = line_chart([(fmt.hour_label(p.hour), p.ratio) for p in burn_points], unit="hub ÷ lab tokens",
+                                value_fmt=lambda v: f"{v:.2f}", none_label="∞",
+                                none_table_label="∞ — no lab tokens this hour") if burn_points else None
+
+    run_facts = {"status": overview.status, "started": fmt.timestamp(overview.started_at), "ended": fmt.timestamp(overview.ended_at),
+                 "elapsed": fmt.duration(overview.elapsed_seconds), "total_api_calls": fmt.count(overview.total_api_calls),
+                 "total_messages": fmt.count(overview.total_messages), "announcement": overview.run_start_announcement}
+    process_facts = {"build": overview.build_info, "hub": overview.hub_prompt_stamp, "pi": overview.pi_prompt_stamp,
+                     "rubric_version": overview.rubric_version, "rubric_hash": overview.rubric_content_hash}
 
     return {
-        "stats_run": selected_run,
-        "run_options": run_options,
-        "api_call_units_note": API_CALL_UNITS_NOTE,
-        "run_overview": overview,
-        "cost_hero_html": cost_hero_html,
-        "burn_html": burn_html,
-        "cache_meter_html": cache_meter_html,
-        "progress_html": progress_html,
-        "headlines_owed_html": headlines_owed_html,
-        "interviews_concluded_html": interviews_concluded_html,
-        "cumulative_cost_html": cumulative_cost_html,
-        "hourly_token_bars": hourly_token_bars,
-        "cost_by_agent_html": cost_by_agent_html,
-        "cost_by_model_html": cost_by_model_html,
-        "cost_by_phase_html": cost_by_phase_html,
-        "cost_by_stage_html": cost_by_stage_html,
-        "cost_by_specialist_html": cost_by_specialist_html,
-        "cost_by_call_kind_html": cost_by_call_kind_html,
-        "call_kind_is_floor": call_kind_is_floor,
-        "funnel_html": funnel_html,
-        "drops_rows": drops_rows,
-        "unvetted_panel_count": fun.unvetted_panel_count,
-        "specialist_rows": specialist_rows,
-        "fanout_html": fanout_html,
-        "taxonomy_html": taxonomy_html,
-        "latency_rows": latency_rows,
-        "latency_capped": latency_capped,
-        "per_agent_rows": per_agent_rows,
-        "gantt_html": gantt_html,
-        "gantt_links": gantt_links,
-        "unattributed_note": unattributed_note,
-        "burn_sparkline_html": burn_sparkline_html,
-        "burn_rows": burn_rows,
+        "stats_run": selected_run, "run_options": run_options, "api_call_units_note": API_CALL_UNITS_NOTE,
+        "cost_hero_html": cost_hero_html, "burn_html": burn_html, "cache_meter_html": cache_meter_html,
+        "progress_html": progress_html, "headlines_owed_html": headlines_owed_html,
+        "interviews_concluded_html": interviews_concluded_html, "cumulative_cost_html": cumulative_cost_html,
+        "hourly_token_legend_html": hourly_token_legend_html, "hourly_token_bars": hourly_token_bars,
+        "hourly_token_twin_html": hourly_token_twin_html,
+        "cost_by_agent_html": cost_by_agent_html, "cost_by_model_html": cost_by_model_html,
+        "cost_by_phase_html": cost_by_phase_html, "cost_by_stage_html": cost_by_stage_html,
+        "cost_by_specialist_html": cost_by_specialist_html, "cost_by_call_kind_html": cost_by_call_kind_html,
+        "call_kind_is_floor": call_kind_is_floor, "funnel_html": funnel_html, "drops_rows": drops_rows,
+        "unvetted_panel_count": fun.unvetted_panel_count, "specialist_legend_html": specialist_legend_html,
+        "specialist_rows": specialist_rows, "specialist_twin_html": specialist_twin_html, "fanout_html": fanout_html,
+        "taxonomy_html": taxonomy_html, "latency_rows": latency_rows, "latency_capped": latency_capped,
+        "per_agent_rows": per_agent_rows, "gantt_html": gantt_html, "gantt_links": gantt_links,
+        "unattributed_note": unattributed_note, "burn_line_html": burn_line_html,
+        "run_facts": run_facts, "process_facts": process_facts, "heartbeat_stale_seconds": HEARTBEAT_STALE_SECONDS,
     }
 
 
