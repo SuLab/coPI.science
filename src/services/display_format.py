@@ -15,8 +15,25 @@ _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
 
 
 def money(value: Decimal | float | int, *, floor: bool = False) -> str:
-    text = f"${Decimal(str(value)):,.2f}"
-    return f"≥ {text}" if floor else text
+    """Two decimals, with two escapes from the resulting rounding.
+
+    `floor=True` prefixes "≥ " — the figure is a LOWER BOUND (some rows predate
+    cache-token logging), and that claim outranks precision, so a sub-cent floor
+    still renders as "≥ $0.00" rather than "< $0.01": "at least under a cent"
+    reads as a contradiction.
+
+    Otherwise a positive amount that would round to $0.00 renders "< $0.01".
+    A per-agent cost of $0.00004 is not zero, and a table that prints it as
+    $0.00 is indistinguishable from one listing an agent that never spent
+    anything. Exact zero keeps "$0.00" — that one IS zero.
+    """
+    amount = Decimal(str(value))
+    text = f"${amount:,.2f}"
+    if floor:
+        return f"≥ {text}"
+    if 0 < amount < Decimal("0.005"):
+        return "< $0.01"
+    return text
 
 
 def count(value: int) -> str:

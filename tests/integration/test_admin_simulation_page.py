@@ -20,6 +20,7 @@ same pattern tests/integration/test_star_topology.py uses).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -494,8 +495,8 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
     assert fresh_resp.status_code == 200
     assert "Active threads" in fresh_resp.text
     assert "Calls in window" in fresh_resp.text
-    assert '<td class="px-4 py-2 sc-num">3</td>' in fresh_resp.text
-    assert '<td class="px-4 py-2 sc-num">5</td>' in fresh_resp.text
+    assert 'data-sc-live="threads">3</td>' in fresh_resp.text
+    assert 'data-sc-live="calls">5</td>' in fresh_resp.text
 
     row = (await db_session.execute(select(SimulationProcessStatus))).scalar_one()
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
@@ -503,8 +504,8 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
 
     stale_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert stale_resp.status_code == 200
-    assert '<td class="px-4 py-2 sc-num">3</td>' not in stale_resp.text
-    assert '<td class="px-4 py-2 sc-num">5</td>' not in stale_resp.text
+    assert 'data-sc-live="threads">3</td>' not in stale_resp.text
+    assert 'data-sc-live="calls">5</td>' not in stale_resp.text
 
 
 async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(client, db_session):
@@ -551,6 +552,17 @@ async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(cli
     assert section.count('class="sc-none-marker"') == 1     # exactly one hollow ∞ marker
     assert "∞ — no lab tokens this hour" in section          # table twin row (unchanged wording)
     assert ">5.00</text>" in section                         # y-max tick reads the peak
+
+    # …and the marker sits ON the y-max gridline, not below it. The y-axis tick
+    # LABEL is drawn at the gridline's y + 4 (`line_chart`'s
+    # `<text … y="{y + 4}">`, src/services/svg_charts.py), so the marker's own
+    # `cy` must be that label's y minus 4. `class="sc-tick"` alone is the y-axis
+    # ticks; the x-axis labels carry `sc-tick sc-tick--x` and the last point's
+    # value carries `sc-point-label`, so neither can match here.
+    marker_cy = re.search(r'class="sc-none-marker" cx="[0-9.]+" cy="([0-9.]+)"', section)
+    y_max_tick = re.search(r'<text class="sc-tick" x="[0-9.-]+" y="([0-9.]+)"[^>]*>5\.00</text>', section)
+    assert marker_cy is not None and y_max_tick is not None
+    assert float(marker_cy.group(1)) + 4 == float(y_max_tick.group(1))
 
 
 # ---------------------------------------------------------------------------

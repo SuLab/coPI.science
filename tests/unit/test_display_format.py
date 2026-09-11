@@ -10,6 +10,15 @@ def test_money_two_decimals_and_floor_prefix():
     assert f.money(Decimal("9"), floor=True) == "≥ $9.00"
 
 
+def test_money_sub_cent_is_not_reported_as_zero():
+    # A positive amount that rounds to $0.00 must stay distinguishable from an
+    # agent that spent nothing at all; exact zero still reads "$0.00".
+    assert f.money(Decimal("0.00005")) == "< $0.01"
+    assert f.money(0) == "$0.00"
+    # The floor claim outranks the sub-cent claim: "≥ under a cent" is nonsense.
+    assert f.money(Decimal("0.00005"), floor=True) == "≥ $0.00"
+
+
 def test_count_thousands_separated():
     assert f.count(133820) == "133,820"
     assert f.count(0) == "0"

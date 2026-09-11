@@ -80,12 +80,14 @@
   <a class="text-indigo-700 hover:underline" href="#sec-announce">Announcement</a>
   <a class="text-indigo-700 hover:underline" href="#sec-history">Command history</a>
   <a class="text-indigo-700 hover:underline" href="#sec-run">Selected run</a>
+  {% if stats_run %}
   <a class="text-indigo-700 hover:underline" href="#sec-cost">Cost</a>
   <a class="text-indigo-700 hover:underline" href="#sec-outcomes">Outcomes</a>
   <a class="text-indigo-700 hover:underline" href="#sec-panel">Specialist panel</a>
   <a class="text-indigo-700 hover:underline" href="#sec-calls">API calls</a>
   <a class="text-indigo-700 hover:underline" href="#sec-agents">Agents</a>
   <a class="text-indigo-700 hover:underline" href="#sec-timeline">Timeline</a>
+  {% endif %}
 </nav>
 
 {% if msg %}
@@ -608,8 +610,8 @@
                 <td class="px-4 py-2 sc-num">{{ row.call_count }}</td>
                 <td class="px-4 py-2 sc-num">{{ row.cost }}</td>
                 <td class="px-4 py-2 text-base text-gray-700">{{ row.last_activity }}</td>
-                <td class="px-4 py-2 sc-num">{{ row.active_threads }}</td>
-                <td class="px-4 py-2 sc-num">{{ row.calls_in_window }}</td>
+                <td class="px-4 py-2 sc-num" data-sc-live="threads">{{ row.active_threads }}</td>
+                <td class="px-4 py-2 sc-num" data-sc-live="calls">{{ row.calls_in_window }}</td>
             </tr>
             {% else %}
             <tr><td colspan="10" class="px-4 py-4 text-base text-gray-600 text-center">No agent activity recorded yet.</td></tr>
