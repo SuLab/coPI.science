@@ -137,7 +137,18 @@ def diverging_hbar(label: str, neg: float, mid: float, pos: float, labels: tuple
                         scale_max=scale_max, value_fmt=whole, table=table)
 
 
-_ML, _MR, _MT, _MB = 56, 16, 12, 28
+# _MT leaves room for the unit caption above the plot; _MR for the last x tick,
+# which is anchored at the plot's right edge rather than centred on it.
+_ML, _MR, _MT, _MB = 56, 16, 26, 28
+
+
+def _label_anchor(x: float, width: int) -> str:
+    """Anchor a point label so it stays inside the viewBox at either edge."""
+    if x > width - _MR - 40:
+        return "end"
+    if x < _ML + 40:
+        return "start"
+    return "middle"
 
 
 def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: Callable[[float], str],
@@ -161,20 +172,22 @@ def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: 
         parts.append(f'<text class="sc-tick" x="{_ML - 6}" y="{y + 4}" text-anchor="end" fill="{TEXT_SECONDARY}">'
                      f"{escape(value_fmt(y_max * frac))}</text>")
     parts.append(f'<line x1="{_ML}" y1="{_MT + plot_h}" x2="{width - _MR}" y2="{_MT + plot_h}" stroke="{AXIS}" stroke-width="1"/>')
-    parts.append(f'<text class="sc-axis-unit" x="{_ML - 6}" y="{_MT - 2}" text-anchor="end" fill="{TEXT_SECONDARY}">{escape(unit)}</text>')
+    parts.append(f'<text class="sc-axis-unit" x="{_ML - 6}" y="10" text-anchor="start" fill="{TEXT_SECONDARY}">{escape(unit)}</text>')
 
     k = max(1, ceil(n / 6)) if n else 1
     coords: list[tuple[float, float, float]] = []
     for i, (xl, v) in enumerate(points):
         x = x_at(i)
         if i % k == 0 or i == n - 1:
-            parts.append(f'<text class="sc-tick sc-tick--x" x="{x}" y="{height - 8}" text-anchor="middle" '
+            anchor = "end" if (n > 1 and i == n - 1) else "middle"
+            parts.append(f'<text class="sc-tick sc-tick--x" x="{x}" y="{height - 8}" text-anchor="{anchor}" '
                          f'fill="{TEXT_SECONDARY}">{escape(xl)}</text>')
         if v is None:
             y = y_at(y_max)
             parts.append(f'<circle class="sc-none-marker" cx="{x}" cy="{y}" r="4" fill="none" '
                          f'stroke="{CATEGORICAL_COLORS[0]}" stroke-width="2"><title>{escape(xl)}: {escape(none_label)}</title></circle>')
-            parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="middle" fill="{TEXT_PRIMARY}">{escape(none_label)}</text>')
+            parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="{_label_anchor(x, width)}" '
+                         f'fill="{TEXT_PRIMARY}">{escape(none_label)}</text>')
         else:
             coords.append((x, y_at(v), v))
     if len(coords) > 1:
@@ -185,7 +198,8 @@ def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: 
                      f"<title>{escape(xl)}: {escape(value_fmt(v))}</title></circle>")
     if coords:
         x, y, v = coords[-1]
-        parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="middle" fill="{TEXT_PRIMARY}">{escape(value_fmt(v))}</text>')
+        parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="{_label_anchor(x, width)}" '
+                     f'fill="{TEXT_PRIMARY}">{escape(value_fmt(v))}</text>')
 
     svg = (f'<svg class="sc-line-svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
            f'aria-label="{escape(unit)} over time">{"".join(parts)}</svg>')
