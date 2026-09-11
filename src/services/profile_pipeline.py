@@ -545,6 +545,10 @@ async def run_profile_pipeline(
 
     await db.flush()
 
+    from src.services.grant_enrichment import enqueue_enrichment_jobs
+    await enqueue_enrichment_jobs(db, user.id, orcid_id)
+    update_progress("step10", "Enqueued grant + industry enrichment jobs")
+
     # agent_reg was loaded before step 3 (the tenure map needed it);
     # it gates file export and revision here.
     agent_id = agent_reg.agent_id if agent_reg else None

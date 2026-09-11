@@ -165,6 +165,12 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                 await execute_monthly_refresh(job, db)
             elif job.type == "review_feedback_analysis":
                 await execute_review_analysis(job, db)
+            elif job.type == "enrich_grants":
+                from src.services.grant_enrichment import execute_enrich_grants
+                await execute_enrich_grants(job, db)
+            elif job.type == "industry_evidence":
+                from src.services.industry_evidence import execute_industry_evidence
+                await execute_industry_evidence(job, db)
             else:
                 raise ValueError(f"Unknown job type: {job.type}")
 
