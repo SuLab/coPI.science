@@ -22,10 +22,64 @@
   .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
   .md-content strong { font-weight: 600; }
   .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .assessment-prose { max-width: 65ch; font-size: 1rem; line-height: 1.625; color: #1f2937; }
-  .assessment-prose p + p { margin-top: 1em; }
+  /* Reading scale for the verdict's running prose. 17px/1.6 at a 68ch measure
+     is the readability target of the 2026-09-11 audit; keep the two wrappers'
+     style blocks IDENTICAL to each other. */
+  .assessment-prose {
+    max-width: 68ch;
+    font-size: 1.0625rem;
+    line-height: 1.6;
+    color: #1f2937;
+    text-wrap: pretty;
+  }
+  .assessment-prose p + p { margin-top: 1.25em; }
   .assessment-prose li { margin: .35em 0; }
+  /* Inside the two-column brief the pitch column is already narrower than the
+     68ch measure, so the cap there would only shorten the lines twice. */
+  .assessment-brief-pitch .assessment-prose { max-width: none; }
+  h2.assessment-headline { text-wrap: balance; }
+
+  /* Keyboard focus has to be visible on every interactive element, including
+     the <summary> toggles the page is now built around. */
+  a:focus-visible,
+  button:focus-visible,
+  summary:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible {
+    outline: 2px solid #4338ca;
+    outline-offset: 2px;
+  }
+
+  @media print {
+    .assessment-jump-nav, nav, footer, form, button { display: none !important; }
+    details:not([open]) > *:not(summary) { display: block !important; }
+    main { max-width: none; }
+    .assessment-prose { max-width: none; }
+  }
 </style>
+<script>
+  // CSS cannot open a <details>, and a collapsed section prints as its summary
+  // alone. Open every one for the print, then put back exactly what the reader
+  // had open.
+  (function () {
+    var wasOpen = null;
+    window.addEventListener('beforeprint', function () {
+      wasOpen = [];
+      document.querySelectorAll('details').forEach(function (d) {
+        wasOpen.push(d.open);
+        d.open = true;
+      });
+    });
+    window.addEventListener('afterprint', function () {
+      if (!wasOpen) return;
+      document.querySelectorAll('details').forEach(function (d, i) {
+        if (i < wasOpen.length) d.open = wasOpen[i];
+      });
+      wasOpen = null;
+    });
+  })();
+</script>
 {% endblock %}
 
 {% block content %}
@@ -36,7 +90,7 @@
    is worse than no control (F6), so every link on this page stays inside
    /manager. #}
 <div class="max-w-5xl mx-auto">
-    <a href="/manager/assessments" class="text-sm text-gray-600 hover:text-gray-700">&larr; Opportunity Assessments</a>
+    <a href="/manager/assessments" class="text-sm text-indigo-700 hover:underline">&larr; Opportunity Assessments</a>
     <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
 
     {# The manager surface's own copy of pi_link — see the twin comment in

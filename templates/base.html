@@ -23,6 +23,12 @@
 </head>
 <body class="h-full">
 
+<!-- Skip link: visually hidden until it takes keyboard focus. First focusable
+     element on every page, so a keyboard or screen-reader user can jump past
+     the nav straight to <main id="main-content">. -->
+<a href="#main-content"
+   class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:bg-white focus:px-3 focus:py-2 focus:rounded focus:shadow">Skip to main content</a>
+
 {% if impersonation_banner %}
 <!-- Impersonation Banner -->
 <div class="bg-amber-400 text-amber-900 px-4 py-2 text-sm flex items-center justify-between">
@@ -171,7 +177,7 @@
 {% endif %}
 
 <!-- Main content -->
-<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+<main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
     {% block content %}{% endblock %}
 </main>
 
