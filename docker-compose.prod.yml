@@ -107,13 +107,11 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
     volumes:
       - ./profiles:/app/profiles
-      # No ./prompts bind mount (#27 I5-f). `3354904` added one here so an
-      # unrebuilt worker would not "run stale prompt text after a host-side
-      # prompt edit" -- but Decision D33 forbids that edit, prompts/ is baked
-      # into the image by the Dockerfile's `COPY . .`, and #27 I5 named the
-      # mount a defect ("silently shadowing the image's prompts") on the three
-      # services that already had it. Those three are a stated residual, not an
-      # endorsement: see docs/plans/2026-09-04-decisions/task-30.md.
+      # No ./prompts bind mount here: prompts/ is baked into the image by the
+      # Dockerfile's `COPY . .`, and prompt text must never be edited on the
+      # host without a rebuild, so a bind mount would silently shadow the
+      # image's prompts with stale host-side text. A few other services do
+      # bind-mount prompts/ as a stated residual, not a pattern to extend.
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,19 +128,13 @@ services:
   agent:
     build:
       context: .
-    # 768m is MEASURED as of 2026-09-04 (#27 I5 / over-implementation R10 --
-    # D19 had shipped it "unmeasured, revisit after a week of docker stats").
-    # Against a copy of the production database (53 active agents, 8460
-    # agent_messages, 1448 hydrated into the log by the B2 rebuild window),
-    # with Slack off and the LLM faked: startup rebuild 110 MiB, peak
-    # 226 MiB over a full 53-agent --reset-cursors sweep, and 213 MiB peak /
-    # 185 MiB steady over 318 turns -- flat from the second sweep on, so the
-    # turn loop does not leak. That is 3.4x headroom. NOT raised (the host is
-    # ~3.7 GB and also runs the blackbird stack) and NOT removed the way D24
-    # removed postgres's: uncapping moves the choice of OOM victim to the
-    # kernel, which on this host can pick postgres -- the durable store D24
-    # deliberately left uncapped. Method and residuals:
-    # docs/plans/2026-09-04-decisions/task-30.md.
+    # 768m is a measured ceiling with headroom over the agent process's real
+    # working set (peak usage well under half this limit across a full
+    # multi-agent sweep and hundreds of turns, with no growth over time — the
+    # turn loop does not leak). NOT raised (the host also runs the blackbird
+    # stack) and NOT left uncapped the way postgres is: uncapping moves the
+    # choice of OOM victim to the kernel, which on this host can pick
+    # postgres -- the durable store that is deliberately left uncapped.
     mem_limit: 768m
     cpus: 1.0
     # An OOM kill is SIGKILL and skips the shutdown flush that persists the
@@ -207,24 +199,20 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    # Memory budget, re-derived 2026-09-04 (#27 I5 / over-implementation R9).
-    # The figure that used to sit here counted three limit_*_zone 10m plus
-    # ssl_session_cache shared:SSL:10m, and predated 1a430c0, which split
-    # those three zones into eight (one set per vhost) and left 90 MiB
-    # declared into this 128m cgroup. This comment therefore
-    # no longer restates nginx.conf's total; it states only the terms nginx
-    # .conf cannot know, and tests/unit/test_nginx_config.py sums the zones
-    # from nginx.conf itself and checks the whole budget against mem_limit:
+    # Memory budget. This comment deliberately does not restate nginx.conf's
+    # shared-memory total as a number — that goes stale the moment a zone is
+    # added, split or resized. Instead it states only the terms nginx.conf
+    # cannot know, and tests/unit/test_nginx_config.py sums the zones from
+    # nginx.conf itself and checks the whole budget against mem_limit:
     #   nginx-mem-budget: zones + 48 workers x 1.0 MiB + 16 MiB headroom
-    # = 37 + 48 + 16 = 101 MiB today. 48 is the worker count the image's
-    # stock `worker_processes auto` picks on the 48-core prod host (this is
-    # not ours to pin -- the mounted file is a conf.d snippet and
-    # worker_processes is a main-context directive). 1.0 MiB per worker is
-    # the measured 36.48 MiB RSS for master + 48 workers idle (shmem
-    # 640 KiB) rounded up for proxy/request buffers under load; the 16 MiB
-    # flat headroom covers TLS handshake scratch and page-cache churn. 64m
-    # OOMs under load. 1.0 cpus so a hard CFS quota doesn't throttle TLS
-    # termination for all three vhosts even on an idle host.
+    # 48 is the worker count the image's stock `worker_processes auto` picks
+    # on the prod host (this is not ours to pin -- the mounted file is a
+    # conf.d snippet and worker_processes is a main-context directive). 1.0
+    # MiB per worker is the measured RSS for master + workers idle, rounded
+    # up for proxy/request buffers under load; the 16 MiB flat headroom
+    # covers TLS handshake scratch and page-cache churn. 64m OOMs under load.
+    # 1.0 cpus so a hard CFS quota doesn't throttle TLS termination for all
+    # three vhosts even on an idle host.
     mem_limit: 128m
     cpus: 1.0
     ports:

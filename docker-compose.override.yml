@@ -1,18 +1,16 @@
 # Logging override — the EC2 instance role (copi-ec2-ses-role) lacks
 # logs:CreateLogStream, so the awslogs driver in docker-compose.prod.yml makes
 # every container fail to start with an AccessDeniedException. This forces the
-# local json-file driver instead.
-#
-# Originally added 2026-05-26 when the instance role was swapped; that copy was
-# never committed and was later deleted from the working tree, which is how the
-# stack ended up running from the dev docker-compose.yml (no restart policy) and
-# failed to come back after the 2026-08-06 host freeze.
+# local json-file driver instead. This file MUST be passed alongside
+# docker-compose.prod.yml on every prod compose invocation (see CLAUDE.md
+# "Compose file set") — running prod off docker-compose.prod.yml alone
+# recreates every service with the broken awslogs driver.
 #
 # Remove this file once the admin adds CloudWatch Logs perms to the role
 # (or restores the previous role with the SES policy attached).
 #
-# SEC2-4 (audit 2026-09-08): json-file with no options grows unbounded on
-# disk -- max-size/max-file caps each service's log at 5 x 50m = 250 MiB.
+# json-file with no options grows unbounded on disk -- max-size/max-file caps
+# each service's log at 5 x 50m = 250 MiB.
 services:
   postgres:
     logging:

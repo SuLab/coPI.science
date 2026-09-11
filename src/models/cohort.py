@@ -5,20 +5,17 @@ activity (scan, thread-activate, tag/reply). Cohorts are orthogonal to Slack
 channels: channel subscriptions are unchanged; cohort membership only gates
 whether one agent will *act on* another agent's posts.
 
-The gate is primarily an agent-behaviour filter, not access control: admin-facing
-views read AgentMessage directly and stay ungated, and that was true of every
-PI-facing view too when this was written.
-
-As of 2026-08-05 that is no longer true for one surface, deliberately: the PI
-conversations feed and thread-expand endpoint (`src/routers/agent_page.py`,
-`GET /agent/{agent_id}/conversations` and `GET
-/agent/{agent_id}/thread/{message_ts}`) had no cohort filter at all and leaked
-every other lab's bot traffic through `#general`, so they now apply the same
-gate the engine computes, as SQL, via `src/services/conversation_feed.py`
-(`resolve_agent_gate` / `gate_clause` / `own_or_gated`). Every other PI- and
-admin-facing read (dashboard, proposals, profile, admin discussion views,
-exports, public graph routes) is unaffected and must stay ungated. See
-specs/cohort-system-v2.md §6.2 for the full amendment.
+The gate is primarily an agent-behaviour filter, not access control: most
+admin- and PI-facing views read AgentMessage directly and stay ungated. The one
+deliberate exception is the PI conversations feed and thread-expand endpoint
+(`src/routers/agent_page.py`, `GET /agent/{agent_id}/conversations` and `GET
+/agent/{agent_id}/thread/{message_ts}`), which would otherwise leak every other
+lab's bot traffic through `#general`; they apply the same gate the engine
+computes, as SQL, via `src/services/conversation_feed.py` (`resolve_agent_gate`
+/ `gate_clause` / `own_or_gated`). Every other PI- and admin-facing read
+(dashboard, proposals, profile, admin discussion views, exports, public graph
+routes) is unaffected and must stay ungated. See specs/cohort-system-v2.md for
+the full amendment.
 """
 
 import uuid
@@ -128,7 +125,6 @@ class CohortAuditEvent(Base):
     ``topology`` carries the full cohort->members map plus the active gate settings,
     written at run start and on every membership change, so a finished simulation
     run stays attributable to the configuration that produced it.
-    See .notes/cohort-system-v2.md §13.1.
     """
 
     __tablename__ = "cohort_audit_events"

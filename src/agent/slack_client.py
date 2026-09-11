@@ -32,9 +32,7 @@ from src.agent.retry_after import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
-# Process-wide shutdown signal (O-1, audit 2026-09-10, replacing the
-# per-pool/thread-local/pending-flag machinery that regressed in three
-# consecutive review rounds -- K-2, M-2, N-2).
+# Process-wide shutdown signal.
 #
 # One threading.Event, shared by every caller regardless of which thread or
 # pool it runs on. It is STICKY for the lifetime of the process: nothing in
@@ -65,8 +63,7 @@ def signal_shutdown() -> None:
 
 
 class SlackShuttingDown(SlackApiError):
-    """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown
-    (K-2 follow-up, audit 2026-09-10).
+    """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown.
 
     Every ``except SlackApiError as exc:`` handler in this module reads
     ``exc.response.get("error")`` unconditionally (``AgentSlackClient._api``'s
@@ -108,8 +105,8 @@ class BotNotInvitedToPrivateChannel(Exception):
 
     This should only fire in response to a genuine invite-path bug — any private
     channel a bot is asked to act on should have been one the bot was invited to
-    at channel-creation time. See specs/agent-system.md §"Auto-join retry must
-    gate on visibility".
+    at channel-creation time. See specs/agent-system.md for the auto-join
+    invite-gating rule.
     """
 
     def __init__(self, agent_id: str, channel_id: str, slack_error: str | None = None):
@@ -199,11 +196,12 @@ MAX_RETRIES = 8
 MAX_RETRY_AFTER = 30.0
 
 # Total time `_call_with_retry` will spend sleeping on a single call before
-# giving up, regardless of how many attempts that took. #23 V7: a legitimate
-# `Retry-After: 60` capped per-sleep at 30s and MAX_RETRIES=3 exhausted after
-# three 30s sleeps (90s) — well short of the two real 60s waits Slack actually
-# asked for — and the caller then wrote a DB-only row the PIs never saw on
-# Slack. Sized so a sustained 30s-per-attempt throttle gets six full attempts
+# giving up, regardless of how many attempts that took. A legitimate
+# `Retry-After: 60` capped per-sleep at 30s and too low a MAX_RETRIES could
+# exhaust the budget after a couple of 30s sleeps -- well short of the real
+# 60s waits Slack actually asked for -- leaving the caller to write a
+# DB-only row the PIs never saw on Slack. Sized so a sustained 30s-per-attempt
+# throttle gets six full attempts
 # (180 / 30 = 6) before giving up.
 RATE_LIMIT_WAIT_BUDGET_SECONDS = 180.0
 
@@ -419,17 +417,17 @@ class AgentSlackClient:
         because test teardown reaches for endpoints the client has no wrapper for
         (``conversations_archive``) and must still get the backoff.
 
-        P-3 (opus review, audit 2026-09-10): checks ``SHUTDOWN_REQUESTED``
-        before attempt 0, not just inside the retry-sleep branch below, so a
-        call that is still queued (or simply hasn't started) when shutdown is
-        signalled aborts with zero network round trips instead of always
-        paying for one full HTTP attempt regardless. Exit bound once attempt
-        0 has actually started: one in-flight HTTP call plus <=1s (the retry
-        sleep's slice size) — see ``shutdown_slack_executor``'s docstring in
+        Checks ``SHUTDOWN_REQUESTED`` before attempt 0, not just inside the
+        retry-sleep branch below, so a call that is still queued (or simply
+        hasn't started) when shutdown is signalled aborts with zero network
+        round trips instead of always paying for one full HTTP attempt
+        regardless. Exit bound once attempt 0 has actually started: one
+        in-flight HTTP call plus <=1s (the retry sleep's slice size) — see
+        ``shutdown_slack_executor``'s docstring in
         ``src/services/slack_executor.py``.
 
-        Bounded by two independent limits rather than a fixed attempt count
-        (#23 V7): a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS`` by
+        Bounded by two independent limits rather than a fixed attempt count:
+        a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS`` by
         default, or ``_wait_budget`` when a caller supplies one), so a legitimate
         ``Retry-After: 60`` gets several real waits rather than being exhausted by
         attempt count alone, and a hard attempt ceiling (``MAX_RETRIES``), so a
@@ -445,11 +443,10 @@ class AgentSlackClient:
         handler entirely and crashed the turn. That happens precisely when Slack is
         throttling us, i.e. when the system is busiest.
         """
-        # P-3 (opus review, audit 2026-09-10): checked BEFORE attempt 0, not
-        # just inside the retry-sleep branch below, so queued-but-unstarted
-        # work aborts without issuing a network round trip at all once
-        # shutdown has already been signalled -- rather than always paying
-        # for one full HTTP call regardless.
+        # Checked BEFORE attempt 0, not just inside the retry-sleep branch
+        # below, so queued-but-unstarted work aborts without issuing a
+        # network round trip at all once shutdown has already been signalled
+        # -- rather than always paying for one full HTTP call regardless.
         if SHUTDOWN_REQUESTED.is_set():
             raise SlackShuttingDown()
         wait_budget = RATE_LIMIT_WAIT_BUDGET_SECONDS if _wait_budget is None else _wait_budget
@@ -526,8 +523,8 @@ class AgentSlackClient:
         no wait at all — it either succeeds immediately or fails immediately — which
         surfaces as the same "a page after the first failed" path below.
 
-        Each page's budget is additionally capped at ``RATE_LIMIT_WAIT_BUDGET_SECONDS``
-        (opus review follow-up to R-1, audit 2026-09-10): ``PAGINATION_WAIT_BUDGET_SECONDS``
+        Each page's budget is additionally capped at ``RATE_LIMIT_WAIT_BUDGET_SECONDS``:
+        ``PAGINATION_WAIT_BUDGET_SECONDS``
         (600s) is larger than the per-call default (180s) precisely so a listing gets
         more total patience across many pages than one call would — but page 0 starts
         with the *entire* remaining listing budget, so without this cap a single early

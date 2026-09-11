@@ -1,4 +1,4 @@
-"""Unit-tier coverage for the DB probe on /api/health (#27 I2). No real
+"""Unit-tier coverage for the DB probe on /api/health. No real
 Postgres — the probe's engine is monkeypatched on src.main, mirroring the
 badge_factory override tests/conftest.py's `client` fixture already does
 (tests/conftest.py:120-121: monkeypatch.setattr("src.main.get_session_factory", ...)).
@@ -71,8 +71,8 @@ async def test_health_503_when_db_probe_fails(monkeypatch):
 class _StalledSession:
     """Async-context-manager stand-in whose `execute` never returns — mimics a
     stalled Postgres, where the TCP connection is open but no query response
-    ever arrives (#27 I2 review: an unbounded probe would pile orphaned
-    coroutines/connections against the pool)."""
+    ever arrives -- an unbounded probe would pile orphaned coroutines/connections
+    against the pool."""
 
     async def __aenter__(self):
         return self
@@ -118,10 +118,10 @@ class _ReapedThenHangingSession:
     """First `execute` burns most of the outer budget then raises the reaped-connection
     error (`connection_invalidated=True`); the retry that follows hangs forever. Only a
     retry that is itself wrapped in a bounded `wait_for` (using what's left of the
-    outer deadline, not a fresh full budget) can make the route answer in time (#27 I2:
-    `engine.connect()` and the second attempt sit outside the bound today, so this
+    outer deadline, not a fresh full budget) can make the route answer in time --
+    otherwise `engine.connect()` and the second attempt sit outside the bound, so this
     retry would hang for the full HEALTH_PROBE_TIMEOUT_SECONDS on top of the time
-    already spent)."""
+    already spent."""
 
     def __init__(self, *, first_probe_seconds: float):
         self._first_probe_seconds = first_probe_seconds
@@ -142,7 +142,7 @@ class _ReapedThenHangingSession:
 
 
 async def test_health_retry_after_reap_stays_within_the_documented_bound(monkeypatch):
-    # Deterministic (audit 2026-09-08 RC-10, REV5): instead of timing the request on
+    # Deterministic: instead of timing the request on
     # the wall clock -- which flaked under a loaded CI host -- record the `timeout=`
     # the route hands to asyncio.wait_for. The first probe burns most of the budget
     # and raises a reaped-connection error; the retry's wait_for must be bounded by

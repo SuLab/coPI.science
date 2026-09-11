@@ -1,4 +1,4 @@
-"""pending_profile has no writer (issue #22 V6-pend) — admin_users must not branch on it."""
+"""pending_profile has no writer — admin_users must not branch on it."""
 
 import inspect
 

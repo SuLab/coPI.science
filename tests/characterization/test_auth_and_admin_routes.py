@@ -65,7 +65,7 @@ async def test_auth_callback_no_code_redirects(client):
 
 
 async def test_auth_callback_state_mismatch_fails_closed(client):
-    # SEC-3: no stored state in a fresh session -> reject even with code+state.
+    # No stored state in a fresh session -> reject even with code+state.
     r = await client.get("/auth/callback", params={"code": "abc", "state": "forged"})
     assert r.status_code == 302
     assert r.headers["location"] == "/login?error=state_mismatch"
@@ -78,7 +78,7 @@ async def test_logout_post_redirects_to_login(client):
 
 
 async def test_logout_get_not_allowed(client):
-    # SEC-8: logout is POST-only (was a CSRF target as a GET).
+    # Logout is POST-only (a GET would be a CSRF target).
     r = await client.get("/logout")
     assert r.status_code == 405
 

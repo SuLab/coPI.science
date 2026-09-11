@@ -1,7 +1,6 @@
 """The post-type vocabulary and the role/topology filter.
 
-Pure functions over plain data — no DB, no engine, no Agent. See
-docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
+Pure functions over plain data — no DB, no engine, no Agent.
 """
 import logging
 
@@ -169,7 +168,7 @@ def test_funding_only_in_the_star_is_empty():
     """Empty is the correct answer here, and the engine must NOT read it as
     "skip the turn" — Option A (a funding reply) is still legitimate. That half
     is enforced in test_post_type_enforcement.py, not here; this only pins that
-    the set really is empty. See spec §5."""
+    the set really is empty."""
     got = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
         self_id="gill", funding_only=True,
@@ -189,11 +188,11 @@ def test_available_for_preserves_declaration_order():
 # --- parse_post_types -------------------------------------------------------
 
 def test_parse_none_yields_the_defaults(caplog):
-    """Spec §5 row 1 says "DEFAULT_POST_TYPES, WARNING once". The defaults are
+    """The spec says "DEFAULT_POST_TYPES, WARNING once". The defaults are
     the correct answer for pi_lab, which HAS no manifest by design, so warning
     on every load would be noise on the common path — the warning belongs to a
-    role that has a manifest and forgot the key. Pinned here so the divergence
-    from §5 is a decision on record, not a silent omission."""
+    role that has a manifest and forgot the key. Pinned here as a decision on
+    record, not a silent omission."""
     caplog.set_level(logging.WARNING)
     assert parse_post_types(None, role="pi_lab") == DEFAULT_POST_TYPES
     assert caplog.text == ""
@@ -234,7 +233,7 @@ def test_parse_warns_when_targets_names_a_role_that_cannot_exist(caplog):
 
 
 def test_a_typod_target_role_really_is_never_offered(caplog):
-    """The other half of that §5 row. The WARNING is only useful if the
+    """The other half of that spec row. The WARNING is only useful if the
     behaviour it predicts is real: no agent can ever satisfy `scout_hubb`, so
     the type is filtered out of every menu on every topology."""
     caplog.set_level(logging.WARNING)

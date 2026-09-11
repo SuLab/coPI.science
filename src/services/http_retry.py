@@ -1,8 +1,8 @@
 """Shared retry/backoff wrapper for outbound HTTP requests.
 
-None of src/services/orcid.py, pubmed.py or grants.py retried a transient failure before issue #23
-(COR-29a): every call was a one-shot httpx request + `raise_for_status()`, so a single 429/502/503 from
-ORCID, NCBI or Grants.gov failed the whole fetch — exactly the case a client-side backoff exists to
+Without this, a one-shot httpx request + `raise_for_status()` in
+src/services/orcid.py, pubmed.py or grants.py would let a single 429/502/503 from
+ORCID, NCBI or Grants.gov fail the whole fetch — exactly the case a client-side backoff exists to
 absorb. One pair of helpers, used by all three, instead of three near-identical retry loops.
 """
 
@@ -72,15 +72,15 @@ async def get_with_retry(
     still sees a failure — this only buys the retries in between.
 
     ``before_request``, if given, is awaited at the top of EVERY loop iteration — including the
-    first — before the request is sent. This lets a caller re-enter its own pacing gate on a retry
-    (issue #23 I1): without it, a caller that paces its first attempt (e.g. ``pubmed._pace_ncbi``)
-    had no way to pace the retries this loop issues on its behalf, letting a burst of 429s escape
+    first — before the request is sent. This lets a caller re-enter its own pacing gate on a retry:
+    without it, a caller that paces its first attempt (e.g. ``pubmed._pace_ncbi``)
+    would have no way to pace the retries this loop issues on its behalf, letting a burst of 429s escape
     the rate ceiling the caller thought it was enforcing.
 
     ``attempt_context``, if given, is entered per ATTEMPT and wraps ``before_request`` plus the one
     request, so a caller's concurrency slot is held only while an attempt is actually in flight and
-    is released across the backoff sleep (issue #23 over-impl R4: ``_ncbi_get`` used to hold an
-    NCBI semaphore slot across all four attempts *and* the sleeps between them, so a single 429
+    is released across the backoff sleep (holding a concurrency slot across all attempts *and*
+    the sleeps between them would let a single 429
     storm cut effective concurrency to a fraction of the slot count for minutes). It wraps
     ``before_request`` rather than just the request so that a pacing gate still reserves its start
     slot *after* admission — reserving before admission would let a caller blocked on the slot
@@ -139,8 +139,8 @@ async def get_with_retry(
     # attempt), so `last_exc` is only ever still `None` here if the loop body never ran at all
     # (`retries < 0`) — a caller misuse, not a runtime failure this function retries. `raise
     # last_exc` with `last_exc: Exception | None` is a mypy error (`Exception must be derived
-    # from BaseException [misc]`); it also degraded to `TypeError: exceptions must derive from
-    # BaseException` at runtime for that same misuse, a worse diagnostic than this (#23 I3).
+    # from BaseException [misc]`); it also degrades to `TypeError: exceptions must derive from
+    # BaseException` at runtime for that same misuse, a worse diagnostic than this.
     raise AssertionError(  # pragma: no cover
         f"unreachable: get_with_retry's loop always returns or raises (last_exc={last_exc!r})"
     )
@@ -207,7 +207,7 @@ async def post_with_retry(
                 continue
         resp.raise_for_status()
         return resp
-    # Unreachable — same reasoning as get_with_retry's identical tail (#23 I3).
+    # Unreachable — same reasoning as get_with_retry's identical tail.
     raise AssertionError(  # pragma: no cover
         f"unreachable: post_with_retry's loop always returns or raises (last_exc={last_exc!r})"
     )

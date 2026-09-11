@@ -2,15 +2,13 @@
 
 Revision ID: 0021
 Revises: 0020
-Create Date: 2026-07-25 00:00:00.000000
 
 Both DB inbox pollers used to page over ``posted_at``, which is derived from the
 *writing process's* clock (float of its minted ts). That made inbound PI delivery
 depend on every writer's clock agreeing with the engine's to within the lookback
 window — fine on one host, silently lossy across hosts. They now page over
 ``created_at`` (``server_default=now()``, i.e. the single Postgres server's
-clock), so these indexes back the new access path. See
-.notes/db-conversations-residual-2026-07-24.md (R3).
+clock), so these indexes back the new access path.
 """
 
 from typing import Sequence, Union

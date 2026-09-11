@@ -100,8 +100,7 @@ async def regen_one(agent_id: str, context_path: Path) -> bool:
 
         # synthesize_profile's result is only dict[str, Any] by annotation; a
         # fenced JSON array/scalar parses fine and would crash these debug
-        # prints on .get() before _validate_profile ever runs (#22 COR-22
-        # fix-round review).
+        # prints on .get() before _validate_profile ever runs.
         if isinstance(synthesized, dict):
             print(f"  research_summary: {len(synthesized.get('research_summary', '').split())} words", flush=True)
             print(f"  techniques: {len(synthesized.get('techniques', []))}", flush=True)

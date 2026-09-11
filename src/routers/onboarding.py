@@ -264,9 +264,8 @@ async def save_private_profile(
     request: Request,
     # Form(""), not Form(...): an omitted field must still be distinguished
     # from a present-but-empty one, but FastAPI's Form() dependency collapses
-    # both to the SAME default no matter what that default is (verified: this
-    # is not fixable via Form(None) either) -- see the agent_page.py twin for
-    # the full investigation (#22 COR-23 residual). `form` below is the raw
+    # both to the SAME default no matter what that default is -- see the
+    # agent_page.py twin for the full investigation. `form` below is the raw
     # Starlette FormData, which does distinguish them. The browser's textarea
     # always submits the field, so this is not reachable from the UI; it
     # protects any other client.
@@ -306,9 +305,9 @@ async def save_private_profile(
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
     # Export to disk. remove_if_empty=True: this is a genuine PI-initiated
-    # clear (blank content.strip()), one of the two real clear paths (#22 C1)
-    # — unlike run_profile_pipeline, which must never delete a disk-only
-    # private profile it did not itself create.
+    # clear (blank content.strip()), one of the two real clear paths — unlike
+    # run_profile_pipeline, which must never delete a disk-only private
+    # profile it did not itself create.
     export_private_profile(
         current_user, profile, agent_id_for_export, remove_if_empty=True
     )
@@ -354,7 +353,7 @@ async def retry_pipeline(
     POST-only: this creates and commits a Job, so over GET it was a
     cross-site request-forgery target (a forged navigation could enqueue work
     on the victim's behalf). SameSite=lax on the session cookie blocks forged
-    cross-site POSTs, so the "Try Again" control posts this form. (SEC-8)
+    cross-site POSTs, so the "Try Again" control posts this form.
     """
     job = Job(
         type="generate_profile",

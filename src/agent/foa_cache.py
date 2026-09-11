@@ -15,7 +15,7 @@ from src.agent.foa_pattern import extract_foa_number as extract_foa_number
 
 logger = logging.getLogger(__name__)
 
-# Kept as a module attribute for backward compatibility (issue #23 COR-27):
+# Kept as a module attribute for backward compatibility:
 # foa_cache.FOA_PATTERN used to be this module's own compiled pattern; it is
 # now just the shared one, same object, so identity checks against
 # foa_pattern.FOA_NUMBER_RE still hold.

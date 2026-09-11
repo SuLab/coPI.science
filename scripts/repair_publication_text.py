@@ -1,13 +1,13 @@
 """Repair publication title/abstract text truncated by the pre-`itertext()` parser.
 
-Until #22 COR-16 (`2c1d504`) the PubMed parser read ElementTree's `.text`, which
-stops at the first child element, so
+Before a parser fix, the PubMed parser read ElementTree's `.text`, which stops at
+the first child element, so
 `<ArticleTitle>Role of <i>TP53</i> in cancer.</ArticleTitle>` was stored as
 `"Role of "`. `<AbstractText>` had the identical defect, and an `<AbstractText>`
 whose first node is markup was stored as `""`. Those stored rows -- not the live
 parser -- are what `profile_export.py` and the synthesis context read.
 
-`35cc010` made the pipeline's existing-row branch refresh
+The pipeline's existing-row branch now refreshes
 title/abstract/journal/year, so a per-user pipeline re-run
 (`python -m src.cli seed-profile --orcid <ORCID>`) repairs any PMID that is still
 listed on that PI's ORCID record. It cannot repair a row whose PMID ORCID does not
@@ -64,8 +64,7 @@ REPAIRABLE_COLUMNS = ("title", "abstract", "journal", "year")
 #   would-repair / repair / no-change / error-no-record
 # The owning PI's ORCID rides along because the follow-up half of the deploy step is
 # "re-run the pipeline for the PIs whose evidence just changed", and deriving that
-# list from the corruption predicate afterwards would under-select (see
-# docs/plans/2026-09-04-decisions/task-20.md).
+# list from the corruption predicate afterwards would under-select.
 ReportEntry = tuple[str, str, str, str]
 
 
@@ -126,7 +125,7 @@ async def repair(
             fresh = rec.get(column)
             # Never blank or overwrite with nothing: a PubMed hiccup, or a record
             # that genuinely lacks an abstract, must not destroy what is on the row
-            # (the same guard the pipeline's update branch uses, 35cc010).
+            # (the same guard the pipeline's update branch uses).
             if not fresh:
                 continue
             if getattr(pub, column) == fresh:

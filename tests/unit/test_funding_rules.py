@@ -27,7 +27,7 @@ def _entry(ts, agent_id, name, content, thread_ts=None, channel="funding-opportu
 
 
 def test_foa_cache_and_funding_rules_share_the_same_compiled_pattern():
-    """Regression guard for issue #23 COR-27: both call sites must be backed by the one shared
+    """Regression guard: both call sites must be backed by the one shared
     pattern, not independently-maintained copies that can re-diverge."""
     from src.agent import foa_cache, funding_rules
     from src.agent.foa_pattern import FOA_NUMBER_RE
@@ -49,8 +49,8 @@ class TestAnnouncementOnly:
         "Thread wrapped. Moving to the dedicated thread.",
         "Posting it now — look for my post shortly.",
         "Confirmed — I'll post a new :moneybag: thread tagging you.",
-        # COR-28a's apostrophe spellings are covered exhaustively, one row per
-        # code point, in TestApostropheClass below.
+        # Apostrophe spellings are covered exhaustively, one row per code
+        # point, in TestApostropheClass below.
     ])
     def test_positive_cases(self, text):
         assert is_announcement_only_funding_reply(text) is True
@@ -88,13 +88,13 @@ class TestAnnouncementOnly:
 
 
 # ---------------------------------------------------------------
-# Apostrophe class (COR-28a) — one row per code point
+# Apostrophe class — one row per code point
 # ---------------------------------------------------------------
 
 # The announcement detector classifies PI-authored and LLM-authored text, where
 # the contraction apostrophe arrives as any of these. U+0027/U+2019/U+02BC were
-# already handled; U+2018, U+00B4 and U+FF07 are the declared widening past the
-# issue's own wording (COR-28a names only the curly U+2019).
+# already handled; U+2018, U+00B4 and U+FF07 are a deliberate widening past
+# the curly U+2019 alone.
 APOSTROPHE_CODE_POINTS = [
     ("U+0027-apostrophe", "'"),
     ("U+2019-right-single-quote", "’"),
@@ -106,9 +106,9 @@ APOSTROPHE_CODE_POINTS = [
 
 
 class TestApostropheClass:
-    """COR-28a: an announcement-only reply must be classified the same whichever apostrophe the
+    """An announcement-only reply must be classified the same whichever apostrophe the
     author (or the model, or Slack's smart-quote autocorrect) used. A partial class is the same
-    defect the issue filed — the U+2019-only class shipped earlier still let four spellings through
+    defect: a U+2019-only class would still let four spellings through
     the atomic-spin-off rule."""
 
     @pytest.mark.parametrize(
@@ -156,8 +156,8 @@ class TestAcknowledgmentOnly:
         assert is_acknowledgment_only_funding_reply(text) is False
 
     @pytest.mark.parametrize("text", [
-        # COR-28b's literal reproduction from findings/issue_23.md:30 — 11 words,
-        # so a 12-word threshold does not fix this at all; 10 does.
+        # A literal reproduction of the reported case — 11 words, so a
+        # 12-word threshold does not fix this at all; 10 does.
         "Agreed, we can send the plasmids and the mice next week.",
         # the general failure mode: vocabulary the fixed marker list misses,
         # demonstrated with a materially longer, equally vocabulary-avoiding sentence.
@@ -165,13 +165,13 @@ class TestAcknowledgmentOnly:
         "to your team early next week.",
     ])
     def test_a_substantive_reply_starting_with_an_ack_word_is_not_rejected(self, text):
-        # COR-28b: opens with "Agreed" (an ack phrase) and contains none of
+        # Opens with "Agreed" (an ack phrase) and contains none of
         # _SUBSTANTIVE_MARKERS_RE's fixed vocabulary, but is unambiguously a
         # real logistics commitment, not a bare acknowledgment.
         assert is_acknowledgment_only_funding_reply(text) is False
 
     def test_long_pure_pleasantry_is_an_accepted_false_negative(self):
-        # Accepted cost of the >= 10-word threshold (issue #23 COR-28b): a
+        # Accepted cost of the >= 10-word threshold: a
         # pleasantry with no substantive content still clears the word-count
         # cutoff meant to rescue substantive replies, so it is (wrongly)
         # treated as not-ack-only. Pinning this rather than "fixing" it keeps
@@ -251,12 +251,11 @@ class TestSummarizer:
         ("PAR-25-297", "PAR-25-297"),  # control: matching casing already worked
     ])
     def test_spinoff_detection_is_case_insensitive(self, root_spelling, spinoff_spelling):
-        """COR-27's sharper half: the root's number was extracted case-insensitively and then
-        compared case-*sensitively* against every candidate spin-off body, so a spin-off that
-        spelled the number any other way was invisible to the summary — and an agent that cannot
+        """If the root's number is extracted case-insensitively but then
+        compared case-*sensitively* against every candidate spin-off body, a spin-off that
+        spelled the number any other way is invisible to the summary — and an agent that cannot
         see the existing spin-off posts a duplicate. NIH's own permalink lower-cases the number,
-        so the mismatched spelling occurs naturally (one such body is in the production copy's
-        `agent_messages`)."""
+        so the mismatched spelling occurs naturally."""
         ml = MessageLog()
         ml.set_bot_name_map({"wisemanbot": "wiseman"})
         ml.append(_entry(
@@ -294,7 +293,7 @@ class TestSummarizer:
 
 
 class TestTagRegexCaseInsensitivity:
-    """COR-28c: @-mentions of a bot tag must resolve regardless of case — Slack's own autocomplete
+    """@-mentions of a bot tag must resolve regardless of case — Slack's own autocomplete
     and manual typing both routinely produce @GRANTBOT, @SuBOT, etc."""
 
     @pytest.mark.parametrize("mention,name", [

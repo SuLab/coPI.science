@@ -1,8 +1,7 @@
 """``send_html_email_outcome`` distinguishes suppressed-before-dispatch,
 SES-client-unavailable, MIME/message-construction-failed, and
-dispatch-failed from an actual send (audit 2026-09-10 R-3, split further by
-an opus-review follow-up the same day) — ``_send_html_email`` previously
-collapsed all of these failure shapes into the same ``False``, so a budget
+dispatch-failed from an actual send — ``_send_html_email`` must not
+collapse all of these failure shapes into the same ``False``, or a budget
 consumer keyed on "did this go out" could not tell a pre-dispatch suppression
 from a real attempt that reached SES, nor a persistent SES-client
 misconfiguration (worth capping retries over) from a one-off per-message MIME

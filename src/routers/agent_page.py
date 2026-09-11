@@ -36,10 +36,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-# See src/agent/agent.py's PROFILES_DIR — same setting, same default (audit
-# 2026-09-08 RC-13).
-# REV3-6 (audit 2026-09-08): None by default, resolved lazily via
-# _profiles_dir() — see agent.py's own accessor for the full rationale.
+# See src/agent/agent.py's PROFILES_DIR — same setting, same default. None by
+# default, resolved lazily via _profiles_dir() — see agent.py's own accessor
+# for the full rationale.
 PROFILES_DIR: Path | None = None
 
 
@@ -418,8 +417,8 @@ async def derive_agent_identity(
     ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids differed.
     CLAUDE.md documents ``pwu`` / ``PWuBot``.
 
-    A THIRD same-initial namesake collides on the prefixed candidate too
-    (issue #26 C1): fall back to a numeric suffix appended to the prefixed
+    A third same-initial namesake collides on the prefixed candidate too:
+    fall back to a numeric suffix appended to the prefixed
     candidate (``pwu2``, ``pwu3``, ...), matching
     ``scripts/backfill_agents.py``'s ``_resolve_agent_id``/``_bot_name_for``.
     """
@@ -486,7 +485,7 @@ async def request_agent(
         # Lost a race on the agent_id unique constraint — another request
         # committed the same derived identity between our SELECT and our
         # commit. Retrying would recompute the identical candidate from the
-        # same now-stale read, so fail fast instead of looping. See #26 C1.
+        # same now-stale read, so fail fast instead of looping.
         await db.rollback()
         raise HTTPException(
             status_code=409,
@@ -548,55 +547,43 @@ async def review_proposal(
         # A delegate (or the PI) may have already reviewed. Retire every recipient's
         # outstanding notification for this agent + proposal before rejecting --
         # otherwise whoever loses this race has no other web path to clear their
-        # notification (V4-4b).
+        # notification.
         from src.services.email_notifications import mark_notification_responded, record_engagement
         await record_engagement(current_user.id, db)
         await mark_notification_responded(agent.id, thread_decision_id, "review", db)
         await db.commit()
         raise HTTPException(status_code=400, detail="Already reviewed")
 
-    # current_user.id / agent.id captured BEFORE the try (V4-4b, Task 21.13): the
-    # loser's own db.add()/flush() failure expires every attribute of every object
-    # this session is tracking, INCLUDING current_user's and agent's primary keys --
-    # reproduced directly against a real Postgres fixture: bare current_user.id /
-    # agent.id in the except arm below, even AFTER its own db.rollback(), raises
-    # sqlalchemy.exc.MissingGreenlet on this async session (same class of bug as Task
-    # 21.2/21.10's rollback fixes; there is no implicit re-fetch on an AsyncSession).
-    # Names avoid colliding with the `agent_id` path parameter (the string slug, e.g.
-    # "alpha") already in scope. agent_agent_id / pi_user_id (I3, #24 V5-2) are the
-    # same story: the except arm's D6 upgrade needs agent.agent_id / agent.user_id
-    # again after the rollback that would otherwise expire them.
+    # Captured before the try: on an AsyncSession, a failed flush expires every
+    # attribute of every tracked object (including these primary keys), and there is
+    # no implicit re-fetch, so the except arm below needs its own copies. Named to
+    # avoid colliding with the `agent_id` path parameter (the string slug).
     current_user_id = current_user.id
     agent_registry_id = agent.id
     agent_agent_id = agent.agent_id
     pi_user_id = agent.user_id
 
-    # Import hoisted ABOVE the try (V4-4b, Task 21.13): the except arm below also
-    # needs record_engagement/mark_notification_responded to retire the race LOSER's
-    # own notification, and a local import inside the try body is not in scope in the
-    # except.
+    # Hoisted above the try: the except arm also needs these to retire the race
+    # loser's own notification, and a local import inside the try body would not be
+    # in scope in the except.
     from src.services.email_notifications import (
         mark_notification_responded,
         record_engagement,
     )
 
-    # V5: two concurrent first-time reviews for the same (thread_decision, agent)
-    # both pass the SELECT guard above and then race on
-    # uq_proposal_reviews_decision_agent. Autoflush (default True; see
-    # src/database.py:39-43) fires on the NEXT db.execute after db.add() below --
-    # which is record_engagement's SELECT, not the final commit -- so the loser's
-    # IntegrityError surfaces there. The guard therefore has to span from db.add
-    # through commit, not just wrap commit() the way the vote endpoint does.
+    # Two concurrent first-time reviews for the same (thread_decision, agent) both
+    # pass the SELECT guard above and then race on
+    # uq_proposal_reviews_decision_agent. Autoflush fires on the next db.execute after
+    # db.add() below (record_engagement's SELECT), not the final commit, so the
+    # loser's IntegrityError surfaces there -- the guard has to span from db.add
+    # through commit, not just wrap commit().
     #
-    # D6/COR-13: existing_row is not None here only when its rating == -1 (the != -1
-    # case returned 400 above) -- the engine's implicit marker (Task 20.9), upgraded
-    # in place instead of a second insert (proposal_reviews has a real UNIQUE
-    # (thread_decision_id, agent_id)). id is left untouched; reviewed_at is bumped to
-    # record when the explicit action happened, not when the engine wrote the
-    # implicit marker. An update cannot raise IntegrityError (no new row), so the
-    # guard below is simply inert on this path -- no serialization on this path,
-    # two simultaneous first explicit reviews over a -1 marker both update, last
-    # writer wins (accepted by the D6 ruling).
+    # existing_row is not None here only when its rating == -1 (the engine's implicit
+    # marker; != -1 already returned 400 above), so it is upgraded in place rather
+    # than inserted (proposal_reviews has a real UNIQUE on (thread_decision_id,
+    # agent_id)). An update cannot raise IntegrityError, so the guard below is inert
+    # on this path -- two simultaneous first reviews over a -1 marker both update and
+    # the last writer wins, which is accepted.
     try:
         if existing_row is not None:
             existing_row.user_id = agent.user_id  # Always the PI
@@ -626,24 +613,18 @@ async def review_proposal(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        # I3 (#24 V5-2 / D6): the reachable race here is web-vs-engine, not
-        # web-vs-web -- _persist_implicit_proposal_review (a separate process, its own
-        # session) inserts rating=-1 between this request's guard SELECT (:526-532,
-        # which already treats -1 as not-yet-reviewed) and this request's flush.
-        # Unconditionally raising "Already reviewed" would be false under D6 (a -1 row
-        # is not a decision) and would throw away the PI's rating/comment for nothing.
-        # Re-select the winning row: if it is still the engine's implicit marker,
-        # upgrade it in place -- the same six fields + reviewed_at the happy-path
-        # insert/update above would have set -- and commit (mirrors the vote endpoint,
-        # src/routers/public.py:1083-1099). Only a REAL winning review (rating != -1)
-        # is actually "already reviewed".
-        # N2 (#24 closure audit): scalar_one_or_none(), not scalar_one() -- an
-        # IntegrityError that was NOT the review-uniqueness conflict (e.g. an FK or
-        # NOT-NULL violation from a concurrently deleted ThreadDecision/User) finds no
-        # winning row here, and scalar_one() would raise NoResultFound -- a 500 out of
-        # the very handler that exists to avoid one. Mirrors reopen_proposal's sibling
-        # recovery (:942-969: scalar_one_or_none() + an else that logs and continues
-        # rather than crashing).
+        # The reachable race here is web-vs-engine: _persist_implicit_proposal_review
+        # (a separate process, its own session) can insert rating=-1 between this
+        # request's guard SELECT and this request's flush. Unconditionally raising
+        # "Already reviewed" would be wrong (a -1 row is not a decision) and would
+        # throw away the PI's rating/comment for nothing, so re-select the winning
+        # row: if it is still the engine's implicit marker, upgrade it in place (the
+        # same fields the happy path would have set) and commit; only a real winning
+        # review (rating != -1) is actually "already reviewed". scalar_one_or_none(),
+        # not scalar_one(): an IntegrityError that was NOT the uniqueness conflict
+        # (e.g. an FK/NOT-NULL violation from a concurrent delete) finds no winning
+        # row here, and scalar_one() would raise NoResultFound instead. Mirrors
+        # reopen_proposal's sibling recovery arm.
         winner = (await db.execute(
             select(ProposalReview).where(
                 ProposalReview.thread_decision_id == thread_decision_id,
@@ -667,44 +648,18 @@ async def review_proposal(
             return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
         if winner is None:
-            # No winning row means this IntegrityError was not the uniqueness conflict
-            # at all (N2), so there is nothing to reject as "already reviewed" -- but
-            # it also means the rollback above threw THIS request's insert away and
-            # nothing took its place, so the PI's rating and comment were persisted
-            # nowhere. R8 / #24 V5: this arm used to log, retire the notification, and
-            # return the same 302 the success path returns, byte for byte. The PI saw
-            # the normal post-review page with their text gone, and because
-            # mark_notification_responded had just flipped the outstanding
-            # EmailNotification to 'responded', no reminder chased the proposal
-            # either. Two changes, ruled in
-            # docs/plans/2026-09-04-decisions/task-14.md:
-            #
-            # 1. A coded 409 instead of the redirect, so the PI is told. The carrier
-            #    copied is post_agent_message's own rollback-then-409 (:1461-1466) --
-            #    the in-repo pattern issue #24's Fix clause names ("rollback + one
-            #    retry then 409"). Deliberately NOT the ?slack_error= /
-            #    ?delegate_error= redirect carriers this file also owns: dashboard.html
-            #    renders both only inside `{% if agent.status == 'active' %}` (:279),
-            #    and delegate_error only inside `{% if is_owner %}` (:330), while this
-            #    handler admits inactive agents (:514, on purpose -- see the docstring)
-            #    and delegates, so a query parameter would be silently dropped for
-            #    exactly the users this branch strands. `from None` matches the
-            #    "Already reviewed" raise below and keeps ruff's B904 quiet.
-            # 2. NO mark_notification_responded. Nothing was persisted, so the
-            #    reminder has to keep chasing the proposal. Leaving the row 'sent' is
-            #    the state that would have existed had the request never happened, and
-            #    every consumer already handles it: _process_user_notifications sends
-            #    nothing while the row is inside its reply window and then expires and
-            #    re-sends by RECONCILING that same row rather than inserting a second
-            #    one (email_notifications.py:274-289, :550-565), so there is neither a
-            #    duplicate send nor a stuck sweep; and a later successful review still
-            #    retires it, because mark_notification_responded filters on
-            #    status == 'sent'.
-            #
-            # record_engagement stays, and is still committed: the PI did act, and all
-            # that call does is reset consecutive_missed / last_engagement_at, so
-            # dropping it would count our own write failure against them and eventually
-            # downgrade their e-mail frequency (_check_engagement_and_downgrade).
+            # No winning row means the IntegrityError was not the uniqueness conflict,
+            # so there is nothing to reject as "already reviewed" -- but the rollback
+            # above also threw this request's insert away, so the PI's rating/comment
+            # were persisted nowhere. Answer with a coded 409 (not the redirect
+            # carriers dashboard.html renders conditionally, which this handler's
+            # broader audience -- inactive agents, delegates -- could silently miss)
+            # so the PI knows to retry, and skip mark_notification_responded: leaving
+            # the notification row 'sent' is the state that would have existed had the
+            # request never happened, and every consumer (the reminder sweep, a later
+            # successful review) already handles that state correctly.
+            # record_engagement still commits: the PI did act, and skipping it would
+            # count our own write failure against their engagement streak.
             logger.error(
                 "IntegrityError on proposal %s review write but no winning row was "
                 "found on re-select -- nothing was persisted, so the reviewer gets a "
@@ -719,9 +674,8 @@ async def review_proposal(
             ) from None
 
         # A real review won the race. Their review is the decision for this agent, so
-        # still retire THIS responder's outstanding notification (V4-4b) before
-        # bouncing them -- the rollback above threw away the retire that ran inside
-        # the try.
+        # still retire this responder's outstanding notification before bouncing them
+        # -- the rollback above threw away the retire that ran inside the try.
         await record_engagement(current_user_id, db)
         await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
         await db.commit()
@@ -735,15 +689,11 @@ async def reopen_proposal(
     agent_id: str,
     thread_decision_id: uuid.UUID,
     request: Request,
-    # Form("") not Form(...), for the same reason as save_private_profile's `content`
-    # below (phase8 M2): an empty textarea submits `guidance=`, which Starlette's form
-    # parser hands to FastAPI as a MISSING field, so a required parameter answers a raw
-    # 422 JSON body -- `{"detail":[{"type":"missing","loc":["body","guidance"],...}]}` --
-    # and the coded 400 six lines down was unreachable from the browser. Measured: both
-    # an empty box and an omitted field 422'd. With the default the handler sees "",
-    # strips it, and returns its own "Guidance text is required". (Unlike that route,
-    # nothing here needs to tell "submitted empty" from "field omitted": both are
-    # rejected, so no raw-FormData presence check is required.)
+    # Form("") not Form(...), same reason as save_private_profile's `content` below:
+    # an empty textarea submits `guidance=`, which Starlette's form parser hands to
+    # FastAPI as a MISSING field, turning a required parameter into a raw 422 before
+    # the coded 400 below is ever reached. With the default the handler sees "",
+    # strips it, and returns its own "Guidance text is required".
     guidance: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -754,8 +704,7 @@ async def reopen_proposal(
     thread lives in a public channel, migrate it to a new ``collab_private``
     channel, post the PI's guidance there, and close the origin thread with a
     neutral ⏸️ marker — **the PI's text is never echoed into the public
-    thread.** See specs/pi-interaction.md §"PI Reopens a Proposal" and
-    specs/privacy-and-channel-visibility.md §Migration Rule.
+    thread.** See specs/pi-interaction.md and specs/privacy-and-channel-visibility.md.
 
     Legacy behavior (``enable_private_refinement=False``): post the PI's
     guidance verbatim into the origin thread. Retained as an emergency
@@ -779,7 +728,7 @@ async def reopen_proposal(
     #
     # Note: the reopen flow creates a collab_private channel, and the cohort gate
     # deliberately exempts those — a PI explicitly pairing two agents outranks an
-    # admin-level cohort grouping. See .notes/cohort-system-v2.md §7.
+    # admin-level cohort grouping.
     if agent.status != "active":
         raise HTTPException(
             status_code=403,
@@ -817,32 +766,25 @@ async def reopen_proposal(
             "(existing review id=%s, refined_in_channel=%s)",
             td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
         )
-        # Same reasoning as review_proposal's "Already reviewed" branch (V4-4b):
-        # retire every recipient's outstanding notification for this agent + proposal
-        # before bouncing them.
+        # Same reasoning as review_proposal's "Already reviewed" branch: retire every
+        # recipient's outstanding notification for this agent + proposal before
+        # bouncing them.
         from src.services.email_notifications import mark_notification_responded, record_engagement
         await record_engagement(current_user.id, db)
         await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
         await db.commit()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
-    # Second idempotency guard, on the migration itself (#24 N1-b / #21 COR-19.6).
-    # The review-row check above is not sufficient, because the review row is exactly
-    # what a lost race destroys: migrate_public_thread_to_private commits its own
-    # AgentChannel/member/handover rows and `refined_in_channel` as soon as its side
-    # effects are irreversible (private_channels.py:644, and :415 on the Slack-off
-    # path), then the `except IntegrityError` arm below rolls back this route's own
-    # ProposalReview insert. A retry therefore finds no review row, and
-    # `origin_visibility` still 'public' -- the migration never flips it -- so without
-    # this it migrated a SECOND time. Slack does not refuse the second create:
-    # AgentSlackClient.create_private_channel (slack_client.py:933-936) appends a fresh
-    # per-call `%Y%m%d-%H%M%S` stamp to the otherwise-deterministic
-    # priv-{a}-{b}-{origin} slug, so the retry asks for a name that never existed. The
-    # first channel -- which already holds the handover and the PI's guidance -- is
-    # then orphaned, with both bots still in it and refined_in_channel repointed away.
-    # `refined_in_channel` is the durable record that the migration happened, so read
-    # it. `d1146a4` added this same guard to the e-mail twin
-    # (email_inbound.py:878-886) and stopped there; the two now read the same.
+    # Second idempotency guard, on the migration itself. The review-row check above is
+    # not sufficient, because the review row is exactly what a lost race destroys:
+    # migrate_public_thread_to_private commits its own AgentChannel/member/handover
+    # rows and `refined_in_channel` as soon as its side effects are irreversible, then
+    # the `except IntegrityError` arm below rolls back this route's own ProposalReview
+    # insert. A retry would then find no review row and `origin_visibility` still
+    # 'public' (the migration never flips it), so it would migrate a second time --
+    # and Slack would not refuse the create, since the private-channel name includes a
+    # per-call timestamp. `refined_in_channel` is the durable record that the
+    # migration happened, so read it; the e-mail twin applies the same guard.
     if td.refined_in_channel:
         logger.info(
             "Proposal %s was already migrated to %s on an earlier attempt -- not "
@@ -914,17 +856,13 @@ async def reopen_proposal(
             from src.services.pi_inbox import get_latest_run_id, record_pi_message
             run_id = await get_latest_run_id(db)
             if run_id:
-                # Held for the recovery arm below (#24 V5 iii). record_pi_message does
-                # not commit -- deliberately, because the e-mail twin needs this row to
-                # ride the same commit that retires the notification, so committing it
-                # early would let a retried S3 delivery write a second one (the #21
-                # COR-19.6 shape). It is the ONLY copy of what the PI typed on this
-                # path: with Slack off the DB inbox is the whole conversation store and
-                # nothing was posted anywhere. A rollback() below therefore destroys the
-                # guidance outright unless the arm re-creates it, which is why the
-                # arguments are captured rather than rebuilt (`td`/`current_user` are
-                # expired by that rollback, and re-deriving the text would duplicate the
-                # two strings the engine reads).
+                # Held for the recovery arm below. record_pi_message does not commit --
+                # deliberately, so it can ride the same commit that retires the
+                # notification instead of letting a retried delivery write a second
+                # row. With Slack off, this row is the only copy of what the PI typed,
+                # so a rollback() below would destroy the guidance outright unless the
+                # arm re-creates it from these captured arguments (`td` and
+                # `current_user` are expired by that rollback).
                 inbox_content = f"PI guidance from {current_user.name}: {guidance}"
                 inbox_sender = f"{current_user.name} (PI)"
                 await record_pi_message(
@@ -939,18 +877,14 @@ async def reopen_proposal(
             logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
         else:
             try:
-                # The channel lookup goes through the boundary. It used to read a
-                # single 200-item page of the paginated conversations.list, so a
-                # workspace with more channels than that reported "Channel not
-                # found" for a channel that exists; list_channel_ids follows every
-                # cursor and raises rather than returning a subset. Archived
-                # channels are counted deliberately — this asks "which id owns
-                # this name", not "can the bot join it".
-                #
-                # The post goes through it too, threaded: post_message takes
-                # thread_ts precisely so this caller does not need a raw client.
-                # It also splits at 4000 characters, which the raw call did not —
-                # long PI guidance was silently chunked by Slack.
+                # The channel lookup goes through the boundary: list_channel_ids
+                # follows every pagination cursor rather than reading a single page,
+                # so it does not misreport "Channel not found" for a channel that
+                # exists in a large workspace. Archived channels are counted
+                # deliberately — this asks "which id owns this name", not "can the bot
+                # join it". The post goes through the boundary too, threaded via
+                # thread_ts, and splits at 4000 characters so long PI guidance is not
+                # silently chunked by Slack.
                 from src.services.slack_web import list_channel_ids_async, post_message_async
 
                 bot_token = token_for_agent_row(agent)
@@ -986,37 +920,31 @@ async def reopen_proposal(
     )
     existing_row = existing.scalar_one_or_none()
 
-    # Captured BEFORE the try for the same reason as review_proposal's V4-4b guard
-    # (:544-554 above): a lost race's IntegrityError expires every attribute of every
-    # object this session is tracking, including agent's and current_user's primary
-    # keys, and this async session has no implicit re-fetch on attribute access after
-    # rollback() -- bare agent.user_id / current_user.id in the except arm below would
-    # raise sqlalchemy.exc.MissingGreenlet.
+    # Captured before the try for the same reason as review_proposal's guard: a lost
+    # race's IntegrityError expires every attribute of every tracked object, and this
+    # async session has no implicit re-fetch after rollback().
     current_user_id = current_user.id
     agent_registry_id = agent.id
     agent_agent_id = agent.agent_id
     pi_user_id = agent.user_id
-    # The human thread id, for the recovery arm's log lines. Read here for the same
-    # reason as the four above: `td` is expired by the rollback. The arm's own
-    # re-select cannot supply it -- the row may be gone by then, which is precisely the
-    # case that used to 500 (#24 V5 i).
+    # The human thread id, for the recovery arm's log lines -- `td` is expired by the
+    # rollback, and the arm's own re-select cannot supply it if the row is gone by then.
     td_thread_id = td.thread_id
 
-    # Import hoisted ABOVE the try (mirrors review_proposal, :556-563): the except arm
-    # below also needs record_engagement/mark_notification_responded, and a local
-    # import inside the try body is not in scope in the except.
+    # Hoisted above the try (mirrors review_proposal): the except arm also needs
+    # record_engagement/mark_notification_responded, and a local import inside the try
+    # body would not be in scope in the except.
     from src.services.email_notifications import (
         mark_notification_responded,
         record_engagement,
     )
 
-    # I2 (#24 V5): mirrors review_proposal's guard exactly. The `existing_row is None`
-    # branch's db.add() can lose a race against a concurrent insert for the same
+    # Mirrors review_proposal's guard exactly. The `existing_row is None` branch's
+    # db.add() can lose a race against a concurrent insert for the same
     # (thread_decision_id, agent_id) -- the engine's implicit marker, an e-mail reply,
-    # a delegate's /review -- surfaced by autoflush at record_engagement, same as
-    # review_proposal three hundred lines above. The two update branches (rating == -1
-    # upgrade; real review left alone) touch no new row, so they cannot raise
-    # IntegrityError -- the guard is inert there.
+    # a delegate's /review -- surfaced by autoflush at record_engagement. The two
+    # update branches (rating == -1 upgrade; real review left alone) touch no new row,
+    # so they cannot raise IntegrityError -- the guard is inert there.
     try:
         if existing_row is None:
             review = ProposalReview(
@@ -1031,13 +959,11 @@ async def reopen_proposal(
             )
             db.add(review)
         elif existing_row.rating == -1:
-            # D6/COR-13: this SELECT happens AFTER migrate_public_thread_to_private (a
-            # multi-call Slack round-trip), so -- unlike the first SELECT above, whose
-            # != -1 case returns early -- the invariant is re-checked here rather than
+            # This SELECT happens after migrate_public_thread_to_private (a multi-call
+            # Slack round-trip), so the invariant is re-checked here rather than
             # assumed: a real review can be filed by the PI, a delegate, or an e-mail
             # reply while that round-trip is in flight. Only the engine's implicit
-            # marker (rating == -1) is safe to upgrade in place; id is left untouched,
-            # reviewed_at is bumped to record when the explicit action happened.
+            # marker (rating == -1) is safe to upgrade in place.
             existing_row.user_id = pi_user_id  # Always the PI
             existing_row.delegate_user_id = current_user_id if not is_owner else None
             existing_row.reviewed_by_user_id = current_user_id
@@ -1048,7 +974,7 @@ async def reopen_proposal(
         else:
             # A real review was filed for this (thread_decision, agent) while the
             # migration ran -- leave it alone rather than overwrite it with the
-            # reopen marker (D6/COR-13).
+            # reopen marker.
             logger.warning(
                 "Proposal %s gained a review (rating=%s) while the reopen migration "
                 "ran -- leaving it alone",
@@ -1064,28 +990,15 @@ async def reopen_proposal(
         await db.rollback()
         # Someone else (the engine's implicit marker, an e-mail reply, a delegate's
         # /review) won the race on uq_proposal_reviews_decision_agent. Do NOT re-run
-        # the migration and do NOT re-raise.
-        #
-        # Does the decision itself still exist? This re-select used to exist to re-bind
-        # `refined_in_channel` from a value captured before the try, because
-        # migrate_public_thread_to_private only FLUSHED it and this rollback() undid
-        # the flush -- orphaning a Slack channel that existed for real. Both migration
-        # paths now COMMIT it themselves as soon as their side effects are irreversible
-        # (private_channels.py:415 and :644), so there is nothing left to restore and
-        # the re-bind is gone: it could only ever write back the value it had just
-        # read. Measured, not argued -- a before_cursor_execute recorder shows the SQL
-        # this arm emits after `ROLLBACK TO SAVEPOINT` contains no UPDATE of
-        # thread_decisions at all (verify-deploy finding 1a), and
-        # test_refined_in_channel_survives_the_lost_race_without_the_arm_re_binding_it
-        # pins the durability that replaced it. What the query is kept for is the
-        # diagnosis below: not every IntegrityError out of the block above is the
-        # review-uniqueness conflict, and a missing decision (an FK violation from a
-        # concurrent delete) is the one shape that explains an empty `winner`.
-        #
-        # scalar_one_or_none(), not scalar_one(): on exactly that shape scalar_one()
-        # raised NoResultFound -- a 500 out of the very arm that exists to avoid one
-        # (#24 V5 i). N2 fixed the identical line in review_proposal's arm (:626-638)
-        # and left this one, which is the handler its own comment points at.
+        # the migration and do NOT re-raise: both migration paths commit
+        # `refined_in_channel` themselves as soon as their side effects are
+        # irreversible, so this rollback has nothing left of the migration to undo.
+        # The decision-exists check below exists for diagnosis: not every
+        # IntegrityError here is the review-uniqueness conflict, and a missing
+        # decision (an FK violation from a concurrent delete) is the one shape that
+        # explains an empty `winner`. scalar_one_or_none(), not scalar_one(): on that
+        # shape scalar_one() would raise NoResultFound, a 500 out of the arm that
+        # exists to avoid one.
         decision_still_exists = (await db.execute(
             select(ThreadDecision.id).where(ThreadDecision.id == thread_decision_id)
         )).scalar_one_or_none() is not None
@@ -1097,8 +1010,8 @@ async def reopen_proposal(
             )
         )).scalar_one_or_none()
         if winner is not None and winner.rating == -1:
-            # Same D6/COR-13 upgrade as the try body above -- the winning row is the
-            # engine's implicit marker, not a real decision.
+            # Same upgrade as the try body above -- the winning row is the engine's
+            # implicit marker, not a real decision.
             winner.user_id = pi_user_id
             winner.delegate_user_id = current_user_id if not is_owner else None
             winner.reviewed_by_user_id = current_user_id
@@ -1126,17 +1039,12 @@ async def reopen_proposal(
             )
 
         if inbox_row is not None:
-            # #24 V5 (iii). On the legacy Slack-off path the rollback() above just
-            # destroyed the PI's guidance: record_pi_message adds the agent_messages
-            # row and leaves the commit to this route (pi_inbox.py:159-173 spells out
-            # why it must, and names this caller), and with Slack off that row is the
-            # only place the text exists -- nothing was posted anywhere else. Re-create
-            # it on the same commit as the recovery below, so the engine's inbound
-            # poller still sees the guidance it would have seen had the race not
-            # happened. Deliberately NOT committed inside record_pi_message: the e-mail
-            # twin (email_inbound.py) retires the notification on the same commit as
-            # this row, and an early commit there would let a retried S3 delivery mint
-            # a second guidance row (#21 COR-19.6).
+            # On the legacy Slack-off path the rollback() above just destroyed the
+            # PI's guidance: with Slack off, the record_pi_message row is the only
+            # place that text exists. Re-create it on the same commit as the recovery
+            # below, so the engine's inbound poller still sees the guidance it would
+            # have seen had the race not happened. record_pi_message itself does not
+            # commit, so a retried delivery cannot mint a second guidance row.
             from src.services.pi_inbox import record_pi_message
             (
                 inbox_run, inbox_channel, inbox_text, inbox_from, inbox_thread,
@@ -1218,8 +1126,8 @@ async def agent_conversations(
         # filtering in Python afterwards would leave the page nearly empty.
         gate = await resolve_agent_gate(db, aid)
         # own_or_gated (src/services/conversation_feed.py) is gate_clause widened
-        # with the PI's own-post carve-out — see its docstring for why the OR is
-        # needed. One expression here, in the reply-count query below, and in
+        # with an exception for the PI's own posts — see its docstring for why the
+        # OR is needed. One expression here, in the reply-count query below, and in
         # agent_thread_replies keeps the feed, the badge, and the expansion from
         # ever disagreeing on what a PI may see.
         gated = own_or_gated(gate, aid)
@@ -1252,7 +1160,7 @@ async def agent_conversations(
         roots = list(reversed(root_rows.scalars().all()))
 
         # Reply counts, gated with the SAME clause (including the own-post
-        # carve-out) so the badge can never promise turns the expansion will not
+        # exception) so the badge can never promise turns the expansion will not
         # show. The real invariant a reply query must honour is that a reply
         # lives in ITS ROOT's channel — `uq_agent_messages_run_ts`
         # (src/models/agent_activity.py) only proves root ids don't collide
@@ -1577,18 +1485,15 @@ async def save_private_profile(
     agent_id: str,
     request: Request,
     # Form("") not Form(...): an emptied textarea submits `content=`, which Starlette's
-    # form parser hands to FastAPI as a MISSING field, so a required parameter 422s and the
-    # PI cannot clear their instructions at all — the clear path below (and the seed/file
-    # clearing in #22 COR-23 / #29) only ran if they happened to leave whitespace behind.
-    # Verified against a copy of production: `content=` -> 422 with nothing cleared.
-    # But FastAPI's Form() dependency resolution collapses "submitted empty" and "field
-    # omitted entirely" to the SAME default regardless of what that default is (verified:
-    # Form(None) returns None for both cases too, not just Form("")) -- so distinguishing
-    # them cannot be done via the Form() parameter at all. `form` below is the raw
-    # Starlette FormData, which DOES tell them apart (a genuinely missing key is not `in`
-    # it), matching the `"<field>" in form` presence-gating pattern save_public_profile
-    # already uses for its six profile fields, just above.
-    # The onboarding twin (onboarding.py::save_private_profile) has the same shape.
+    # form parser hands to FastAPI as a MISSING field, so a required parameter 422s and
+    # the PI cannot clear their instructions at all. FastAPI's Form() dependency
+    # resolution collapses "submitted empty" and "field omitted entirely" to the same
+    # default regardless of what that default is, so distinguishing them cannot be
+    # done via the Form() parameter at all -- `form` below is the raw Starlette
+    # FormData, which does tell them apart (a genuinely missing key is not `in` it),
+    # matching the `"<field>" in form` presence-gating pattern save_public_profile
+    # already uses for its six profile fields, just above. The onboarding twin
+    # (onboarding.py::save_private_profile) has the same shape.
     content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1596,10 +1501,9 @@ async def save_private_profile(
     """Save private profile to disk and database."""
     form = await request.form()
     if "content" not in form:
-        # #22 COR-23 residual (item 44): a request that OMITS `content`
-        # entirely must not be treated the same as one that submits it empty
-        # (which is a deliberate clear). Not reachable from the browser
-        # (templates/agent/profile.html's textarea is always submitted), but a
+        # A request that omits `content` entirely must not be treated the same as one
+        # that submits it empty (which is a deliberate clear). Not reachable from the
+        # browser (templates/agent/profile.html's textarea is always submitted), but a
         # data-destroying default for any other client.
         raise HTTPException(
             status_code=400,
@@ -1609,7 +1513,7 @@ async def save_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    # Persist to DB FIRST (COR-24: disk must never be ahead of the DB) — use the
+    # Persist to DB first: disk must never be ahead of the DB — use the
     # PI's user_id, not the delegate's. Create the row if this is the first
     # private-profile save for this PI: `if profile:` used to make a missing row
     # a silent, permanent disk-only write with no DB record at all.
@@ -1627,12 +1531,12 @@ async def save_private_profile(
         # onboarding.py's save_private_profile) — otherwise a leftover seed
         # from an admin-seeded PI who never completed onboarding is
         # re-exported to disk by the next profile_pipeline run
-        # (`content = md or seed`), undoing the clear (#22 COR-23, #29).
+        # (`content = md or seed`), undoing the clear.
         profile.private_profile_seed = None
     await db.commit()
 
     # A blank/whitespace save deletes the exported file rather than writing
-    # whitespace to it (#22 COR-23, #29) — agent.py's private_profile property
+    # whitespace to it — agent.py's private_profile property
     # falls back to "No private instructions yet." only when the file is
     # absent, so a stale file left behind after clearing would keep the agent
     # honouring instructions the PI just deleted.
@@ -1993,7 +1897,7 @@ async def invite_delegate(
     errors = []
     sent_count = 0
     for email in email_list:
-        # Basic validation (length-capped to avoid ReDoS; see SEC-16)
+        # Basic validation (length-capped to avoid ReDoS)
         if not is_valid_email(email):
             errors.append(f"Invalid email: {email}")
             continue

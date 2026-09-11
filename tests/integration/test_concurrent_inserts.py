@@ -1,20 +1,19 @@
-"""Issue #24 V5's Definition of done: "for V5, a concurrent-insert test".
+"""A genuine concurrent-insert test for the two write-guard endpoints.
 
-Every existing V5 test (`tests/unit/test_concurrent_write_guards.py`) drives the route
+`tests/unit/test_concurrent_write_guards.py` drives the route
 functions with a hand-built fake `AsyncSession` that raises a scripted `IntegrityError`
 at a specific call — nothing inserts, nothing races, and no real unique constraint is
-ever exercised. That was excused as unavoidable because the shared, savepoint-joined
+ever exercised, because the shared, savepoint-joined
 `db_session` fixture (tests/conftest.py) cannot produce genuine cross-transaction
-concurrency. The excuse doesn't hold: `tests/integration/test_profile_version_race.py`
+concurrency. `tests/integration/test_profile_version_race.py`
 already races two independent sessions from the session-scoped `engine` fixture with
-`asyncio.gather`, and this file copies that shape for the two V5 endpoints.
+`asyncio.gather`, and this file copies that shape for the two write-guard endpoints.
 
 Both tests use TWO independent `async_sessionmaker(engine)` sessions — separate
 connections, separate real Postgres transactions — never the shared `db_session`. The
 unique-constraint conflict is real: Postgres serializes the second writer's INSERT
 against the first's row lock and raises a genuine `IntegrityError` once unblocked, so
-no `asyncio.Barrier` is needed to force the overlap (mirroring the reasoning in
-`audit-issue-24.md` / `closure-24.md` Blocker 1).
+no `asyncio.Barrier` is needed to force the overlap.
 """
 
 import asyncio

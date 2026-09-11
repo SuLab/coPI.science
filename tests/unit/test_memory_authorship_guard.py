@@ -1,4 +1,4 @@
-"""Memory synthesis must not persist ungrounded authorship claims (#29)."""
+"""Memory synthesis must not persist ungrounded authorship claims."""
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine

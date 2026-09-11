@@ -1,4 +1,4 @@
-"""retrieve_abstract / retrieve_full_text must surface the author list (#29)."""
+"""retrieve_abstract / retrieve_full_text must surface the author list."""
 
 from src.agent import tools as tools_mod
 
@@ -65,9 +65,9 @@ async def test_retrieve_abstract_no_truncation_suffix_at_exactly_20_authors(monk
 
 
 async def test_retrieve_abstract_includes_doi(monkeypatch):
-    # Issue #29 rollout (audit O-I3): without the DOI in the tool answer, the
-    # legit first-person path is unsatisfiable — the emit gate requires a
-    # cited DOI, and the model had nowhere to get one.
+    # Without the DOI in the tool answer, the legit first-person path is
+    # unsatisfiable — the emit gate requires a cited DOI, and the model had
+    # nowhere to get one.
     async def fake_fetch(pmid_or_doi):
         d = dict(FAKE)
         d["doi"] = "10.1093/bioadv/vbag036"
@@ -117,7 +117,7 @@ async def test_retrieve_full_text_includes_authors(monkeypatch):
     assert "Wu C, Su AI" in out
 
     # The Authors line sits between Title and Journal, delimited as its own
-    # fenced block (SEC-14) — not just present anywhere in the output.
+    # fenced block — not just present anywhere in the output.
     title_idx = out.index("Title:")
     authors_idx = out.index("<paper_authors>")
     journal_idx = out.index("Journal:")

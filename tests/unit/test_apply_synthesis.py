@@ -1,5 +1,5 @@
-"""Unit tests for the shared write-gate (issue #22 COR-22 residual / red-team
-"four scripts bypass the gate")."""
+"""Unit tests for the shared write-gate, including the "four scripts bypass
+the gate" case."""
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -79,12 +79,12 @@ def test_empty_synthesized_is_never_applied():
 @pytest.mark.parametrize("wrong", ["cancer", 5, {"a": 1}])
 @pytest.mark.parametrize("field", _LIST_FIELDS)
 def test_a_non_list_value_is_rejected_and_the_stored_list_survives(field, wrong):
-    """issue #22 I1 (`beae171`) + #22 V6: a model returning a bare string for a
-    list column iterated it character-by-character onto the column
-    (`"cancer"` -> `['c','a','n','c','e','r']`) and a non-iterable raised
-    `StatementError` at flush, failing the whole job. `beae171` coerced every
-    non-list to `[]` -- which fixed the corruption and introduced a second
-    one, because `[]` is written over whatever was curated there. A value of
+    """A model returning a bare string for a list column must not be iterated
+    character-by-character onto the column (`"cancer"` ->
+    `['c','a','n','c','e','r']`), and a non-iterable must not raise
+    `StatementError` at flush and fail the whole job. Coercing every non-list
+    to `[]` is also wrong, because `[]` would then be written over whatever
+    was curated there. A value of
     the wrong type says nothing about the stored one, so it is rejected and
     the stored value is left alone.
 
@@ -102,11 +102,10 @@ def test_a_non_list_value_is_rejected_and_the_stored_list_survives(field, wrong)
 
 @pytest.mark.parametrize("field", _LIST_FIELDS)
 def test_an_omitted_list_field_leaves_the_stored_list_alone(field):
-    """issue #22 V6, the filed shape: a response that PASSES validation while
-    omitting `keywords`/`key_targets`/`experimental_models` used to write `[]`
-    over curated values (measured in production as
-    `keywords=[] key_targets=[] experimental_models=[]`). An omitted key is not
-    an instruction to empty a column -- it is the absence of one.
+    """A response that PASSES validation while omitting
+    `keywords`/`key_targets`/`experimental_models` must not write `[]` over
+    curated values. An omitted key is not an instruction to empty a column --
+    it is the absence of one.
     """
     curated = ["curated-a", "curated-b"]
     p = _profile(profile_version=4, research_summary="OLD", synthesis_validated=True,
@@ -225,8 +224,8 @@ def test_does_not_touch_evidence_counts():
 
 
 def test_a_versioned_profile_with_no_summary_is_not_worth_protecting():
-    """_stored_is_worth_keeping (issue #22 COR-22 fix round: the shared
-    predicate extracted out of run_profile_pipeline/apply_synthesis) requires
+    """_stored_is_worth_keeping (the shared predicate extracted out of
+    run_profile_pipeline/apply_synthesis) requires
     `bool(profile.research_summary)`; a versioned, previously-validated
     profile whose summary is the empty string (not None) is not worth
     protecting either — mutation-kill for that leg of the predicate, not just
@@ -247,7 +246,7 @@ def test_a_non_dict_synthesized_result_is_never_applied():
     resynth_from_current_pubs.py, regen_profiles_from_web.py) hand
     apply_synthesis their own extract_json result directly with no such
     guard — so apply_synthesis itself must reject a non-dict `synthesized`
-    before ever calling a dict method on it (issue #22 COR-22/COR-23 residual).
+    before ever calling a dict method on it.
     """
     p = _profile(profile_version=0, research_summary=None, synthesis_validated=None)
     applied = apply_synthesis(p, [1, 2, 3], validated=True)

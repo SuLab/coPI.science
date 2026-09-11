@@ -1,17 +1,15 @@
 """Clear-after-write for the agent-page private-profile save route.
 
-Companion to the ``export_private_profile`` unlink fix in
-``src/services/profile_export.py`` (Unit H item 3, #22 COR-23 / #29). The
-22.6/22.11 re-review found that ``POST /agent/{agent_id}/profile/save`` wrote
-a blank submission's raw (whitespace) content straight to
-``profiles/private/{agent_id}.md`` instead of removing the file, so
+Companion to the ``export_private_profile`` unlink behaviour in
+``src/services/profile_export.py``. ``POST /agent/{agent_id}/profile/save`` must
+remove ``profiles/private/{agent_id}.md`` on a blank submission rather than
+writing its raw (whitespace) content straight to disk, so
 ``src/agent/agent.py``'s ``private_profile`` property — which falls back to
-"No private instructions yet." only when the file is ABSENT — kept honouring
-instructions the PI had just deleted.
+"No private instructions yet." only when the file is ABSENT — does not keep
+honouring instructions the PI just deleted.
 
 Real ASGI requests, real Postgres — same harness as ``test_agent_page.py``,
-kept self-contained here (rather than importing its fixtures) because that
-file is owned by another implementer working concurrently in this tree.
+kept self-contained here rather than importing its fixtures.
 """
 
 import base64
@@ -120,12 +118,11 @@ async def test_a_truly_empty_content_field_clears_the_private_profile(
     """An emptied textarea submits ``content=``, and that must clear.
 
     Starlette's form parser hands an empty value to FastAPI as a MISSING field, so this
-    route's original ``content: str = Form(...)`` returned a raw
-    ``422 {"type":"missing","loc":["body","content"]}`` and cleared nothing — meaning the
-    clear path (and with it the seed-clearing of #22 COR-23 / #29) was unreachable from a
-    browser unless the PI happened to leave whitespace in the box. Found by driving the
-    real route against a copy of production. The onboarding twin has always used
-    ``Form("")``; this is that parity, pinned.
+    route must declare ``content: str = Form("")``, not ``Form(...)`` -- otherwise it
+    returns a raw ``422 {"type":"missing","loc":["body","content"]}`` and clears
+    nothing, making the clear path (and with it the seed-clearing) unreachable from a
+    browser unless the PI happened to leave whitespace in the box. The onboarding twin
+    already uses ``Form("")``; this pins that same parity here.
     """
     pi, agent = pi_and_agent
     path = profiles_dir / "private" / f"{agent.agent_id}.md"
@@ -156,14 +153,14 @@ async def test_a_truly_empty_content_field_clears_the_private_profile(
 async def test_omitting_content_entirely_is_rejected_and_survives(
     client, db_session, profiles_dir, pi_and_agent
 ):
-    """#22 COR-23 residual (item 44): a request that OMITS `content` entirely
+    """A request that OMITS `content` entirely
     (as opposed to submitting it present-but-empty) must not blank anything.
     Not reachable from the browser (templates/agent/profile.html's textarea is
     always submitted), so this only matters for a hand-crafted or scripted
-    POST — but before this fix the `Form("")` shape treated "absent" and
-    "present and empty" identically, so an omitted field 302'd and destroyed
-    both private columns and the disk file, where the ORIGINAL
-    `Form(...)` shape 422'd and destroyed nothing.
+    POST — but the route must not treat "absent" and
+    "present and empty" identically the way plain `Form("")` does, or an
+    omitted field would 302 and destroy both private columns and the disk
+    file where a 422 that destroys nothing is correct.
     """
     pi, agent = pi_and_agent
     path = profiles_dir / "private" / f"{agent.agent_id}.md"
@@ -197,9 +194,9 @@ async def test_omitting_content_entirely_is_rejected_and_survives(
 async def test_onboarding_twin_also_rejects_an_omitted_content_field(
     client, db_session, monkeypatch, tmp_path, pi_and_agent
 ):
-    """onboarding.py's save_private_profile has always had the same
-    `Form("")` shape as the agent_page.py route above (#22 COR-23 residual);
-    it gets the same `content: str | None = Form(None)` fix."""
+    """onboarding.py's save_private_profile must not use the same plain
+    `Form("")` shape as the agent_page.py route above for this case; it needs
+    the same `content: str | None = Form(None)` handling."""
     from src.services import profile_export
 
     monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
@@ -230,7 +227,7 @@ async def test_onboarding_twin_also_rejects_an_omitted_content_field(
 
 
 # ---------------------------------------------------------------------------
-# The clear must survive the next profile_pipeline run (#22 COR-23, over-impl R1)
+# The clear must survive the next profile_pipeline run
 # ---------------------------------------------------------------------------
 
 # A public synthesis that passes profile_pipeline._validate_profile (100-350 word
@@ -280,10 +277,8 @@ def _install_pipeline_fakes(monkeypatch, profiles_dir):
 async def never_onboarded_pi_and_agent(db_session):
     """A PI who never completed onboarding — the common case, not the corner.
 
-    Measured on the disposable production copy (copi_verify, 2026-09-04):
-    36 of 53 active agents have ``onboarding_complete = false`` (113 of 144
-    users), because every admin-seeded pilot lab is in that state. The
-    onboarding flag is therefore no proxy at all for "this PI has made a
+    Every admin-seeded pilot lab starts with ``onboarding_complete = false``.
+    The onboarding flag is therefore no proxy at all for "this PI has made a
     private-instructions decision".
     """
     pi = await factories.make_user(
@@ -306,14 +301,14 @@ async def never_onboarded_pi_and_agent(db_session):
 async def test_a_clear_through_the_agent_page_survives_the_next_pipeline_run(
     client, db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
 ):
-    """#22 COR-23 / over-impl R1: the seed-resurrection guard must key on the
+    """The seed-resurrection guard must key on the
     cleared state, not on ``user.onboarding_complete``.
 
     ``POST /agent/{agent_id}/profile/save`` is the other clear route (usable by
     the PI *or* a delegate). It nulls both private columns, unlinks the exported
     file and records an empty private revision — but it never touches
-    ``onboarding_complete``. For the 36-of-53 active agents whose PI never
-    finished onboarding, a guard keyed on that flag lets the very next pipeline
+    ``onboarding_complete``. For an agent whose PI never
+    finished onboarding, a guard keyed on that flag would let the very next pipeline
     run (a regenerate, an admin re-enqueue, a monthly refresh) synthesize a
     fresh model-authored seed and export it to disk, undoing the clear — which
     is exactly what the guard exists to prevent.
@@ -411,7 +406,7 @@ _WHITESPACE_CLEARS = [
 async def test_a_whitespace_clear_survives_the_next_pipeline_run(
     blank, client, db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
 ):
-    """#22 COR-23 / audit D3: a clear is a clear whatever whitespace the PI left behind.
+    """A clear is a clear whatever whitespace the PI left behind.
 
     Same end-to-end shape as
     ``test_a_clear_through_the_agent_page_survives_the_next_pipeline_run`` above -- real

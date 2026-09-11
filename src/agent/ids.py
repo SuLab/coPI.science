@@ -26,8 +26,7 @@ keeping the id ts-shaped, float-parseable and strictly ordered. The cost is
 resolution (a writer can mint one id per slot), which is orders of magnitude
 above the real posting rate.
 
-See specs/local-db-conversations.md, the PR #19 review (M1 / mint precision) and
-.notes/db-conversations-residual-2026-07-24.md (R1).
+See specs/local-db-conversations.md for the full mint-precision rationale.
 """
 
 from __future__ import annotations

@@ -52,7 +52,7 @@ class TestLoadManifest:
 
     def test_repo_manifest_has_the_expected_shape(self):
         """Counts include grantbot, which is a member of all three cohorts (+1
-        row each, +1 distinct id over the 2026-08-18 122-PI union)."""
+        row each, +1 distinct id over the PI union)."""
         m = load_manifest(REPO_MANIFEST)["cohorts"]
         assert len(m["cabo-retreat"]["members"]) == 35
         assert len(m["schultz-reunion"]["members"]) == 78

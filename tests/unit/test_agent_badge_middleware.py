@@ -1,11 +1,11 @@
 """AgentBadgeMiddleware must run ZERO badge-count queries for /static and
-/api/health (issue #25 P1.4/P1.5).
+/api/health.
 
 No DB: src.main.get_session_factory is monkeypatched with a recording fake, and
 the assertion is on WHICH statements were issued, not on whether a session was
 opened at all — /api/health legitimately opens one for its own `SELECT 1` DB
-probe (#27 I2, Task 27.2), so "no session" is not the invariant. "No query
-against the badge tables" is.
+probe, so "no session" is not the invariant. "No query against the badge
+tables" is.
 """
 
 import base64
@@ -60,7 +60,7 @@ class _RecordingSession:
 
 
 class _RecordingEngine:
-    """Stands in for the health probe's own engine (#27 I2).
+    """Stands in for the health probe's own engine.
 
     The probe deliberately does NOT use the request session factory: it needs asyncpg
     connect/command timeouts that `asyncio.wait_for` cannot supply (see src/main.py).
@@ -111,7 +111,7 @@ async def test_health_path_runs_no_badge_queries(app_and_statements):
 
 
 async def test_normal_path_runs_badge_queries(app_and_statements):
-    """Positive control (#25 P1.4/P1.5 D1).
+    """Positive control for the two tests above.
 
     The two tests above assert an EMPTY badge-query list for /static and /api/health.
     That assertion is also satisfied by a middleware that was deleted, disabled, or
@@ -234,8 +234,8 @@ def client_with_recording_session(monkeypatch):
 
 
 async def test_badge_ignores_implicit_minus_one_reviews(client_with_recording_session):
-    """Issue #20 COR-5/COR-13 residual (Task 20.9c): the engine's implicit
-    `rating=-1` review row must not silence the nav badge. The seeded PI has
+    """The engine's implicit `rating=-1` review row must not silence the nav
+    badge. The seeded PI has
     one proposal whose only review is that implicit row, so the badge must
     still show 1 unreviewed proposal, not 0.
     """

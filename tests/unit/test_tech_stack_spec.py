@@ -1,5 +1,5 @@
-"""specs/tech-stack.md cites src/models/llm_call_log.py, which does not exist;
-LlmCallLog actually lives in src/models/agent_activity.py (issue #26 DOC-4).
+"""specs/tech-stack.md must not cite src/models/llm_call_log.py, which does not exist;
+LlmCallLog actually lives in src/models/agent_activity.py.
 """
 
 from pathlib import Path

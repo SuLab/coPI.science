@@ -1,4 +1,4 @@
-"""T11 — the proposal review loop, from a concluded thread up to (but not through)
+"""The proposal review loop, from a concluded thread up to (but not through)
 the email seam.
 
 Scope, stated once so the gap stays visible:
@@ -12,8 +12,7 @@ Scope, stated once so the gap stays visible:
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
   test that touches the notification path replaces `send_proposal_notification` with a
   recording double and says so in every assertion message, so a reader cannot mistake a
-  green run here for "proposal email is covered". It is not covered. See
-  `.notes/full-system-test-plan.md` § Global Constraints.
+  green run here for "proposal email is covered". It is not covered.
 
 Dependencies: the database is REAL (the rolled-back `db_session` from
 tests/conftest.py). The LLM, Slack and SES are all doubled — and the autouse
@@ -532,11 +531,11 @@ async def test_a_decided_review_cannot_be_re_decided(
 async def test_an_explicit_web_review_upgrades_the_engines_implicit_rating_marker(
     client, db_session, lab, proposal,
 ):
-    """D6/COR-13 (ruling-D6-implicit-review-upsert.md): Task 20.9 has the engine
-    persist an implicit ProposalReview(rating=-1, submitted_via="engine") the first
+    """The engine
+    persists an implicit ProposalReview(rating=-1, submitted_via="engine") the first
     time a PI engages a proposal thread in Slack/DB. That row is NOT "already acted
-    on" — pre-ruling, the SELECT guard above treated ANY existing row as terminal and
-    returned 400 "Already reviewed", making the review form 20.9c re-shows a dead end.
+    on" — a SELECT guard that treats ANY existing row as terminal and returns 400
+    "Already reviewed" makes the review form re-shown to the PI a dead end.
     The first explicit web review must upgrade that row in place instead.
 
     Control for the same file: `test_a_decided_review_cannot_be_re_decided` above pins
@@ -622,33 +621,25 @@ async def test_a_review_cannot_be_filed_against_someone_elses_proposal(
 async def test_review_proposal_recovery_with_no_winning_row_returns_a_clean_response(
     db_session, lab, llm, proposal,
 ):
-    """N2 (#24 closure audit; final-C-races-brief.md commit 3): review_proposal's
-    ``except IntegrityError`` arm re-selected the presumed race winner with
-    ``.scalar_one()`` -- correct when the IntegrityError really was the
-    review-uniqueness conflict, but ANY OTHER IntegrityError also lands in this same
-    except arm (e.g. an FK/NOT-NULL violation from a concurrently deleted User), and
-    ``.scalar_one()`` then finds no row and raises ``NoResultFound`` -- a 500 out of
-    the very handler that exists to avoid one. ``reopen_proposal``'s sibling recovery
-    already uses ``.scalar_one_or_none()`` (agent_page.py:942-969, logging and
-    continuing instead of crashing); this pins that ``review_proposal`` now matches.
+    """review_proposal's ``except IntegrityError`` arm must not re-select the
+    presumed race winner with ``.scalar_one()`` -- correct when the IntegrityError
+    really was the review-uniqueness conflict, but ANY OTHER IntegrityError also
+    lands in this same except arm (e.g. an FK/NOT-NULL violation from a
+    concurrently deleted User), and ``.scalar_one()`` then finds no row and raises
+    ``NoResultFound`` -- a 500 out of the very handler that exists to avoid one. Use
+    ``.scalar_one_or_none()`` instead, matching ``reopen_proposal``'s sibling
+    recovery (agent_page.py:942-969), logging and continuing instead of crashing.
 
-    **R8 / #24 V5 (Task 14): why the 302 in this test became a 409.** N2's fix was
-    right that the arm must not raise ``NoResultFound``; it was wrong about what a
-    "clean response" is. ``winner is None`` means the rollback threw the PI's insert
-    away AND no other row took its place, so *nothing was persisted* -- and the arm
-    answered a redirect byte-identical to the success path while retiring the
-    outstanding ``EmailNotification``, so the PI saw the normal post-review page, lost
-    their rating and comment, and no reminder chased the proposal either. The arm now
-    raises ``HTTPException(409)``, copied from ``post_agent_message``'s own
-    rollback-then-409 (agent_page.py:1461-1466) -- the in-repo pattern issue #24's
-    ``Fix:`` clause names -- and leaves the notification ``sent``. The redirect
-    carriers this route also owns (``?slack_error=``/``?delegate_error=``) were
-    rejected because ``templates/agent/dashboard.html`` renders both only inside
-    ``{% if agent.status == 'active' %}`` (and ``delegate_error`` only inside
-    ``{% if is_owner %}``), while this handler deliberately serves inactive agents and
-    delegates; see docs/plans/2026-09-04-decisions/task-14.md.
+    When ``winner is None``, the rollback threw the PI's insert away AND no other
+    row took its place, so *nothing was persisted* -- the arm must not answer a
+    redirect byte-identical to the success path while retiring the outstanding
+    ``EmailNotification``, or the PI sees the normal post-review page, loses their
+    rating and comment, and no reminder chases the proposal either. The arm must
+    instead raise ``HTTPException(409)``, matching ``post_agent_message``'s own
+    rollback-then-409 pattern (agent_page.py:1461-1466), and leave the notification
+    ``sent``.
 
-    What N2 pinned and this test still pins: no 500, no ``NoResultFound``, and no
+    What this test pins: no 500, no ``NoResultFound``, and no
     partial ``ProposalReview`` row left behind.
 
     Reproduced with a genuine, non-uniqueness IntegrityError, not a scripted fake:
@@ -1075,23 +1066,20 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
         "the PI's private guidance was echoed into the PUBLIC origin thread"
     )
 
-    # Fixed deliberately in Task 16 (#20 blocker 5), as the previous version of this
-    # assertion instructed. The rating=0 reopen sentinel is no longer rendered as a
-    # score: the form only offers 1..4, `agent_page.py:509` rejects a submitted 0 and
-    # `email_inbound.py:383` rejects it too, so every one of the 233 zeros measured on
-    # the production copy is a sentinel and never a PI's answer. The dashboard now
-    # labels it "Reopened with guidance" instead of telling the PI they scored a
-    # proposal zero out of four (wiseman's own page showed that 89 times).
+    # The rating=0 reopen sentinel must not be rendered as a score: the form only
+    # offers 1..4, `agent_page.py:509` rejects a submitted 0 and `email_inbound.py:383`
+    # rejects it too, so a rating=0 row is always a sentinel, never a PI's answer. The
+    # dashboard must label it "Reopened with guidance" instead of telling the PI they
+    # scored a proposal zero out of four.
     page = (await client.get(
         "/agent/alpha/dashboard", headers=_auth(lab.pi_a_id))).text
     assert "Rating: 0/4" not in page, (
         "the rating=0 reopen sentinel is being rendered as a score again"
     )
     # This IS a genuine reopen -- the route writes comment="[Reopened] {guidance}" -- so
-    # it carries the reopen label. The discriminator matters because 227 of the 233
-    # rating=0 rows on the production copy are a bulk backfill with no comment and no
-    # reviewer, and those must NOT claim to be reopens (audit D1); they read
-    # "No score recorded" instead. See docs/plans/2026-09-04-decisions/task-D1-D2.md.
+    # it carries the reopen label. The discriminator matters because a bulk-backfilled
+    # rating=0 row with no comment and no reviewer must NOT claim to be a reopen; it
+    # must read "No score recorded" instead.
     assert "Reopened with guidance" in page, (
         "the reopened proposal should be labelled as reopened, not scored"
     )
@@ -1190,10 +1178,10 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
 async def test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker(
     client, db_session, lab, proposal, slack_off,
 ):
-    """D6/COR-13 (ruling-D6-implicit-review-upsert.md): same rule for reopen_proposal.
-    Pre-ruling, the `already_reviewed` guard treated the engine's implicit rating=-1
-    row as a completed reopen and silently redirected — the Slack migration never ran
-    and the PI's guidance was dropped.
+    """Same rule for reopen_proposal:
+    the `already_reviewed` guard must not treat the engine's implicit rating=-1
+    row as a completed reopen and silently redirect — that would skip the Slack
+    migration and drop the PI's guidance.
 
     Control for the same file: `test_a_rated_proposal_cannot_then_be_reopened_by_the_
     same_agent` above pins that an existing REAL rating (!= -1) still swallows the
@@ -1248,14 +1236,14 @@ async def test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marke
 async def test_reopen_leaves_a_concurrent_real_review_alone(
     client, db_session, lab, proposal, monkeypatch,
 ):
-    """D6/COR-13 fix round 1 (ruling-D6-implicit-review-upsert.md): the SECOND
+    """The SECOND
     `ProposalReview` SELECT in `reopen_proposal` happens AFTER
     `migrate_public_thread_to_private` -- a multi-call Slack round-trip -- precisely
-    because a row can appear or change in that window. Pre-fix the branch was
-    `if existing_row is not None: <upgrade>`, so a REAL review filed concurrently (the
+    because a row can appear or change in that window. The branch must not simply
+    upgrade `if existing_row is not None`: a REAL review filed concurrently (the
     PI rating on the still-rendered dashboard, a delegate, or an e-mail reply) while the
-    migration ran got overwritten with rating=0 / "[Reopened] ..." / submitted_via="web"
-    / a fresh reviewed_at.
+    migration ran must not be overwritten with rating=0 / "[Reopened] ..." /
+    submitted_via="web" / a fresh reviewed_at.
 
     Control: `test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker`
     above pins that an untouched -1 marker IS still upgraded.
@@ -1325,16 +1313,16 @@ async def test_reopen_leaves_a_concurrent_real_review_alone(
 async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
     client, db_session, lab, proposal, slack_off, monkeypatch,
 ):
-    """I2 (#24 V5, audit-issue-24.md): before this fix, reopen_proposal's write block
-    (`db.add(review)` through `commit()`) had no `except IntegrityError` -- the exact
-    guard Task 24.2 added to review_proposal, left off its sibling. With no existing
+    """reopen_proposal's write block
+    (`db.add(review)` through `commit()`) must have an `except IntegrityError` guard,
+    matching review_proposal's sibling guard. With no existing
     review, the reopen takes the INSERT branch; migrate_public_thread_to_private has
     already created the private Slack channel and (flush-only) set
     `refined_in_channel` by this point. If a concurrent writer wins the race on
-    `uq_proposal_reviews_decision_agent`, the pre-fix code 500s, `get_db` rolls back,
+    `uq_proposal_reviews_decision_agent`, code with no guard 500s, `get_db` rolls back,
     and the channel that already exists for real is orphaned (refined_in_channel and
     the AgentChannel rows are gone) -- and a PI retry then passes the `:695` `!= -1`
-    guard (D6) and migrates AGAIN, minting a SECOND channel.
+    guard and migrates AGAIN, minting a SECOND channel.
 
     Harness note (empirically confirmed, not just asserted): `db_session`
     (tests/conftest.py) binds one nested SAVEPOINT inside a single outer transaction
@@ -1350,12 +1338,12 @@ async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
     session (see `test_concurrent_write_guards.py`'s
     `test_reopen_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race` and
     `test_reopen_proposal_leaves_a_real_winner_alone_after_a_lost_race`); what THIS
-    test proves against a real Postgres constraint is the other half of I2: the
+    test proves against a real Postgres constraint is the other half: the
     guard actually catches the IntegrityError (no 500) and `refined_in_channel`
     survives the recovery rather than being silently dropped.
 
     Since the migration commits its own rows (391e545 for the Slack-off path, 34d3c15
-    for Slack-on), the retry at the end also exercises the #24 N1-b guard: the losing
+    for Slack-on), the retry at the end also exercises the guard: the losing
     request leaves exactly the production wreckage -- a committed private channel, a
     set `refined_in_channel`, and no review row -- and the second POST must not migrate
     again. `test_a_retried_reopen_after_a_lost_race_does_not_mint_a_second_channel`
@@ -1413,13 +1401,11 @@ async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
     # test_concurrent_write_guards.py's fake-session tests pin.
     #
     # The migration's rows are no longer the caller's to lose. `_migrate_offline`
-    # commits them (391e545, #24 N1-a) at the same durability boundary the Slack-on
+    # commits them at the same durability boundary the Slack-on
     # path has drawn since 34d3c15, so the AgentChannel row and `refined_in_channel`
     # outlive this rollback. That is what makes the retry below a test of the ROUTE's
     # idempotency rather than of the savepoint: the retry meets exactly the production
     # state -- no review row, a committed private channel, `refined_in_channel` set.
-    # Before 391e545 both numbers were 0 and 1 and the comment here called the leading
-    # 0 a shared-savepoint limitation; that was true of the code as it then stood.
     rows = (await db_session.execute(
         select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
     )).scalars().all()
@@ -1454,7 +1440,7 @@ async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
         "channel on top of the one the lost attempt already created and committed. No "
         "review row survives the race to stop it, so `refined_in_channel` -- which the "
         "migration commits -- is the only durable record that the migration happened, "
-        "and reopen_proposal has to read it (#24 N1-b / #21 COR-19.6)"
+        "and reopen_proposal has to read it"
     )
     td_after = await _decision(db_session, proposal.thread_id)
     assert td_after.refined_in_channel == channel_id_before_retry, (
@@ -1467,18 +1453,17 @@ async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
 async def test_a_retried_reopen_after_a_lost_race_does_not_mint_a_second_channel(
     client, db_session, lab, proposal, monkeypatch, request, slack_fixture,
 ):
-    """#24 N1-b / #21 COR-19.6 — the web twin of
+    """The web twin of
     `test_email_inbound_reply_paths.py::test_a_retried_inbound_email_does_not_create_a_second_private_channel`.
 
-    `d1146a4` gave the e-mail handler a second idempotency guard and stopped there;
-    `reopen_proposal` gated the migration on `enable_private_refinement and
-    origin_visibility == "public"` alone and read `refined_in_channel` nowhere. The
+    `reopen_proposal` must not gate the migration on `enable_private_refinement and
+    origin_visibility == "public"` alone while reading `refined_in_channel` nowhere. The
     review-row guard at the top of the route is not enough on its own, because the
     review row is exactly what a lost race destroys:
 
       1. `migrate_public_thread_to_private` commits the AgentChannel, its members, the
          handover and `refined_in_channel` as soon as its side effects are real
-         (34d3c15 for Slack-on, 391e545 for Slack-off).
+         (both the Slack-on and Slack-off paths).
       2. The route's own `db.add(review)` then loses the race on
          `uq_proposal_reviews_decision_agent` and the `except IntegrityError` arm rolls
          it back.
@@ -1711,11 +1696,11 @@ async def test_the_slack_off_reopen_writes_the_pis_guidance_to_the_db_inbox(
 async def test_a_lost_reopen_race_keeps_the_pis_inbox_guidance(
     client, db_session, lab, proposal, legacy_db_only, monkeypatch,
 ):
-    """#24 V5 (iii) — the recovery arm re-creates the guidance row the rollback ate.
+    """The recovery arm must re-create the guidance row the rollback ate.
 
     `record_pi_message` does not commit, deliberately: the e-mail twin needs this row on
     the same commit that retires the notification, so committing early would let a
-    retried S3 delivery mint a second one (#21 COR-19.6). That makes durability the
+    retried S3 delivery mint a second one. That makes durability the
     CALLER's job, and this caller was rolling back without doing it. With Slack off the
     DB inbox is the whole conversation store — nothing was posted anywhere else — so
     losing the row loses what the PI typed, silently: the request still answers 302 and
@@ -1751,14 +1736,14 @@ async def test_a_lost_reopen_race_keeps_the_pis_inbox_guidance(
         "the PI's guidance is gone: record_pi_message added it to the session, the "
         "lost-race rollback threw it away, and the recovery arm re-created only the "
         f"review row (found {n} inbox rows). With Slack off this row is the only copy "
-        "of what the PI wrote (#24 V5 iii)"
+        "of what the PI wrote"
     )
 
 
 async def test_the_reopen_recovery_arm_survives_the_proposal_row_vanishing(
     client, db_session, lab, proposal, legacy_db_only, monkeypatch,
 ):
-    """#24 V5 (i) — the identical defect N2 fixed in review_proposal's arm (:626-638).
+    """The identical defect fixed in review_proposal's arm (:626-638).
 
     Not every IntegrityError out of this write block is the review-uniqueness conflict.
     If the ThreadDecision is deleted between this route's SELECT and its flush, the

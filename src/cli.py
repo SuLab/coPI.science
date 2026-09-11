@@ -249,8 +249,7 @@ def backfill_profile_revisions():
             agents = {a.agent_id: a for a in result.scalars().all()}
 
             # Derived from the setting (env COPI_PROFILES_DIR, default "profiles") rather
-            # than a hardcoded literal (audit 2026-09-08 RC-13 L2, opus review) -- every
-            # other profile path builder was converted for RC-13; this one was missed.
+            # than a hardcoded literal, matching every other profile path builder.
             profiles_root = Path(get_settings().profiles_dir)
             count = 0
             for profile_type, subdir in [

@@ -1,4 +1,4 @@
-"""Settings repr()/str() must not leak credentials (SEC-19)."""
+"""Settings repr()/str() must not leak credentials."""
 
 import pytest
 
@@ -137,8 +137,7 @@ def test_reading_database_url_still_returns_the_real_dsn():
 # a signing key, or a password. Adding a field to Settings that renders in the clear
 # forces an edit here, i.e. an explicit classification.
 NON_SECRET_STR_FIELDS = {
-    # Comma-separated daily-audit recipient emails (copi-prod's 9ab5555) —
-    # addresses, not credentials.
+    # Comma-separated daily-audit recipient emails — addresses, not credentials.
     "audit_recipients",
     "environment",
     "orcid_client_id",       # OAuth *public* client id; ships in the browser redirect
@@ -156,7 +155,7 @@ NON_SECRET_STR_FIELDS = {
     "llm_agent_model",
     "llm_agent_model_opus",
     "llm_agent_model_sonnet",
-    "profiles_dir",  # a local filesystem path, not a credential (audit RC-13)
+    "profiles_dir",  # a local filesystem path, not a credential
 }
 
 
@@ -166,9 +165,8 @@ def _str_field_names():
 
 def _sweep_settings(value_for):
     # A field with a `validation_alias` (e.g. profiles_dir/COPI_PROFILES_DIR) only
-    # accepts that alias as a constructor kwarg now that Settings no longer sets
-    # `populate_by_name=True` (audit 2026-09-08, opus review) — feed it the alias,
-    # not the bare field name.
+    # accepts that alias as a constructor kwarg, since Settings does not set
+    # `populate_by_name=True` — feed it the alias, not the bare field name.
     kwargs = {}
     for n in _str_field_names():
         alias = Settings.model_fields[n].validation_alias

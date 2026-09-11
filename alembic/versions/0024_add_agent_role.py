@@ -2,12 +2,10 @@
 
 Revision ID: 0024
 Revises: 0023
-Create Date: 2026-08-05 00:00:00.000000
 
 `role` selects per-role prompt overrides (prompts/roles/{role}/) and a per-role
 tool allow-list. Default 'pi_lab' == the pre-existing all-agents-identical
 behaviour, so this column is a no-op until an agent is explicitly reassigned.
-See docs/specs/2026-08-05-hub-bot-customization-design.md.
 
 Downgrade is idempotent (if_exists) per the branch convention (0022/0023).
 """

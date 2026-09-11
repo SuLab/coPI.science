@@ -302,7 +302,7 @@ async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
 
 
 async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
-    """RC-2 (audit 2026-09-08): replay protection across a restart is the durable
+    """Replay protection across a restart must rely on the durable
     ``handled_at`` marker, not the in-memory seen-set. A DM that was already
     handled (or backfilled by migration 0030) is not re-run after a restart; the
     seed no longer populates ``_pi_dm_seen`` from the DB."""
@@ -330,12 +330,11 @@ async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
 
 
 async def test_dm_for_an_unknown_agent_is_marked_handled_not_retried_forever(db_session):
-    """A5 (opus review, audit 2026-09-08); REV3-1 tightens the test this
-    guards against a DM for an agent_id that does not exist in AgentRegistry
-    at all (never provisioned, or the row itself was deleted) used to
-    `continue` before _mark_pi_dm_handled, leaving handled_at NULL — which
-    matches the durable-marker recovery clause forever, re-fetching this row
-    on every poll with no way it will ever be processed."""
+    """A DM for an agent_id that does not exist in AgentRegistry
+    at all (never provisioned, or the row itself was deleted) must not
+    `continue` before _mark_pi_dm_handled, leaving handled_at NULL — that
+    would match the durable-marker recovery clause forever, re-fetching this
+    row on every poll with no way it will ever be processed."""
     run = await factories.make_simulation_run(db_session)
     engine = _engine_for(db_session, run.id, agents=[Agent("su", "SuBot", "Andrew Su")])
     handler = _RecordingPiHandler()
@@ -363,10 +362,10 @@ async def test_dm_for_an_unknown_agent_is_marked_handled_not_retried_forever(db_
 async def test_dm_for_a_registered_but_not_yet_rostered_agent_is_left_unhandled(
     db_session,
 ):
-    """REV3-1 (opus review, audit 2026-09-08): `self.agents` shrinks on
+    """`self.agents` shrinks on
     deactivation and is only partially populated before the first roster
     sync, so "not in self.agents" alone must not be treated as "will never
-    be processed" the way A5 originally did — that stamped handled_at on a
+    be processed" — stamping handled_at on a
     DM for an agent that legitimately exists (and may be added to the live
     roster on the very next sync), permanently discarding it. Only an
     agent_id with NO AgentRegistry row at all may be stamped immediately."""
@@ -868,8 +867,8 @@ async def test_flush_chunks_a_batch_that_exceeds_the_bind_parameter_ceiling(db_s
     # deliberately re-queues a failed batch in full rather than dropping it, so an
     # oversized batch fails identically on every retry and the buffer never
     # drains — every message stays in volatile memory while the DB is supposed to
-    # be the durable store. Observed in production on 2026-08-14 with 6,988
-    # buffered rows (~112k parameters), failing once per turn.
+    # be the durable store. Observed in production with thousands of
+    # buffered rows (tens of thousands of parameters), failing once per turn.
     run = await factories.make_simulation_run(db_session)
     engine = _engine_for(db_session, run.id)
 

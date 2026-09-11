@@ -1,5 +1,5 @@
-"""S-7 (audit 2026-09-10): synchronous boto3 SES sends must run off the event
-loop, through src.services.io_executor.run_blocking, from every async call
+"""Synchronous boto3 SES sends must run off the event loop, through
+src.services.io_executor.run_blocking, from every async call
 site in src/services/email_inbound.py and src/services/email_notifications.py.
 
 No DB/Docker needed: these exercise pure functions with monkeypatched

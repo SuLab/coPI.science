@@ -40,17 +40,15 @@ _UNPACED_TESTS = {
 
 @pytest.fixture(autouse=True)
 def _no_retry_backoff(monkeypatch, request):
-    """Zero the retry loop's backoff (issue #23 COR-29a) so a mocked 5xx doesn't add ~3.5s of real
+    """Zero the retry loop's backoff so a mocked 5xx doesn't add ~3.5s of real
     sleep per test, and — except for the two tests below that need real values — also zero the
-    NCBI pacing gate (COR-29b) and reset its shared clock, so the other ~10 tests that reach
+    NCBI pacing gate and reset its shared clock, so the other ~10 tests that reach
     _ncbi_get don't each pay the pacing interval too.
 
-    This fixture used to also rebind `_NCBI_SEMAPHORES` to fresh Semaphores for every test,
-    because an `asyncio.Semaphore` binds to a loop at its first *contended* acquire and each test
-    runs its own event loop. That mitigation is gone: `pubmed._ncbi_semaphore` now keys the
-    semaphores on the RUNNING loop (closure-23 R7), so a per-test rebind has nothing left to fix —
-    and `test_the_ncbi_semaphore_is_not_shared_across_event_loops` below pins that directly instead
-    of a fixture papering over it."""
+    A per-test Semaphore rebind is unnecessary here: `pubmed._ncbi_semaphore` keys the
+    semaphores on the RUNNING loop, so a fresh `asyncio.Semaphore` binding to a loop at its
+    first *contended* acquire is a non-issue across the separate event loop each test runs —
+    `test_the_ncbi_semaphore_is_not_shared_across_event_loops` below pins that directly."""
     monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
     if request.node.name not in _UNPACED_TESTS:
         monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: 0.0, False: 0.0})
@@ -58,14 +56,14 @@ def _no_retry_backoff(monkeypatch, request):
 
 
 def test_semaphores_are_sized_by_api_key_presence():
-    """COR-29c: a keyless deployment must use the smaller concurrency bound; a keyed one the
+    """A keyless deployment must use the smaller concurrency bound; a keyed one the
     larger. Both must exist regardless of the current settings' key."""
     assert pubmed._NCBI_SEMAPHORE_SIZES[False] == 2
     assert pubmed._NCBI_SEMAPHORE_SIZES[True] == 8
 
 
 def test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it():
-    """over-impl R4 / closure-23 R2: the resized semaphore left the keyed path paced at
+    """The resized semaphore must not leave the keyed path paced at
     `1/0.12 = 8.33` req/s against NCBI's **10** req/s keyed ceiling — 83.3%, i.e. we throttled
     ourselves 17% below the limit the policy actually grants, on the path the profile pipeline
     spends all its time in. The keyless path was already at 98.0% of its 3 req/s ceiling.
@@ -78,12 +76,11 @@ def test_ncbi_pacing_lands_at_the_policy_ceiling_not_below_it():
     """
     keyed_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[True]
     keyless_rate = 1.0 / pubmed._NCBI_PACING_SECONDS[False]
-    # AMENDED (audit D5). This lower bound was 9.5, which forced the interval to 0.105 --
-    # and at 0.105 the worst-case BURST is floor(1/0.105)+1 = 10, i.e. exactly NCBI's
-    # ceiling with no tolerance for jitter. Pinning the average alone is what let a
-    # 17-in-one-second regression through, so the bound is now 8.9 (0.112 s, 89.3% of the
-    # granted ceiling -- still comfortably above the 83.3% over-impl R4 filed as wasteful)
-    # and the burst is pinned separately by
+    # A 9.5 lower bound would force the interval to 0.105 -- and at 0.105 the worst-case
+    # BURST is floor(1/0.105)+1 = 10, i.e. exactly NCBI's ceiling with no tolerance for
+    # jitter, and pinning the average alone would let a 17-in-one-second regression
+    # through undetected. The bound is 8.9 (0.112 s, 89.3% of the granted ceiling) and
+    # the burst is pinned separately by
     # test_the_keyed_burst_bound_is_one_under_the_policy_ceiling.
     assert 8.9 <= keyed_rate <= 10.0, keyed_rate      # NCBI keyed ceiling: 10 req/s
     assert 2.9 <= keyless_rate <= 3.0, keyless_rate   # NCBI keyless ceiling: 3 req/s
@@ -99,8 +96,8 @@ _CONTENDING_CALLS = 12
 
 @respx.mock
 def test_the_ncbi_semaphore_is_not_shared_across_event_loops():
-    """closure-23 R7: `_NCBI_SEMAPHORES` was a module-level singleton, and the HAZARD comment in
-    `src/services/pubmed.py` documented rather than fixed it.
+    """`_NCBI_SEMAPHORES` must not be a module-level singleton, or the HAZARD this
+    guards against in `src/services/pubmed.py` is only documented, not fixed.
 
     An `asyncio.Semaphore` does not bind to a loop at construction; it binds at its first
     *contended* `acquire()` (checked against CPython 3.11's and 3.12's `asyncio/locks.py`: the
@@ -109,8 +106,8 @@ def test_the_ncbi_semaphore_is_not_shared_across_event_loops():
     `RuntimeError: ... is bound to a different event loop` in every loop after that — permanently,
     since nothing rebuilds it.
 
-    Two real `asyncio.run()` calls, the shape `e6a03f7` used for the pacing cursor
-    (`test_pace_ncbi_survives_two_separate_event_loops` above). The mocked handler yields once
+    Two real `asyncio.run()` calls, the same shape as
+    `test_pace_ncbi_survives_two_separate_event_loops` above. The mocked handler yields once
     while the slot is held, so the concurrent callers genuinely contend rather than each finishing
     before the next starts.
     """
@@ -196,7 +193,7 @@ async def test_a_hung_ncbi_stops_retrying_once_its_call_budget_is_spent(monkeypa
 
 @respx.mock
 async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
-    """COR-29b, review fix round 2: the rate ceiling must hold under concurrency, via a gate that
+    """The rate ceiling must hold under concurrency, via a gate that
     (unlike an `asyncio.Lock`) is never bound to whichever event loop happens to be running when
     it is first used — see the module-level comment above `_pace_ncbi`. With the old per-slot
     `finally: sleep(interval)`, N semaphore slots each sleeping `interval` allow N/interval
@@ -270,7 +267,7 @@ async def test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling(monkeyp
     of synchronous, loop-blocking work (SSL context + CA bundle). `asyncio.gather` puts every
     coroutine in the ready queue, each runs to its first real await only after building its client,
     so the loop stalls for N x 32 ms and every reservation that came due during the stall departs
-    in the same tick. Measured by the audit at N=30: 17 starts in one second, minimum gap 0.15 ms.
+    in the same tick. At N=30: 17 starts in one second, minimum gap 0.15 ms.
 
     Counted in a sliding window, never compared against a wall-clock threshold, so a loaded
     machine cannot flake it: the assertion is "how many starts share any one second", which is
@@ -519,9 +516,9 @@ async def test_fetch_pubmed_records_empty_input_no_http():
 
 @respx.mock
 async def test_fetch_abstract_surfaces_the_doi():
-    """Issue #29 rollout (audit O-I3): fetch_abstract must pass the parsed DOI
-    through to its return dict — the retrieve tools cite it so the emit gate's
-    DOI requirement is satisfiable for a legit first-person share."""
+    """fetch_abstract must pass the parsed DOI through to its return dict —
+    the retrieve tools cite it so the emit gate's DOI requirement is
+    satisfiable for a legit first-person share."""
     respx.get(f"{EUTILS}/efetch.fcgi").mock(
         return_value=httpx.Response(200, text=EFETCH_XML)
     )

@@ -1,10 +1,10 @@
-"""`Settings.profiles_dir` (audit 2026-09-08 RC-13).
+"""`Settings.profiles_dir`.
 
 Root cause: `PROFILES_DIR = Path("profiles")` (src/agent/agent.py) and the equivalent
 literals in src/agent/tools.py, src/routers/agent_page.py and
 src/services/profile_export.py are CWD-relative literals with nothing configurable. On
 a host where `profiles/` is root-owned (see CLAUDE.md's UID 10001 precondition), a
-disk write under one of these paths fails -- silently, in the case RC-7 closes -- and
+disk write under one of these paths can fail silently, and
 the live tier's preflight said nothing about it.
 
 This test covers only the setting itself (env var `COPI_PROFILES_DIR`, default
@@ -45,8 +45,8 @@ def test_profiles_dir_field_name_is_not_a_second_env_var(monkeypatch):
 
 
 def test_agent_profiles_dir_accessor_honors_a_later_env_var_change(monkeypatch):
-    """REV3-6 (opus review, audit 2026-09-08): PROFILES_DIR used to be resolved
-    from get_settings() once, at import time -- a later COPI_PROFILES_DIR +
+    """PROFILES_DIR must not be resolved from get_settings() once, at import
+    time -- otherwise a later COPI_PROFILES_DIR +
     get_settings.cache_clear() (exactly what scripts/live_slack_preflight.py's
     runtime check does) had no effect on the module constant every path
     builder actually used. `_profiles_dir()` re-reads get_settings() on every

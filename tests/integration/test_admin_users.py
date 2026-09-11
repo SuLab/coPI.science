@@ -497,11 +497,11 @@ async def test_admin_delete_user_returns_409_on_integrity_error(
 async def test_admin_delete_user_refuses_when_it_would_orphan_an_active_agent(
     client, db_session, admin
 ):
-    """RC-8 (#25 D1 asymmetry): the orphan guard lived only in profile.py's self-service
-    delete-account route. admin_delete_user skipped it entirely, and agents.user_id is
-    ondelete='SET NULL' (not CASCADE), so an admin could delete the owner of a live agent
-    and leave a Slack bot posting under nobody's account -- active on the roster, but with
-    no owner able to deactivate, edit, or answer proposals for it."""
+    """admin_delete_user must apply the same orphan guard as the self-service
+    delete-account route: agents.user_id is ondelete='SET NULL' (not CASCADE), so
+    deleting the owner of a live agent would leave a Slack bot posting under
+    nobody's account -- active on the roster, but with no owner able to
+    deactivate, edit, or answer proposals for it."""
     target = await factories.make_user(db_session)
     agent = await factories.make_agent(db_session, user=target, status="active")
     target_id = target.id

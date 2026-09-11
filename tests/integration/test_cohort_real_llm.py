@@ -270,7 +270,7 @@ async def test_real_scan_response_parses_under_an_active_gate(log):
 
 
 async def test_real_model_acts_on_an_uncohorted_peer_under_open_policy(log):
-    """§5.2 with a real model: under `open`, a cohorted agent must be able to act on an
+    """The open-policy asymmetry with a real model: under `open`, a cohorted agent must be able to act on an
     uncohorted one.
 
     This is the defect a real multi-turn run surfaced. The gate was asymmetric — the

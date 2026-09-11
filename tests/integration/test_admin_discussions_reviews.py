@@ -2,14 +2,9 @@
 
 The `reviews_query` in src/routers/admin.py's `admin_discussions` route (feeding
 `templates/admin/discussions.html`'s "PI Reviews" section, which renders
-`{{ rev.rating }}/4`) counted every ProposalReview row, including the engine's
-implicit `rating = -1` marker row (src.agent's `_persist_implicit_proposal_review`).
-That marker is not a real PI review — Task 20.9c already taught the badge, the
-review e-mail, the digest and the dashboard form to ignore it (see
-.superpowers/sdd/2026-09-02-close-issues-20-27/task-20.9c-report.md), and part 3
-taught the admin agents page too. This is the same fix applied to the one
-remaining reader, the admin discussions page: a lone `rating = -1` row must not
-render as "-1/4".
+`{{ rev.rating }}/4`) must not count the engine's implicit `rating = -1` marker
+row (src.agent's `_persist_implicit_proposal_review`) as a real PI review: a
+lone `rating = -1` row must not render as "-1/4".
 
 Real ASGI requests, real Postgres, real Jinja templates — same harness as
 tests/integration/test_cohort_admin.py.

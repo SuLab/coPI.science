@@ -1,5 +1,5 @@
-"""A dedicated thread pool for synchronous, non-Slack blocking I/O (S-7, audit
-2026-09-10) -- currently just outbound SES email sends.
+"""A dedicated thread pool for synchronous, non-Slack blocking I/O --
+currently just outbound SES email sends.
 
 ``src/services/email_inbound.py``'s ``_send_*`` helpers and
 ``src/services/email_notifications.py``'s ``send_html_email_outcome`` /
@@ -115,7 +115,7 @@ def shutdown_io_executor() -> None:
 # hangs waiting to join its worker threads. `threading._register_atexit`
 # hooks run BEFORE `threading._shutdown()`'s non-daemon-thread join; a plain
 # `atexit.register` callback (the fallback here) only runs AFTER it, same
-# ordering rationale as slack_executor.py's P-1.
+# ordering rationale as slack_executor.py's atexit handling.
 try:
     threading._register_atexit(shutdown_io_executor)  # type: ignore[attr-defined]
 except (AttributeError, RuntimeError):  # pragma: no cover - non-CPython, or

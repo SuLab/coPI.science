@@ -1,15 +1,15 @@
 """templates/base.html renders valid JS in the posthog.identify block.
 
-DOC-5 (issue #26): the object literal at base.html:20 is missing its closing
-`}` before the call's `)` — a JS SyntaxError on every logged-in page of any
+The object literal at base.html:20 must not be missing its closing `}` before
+the call's `)` — that produces a JS SyntaxError on every logged-in page of any
 deployment with POSTHOG_API_KEY set (the earlier posthog.init <script> is a
 separate tag and is unaffected, so the failure is silent, not a page crash).
 Renders through the app's own Jinja2Templates instance (same construction as
 every router) so a future template edit is caught the same way a route would
 hit it.
 
-COR-16 (issue #22): the fix above interpolated ``current_user.name``/``.email``
-straight into single-quoted JS string literals. Jinja2's HTML autoescaping
+Interpolating ``current_user.name``/``.email`` straight into single-quoted JS
+string literals is also wrong: Jinja2's HTML autoescaping
 turns a plain apostrophe into ``&#39;``, which parses fine but silently
 corrupts the identified value (PostHog sees ``O&#39;Brien``, not
 ``O'Brien``). Worse, a value ending in a bare backslash (nothing HTML-special
@@ -91,10 +91,10 @@ def test_posthog_identify_preserves_apostrophe_in_name_and_email(tmp_path):
 
 
 def test_posthog_identify_renders_the_id_via_tojson_like_name_and_email():
-    """issue #26 Minor 8: current_user.id was still interpolated into a
-    single-quoted JS literal (HTML-autoescaped only) while name/email went
-    through |tojson — asymmetric hardening. Harmless today (User.id is a
-    UUID column) but the id should get the same treatment.
+    """current_user.id must not be interpolated into a single-quoted JS
+    literal (HTML-autoescaped only) while name/email go through |tojson —
+    that is asymmetric hardening. Harmless today (User.id is a UUID column)
+    but the id should get the same treatment.
     """
     html = _render(email="a@b.org")
     m = _SCRIPT_RE.search(html)

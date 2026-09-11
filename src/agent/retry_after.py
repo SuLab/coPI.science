@@ -4,8 +4,8 @@ Slack's Retry-After is documented as an integer count of seconds, but real respo
 as an RFC 7231 HTTP-date, a float count of seconds ("2.5"), and either of those with the wrong sign. A raw
 ``int(header)`` (or ``float(header)``) therefore raises ``ValueError`` for the date/negative forms — and
 because that raise can happen inside a caller's ``except SlackApiError:`` block, it escapes as an unrelated
-exception type instead of a retryable one (issue #23 V7e). This module gives every Retry-After call site
-(``src/agent/slack_client.py``; Part 24's provisioning-loop cap) one place to get it right: parse a
+exception type instead of a retryable one. This module gives every Retry-After call site
+(``src/agent/slack_client.py``; the provisioning-loop cap) one place to get it right: parse a
 delta-seconds float, or an HTTP-date and compute the delta from ``now``, clamp to ``[0, cap]``, and fall
 back to ``default`` when nothing parses. Ported from the equivalent inline logic in
 ``src/services/slack_web.py:_call`` (``:104-120``), which already does this correctly for the web-layer

@@ -1,21 +1,20 @@
 """Cohort interaction gate + reactive-priority scheduler.
 
-Implements the test plan in .notes/cohort-system-v2.md §15. Organised by spec
-section so a failure names the rule it broke:
+Organised by topic so a failure names the rule it broke:
 
-- TestGateHelper            §5.1  the per-entry decision table
-- TestComputeGates          §5.2  policy semantics, shared by engine and admin
-- TestPreflight             §5.3  refusing to silence a roster
-- TestGatedReads            §6    MessageLog read filtering
-- TestReadPathInventory     §6    every public read method is classified
-- TestStatePruning          §6.1  stale interesting_posts
-- TestDbPrimaryPaths        §6.2  ingestion is never gated; is_bot keying
-- TestPrivateChannels       §7    PI pairings outrank the gate
-- TestGrandfathering        §8    resumed runs, conclude-but-deprioritise
-- TestTagHygiene            §9    outbound mention stripping
-- TestScheduler             §10   eligibility, fairness valve, ratio counters
-- TestTopologySnapshot      §13.1 provenance
-- TestMigrationHygiene      §14   single head, no duplicate revision ids
+- TestGateHelper            the per-entry decision table
+- TestComputeGates          policy semantics, shared by engine and admin
+- TestPreflight             refusing to silence a roster
+- TestGatedReads            MessageLog read filtering
+- TestReadPathInventory     every public read method is classified
+- TestStatePruning          stale interesting_posts
+- TestDbPrimaryPaths        ingestion is never gated; is_bot keying
+- TestPrivateChannels       PI pairings outrank the gate
+- TestGrandfathering        resumed runs, conclude-but-deprioritise
+- TestTagHygiene            outbound mention stripping
+- TestScheduler             eligibility, fairness valve, ratio counters
+- TestTopologySnapshot      provenance
+- TestMigrationHygiene      single head, no duplicate revision ids
 """
 
 import inspect
@@ -156,7 +155,7 @@ def _thread(agent, thread_id, other, pending=False, channel="general", grandfath
 
 
 # ---------------------------------------------------------------------------
-# §5.1 — the per-entry decision table
+# The per-entry decision table
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +195,7 @@ class TestGateHelper:
         assert _entry_allowed(_post("1", "c", "su", "SuBot", "hi"), set()) is False
 
 
-# The whole of §5.1 as data, so a failure names the row rather than the assertion, and
+# The whole decision table as data, so a failure names the row rather than the assertion, and
 # so the table itself can be checked for polarity (see the control below).
 DECISION_TABLE = [
     # (row name, _post kwargs, gate, expected_visible)
@@ -218,7 +217,7 @@ DECISION_TABLE = [
     "name,kwargs,gate,expected", DECISION_TABLE, ids=[r[0] for r in DECISION_TABLE]
 )
 def test_decision_table_row(name, kwargs, gate, expected):
-    """Every §5.1 row, asserted in the direction the table states."""
+    """Every decision-table row, asserted in the direction the table states."""
     base = dict(ts="1", channel="c", agent_id="x", name="X", content="")
     base.update(kwargs)
     entry = _post(**base)
@@ -239,7 +238,7 @@ def test_decision_table_has_both_polarities():
 
 
 # ---------------------------------------------------------------------------
-# §5.2 — policy semantics (the rule v1 documented and the code inverted)
+# Policy semantics (the rule v1 documented and the code inverted)
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +286,7 @@ class TestComputeGates:
         the union of its co-members, which would not contain it. The result was an
         agent that could react and never be replied to — it could not hold a
         conversation, which is the opposite of "unrestricted", and it contradicts the
-        §5.1 row "`A` has no cohort memberships, policy = open -> Yes".
+        decision-table row "`A` has no cohort memberships, policy = open -> Yes".
 
         Found by a real multi-turn run: the uncohorted agent opened two threads and no
         cohorted agent ever replied. Every gate-computation test passed, and the
@@ -370,7 +369,7 @@ class TestComputeGates:
 
 
 # ---------------------------------------------------------------------------
-# §5.3 — preflight: never silently silence a roster
+# Preflight: never silently silence a roster
 # ---------------------------------------------------------------------------
 
 
@@ -429,7 +428,7 @@ def test_preflight_allows_when_a_live_member_exists():
 
 
 def test_open_policy_never_emits_an_empty_gate():
-    """§5.4: under `open`, an empty set is a bug — it would silence the agent.
+    """Under `open`, an empty set is a bug — it would silence the agent.
 
     Swept over every topology shape rather than one example, because the shapes differ
     in which branch of compute_gates they take (uncohorted, solo, overlapping, offline
@@ -584,7 +583,7 @@ class TestPreflight:
 
 
 # ---------------------------------------------------------------------------
-# §6 — gated reads
+# Gated reads
 # ---------------------------------------------------------------------------
 
 
@@ -664,7 +663,7 @@ class TestGatedReads:
 class TestReadPathInventory:
     """Guard: a new public read method must declare its cohort classification.
 
-    Without this the §6 inventory rots the first time someone adds a reader and
+    Without this the read-path inventory rots the first time someone adds a reader and
     forgets the gate — which is exactly how has_new_reply_from_other was missed.
     """
 
@@ -681,7 +680,7 @@ class TestReadPathInventory:
                 unclassified.append(name)
         assert not unclassified, (
             "MessageLog read methods missing a 'COHORT-GATE: GATED|UNGATED' marker "
-            f"in their docstring: {unclassified}. See .notes/cohort-system-v2.md §6."
+            f"in their docstring: {unclassified}."
         )
 
     def test_writes_are_not_gated(self):
@@ -694,7 +693,7 @@ class TestReadPathInventory:
 
 
 # ---------------------------------------------------------------------------
-# §6.1 — stale banked posts
+# Stale banked posts
 # ---------------------------------------------------------------------------
 
 
@@ -740,7 +739,7 @@ class TestStatePruning:
 
 
 # ---------------------------------------------------------------------------
-# §6.2 — DB-primary read paths
+# DB-primary read paths
 # ---------------------------------------------------------------------------
 
 
@@ -779,7 +778,7 @@ class TestDbPrimaryPaths:
         assert AgentMessage.__table__.c.agent_id.nullable is True
 
     def test_log_entry_carries_persisted_visibility(self):
-        """§7 reads LogEntry.visibility rather than the engine's in-memory channel
+        """Private-channel reads use LogEntry.visibility rather than the engine's in-memory channel
         map, so it must survive ingestion from another process."""
         from src.models.agent_activity import AgentMessage
         assert "visibility" in AgentMessage.__table__.c
@@ -787,7 +786,7 @@ class TestDbPrimaryPaths:
 
 
 # ---------------------------------------------------------------------------
-# §7 — PI-created private channels outrank the gate
+# PI-created private channels outrank the gate
 # ---------------------------------------------------------------------------
 
 
@@ -835,7 +834,7 @@ class TestPrivateChannels:
 
 
 # ---------------------------------------------------------------------------
-# §8 — grandfathering
+# Grandfathering
 # ---------------------------------------------------------------------------
 
 
@@ -925,7 +924,7 @@ class TestGrandfathering:
 
     def test_phase4_reads_ungated_so_threads_can_conclude(self):
         """Phase 4 must see a grandfathered partner's reply — the thread is open and
-        entitled to finish. Pinned on the call site, since the whole point of §8 is
+        entitled to finish. Pinned on the call site, since the whole point of grandfathering is
         that Phase 4 and the scheduler deliberately differ."""
         src = inspect.getsource(SimulationEngine._phase4_reply_threads)
         assert "allowed_sender_ids=None" in src
@@ -943,7 +942,7 @@ class TestGrandfathering:
 
 
 # ---------------------------------------------------------------------------
-# §9 — outbound mention hygiene
+# Outbound mention hygiene
 # ---------------------------------------------------------------------------
 
 
@@ -1060,7 +1059,7 @@ class TestTagHygiene:
 
 
 # ---------------------------------------------------------------------------
-# §10 — scheduler
+# Scheduler
 # ---------------------------------------------------------------------------
 
 
@@ -1201,7 +1200,7 @@ class TestScheduler:
 
 
 # ---------------------------------------------------------------------------
-# §13.1 — provenance
+# Provenance
 # ---------------------------------------------------------------------------
 
 
@@ -1250,7 +1249,7 @@ class TestTopologySnapshot:
 
 
 # ---------------------------------------------------------------------------
-# §14 — migration hygiene
+# Migration hygiene
 # ---------------------------------------------------------------------------
 
 
@@ -1271,7 +1270,7 @@ class TestMigrationHygiene:
         assert not dupes, (
             f"duplicate alembic revision ids {dupes} — Alembic keeps only the "
             "last-sorted file, silently skipping the other while stamping the DB "
-            "as fully migrated. See .notes/cohort-system-v2.md §14."
+            "as fully migrated."
         )
 
     def test_exactly_one_head(self):

@@ -1,11 +1,11 @@
 """Hardening for inbound email reply processing.
 
-These pin the defects found while investigating the dead prod reply flow
-(2026-08-11): a sender-forged ``Authentication-Results: ... pass`` header
-defeated the SEC-5 anti-spoofing gate, HTML-only replies were silently
-dropped, auto-responders could loop with the help email, the declared
-per-token rate limit was never enforced, and a poison message in the inbound
-bucket was retried forever.
+These pin defects that broke the inbound reply flow: a sender-forged
+``Authentication-Results: ... pass`` header must not defeat the anti-spoofing
+gate, HTML-only replies must not be silently dropped, auto-responders must
+not loop with the help email, the declared per-token rate limit must be
+enforced, and a poison message in the inbound bucket must not be retried
+forever.
 """
 
 import email
@@ -37,7 +37,7 @@ def _msg(raw: str) -> email.message.Message:
 
 def test_forged_pass_header_below_ses_fail_is_rejected():
     """SES prepends its header on receipt, so a sender-supplied pass sits below
-    it. Merging verdicts across headers let the forged pass win (SEC-5)."""
+    it. Merging verdicts across headers would let the forged pass win."""
     raw = (
         "Authentication-Results: amazonses.com; spf=fail smtp.mailfrom=evil.com; "
         "dkim=none; dmarc=fail header.from=scripps.edu\n"
@@ -241,11 +241,11 @@ async def test_auto_submitted_no_is_not_treated_as_an_auto_reply():
         await process_inbound_email(raw, db=None)
 
 
-# --- Reply token falls back through Cc/Delivered-To/X-Original-To (S-6) -----
+# --- Reply token falls back through Cc/Delivered-To/X-Original-To ----------
 
 
 async def test_reply_token_falls_back_to_cc_when_absent_from_to():
-    """S-6 (audit 2026-09-10): a PI who Ccs the reply address instead of (or
+    """A PI who Ccs the reply address instead of (or
     in addition to) putting it in To must still be recognized -- reaching the
     token-lookup db.execute (the AttributeError on db=None) is the evidence
     the fallback found the token, not the early "no token" return.
@@ -625,7 +625,7 @@ async def _instruction_world(db, *, email_addr, token):
 async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type(
     db_session, monkeypatch, fail_at, retried,
 ):
-    """#21 COR-32: what makes a failure terminal is that a Slack channel now exists.
+    """What makes a failure terminal is that a Slack channel now exists.
 
     Both halves raise the *same* ``RuntimeError("slack is unhappy")`` out of
     ``migrate_public_thread_to_private``; the only difference is where the migration
@@ -696,15 +696,14 @@ async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type
     assert ("We'll retry automatically" in mail["body"]) is retried
 
 
-# --- Unbounded in-memory dedup/rate-limit maps are pruned (SEC3-4, audit 2026-09-10) ----
+# --- Unbounded in-memory dedup/rate-limit maps are pruned ------------------
 #
 # _RECENT_REPLY_TIMES, _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT,
 # _INSTRUCTION_FAILURE_EMAILS_SENT and _S3_FAILURE_COUNTS are keyed by
 # notification id / sender address / S3 key and never removed, so a
 # long-lived worker process accumulates one entry per key forever.
 #
-# Opus review follow-up (audit 2026-09-10): the original fix used one 24h
-# window for all four maps, but _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT
+# A single 24h window for all four maps is not safe: _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT
 # and _INSTRUCTION_FAILURE_EMAILS_SENT are documented, deliberate LIFETIME
 # caps (MAX_HELP_EMAILS_PER_NOTIFICATION etc. — "per notification"/"per
 # address", not "per day") — pruning them on a 24h clock silently turned them

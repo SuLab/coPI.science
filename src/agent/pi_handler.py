@@ -138,7 +138,7 @@ class PIHandler:
             if profile_match:
                 new_profile = profile_match.group(1).strip()
 
-                # DB first, disk second (RC-7, audit 2026-09-08). The DB is the
+                # DB first, disk second. The DB is the
                 # primary store; a disk write failure must never be reported to
                 # the PI as success, and it must never be allowed to overwrite a
                 # good DB row with stale content (that was the original defect —
@@ -150,7 +150,7 @@ class PIHandler:
                 # `db_ok` is the one flag the ack and the disk write key on, and
                 # once persist_private_profile_to_db returns True the profile
                 # row is durably committed — nothing after that point may flip
-                # `db_ok` back to False (Opus follow-up review, 2026-09-08).
+                # `db_ok` back to False.
                 # The revision bookkeeping (two more SELECTs, create_revision,
                 # a second commit) that used to share this method's outer
                 # try/except could do exactly that: an exception there, AFTER
@@ -214,8 +214,7 @@ class PIHandler:
                     db_ok = committed
 
                 # Disk is best-effort, and only attempted once the DB persist
-                # actually succeeded (RC-7 follow-up 3, Opus review
-                # 2026-09-08): when db_ok is False, nothing was durably saved
+                # actually succeeded: when db_ok is False, nothing was durably saved
                 # anywhere, the PI is told to retry, and the agent must not
                 # start behaving on an instruction it just reported as
                 # unsaved — update_private_profile always sets the in-memory
@@ -469,7 +468,7 @@ class PIHandler:
             # slack_sdk re-raises non-HTTP transport failures unchanged
             # (_call_with_retry only catches SlackApiError) — this is the
             # real unguarded raise on the _poll_inbound_from_db ->
-            # handle_channel_tag -> _send_dm chain (COR-10(3)). The DB record
+            # handle_channel_tag -> _send_dm chain. The DB record
             # below still gets written on failure, so the DM survives as a
             # DB-only row exactly like the Slack-off path.
             try:

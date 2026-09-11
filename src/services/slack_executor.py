@@ -1,92 +1,23 @@
 """A dedicated thread pool for synchronous Slack Web API calls.
 
-Every ``asyncio.to_thread`` wrapper around a blocking ``AgentSlackClient``/
-``httpx`` Slack call previously shared the event loop's *default* executor
-(``min(32, os.cpu_count() + 4)`` threads) with every other ``to_thread`` user in
-the process. Each Slack call can block for up to
-``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s) under a sustained
-throttle, so a run of Slack calls could occupy enough of that shared pool to
-starve unrelated ``to_thread`` work (DB migrations off the loop, CPU-bound
-helpers, etc.) that has nothing to do with Slack.
+Each Slack call can block for a long time under a sustained rate-limit
+throttle, so sharing the event loop's default ``to_thread`` executor would
+let a run of Slack calls starve unrelated non-Slack work. ``run_slack_call``
+gives Slack I/O its own bounded pool (sized well above one call flow's
+sequential call count, so a second concurrent flow isn't left queuing behind
+the first) so a Slack throttle can only ever starve other Slack calls.
 
-``run_slack_call`` gives Slack I/O its own bounded pool instead, so a Slack
-throttle can only ever starve *other Slack calls*, never the rest of the
-process. Use it everywhere a synchronous Slack Web API call (through
-``AgentSlackClient`` or the ``slack_web``/``slack_provisioning`` httpx helpers)
-is moved off the event loop; leave non-Slack ``to_thread`` call sites alone.
-
-**Shutdown (O-1, audit 2026-09-10 — replaces the per-pool
-event/thread-local/pending-flag design from K-2/M-2/N-2, which regressed in
-three consecutive review rounds).** ``shutdown_slack_executor()`` sets the
-single process-wide ``slack_client.SHUTDOWN_REQUESTED`` event (sticky for the
-rest of the process's life — see that module) and then calls
-``pool.shutdown(wait=False, cancel_futures=False)``: queued-but-not-yet-started
-work still runs (it is NOT dropped — a queued ``run_slack_call`` must
-execute and abort quickly via the event rather than raise ``CancelledError``
-into an in-flight turn). Exit bound (P-3, audit 2026-09-10):
-``slack_client._call_with_retry`` checks the event BEFORE attempt 0, so
-queued-but-unstarted work aborts immediately with no network round trip at
-all once the event is already set by the time it gets a worker thread. A
-call whose attempt 0 was already in flight when the event was set is bounded
-by one in-flight HTTP call plus <=1s: it either fails with a real
-``ratelimited`` response (in which case the NEXT check, in the retry-sleep
-branch, aborts within about a second via
-``slack_client._sleep_interruptibly``'s <=1s slices) or succeeds/fails
-outright on its own. A call blocked on the underlying HTTP request itself
-(not sleeping on a throttle) is not interrupted mid-request by any of this;
-it still runs to completion or times out on its own.
-
-Call this from every process's shutdown path: the FastAPI app's lifespan
-(``src/main.py``) and the worker's shutdown path (``src/worker/main.py``) call it
-explicitly; ``atexit.register`` below is a backstop for anything that exits
-without running either (a crash path, a script that imports this module
-directly, etc.) so the pool is never the reason interpreter shutdown hangs.
-
-**Interpreter-exit ordering (P-1, opus review, audit 2026-09-10).** A plain
-``atexit.register`` callback runs too late to help a pool worker that is
-mid-sleep at exit: ``threading._shutdown()`` (which the interpreter runs
-before any ``atexit`` callback) already joins every non-daemon thread —
-including this pool's workers — to completion first, so a sleeping worker
-would run out its full sleep before ``shutdown_slack_executor`` ever fires.
-``threading._register_atexit`` hooks run BEFORE that join instead, so
-``signal_shutdown`` is registered there too (guarded by ``hasattr`` with an
-``atexit.register`` fallback), letting an in-flight sleeper see
-``SHUTDOWN_REQUESTED`` and abort in time.
-
-**The agent-run process (src/agent/main.py) does NOT call this.** Its worker
-threads exit with the process once their sleeps become interruptible via the
-shared event; there is no separate pool lifecycle to tear down there. It
-calls ``slack_client.signal_shutdown()`` directly instead (with a grace
-delay on the first signal — see ``src/agent/main.py``).
-
-**Re-creation after shutdown.** ``_get_executor()`` lazily creates a fresh
-plain ``ThreadPoolExecutor`` when ``_SLACK_EXECUTOR`` is ``None`` — including
-right after a ``shutdown_slack_executor()`` call, so ``run_slack_call`` is
-re-entrant across a shutdown rather than raising. It does NOT touch
-``SHUTDOWN_REQUESTED`` in either direction: because that event is sticky for
-the process's life, a call queued on the fresh pool is expected to still
-abort immediately via ``_sleep_interruptibly``. This matters mainly for a
-test process sharing one interpreter across many independent
-lifespans/pools — real production shutdown paths exit the interpreter
-shortly after calling this anyway.
-
-**Sizing / queuing bound (opus review follow-up, audit 2026-09-10).** A single
-`private_channels.migrate_public_thread_to_private` call ("reopen a public
-thread into a private channel") makes up to ~8 sequential `run_slack_call`s by
-itself (two `_make_client`s, `create_private_channel`, two `invite_to_channel`s,
-`_resolve_channel_id`, 2+ handover `post_message`s, a close-marker
-`post_message`, and an other-PI invite + DM) — sequential, not concurrent,
-because each `await`s the last. ``SLACK_IO_MAX_WORKERS`` therefore has to
-comfortably exceed the call count of one flow, not just be "more than one": a
-pool sized at exactly one flow's call count leaves zero headroom for a SECOND
-concurrent reopen (or a GrantBot post, or a delegate-name lookup) to make
-Slack calls at all — those would simply queue behind whichever calls are
-already using every worker, indistinguishable from a Slack throttle from the
-caller's point of view. 16 gives roughly 2x one flow's sequential call count,
-so two whole reopens (or one reopen plus several smaller flows) can be
-in-flight without one starving the other for a worker thread; anything queued
-beyond that still eventually runs — the pool is a queue, not a hard cap on
-concurrency — but waits for a free worker like any bounded pool.
+Shutdown sets the process-wide ``slack_client.SHUTDOWN_REQUESTED`` event
+first (checked before attempt 0 and again in the retry-sleep loop, so queued
+or throttled calls abort quickly) and then shuts the pool down with
+``wait=False, cancel_futures=False`` so already-queued work still runs to
+completion rather than raising ``CancelledError`` mid-turn. It is registered
+via ``threading._register_atexit`` (which runs before the interpreter joins
+worker threads) with a plain ``atexit.register`` fallback, because a normal
+``atexit`` callback would fire too late to interrupt an already-sleeping
+worker. The agent-run process does not call this directly — it signals
+``slack_client.signal_shutdown()`` itself since it owns no separate pool
+lifecycle.
 """
 
 import asyncio
@@ -154,8 +85,8 @@ def shutdown_slack_executor() -> None:
     """Shut the Slack I/O pool down without blocking on in-flight calls.
 
     Sets the process-wide ``slack_client.SHUTDOWN_REQUESTED`` event FIRST:
-    ``_call_with_retry`` checks it before attempt 0 (P-3, audit 2026-09-10),
-    so a queued-but-unstarted call aborts with no network round trip at all,
+    ``_call_with_retry`` checks it before attempt 0, so a queued-but-unstarted
+    call aborts with no network round trip at all,
     and again inside the retry-sleep branch — ``_sleep_interruptibly`` sleeps
     a Retry-After backoff in <=1s slices and checks the event between slices,
     so an in-flight call that is mid-throttle aborts within about a second
@@ -188,13 +119,12 @@ def shutdown_slack_executor() -> None:
         executor.shutdown(wait=False, cancel_futures=False)
 
 
-# P-1 (opus review, audit 2026-09-10): a plain `atexit.register` callback
-# runs AFTER `threading._shutdown()` has already joined every non-daemon
-# thread to completion -- including this pool's workers. A worker sleeping
-# through `_sleep_interruptibly` at interpreter exit therefore runs out its
-# FULL sleep (nothing has set SHUTDOWN_REQUESTED yet) before the atexit
-# callback below ever gets a chance to fire; reviewer measured a 5s sleeper
-# completing in full rather than aborting.
+# A plain `atexit.register` callback runs AFTER `threading._shutdown()` has
+# already joined every non-daemon thread to completion -- including this
+# pool's workers. A worker sleeping through `_sleep_interruptibly` at
+# interpreter exit therefore runs out its FULL sleep (nothing has set
+# SHUTDOWN_REQUESTED yet) before the atexit callback below ever gets a
+# chance to fire.
 #
 # `threading._register_atexit` hooks run BEFORE that join, so registering
 # `signal_shutdown` there sets the event in time for an in-flight sleeper to
@@ -208,7 +138,7 @@ try:
     threading._register_atexit(signal_shutdown)  # type: ignore[attr-defined]
 except (AttributeError, RuntimeError):  # pragma: no cover - non-CPython, or
     # imported during interpreter shutdown ("can't register atexit after
-    # shutdown"); fall back rather than failing the import (Q-3).
+    # shutdown"); fall back rather than failing the import.
     atexit.register(signal_shutdown)
 
 # Backstop for any exit path that does not run the FastAPI lifespan or the

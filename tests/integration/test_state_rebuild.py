@@ -82,7 +82,7 @@ def _engine_for(session, run_id, agent_ids=AGENT_IDS, slack_clients=None):
     """A real SimulationEngine with Slack off (by default) and no budget.
 
     ``slack_clients`` defaults to a ``NullTransport`` per agent (Slack fully
-    off); pass an explicit mapping to give one agent a CONNECTED client (RC-9b
+    off); pass an explicit mapping to give one agent a CONNECTED client (some
     tests need this — ``_derive_post_failure_count`` only trusts a trailing
     ``slack_ts IS NULL`` run as evidence of a failure when the agent has a
     connected client).
@@ -198,9 +198,8 @@ async def test_a_reopened_thread_survives_a_rebuild(db_session):
     survives a restart otherwise: message_count_offset defaults to 0, so the
     very next Phase 4 recompute (len(history) - offset) would immediately hit
     max_thread_messages and re-close it as 'timeout', and pi_context (never
-    itself persisted) would simply be gone. See COR-13 / red-team B6."""
-    # UTC/datetime are already imported at module scope (:24) — no need to
-    # re-import here (red-team m7).
+    itself persisted) would simply be gone."""
+    # UTC/datetime are already imported at module scope.
     run = await factories.make_simulation_run(db_session)
     root_ts = await _stored_thread(db_session, run, replies=2)
     # The PI's own reopening message is an ordinary log row (sender_agent_id
@@ -210,7 +209,7 @@ async def test_a_reopened_thread_survives_a_rebuild(db_session):
     # exactly `_engine_for`'s `pi_name=f"PI {a}"` for agent "su", i.e. the
     # form a real Slack-native reopen leaves behind via
     # `client.resolve_user_name`. It is deliberately picked to still pass
-    # under the #20 I2 fail-closed name check (not just under the old loose
+    # under the fail-closed name check (not just under the old loose
     # `sender_agent_id is None` predicate) — see the negative controls below
     # for the cases that must now be rejected.
     pi_ts = f"{float(root_ts) + 100:.6f}"
@@ -250,7 +249,7 @@ async def test_a_reopened_thread_survives_a_rebuild(db_session):
 async def test_a_reopened_thread_does_not_treat_a_random_lurkers_reply_as_pi_context(
     db_session,
 ):
-    """#20 I2: the rebuild used to accept ANY row with sender_agent_id NULL as
+    """The rebuild used to accept ANY row with sender_agent_id NULL as
     pi_context — including an arbitrary workspace human's reply, which
     agent.py then renders as "Their message is authoritative". A row from
     someone who is neither a bot nor a name in the thread's PI-name set must
@@ -286,7 +285,7 @@ async def test_a_reopened_thread_does_not_treat_a_random_lurkers_reply_as_pi_con
 async def test_a_reopened_thread_does_not_treat_an_unattributed_bot_row_as_pi_context(
     db_session,
 ):
-    """#20 I2, bot-row half: an unattributed bot post (sender_agent_id NULL,
+    """Bot-row half: an unattributed bot post (sender_agent_id NULL,
     is_bot True — e.g. GrantBot's :moneybag: posts whose bot_name lookup
     missed) must also be rejected, not just human rows."""
     run = await factories.make_simulation_run(db_session)
@@ -456,17 +455,15 @@ async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkey
 
 
 async def test_a_rebuild_seeds_the_reopen_dedup_set_and_does_not_re_reopen(db_session):
-    """COR-13's third *Fix:* clause: a thread already reopened in a PRIOR
-    process (``ThreadDecision.reopened_at`` set, its synthetic 'PI (via web)'
-    guidance row already a durable ``agent_messages`` row) must not be
-    reopened again by the next ``_sync_proposal_reviews_from_db`` tick after a
-    restart. Before this fix, ``_db_reopened_thread_ids`` always rebuilt empty
-    (it is in-memory only), so the tick re-entered the reopen block: it would
-    have skipped re-minting only because ``already_minted`` (a message-log
-    scan) happens to catch it, but it still overwrote both agents'
-    ``ThreadState`` with a fresh ``message_count_offset`` — the "fresh reply
-    budget each restart" half of the bug, which a reopened thread can never
-    survive across repeated restarts. See COR-13 / red-team B6."""
+    """A thread already reopened in a PRIOR process (``ThreadDecision.reopened_at``
+    set, its synthetic 'PI (via web)' guidance row already a durable
+    ``agent_messages`` row) must not be reopened again by the next
+    ``_sync_proposal_reviews_from_db`` tick after a restart: ``_db_reopened_thread_ids``
+    is in-memory only and rebuilds empty, so without seeding it from the DB the
+    tick would re-enter the reopen block and overwrite both agents'
+    ``ThreadState`` with a fresh ``message_count_offset`` — a reopened thread
+    would then never survive across repeated restarts with a consistent reply
+    budget."""
     run = await factories.make_simulation_run(db_session)
     pi = await factories.make_user(db_session)
     root_ts = await _stored_thread(db_session, run, replies=2)
@@ -560,7 +557,7 @@ async def test_a_rebuild_does_not_seed_an_unreopened_threads_dedup_entry(db_sess
 
 
 async def test_a_first_time_activation_keeps_the_channel_backlog(db_session):
-    """#20 E6(2): a roster flip must restore prior state, not manufacture it.
+    """A roster flip must restore prior state, not manufacture it.
 
     ``_rebuild_one_agent_state`` fast-forwards ``last_seen_cursor`` to the
     log's high-water mark so a RE-added agent resumes where it left off. An
@@ -638,8 +635,8 @@ async def test_a_re_added_agent_still_resumes_from_the_high_water_mark(db_sessio
 
 
 # ---------------------------------------------------------------------------
-# COR-13, the rebuild half: the reply budget a reopen grants is CONSUMED, and
-# the consumption has to survive a restart.
+# The reply budget a reopen grants is CONSUMED, and the consumption has to
+# survive a restart.
 #
 # `message_count_offset` is the durable-looking half of the reopen: Phase 4
 # recomputes `message_count = len(history) - offset` (:1548) and closes the
@@ -725,7 +722,7 @@ def _budget_left(eng, agent_id, root_ts):
 async def test_a_reopened_threads_reply_budget_is_not_regranted_by_a_restart(
     db_session,
 ):
-    """COR-13's "plus a fresh reply budget each time", rebuild half.
+    """A reopen must not grant a fresh reply budget on every restart, only once.
 
     Four messages predate `reopened_at` and two follow it, so two of the
     twelve replies the reopen granted are spent. A restart must see ten left,
@@ -769,9 +766,8 @@ async def test_a_reopened_threads_reply_budget_is_not_regranted_by_a_restart(
 
     thread2 = eng2.agents["su"].state.active_threads[root_ts]
     assert thread2.message_count_offset == 4, (
-        "the second restart moved the reopen point forward again — this is the "
-        "'fresh reply budget each time' half of COR-13: offset "
-        f"{thread2.message_count_offset}, expected 4"
+        "the second restart moved the reopen point forward again, regranting "
+        f"a fresh reply budget: offset {thread2.message_count_offset}, expected 4"
     )
     assert _budget_left(eng2, "su", root_ts) == 8, (
         "a reopened thread got its whole budget back on the second restart, so it "
@@ -840,20 +836,18 @@ async def test_a_roster_flip_rebuilds_the_same_reopen_offset_as_a_restart(
 
 
 # ---------------------------------------------------------------
-# RC-2 (#20 audit 2026-09-08): a PI row marked 'pending' survives a restart
-# whose inbound cursor has already advanced well past it.
+# A PI row marked 'pending' survives a restart whose inbound cursor has
+# already advanced well past it.
 # ---------------------------------------------------------------
 
 async def test_a_pending_pi_row_is_handled_after_a_restart_despite_the_cursor(db_session):
-    """Three cooperating mechanisms used to lose a PI message written while
-    agent-run was down: record_pi_message never marked anything durable,
-    _rebuild_state_from_db loaded the PI row into the MessageLog (so the old
-    NULL-fallback `state is None and in_log` skip treated it as already
-    accounted for), and _seed_pi_inbox_cursor jumped the cursor to
-    max(created_at) — well past this row once a later message exists. RC-2's
-    'pending' marker (stamped by record_pi_message at insert time) survives
-    all three: it is neither None (so the NULL-fallback skip never applies)
-    nor bounded by the cursor window (the WHERE clause ORs it in explicitly).
+    """A PI message written while agent-run was down must not be lost to the
+    combination of the durable 'pending' marker (stamped by record_pi_message
+    at insert time), state rebuild loading the row into the MessageLog, and
+    the inbox cursor being seeded at max(created_at) — well past this row once
+    a later message exists. The 'pending' marker must survive all three: it is
+    neither None (so a NULL-fallback skip never applies) nor bounded by the
+    cursor window (the WHERE clause ORs it in explicitly).
     """
     run = await factories.make_simulation_run(db_session)
     now = datetime.now(UTC)
@@ -904,18 +898,17 @@ async def test_a_pending_pi_row_is_handled_after_a_restart_despite_the_cursor(db
 
 
 # ---------------------------------------------------------------
-# SEC-F2 (opus review, audit 2026-09-08): a row left 'ingested' by a handler
-# that was interrupted mid-flight (process restart between the INGESTED write
-# and the HANDLED write) must still be recovered, however far the cursor has
-# advanced past it — the same cursor-independent guarantee RC-2 gave 'pending'.
+# A row left 'ingested' by a handler that was interrupted mid-flight (process
+# restart between the INGESTED write and the HANDLED write) must still be
+# recovered, however far the cursor has advanced past it — the same
+# cursor-independent guarantee 'pending' gets, above.
 # ---------------------------------------------------------------
 
 async def test_an_ingested_pi_row_is_handled_after_a_restart_despite_the_cursor(db_session):
-    """Before this fix the cursor-independent OR-clause only named 'pending', so
-    a row that had already advanced to 'ingested' (its handler ran and then the
-    process died before the HANDLED write landed) was invisible to this recovery
-    path once it aged past PI_INBOX_LOOKBACK_S — identical to the RC-2 bug this
-    file already pins for 'pending', but for the OTHER durable marker value."""
+    """The cursor-independent OR-clause must also cover 'ingested', not just
+    'pending': a row that had already advanced to 'ingested' (its handler ran
+    and then the process died before the HANDLED write landed) must not become
+    invisible to this recovery path once it ages past PI_INBOX_LOOKBACK_S."""
     run = await factories.make_simulation_run(db_session)
     now = datetime.now(UTC)
     old_created = now - timedelta(seconds=10 * PI_INBOX_LOOKBACK_S)
@@ -954,14 +947,12 @@ async def test_an_ingested_pi_row_is_handled_after_a_restart_despite_the_cursor(
 
 
 # ---------------------------------------------------------------
-# A1 (opus review, audit 2026-09-08): the INGESTED marker used to be written
-# only for `state is None`, so a row already stamped 'pending' at insert (RC-2's
-# default) whose handler raises left no durable record that an attempt was
-# made — unlike a fresh legacy NULL-state row, which at least advanced to
-# 'ingested'. Folded into the F2 fix: INGESTED is now written for
-# `state in (None, 'pending')` before the handler runs, and a failed write
-# skips the handler for that tick rather than letting the row look
-# already-appended with no marker progress.
+# The INGESTED marker must be written for `state in (None, 'pending')` before
+# the handler runs, not only for `state is None` — otherwise a row already
+# stamped 'pending' at insert whose handler raises leaves no durable record
+# that an attempt was made. A failed INGESTED write must also skip the
+# handler for that tick rather than let the row look already-appended with
+# no marker progress.
 # ---------------------------------------------------------------
 
 async def test_a_raising_handler_still_advances_a_pending_row_to_ingested(db_session, monkeypatch):
@@ -992,10 +983,8 @@ async def test_a_raising_handler_still_advances_a_pending_row_to_ingested(db_ses
     )).scalar_one()
     assert len(calls) == 1
     assert row.pi_inbound_state == "ingested", (
-        "a raising handler must still leave the row advanced past 'pending' — "
-        "before this fix a row already stamped 'pending' at insert never got "
-        "an INGESTED write at all (only a NULL-state row did), so a failing "
-        "handler left no durable record that an attempt was made"
+        "a raising handler must still leave the row advanced past 'pending', "
+        "or a failing handler leaves no durable record that an attempt was made"
     )
 
     # At-least-once: the row stays inside the lookback window and unhandled, so
@@ -1009,7 +998,7 @@ async def test_a_raising_handler_still_advances_a_pending_row_to_ingested(db_ses
 async def test_a_failed_ingested_mark_skips_the_handler_and_retries_next_tick(
     db_session, monkeypatch,
 ):
-    """SEC-F2's other half: when the INGESTED write itself fails, the handler
+    """When the INGESTED write itself fails, the handler
     must not run this tick — the row is left exactly as it was (here,
     'pending') so the ordinary cursor-independent recovery path retries it,
     rather than risk appending the entry into the log with no durable marker
@@ -1063,22 +1052,20 @@ async def test_a_failed_ingested_mark_skips_the_handler_and_retries_next_tick(
 
 
 # ---------------------------------------------------------------
-# A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row that a
-# terminal skip branch `continue`s (tombstoned thread) must be stamped
-# HANDLED there too, or it keeps matching the cursor-independent recovery
-# disjunct and is re-selected every tick forever, since nothing will ever
-# process it.
+# A 'pending'/'ingested' row that a terminal skip branch `continue`s
+# (tombstoned thread) must be stamped HANDLED there too, or it keeps matching
+# the cursor-independent recovery disjunct and is re-selected every tick
+# forever, since nothing will ever process it.
 # ---------------------------------------------------------------
 
 async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled_after_max_attempts(
     db_session,
 ):
-    """REV3-2 (opus review, audit 2026-09-08) tightened A4: the tombstone
-    branch must not stamp HANDLED on the very first match — _dead_thread_ids
-    is in-process only and reset on restart, so a thread wrongly tombstoned
-    by a TRANSIENT ThreadNotFound must get bounded retries, not be buried
-    permanently on one tick. It goes through the SEC2-1 attempt counter and
-    only becomes terminal past PI_INBOUND_MAX_ATTEMPTS."""
+    """The tombstone branch must not stamp HANDLED on the very first match —
+    _dead_thread_ids is in-process only and reset on restart, so a thread
+    wrongly tombstoned by a TRANSIENT ThreadNotFound must get bounded
+    retries, not be buried permanently on one tick. It goes through an
+    attempt counter and only becomes terminal past PI_INBOUND_MAX_ATTEMPTS."""
     from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
 
     run = await factories.make_simulation_run(db_session)
@@ -1123,9 +1110,8 @@ async def test_a_pending_row_for_a_tombstoned_thread_is_stamped_handled_after_ma
 
 
 # ---------------------------------------------------------------
-# RC-9b (#20 audit 2026-09-08): post_failure_count is reconstructed on
-# rebuild from trailing DB-only rows, but only when Slack is actually
-# connected for this agent.
+# post_failure_count is reconstructed on rebuild from trailing DB-only rows,
+# but only when Slack is actually connected for this agent.
 # ---------------------------------------------------------------
 
 class _ConnectedClient:
@@ -1135,9 +1121,10 @@ class _ConnectedClient:
 
 
 async def test_post_failure_count_is_derived_from_trailing_db_only_rows(db_session):
-    """ThreadState.post_failure_count is in-memory only, so a restart used to
-    hand a still-failing thread a fresh two strikes every time — silently
-    undoing the #20 COR-1b back-off. Two trailing DB-only (slack_ts IS NULL)
+    """ThreadState.post_failure_count is in-memory only, so a restart must
+    reconstruct it rather than hand a still-failing thread a fresh two
+    strikes every time, silently undoing the post-failure back-off. Two
+    trailing DB-only (slack_ts IS NULL)
     rows authored by `su` are exactly what two Slack-refused posts leave
     behind; with a CONNECTED client for `su`, the rebuild must reconstruct
     post_failure_count == 2 from them.
@@ -1209,8 +1196,8 @@ async def test_post_failure_count_stays_zero_when_slack_is_off_for_the_agent(db_
 async def test_post_failure_count_stays_zero_for_a_db_origin_root_even_when_connected(
     db_session,
 ):
-    """A3/RC-9 (opus review, audit 2026-09-08): `slack_ts IS NULL` is not evidence
-    of a failure for a thread whose ROOT never had Slack presence either -- a
+    """`slack_ts IS NULL` is not evidence of a failure for a thread whose ROOT
+    never had Slack presence either -- a
     thread started with Slack off, a PI-web-rooted thread, or an unrepaired legacy
     row all leave every reply legitimately `slack_ts IS NULL` even once the agent
     later gets a CONNECTED client. Without gating on the root, this DB-origin
@@ -1250,8 +1237,8 @@ async def test_post_failure_count_stays_zero_for_a_db_origin_root_even_when_conn
 
 
 # ---------------------------------------------------------------
-# K-4 (RC-7 residual, audit 2026-09-10): a restart must not keep serving a
-# stale on-disk private profile file when the DB row is newer.
+# A restart must not keep serving a stale on-disk private profile file when
+# the DB row is newer.
 # ---------------------------------------------------------------
 
 async def test_rebuild_resyncs_a_stale_disk_private_profile_from_the_db(
@@ -1315,8 +1302,8 @@ async def test_rebuild_keeps_the_db_content_cached_even_if_disk_is_unwritable(
 async def test_a_steady_state_trailing_newline_does_not_trigger_a_rewrite(
     db_session, tmp_path, monkeypatch, caplog,
 ):
-    """K-4 follow-up (opus review, audit 2026-09-10): update_private_profile
-    (and export_private_profile) always write ``content + "\\n"`` to disk but
+    """update_private_profile (and export_private_profile) always write
+    ``content + "\\n"`` to disk but
     cache the argument WITHOUT that trailing newline — an exact comparison
     between a freshly-loaded disk read and the DB value never matches even
     when nothing has changed, rewriting the file (and logging "was stale")
@@ -1359,7 +1346,7 @@ async def test_a_steady_state_trailing_newline_does_not_trigger_a_rewrite(
 async def test_an_empty_db_value_removes_a_stale_disk_file_and_resets_the_cache(
     db_session, tmp_path, monkeypatch,
 ):
-    """K-4 follow-up (opus review, audit 2026-09-10): a PI clearing their
+    """A PI clearing their
     standing instruction (DB value empty/NULL) is authoritative too, exactly
     like a real edit — a stale non-empty disk file left over from before the
     clear must be removed, and the agent's cache must fall back to the same
@@ -1388,9 +1375,9 @@ async def test_an_empty_db_value_removes_a_stale_disk_file_and_resets_the_cache(
 async def test_a_missing_researcher_profile_row_leaves_a_stale_disk_file_alone(
     db_session, tmp_path, monkeypatch,
 ):
-    """L-2 (opus review, audit 2026-09-10): a MISSING `ResearcherProfile` row
-    (the agent's linked user has never had a profile row created at all) is
-    NOT the same event as a PI clearing their standing instruction —
+    """A MISSING `ResearcherProfile` row (the agent's linked user has never had
+    a profile row created at all) is NOT the same event as a PI clearing their
+    standing instruction —
     `db_content` was computed as `""` in both cases, so the cleared-branch's
     disk unlink ran for a row that was simply never created, permanently
     destroying a disk file with no way to recover it. Only a REAL row whose
@@ -1424,7 +1411,7 @@ async def test_a_missing_researcher_profile_row_leaves_a_stale_disk_file_alone(
 async def test_an_unlink_failure_on_a_real_clear_still_invalidates_the_cache(
     db_session, tmp_path, monkeypatch,
 ):
-    """L-3 (opus review, audit 2026-09-10): if the disk `unlink()` in the
+    """If the disk `unlink()` in the
     genuinely-cleared branch (a real row whose `private_profile_md` is
     empty/NULL) raises, the whole per-agent sync is wrapped in a bare
     `except Exception` that only logs — leaving `agent.private_profile`
@@ -1468,7 +1455,7 @@ async def test_an_unlink_failure_on_a_real_clear_still_invalidates_the_cache(
 async def test_a_failed_resync_write_logs_a_warning_not_the_resynced_info(
     db_session, tmp_path, monkeypatch, caplog,
 ):
-    """M-4 (opus review, audit 2026-09-10): the DB-is-stale-relative-to-disk
+    """The DB-is-stale-relative-to-disk
     branch calls `agent.update_private_profile(...)` and unconditionally logs
     an INFO "resynced" line, even though `update_private_profile` returns
     False (and only logs its own ERROR) when the disk write itself fails.
@@ -1514,13 +1501,12 @@ async def test_a_failed_resync_write_logs_a_warning_not_the_resynced_info(
 async def test_a_roster_re_add_also_resyncs_the_private_profile(
     db_session, tmp_path, monkeypatch,
 ):
-    """L-4 (opus review, audit 2026-09-10): `_rebuild_one_agent_state` (the
-    inactive->active roster-flip path, distinct from startup's
-    `_rebuild_agent_state`) built a fresh `Agent()` and never ran the private-
-    profile DB/disk reconciliation `_sync_private_profiles_from_db` runs at
-    startup — so a roster re-add kept serving whatever the freshly-constructed
-    `Agent()`'s cache happened to read from a stale on-disk file, same defect
-    as K-4 but on the OTHER rebuild path.
+    """`_rebuild_one_agent_state` (the inactive->active roster-flip path,
+    distinct from startup's `_rebuild_agent_state`) must run the same
+    private-profile DB/disk reconciliation `_sync_private_profiles_from_db`
+    runs at startup on its freshly-built `Agent()`, or a roster re-add keeps
+    serving whatever that `Agent()`'s cache happened to read from a stale
+    on-disk file.
     """
     import src.agent.agent as agent_module
 
@@ -1559,9 +1545,9 @@ async def test_a_roster_re_add_also_resyncs_the_private_profile(
 
 
 # ---------------------------------------------------------------
-# K-6 follow-up (opus review, audit 2026-09-10): a roster re-add must restore
-# subscribed_channels, or K-6's own-private-channel new_post gate wrongly
-# rejects a legitimate post to a channel this agent already belongs to.
+# A roster re-add must restore subscribed_channels, or the own-private-channel
+# new_post gate wrongly rejects a legitimate post to a channel this agent
+# already belongs to.
 # ---------------------------------------------------------------
 
 async def test_a_roster_flip_restores_subscribed_channels_for_a_known_private_channel(
@@ -1571,11 +1557,11 @@ async def test_a_roster_flip_restores_subscribed_channels_for_a_known_private_ch
     for a channel the ENGINE has never seen before — it skips anything
     already in `_channel_id_map`, which every collab_private channel this
     agent belonged to before a roster flip already is. Without restoring it
-    in `_rebuild_one_agent_state`, K-6's `new_post` gate (audit 2026-09-10)
-    — which trusts `_channel_visibility` only for a PUBLIC entry, precisely
-    because it cannot otherwise tell one pair's private channel from
-    another's — wrongly refuses a re-added agent's post to its own,
-    already-discovered private channel.
+    in `_rebuild_one_agent_state`, the `new_post` gate — which trusts
+    `_channel_visibility` only for a PUBLIC entry, precisely because it cannot
+    otherwise tell one pair's private channel from another's — wrongly
+    refuses a re-added agent's post to its own, already-discovered private
+    channel.
     """
     run = await factories.make_simulation_run(db_session)
     channel = await factories.make_agent_channel(
@@ -1603,8 +1589,8 @@ async def test_a_roster_flip_restores_subscribed_channels_for_a_known_private_ch
 
 
 async def test_a_roster_flip_never_subscribes_an_undiscovered_channel(db_session):
-    """L-6 (opus review, audit 2026-09-10): the subscribed_channels restore
-    query joined `agent_channels`/`private_channel_members` with NO
+    """The subscribed_channels restore query must not join
+    `agent_channels`/`private_channel_members` with NO
     visibility filter and no intersection against `self._channel_id_map` —
     unlike `_sync_private_channels_from_db`, which only ever integrates a
     channel this process has actually discovered (added to `_channel_id_map`/

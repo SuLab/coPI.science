@@ -229,7 +229,7 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 @pytest.mark.parametrize("rev", ["0022", "0025", "0026", "0027", "0028"])
 def test_revision_status_accepts_every_start_in_the_chain_below_the_head(rev):
-    """#27 I2 / F24: preflight BLOCKed a start it had no reason to refuse.
+    """preflight BLOCKed a start it had no reason to refuse.
 
     `SUPPORTED_START_REVISIONS` stopped at 0024 while the head moved to 0029, so a
     database at 0025-0028 -- where a rolled-back-and-retried migration leaves one, and
@@ -241,7 +241,7 @@ def test_revision_status_accepts_every_start_in_the_chain_below_the_head(rev):
 
 
 def test_supported_start_revisions_are_the_whole_chain_below_the_head():
-    """#27 I2 / F24: the allowlist is derived, not hand-maintained.
+    """The allowlist is derived, not hand-maintained.
 
     It stopped at 0024 while the head moved to 0029, so a start at 0025-0028 -- which
     is where a rolled-back-and-retried migration leaves a database -- was refused. The
@@ -249,10 +249,9 @@ def test_supported_start_revisions_are_the_whole_chain_below_the_head():
     3a726bb added 0024), each time one release late.
     """
     # Assert the PROPERTY, with concrete values -- never re-derive the expression the
-    # module uses. An audit found the previous version of this test was a
-    # character-for-character copy of preflight.py's own comprehension, so it asserted
-    # the implementation against itself and could not fail: the 0024 bug it exists to
-    # catch would have sailed straight through it.
+    # module uses. A version of this test that is a character-for-character copy of
+    # preflight.py's own comprehension asserts the implementation against itself and
+    # cannot fail: the 0024 bug it exists to catch would sail straight through it.
     supported = pf.SUPPORTED_START_REVISIONS
 
     # The defect this test exists for: a rolled-back-and-retried migration leaves the
@@ -773,7 +772,7 @@ def test_legacy_inventory_reports_both_buckets_separately():
 
 
 # --------------------------------------------------------------------------- #
-# Publication (user_id, pmid) duplicate inventory (#22 I3)
+# Publication (user_id, pmid) duplicate inventory
 # --------------------------------------------------------------------------- #
 
 
@@ -1150,8 +1149,8 @@ def test_new_chain_objects_are_planned():
     assert "reopened_at" in names                          # 0028
     assert "pi_engaged_at" in names                        # 0029
     assert "pi_inbound_state" in names                     # 0029
-    assert "sender_user_id" in names                       # 0030 (RC-1)
-    assert "handled_at" in names                           # 0030 (RC-2)
+    assert "sender_user_id" in names                       # 0030
+    assert "handled_at" in names                           # 0030
 
 
 # --------------------------------------------------------------------------- #
@@ -1272,9 +1271,8 @@ def test_postflight_keeps_the_partial_predicate_in_the_expected_index_definition
 def test_postflight_expects_an_index_for_every_index_the_chain_creates():
     """Every planned index/constraint must be checked by postflight somewhere. A
     UNIQUE constraint gets a Postgres-backed index (EXPECTED_INDEXES); a FOREIGN
-    KEY constraint (A6, opus review, audit 2026-09-08 -- e.g.
-    agent_messages_sender_user_id_fkey) does not, and is instead checked by
-    definition in EXPECTED_CONSTRAINTS."""
+    KEY constraint (e.g. agent_messages_sender_user_id_fkey) does not, and is
+    instead checked by definition in EXPECTED_CONSTRAINTS."""
     planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind in {"index", "constraint"}}
     assert planned <= set(po.EXPECTED_INDEXES) | set(po.EXPECTED_CONSTRAINTS)
 
@@ -1637,9 +1635,9 @@ def test_write_snapshot_records_the_deletions_postflight_must_expect(tmp_path):
 
 
 def test_an_extra_table_the_models_do_not_declare_is_not_a_blocking_drift():
-    """A real production database carries operator artefacts — copi's has
-    email_notifications_expired_bak_20260814 (40 rows) from the 2026-08-14 deploy.
-    The ORM is entirely unaffected by an extra table, so classifying remove_table as
+    """A real production database carries operator artefacts, e.g. a manual backup
+    table left behind by an earlier deploy. The ORM is entirely unaffected by an
+    extra table, so classifying remove_table as
     a failure BLOCKed a perfectly good migration."""
     import scripts.migrate.postflight as post
 
@@ -1648,9 +1646,8 @@ def test_an_extra_table_the_models_do_not_declare_is_not_a_blocking_drift():
 
 
 # --------------------------------------------------------------------------- #
-# The snapshot must belong to the run being verified (audit I3), and an
-# expectation must only be recorded for a chain that will actually run 0025
-# (audit I2).
+# The snapshot must belong to the run being verified, and an
+# expectation must only be recorded for a chain that will actually run 0025.
 # --------------------------------------------------------------------------- #
 
 

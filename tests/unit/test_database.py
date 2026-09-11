@@ -1,4 +1,4 @@
-"""Unit tests for src.database.make_engine (issue #25 P3). No connection is made —
+"""Unit tests for src.database.make_engine. No connection is made —
 create_async_engine only builds the Engine/Pool objects; SQLAlchemy connects lazily
 on first checkout."""
 

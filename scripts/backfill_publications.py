@@ -65,7 +65,7 @@ async def backfill(db, mapping: dict[str, list[str]], fetch=None, apply: bool = 
             ).all()
             if p
         }
-        # #22 I4a: a PMID listed twice for one agent in the input file (a human-curated
+        # A PMID listed twice for one agent in the input file (a human-curated
         # JSON mapping — copy/paste duplicates happen) must not be requeued twice: with
         # the new uq_publications_user_pmid constraint (0025), a repeat would abort the
         # whole --apply run at db.flush() with an IntegrityError instead of being a

@@ -1,12 +1,11 @@
-"""Static check that .dockerignore actually excludes the paths issue #27 I3
-flagged as baked into every image layer, and does not exclude paths the
-running app reads at runtime.
+"""Static check that .dockerignore excludes secrets, backups and other paths
+that should not be baked into every image layer, and does not exclude paths
+the running app reads at runtime.
 
 Docker (moby/patternmatcher) matches each pattern per path *component*, Go
 filepath.Match semantics (`*`/`?` never cross `/`); a `**/` prefix means "at
 any depth". This reimplements just enough of that to check the patterns in
-.dockerignore — mirrors the reference Go program in
-scratchpad/findings/issue_27_redteam.md §2 (not shipped in this repo).
+.dockerignore.
 """
 
 import fnmatch
@@ -43,8 +42,8 @@ def _is_excluded(path: str) -> bool:
     return any(_pattern_matches(p, path) for p in _patterns())
 
 
-# The I3 baked-secret/bloat paths this task closes (findings/issue_27.md I3-b..g,
-# redteam NEW-1/NEW-2).
+# Secrets, backups, caches and other paths that must never be baked into an
+# image layer.
 MUST_EXCLUDE = [
     "backups/prod-sync-20260810/env.prod",
     "backups/prod-sync-20260810/copi_prod_20260810.dump",
@@ -64,10 +63,10 @@ MUST_EXCLUDE = [
     "docs/specs/2026-08-05-hub-bot-customization-design.md",
     ".env.local",
     "backups/x/.env",  # nested dotfile — belt-and-suspenders via **/.env*
-    # profiles/ holds PI private profiles (profiles/private/*) — COPY . . was
-    # baking them into every image layer even though prod always bind-mounts
-    # the real tree over it and `migrate` (the only service without the
-    # mount) never reads profiles at all (#27 I3 fix round 1).
+    # profiles/ holds PI private profiles (profiles/private/*) — COPY . . bakes
+    # them into every image layer even though prod always bind-mounts the real
+    # tree over it, and `migrate` (the only service without the mount) never
+    # reads profiles at all.
     "profiles/public/x.md",
     "profiles/private/su.md",
     "profiles/memory/x.md",
@@ -75,8 +74,7 @@ MUST_EXCLUDE = [
     # evidence subtrees — nothing in src/, scripts/, templates/ or alembic/
     # opens a path under docs/ at runtime (they appear only in comments and
     # docstrings), and docs/specs was already excluded on exactly that
-    # reasoning. Measured in a real build: they were 3,239,393 of /app's
-    # 7,845,067 bytes — 41% of the image tree (#27 I3 round 2).
+    # reasoning. They make up a large fraction of the image tree by size.
     "docs/plans/2026-09-02-close-issues-20-27.md",
     "docs/plans/2026-09-02-close-issues-20-27-evidence/issues/issue_27.md",
     "docs/plans/2026-09-04-decisions/task-8.md",
@@ -84,7 +82,7 @@ MUST_EXCLUDE = [
 ]
 
 # Paths the running app/worker/agent/grantbot reads from the tree at runtime —
-# must stay reachable in the image (deploy_dossier.md §1 "Image contents").
+# must stay reachable in the image.
 # NOTE: data/, logs/ and profiles/ are deliberately NOT in this list — all
 # three are excluded from the image (.dockerignore) and bind-mounted at
 # runtime (docker-compose.prod.yml:95-98,124-127 for data/logs; profiles/ is

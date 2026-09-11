@@ -44,7 +44,7 @@ def test_every_prod_service_including_migrate_has_the_json_file_log_override():
 
 
 def test_every_service_json_file_log_has_rotation_options():
-    # SEC2-4 (audit 2026-09-08): json-file with no options grows unbounded --
+    # json-file logging with no options grows unbounded --
     # every service's override must cap it (max-size/max-file), same as
     # every other json-file logging block in this repo.
     override = _override_compose()["services"]
@@ -115,17 +115,12 @@ def test_agent_has_a_stop_grace_period_for_clean_shutdown_flush():
 
 
 # `./prompts:/app/prompts` is a bind mount over prompt text the image already
-# bakes (`COPY . .`). #27 I5 named it a DEFECT -- "silently shadowing the
-# image's prompts" -- on app, agent and grantbot; `3354904` then added a
-# fourth, on worker, and pinned it, on the rationale that an unrebuilt worker
-# would otherwise "run stale prompt text after a host-side prompt edit".
-# Decision D33 forbids that edit: no file under prompts/ may change. So the
-# mount's whole purpose is a workflow that is not allowed to happen, and the
-# pin locked the widening in. Task 30c reverts the widening. The three
-# pre-existing mounts REMAIN, and remain a defect -- removing them changes
-# deployed behaviour and belongs with the runbook, not here. This set is
-# therefore a stated residual, not an endorsement; see
-# docs/plans/2026-09-04-decisions/task-30.md.
+# bakes (`COPY . .`), so it silently shadows the image's prompts on app, agent
+# and grantbot. Files under prompts/ are never edited on a live host, so the
+# mount serves no live purpose; it remains a stated residual (removing it
+# changes deployed behaviour and belongs with the deploy runbook, not here),
+# and it must not spread to a fourth service (worker), which would open a new
+# un-gated write path into model-facing text.
 PROMPTS_MOUNT = "./prompts:/app/prompts"
 SERVICES_THAT_STILL_SHADOW_PROMPTS = {"app", "agent", "grantbot"}
 
@@ -139,6 +134,6 @@ def test_the_prompts_bind_mount_did_not_spread_to_a_fourth_service():
     assert shadowing == SERVICES_THAT_STILL_SHADOW_PROMPTS, (
         f"services bind-mounting {PROMPTS_MOUNT} are {sorted(shadowing)}; "
         f"expected {sorted(SERVICES_THAT_STILL_SHADOW_PROMPTS)}. Adding one is a new "
-        "un-gated write path into model-facing text (D33); removing one of the three "
-        "is progress, but update this set and task-30.md in the same commit."
+        "un-gated write path into model-facing text; removing one of the three "
+        "is progress, but update this set to match."
     )

@@ -65,8 +65,9 @@ async def test_a_real_public_record_fetches_and_parses(api_budget):
         "fetch_orcid_profile fell back to the raw id, which is what it does when the "
         "name block is missing — ORCID's person.name shape may have changed"
     )
-    # Dated assertion, allowed to be updated: as of 2026-07-30 this record is Carberry.
-    assert "Carberry" in prof["name"], f"as-of-2026-07-30 value changed: {prof['name']!r}"
+    # This is ORCID's stable sample record; the name is not expected to change,
+    # but this assertion may be updated if it ever does.
+    assert "Carberry" in prof["name"], f"expected name value changed: {prof['name']!r}"
 
 
 async def test_fetch_orcid_record_returns_the_documented_top_level_shape(api_budget):

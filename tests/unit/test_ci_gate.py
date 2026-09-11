@@ -79,9 +79,9 @@ def test_mypy_ceiling_records_its_provenance_and_the_numbers_agree():
     assert n_slack > 0, "a ceiling equal to the measured count goes red on the next honest fix"
 
 
-def test_local_only_ci_stance_has_a_pointer_to_the_decision():
+def test_ci_sh_states_the_local_only_stance():
     text = _ci_sh()
-    assert "issue #27 I1" in text
+    assert "CI is deliberately local-only" in text
 
 
 def test_ci_sh_gates_the_stages_in_the_documented_order():
@@ -106,7 +106,7 @@ def test_mypy_ceiling_ratchet_has_the_same_shape_as_the_ruff_ratchet():
     assert re.search(r'MYPY_MAX="\$\{MYPY_MAX:-\d+\}"', text)
 
 
-# --- Behavioural pins for #27 I8: deleting ci.sh's `exit 1`s must not go unnoticed. ---
+# --- Behavioural pins: deleting ci.sh's `exit 1`s must not go unnoticed. ---
 #
 # These actually run scripts/ci.sh in a subprocess (same shape
 # test_run_migration_sh.py uses for bash), with the expensive steps disabled
@@ -126,8 +126,8 @@ SMOKE_STEP_SKIPPED = "skipped (opt-in"
 # ci.sh reads ten knobs from the environment (LOCK_SMOKE, LOCKCHECK, LOCKCHECK_PYTHON,
 # CI_MIGRATION_DB, MIGCHECK_PORT, MIGRATION_FLOOR, MYPY_MAX, SRC_LINT_MAX, COV_MIN,
 # VENV_PY), so a nested run whose env is built as `{**os.environ, ...}` silently adopts
-# whichever of them the operator happened to export. Measured 2026-09-04 with
-# LOCK_SMOKE=1 in the parent shell: the child ran the real `uv pip install
+# whichever of them the operator happened to export. For example, with
+# LOCK_SMOKE=1 in the parent shell: the child runs the real `uv pip install
 # --require-hashes -r requirements.lock` — ~2 s on a warm uv cache, and long enough on a
 # cold one to trip this file's own `timeout=180`.
 #
@@ -161,13 +161,11 @@ def nested_gate_env(**overrides) -> dict[str, str]:
 
 
 # The banner ci.sh actually echoes when it starts the full pytest run. It is the
-# marker to assert on, and the reason is worth writing down: until 2026-09-04 the
-# negative test below asserted `"-m pytest" not in proc.stdout` — a string ci.sh
-# NEVER prints. The gate echoes this banner and then runs the command; the command
-# line itself is never printed (no `set -x`). Measured on a gate run that really did
-# reach the pytest step: `"-m pytest" in output` is False while `"==> pytest" in
-# output` is True, so the old assertion held in exactly the state it claimed to
-# forbid. Grep before you trust a not-in assertion.
+# marker to assert on: asserting `"-m pytest" not in proc.stdout` instead would be
+# vacuous, since ci.sh never prints the command line it runs (no `set -x`) — that
+# string is never in stdout regardless of whether the pytest step was reached.
+# `"==> pytest" in output` is the only string that is actually present once the
+# gate reaches the pytest step. Grep before you trust a not-in assertion.
 PYTEST_BANNER = "==> pytest"
 
 
@@ -279,15 +277,15 @@ def test_ci_sh_mypy_ceiling_positive_control_lets_the_gate_proceed():
     assert SMOKE_STEP_SKIPPED in run.output, run.output
 
 
-# --- #27 Gap 1: the gate must say which tests it did not run. ---
+# --- The gate must say which tests it did not run. ---
 #
 # `ci.sh` runs `pytest tests/` with NO `-m` expression, so nothing is deselected:
 # tests/conftest.py's `pytest_collection_modifyitems` adds a `skip` marker to every
 # `live_slack` test when the workspace credentials are absent, and to every `live_api`
 # test when `LIVE_API_TESTS` is unset. Both tiers therefore land inside the gate's own
-# "N skipped" tally, indistinguishable from an ordinary skip. That silence is how the
-# #20 COR-1b data-loss regression reached HEAD: the test that catches it lives in the
-# live Slack tier and was green at 18ba52c because it never ran.
+# "N skipped" tally, indistinguishable from an ordinary skip. That silence lets a
+# data-loss regression reach HEAD undetected when the test that catches it lives only
+# in a gated tier that never ran.
 
 GATED_TIER_BANNER = "==> gated tiers this gate did NOT run"
 

@@ -48,9 +48,9 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     """Same collision logic as scripts/generate_sparsedata_user.py + agent_page.py.
 
     Order: bare last name -> first-initial prefix -> numeric suffix appended
-    to the PREFIXED candidate (agent_page.derive_agent_identity, issue #26
-    C1/C2 — the numeric branch used to restart from the bare stem, diverging
-    from the web path on a third same-initial collision).
+    to the PREFIXED candidate (agent_page.derive_agent_identity) — the numeric
+    branch must not restart from the bare stem, or it diverges from the web
+    path on a third same-initial collision.
     """
     base = _slugify_last_name(name)
     candidate = base
@@ -75,8 +75,8 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
 def _bot_name_for(agent_id: str, name: str) -> str:
     last = name.strip().split()[-1]
     last_alpha = "".join(c for c in last if c.isalpha())
-    # Strip a numeric suffix (issue #26 C2): agent_id[0] of "pwu2" is "p", but
-    # the "2" belongs before "Bot" (PWu2Bot), matching derive_agent_identity.
+    # Strip a numeric suffix: agent_id[0] of "pwu2" is "p", but the "2" belongs
+    # before "Bot" (PWu2Bot), matching derive_agent_identity.
     stem = "".join(c for c in agent_id if not c.isdigit())
     suffix = agent_id[len(stem):]
     if stem.lower() == last_alpha.lower():

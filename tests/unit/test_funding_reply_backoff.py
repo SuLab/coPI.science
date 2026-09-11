@@ -1,4 +1,4 @@
-"""_reply_to_thread's funding_reject_count reset (issue #23 COR-28b'). Modeled on
+"""_reply_to_thread's funding_reject_count reset. Modeled on
 tests/unit/test_authorship_emit_gate.py's TestPhase4AuthorshipBackoff, which pins the analogous
 authorship-guard counter."""
 
@@ -62,7 +62,7 @@ async def test_reject_count_resets_on_a_non_rejected_draft_even_if_suppressed(en
 
     # Third turn: a rejected draft after the reset must resume the two-strike
     # tolerance at count=1 (still below the >=2 backoff threshold), not skip
-    # straight to backing the thread off. Pins that COR-28b' restored the
+    # straight to backing the thread off. Pins that the reset restores the
     # tolerance rather than merely zeroing the counter once.
     state["next"] = ack_only_reply
     await engine._reply_to_thread(good, thread)

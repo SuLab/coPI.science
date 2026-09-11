@@ -85,10 +85,10 @@ console = Console()
 def _write_state(created: list[dict]) -> None:
     """Persist created-app credentials to STATE_FILE with owner-only perms.
 
-    The file holds Slack app client_secrets, so it is chmod 0600 (was created
-    world-readable at 0644) and is gitignored — never commit it. Written after
+    The file holds Slack app client_secrets, so it is chmod 0600 (not
+    world-readable) and is gitignored — never commit it. Written after
     each app is created so an interrupted run can be resumed with --skip-create
-    without recreating apps or losing already-issued secrets. See SEC-9.
+    without recreating apps or losing already-issued secrets.
     """
     STATE_FILE.write_text(json.dumps(created, indent=2))
     try:
@@ -442,7 +442,7 @@ def main():
                 app = create_app(
                     config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
                     scopes=scopes,
-                    retry_after_cap=900.0,  # a host operator can wait; the web path cannot (#24 C2-3)
+                    retry_after_cap=900.0,  # a host operator can wait; the web path cannot
                 )
                 created.append(app)
                 # Persist immediately (0600) so an interruption mid-run doesn't

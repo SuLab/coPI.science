@@ -14,7 +14,7 @@ uses ``slack_sdk``; this module uses raw ``httpx`` for the manifest/OAuth API,
 which ``slack_sdk`` doesn't cover). **Async callers (the admin routes, via
 ``admin_provisioning.py``) MUST use the ``_async`` wrappers at the bottom of
 this module, not the sync functions** — ``create_app``'s retry loop alone can
-block for minutes on a rate-limited response (issue #24 C2).
+block for minutes on a rate-limited response.
 """
 
 import logging
@@ -31,8 +31,8 @@ SLACK_API = "https://slack.com/api"
 
 # Cap on how long a single apps.manifest.create rate-limit wait may run, even
 # though it now happens on a worker thread (asyncio.to_thread) rather than the
-# event loop — an unbounded Slack-supplied Retry-After (issue #24 C2-3 measured
-# up to 4500s) would otherwise still tie up that thread and the admin's request
+# event loop — an unbounded Slack-supplied Retry-After (observed as high as
+# 4500s) would otherwise still tie up that thread and the admin's request
 # for an unreasonable time. Mirrors slack_web._MAX_RETRY_AFTER.
 _MAX_MANIFEST_RETRY_AFTER = 30.0
 
@@ -78,7 +78,7 @@ def rotate_config_token(refresh_token: str) -> tuple[str, str, int]:
     access token's expiry (unix seconds; 0 if Slack omits it). Slack rotates the
     refresh token too and it is single-use, so the caller MUST persist the new
     pair atomically. ``exp`` lets callers cache the access token and avoid
-    rotating on every use (see admin_provisioning; SEC-10).
+    rotating on every use (see admin_provisioning).
     """
     resp = httpx.post(
         f"{SLACK_API}/tooling.tokens.rotate",
@@ -204,13 +204,13 @@ def exchange_code(
     token = data.get("access_token", "")
     if not token.startswith("xoxb-"):
         # Do NOT echo any part of the token — this message can surface in logs
-        # and a user-facing ?slack_error= redirect. See SEC-9.
+        # and a user-facing ?slack_error= redirect.
         raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token
 
 
 # ---------------------------------------------------------------------------
-# issue #24 C2: every function above is synchronous httpx, and create_app's
+# Every function above is synchronous httpx, and create_app's
 # retry loop alone can now sleep up to (max_rate_limit_retries - 1) * 30s (capped,
 # see _MAX_MANIFEST_RETRY_AFTER) between rate-limited attempts. Called directly
 # from an `async def` route (admin_provisioning.py), that blocks the whole

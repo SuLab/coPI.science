@@ -163,7 +163,7 @@ class TestInviteRouter:
 
 
 # ---------------------------------------------------------------
-# Delegate Slack-ID sync: the no-token branch (#23 R5 / V10b)
+# Delegate Slack-ID sync: the no-token branch
 # ---------------------------------------------------------------
 
 
@@ -212,14 +212,13 @@ class TestDelegateSlackIdSyncLogging:
     async def test_no_bot_token_logs_the_skipped_delegate_slack_id_sync(
         self, monkeypatch, caplog
     ):
-        """#23 V10b: an agent with no usable bot token must SAY it skipped the sync.
+        """An agent with no usable bot token must SAY it skipped the sync.
 
-        `if bot_token:` used to have no `else`, so an unconfigured agent was
-        indistinguishable in the logs from "the sync ran and found nothing to link".
-        Asserted on the emitted message rather than on a bare "something was logged"
-        so the phrase an operator greps for is what the branch actually prints —
-        closure-23's own R5 measurement (`grep "skipping delegate Slack-ID sync"
-        tests/` = 0 hits) was a search for a string no test spelled out.
+        `if bot_token:` must have an `else`, or an unconfigured agent is
+        indistinguishable in the logs from "the sync ran and found nothing to
+        link". Asserted on the emitted message rather than on a bare
+        "something was logged" so the phrase an operator greps for is what
+        the branch actually prints.
         """
         import logging
 

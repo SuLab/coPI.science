@@ -15,10 +15,10 @@
 #      later is blanked too. Names only; no value is ever read or printed.
 #   2. scripts/live_slack_preflight.py must exit 0. It re-proves the blanking through
 #      the real settings object, asks Slack's own auth.test which workspace each
-#      fixture token belongs to (check 3), and — audit 2026-09-08 RC-13 — confirms
+#      fixture token belongs to (check 3), and confirms
 #      profiles/{public,private,memory} under `profiles_dir` (env COPI_PROFILES_DIR,
 #      default "profiles") exist and are writable, creating them if missing (check 6).
-#      An unwritable profiles dir is exactly RC-7's silent-clobber trigger, so this
+#      An unwritable profiles dir can silently clobber a profile write, so this
 #      tier refuses up front rather than discovering it mid-run. A non-zero exit from
 #      any check ABORTS — pytest is never reached.
 #   3. only then does pytest run, with the tier's own SLACK_TEST_* environment.

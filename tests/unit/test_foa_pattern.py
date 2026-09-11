@@ -1,4 +1,4 @@
-"""Shared FOA number pattern — table-driven over issue #23 COR-27's divergence table plus lowercase."""
+"""Shared FOA number pattern — table-driven over each FOA family's spelling divergence plus lowercase."""
 
 import pytest
 
@@ -16,8 +16,8 @@ from src.agent.foa_pattern import FOA_NUMBER_RE, extract_foa_number
 ])
 def test_all_families_case_insensitive_and_both_year_lengths(number):
     assert FOA_NUMBER_RE.search(number), f"{number} did not match FOA_NUMBER_RE"
-    # The pattern matches either case (COR-27b) but the *return* is canonical
-    # (COR-27b's consequence — see test_extract_canonicalises_the_number).
+    # The pattern matches either case but the *return* is canonical — see
+    # test_extract_canonicalises_the_number.
     assert extract_foa_number(f"See {number} for details.") == number.upper()
 
 
@@ -31,14 +31,13 @@ def test_extract_returns_none_for_no_match():
 
 
 # ---------------------------------------------------------------------------
-# COR-27b: the return value is a cache *file name*, so it must canonicalise
+# The return value is a cache *file name*, so it must canonicalise
 # ---------------------------------------------------------------------------
 
 # Every row is a spelling that appears in real Slack/LLM text; the expected
 # value is the form NIH publishes and the form Grants.gov returns in its
 # `number` field — which is what `foa_cache.cache_foa` uses as the file name.
-# Measured on the production copy (`grantbot_posted_foas`): 251/251 rows are
-# already upper-case, so upper-case is the canonical spelling of the cache key.
+# Upper-case is the canonical spelling of the cache key.
 CANONICALISATION_CASES = [
     ("all lower, PA family", "See par-24-293 for details.", "PAR-24-293"),
     ("all lower, agency-coded", "See rfa-ai-27-019 for details.", "RFA-AI-27-019"),
@@ -49,7 +48,6 @@ CANONICALISATION_CASES = [
     # The real shape this defect takes in production: NIH's own permalink
     # lower-cases the number, so a post whose first mention is the link
     # yields a lower-case extraction and a cache key that never resolves.
-    # (One such body exists in the production copy's `agent_messages`.)
     (
         "NIH permalink first",
         ":moneybag: *Funding Opportunity*\n"
@@ -66,7 +64,7 @@ CANONICALISATION_CASES = [
     ids=[i for i, _, _ in CANONICALISATION_CASES],
 )
 def test_extract_canonicalises_the_number(content, expected):
-    """COR-27b made the pattern IGNORECASE; `extract_foa_number`'s result is used verbatim as a
+    """The pattern is IGNORECASE, but `extract_foa_number`'s result is used verbatim as a
     cache file name (`foa_cache.cache_foa` → `data/foa_cache/<number>.json`), and the writers key
     it on Grants.gov's canonical upper-case `number`. Returning the post's own casing therefore
     turns a case difference into a permanent cache miss."""

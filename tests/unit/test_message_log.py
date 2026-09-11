@@ -132,8 +132,7 @@ class TestServiceBotTagsDoNotReserveThreads:
         caller routes the message to a single agent. Participation no longer
         does — _extract_tagged_agents filters per mention, so the roster tag
         after the service tag reserves the thread instead of leaving it open to
-        everyone. This expectation was updated deliberately, as the previous
-        version of this test asked (#20 COR-8): the old None was the *open*
+        everyone. This expectation is deliberate: the old None was the *open*
         2-party fallback, i.e. a thread any agent could join.
         """
         log.append(
@@ -174,8 +173,8 @@ class TestExtractTaggedAgentResolvesSlackUidMentions:
         # Slack real bot_user_ids are alnum-only (e.g. "U0AMQGYBFL7"); an
         # underscore in the fixture uid would silently miss the uid branch of
         # extract_bot_mentions's regex (`[A-Za-z0-9]+`) and pass for the
-        # wrong reason (the same trap red-team M5 flags for the sibling
-        # mentions.py test — verified by running both forms).
+        # wrong reason — the same trap the sibling mentions.py test guards
+        # against (verified by running both forms).
         log.set_bot_uid_map({"UWISEMAN1": "wiseman"})
         assert log._extract_tagged_agent("thoughts <@UWISEMAN1>?") == "wiseman"
 
@@ -184,7 +183,7 @@ class TestExtractTaggedAgentResolvesSlackUidMentions:
         assert log._extract_tagged_agent("thoughts <@UZZZZZZ>?") is None
 
     def test_an_unknown_bot_name_still_extracts_nothing(self, log):
-        # Pre-fix behaviour, preserved (red-team B4): get_thread_allowed_agents
+        # get_thread_allowed_agents
         # locks a thread on this value, so an unrecognised bot name must come
         # back None, not the raw token — a phantom agent_id must never come
         # out of here.
@@ -192,7 +191,7 @@ class TestExtractTaggedAgentResolvesSlackUidMentions:
 
 
 # ---------------------------------------------------------------
-# A root that tags more than one bot (#20 COR-8)
+# A root that tags more than one bot
 # ---------------------------------------------------------------
 
 @pytest.fixture
@@ -236,8 +235,8 @@ def _human_entry(ts, content, channel="general", thread_ts=None):
 
 
 class TestMultiTagRootParticipation:
-    """#20 COR-8 asked for tag ROUTING. Locking participation to the *first*
-    translated uid regressed the case the issue exists to fix, and opening the
+    """Tag mentions are ROUTING, not first-match. Locking participation to the
+    *first* translated uid regresses the multi-tag case, and opening the
     thread instead would break specs/agent-system.md:278-287 ("No third agent
     may join"). The correct set is the poster plus every tagged agent."""
 

@@ -1,5 +1,4 @@
-"""execute_tool must only charge the per-thread abstract/full-text budget on a successful fetch
-(issue #23 COR-30)."""
+"""execute_tool must only charge the per-thread abstract/full-text budget on a successful fetch."""
 
 from src.agent import tools as tools_mod
 from src.agent.state import ThreadState
@@ -33,7 +32,7 @@ async def test_a_successful_abstract_fetch_spends_the_budget(monkeypatch):
         "retrieve_abstract", {"pmid_or_doi": "40000001"}, "su", thread,
     )
     assert thread.abstracts_other == 1
-    assert "T" in out  # delimited as <paper_title>T</paper_title> — SEC-14
+    assert "T" in out  # delimited as <paper_title>T</paper_title>
 
 
 async def test_a_failed_full_text_fetch_does_not_spend_the_budget(monkeypatch):
@@ -49,13 +48,13 @@ async def test_a_failed_full_text_fetch_does_not_spend_the_budget(monkeypatch):
     assert thread.full_text == 0
 
 
-# ---- the SHIPPED call site, not the orphaned helper (#23 R8) ----
+# ---- the SHIPPED call site, not the orphaned helper ----
 #
-# The COR-30 refactor above moved execute_tool off `_execute_retrieve_abstract` /
-# `_execute_retrieve_full_text` and onto the pure `_format_*_result` renderers, which
-# left those two helpers with no caller anywhere in src/ — their only callers are in
+# execute_tool goes through the pure `_format_*_result` renderers, not directly
+# through `_execute_retrieve_abstract` / `_execute_retrieve_full_text`, which
+# have no caller anywhere in src/ — their only callers are in
 # tests/unit/test_retrieve_tools_authors.py. So every assertion about what a tool answer
-# CONTAINS (the #29 author list, the #29 audit-O-I3 DOI, the SEC-14 fences) was pinned on
+# CONTAINS (the author list, the DOI, the fenced blocks) must not be pinned on
 # a path production never executes: `_format_abstract_result` could be gutted and that
 # file would stay green. These two run the same assertions through execute_tool.
 

@@ -88,8 +88,8 @@ SNAPSHOT_SCHEMA = "public"
 # ---------------------------------------------------------------------------
 # Method: build a fixture at 0018, bulk-load N synthetic agent_messages rows, then
 # run the 15-statement 0019+0021 DDL block for agent_messages inside ONE transaction
-# in psql with \timing on, and sum the statement times. postgres:15, the compose
-# postgres container, on this developer's machine, 2026-08-04:
+# in psql with \timing on, and sum the statement times. Measured against
+# postgres:15, the compose postgres container:
 #
 #     rows        DDL block total   post-migration total relation size
 #     10,011          112.0 ms       3,608 kB   (from 2,016 kB, +79%)
@@ -227,8 +227,8 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0029", "column", "pi_inbound_state", "agent_messages"),
     # 0030_pi_ownership_and_dm_handled
     PlannedObject("0030", "column", "sender_user_id", "agent_messages"),
-    # A6 (opus review, audit 2026-09-08): 0030 also creates this named FK
-    # constraint (_SENDER_USER_ID_FK in the migration) -- it was missing here.
+    # 0030 also creates this named FK constraint (_SENDER_USER_ID_FK in the
+    # migration).
     PlannedObject("0030", "constraint", "agent_messages_sender_user_id_fkey", "agent_messages"),
     PlannedObject("0030", "index", "ix_agent_messages_sender_user_id", "agent_messages"),
     PlannedObject("0030", "column", "handled_at", "pi_dm_messages"),
@@ -1997,12 +1997,11 @@ async def publication_duplicate_plan(conn) -> tuple[list[str], list[str]]:
 async def check_publication_duplicates(conn):
     """(user_id, pmid) duplicates 0025's dedup will merge into one row and delete.
 
-    Task 22.2's deploy note claimed check 11 (legacy-row inventory, above) already
-    surfaced this count before 0025 runs — it does not: that check is exclusively
-    about agent_messages.content, and check_sizing reports only a bare
-    ``count(*)`` on publications for lock-window sizing, not which rows are
+    check 11 (legacy-row inventory, above) does NOT surface this count: that check
+    is exclusively about agent_messages.content, and check_sizing reports only a
+    bare ``count(*)`` on publications for lock-window sizing, not which rows are
     duplicates. This is the actual pre-flight visibility for 0025's irreversible
-    DELETE (see #22 I3, I2).
+    DELETE.
     """
     title = "Publication (user_id, pmid) duplicates 0025 will merge and delete"
     if not await table_exists(conn, "publications"):

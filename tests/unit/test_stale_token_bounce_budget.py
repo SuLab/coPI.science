@@ -1,5 +1,4 @@
-"""REV4-6 (audit 2026-09-08) and its follow-up, extended by R-3 and its own
-opus-review follow-up (both audit 2026-09-10): _maybe_send_stale_token_bounce's
+"""_maybe_send_stale_token_bounce's
 per-address budget is consumed by SENT, FAILED (send_raw_email was actually
 invoked -- a post-dispatch failure still means a mail may have left, so an
 autoresponder ping-pong stays capped) and CLIENT_UNAVAILABLE (the SES client
@@ -53,7 +52,7 @@ async def test_a_suppressed_outcome_does_not_consume_the_budget(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_not_dispatched_outcome_does_not_consume_the_budget(monkeypatch):
-    """R-3's root-cause fix: a boto3-client/MIME construction error never
+    """A boto3-client/MIME construction error never
     reached send_raw_email, so it must not be charged like a real send attempt."""
     monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
     monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: True)
@@ -69,7 +68,7 @@ async def test_a_not_dispatched_outcome_does_not_consume_the_budget(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_a_client_unavailable_outcome_consumes_the_budget(monkeypatch):
-    """Opus review follow-up, audit 2026-09-10: CLIENT_UNAVAILABLE (the SES
+    """CLIENT_UNAVAILABLE (the SES
     client itself failed to construct) is a persistent misconfiguration that
     will keep failing every retry -- unlike NOT_DISPATCHED (a one-off
     MIME/message error), it must count against the cap or a broken client
@@ -123,7 +122,7 @@ async def test_a_sent_outcome_consumes_the_budget(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_slot_is_reserved_before_the_send_is_dispatched(monkeypatch):
-    """Opus review follow-up, audit 2026-09-10: charging strictly AFTER
+    """Charging strictly AFTER
     send_html_email_outcome returns is a check-then-act race — a future
     threaded/concurrent send could let two replies from the same address both
     read the same pre-send count and both pass the cap check before either
@@ -170,13 +169,12 @@ async def test_a_refunded_reservation_does_not_leak_across_repeated_suppressions
 async def test_refunding_one_of_two_interleaved_reservations_leaves_the_other_charged(
     monkeypatch,
 ):
-    """K-5 (audit 2026-09-10): the refund wrote back the pre-reservation
-    ``sent_so_far`` snapshot instead of decrementing whatever the counter
-    holds NOW. If a second reservation lands while the first call's send is
-    in flight (the exact race "reserve before dispatch" exists to survive),
-    the old code's refund clobbered the counter back to its stale snapshot —
-    silently un-charging the SECOND reservation too, not just the one being
-    refunded.
+    """The refund must not write back the pre-reservation ``sent_so_far``
+    snapshot instead of decrementing whatever the counter holds NOW. If a
+    second reservation lands while the first call's send is in flight (the
+    exact race "reserve before dispatch" exists to survive), a refund that
+    clobbers the counter back to its stale snapshot silently un-charges the
+    SECOND reservation too, not just the one being refunded.
     """
     monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
     monkeypatch.setattr("src.services.email.is_allowed_recipient", lambda addr: True)

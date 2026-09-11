@@ -2,7 +2,6 @@
 
 Revision ID: 0025
 Revises: 0024
-Create Date: 2026-09-02 00:00:00.000000
 
 publications has never had a uniqueness guarantee on (user_id, pmid)
 (models/publication.py had no __table_args__; 0001_initial.py:121-122 created only
@@ -16,7 +15,7 @@ this silently: (a) made `scalar_one_or_none()` in the PMC-methods step raise
 MultipleResultsFound, swallowed at a debug log; (b) duplicated citation lines in the
 exported markdown; (c) inflated admin.py's publication counts; (d) was a multiplier
 on the join `_load_publication_records` (simulation.py) re-runs on every roster
-sync. See issue #22 COR-16 (the pipeline-side dedup landed separately, same issue).
+sync. The pipeline-side dedup landed separately.
 
 `pmid` stays nullable — a DOI-only publication has none, and Postgres unique
 constraints treat NULL as distinct from every other NULL, so multiple no-PMID rows
@@ -26,8 +25,8 @@ The dedup step below runs BEFORE the constraint is added: an existing deployment
 can already have duplicate rows, and create_unique_constraint fails outright
 against a table that violates it.
 
-#22 I2: the keeper was originally chosen by ``p.id > p2.id`` (delete the higher
-id). ``Publication.id`` is ``default=uuid.uuid4`` (src/models/publication.py),
+The keeper is not chosen by ``p.id > p2.id`` (delete the higher id):
+``Publication.id`` is ``default=uuid.uuid4`` (src/models/publication.py),
 which is uncorrelated with insertion order or richness, so that rule could delete
 a rich row (abstract, methods_text, doi, pmcid, journal, year, author_position)
 and keep a title-only one. The keeper is now chosen deterministically by

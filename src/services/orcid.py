@@ -23,7 +23,7 @@ def _get(d: Any, *keys: str, default: Any = None) -> Any:
     ``dict.get(key, default)`` only substitutes ``default`` when ``key`` is *missing* — not when
     its value is present-but-``None``. This walks ``keys`` through ``d``, treating a ``None``
     (or non-dict) value at any point as "stop, return default" instead of raising on the next
-    ``.get()``. See issue #22 COR-15.
+    ``.get()``.
     """
     cur: Any = d
     for key in keys:

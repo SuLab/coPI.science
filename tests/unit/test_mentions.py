@@ -1,4 +1,4 @@
-"""BOT_TAG_RE / extract_bot_mentions — the shared bot-tag matcher (issue #20 COR-8)."""
+"""BOT_TAG_RE / extract_bot_mentions — the shared bot-tag matcher."""
 
 from src.agent.mentions import BOT_TAG_RE, extract_bot_mentions
 
@@ -23,7 +23,7 @@ class TestExtractBotMentions:
         # UZZZZZZ, not U_UNKNOWN: a real Slack bot_user_id is alnum-only, and
         # an underscore isn't in the uid group's [A-Za-z0-9]+ class — U_UNKNOWN
         # would fail to match the <@...> alternative at all and pass this
-        # assertion for the wrong reason (see red-team M5).
+        # assertion for the wrong reason.
         assert extract_bot_mentions("<@UZZZZZZ>", {"U12345": "su"}) == []
         assert extract_bot_mentions("<@U12345>", None) == []
 

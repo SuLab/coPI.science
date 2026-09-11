@@ -1,16 +1,13 @@
-"""The nav badge must not count a reopen marker as a completed review (#20 blocker 5).
+"""The nav badge must not count a reopen marker as a completed review.
 
 `AgentBadgeMiddleware` (src/main.py) computes, per agent the signed-in user owns or
 is delegated on, `unreviewed = total proposals - reviewed proposals`, and its
-`reviewed` half filtered only the engine's implicit `rating = -1` marker. A PI who
-reopens a proposal with guidance gets a second sentinel — `rating = 0`, the
-"reopen-with-guidance sentinel" `simulation.py:3510-3512` names next to `-1` — which
-is not a score: the dashboard form offers 1-4 only and both writers reject anything
-outside that range (`agent_page.py:509`, `email_inbound.py:383`). Counting it as a
-review hides outstanding work from the nav badge. Measured read-only on the
-disposable production copy (`copi_verify`, 2026-09-04): 233 rating=0 rows against 0
-rating=-1 rows, mis-counting 12 of 53 active agents (wiseman by 89, briney 29, su 21).
-`src/routers/admin.py`'s two readers were fixed in `9505554`; this is the third.
+`reviewed` half must filter both of the engine's non-review sentinel ratings: the
+implicit `rating = -1` marker and the "reopen-with-guidance" `rating = 0` marker
+(`simulation.py:3510-3512`). Neither is a score: the dashboard form offers 1-4 only
+and both writers reject anything outside that range (`agent_page.py:509`,
+`email_inbound.py:383`). Counting either as a review hides outstanding work from
+the nav badge.
 
 Harness note: the badge count has no rendered seam a test can read — it lands on
 `request.state.agent_badge_count` and only the nav template shows it — so these tests

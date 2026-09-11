@@ -2,12 +2,9 @@
 
 The `review_counts` query in src/routers/admin.py's `admin_agents` route (feeding
 `templates/admin/agents.html`'s `unreviewed = total_proposals - total_reviewed`)
-counted every ProposalReview row, including the engine's implicit `rating = -1`
-marker row (src.agent's `_persist_implicit_proposal_review`). That marker is not
-a real PI review — Task 20.9c already taught the badge, the review e-mail, the
-digest and the dashboard form to ignore it (see
-.superpowers/sdd/2026-09-02-close-issues-20-27/task-20.9c-report.md); this is the
-same fix applied to the one remaining reader, the admin agents page.
+must not count the engine's implicit `rating = -1` marker row
+(src.agent's `_persist_implicit_proposal_review`) as a real PI review, matching
+how the badge, the review e-mail, and the dashboard form already treat it.
 
 Real ASGI requests, real Postgres, real Jinja templates — same harness as
 tests/integration/test_cohort_admin.py.
@@ -111,12 +108,10 @@ async def test_a_review_of_a_non_proposal_decision_is_not_counted_as_reviewing_a
     """The reviewed count must be scoped to the rows the total counts.
 
     `proposal_counts` counts decisions with `outcome='proposal'` that this agent
-    participated in; the reviewed count used to count every ProposalReview bearing the
-    agent's id, including reviews of decisions whose outcome later moved off 'proposal'.
-    `total - reviewed` then went negative — measured on production data: 22 of 53 active
-    agents, with the roster reporting 98 outstanding proposals against 166 actually
-    outstanding, and the template rendering a green "N reviewed" for agents whose own
-    dashboards still listed review forms (issue #20 closure audit).
+    participated in; the reviewed count must not count ProposalReview rows for
+    decisions whose outcome later moved off 'proposal', or `total - reviewed`
+    goes negative and the page renders a "N reviewed" count that exceeds what
+    the agent's own dashboard still lists as outstanding.
     """
     pi = await factories.make_user(db_session, email="scope@example.org")
     agent = await factories.make_agent(
@@ -156,17 +151,14 @@ async def test_a_review_of_a_non_proposal_decision_is_not_counted_as_reviewing_a
 # The reopen marker (rating = 0)
 #
 # A PI who reopens a proposal with guidance gets a ProposalReview row carrying
-# `rating=0`, `comment="[Reopened] …"` and `submitted_via="web"` — the second
-# sentinel `simulation.py:3510-3512` names alongside `-1` ("the reopen-with-
-# guidance sentinel rating=0"). It is not a score: the dashboard form offers
+# `rating=0`, `comment="[Reopened] …"` and `submitted_via="web"` — a second
+# sentinel value alongside `-1`. It is not a score: the dashboard form offers
 # 1-4 only and both writers reject anything outside that range
 # (`agent_page.py:509`, `email_inbound.py:383`), so no PI can submit a 0.
 #
-# `rating != -1` let all of them through. Measured on the disposable production
-# copy (copi_verify, 2026-09-04): 233 such rows, 0 rows at rating -1; wiseman
-# alone carries 89 of them against 135 proposals, so his page claimed 123
-# reviews where 34 exist, and /admin/discussions?run_id=all rendered "0/4" 130
-# times.
+# The reviewed-count query must exclude rating=0 the same way it excludes
+# rating=-1, or a reopen marker is counted as a completed review and the
+# unreviewed count understates what is actually outstanding.
 # ---------------------------------------------------------------------------
 
 

@@ -3,15 +3,14 @@
 Two things are pinned here:
 
 1. The ``DEFAULT_START`` comment must not read like an open TODO — ``--start``
-   has taken a real argparse value since before issue #26 was filed
+   has taken a real argparse value
    (``git log -S"add_argument.*--start" -- scripts/build_cabo_sankey.py``).
    This is asserted against the *contiguous comment block* above the
    assignment, and never against the default date itself: pinning the literal
-   date made the previous version of this file raise ``StopIteration`` (a test
-   *error*, not a failure) the moment anyone changed the date or reflowed the
-   comment — the landmine ``audit-over-implementation.md`` recorded.
-2. ``plotly`` lives in the optional ``scripts`` extra (#27 I4), so it is absent
-   from ``requirements.lock`` and therefore from the runtime image. The
+   date makes a test raise ``StopIteration`` (a test *error*, not a failure)
+   the moment anyone changes the date or reflows the comment.
+2. ``plotly`` lives in the optional ``scripts`` extra, so it is absent from
+   ``requirements.lock`` and therefore from the runtime image. The
    documented invocation must still parse its arguments, and must name the
    extra instead of dying on a bare ``ModuleNotFoundError``.
 """
@@ -82,7 +81,7 @@ def test_default_start_comment_mentions_the_start_flag():
 
 
 def test_help_works_without_plotly(tmp_path):
-    """--help must not need a plotting library (#27 I4 / over-impl R20)."""
+    """--help must not need a plotting library."""
     proc = _run_without_plotly(tmp_path, "--help")
     assert proc.returncode == 0, (
         "`python scripts/build_cabo_sankey.py --help` must work in an image "
@@ -110,8 +109,8 @@ def test_header_does_not_claim_scripts_needs_docker_cp():
     """`COPY . .` bakes scripts/ into the image; the dev file bind-mounts it.
 
     The stale "scripts/ isn't mounted — docker cp it in first" sentence
-    contradicted the script's own `docker compose exec app python scripts/...`
-    line (closure-26 residual).
+    contradicts the script's own `docker compose exec app python scripts/...`
+    line.
     """
     assert "isn't mounted" not in SCRIPT
     assert "docker compose cp scripts/build_cabo_sankey.py" not in SCRIPT

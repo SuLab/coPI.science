@@ -1,4 +1,4 @@
-"""Unit tests for _validate_profile null/type safety (issue #22 COR-16)."""
+"""Unit tests for _validate_profile null/type safety."""
 
 from src.services.profile_pipeline import _validate_profile
 
@@ -24,10 +24,10 @@ def test_empty_profile_fails():
 
 
 def test_non_dict_list_profile_does_not_raise():
-    # A fenced JSON array from extract_json used to reach `.get()` here and
+    # A fenced JSON array from extract_json must not reach `.get()` here and
     # crash with AttributeError one frame before apply_synthesis's own guard
-    # (#22 COR-22 fix-round review: vet_publications.py and
-    # resynth_from_current_pubs.py call _validate_profile directly).
+    # (vet_publications.py and resynth_from_current_pubs.py call
+    # _validate_profile directly).
     assert _validate_profile([1, 2, 3]) is False
 
 

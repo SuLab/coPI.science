@@ -1,23 +1,21 @@
-"""V4-3/V4-4a: an unanswered proposal_review reminder expires instead of being immortal, and the
-downgrade ladder can advance past its first rung. V4-3's third test also pins B3/M1: expiring then
+"""An unanswered proposal_review reminder must expire instead of being immortal, and the
+downgrade ladder must be able to advance past its first rung. Expiring then
 falling through to a re-send for the SAME proposal must reconcile the existing row, not violate
 uq_email_notification_user_thread_category.
 
-Originally (V4-3) `expired` was written only once a REPLACEMENT had been accepted by SES, because
-`email_inbound.process_inbound_email` dropped any reply whose notification was not `status ==
-"sent"` -- so retiring the row here, with nothing to replace it, would have killed the only reply
-address the PI was ever given. RC-4 (audit 2026-09-08, #21 V4-3) closed that gap on the inbound
-side: a reply is now refused on its own once `sent_at` is older than
-`settings.email_notification_expiry_days`, independent of this row's `status`. That makes it safe
-for the SWEEP to mark `expired` on the two bail paths below where nothing was sent AND the
-outstanding row was already past the window -- inbound would refuse a reply to it regardless. The
-THIRD no-send path (`test_a_failed_ses_send_leaves_the_notification_answerable`) is deliberately
-unchanged: an SES-refused send is a transient failure, not a sign there is nothing left to answer,
+The inbound side (`email_inbound.process_inbound_email`) refuses a reply on its own once
+`sent_at` is older than `settings.email_notification_expiry_days`, independent of the
+notification row's `status` — a reply whose notification is not `status == "sent"` is
+dropped regardless. That makes it safe for the SWEEP to mark `expired` on the two bail
+paths below where nothing was sent AND the outstanding row was already past the window --
+inbound would refuse a reply to it regardless. The THIRD no-send path
+(`test_a_failed_ses_send_leaves_the_notification_answerable`) is deliberately different:
+an SES-refused send is a transient failure, not a sign there is nothing left to answer,
 so that row must stay `sent` and answerable on the next attempt.
 
 Also here (same sweep, same file): the reopen sentinel. `reopen_proposal` files a ProposalReview
-with `rating=0`, which `_get_unreviewed_proposals_for_user` and the status_overview digest both
-counted as a completed review -- see Task 16's ruling, docs/plans/2026-09-04-decisions/task-16.md.
+with `rating=0`, which `_get_unreviewed_proposals_for_user` and the status_overview digest must
+not count as a completed review.
 """
 
 import uuid
@@ -61,11 +59,11 @@ async def _eager(db_session, user_id) -> User:
 
 
 async def test_a_sweep_with_nothing_to_send_and_a_lapsed_reminder_expires_it(db_session):
-    """RC-4: `_process_user_notifications` returns at its `if not proposals` bail. The
+    """`_process_user_notifications` returns at its `if not proposals` bail. The
     reply window lapsed, so the sweep falls through — but the proposal has since been
     reviewed on the dashboard, so there is nothing left to send. Nothing will ever
-    replace this row, and `email_inbound.process_inbound_email` now refuses a reply to
-    it on its own (RC-4's `sent_at` age check) regardless of `status` — so marking it
+    replace this row, and `email_inbound.process_inbound_email` refuses a reply to
+    it on its own (via its `sent_at` age check) regardless of `status` — so marking it
     `expired` here is bookkeeping, not a functional change to what a reply would do.
     """
     user = await factories.make_user(db_session, email="pi.expiry@scripps.edu")
@@ -82,7 +80,7 @@ async def test_a_sweep_with_nothing_to_send_and_a_lapsed_reminder_expires_it(db_
     db_session.add(notification)
     db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
     # Already reviewed, so the fall-through finds nothing to send and never reaches SES.
-    # tests/factories.py has no make_proposal_review at 18ba52c — insert the row directly.
+    # tests/factories.py has no make_proposal_review — insert the row directly.
     db_session.add(ProposalReview(
         thread_decision_id=td.id, agent_id=agent.agent_id, user_id=user.id,
         reviewed_by_user_id=user.id, rating=3, submitted_via="web",
@@ -96,8 +94,8 @@ async def test_a_sweep_with_nothing_to_send_and_a_lapsed_reminder_expires_it(db_
     await db_session.refresh(notification)
     assert notification.status == "expired", (
         f"notification {notif_id} is {notification.status!r} after a sweep that found "
-        "nothing left to send for an outstanding row already past the reply window — RC-4 "
-        "expects it retired here, since email_inbound's own age check would refuse a reply "
+        "nothing left to send for an outstanding row already past the reply window — it "
+        "must be retired here, since email_inbound's own age check would refuse a reply "
         "to it either way."
     )
 
@@ -105,7 +103,7 @@ async def test_a_sweep_with_nothing_to_send_and_a_lapsed_reminder_expires_it(db_
 async def test_an_allowlist_suppressed_sweep_with_a_lapsed_reminder_expires_it(
     db_session, monkeypatch,
 ):
-    """RC-4: the outbound allowlist bail in `_process_user_notifications` (it advances
+    """The outbound allowlist bail in `_process_user_notifications` (it advances
     the send clock and returns False without sending) marks the outstanding row expired
     when it was already past the reply window — nothing will ever replace it while the
     allowlist blocks this recipient, and a reply to it would be refused by
@@ -146,7 +144,7 @@ async def test_an_allowlist_suppressed_sweep_with_a_lapsed_reminder_expires_it(
     ).scalar_one()
     assert row.status == "expired", (
         f"notification {notification.id} is {row.status!r} after an allowlist-suppressed "
-        "sweep found the outstanding row already past the reply window — RC-4 expects it "
+        "sweep found the outstanding row already past the reply window — it must be "
         "retired here, since nothing will ever replace it while the allowlist blocks this "
         "recipient and email_inbound's own age check would refuse a reply to it either way."
     )
@@ -372,10 +370,10 @@ async def test_a_recently_sent_outstanding_notification_is_not_expired(db_sessio
 async def test_expiring_then_resending_does_not_violate_the_uniqueness_constraint(
     db_session, monkeypatch,
 ):
-    """B3: after expiry the sweep falls through and sends again for the SAME proposal —
+    """After expiry the sweep falls through and sends again for the SAME proposal —
     uq_email_notification_user_thread_category means the row must be reconciled, not
     re-INSERTed, or the mail goes out and the bookkeeping INSERT fails behind it. This
-    exercises Task 21.11's SELECT-then-upsert end to end."""
+    exercises the SELECT-then-upsert path end to end."""
     monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
     user = await factories.make_user(db_session, email="pi.reexpiry@scripps.edu")
     agent = await factories.make_agent(db_session, user=user)
@@ -427,8 +425,8 @@ async def test_expiring_then_resending_does_not_violate_the_uniqueness_constrain
     )
     assert rows[0].status == "sent"
     assert rows[0].reply_token != old_token, (
-        "SEC-F1 (opus review, audit 2026-09-08): expiring then re-sending must mint a "
-        "FRESH reply_token — reusing the old one (I2, #21 fix round B) left the FIRST "
+        "expiring then re-sending must mint a "
+        "FRESH reply_token — reusing the old one left the FIRST "
         "e-mail's reply address permanently redeemable, since process_inbound_email "
         "looks up purely by token with no per-send identity."
     )
@@ -437,10 +435,10 @@ async def test_expiring_then_resending_does_not_violate_the_uniqueness_constrain
 async def test_a_reply_to_the_superseded_email_is_refused_after_a_resend(
     db_session, monkeypatch,
 ):
-    """SEC-F1 (opus review, audit 2026-09-08), the inbound half: I2 (#21 fix round B)
-    reused the token across a resend so a PI replying to the SUPERSEDED (pre-resend)
-    e-mail still resolved -- but that meant the first e-mail's reply address stayed
-    redeemable forever. A resend now mints a fresh token, so a reply quoting the old
+    """The inbound half: reusing the token across a resend would let a PI replying to
+    the SUPERSEDED (pre-resend) e-mail still resolve -- but that would mean the first
+    e-mail's reply address stays redeemable forever. A resend mints a fresh token, so a
+    reply quoting the old
     one must be refused (the same "No notification found for token" path a stranger's
     token hits) rather than silently applied against the now-current row."""
     monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")

@@ -10,8 +10,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # RFC 5321 caps an email address at 254 characters. Enforcing this *before*
 # running the regex is essential, not cosmetic: the pattern backtracks
 # superlinearly on long dot-heavy input, so matching uncapped attacker input on
-# an unauthenticated field (waitlist / onboarding / profile) is a ReDoS vector
-# (audit SEC-16).
+# an unauthenticated field (waitlist / onboarding / profile) is a ReDoS vector.
 MAX_EMAIL_LENGTH = 254
 
 
@@ -36,7 +35,7 @@ def csv_safe_cell(value: object) -> str:
     Untrusted text (e.g. a public waitlist name/note) written verbatim into a
     CSV becomes a live formula when an admin opens the file in a spreadsheet.
     Prefixing a leading dangerous character with a single quote forces text
-    interpretation without otherwise changing the value (audit SEC-20).
+    interpretation without otherwise changing the value.
     """
     text = "" if value is None else str(value)
     if text and text[0] in _CSV_INJECTION_PREFIXES:

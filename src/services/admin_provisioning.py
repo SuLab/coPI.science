@@ -37,7 +37,7 @@ _TOKEN_EXP_MARGIN = 120
 
 # Slack API error slugs that indicate the config token itself is bad (as
 # opposed to a manifest/validation error) — the only case worth rotating and
-# retrying create_app for (SEC-10).
+# retrying create_app for.
 _AUTH_ERRORS = (
     "not_authed",
     "invalid_auth",
@@ -55,7 +55,7 @@ async def _rotate_and_persist(db: AsyncSession, refresh: str) -> str:
     """Rotate the config token and persist the new triple in one unit.
 
     Split out of ``_config_token`` so the caller can wrap this in
-    ``asyncio.shield`` (SEC-10): Slack's refresh token is single-use and is
+    ``asyncio.shield``: Slack's refresh token is single-use and is
     consumed the moment the worker thread's ``httpx.post`` completes, so if the
     awaiting task is cancelled after that but before these three KV rows land,
     both the old and the new refresh token become unusable and all Slack
@@ -96,7 +96,7 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     new pair. To keep those single-use rotations rare, we cache the access token
     with its expiry and reuse it until it is about to expire (or ``force_rotate``
     is set after an auth failure). Only then do we rotate and persist the new
-    ``(token, refresh, exp)`` triple atomically before returning (SEC-10).
+    ``(token, refresh, exp)`` triple atomically before returning.
 
     Seeds from ``Settings`` (``.env``) on first use; thereafter the KV rows are
     authoritative.
@@ -124,7 +124,7 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
         try:
             # asyncio.shield: a cancellation of THIS awaiting task (e.g. uvicorn's
             # graceful shutdown mid-deploy) must not stop the rotate-and-persist
-            # unit once Slack's single-use refresh token has been spent (SEC-10).
+            # unit once Slack's single-use refresh token has been spent.
             return await asyncio.shield(_rotate_and_persist(db, refresh))
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
@@ -163,7 +163,7 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     # Use the cached access token; only rotate (consuming a single-use refresh)
     # if create_app fails specifically because the token is bad. This keeps
     # rotations rare and means a rotation is never "spent" on a manifest error
-    # (SEC-10).
+    #
     config_token = await _config_token(db)
     # C2: release the pooled connection before the blocking Slack round trip.
     # _config_token either just ran read-only SELECTs (cached-token path) or
@@ -186,7 +186,7 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
 
     # Idempotency: a prior "Provision" click for this agent may have left a
     # pending bridge row (holding a client_secret + reusable state). Drop any
-    # such rows so there is at most one live provisioning per agent (SEC-10).
+    # such rows so there is at most one live provisioning per agent.
     await db.execute(
         delete(SlackAppProvision).where(
             SlackAppProvision.agent_registry_id == agent.id
@@ -248,7 +248,7 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
         # reusable OAuth state (no TTL), so leaving it behind is a standing
         # secret + replay surface. Log details server-side only; surface a
         # generic message so no token/secret fragment reaches the redirect URL
-        # or access logs. See SEC-9.
+        # or access logs.
         logger.error(
             "Token exchange failed for agent %s (provision %s): %s",
             prov.agent_registry_id, prov.id, exc,

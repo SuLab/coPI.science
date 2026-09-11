@@ -1,7 +1,7 @@
 """Shared FOA (Funding Opportunity Announcement) number pattern.
 
-`src/agent/foa_cache.FOA_PATTERN` and `src/agent/funding_rules._FOA_NUMBER_RE` diverged in both
-directions (issue #23 COR-27): the cache's pattern required an agency-code segment between two dashes
+`src/agent/foa_cache.FOA_PATTERN` and `src/agent/funding_rules._FOA_NUMBER_RE` used to diverge in both
+directions: the cache's pattern required an agency-code segment between two dashes
 (`RFA-AI-27-019`) and so rejected the entire PA/PAR/PAS parent-announcement family (`PAR-24-293`,
 `PA-24-293`, `PAS-24-293`), which have no such segment; funding_rules' pattern accepted that family plus
 RFA but not NOT/OTA/RFI/DE-FOA. Neither was case-insensitive. This module is the one pattern both call
@@ -33,7 +33,7 @@ def extract_foa_number(content: str) -> str | None:
     """Return the first FOA number found in ``content`` in canonical form, or None.
 
     Canonical means upper case, the form NIH publishes and the form Grants.gov returns in its
-    ``number`` field. The pattern is IGNORECASE (issue #23 COR-27), so without this the result
+    ``number`` field. The pattern is IGNORECASE, so without this the result
     would carry whatever casing the post used — and the result is used verbatim as a cache **file
     name** (``foa_cache.cache_foa`` → ``data/foa_cache/<number>.json``) and as the key of the
     per-thread FOA prompt context Phase 5 builds. Both cache writers key on the canonical

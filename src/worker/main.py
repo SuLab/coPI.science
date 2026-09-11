@@ -36,18 +36,18 @@ _shutdown = False
 JOB_RETRY_BACKOFF_BASE_SECONDS = 5.0
 JOB_RETRY_BACKOFF_CAP_SECONDS = 300.0
 
-# Stale-processing reaper (COR-18a/b): a worker that dies mid-job (OOM, SIGKILL, host
+# Stale-processing reaper: a worker that dies mid-job (OOM, SIGKILL, host
 # crash) leaves its claimed row committed 'processing' forever — claim_job only ever
 # selects 'pending' rows, so nothing else in the system will ever pick it back up.
 #
-# 3600s, not 900s (controller ruling, #23.12 review): after Tasks 23.11/23.12/23.13 every
-# outbound HTTP client this pipeline calls retries. One _ncbi_get can take up to 4 attempts
-# × 60s timeout + backoff ≈ 243s, and convert_dois_to_pmids issues one such call per
-# unresolved DOI SEQUENTIALLY, on top of up to 10 PMC methods fetches and three retried
-# ORCID calls — so under a sustained NCBI/ORCID brownout a single profile job can
-# legitimately exceed 900s. A purely time-based reaper set at 900s would re-queue a job
-# whose worker is still running it, causing duplicate synthesis + LLM spend. A heartbeat
-# (periodic started_at bump) is the full fix; raising the threshold is a stopgap.
+# 3600s, not 900s: every outbound HTTP client this pipeline calls retries. One
+# _ncbi_get can take up to 4 attempts × 60s timeout + backoff ≈ 243s, and
+# convert_dois_to_pmids issues one such call per unresolved DOI SEQUENTIALLY, on top
+# of up to 10 PMC methods fetches and three retried ORCID calls — so under a
+# sustained NCBI/ORCID brownout a single profile job can legitimately exceed 900s. A
+# purely time-based reaper set at 900s would re-queue a job whose worker is still
+# running it, causing duplicate synthesis + LLM spend. A heartbeat (periodic
+# started_at bump) is the full fix; raising the threshold is a stopgap.
 JOB_STALE_PROCESSING_THRESHOLD_SECONDS = 3600   # 1 hour
 JOB_REAP_CHECK_INTERVAL_SECONDS = 300           # mirrors notification_check_interval's cadence
 
@@ -83,7 +83,7 @@ async def reap_stale_jobs(session_factory: async_sessionmaker) -> int:
 
     A worker that dies mid-job (OOM, SIGKILL, host crash) leaves its claimed row committed
     'processing' by claim_job — claim_job only ever selects 'pending' rows, so nothing else in
-    the system will ever pick this job back up (COR-18a/b). started_at is the column claim_job
+    the system will ever pick this job back up. started_at is the column claim_job
     already writes and nothing has read until now.
 
     Single-replica invariant: this reaper is only safe because run_worker is serial and
@@ -195,7 +195,7 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             # failure record, or this commit itself raises PendingRollbackError,
             # which escapes process_job and strands the job in 'processing' until
             # the stale-processing reaper re-queues it after
-            # JOB_STALE_PROCESSING_THRESHOLD_SECONDS (COR-17; see
+            # JOB_STALE_PROCESSING_THRESHOLD_SECONDS (see
             # tests/integration/test_worker.py).
             await db.rollback()
             # rollback() expires every instrumented attribute on `job` (SQLAlchemy does this
@@ -211,8 +211,8 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             if job.attempts >= job.max_attempts:
                 # 'failed' (not 'dead'): the enum's 'failed' value is what
                 # templates/onboarding/profile_review.html's self-service "Try
-                # Again" button keys on (COR-18e/f) — 'dead' matches no branch
-                # there and rendered a blank page with no explanation.
+                # Again" button keys on — 'dead' matches no branch there and
+                # would render a blank page with no explanation.
                 job.status = "failed"
                 logger.warning("Job %s marked as failed after %d attempts", job.id, job.attempts)
                 await db.commit()
@@ -220,8 +220,8 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                 job.status = "pending"  # Will be retried
                 await db.commit()
                 # Exponential backoff so the next claim_job (ordered by enqueued_at) doesn't
-                # reclaim THIS job again immediately — without this all max_attempts burn
-                # back-to-back with zero delay (COR-18c).
+                # reclaim THIS job again immediately — without this all max_attempts would
+                # burn back-to-back with zero delay.
                 delay = min(
                     JOB_RETRY_BACKOFF_CAP_SECONDS,
                     JOB_RETRY_BACKOFF_BASE_SECONDS * (2 ** max(0, job.attempts - 1)),
@@ -242,8 +242,8 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                     step = min(1.0, delay - waited)
                     await asyncio.sleep(step)
                     waited += step
-            # completed_at is NOT set here (COR-18d): it now means "genuinely completed",
-            # matching how templates/admin/jobs.html and user_detail.html display it. A job
+            # completed_at is NOT set here: it means "genuinely completed", matching
+            # how templates/admin/jobs.html and user_detail.html display it. A job
             # that failed or is retrying has not completed.
 
 
@@ -275,7 +275,7 @@ async def run_worker():
 
             now = asyncio.get_event_loop().time()
 
-            # Stale-processing reaper (throttled) — COR-18a/b
+            # Stale-processing reaper (throttled)
             if now - last_reap_check >= JOB_REAP_CHECK_INTERVAL_SECONDS:
                 last_reap_check = now
                 try:
@@ -326,17 +326,15 @@ async def _shutdown_worker(engine) -> None:
     """The worker's shutdown path, factored out so it's testable without
     spinning the real (Postgres-backed, runs-forever) ``run_worker`` loop.
 
-    Opus review follow-up (audit 2026-09-10): shuts the Slack I/O executor
-    down BEFORE disposing the DB engine — a Slack call abandoned mid-throttle
-    has no further use for the DB connection pool either way, and ordering it
-    first means a slow/hung executor shutdown can never leave the engine
-    undisposed.
+    Shuts the Slack I/O executor down BEFORE disposing the DB engine — a Slack
+    call abandoned mid-throttle has no further use for the DB connection pool
+    either way, and ordering it first means a slow/hung executor shutdown can
+    never leave the engine undisposed.
     """
     logger.info("Worker shutting down")
     shutdown_slack_executor()
-    # S-7 (audit 2026-09-10): same shutdown treatment as the Slack pool for
-    # the outbound-email (SES) pool -- see
-    # src/services/io_executor.py's module docstring.
+    # Same shutdown treatment as the Slack pool for the outbound-email (SES) pool
+    # -- see src/services/io_executor.py's module docstring.
     shutdown_io_executor()
     await engine.dispose()
 

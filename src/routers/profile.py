@@ -127,13 +127,12 @@ async def profile_save(
     # Which fields the client actually SENT. FastAPI maps an empty Form value to
     # the parameter default, so `Form(None)` cannot tell "the user cleared this
     # box" (must write "") from "the field was not in the POST at all" (must
-    # leave the stored value alone). The raw form can. See issue #22 COR-22.
+    # leave the stored value alone). The raw form can.
     form = await request.form()
 
     # Only touch email if the client actually sent the field — same presence
     # gate as the profile fields below. A POST that omits `email` must not
-    # silently NULL User.email (nullable+unique, so nothing would raise). See
-    # issue #22 COR-22 fix round 1.
+    # silently NULL User.email (nullable+unique, so nothing would raise).
     if "email" in form:
         # Validate the email up front so a bad value rejects the whole submission
         # before anything is persisted.
@@ -288,7 +287,7 @@ async def delete_account(
     # agent leaves status='active' with no owner — a bot on Slack in this PI's
     # name that nobody can deactivate, edit or answer proposals for. Refuse,
     # and say what to do about it, rather than silently deactivating an agent
-    # the user did not ask us to touch. (#25 D1 / phase8 I3.)
+    # the user did not ask us to touch.
     blocking_agent = await agent_blocking_account_delete(db, current_user)
     if blocking_agent is not None:
         return templates.TemplateResponse(

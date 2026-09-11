@@ -37,7 +37,7 @@ class _Resp:
         return self._payload
 
 
-# --- issue #24 C2: off the event loop, capped, no wasted final sleep ------------------
+# --- off the event loop, capped, no wasted final sleep --------------------------------
 
 
 async def test_create_app_async_runs_off_the_event_loop(monkeypatch):
@@ -144,7 +144,7 @@ def test_every_blocking_entry_point_has_an_async_twin():
 async def test_exchange_code_async_runs_off_the_event_loop(monkeypatch):
     """The three single-shot twins (lookup_team_id_async, rotate_config_token_async,
     exchange_code_async) need the same thread-identity proof as create_app_async: a twin that
-    dropped asyncio.to_thread would be caught by nothing else -- Task 24.4's tests monkeypatch
+    dropped asyncio.to_thread would be caught by nothing else -- other tests monkeypatch
     these out entirely, so they never observe which thread the call actually ran on."""
     loop_thread = threading.get_ident()
     seen: dict[str, int] = {}
@@ -204,8 +204,7 @@ async def test_rotate_config_token_async_runs_off_the_event_loop(monkeypatch):
 # --- the manifest -------------------------------------------------------------------
 
 # Every Slack API method the codebase calls, and the bot scope it needs. Derived by
-# grepping src/ for `client.<method>` — see the Surface Inventory in
-# .notes/slack-integration-test-plan.md.
+# grepping src/ for `client.<method>`.
 METHOD_SCOPES = {
     "auth.test": None,                                  # no scope required
     "chat.postMessage": "chat:write",
@@ -313,7 +312,7 @@ def test_create_app_retries_only_on_rate_limit(monkeypatch):
 
 
 def test_exchange_code_never_echoes_the_token(monkeypatch):
-    """SEC-9. This error string reaches the server log and a user-facing
+    """This error string reaches the server log and a user-facing
     ?slack_error= redirect, so any fragment of the value is a leak."""
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(
         {"ok": True, "access_token": "xoxp-WRONGTYPE-abcdefghijklmnop"}))
@@ -345,7 +344,7 @@ def test_exchange_code_surfaces_a_slack_error(monkeypatch):
 
 @pytest.mark.integration
 async def test_rotation_persists_the_whole_triple(db_session, monkeypatch):
-    """SEC-10. The refresh token just spent is dead; if only some of the three KV rows
+    """The refresh token just spent is dead; if only some of the three KV rows
     land, app-config access is lost with no way back to the old pair."""
     monkeypatch.setattr(
         "src.services.slack_provisioning.rotate_config_token",

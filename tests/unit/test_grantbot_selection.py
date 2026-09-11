@@ -1,5 +1,4 @@
-"""GrantBot's LLM selection step must never post unvetted opportunities on a parse failure
-(issue #23 COR-26a/COR-26b)."""
+"""GrantBot's LLM selection step must never post unvetted opportunities on a parse failure."""
 
 import pytest
 
@@ -49,7 +48,7 @@ async def test_a_number_the_llm_invented_is_dropped_not_a_hard_fail(monkeypatch)
 
 
 async def test_a_transport_failure_propagates_instead_of_hard_failing(monkeypatch):
-    """I2: a transient Anthropic 429/529/timeout must NOT be swallowed into the `[]` hard-fail —
+    """A transient Anthropic 429/529/timeout must NOT be swallowed into the `[]` hard-fail —
     that would silently cost GrantBot the whole day (the scheduler marks the day complete on any
     normal return). It must propagate so the scheduler's `except` (which does NOT mark the day
     complete) retries on its next 15-minute tick."""
@@ -63,9 +62,9 @@ async def test_a_transport_failure_propagates_instead_of_hard_failing(monkeypatc
 
 
 def test_dead_profile_search_helpers_are_removed():
-    """COR-26d: these three helpers and PROFILES_DIR had zero callers anywhere in src/, scripts/
-    or tests/ — grantbot's profile-driven keyword search was superseded and never removed. 83 dead
-    lines plus a dead module constant."""
+    """These three helpers and PROFILES_DIR must have zero callers anywhere in src/, scripts/
+    or tests/ — grantbot's profile-driven keyword search was superseded and must not linger as
+    dead code plus a dead module constant."""
     for name in (
         "_load_researcher_profiles", "_extract_list_section",
         "_build_search_queries", "PROFILES_DIR",

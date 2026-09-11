@@ -1,4 +1,4 @@
-"""Unit tests for src/services/atomic_write.py (issue #22 COR-24)."""
+"""Unit tests for src/services/atomic_write.py."""
 
 import stat
 import tempfile

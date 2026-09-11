@@ -1,4 +1,4 @@
-"""SEC-5: anti-spoofing checks for inbound email processing."""
+"""Anti-spoofing checks for inbound email processing."""
 
 import email
 
@@ -27,8 +27,8 @@ def test_all_pass_accepted():
 
 
 def test_authserv_id_with_rfc_8601_version_token_is_accepted():
-    # S-5 (audit 2026-09-10): RFC 8601 §2.2 permits a trailing
-    # `authres-version` token on the authserv-id (`amazonses.com 1`). A
+    # RFC 8601 permits a trailing `authres-version` token on the authserv-id
+    # (`amazonses.com 1`). A
     # comparison that requires an exact match against bare `amazonses.com`
     # rejects every genuine SES message once it stamps a version.
     h = ("Authentication-Results: amazonses.com 1; spf=pass smtp.mailfrom=b.com; "
@@ -57,7 +57,7 @@ def test_dmarc_none_with_aligned_spf_pass_accepted():
     assert _authentication_results_ok(_msg(h)) is True
 
 
-# --- DMARC alignment when dmarc != pass (SEC3-2, audit 2026-09-10) ---------
+# --- DMARC alignment when dmarc != pass ------------------------------------
 #
 # dmarc=none means the sender's domain publishes no DMARC policy, not that
 # the message failed -- but without dmarc=pass, a lone spf=pass on the
@@ -104,8 +104,8 @@ def test_unaligned_dkim_header_d_rejected():
 
 
 def test_quoted_mailfrom_local_part_cannot_inject_a_fake_domain_tag():
-    # Opus review follow-up (audit 2026-09-10): the domain-tag regexes
-    # (_SPF_MAILFROM_RE/_DKIM_D_RE/_DKIM_I_RE) used to `.search()` the WHOLE
+    # The domain-tag regexes
+    # (_SPF_MAILFROM_RE/_DKIM_D_RE/_DKIM_I_RE) must not `.search()` the WHOLE
     # Authentication-Results header, ignoring RFC 5322 quoting -- so a
     # quoted MAIL FROM local part containing the literal text
     # `header.d=scripps.edu;` (a fake DKIM domain tag, closed with a `;` that
@@ -162,8 +162,7 @@ def test_subdomain_alignment_accepted():
 
 
 def test_parent_domain_of_the_from_domain_is_not_aligned():
-    # Opus review follow-up (audit 2026-09-10): alignment must be
-    # one-directional. If a PARENT domain (e.g. a shared email platform like
+    # Alignment must be one-directional. If a PARENT domain (e.g. a shared email platform like
     # provider.com) passing SPF/DKIM for itself were accepted as "aligned"
     # with any From address at a subdomain of it (pi@pi.provider.com), any
     # OTHER tenant of that same platform could spoof any other tenant's users
@@ -186,7 +185,7 @@ def test_permerror_rejected():
     assert _authentication_results_ok(_msg(h)) is False
 
 
-# --- From parsing (SEC3-1, audit 2026-09-10) --------------------------------
+# --- From parsing -----------------------------------------------------------
 
 
 def test_unparseable_from_returns_none():
@@ -220,8 +219,8 @@ def test_group_syntax_rejected():
 
 
 def test_single_member_group_syntax_is_accepted():
-    # Opus review follow-up (audit 2026-09-10): the refusal above is about
-    # AMBIGUITY (more than one candidate address), not group syntax itself --
+    # The refusal above is about AMBIGUITY (more than one candidate address),
+    # not group syntax itself --
     # a group naming exactly one member resolves unambiguously via
     # getaddresses and must be accepted like any other single-address header.
     h = "From: Group: a@b.com;"

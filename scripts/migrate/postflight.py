@@ -136,7 +136,7 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     # reasoning).
     ("thread_decisions", "pi_engaged_at", "timestamp with time zone", True, ""),
     ("agent_messages", "pi_inbound_state", "character varying", True, ""),
-    # 0030 — RC-1's ownership carrier and RC-2's DM handled-marker. Both
+    # 0030 — the sender ownership carrier and the DM handled-marker. Both
     # nullable, no default; sender_user_id has no backfill (there is no way to
     # recover who wrote a pre-existing row), handled_at IS backfilled by the
     # migration itself for pre-existing inbound rows (to created_at) — but a
@@ -228,7 +228,7 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
         "private_channel_members",
         "FOREIGN KEY (added_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
     ),
-    # 0030 (A6, opus review, audit 2026-09-08)
+    # 0030
     "agent_messages_sender_user_id_fkey": (
         "agent_messages",
         "FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE SET NULL",
@@ -271,10 +271,10 @@ DRIFT_FAIL_OPS = frozenset(
 )
 #: Reported, never fatal. ``remove_table`` means the DATABASE has a table no model
 #: declares — an operator artefact, not something the ORM can trip over. Production
-#: carries exactly one (``email_notifications_expired_bak_20260814``, 40 rows, made
-#: during the 2026-08-14 deploy), and classifying it as fatal turned a correct
-#: migration into "VERIFICATION FAILED ... Restore" inside the migration window.
-#: postflight runs with warn_exit_code=0, so a WARN here still lets the deploy proceed.
+#: carries one such table (``email_notifications_expired_bak_20260814``, a manual
+#: backup snapshot), and classifying it as fatal turned a correct migration into
+#: "VERIFICATION FAILED ... Restore" inside the migration window. postflight runs
+#: with warn_exit_code=0, so a WARN here still lets the deploy proceed.
 DRIFT_WARN_OPS = frozenset({"remove_table"})
 DRIFT_IGNORED_OPS = frozenset(
     {"remove_index", "remove_constraint", "add_table_comment", "remove_column"}

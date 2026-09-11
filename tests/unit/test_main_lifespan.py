@@ -1,5 +1,4 @@
-"""The FastAPI app's lifespan shuts the Slack I/O executor down on exit (opus
-review follow-up to R-2, audit 2026-09-10).
+"""The FastAPI app's lifespan shuts the Slack I/O executor down on exit.
 
 A bare module-level ``ThreadPoolExecutor`` (src/services/slack_executor.py) is
 never torn down on its own — an in-flight Slack call blocked on a sustained
@@ -43,16 +42,16 @@ async def test_create_app_actually_drives_the_lifespan_shutdown(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_real_lifespan_shutdown_does_not_permanently_kill_run_slack_call():
-    """K-9 (audit 2026-09-10): the REAL (unmocked) shutdown_slack_executor()
-    used to leave the module-level pool permanently shut down. Any pytest
-    process that drives this app's real ASGI lifespan even once (many
-    integration tests do, for reasons that have nothing to do with Slack) then
-    broke run_slack_call for every OTHER test sharing that interpreter,
-    regardless of whether that test ever touched shutdown itself. The pool
-    must now be lazily re-created on the next call instead.
+    """The REAL (unmocked) shutdown_slack_executor() must not leave the
+    module-level pool permanently shut down. Any pytest process that drives
+    this app's real ASGI lifespan even once (many integration tests do, for
+    reasons that have nothing to do with Slack) would otherwise break
+    run_slack_call for every OTHER test sharing that interpreter, regardless
+    of whether that test ever touched shutdown itself. The pool must be
+    lazily re-created on the next call instead.
 
-    L-1 (opus review, audit 2026-09-10): this drives the REAL
-    ``shutdown_slack_executor()``, which now also sets
+    This drives the REAL
+    ``shutdown_slack_executor()``, which also sets
     ``slack_client.SHUTTING_DOWN`` (the module-level fallback) as a side
     effect — leaving that Event set for the rest of this pytest process
     would abort every OTHER test's retry sleep bound to it (any

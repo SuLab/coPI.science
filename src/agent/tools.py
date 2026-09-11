@@ -11,8 +11,8 @@ from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
 
-# See src/agent/agent.py's PROFILES_DIR — same setting, same default (RC-13).
-# REV3-6 (audit 2026-09-08): None by default, resolved lazily via
+# See src/agent/agent.py's PROFILES_DIR — same setting, same default.
+# None by default, resolved lazily via
 # _profiles_dir() — see agent.py's own accessor for the full rationale.
 PROFILES_DIR: Path | None = None
 
@@ -136,10 +136,9 @@ async def execute_tool(
             result = await fetch_abstract(tool_input["pmid_or_doi"])
             if "error" in result:
                 return result["error"]
-            # Only a resolved paper counts against the thread's budget (issue
-            # #23 COR-30): the old code incremented before the fetch, so a bad
-            # PMID/DOI or a transient PubMed failure still spent the thread's
-            # abstract allowance on nothing.
+            # Only a resolved paper counts against the thread's budget: incrementing
+            # before the fetch would let a bad PMID/DOI or a transient PubMed
+            # failure spend the thread's abstract allowance on nothing.
             if thread_state:
                 thread_state.abstracts_other += 1
             return _format_abstract_result(result)
@@ -214,7 +213,7 @@ async def _execute_retrieve_profile(agent_id: str) -> str:
     """Read a public profile from disk."""
     profile_path = _profiles_dir() / "public" / f"{agent_id}.md"
     try:
-        # Profiles are user-editable text — fence as untrusted data (SEC-14).
+        # Profiles are user-editable text — fence as untrusted data.
         return delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
     except FileNotFoundError:
         return f"No public profile found for agent '{agent_id}'."
@@ -230,7 +229,7 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
 
 def _format_abstract_result(result: dict[str, Any]) -> str:
     """Render a successful ``fetch_abstract`` result for the tool-use reply."""
-    # Title/abstract come from PubMed — untrusted external text (SEC-14).
+    # Title/abstract come from PubMed — untrusted external text.
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
     ]
@@ -239,15 +238,15 @@ def _format_abstract_result(result: dict[str, Any]) -> str:
         shown = ", ".join(authors[:20])
         if len(authors) > 20:
             shown += f", … (+{len(authors) - 20} more)"
-        # Author names come from PubMed — untrusted external text (SEC-14).
+        # Author names come from PubMed — untrusted external text.
         parts.append(f"Authors: {delimit(shown, 'paper_authors')}")
     parts += [
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
     ]
     if result.get("doi"):
-        # From PubMed — untrusted external text (SEC-14). Cited so a lab
-        # sharing its own paper can ground the claim in a DOI (issue #29).
+        # From PubMed — untrusted external text. Cited so a lab
+        # sharing its own paper can ground the claim in a DOI.
         parts.append(f"DOI: {delimit(result['doi'], 'paper_doi')}")
     parts += [
         "",
@@ -266,7 +265,7 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
 
 def _format_full_text_result(result: dict[str, Any]) -> str:
     """Render a successful ``fetch_full_text`` result for the tool-use reply."""
-    # Title/abstract/methods come from PubMed/PMC — untrusted external text (SEC-14).
+    # Title/abstract/methods come from PubMed/PMC — untrusted external text.
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
     ]
@@ -275,15 +274,15 @@ def _format_full_text_result(result: dict[str, Any]) -> str:
         shown = ", ".join(authors[:20])
         if len(authors) > 20:
             shown += f", … (+{len(authors) - 20} more)"
-        # Author names come from PubMed — untrusted external text (SEC-14).
+        # Author names come from PubMed — untrusted external text.
         parts.append(f"Authors: {delimit(shown, 'paper_authors')}")
     parts += [
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
     ]
     if result.get("doi"):
-        # From PubMed — untrusted external text (SEC-14). Cited so a lab
-        # sharing its own paper can ground the claim in a DOI (issue #29).
+        # From PubMed — untrusted external text. Cited so a lab
+        # sharing its own paper can ground the claim in a DOI.
         parts.append(f"DOI: {delimit(result['doi'], 'paper_doi')}")
     if result.get("pmcid"):
         parts.append(f"PMCID: {result['pmcid']}")

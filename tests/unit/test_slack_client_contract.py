@@ -42,7 +42,7 @@ from src.agent.slack_client import (
 from tests.fakes import RecordingSlackClient, _SlackResponse, slack_error
 
 # Captured before the module-level `_no_real_sleep` autouse fixture below ever
-# monkeypatches `time.sleep` to a no-op, so K-2's abort-latency test can
+# monkeypatches `time.sleep` to a no-op, so the abort-latency test below can
 # restore genuine sleeping for the one test that needs real wall-clock time to
 # pass or fail meaningfully.
 _REAL_SLEEP = time.sleep
@@ -189,15 +189,15 @@ def test_retry_after_header_is_honoured(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
     )
     _client(fake).post_message("general", "hi")
-    # K-2: the sleep is now sliced into <=1s chunks so a shutdown can
-    # interrupt it promptly, so it is a list of one-second slices now
+    # The sleep is sliced into <=1s chunks so a shutdown can
+    # interrupt it promptly, so it is a list of one-second slices
     # rather than one call carrying the full duration.
     assert all(s <= 1.0 for s in slept)
     assert sum(slept) == 17, f"slept {slept}, expected Slack's Retry-After of 17"
 
 
 def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
-    """V7e: a non-integer Retry-After (HTTP-date, float string, negative) used to raise ValueError
+    """A non-integer Retry-After (HTTP-date, float string, negative) must not raise ValueError
     *inside* the `except SlackApiError:` block, escaping post_message's `except SlackApiError` entirely
     and crashing the turn — exactly when Slack is already throttling us."""
     slept = []
@@ -209,9 +209,9 @@ def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
         ]},
     )
     assert _client(fake).post_message("general", "hi") is not None
-    # A past-dated HTTP-date is unusable, so parse_retry_after falls back to the caller's
-    # `default` (5.0 here) rather than the 0.0 it used to compute — a zero backoff is a hot
-    # retry against an API that just throttled us (#24 audit Minor 2, commit 35c59a9).
+    # A past-dated HTTP-date is unusable, so parse_retry_after must fall back to the caller's
+    # `default` (5.0 here) rather than compute 0.0 — a zero backoff is a hot
+    # retry against an API that just throttled us.
     assert all(s <= 1.0 for s in slept)
     assert sum(slept) == 5.0
 
@@ -243,7 +243,7 @@ def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
 
 
 def test_a_60s_retry_after_is_honoured_across_multiple_throttled_attempts(monkeypatch):
-    """#23 V7: `Retry-After: 60` used to be indistinguishable from a dropped post — the
+    """`Retry-After: 60` used to be indistinguishable from a dropped post — the
     old fixed `MAX_RETRIES = 3` exhausted after three 30s-capped sleeps (90s total) even
     though Slack asked for only three real waits' worth of patience. The wait budget
     (180s) must let this succeed instead of raising."""
@@ -296,13 +296,13 @@ def test_exhaustion_error_states_how_long_was_waited(monkeypatch):
 
 
 def test_call_with_retry_aborts_before_attempt_zero_when_already_shutting_down(monkeypatch):
-    """P-3 (opus review, audit 2026-09-10): a call that is still queued (or
-    just hasn't started yet) when shutdown is signalled used to always make
-    its first attempt regardless — `_call_with_retry` only ever checked
-    `SHUTTING_DOWN` inside the `except SlackApiError` retry-sleep branch, so
-    attempt 0 always ran a full network round trip even when the process had
-    already decided to exit. Checking the event before attempt 0 means that
-    work aborts immediately with zero Slack calls made.
+    """A call that is still queued (or just hasn't started yet) when shutdown
+    is signalled must not make its first attempt regardless — `_call_with_retry`
+    must not only check `SHUTTING_DOWN` inside the `except SlackApiError`
+    retry-sleep branch, or attempt 0 always runs a full network round trip
+    even when the process has already decided to exit. Checking the event
+    before attempt 0 means that work aborts immediately with zero Slack calls
+    made.
     """
     SHUTTING_DOWN.set()
     try:
@@ -319,7 +319,7 @@ def test_call_with_retry_aborts_before_attempt_zero_when_already_shutting_down(m
 
 
 def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch):
-    """K-2 (opus review, audit 2026-09-10): a worker thread sleeping through a
+    """A worker thread sleeping through a
     Retry-After backoff must not hold interpreter shutdown open for the whole
     (up to 180s) wait budget. `_call_with_retry` sleeps in <=1s slices and
     checks `SHUTTING_DOWN` between them, so once shutdown is signalled the
@@ -361,7 +361,7 @@ def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch)
 
 
 def test_post_one_handles_a_shutdown_abort_without_an_attributeerror(monkeypatch):
-    """K-2 follow-up (opus review, audit 2026-09-10): every ``except
+    """Every ``except
     SlackApiError as exc:`` handler in this module reads
     ``exc.response.get("error")`` unconditionally — a plain
     ``SlackApiError("shutting down", response=None)`` broke that contract and
@@ -806,10 +806,10 @@ def test_a_single_call_with_no_wait_budget_override_is_unchanged(monkeypatch):
 
 
 def test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page(monkeypatch):
-    """Root cause of R-1: before this fix, every page got its own full
-    `RATE_LIMIT_WAIT_BUDGET_SECONDS`, so a listing that stayed throttled across
-    many pages could block for MAX_PAGES * that budget. `_paginate` now owns one
-    listing-level budget shared across all its pages.
+    """Every page must not get its own full `RATE_LIMIT_WAIT_BUDGET_SECONDS`,
+    or a listing that stays throttled across many pages could block for
+    MAX_PAGES * that budget. `_paginate` owns one listing-level budget shared
+    across all its pages.
 
     Uses a fake monotonic clock that only advances on `time.sleep` (which the
     module-level `_no_real_sleep` fixture would otherwise make free) so the
@@ -858,10 +858,10 @@ def test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page(mon
 
 
 def test_a_single_pages_wait_budget_is_capped_at_the_per_call_default(monkeypatch):
-    """Opus-review follow-up to R-1: PAGINATION_WAIT_BUDGET_SECONDS (600s) is
+    """PAGINATION_WAIT_BUDGET_SECONDS (600s) is
     much larger than RATE_LIMIT_WAIT_BUDGET_SECONDS (180s), and page 0 starts
-    with the *entire* listing budget as its remaining allowance — so, before
-    this fix, a lone first page could be given ~600s instead of the per-call
+    with the *entire* listing budget as its remaining allowance — so a lone
+    first page must not be given ~600s instead of the per-call
     180s default. Each page's `_wait_budget` must be capped at
     RATE_LIMIT_WAIT_BUDGET_SECONDS regardless of how much listing budget
     remains."""
@@ -1355,7 +1355,7 @@ def test_resolve_user_name_falls_back_to_real_name_with_no_display_name():
 
 
 def test_resolve_user_name_tolerates_a_null_profile():
-    """M1 (#23 V7e's type-substitution sibling): `dict.get(k, {})` returns the actual value —
+    """Type-substitution sibling case: `dict.get(k, {})` returns the actual value —
     `None`, not the default `{}` — when Slack sends the key present with a null value
     (`"profile": null`). The old chained `.get("profile", {}).get("display_name")` then raised
     `AttributeError` on `None`, which the surrounding `except SlackApiError` does not catch, so it

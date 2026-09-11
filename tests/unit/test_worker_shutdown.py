@@ -1,6 +1,5 @@
-"""The worker's shutdown path shuts the Slack I/O executor down (opus review
-follow-up to R-2, audit 2026-09-10) — see the identical reasoning in
-tests/unit/test_main_lifespan.py for the web app's side.
+"""The worker's shutdown path shuts the Slack I/O executor down — see the
+identical reasoning in tests/unit/test_main_lifespan.py for the web app's side.
 
 `run_worker()` itself needs Postgres and runs forever, so this drives
 `_shutdown_worker`, the factored-out tail of the loop, directly — mirroring

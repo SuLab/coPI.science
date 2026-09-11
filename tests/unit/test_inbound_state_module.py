@@ -1,9 +1,9 @@
-"""REV3-7 (opus review, audit 2026-09-08): the four ``PI_INBOUND_*`` constants
-live in a dependency-free ``src.agent.inbound_state`` module.
+"""The four ``PI_INBOUND_*`` constants must live in a dependency-free
+``src.agent.inbound_state`` module, not be imported by
 ``src.services.pi_inbox`` (the web/worker request path that records a PI
-message) used to import ``PI_INBOUND_PENDING`` from ``src.agent.simulation``
-inside its own function body — dragging the whole simulation engine module
-into the web/worker process just to read one string constant.
+message) from ``src.agent.simulation`` inside its own function body —
+otherwise that drags the whole simulation engine module into the web/worker
+process just to read one string constant.
 """
 
 import subprocess
@@ -31,7 +31,7 @@ def test_simulation_still_re_exports_them_for_existing_callers():
 
 
 def test_importing_pi_inbox_does_not_pull_in_the_simulation_engine():
-    """The whole point of REV3-7: a fresh process that imports
+    """A fresh process that imports
     ``src.services.pi_inbox`` alone (no other src.agent.simulation import
     already in sys.modules) must not transitively import
     ``src.agent.simulation`` — that module is the request path's own web/

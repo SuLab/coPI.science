@@ -1,7 +1,6 @@
-"""Doc-accuracy checks for the final-fix-wave Unit F controller documentation
-(#27 I2 I3 I5): the prod runbook (Part R of the close-issues-20-27 plan doc)
-must fold in the implementation-review deploy notes with the corrected UID
-10001 chown scope, the plan doc must carry a controller-rulings appendix,
+"""Doc-accuracy checks for the prod deploy runbook: the plan doc's deploy
+section must fold in the deploy notes with the corrected UID 10001 chown
+scope and carry a controller-rulings appendix,
 docs/production-migration.md's routine-deploy section must document the
 fail-closed escape hatch and the reboot-vs-`migrate` restart-policy mismatch,
 and CLAUDE.md's agent-restart runbook must call out that step 3 now also
@@ -45,10 +44,10 @@ def test_claude_md_restart_step_mentions_migrate():
 
 
 def test_claude_md_restart_step_3_points_at_redeploy_script():
-    """audit 2026-09-08 RC-6, #27 I2: a bare `docker compose up -d --build app worker`
+    """A bare `docker compose up -d --build app worker`
     on a running stack does not guarantee `migrate` reruns before the new containers
     start. Step 3 must drive scripts/redeploy.sh, which enforces the ordering
-    explicitly, not the raw compose invocation this replaced."""
+    explicitly, not a raw compose invocation."""
     text = CLAUDE_MD.read_text()
     idx = text.index("Before restarting")
     restart_section = text[idx : idx + 2000]
@@ -60,9 +59,9 @@ def test_claude_md_restart_step_3_points_at_redeploy_script():
 
 
 def test_production_migration_doc_routine_deploy_section_points_at_redeploy_script():
-    """RC-6: the routine-deploy section (10.1) described the exact race this script
-    fixes; it must now tell the reader to run scripts/redeploy.sh instead of the raw
-    `up -d --build app worker grantbot` invocation."""
+    """The routine-deploy section (10.1) describes a race between a raw
+    `up -d --build app worker grantbot` invocation and `migrate`; it must tell the
+    reader to run scripts/redeploy.sh instead of that raw invocation."""
     text = PROD_MIGRATION_DOC.read_text()
     idx = text.index("### 10.1 The routine path")
     section = text[idx : idx + 2500]
@@ -70,8 +69,8 @@ def test_production_migration_doc_routine_deploy_section_points_at_redeploy_scri
 
 
 def test_production_migration_doc_step_9_points_at_redeploy_script():
-    """RC-6 follow-up (audit 2026-09-08, opus review): Step 9 still told the reader
-    to run the raw `up -d --build app worker` this section (10.1) documents as
+    """Step 9 must not tell the reader
+    to run the raw `up -d --build app worker` that section 10.1 documents as
     racy against a running stack. It must point at scripts/redeploy.sh too."""
     text = PROD_MIGRATION_DOC.read_text()
     idx = text.index("### Step 9")
@@ -81,8 +80,8 @@ def test_production_migration_doc_step_9_points_at_redeploy_script():
 
 
 def test_production_migration_doc_lists_0024_as_a_supported_starting_point():
-    """issue #26 Minor 10: A4's doc widening (Part M) added 0024 as a
-    supported starting point but no test pinned it."""
+    """0024 is a supported starting point for a fresh migration and must be
+    documented as such."""
     text = PROD_MIGRATION_DOC.read_text()
     assert "**0024**" in text
     assert "is also a supported starting point" in text
@@ -109,9 +108,10 @@ def _alembic_head() -> str:
 
 
 def test_production_migration_doc_states_the_current_alembic_head():
-    """#27 I2 / F23: the runbook named a target that the tree had moved past.
+    """The runbook must not name a fixed alembic-head target that the tree can move
+    past.
 
-    `run_migration.sh` now derives the target, so the number here is documentation
+    `run_migration.sh` derives the target, so the number here is documentation
     rather than configuration -- but a runbook that quotes a stale head still sends the
     operator looking for a mismatch that is not there, so it is pinned to the tree.
     """
@@ -133,18 +133,18 @@ def test_production_migration_doc_says_the_target_is_derived_not_pinned():
 
 
 # --------------------------------------------------------------------------- #
-# Part R additions deferred to Task 33 (plan Step 11): the per-user pipeline
+# The deploy runbook (Part R) must additionally cover: the per-user pipeline
 # re-run, 0029's measured lock row, and deploy note 18's discharged sentence.
 # --------------------------------------------------------------------------- #
 
 
 def test_part_r_carries_the_publication_text_repair_step():
-    """Task 20 measured 896 rows still holding truncated PubMed text and shipped
+    """896 rows still hold truncated PubMed text and need
     `scripts/repair_publication_text.py`; without an ordered runbook step the repair is
     prose nobody re-reads."""
     text = PLAN_DOC.read_text()
     assert "scripts/repair_publication_text.py --all" in text, (
-        "Part R must carry Task 20's repair step, including --all (the targeted "
+        "Part R must carry the repair step, including --all (the targeted "
         "predicate reaches only 248 of the 896 wrong rows)"
     )
     assert "--all --apply" in text, (
@@ -180,7 +180,7 @@ def test_part_r_states_why_a_pipeline_re_run_is_not_enough_on_its_own():
 def test_part_r_lock_table_has_0029s_measured_row():
     text = PLAN_DOC.read_text()
     assert "1.6 – 3.1 ms" in text, (
-        "R.6's lock table must carry Task 8's measured 0029 row (whole revision, "
+        "R.6's lock table must carry 0029's measured lock row (whole revision, "
         "1.6 - 3.1 ms)"
     )
     assert "0.77 – 1.27 ms" in text, "R.6 must carry 0029's thread_decisions ADD COLUMN timing"
@@ -188,22 +188,22 @@ def test_part_r_lock_table_has_0029s_measured_row():
 
 
 def test_part_r_lock_table_says_what_each_figure_measures():
-    """audit-phase8-migration.md N4: preflight's published "worst-case lock window 0.3 s"
+    """preflight's published "worst-case lock window 0.3 s"
     is `estimate_lock_window_ms(publications_rows)`, a model calibrated on 0019's
     agent_messages index build -- not a measurement of this chain. A table that mixes
     measured statement times with that number and labels the column "Measured" is wrong."""
     text = PLAN_DOC.read_text()
     assert "not a measurement of this chain" in text, (
         "R.6's lock table must say which figures are measurements and which are model "
-        "output; audit-phase8-migration.md N4 records the 0.3 s figure as neither"
+        "output; the 0.3 s figure is neither"
     )
 
 
 def test_deploy_note_18_no_longer_defers_the_agent_measurement():
     text = PLAN_DOC.read_text()
     assert "docker stats --no-stream` during a turn before tightening." not in text, (
-        "deploy note 18's 'measure before tightening' sentence is discharged by Task 30b "
-        "and must be replaced by the measurement itself"
+        "deploy note 18's 'measure before tightening' sentence must be replaced "
+        "by the measurement itself"
     )
     assert "3.4× headroom" in text, (
         "deploy note 18 must carry the measured peak behind the agent's 768m cap"
@@ -211,9 +211,9 @@ def test_deploy_note_18_no_longer_defers_the_agent_measurement():
 
 
 # --------------------------------------------------------------------------- #
-# The post-merge closure handoff (Task 33). Part R tells an operator how to
-# DEPLOY this branch; nothing told them how to CLOSE #20-#27 afterwards, so the
-# dispositions, carve-outs and follow-ups lived only in a plan nobody re-reads.
+# The post-merge closure handoff. The deploy runbook tells an operator how to
+# DEPLOY a branch; the closure handoff separately records how to CLOSE the
+# issues it fixes afterwards -- dispositions, exceptions and follow-ups.
 # These pins are deliberately written to fail with a sentence rather than a
 # StopIteration or an IndexError: every read is a plain `in`, every slice is
 # guarded by an explicit `find() != -1`, and every assert carries a message.
@@ -237,8 +237,8 @@ def _closure_handoff_text() -> str:
     """Read the handoff, or fail with the path rather than a FileNotFoundError."""
     assert CLOSURE_HANDOFF.is_file(), (
         f"the post-merge closure handoff is missing: expected {CLOSURE_HANDOFF}. "
-        "Part R of docs/plans/2026-09-02-close-issues-20-27.md is the deploy runbook; "
-        "this is the closure layer on top of it (plan Task 33)."
+        "The deploy runbook covers deploying the branch; "
+        "this is the closure layer on top of it."
     )
     return CLOSURE_HANDOFF.read_text()
 
@@ -267,10 +267,9 @@ def test_closure_handoff_exists_and_names_its_reader():
 
 
 def test_closure_handoff_carries_the_per_issue_disposition_table():
-    """Task 32 graded every DoD clause in docs/plans/2026-09-04-decisions/README.md.
-
-    The handoff copies that verdict; a reader who has to re-derive it will re-derive it
-    differently.
+    """Each issue's Definition-of-Done clauses were graded once against a documented
+    verdict; the handoff copies that verdict so a reader does not re-derive it
+    (possibly differently).
     """
     text = _closure_handoff_text()
     missing = [
@@ -279,7 +278,7 @@ def test_closure_handoff_carries_the_per_issue_disposition_table():
         if f"{issue}" not in text or disposition not in text
     ]
     assert not missing, (
-        "the handoff's per-issue table must carry every issue and its Task 32 disposition; "
+        "the handoff's per-issue table must carry every issue and its disposition; "
         f"not found: {', '.join(missing)}"
     )
     for issue in ("#20", "#26"):
@@ -290,7 +289,7 @@ def test_closure_handoff_carries_the_per_issue_disposition_table():
 
 
 def test_closure_handoff_gives_the_exact_closes_line_and_the_omissions():
-    """Plan Step 3: #21, #26 and #27 must NOT ride the merge's `Closes` line."""
+    """#21, #26 and #27 must NOT ride the merge's `Closes` line."""
     text = _closure_handoff_text()
     assert "Closes #20, #22, #23, #24, #25" in text, (
         "the handoff must quote the exact `Closes` line the PR body carries "
@@ -307,14 +306,15 @@ def test_closure_handoff_gives_the_exact_closes_line_and_the_omissions():
 
 
 def test_closure_handoff_does_not_claim_the_backfill_script_was_tested_locally():
-    """#26 DoD clause 2 is the one clause no pre-merge work can satisfy.
+    """One Definition-of-Done clause requires testing a backfill script locally, which
+    no pre-merge work can satisfy.
 
     `scripts/backfill_slack_ts.py` makes outbound Slack calls for every candidate row and
     its CLI is `"--apply" in sys.argv`, so there is no offline mode and no `--help` probe.
     """
     text = _closure_handoff_text()
     assert "Do not claim the script was tested locally" in text, (
-        "the DOC-7 procedure must carry the prohibition verbatim -- the script has never "
+        "the handoff must carry the prohibition verbatim -- the script has never "
         "been run against the local copy, because it would fire real requests at slack.com"
     )
     assert "no `--help`" in text, (
@@ -322,8 +322,8 @@ def test_closure_handoff_does_not_claim_the_backfill_script_was_tested_locally()
         '`"--apply" in sys.argv`, so any invocation goes straight to a DB connect'
     )
     assert "23" in text and "28" in text, (
-        "the handoff must state both NULL-slack_ts counts (23 on the copy, 28 in "
-        "audit-phase8-migration.md) and mark the live count authoritative"
+        "the handoff must state both NULL-slack_ts counts (23 on the local copy and 28 "
+        "on the live count) and mark the live count authoritative"
     )
 
 
@@ -342,9 +342,9 @@ def test_closure_handoff_carries_the_three_overturned_rulings():
     three times, and each reversal has a measured reason that must travel with it."""
     text = _closure_handoff_text()
     for needle, why in (
-        ("carries no proposal identity", "Task 12's CL21-2 reversal (option (b))"),
-        ("re-opens phase-8 C2", "Task 29's rejection of pool_pre_ping on the probe engine"),
-        ("thread_outcome_enum", "Task 5's parked-thread ruling (option (c))"),
+        ("carries no proposal identity", "the reversal choosing option (b)"),
+        ("re-opens phase-8 C2", "the rejection of pool_pre_ping on the probe engine"),
+        ("thread_outcome_enum", "the parked-thread ruling choosing option (c)"),
     ):
         assert needle in text, (
             f"the handoff must record {why}; expected the phrase {needle!r} and did not "
@@ -353,18 +353,19 @@ def test_closure_handoff_carries_the_three_overturned_rulings():
 
 
 def test_closure_handoff_turns_every_follow_up_into_a_runnable_command():
-    """Plan Step 8: a residual that is only prose is a residual nobody re-reads."""
+    """A residual that is only prose is a residual nobody re-reads: every named
+    follow-up needs its own runnable `gh issue create` line."""
     text = _closure_handoff_text()
     commands = text.count("gh issue create")
     assert commands >= 26, (
-        "every named follow-up needs its own `gh issue create` line (F1-F22, F25-F26 and "
-        f"the five Task 32 named during execution); found only {commands}"
+        "every named follow-up needs its own `gh issue create` line; "
+        f"found only {commands}"
     )
     for fixed in ("F23", "F24"):
         section = _section(text, "## Step 8")
         assert section, "the handoff must have a `## Step 8` follow-up section"
         assert f"**{fixed}**" not in section or "FIXED" in section, (
-            f"{fixed} was fixed by 71082fb and must not be listed as an open follow-up"
+            f"{fixed} was already fixed and must not be listed as an open follow-up"
         )
 
 

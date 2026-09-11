@@ -5,7 +5,7 @@ Documentation=file:///home/ubuntu/copi-python/docs/specs/2026-08-18-postgres-bac
 [Service]
 Type=oneshot
 # Deliberately does not depend on the failed unit's own error handling: this is
-# the independent path (audit C2) that fires even when copi-backup.service was
+# the independent path that fires even when copi-backup.service was
 # killed by a signal (e.g. SIGTERM from TimeoutStartSec) before it ever reached
 # its own except block. `copi-backup report` mails whatever status.json and
 # sidecars are on disk, so it reflects the real state regardless of why %i failed.

@@ -57,18 +57,17 @@ _MAX_S3_LIST_PAGES = 20
 # forever. Replies keep being processed past the cap — only the help emails stop.
 MAX_HELP_EMAILS_PER_NOTIFICATION = 3
 
-# REV3-3 (opus review, audit 2026-09-08): stale-token bounces per From
-# address. Same shape as MAX_HELP_EMAILS_PER_NOTIFICATION -- without a
+# Stale-token bounces per From address. Same shape as
+# MAX_HELP_EMAILS_PER_NOTIFICATION -- without a
 # ceiling, a PI who keeps replying to an old, superseded reminder (or an
 # autoresponder the RFC 3834 gate misses) trades bounces with us forever.
 MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS = 3
 
 # notification id (str) -> recent reply timestamps (monotonic-ish epoch
-# seconds). SEC2-5 (audit 2026-09-08): keyed by notification.id, not the
-# reply token -- the token now rotates on resend (RC-4), so a token-keyed
-# limiter's count resets to zero every time the PI's notification is
-# resent, letting a sender who triggers resends evade the per-notification
-# cap entirely.
+# seconds). Keyed by notification.id, not the reply token -- the token
+# rotates on resend, so a token-keyed limiter's count resets to zero every
+# time the PI's notification is resent, letting a sender who triggers
+# resends evade the per-notification cap entirely.
 _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 
 # notification id (str) -> help emails sent (in-memory, like the rate
@@ -76,8 +75,8 @@ _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 # resets the count). Also keyed by notification.id for the same reason.
 _HELP_EMAILS_SENT: dict[str, int] = {}
 
-# From address (lowercased) -> stale-token bounces sent (REV3-3, in-memory
-# like the help-email cap above). There is no notification id to key on here
+# From address (lowercased) -> stale-token bounces sent (in-memory, like the
+# help-email cap above). There is no notification id to key on here
 # -- the whole point is that the token did not resolve to one -- so this is
 # keyed on the sender's address instead.
 _STALE_TOKEN_BOUNCES_SENT: dict[str, int] = {}
@@ -85,7 +84,7 @@ _STALE_TOKEN_BOUNCES_SENT: dict[str, int] = {}
 # notification id -> instruction-failure emails sent (in-memory, like the help-email rate
 # limiter above). Caps the PI-facing email at one per notification. _handle_instruction's
 # failure sites split into two shapes, and the line between them is NOT which exception
-# was raised — it is whether anything irreversible had happened yet (COR-32):
+# was raised — it is whether anything irreversible had happened yet:
 #
 #   TERMINAL (notify the PI, return False, caller retires the notification, S3 object
 #   CONSUMED): a real Slack private channel already exists. Only
@@ -106,8 +105,8 @@ _INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
 _S3_FAILURE_COUNTS: dict[str, int] = {}
 
-# SEC3-4 (audit 2026-09-10): companion "last touched" timestamp dicts for the
-# bounded-in-name-only maps above. None of _RECENT_REPLY_TIMES,
+# Companion "last touched" timestamp dicts for the bounded-in-name-only maps
+# above. None of _RECENT_REPLY_TIMES,
 # _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT, _INSTRUCTION_FAILURE_EMAILS_SENT
 # or _S3_FAILURE_COUNTS ever drop a key once created -- they are keyed by
 # notification id, sender address, or S3 key, all unbounded over the life of
@@ -120,8 +119,8 @@ _STALE_BOUNCES_TOUCHED: dict[str, float] = {}
 _INSTRUCTION_FAILURE_TOUCHED: dict[str, float] = {}
 _S3_FAILURE_TOUCHED: dict[str, float] = {}
 
-# Opus review follow-up (audit 2026-09-10): a single 24h window for every map
-# silently turned three documented LIFETIME caps (MAX_HELP_EMAILS_PER_NOTIFICATION,
+# A single 24h window for every map would silently turn three documented
+# LIFETIME caps (MAX_HELP_EMAILS_PER_NOTIFICATION,
 # MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS, the one-per-notification instruction-failure
 # email) into 24h ROLLING caps -- a sender who keeps a notification's reply window
 # open, or keeps retrying the same stale token, could simply wait out the day and
@@ -165,8 +164,8 @@ def _reply_rate_ok(notification_id: str, now: float | None = None) -> bool:
     MAX_REPLIES_PER_TOKEN_PER_HOUR. In-memory: the worker is a single
     long-lived process, and a restart merely resets the window.
 
-    Keyed by ``notification_id`` (SEC2-5, audit 2026-09-08), not the reply
-    token: the token rotates on resend (RC-4), so a token-keyed limiter
+    Keyed by ``notification_id``, not the reply token: the token rotates on
+    resend, so a token-keyed limiter
     would reset every time the notification is resent.
     """
     ts = time.time() if now is None else now
@@ -210,15 +209,15 @@ def _is_auto_submitted(msg: email.message.Message) -> bool:
 # this to require dmarc=pass.)
 _AUTH_FAIL_VERDICTS = {"fail", "softfail", "temperror", "permerror"}
 
-# SEC3-2 (audit 2026-09-10): the domain tags carried alongside a passing spf/
-# dkim verdict, used to check alignment with the From address when dmarc!=pass
+# The domain tags carried alongside a passing spf/dkim verdict, used to
+# check alignment with the From address when dmarc!=pass
 # (see below).
 _SPF_MAILFROM_RE = re.compile(r"smtp\.mailfrom=([^\s;]+)", re.IGNORECASE)
 _DKIM_D_RE = re.compile(r"header\.d=([^\s;]+)", re.IGNORECASE)
 _DKIM_I_RE = re.compile(r"header\.i=([^\s;]+)", re.IGNORECASE)
 
-# Opus review follow-up (audit 2026-09-10): a mechanism's verdict and its
-# domain tag(s) must be read from that mechanism's OWN resinfo segment, not
+# A mechanism's verdict and its domain tag(s) must be read from that
+# mechanism's OWN resinfo segment, not
 # `.search()`ed/`.findall()`ed across the whole raw header text. RFC 5322
 # quoted-strings (e.g. a `smtp.mailfrom=` value with a quoted local part) can
 # contain a literal `;` that is not a real segment boundary, and can contain
@@ -271,9 +270,9 @@ def _domain_of(value: str) -> str:
 
 
 def _domains_aligned(authenticated_domain: str, from_domain: str) -> bool:
-    """Relaxed DMARC-style alignment, one-directional (opus review follow-up,
-    audit 2026-09-10): ``authenticated_domain`` (the ``smtp.mailfrom=``/
-    ``header.d=``/``header.i=`` domain that actually passed SPF/DKIM) must
+    """Relaxed DMARC-style alignment, one-directional: ``authenticated_domain``
+    (the ``smtp.mailfrom=``/``header.d=``/``header.i=`` domain that actually
+    passed SPF/DKIM) must
     equal ``from_domain`` or be a SUBdomain of it (a dotted suffix, not merely
     a same-string suffix like 'evilscripps.edu' vs 'scripps.edu') -- never the
     other way around. Accepting the reverse (``authenticated_domain`` a
@@ -300,10 +299,10 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     SES receipt path (i.e. it was injected, not delivered), so we reject. We
     then reject on any explicit failure verdict and require at least one strong
     pass — this is the primary anti-spoofing gate, since the From header alone
-    is trivially forgeable. See SEC-5.
+    is trivially forgeable.
 
-    SEC3-2 (audit 2026-09-10): ``dmarc=pass`` already encodes alignment and is
-    accepted on its own. Without it (``dmarc=none``/missing), a lone
+    ``dmarc=pass`` already encodes alignment and is accepted on its own.
+    Without it (``dmarc=none``/missing), a lone
     ``spf=pass`` or ``dkim=pass`` is not enough by itself: SES will happily
     report ``spf=pass`` for an envelope sender that has nothing to do with the
     From address (e.g. attacker@evil.com passes SPF for evil.com while From
@@ -324,19 +323,18 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
     # SES's authserv-id: anything else did not transit our SES receipt path.
     # Split into resinfo segments (respecting quoting) FIRST — segments[0] is
     # the authserv-id (+ optional RFC 8601 version token), the rest are
-    # resinfo segments read below. A naive `header.split(";", 1)` here (S-5,
-    # audit 2026-09-10) is not quote-aware, same hazard
-    # _split_auth_results_segments already guards the resinfo segments
-    # against: a quoted identity containing a literal `;` could fabricate a
-    # fake authserv-id boundary.
+    # resinfo segments read below. A naive `header.split(";", 1)` here is not
+    # quote-aware, same hazard _split_auth_results_segments already guards
+    # the resinfo segments against: a quoted identity containing a literal
+    # `;` could fabricate a fake authserv-id boundary.
     header = headers[0]
     segments = _split_auth_results_segments(header)
 
-    # RFC 8601 §2.2: `authserv-id [ SP authres-version ]` -- SES may stamp
+    # RFC 8601: `authserv-id [ SP authres-version ]` -- SES may stamp
     # `amazonses.com 1` (a trailing version token), not just bare
-    # `amazonses.com`. S-5 (audit 2026-09-10): comparing the whole segment
-    # verbatim rejected every genuine SES message once a version token was
-    # present. Split on whitespace and compare only the authserv-id itself.
+    # `amazonses.com`. Comparing the whole segment verbatim would reject a
+    # genuine SES message whenever a version token is present, so split on
+    # whitespace and compare only the authserv-id itself.
     authserv_id = segments[0].strip().lower().split()[0] if segments[0].strip() else ""
     if authserv_id != "amazonses.com":
         logger.warning(
@@ -411,9 +409,9 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
 
     Returns the number of emails processed.
     """
-    # SEC3-4 (audit 2026-09-10): prune the in-memory rate-limit/dedup maps
-    # before doing anything else this poll, so they don't grow unbounded over
-    # the life of the worker process.
+    # Prune the in-memory rate-limit/dedup maps before doing anything else
+    # this poll, so they don't grow unbounded over the life of the worker
+    # process.
     _prune_stale_entries()
 
     settings = get_settings()
@@ -484,7 +482,7 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
                 _S3_FAILURE_COUNTS[key] = _S3_FAILURE_COUNTS.get(key, 0) + 1
                 _S3_FAILURE_TOUCHED[key] = time.time()
                 if _S3_FAILURE_COUNTS[key] >= MAX_S3_PROCESS_ATTEMPTS:
-                    # Minor 3 (fix round A): quarantining ends the retry loop an
+                    # Quarantining ends the retry loop an
                     # InstructionApplyFailed(will_retry=True) site was counting on to
                     # eventually get the PI a working notification — clear its cap
                     # entry too, so a future re-processing (an operator fixes the root
@@ -524,7 +522,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
     msg = email.message_from_bytes(raw_email)
 
     # Anti-spoofing gate: the message must carry passing SES SPF/DKIM/DMARC
-    # verdicts before we trust anything about the sender (SEC-5).
+    # verdicts before we trust anything about the sender.
     if not _authentication_results_ok(msg):
         return
 
@@ -535,8 +533,8 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         return
 
     # Extract reply token from To, falling back to Cc, Delivered-To, then
-    # X-Original-To (S-6, audit 2026-09-10): the review+TOKEN@ address is not
-    # always the primary recipient — a PI can Cc the reply address, or a
+    # X-Original-To: the review+TOKEN@ address is not always the primary
+    # recipient — a PI can Cc the reply address, or a
     # forwarding rule can move it out of To entirely, in which case a
     # downstream MTA typically records the ORIGINAL envelope recipient in
     # Delivered-To/X-Original-To. Checked in this order (most to least
@@ -557,17 +555,17 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         return
 
     # Look up notification by token. The rate limit below is keyed on the
-    # notification's id, not the token itself (SEC2-5), so the lookup has to
-    # happen first.
+    # notification's id, not the token itself, so the lookup has to happen
+    # first.
     result = await db.execute(
         select(EmailNotification).where(EmailNotification.reply_token == token)
     )
     notification = result.scalar_one_or_none()
     if not notification:
         logger.warning("No notification found for token: %s...", token[:8])
-        # REV3-3 (opus review, audit 2026-09-08): after F1's token rotation, a
-        # PI who replies to a superseded reminder now gets silence instead of
-        # a stale-but-answerable notification. If the From address matches a
+        # Since a reply token rotates on resend, a PI who replies to a
+        # superseded reminder gets silence instead of a stale-but-answerable
+        # notification. If the From address matches a
         # KNOWN user, say so with one short bounce (never to an unknown
         # address -- that would make this an oracle for guessing registered
         # emails).
@@ -631,14 +629,15 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         )
         return
 
-    # RC-4 (#21 V4-3): the reply token is a bearer credential -- it must not stay live
-    # forever. `expired` was previously written only when a replacement reminder went
-    # out, so a PI who never got a second reminder (nothing left to review, or the
-    # outbound allowlist suppressed it) could still redeem the original token months
-    # later. Enforce the same expiry window here, independent of whether the sweep
-    # ever marks the row. Refuse BEFORE the LLM classification / rating-or-instruction
-    # application below, and mark the row so a retried stale reply short-circuits on
-    # the `status != "sent"` check above instead of earning a second notice.
+    # The reply token is a bearer credential -- it must not stay live forever.
+    # Writing `expired` only when a replacement reminder goes out would let a
+    # PI who never got a second reminder (nothing left to review, or the
+    # outbound allowlist suppressed it) redeem the original token months
+    # later, so enforce the same expiry window here, independent of whether
+    # the sweep ever marks the row. Refuse BEFORE the LLM classification /
+    # rating-or-instruction application below, and mark the row so a retried
+    # stale reply short-circuits on the `status != "sent"` check above
+    # instead of earning a second notice.
     settings = get_settings()
     reply_age = datetime.now(UTC) - notification.sent_at
     if reply_age > timedelta(days=settings.email_notification_expiry_days):
@@ -688,9 +687,9 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             )
             await record_engagement(user.id, db)
             await mark_notification_responded(notification.agent_registry_id, td.id, "review", db)
-            # Commit BEFORE the SES confirmation send (COR-19.6): a send failure must not
-            # roll back a review that already succeeded. A retry after this point takes the
-            # "already responded" early return above (:284-286) and does nothing — the PI
+            # Commit BEFORE the SES confirmation send: a send failure must not
+            # roll back a review that already succeeded. A retry after this point takes
+            # the "already responded" early return above and does nothing — the PI
             # simply doesn't get a second shot at the confirmation, which is the accepted
             # trade against duplicating the review itself.
             await db.commit()
@@ -706,7 +705,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             instruction=instruction,
             db=db,
         )
-        # C1 (COR-32 fix round B): a terminal migration failure inside
+        # A terminal migration failure inside
         # _handle_instruction rolls back this session, which expires every
         # attribute of user/notification/td (worker/main.py:198-206's own
         # rollback -> refresh pattern) — a bare attribute read below
@@ -719,10 +718,10 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         await db.refresh(notification)
         await db.refresh(td)
         await record_engagement(user.id, db)
-        # Item 2/3 (COR-32 fix round A tidy): `resolved` only flips True once the commit
+        # `resolved` only flips True once the commit
         # below — the one that actually retires the notification — has succeeded. The
         # cap pop() must happen AFTER that commit, never before: a failed commit means
-        # nothing was persisted (the S3 object is retried, per COR-32), and a still-set
+        # nothing was persisted (the S3 object is retried), and a still-set
         # cap is what stops that retry's own failure from re-emailing the PI a second
         # time for what looks, from their side, like the same failure. Once `resolved`
         # is True the notification IS durably retired, so ANY fault after that point
@@ -733,9 +732,8 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         resolved = False
         try:
             await mark_notification_responded(notification.agent_registry_id, td.id, "instruction", db)
-            # Commit before the final confirmation send (COR-19.6), same reasoning as the
-            # review branch above. NOTE — residual, out of scope for this task (see the
-            # Design decision note above): _handle_instruction's OWN internal side effects
+            # Commit before the final confirmation send, same reasoning as the
+            # review branch above. Note: _handle_instruction's OWN internal side effects
             # (the migration, the legacy Slack post, its inactive/private-origin emails) still
             # run before this commit, shared with the web /reopen route's identical shape.
             await db.commit()
@@ -776,7 +774,7 @@ def _extract_reply_token(to_address: str) -> str | None:
 def _extract_email_address(msg: email.message.Message) -> str | None:
     """Extract the single bare address from a message's From header(s).
 
-    SEC3-1 (audit 2026-09-10): a naive ``re.search(r"<([^>]+)>", ...)`` over a
+    A naive ``re.search(r"<([^>]+)>", ...)`` over a
     single From header returns the FIRST angle-bracketed token, which is the
     display name's problem when the display name itself contains a bracketed
     address literal -- ``"Alice <pi@univ.edu>" <attacker@evil.com>`` yields the
@@ -812,7 +810,7 @@ def _decode_part(part: email.message.Message) -> str:
         # charset string .decode() can't use at all (e.g. one with an embedded NUL).
         # The old codecs.lookup(charset) probe only ever caught the first case.
         logger.warning(
-            "Unknown charset %r on inbound email part; decoding as utf-8 (COR-19.3)", charset
+            "Unknown charset %r on inbound email part; decoding as utf-8", charset
         )
         return payload.decode("utf-8", errors="replace")
 
@@ -918,7 +916,7 @@ async def classify_reply(body: str, proposal_summary: str) -> dict:
     # unguessable per-call boundary and instruct the model to treat everything
     # inside strictly as data. This blocks prompt-injection via the email body
     # (or a crafted summary) — the attacker cannot know the boundary to close
-    # it early. See SEC-5 / SEC-14.
+    # it early.
     boundary = secrets.token_hex(12)
 
     user_message = f"""You are classifying an email reply to a collaboration proposal notification.
@@ -1011,14 +1009,14 @@ async def _handle_review(
     is_owner = agent.user_id == user.id
 
     if existing_row is not None:
-        # D6/COR-13: a MARKER row is not a real review — rating=-1 is the engine's
-        # implicit marker (Task 20.9) and rating=0 is the reopen sentinel — so upgrade it
+        # A MARKER row is not a real review — rating=-1 is the engine's
+        # implicit marker and rating=0 is the reopen sentinel — so upgrade it
         # in place rather than inserting a second row. The reopen case is load-bearing:
         # the sweep chases a reopened proposal (it IS outstanding) and the web form is
         # deliberately not re-offered, so THIS is the PI's path to rating it. Reading 0
-        # as "already reviewed" here is what put 11 of 26 notifiable users in an
-        # unbounded reminder loop -- reminded, answered "Got it - you rated it 4", and
-        # never recorded (audit D2). See task-D1-D2.md.
+        # as "already reviewed" here would put notifiable users in an unbounded
+        # reminder loop -- reminded, answered "Got it - you rated it 4", and never
+        # recorded.
         # (proposal_reviews has a real UNIQUE (thread_decision_id, agent_id)). id is
         # left untouched; reviewed_at (amendment) is moved forward to record when the
         # explicit action happened, not when the engine wrote the implicit marker.
@@ -1060,7 +1058,7 @@ class InstructionApplyFailed(Exception):
     has already been emailed an explanation by the time this is raised — raising
     (instead of returning False) tells process_inbound_email's poller caller to retry
     the whole message rather than silently marking the notification responded and
-    deleting the S3 object (COR-32).
+    deleting the S3 object.
 
     "Pre-mutation" means precisely: nothing irreversible has happened on Slack, and
     nothing has been committed to the DB that a retry could duplicate. It is a fact
@@ -1068,7 +1066,7 @@ class InstructionApplyFailed(Exception):
     private` reports it through `MigrationProgress`, because it is the only code that
     knows. Once that migration has a live Slack channel, the identical exception means
     the opposite: retrying would mint a second orphan channel, so _handle_instruction
-    emails the PI and returns False instead (fix round A, Critical #1).
+    emails the PI and returns False instead.
 
     `notification_id`, when set, lets `poll_inbound_emails` clear this notification's
     entry in `_INSTRUCTION_FAILURE_EMAILS_SENT` once it gives up and quarantines the
@@ -1084,14 +1082,14 @@ class InstructionApplyFailed(Exception):
 async def _notify_instruction_failure(
     pi_email: str | None, bot_name: str, notification_id, *, will_retry: bool
 ) -> None:
-    """PI-facing explanation for a _handle_instruction failure (COR-32).
+    """PI-facing explanation for a _handle_instruction failure.
 
-    S-7 (audit 2026-09-10): async so its ``_send_simple_email`` call can run
-    through ``run_blocking`` off the event loop -- every call site is inside
-    ``_handle_instruction`` (async), and this used to call ``_send_simple_email``
-    (a synchronous boto3 SES call) directly on the loop.
+    Async so its ``_send_simple_email`` call can run through ``run_blocking``
+    off the event loop -- every call site is inside ``_handle_instruction``
+    (async), and a synchronous boto3 SES call must not run directly on the
+    loop.
 
-    Takes plain values, not ORM objects (C1, COR-32 fix round B): the
+    Takes plain values, not ORM objects: the
     migration-failure call site must invoke this AFTER a `db.rollback()` that
     expires every attribute of `user`/`agent`/`notification` — an ORM-object
     signature would need exactly those now-expired attributes, and a bare
@@ -1099,7 +1097,7 @@ async def _notify_instruction_failure(
     raises MissingGreenlet rather than transparently reloading. Every call
     site passes values read before any such risk, so this stays uniform.
 
-    Capped at one email per notification — but (Minor 3) only once a send actually
+    Capped at one email per notification — but only once a send actually
     succeeds: a failed send (SES throttled, allowlist suppression, ...) must not burn
     the one shot the PI would otherwise get. `will_retry=True` keeps the retry wording
     (the S3 object is kept, so this site is re-entered on every poll until the object
@@ -1143,8 +1141,7 @@ async def _notify_instruction_failure(
 
 
 async def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
-    """PI-facing notice that a reply arrived after its token's reply window closed
-    (RC-4, #21 V4-3).
+    """PI-facing notice that a reply arrived after its token's reply window closed.
 
     Unlike `_notify_instruction_failure`'s in-memory send cap, this needs no dedup
     dict: the caller marks the row `expired` (and commits) before calling this, so a
@@ -1152,9 +1149,8 @@ async def _notify_reply_expired(pi_email: str | None, notification_id) -> None:
     `notification.status != "sent"` gate in `process_inbound_email` -- this can fire
     at most once per token.
 
-    S-7 (audit 2026-09-10): async so its ``_send_simple_email`` call can run
-    through ``run_blocking`` off the event loop -- see
-    ``_notify_instruction_failure``'s docstring.
+    Async so its ``_send_simple_email`` call can run through ``run_blocking``
+    off the event loop -- see ``_notify_instruction_failure``'s docstring.
     """
     if not pi_email:
         # User.email is nullable; process_inbound_email's fail-closed check above
@@ -1186,8 +1182,7 @@ async def _handle_instruction(
     With ``enable_private_refinement`` on and a public origin thread, the
     guidance is taken into a new ``collab_private`` channel via
     ``migrate_public_thread_to_private`` so the PI's text NEVER lands in the
-    public thread (SEC-5 — closes the guidance-leak on the normal PI flow).
-    Legacy mode (flag off) posts to the origin thread, matching the web
+    public thread. Legacy mode (flag off) posts to the origin thread, matching the web
     fallback.
 
     Returns True if the proposal was reopened. Returns False when the agent is
@@ -1237,7 +1232,7 @@ async def _handle_instruction(
         )
         return False
 
-    # Second idempotency guard, on the migration itself (#21 COR-19.6). The review-row
+    # Second idempotency guard, on the migration itself. The review-row
     # check above is not sufficient: if the OUTER process_inbound_email commit fails
     # AFTER migrate_public_thread_to_private has committed its own rows (which it now
     # does, as soon as its Slack side effects are irreversible), the ProposalReview add
@@ -1274,14 +1269,14 @@ async def _handle_instruction(
                 migrate_public_thread_to_private,
             )
 
-            # COR-32 (round C): the migration reports here whether it had reached its
+            # The migration reports here whether it had reached its
             # point of no return — a live Slack channel — when it failed. The failure
             # branch below routes on THAT fact, not on the exception's type or message:
             # the same RuntimeError means "retry me" from a throttled auth.test and
             # "never retry me" from the invite one statement after conversations.create.
             progress = MigrationProgress()
 
-            # C1 (COR-32 fix round B): capture into plain locals BEFORE the call. A
+            # Capture into plain locals BEFORE the call. A
             # DB-flavored failure inside the migration (its own db.flush(), or a
             # timeout while the transaction is held open across its blocking Slack
             # calls) poisons the session — reproduced: even a bare read of an
@@ -1306,18 +1301,17 @@ async def _handle_instruction(
                     user.name, td.thread_id, td.channel, result.channel_name,
                 )
             except Exception as exc:
-                # Critical #1 (COR-32 fix round): migrate_public_thread_to_private
-                # creates a real Slack channel and DB rows before most of its work —
-                # it is NOT idempotent ONCE THAT CHANNEL EXISTS. Raising past that
-                # point (21.9's original fix) would let the S3 object retry up to
-                # MAX_S3_PROCESS_ATTEMPTS times, minting that many orphan channels.
-                # Such a failure is terminal: notify the PI (dashboard is now the only
-                # way forward) and let the caller retire the notification and commit as
-                # usual — same shape as a pre-COR-32 silent failure (at most one orphan
-                # channel), except the PI is now told. Everything the migration does
-                # BEFORE that point is a different case entirely, handled below.
+                # migrate_public_thread_to_private creates a real Slack channel and
+                # DB rows before most of its work — it is NOT idempotent ONCE THAT
+                # CHANNEL EXISTS. Raising past that point would let the S3 object
+                # retry up to MAX_S3_PROCESS_ATTEMPTS times, minting that many orphan
+                # channels. Such a failure is terminal: notify the PI (dashboard is
+                # now the only way forward) and let the caller retire the notification
+                # and commit as usual, so at most one orphan channel is minted and the
+                # PI is told. Everything the migration does BEFORE that point is a
+                # different case entirely, handled below.
                 #
-                # C1 (fix round B): roll back FIRST, as the very first statement,
+                # Roll back FIRST, as the very first statement,
                 # before touching td/notification/user/agent at all — a DB-flavored
                 # failure above (e.g. the migration's own db.flush()) leaves this
                 # session needing a rollback, and every attribute read raises
@@ -1336,7 +1330,7 @@ async def _handle_instruction(
                     "reopen: %s", thread_id_s, exc, exc_info=True,
                 )
                 if progress.safe_to_retry:
-                    # COR-32 (round C): the migration got nowhere — no Slack channel
+                    # The migration got nowhere — no Slack channel
                     # was requested and its own commit never ran, so the rollback above
                     # left the world exactly as this delivery found it. Consuming the
                     # PI's instruction here was the defect the issue actually describes:
@@ -1365,7 +1359,7 @@ async def _handle_instruction(
                         f"any irreversible side effect",
                         notification_id=notif_id,
                     ) from exc
-                # Item 4 (COR-32 fix round A tidy): _notify_instruction_failure's own
+                # _notify_instruction_failure's own
                 # send can fault too (SES down, an unexpected exception from
                 # _send_simple_email). Left uncaught, that would escape this inner
                 # except into the outer blanket `except Exception` below, which treats
@@ -1477,7 +1471,7 @@ async def _handle_instruction(
     # refined_in_channel on the ThreadDecision but leaves the review to us).
     is_owner = agent.user_id == user.id
     if already_row is not None:
-        # D6/COR-13: already_row.rating == -1 here (the != -1 case returned False
+        # already_row.rating == -1 here (the != -1 case returned False
         # above) — the engine's implicit marker, upgraded in place instead of a
         # second insert. id is left untouched; reviewed_at (amendment) is moved
         # forward to record when the explicit reopen happened.
@@ -1563,9 +1557,9 @@ async def _send_instruction_confirmation(
 
 
 async def _maybe_send_stale_token_bounce(to_email: str) -> None:
-    """REV3-3 (opus review, audit 2026-09-08): tell a KNOWN sender their reply
-    landed on a token that no longer resolves to a notification -- most often
-    because F1's rotation superseded it with a newer reminder. Rate-limited
+    """Tell a KNOWN sender their reply landed on a token that no longer
+    resolves to a notification -- most often because a rotation superseded
+    it with a newer reminder. Rate-limited
     per address (same shape as MAX_HELP_EMAILS_PER_NOTIFICATION) so a PI
     stuck replying to an old thread (or an autoresponder the RFC 3834 gate
     misses) cannot trade bounces with us forever.
@@ -1589,8 +1583,7 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         "reminder instead, or use the dashboard.</p>"
         "<p>Replies to this address are not monitored.</p>"
     )
-    # REV4-6 + follow-up (audit 2026-09-08), R-3, and an opus-review follow-up
-    # (both audit 2026-09-10): an allowlist-suppressed recipient never reaches
+    # An allowlist-suppressed recipient never reaches
     # SES, so it must not consume the budget — and neither does a
     # NOT_DISPATCHED outcome (a MIME/message-construction error before
     # send_raw_email was ever called: a property of THIS message, so the next
@@ -1609,8 +1602,7 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
         logger.info("Stale-token bounce to %s suppressed by outbound allowlist", to_email)
         return
     # Reserve the slot BEFORE dispatching, refunding it only if the outcome shows
-    # nothing reached SES (opus review follow-up, audit 2026-09-10). Charging
-    # strictly after the call, as before, is a check-then-act race: nothing here
+    # nothing reached SES. Charging strictly after the call is a check-then-act race: nothing here
     # is concurrent today (the send is a synchronous function call), but a
     # send_html_email_outcome that ever became threaded/concurrent could let two
     # replies from the same address both read the same `sent_so_far` and both pass
@@ -1624,7 +1616,7 @@ async def _maybe_send_stale_token_bounce(to_email: str) -> None:
     )
     if outcome in (SendOutcome.SUPPRESSED, SendOutcome.NOT_DISPATCHED):
         # Refund: nothing reached SES, so this attempt must not count against
-        # the cap. K-5 (audit 2026-09-10): must decrement whatever the counter
+        # the cap. Must decrement whatever the counter
         # holds NOW, not write back the pre-reservation `sent_so_far` — two
         # interleaved reservations for the same address (this one reserving
         # sent_so_far+1, another reserving sent_so_far+2) would otherwise have

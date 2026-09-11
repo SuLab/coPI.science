@@ -31,16 +31,16 @@ templates = Jinja2Templates(directory="templates")
 
 # Per-IP throttle for the anonymous proposal-feedback endpoints (defense in
 # depth behind the nginx edge limits). Generous enough for a human clicking
-# through the graph, tight enough to blunt scripted vote-spam (SEC-7).
+# through the graph, tight enough to blunt scripted vote-spam.
 _vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
 
 # Per-IP throttle for the public waitlist form. A real signup happens once;
-# this caps scripted row-spam on the unauthenticated endpoint (SEC-17).
+# this caps scripted row-spam on the unauthenticated endpoint.
 _waitlist_limiter = SlidingWindowRateLimiter(max_events=10, window_seconds=3600)
 
 # Field caps for the public waitlist write, applied before persisting so
 # oversized input is truncated rather than raising a DB DataError -> 500
-# (name/institution are String(255); note is unbounded Text) (SEC-17).
+# (name/institution are String(255); note is unbounded Text).
 _WAITLIST_NAME_MAX = 255
 _WAITLIST_INSTITUTION_MAX = 255
 _WAITLIST_NOTE_MAX = 2000
@@ -54,7 +54,7 @@ def _graph_csp(nonce: str) -> str:
     requires a per-request nonce for the inline executable script (defense in
     depth behind the |tojson/escapeHtml output encoding). 'unsafe-eval' is
     present only because the Tailwind Play CDN JIT-compiles utilities in the
-    browser; vendoring a compiled Tailwind build (SEC-18) lets it be dropped.
+    browser; vendoring a compiled Tailwind build lets it be dropped.
     """
     return "; ".join(
         [
@@ -93,11 +93,11 @@ def _render_graph(request: Request, context: dict) -> HTMLResponse:
 # a historical snapshot and is correct for that window — do not "refresh" it, or a
 # published graph silently redraws.
 #
-# It is NOT the current Scripps roster: as of 2026-08-18 it omits nine
-# Scripps/Calibr PIs (alanjary, bollong, chatterjee, diercks, droujinine, good,
-# hogenesch, mcnamara, yliu). /scripps-graph therefore selects its nodes from the
+# It is NOT the current Scripps roster: it omits nine Scripps/Calibr PIs
+# (alanjary, bollong, chatterjee, diercks, droujinine, good, hogenesch,
+# mcnamara, yliu). /scripps-graph therefore selects its nodes from the
 # `scripps-investigators` cohort and only falls back here when that cohort is
-# missing. See docs/specs/2026-08-18-cohort-seeding-design.md §5.
+# missing.
 _SCRIPPS = {
     # Active Cabo run window
     "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
@@ -119,9 +119,7 @@ _OTHER_INST = {
     "nomura": "UC Berkeley",
 }
 
-# /scripps-graph selects its nodes from this cohort, not from _SCRIPPS. See
-# docs/specs/2026-08-18-cohort-seeding-design.md §5 and
-# docs/plans/2026-08-18-cohort-seeding.md.
+# /scripps-graph selects its nodes from this cohort, not from _SCRIPPS.
 SCRIPPS_COHORT_NAME = "scripps-investigators"
 
 
@@ -143,8 +141,8 @@ async def _scripps_agent_ids(db: AsyncSession) -> set[str] | None:
     return {r.agent_id for r in rows} or None
 
 
-# Run-window cutover for the Cabo retreat graph: matches commit 0ef4741
-# (the Cabo retreat roster reshape). All proposals to date share a single
+# Run-window cutover for the Cabo retreat graph: matches the Cabo retreat
+# roster reshape. All proposals to date share a single
 # simulation_run_id, so date is the only way to isolate the new run window.
 CABO_WINDOW_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
@@ -508,7 +506,7 @@ async def waitlist_submit(
 
     # Truncate to the column limits before persisting: name/institution are
     # String(255) (oversized -> DataError -> 500) and note is unbounded Text
-    # (an uncapped public write) (SEC-17).
+    # (an uncapped public write).
     name_clean = name.strip()[:_WAITLIST_NAME_MAX]
     institution_clean = institution.strip()[:_WAITLIST_INSTITUTION_MAX]
     note_clean = note.strip()[:_WAITLIST_NOTE_MAX]
@@ -840,7 +838,7 @@ def _largest_component(nodes, links):
 # Graph-payload cache. The four public graph routes take only Depends(get_db)
 # — no auth — and each builds its payload by sequential-scanning the two
 # largest tables and running O(V^2 * L^2) institution clustering. Left uncached
-# that is an unauthenticated DB-backed DoS (SEC-15). We memoize the payload per
+# that is an unauthenticated DB-backed DoS. We memoize the payload per
 # parameter set for a short TTL, and serialize concurrent misses under a lock
 # so a burst of N requests triggers at most one DB build per TTL window (the
 # per-worker complement to the nginx edge limits in nginx.conf).
@@ -1034,7 +1032,7 @@ async def submit_proposal_vote(
 
     # Require a browser token: without one, every request inserts a fresh row
     # (the unique (decision, token) constraint can't dedup NULL tokens), which
-    # is an unbounded-storage vector on this public endpoint (SEC-7).
+    # is an unbounded-storage vector on this public endpoint.
     token = _clean_token(payload.voter_token)
     if token is None:
         raise HTTPException(status_code=422, detail="voter_token required")

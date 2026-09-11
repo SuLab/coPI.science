@@ -1,5 +1,5 @@
-"""P-1 (opus review, audit 2026-09-10): a plain ``atexit.register`` for
-``shutdown_slack_executor`` runs too late to abort a pool sleeper.
+"""A plain ``atexit.register`` for ``shutdown_slack_executor`` runs too late
+to abort a pool sleeper.
 
 ``atexit`` callbacks registered the normal way run AFTER the interpreter's
 own ``threading._shutdown()``, which joins every non-daemon thread

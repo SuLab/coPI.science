@@ -1,4 +1,4 @@
-"""Task T4 — the profile pipeline, end to end and live.
+"""The profile pipeline, end to end and live.
 
 `live_api` **and** `real_llm`. This is the first test in the system where ORCID, PubMed
 and Anthropic run together against a real database. It is the actual production path for
@@ -17,8 +17,8 @@ assertion in this file. The expected vocabulary is derived from a live ORCID fet
 test performs itself, never hardcoded.
 
 That assertion needed two attempts, and the first one was wrong. Matching the corpus
-vocabulary against a hand-written decoy only proves the matcher *can* say no. Measured on
-2026-07-30: given nothing but "Lisa Racki, Scripps Research Institute, Integrative
+vocabulary against a hand-written decoy only proves the matcher *can* say no. Measured:
+given nothing but "Lisa Racki, Scripps Research Institute, Integrative
 Structural and Computational Biology" and an empty publication list, Claude Opus returns
 a confident, `_validate_profile`-passing profile that already contains three of the seven
 derived corpus terms (chromatin, histone, remodeling), from what it remembers about her.
@@ -90,13 +90,13 @@ pytestmark = [
 #     `orcids.txt` under "Pilot lab ORCIDs — Scripps Research" (verified 2026-03-21), so
 #     if it were ever deleted or made private the product would break long before this
 #     test noticed, and the failure would be the *correct* signal rather than noise.
-#   * It is small and slow-growing — 12 work entries spanning 2002-2025 as of
-#     2026-07-30, roughly one paper a year. Small matters twice over: it bounds the token
+#   * It is small and slow-growing — roughly a dozen work entries, roughly one paper a
+#     year. Small matters twice over: it bounds the token
 #     spend, and it bounds the number of NCBI requests `run_profile_pipeline` fires (see
 #     `_ncbi_get`, which paces itself at ~2.9 req/s against a 3 req/s anonymous policy
 #     limit — a large corpus would be the thing that gets this IP blocked).
-#   * It exercises BOTH ORCID→PubMed resolution paths: as of 2026-07-30, 7 works carry a
-#     PMID directly and 5 are DOI-only, so `convert_dois_to_pmids` (ID converter, then
+#   * It exercises BOTH ORCID→PubMed resolution paths: most works carry a
+#     PMID directly and some are DOI-only, so `convert_dois_to_pmids` (ID converter, then
 #     the per-DOI ESearch fallback) really runs. One of the DOI-only entries is a bioRxiv
 #     preprint that resolves to nothing, which exercises the unresolved branch too.
 #   * The research has two clearly separated phases — early chromatin-remodelling work,
@@ -518,8 +518,8 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
     # --- and the control that makes the two assertions above mean anything --------------
     #
     # The decoy above is hand-written, which only proves the matcher CAN say no. It does
-    # not prove it would say no to THIS model writing about THIS person. Measured on
-    # 2026-07-30: asked to profile "Lisa Racki, Scripps Research Institute, Integrative
+    # not prove it would say no to THIS model writing about THIS person. Measured:
+    # asked to profile "Lisa Racki, Scripps Research Institute, Integrative
     # Structural and Computational Biology" with an EMPTY publication list, Opus returns a
     # confident, _validate_profile-passing profile that already contains "chromatin",
     # "remodeling" and "histone" — three of the seven derived corpus terms — purely from
@@ -971,7 +971,7 @@ async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_th
     )
     assert (profile.evidence_pmid_count or 0) > 0, (
         f"evidence_pmid_count is {profile.evidence_pmid_count!r}. ORCID is up in this test "
-        "and this record carries PMIDs directly (7 of 12 as of 2026-07-30), so zero means "
+        "and this record carries most PMIDs directly, so zero means "
         "the ORCID leg failed too and this is a total outage, not a PubMed one — and the "
         "state below would then be 'lost' for the wrong reason"
     )
@@ -996,8 +996,8 @@ async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_th
 
     # Thinness at the level of the profile text, not just its evidence base. The degraded
     # summary is NOT empty of the researcher's subject matter — the model recognises the
-    # name — so the measurable claim is a strict subset, not an absence. Measured
-    # 2026-07-30: the degraded summary reached 2 of the 7 corpus terms (chromatin,
+    # name — so the measurable claim is a strict subset, not an absence. Measured:
+    # the degraded summary reached 2 of the 7 corpus terms (chromatin,
     # remodeling) against 7 of 7 for the grounded run. If this ever came out equal, the
     # PubMed leg would be contributing nothing the model did not already know.
     degraded_hits = set(mentioned(profile.research_summary, corpus))

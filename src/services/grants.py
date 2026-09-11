@@ -81,7 +81,7 @@ async def search_opportunities(
         id, number, title, agency, open_date, close_date, description
 
     ``description`` is **always** ``""``: search2's ``oppHits`` do not carry one.
-    Measured live 2026-08-04 — a hit's entire key set is agency, agencyCode,
+    A hit's entire key set is agency, agencyCode,
     cfdaList, closeDate, docType, id, number, openDate, oppStatus, title. The
     real description lives on the detail endpoint (``fetch_opportunity_detail``).
     That empty description reaching the drafting prompt is a known, reported bug,

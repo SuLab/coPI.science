@@ -1,8 +1,7 @@
 """Integration test for reconciling stale `running` SimulationRun rows at agent
-startup (issue #25 D2). A crash / OOM-kill / `docker kill` leaves a run's status
-stuck at "running" forever: neither --fresh (inserts a new row) nor resume
-(repairs only the single latest row by started_at) ever touches an older
-stale row.
+startup. A crash / OOM-kill / `docker kill` leaves a run's status stuck at
+"running" forever: neither --fresh (inserts a new row) nor resume (repairs only
+the single latest row by started_at) ever touches an older stale row.
 """
 
 import inspect
@@ -17,7 +16,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_run_simulation_actually_calls_the_reconciler():
-    """#25 I2: measured — restoring _reconcile_stale_runs' body but deleting its call
+    """Restoring _reconcile_stale_runs' body but deleting its call
     site from _run_simulation leaves the entire suite (190 + 94 tests, everything)
     green, because nothing exercises _run_simulation's `if not no_db:` block end to
     end. A fake-session harness for that whole block is out of proportion; a source

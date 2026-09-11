@@ -264,18 +264,18 @@ async def test_simulation_run_delete_cascades_children(db_session):
 
 
 # --------------------------------------------------------------------------
-# 6. DAT-1 (issue #25 D1, fixed): private_channel_members.user_id is now
+# 6. private_channel_members.user_id is
 #    ondelete="CASCADE" (0026), so deleting a role="pi" member's user no
 #    longer drives user_id -> NULL against a row whose agent_id is also
-#    NULL (which used to violate pcm_exactly_one_of_agent_or_user).
+#    NULL (which would violate pcm_exactly_one_of_agent_or_user).
 # --------------------------------------------------------------------------
 
-async def test_dat1_deleting_pi_member_user_cascades_pcm_row(db_session):
-    # DAT-1 (issue #25 D1, fixed): private_channel_members.user_id is now
+async def test_deleting_pi_member_user_cascades_pcm_row(db_session):
+    # private_channel_members.user_id is
     # ondelete="CASCADE" (0026), so deleting a role="pi" member's user no
     # longer drives user_id -> NULL against a row whose agent_id is also
-    # NULL (which used to violate pcm_exactly_one_of_agent_or_user). The
-    # delete must now succeed and the membership row must be gone.
+    # NULL (which would violate pcm_exactly_one_of_agent_or_user). The
+    # delete must succeed and the membership row must be gone.
     ch = await factories.make_agent_channel(db_session, visibility="collab_private")
     u = await factories.make_user(db_session)
     m = await factories.make_private_channel_member(
@@ -321,7 +321,7 @@ async def test_proposal_review_unique_per_thread_and_agent(db_session):
             await db_session.flush()
 
 
-async def test_dat1_deleting_added_by_user_is_safe(db_session):
+async def test_deleting_added_by_user_is_safe(db_session):
     # Contrast: added_by_user_id is also SET NULL, but nulling it violates no
     # CHECK, so deleting an added_by user succeeds and the row survives.
     ch = await factories.make_agent_channel(db_session, visibility="collab_private")
@@ -344,7 +344,7 @@ async def test_dat1_deleting_added_by_user_is_safe(db_session):
 
 
 # --------------------------------------------------------------------------
-# 7. P2 (issue #25) — passive_deletes=True on every delete-orphan cascade.
+# 7. passive_deletes=True on every delete-orphan cascade.
 #
 # `32c4ca3` added the flag to all 11 of them so a parent delete leans on the
 # DB's ON DELETE CASCADE instead of SELECTing every child row into memory and
@@ -366,10 +366,10 @@ def _delete_orphan_relationships():
     }
 
 
-def test_p2_every_delete_orphan_relationship_sets_passive_deletes():
+def test_every_delete_orphan_relationship_sets_passive_deletes():
     rels = _delete_orphan_relationships()
     # Control: a walk that found nothing would satisfy the assertion below
-    # vacuously. Issue #25 P2 counted 11; a new cascade must be added here
+    # vacuously. A new cascade must be added here
     # deliberately, having first been given a DB-side ON DELETE CASCADE.
     assert set(rels) == {
         "AgentChannel.private_members",
@@ -388,7 +388,7 @@ def test_p2_every_delete_orphan_relationship_sets_passive_deletes():
     assert not missing, f"delete-orphan cascade without passive_deletes=True: {missing}"
 
 
-async def test_p2_each_passive_delete_child_fk_really_cascades_in_the_schema(db_session):
+async def test_each_passive_delete_child_fk_really_cascades_in_the_schema(db_session):
     """The other half of P2's fix: passive_deletes hands the job to the DB.
 
     If a child FK were anything but ON DELETE CASCADE, passive_deletes=True
@@ -413,7 +413,7 @@ async def test_p2_each_passive_delete_child_fk_really_cascades_in_the_schema(db_
     assert not wrong, f"passive_deletes with no DB-side CASCADE behind it: {wrong}"
 
 
-async def test_p2_a_user_delete_leaves_the_publications_to_the_database(db_session):
+async def test_a_user_delete_leaves_the_publications_to_the_database(db_session):
     u = await factories.make_user(db_session)
     pubs = [Publication(user_id=u.id, title=f"paper {i}") for i in range(3)]
     db_session.add_all(pubs)

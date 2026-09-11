@@ -15,7 +15,7 @@ than quietly make a network call), SES is a recorder, and the two export
 directories are redirected into ``tmp_path`` so the suite never writes into
 ``profiles/``.
 
-Discipline (see ``.notes/full-system-test-plan.md``): every absence assertion
+Discipline: every absence assertion
 carries a positive control in the same test. "The victim's row did not change"
 is worthless next to a route that changes nothing for anybody, so each negative
 is paired with the same request producing the effect it is supposed to produce.
@@ -90,8 +90,8 @@ def export_dirs(tmp_path, monkeypatch):
     pub, priv = tmp_path / "public", tmp_path / "private"
     monkeypatch.setattr(profile_export, "PROFILES_DIR", pub)
     monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", priv)
-    # onboarding.py's on-disk fallback now calls profile_export._private_profiles_dir()
-    # at request time (REV4-1) instead of reading a module-level constant bound at
+    # onboarding.py's on-disk fallback calls profile_export._private_profiles_dir()
+    # at request time instead of reading a module-level constant bound at
     # import time, so patching the service module's constant is sufficient here.
     return SimpleNamespace(public=pub, private=priv)
 
@@ -1155,7 +1155,7 @@ async def test_delete_account_returns_409_on_integrity_error(client, db_session,
     )
 
 
-# --- #25 D1 / phase8 I3: the delete must not orphan a live agent -------------
+# --- the delete must not orphan a live agent -------------
 #
 # "Owns an active agent" means: an ``agents`` row whose ``user_id`` is the
 # caller (the column is UNIQUE, so at most one) AND whose ``status`` is live or
@@ -1392,14 +1392,14 @@ async def test_the_private_export_skips_an_empty_private_profile(db_session, exp
 async def test_the_private_export_deletes_the_file_once_content_is_cleared(
     db_session, export_dirs
 ):
-    """Clear-after-write (#22 COR-23, #29): the 22.6/22.11 re-review found that
-    clearing a private profile nulled the DB columns but left a previously
+    """Clear-after-write: clearing a private profile must not
+    null the DB columns while leaving a previously
     exported profiles/private/{agent_id}.md on disk, which src/agent/agent.py's
     private_profile property keeps reading — it only falls back to "No private
     instructions yet." when the file is ABSENT. Removing the file (not just
-    skipping the write) is what makes that fallback correct again.
+    skipping the write) is what makes that fallback correct.
 
-    `remove_if_empty=True` is required here (#22 C1): the default is now False
+    `remove_if_empty=True` is required here: the default is False
     so that a run_profile_pipeline call — which has no genuine "cleared"
     case — can never delete a disk-only private profile it did not itself
     create. Only a real clear path (onboarding.py's save_private_profile)

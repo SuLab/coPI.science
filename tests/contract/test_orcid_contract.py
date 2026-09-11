@@ -21,7 +21,7 @@ OID = "0000-0002-1825-0097"
 
 @pytest.fixture(autouse=True)
 def _no_retry_backoff(monkeypatch):
-    """These tests pin parse/error-swallow behaviour, not the retry loop (issue #23 COR-29a) —
+    """These tests pin parse/error-swallow behaviour, not the retry loop —
     zero the backoff so a mocked 5xx/timeout doesn't add ~3.5s of real sleep per test."""
     monkeypatch.setattr(orcid, "_RETRY_BACKOFF", 0)
 
@@ -185,7 +185,7 @@ async def test_fetch_orcid_works_swallows_timeout_returns_empty():
     assert route.called
 
 
-# ---- null-container tolerance (COR-15: ORCID sends explicit `null`, not a missing key) ----
+# ---- null-container tolerance: ORCID sends explicit `null`, not a missing key ----
 
 
 def _record_all_null_containers():
@@ -285,9 +285,9 @@ async def test_fetch_orcid_works_tolerates_a_null_external_id_type():
     assert works[0]["pmid"] == "31000001"
 
 
-# ---- RC-11: a *present* container that is explicitly null, not merely absent ----
+# ---- A *present* container that is explicitly null, not merely absent ----
 #
-# The tests above (COR-15) cover null leaves nested under a container that itself exists.
+# The tests above cover null leaves nested under a container that itself exists.
 # These cover the container ORCID sometimes nulls out entirely: "group": null on the
 # fundings/works envelope, and "summaries": null on one affiliation-group entry. Plain
 # `dict.get(key, [])` only substitutes the default for a *missing* key — a present `None`
@@ -329,7 +329,7 @@ async def test_fetch_orcid_profile_tolerates_a_null_summaries_container():
     assert prof.get("institution") is None
 
 
-# ---- retry behaviour, not just the wiring (#23 COR-29a / R6) ----
+# ---- retry behaviour, not just the wiring ----
 #
 # Until now the only thing pinning orcid.py's retry loop was the `_no_retry_backoff`
 # fixture above — i.e. the *wiring*: if the module stopped calling get_with_retry, the

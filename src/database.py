@@ -21,7 +21,7 @@ def make_engine(url: str, **overrides):
     pool_recycle forces connections older than 1800s to be replaced, ahead of
     typical infra idle-connection kill windows. pool_timeout bounds how long
     a checkout waits when the pool is exhausted. Explicit ``overrides`` (e.g.
-    pool_size/max_overflow) win over these defaults. See issue #25 P3.
+    pool_size/max_overflow) win over these defaults.
 
     These defaults assume a QueuePool-family pool (SQLAlchemy's async default);
     passing ``poolclass=NullPool`` alongside them raises ``TypeError`` (NullPool

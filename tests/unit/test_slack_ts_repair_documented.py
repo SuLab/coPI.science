@@ -1,5 +1,5 @@
 """CLAUDE.md and README.md must mention the one-time backfill_slack_ts.py
-repair (issue #26 DOC-7/A3): a workspace with pre-Stage-6 agent_messages rows
+repair: a workspace with pre-Stage-6 agent_messages rows
 (slack_ts IS NULL) silently keeps Slack replies to those threads off Slack
 (_slack_parent_ts returns None for them, src/agent/simulation.py), and
 docs/production-migration.md's own coverage of the repair is scoped to
@@ -14,9 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # -e PYTHONPATH=/app is part of the command, not decoration: sys.path[0] is the script's
 # own directory, so `import src` would otherwise resolve to the copy baked into
-# site-packages rather than /app. docs/production-migration.md §8 Step 8 and §11,
-# run_migration.sh's step-8 text and Part R.6b all say so; the runbook paragraphs used to
-# omit it (issue #26 closure audit, blocker 4).
+# site-packages rather than /app. docs/production-migration.md and
+# run_migration.sh's step-8 text must say so; the runbook paragraphs must not
+# omit it.
 _WRAPPED_COMMAND = (
     "docker compose exec -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py --apply"
 )
@@ -26,7 +26,7 @@ def test_claude_md_mentions_the_repair_script():
     text = (REPO_ROOT / "CLAUDE.md").read_text()
     assert _WRAPPED_COMMAND in text, (
         "CLAUDE.md must tell the operator to run the repair through "
-        "docker compose exec, per the repo convention (#26 DOC-7)"
+        "docker compose exec, per the repo convention"
     )
 
 
@@ -34,5 +34,5 @@ def test_readme_mentions_the_repair_script():
     text = (REPO_ROOT / "README.md").read_text()
     assert _WRAPPED_COMMAND in text, (
         "README.md must tell the operator to run the repair through "
-        "docker compose exec, per the repo convention (#26 DOC-7)"
+        "docker compose exec, per the repo convention"
     )

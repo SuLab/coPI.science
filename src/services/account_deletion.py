@@ -5,8 +5,7 @@ owner of an active (or one-click-from-active ``pending``) agent leaves a Slack
 bot on the simulation roster that nobody can deactivate, edit, or answer
 proposals for. Both the self-service delete-account flow (``src/routers/
 profile.py``) and the admin delete route (``src/routers/admin.py``) must
-refuse in exactly this case (#25 D1; audit 2026-09-08 RC-8 closed the
-admin-route gap).
+refuse in exactly this case.
 """
 
 from sqlalchemy import select
@@ -20,7 +19,6 @@ from src.models import AgentRegistry, User
 # pending row straight to 'active' without re-reading user_id. The parked
 # states ('inactive', 'suspended') are deliberately absent: "deactivate the
 # agent" is the remedy the refusal names, so it has to unblock the delete.
-# See docs/plans/2026-09-04-decisions/task-25.md.
 AGENT_STATUSES_BLOCKING_ACCOUNT_DELETE = ("active", "pending")
 
 
@@ -34,8 +32,8 @@ async def agent_blocking_account_delete(
     ``ondelete="CASCADE"``, so deleting a delegate removes the delegation and
     leaves the agent's owner alone.
 
-    ``with_for_update()`` (SEC-F3, opus review, audit 2026-09-08; keyed on
-    ``user_id`` alone as of SEC2-2, audit 2026-09-08) locks the row this reads
+    ``with_for_update()`` (keyed on
+    ``user_id`` alone) locks the row this reads
     for the rest of the caller's transaction, so the check and the delete it
     gates cannot race an admin's concurrent ``UPDATE ... SET status='active'``
     on the same row. The status predicate has to be evaluated in Python
@@ -49,7 +47,7 @@ async def agent_blocking_account_delete(
     ``for_update=False`` is for read-only callers (the GET confirmation page)
     that must not hold a row lock outside a delete transaction.
 
-    REV4-3 (audit 2026-09-08): locking only the ``agents`` row is not enough --
+    Locking only the ``agents`` row is not enough --
     when the user owns no agent yet, that SELECT returns no rows, so it locks
     nothing. A concurrent self-service signup inserting a brand-new ``agents``
     row with ``user_id`` pointing at this same user (the FK the delete is

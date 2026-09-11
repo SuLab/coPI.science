@@ -1,4 +1,4 @@
-"""export_private_profile falls back to private_profile_seed (issue #22 COR-23)."""
+"""export_private_profile falls back to private_profile_seed."""
 
 from types import SimpleNamespace
 

@@ -1,14 +1,13 @@
-"""P-2 (opus review, audit 2026-09-10): the teardown path must set
-``SHUTDOWN_REQUESTED`` unconditionally, not only via the SIGTERM/SIGINT
-handler's ``loop.call_later`` timer.
+"""The teardown path must set ``SHUTDOWN_REQUESTED`` unconditionally, not only
+via the SIGTERM/SIGINT handler's ``loop.call_later`` timer.
 
-Before this fix, the first signal only scheduled the Slack-abort event via
-``loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)``. If
+If the first signal only scheduled the Slack-abort event via
+``loop.call_later(SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown)`` and
 ``sim_engine.start()`` returned before that timer fired (the common case: a
 ``--max-runtime`` run finishing on schedule, a clean stop, or simply a run
 that flushes faster than the 20s grace), the timer was dropped when the
 event loop closed and the event was NEVER set — a ``run_slack_call`` queued
-just before exit would run to completion (modulo the P-1 fix's
+just before exit would run to completion (modulo the
 ``threading._register_atexit`` hook, which is a different pool) rather than
 aborting promptly at the point the process has already decided to exit.
 
@@ -24,8 +23,8 @@ from src.agent import main as _main_module
 from src.agent.slack_client import SlackShuttingDown, _sleep_interruptibly
 from src.services.slack_executor import run_slack_call
 
-# P-4 (opus review, audit 2026-09-10): SHUTDOWN_REQUESTED is cleared before
-# and after every test by tests/conftest.py's autouse
+# SHUTDOWN_REQUESTED is cleared before and after every test by
+# tests/conftest.py's autouse
 # `_clear_slack_shutdown_requested` fixture; no per-file fixture needed here.
 
 
@@ -66,10 +65,10 @@ async def test_finalize_shutdown_cancels_the_pending_grace_timer():
     shutdown = _main_module._make_shutdown_handler(loop, fake_engine)
 
     shutdown()  # first signal: schedules the grace-delay timer
-    # S-1 (audit 2026-09-10): the timer is now installed via
-    # loop.call_soon_threadsafe (not directly inside the handler, which may
-    # run as a true signal.signal callback) — give the loop one tick to run
-    # that queued callback before reading the handle back.
+    # The timer is installed via loop.call_soon_threadsafe (not directly
+    # inside the handler, which may run as a true signal.signal callback) —
+    # give the loop one tick to run that queued callback before reading the
+    # handle back.
     await asyncio.sleep(0)
     timer_handle = shutdown.state["timer_handle"]
     assert timer_handle is not None

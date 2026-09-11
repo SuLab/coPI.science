@@ -1,5 +1,5 @@
-"""RC-7 (audit 2026-09-08): a failed private-profile disk write must not clobber the
-DB copy with stale content.
+"""A failed private-profile disk write must not clobber the DB copy with stale
+content.
 
 Root cause (pre-fix): `Agent.update_private_profile` was disk-first and swallowed the
 exception on failure, invalidating the in-memory cache (`self._private_profile = None`)
@@ -155,7 +155,7 @@ async def test_persist_returns_false_and_logs_on_a_db_exception(tmp_path, monkey
 
 # ---------------------------------------------------------------------------
 # PIHandler._handle_standing_instruction end-to-end: DB-first-then-disk, with
-# a stub session_factory (RC-7 follow-ups 2 and 3, Opus review 2026-09-08).
+# a stub session_factory.
 # ---------------------------------------------------------------------------
 
 
@@ -262,7 +262,7 @@ def _pi_handler(tmp_path, monkeypatch, db, *, disk_write_result: bool = True):
 async def test_a_db_failure_tells_the_pi_it_could_not_be_saved_and_skips_the_disk_write(
     tmp_path, monkeypatch,
 ):
-    """RC-7 follow-ups 2+3: when the DB persist fails, (a) the acknowledgement
+    """When the DB persist fails, (a) the acknowledgement
     must say so rather than claiming success, (b) no profile revision is
     recorded, and (c) the disk write is skipped entirely so the agent's actual
     in-memory profile is not left disagreeing with what the PI was told (an
@@ -296,7 +296,7 @@ async def test_a_db_failure_tells_the_pi_it_could_not_be_saved_and_skips_the_dis
 async def test_a_revision_bookkeeping_failure_after_a_committed_profile_row_still_acknowledges_success(
     tmp_path, monkeypatch,
 ):
-    """Opus follow-up review (2026-09-08): `persist_private_profile_to_db` commits
+    """`persist_private_profile_to_db` commits
     internally and returns True, but the profile-revision bookkeeping that followed
     it (two more SELECTs, create_revision, a second commit) used to sit inside the
     SAME outer try/except as the persist call. An exception there flipped `db_ok`
@@ -343,7 +343,7 @@ async def test_a_revision_bookkeeping_failure_after_a_committed_profile_row_stil
 async def test_a_disk_failure_alone_still_acknowledges_success_and_the_db_holds_the_new_content(
     tmp_path, monkeypatch,
 ):
-    """RC-7's main fix, exercised through the full handler: the DB is primary,
+    """Exercised through the full handler: the DB is primary,
     so a disk write failure (permission denied, a read-only mount, ...) after
     a successful DB persist must not be reported to the PI as a failure — and
     the DB row must actually carry the new content, not something stale."""
@@ -379,9 +379,9 @@ class _RaisingExitSessionCtx(_StubSessionCtx):
 async def test_a_session_teardown_failure_after_a_committed_profile_row_still_acknowledges_success(
     tmp_path, monkeypatch,
 ):
-    """Opus tail review (2026-09-10): `db_ok` was assigned inside the `async with`, so an
+    """`db_ok` must not be assigned inside the `async with` in a way that lets an
     exception from the session's `__aexit__` -- after persist had already committed --
-    still reached the outer handler and flipped it to False. Only "the profile row was
+    reach the outer handler and flip it to False. Only "the profile row was
     never committed" may produce the retry acknowledgement."""
     from types import SimpleNamespace
 

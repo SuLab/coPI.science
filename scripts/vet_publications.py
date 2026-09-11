@@ -184,7 +184,7 @@ async def _process(orcid: str, db: AsyncSession, dry_run: bool) -> dict:
             else:
                 # Not necessarily a validation failure: apply_synthesis also
                 # declines a response that carries none of the fields it writes,
-                # rather than blanking the profile with it (issue #22 V6) — and
+                # rather than blanking the profile with it — and
                 # in that case it has already logged the response's keys
                 # immediately above this line. So this line reports the outcome
                 # and `validated`, not a guess at the cause.

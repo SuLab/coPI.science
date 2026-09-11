@@ -96,7 +96,7 @@ class AgentMessage(Base):
     phase: Mapped[str] = mapped_column(String(30), nullable=False)  # scan, prune, thread_reply, new_post, etc.
     visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
-    )  # denormalized from agent_channels.visibility; see specs/privacy-and-channel-visibility.md §G1/G2
+    )  # denormalized from agent_channels.visibility; see specs/privacy-and-channel-visibility.md
     # Content columns (DB is now the primary conversation store, not Slack).
     content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     sender_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
@@ -113,13 +113,12 @@ class AgentMessage(Base):
     # inbound poller has claimed this row", which covers every pre-0029 row and
     # every row another path (the Slack poller, the engine's own append) put in
     # the log; readers must treat NULL as today's behaviour, i.e. dedup on
-    # MessageLog presence. See COR-10(3) / migration 0029 /
-    # docs/plans/2026-09-04-decisions/task-7.md.
+    # MessageLog presence. See migration 0029.
     pi_inbound_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # The PI/user who actually wrote this row — NULL for every bot-authored row
     # and for a pre-0030 human/web row (migration 0030 adds no backfill for
     # existing rows: there is no way to recover who wrote them). This is the
-    # ownership carrier RC-1 (#20 COR-5) uses in place of thread membership:
+    # ownership carrier that inbound-message handling uses in place of thread membership:
     # SimulationEngine._agent_ids_owned_by_user(sender_user_id) resolves the
     # set of agents this user actually owns (AgentRegistry.user_id, or an
     # AgentDelegate row), and _handle_pi_inbound_entry restricts every
@@ -127,7 +126,7 @@ class AgentMessage(Base):
     # @bot tag) to that set — never to "whoever else happens to share this
     # thread". ON DELETE SET NULL rather than CASCADE: deleting a PI's account
     # must not delete the historical record of what was said in a shared
-    # thread. See docs/plans/2026-09-08-audit-fixes.md RC-1.
+    # thread. See migration 0030.
     sender_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -264,7 +263,7 @@ class ThreadDecision(Base):
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     origin_visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
-    )  # drives Phase 5 dedup-context filter; see specs/privacy-and-channel-visibility.md §G3
+    )  # drives the spontaneous-post dedup-context filter; see specs/privacy-and-channel-visibility.md
     refined_in_channel: Mapped[str | None] = mapped_column(
         String(100), nullable=True,
     )  # private channel ID if the thread migrated from a public channel via the reopen flow
@@ -273,14 +272,14 @@ class ThreadDecision(Base):
     )
     reopened_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
-    )  # set when a PI reopens a decided thread (Slack-native or web rating=0 guidance) — COR-13
+    )  # set when a PI reopens a decided thread (Slack-native or web rating=0 guidance)
     # Durable record that the owning PI engaged with this thread, i.e. that the
     # pending-proposal block was cleared. NULL means "no engagement recorded" —
     # exactly what every pre-0029 row has always meant, so the rebuild's re-block
     # is unchanged for them. This carries the implicit review INSTEAD of a
     # ProposalReview row because proposal_reviews.user_id is ondelete="CASCADE"
     # to users, so deleting a PI would erase the engine's own block-clearing
-    # markers. See COR-5 / migration 0029 / docs/plans/2026-09-04-decisions/task-8.md.
+    # markers. See migration 0029.
     pi_engaged_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
@@ -293,7 +292,7 @@ class PrivateChannelMember(Base):
     """Authoritative membership for collab_private channels.
 
     Each row represents either a bot member (agent_id non-null) or a human PI
-    member (user_id non-null). See specs/data-model.md §PrivateChannelMember
+    member (user_id non-null). See specs/data-model.md
     and specs/privacy-and-channel-visibility.md.
     """
 
@@ -384,7 +383,7 @@ class PiDmMessage(Base):
     ts: Mapped[str] = mapped_column(String(50), nullable=False)  # canonical id
     slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
-    # Durable at-least-once marker for inbound rows (RC-2): set once, after
+    # Durable at-least-once marker for inbound rows: set once, after
     # SimulationEngine._poll_pi_dms_from_db's PIHandler.handle_dm call returns
     # (successfully or not — one attempt, mirroring agent_messages.pi_inbound_state's
     # INGESTED->HANDLED shape with a single timestamp rather than two states, since a

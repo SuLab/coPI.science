@@ -1,10 +1,9 @@
 """scripts/backfill_agents.py's collision/bot-name logic must match the web
-path (agent_page.derive_agent_identity, fixed in issue #26 Task 26.9): the
-numeric branch extends the PREFIXED candidate ('pwu2'), not the bare stem
-('wu2') — before the fix these diverged, and _bot_name_for('wu2', ...) even
-produced 'WWuBot' (agent_id[0] of 'wu2' is 'w'), silently colliding with any
-bare-stem 'w...' bot via SimulationEngine._bot_name_to_id (issue #26 C2,
-red-team sharpening).
+path (agent_page.derive_agent_identity): the numeric branch extends the
+PREFIXED candidate ('pwu2'), not the bare stem ('wu2') — otherwise these
+diverge, and _bot_name_for('wu2', ...) produces 'WWuBot' (agent_id[0] of
+'wu2' is 'w'), silently colliding with any bare-stem 'w...' bot via
+SimulationEngine._bot_name_to_id.
 """
 
 from types import SimpleNamespace
@@ -61,8 +60,8 @@ def test_bot_name_for_second_numeric_suffix():
 
 
 async def test_resolve_agent_id_raises_when_the_numeric_range_is_exhausted():
-    """issue #26 Minor 4: exhausting range(2, 20) must raise cleanly, not
-    silently fall through and return a colliding id."""
+    """Exhausting range(2, 20) must raise cleanly, not silently fall through
+    and return a colliding id."""
     taken = {"wu", "pwu"} | {f"pwu{i}" for i in range(2, 20)}
     db = _FakeAgentRegistryDb(taken=taken)
     with pytest.raises(RuntimeError):

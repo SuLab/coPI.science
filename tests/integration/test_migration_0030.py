@@ -1,14 +1,14 @@
-"""Integration test for migration 0030 (RC-1 + RC-2, #20 audit 2026-09-08).
+"""Integration test for migration 0030.
 
 0030 carries two columns and one backfill:
 
   * ``agent_messages.sender_user_id`` — the ownership carrier
-    ``SimulationEngine._agent_ids_owned_by_user`` resolves against (RC-1 /
-    #20 COR-5): nullable UUID, FK ``users.id`` ON DELETE SET NULL, indexed.
+    ``SimulationEngine._agent_ids_owned_by_user`` resolves against:
+    nullable UUID, FK ``users.id`` ON DELETE SET NULL, indexed.
     No backfill — there is no way to recover who wrote a pre-existing row.
   * ``pi_dm_messages.handled_at`` — the durable at-least-once marker
     ``SimulationEngine._poll_pi_dms_from_db`` reads instead of the in-memory
-    ``_pi_dm_seen`` set (RC-2). BACKFILLED for existing inbound rows
+    ``_pi_dm_seen`` set. BACKFILLED for existing inbound rows
     (``handled_at = created_at``) so a deploy of this fix does not re-run
     ``PIHandler.handle_dm`` against the DM channel's entire history; outbound
     rows are left NULL (the column is meaningless for them).

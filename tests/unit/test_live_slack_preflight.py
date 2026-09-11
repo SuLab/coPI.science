@@ -6,8 +6,7 @@ tokens and a live app-config token pair. Its contract is therefore inverted from
 normal check: every path that cannot be *proved* safe is a refusal (exit non-zero), and
 nothing it prints may contain a credential.
 
-These tests drive the four checks the plan specifies
-(`docs/plans/2026-09-04-close-remaining-gaps.md` Task 2 Step 2) through injected fakes —
+These tests drive the preflight checks through injected fakes —
 no Slack call, no `.env` read, no network.
 """
 
@@ -360,12 +359,12 @@ def test_the_runner_aborts_before_pytest_when_the_preflight_refuses():
     assert "= test session starts" not in out, f"pytest must never start: {out}"
 
 # ---------------------------------------------------------------------------
-# Check 5 — an operator-supplied database is an unbounded token source.
-# Added after an audit of the first live run found that checks 1-2 bound only the
-# ENVIRONMENT, while AgentRegistry.slack_bot_token is DB-first and authoritative
-# (CLAUDE.md) and _sync_roster_from_db re-reads it every ~30s. That run was safe only
-# because agent_registry.agent_id is UNIQUE and the fixtures would have collided with
-# any pre-existing roster -- a schema accident, not a control.
+# Check 5 — an operator-supplied database is an unbounded token source. Checks 1-2
+# bound only the ENVIRONMENT, while AgentRegistry.slack_bot_token is DB-first and
+# authoritative (CLAUDE.md) and _sync_roster_from_db re-reads it every ~30s. A run
+# against a live database is safe only because agent_registry.agent_id is UNIQUE and
+# the fixtures would collide with any pre-existing roster -- a schema accident, not
+# a control.
 # ---------------------------------------------------------------------------
 
 
@@ -394,10 +393,9 @@ def test_check_five_never_echoes_a_dsn_password():
 
 
 def test_check_five_never_echoes_a_dsn_password_containing_an_at_sign():
-    # SEC3-3 (audit 2026-09-10): the old `//[^@/]*@` regex stops at the FIRST
-    # `@`, so a password containing a literal `@` leaks its tail (everything
-    # after that first `@`, up to and including the real host) into the
-    # printed detail.
+    # A `//[^@/]*@` regex would stop at the FIRST `@`, so a password containing
+    # a literal `@` would leak its tail (everything after that first `@`, up
+    # to and including the real host) into the printed detail.
     check = check_no_operator_supplied_database(
         {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:hun@ter2@db.internal:5432/prod"}
     )
@@ -410,10 +408,9 @@ def test_check_five_never_echoes_a_dsn_password_containing_an_at_sign():
 
 
 def test_check_five_never_echoes_a_dsn_with_a_non_numeric_port():
-    # SEC3-3 follow-up (opus review, audit 2026-09-10): urlsplit's `.port`
-    # raises ValueError for a non-numeric port instead of returning None, so
-    # the old urlsplit-based redaction crashed on a malformed DSN instead of
-    # refusing safely.
+    # urlsplit's `.port` raises ValueError for a non-numeric port instead of
+    # returning None, so a urlsplit-based redaction that doesn't guard against
+    # this would crash on a malformed DSN instead of refusing safely.
     check = check_no_operator_supplied_database(
         {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:hunter2@db.internal:notaport/prod"}
     )
@@ -424,9 +421,9 @@ def test_check_five_never_echoes_a_dsn_with_a_non_numeric_port():
 
 
 def test_check_five_never_echoes_a_dsn_password_containing_a_slash():
-    # SEC3-3 follow-up: urlsplit puts everything after the first unescaped `/`
-    # into `.path`, so a password containing `/` put part of the password in
-    # `parts.path`, which the old code appended to the printed detail verbatim.
+    # urlsplit puts everything after the first unescaped `/` into `.path`, so a
+    # password containing `/` puts part of the password in `parts.path`,
+    # which must not be appended to the printed detail verbatim.
     check = check_no_operator_supplied_database(
         {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:pa/ss@db.internal/prod"}
     )
@@ -437,8 +434,8 @@ def test_check_five_never_echoes_a_dsn_password_containing_a_slash():
 
 
 def test_check_five_never_echoes_a_dsn_password_containing_at_and_the_rest_intact():
-    # Same shape as the plain @-in-password case above, phrased with the
-    # reviewer's exact fixture string.
+    # Same shape as the plain @-in-password case above, with the rest of the
+    # DSN intact around it.
     check = check_no_operator_supplied_database(
         {"TEST_DATABASE_URL": "postgresql+asyncpg://someuser:p@ss@db.internal/prod"}
     )
@@ -478,11 +475,11 @@ def test_check_five_gates_check_three_so_no_token_is_sent():
 
 
 # ---------------------------------------------------------------------------
-# Check 6 (audit 2026-09-08 RC-13) — the resolved profiles/{public,private,memory}
-# directories must be writable by the current uid before the tier (or any agent code)
-# tries to write a profile there. RC-7's silent-clobber bug was triggered by exactly
-# this: a permission-denied temp-file write that got swallowed instead of refused up
-# front. Must run BEFORE any Slack call, same as checks 1/2/5.
+# Check 6 — the resolved profiles/{public,private,memory} directories must be
+# writable by the current uid before the tier (or any agent code) tries to
+# write a profile there: a permission-denied temp-file write that gets
+# swallowed instead of refused up front causes a silent clobber. Must run
+# BEFORE any Slack call, same as checks 1/2/5.
 # ---------------------------------------------------------------------------
 
 
@@ -496,10 +493,10 @@ def test_check_six_creates_and_accepts_a_writable_profiles_dir(tmp_path):
 
 
 def test_check_six_refuses_a_nonexistent_profiles_dir_with_the_exact_remedy(tmp_path):
-    """A mistyped/nonexistent COPI_PROFILES_DIR (audit 2026-09-08, opus review): the
-    old behaviour created `profiles_dir` itself via `mkdir(parents=True)`, which
-    silently created an arbitrary directory tree instead of refusing a typo. Only the
-    three subdirs are created; profiles_dir itself must already exist."""
+    """A mistyped/nonexistent COPI_PROFILES_DIR must be refused, not silently created:
+    creating `profiles_dir` itself via `mkdir(parents=True)` would create an arbitrary
+    directory tree instead of catching the typo. Only the three subdirs are created;
+    profiles_dir itself must already exist."""
     target = tmp_path / "typo-ed-profiles-dir"
     assert not target.exists()
     check = check_profiles_dir_writable(target)
@@ -510,7 +507,7 @@ def test_check_six_refuses_a_nonexistent_profiles_dir_with_the_exact_remedy(tmp_
 
 
 def test_check_six_quotes_a_profiles_dir_containing_a_space_in_the_remedy(tmp_path):
-    """R-5 (audit 2026-09-10): the remedy interpolates `profiles_dir` raw into a
+    """The remedy interpolates `profiles_dir` raw into a
     `sudo chown -R ... <dir>` suggestion. Unquoted, a path with a space (or shell
     metacharacters) renders as a copy-paste line that runs `chown` against the wrong
     (truncated) path, or worse. `shlex.quote` makes the suggested command safe to

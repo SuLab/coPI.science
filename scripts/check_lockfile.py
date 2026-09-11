@@ -3,21 +3,20 @@
 
 WHY NOT "does the lock equal a fresh pip-compile?"
 =================================================
-That was the first implementation of this gate (#27 I4-e), and it cannot work as a
-gate, because it compares the committed lock against *whatever PyPI holds right now*:
+That cannot work as a gate, because it compares the committed lock against
+*whatever PyPI holds right now*:
 
   * Any of the ~200 transitive packages publishing a release makes the committed lock
-    differ from a fresh resolve, with no change to this repository. Measured on
-    2026-09-04: `alembic 1.19.2` was published at 17:10:12Z and the gate went red for
-    every developer within the hour, blaming "pyproject.toml changed without
-    regenerating it" — which nobody had done.
-  * It is not even reproducible within one machine. Two back-to-back runs of the same
-    `pip-compile` command disagreed (alembic 1.19.1 vs 1.19.2, rich 14.3.4 vs 15.0.0)
-    depending on which HTTP cache the ephemeral environment saw.
+    differ from a fresh resolve, with no change to this repository — a real release
+    once turned the gate red for every developer within the hour, blaming
+    "pyproject.toml changed without regenerating it" when nobody had done that.
+  * It is not even reproducible within one machine: two back-to-back runs of the same
+    `pip-compile` command can disagree, depending on which HTTP cache the ephemeral
+    environment saw.
 
-`scripts/ci.sh` is the whole gate and the pre-push hook runs it (decision D17), so a
-check that goes red on its own schedule does not protect the lock — it just stops
-people pushing, and teaches them to reach for LOCKCHECK=none.
+`scripts/ci.sh` is the whole gate and the pre-push hook runs it, so a check that goes
+red on its own schedule does not protect the lock — it just stops people pushing, and
+teaches them to reach for LOCKCHECK=none.
 
 WHAT THIS CHECKS INSTEAD
 ========================
@@ -31,7 +30,7 @@ determined by the two files, so it is checked from the two files:
 Adding or re-constraining a dependency without regenerating therefore fails, immediately
 and for a reason that names the package. Upstream releasing something new does not.
 
-Known limit, stated because the audit caught the docstring overclaiming it: REMOVING a
+Known limit: REMOVING a
 dependency from pyproject.toml is not detected. The check walks what pyproject declares
 and asks whether the lock satisfies it, so a package deleted from pyproject is simply no
 longer asked about — the lock keeps installing it and this exits 0 (reproduced with

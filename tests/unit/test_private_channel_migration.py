@@ -335,7 +335,7 @@ class TestImports:
 
 
 # ---------------------------------------------------------------------------
-# Transaction boundary — the Slack-off migration owns its own commit (#24 N1-a)
+# Transaction boundary — the Slack-off migration owns its own commit
 # ---------------------------------------------------------------------------
 
 
@@ -472,7 +472,7 @@ class TestOfflineMigrationDurability:
 
 
 # ---------------------------------------------------------------------------
-# RC-14 (audit 2026-09-08 follow-up) — every Slack call runs off the event loop
+# Every Slack call runs off the event loop
 # ---------------------------------------------------------------------------
 
 
@@ -480,7 +480,7 @@ class _ThreadRecordingSlackClient(FakeSlackClient):
     """Records which OS thread each Slack-calling method actually ran on.
 
     A synchronous ``AgentSlackClient`` call can block for up to
-    ``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s, RC-3) under a
+    ``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s) under a
     sustained 429. Called straight from async code, that freezes the single
     ASGI worker or the worker process for the whole retry loop. This fake
     proves the fix: every method the migration calls records
@@ -519,7 +519,7 @@ class _ThreadRecordingSlackClient(FakeSlackClient):
 
 @pytest.mark.integration
 class TestSlackCallsRunOffTheEventLoop:
-    """RC-14: src/services/private_channels.py calls straight into
+    """src/services/private_channels.py calls straight into
     AgentSlackClient's synchronous, blocking methods from async code (the web
     reopen route, the e-mail inbound worker). Every one of those calls must go
     through ``asyncio.to_thread`` so a Slack throttle cannot freeze the

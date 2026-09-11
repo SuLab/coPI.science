@@ -1,5 +1,5 @@
-"""README.md's agent-simulation runbook must not repeat two stale claims
-(issue #26 DOC-1): (a) PILOT_LABS in src/agent/simulation.py — the roster is
+"""README.md's agent-simulation runbook must not repeat two stale claims:
+(a) PILOT_LABS in src/agent/simulation.py — the roster is
 AgentRegistry-driven and PILOT_LABS has zero matches in src/; (b) the
 agent-run container "mounts source" — under prod compose it BAKES the source
 (CLAUDE.md "Running the Agent Simulation"), so a code change needs

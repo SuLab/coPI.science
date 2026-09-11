@@ -19,7 +19,7 @@ DETAIL_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
 
 @pytest.fixture(autouse=True)
 def _no_retry_backoff(monkeypatch):
-    """Zero the retry backoff (issue #23 COR-29a) so the two tests that mock a 500 don't add
+    """Zero the retry backoff so the two tests that mock a 500 don't add
     ~3.5s of real sleep each."""
     monkeypatch.setattr(grants, "_RETRY_BACKOFF", 0)
 
@@ -52,8 +52,8 @@ async def test_search_opportunities_maps_fields():
             "agency": "HHS-NIH11",
             "open_date": "2026-01-01",
             "close_date": "2026-06-01",
-            # The provider literal above sends no description — search2 does not,
-            # measured live 2026-08-04 — so the projection maps it to "". Asserting
+            # The provider literal above sends no description — search2 does not
+            # send one — so the projection maps it to "". Asserting
             # the empty string rather than dropping the key keeps both halves
             # honest: what grants.gov sends, and what we hand our callers.
             "description": "",
@@ -160,7 +160,7 @@ async def test_search_for_researchers_swallows_search_errors():
     assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it
 
 
-# ---- retry behaviour, not just the wiring (#23 COR-29a / R6) ----
+# ---- retry behaviour, not just the wiring ----
 #
 # As in test_orcid_contract.py: the `_no_retry_backoff` fixture above pinned only that
 # `_RETRY_BACKOFF` still exists, and the generic loop is exercised in

@@ -2,8 +2,8 @@
 
 No compose CLI, no Docker daemon — parsed as plain YAML.
 
-Since Task 27.8 (commit 5f8aa2b) the image runs as fixed UID 10001
-(Dockerfile). The dev compose file bind-mounts the whole checkout at
+The image runs as fixed UID 10001 (Dockerfile). The dev compose file
+bind-mounts the whole checkout at
 `.:/app`, which is owned by the host user (typically UID 1000/1001, not
 10001) — so dev containers built from the same image can no longer write
 into the bind-mounted tree. The fix is dev-only: every service in

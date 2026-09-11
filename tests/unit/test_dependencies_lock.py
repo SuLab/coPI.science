@@ -1,8 +1,8 @@
-"""Static checks for #27 I4: upper caps on version-sensitive deps, plotly out
-of the runtime install, an alembic floor high enough for `if_exists=` in
-migration downgrades, and a lockfile that exists and names every runtime
-dependency. Does not attempt to re-validate pip-compile's own hash pinning —
-that's pip's job at install time (--require-hashes, wired in Task 27.6)."""
+"""Static checks: upper caps on version-sensitive deps, plotly out of the
+runtime install, an alembic floor high enough for `if_exists=` in migration
+downgrades, and a lockfile that exists and names every runtime dependency.
+Does not attempt to re-validate pip-compile's own hash pinning — that's pip's
+job at install time (--require-hashes)."""
 
 import os
 import re
@@ -30,18 +30,18 @@ def test_version_sensitive_deps_have_upper_caps():
     }
     for name in ("fastapi", "sqlalchemy", "anthropic", "slack-sdk"):
         assert "<" in deps[name], f"{name} has no upper cap: {deps[name]!r}"
-    # #27 I4's second Fix clause: cap the PRE-1.0 packages too, where a minor bump is a
-    # breaking change by convention. These five sit on request-handling and database
+    # Cap the PRE-1.0 packages too, where a minor bump is a breaking change by
+    # convention. These five sit on request-handling and database
     # paths (serving, every outbound call, the DB driver, form parsing, the CLI entry).
     for name in ("uvicorn", "httpx", "asyncpg", "python-multipart", "typer"):
         assert "<" in deps[name], f"pre-1.0 dep {name} has no upper cap: {deps[name]!r}"
 
 
 def test_floors_clear_the_advisories_named_in_issue_27_i4():
-    """#27 I4's "raise floors past known CVEs". Checked against OSV on 2026-09-04:
-    jinja2 <3.1.6 carries 6 advisories, python-multipart <0.0.31 carries 16, authlib
-    <1.7.1 carries 22. The lock already resolved above all three, so these floors change
-    nothing today — they stop a future resolve walking back into them."""
+    """Floors must raise past known CVEs: jinja2 <3.1.6 carries 6 advisories,
+    python-multipart <0.0.31 carries 16, authlib <1.7.1 carries 22. The lock
+    already resolves above all three, so these floors change nothing today —
+    they stop a future resolve walking back into them."""
     from packaging.requirements import Requirement
     from packaging.version import Version
 
@@ -105,10 +105,9 @@ def test_ci_sh_runs_the_deterministic_lock_check_before_the_suite():
     """The gate checks lock-vs-pyproject consistency, offline, not lock-vs-PyPI.
 
     The original implementation diffed the committed lock against a fresh pip-compile,
-    which made the gate red whenever any of ~200 transitive packages published a
-    release — measured 2026-09-04, alembic 1.19.2 (published 17:10Z) turned it red with
-    no repository change, and two back-to-back resolves disagreed depending on HTTP
-    cache state. See the step's comment in scripts/ci.sh.
+    which makes the gate red whenever any of ~200 transitive packages publishes a
+    release with no repository change, and two back-to-back resolves can disagree
+    depending on HTTP cache state. See the step's comment in scripts/ci.sh.
     """
     text = _ci_sh()
     assert "scripts/check_lockfile.py" in text
@@ -209,7 +208,7 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
 
 
 def test_lock_smoke_step_is_documented_and_opt_in():
-    # #27 I6: the freshness gate above proves the lock MATCHES pyproject.toml;
+    # The freshness gate above proves the lock MATCHES pyproject.toml;
     # nothing proves it actually WORKS on the Python 3.11 the Dockerfile installs
     # it on. Static pin that the opt-in smoke step exists, is off by default, and
     # names the three entry points it imports.

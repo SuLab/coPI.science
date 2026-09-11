@@ -165,9 +165,9 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
         orcid="0000-0002-1825-0097",
         institution=None,
         department=None,
-        # Still onboarding (fix round: Step 9b's seed generation is now gated
-        # on this), matching every other GM fixture in this file that expects
-        # the private-seed call to fire on a first run.
+        # Still onboarding (Step 9b's seed generation is gated on this),
+        # matching every other GM fixture in this file that expects the
+        # private-seed call to fire on a first run.
         onboarding_complete=False,
     )
 
@@ -225,7 +225,7 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
     it, stores no synthesized fields, and leaves version at 0 — but still
     records grant titles and the abstracts hash. `onboarding_complete=False`
     keeps Step 9b's seed generation gated "in" (it is gated on "still
-    onboarding" since the COR-23 fix round), and the same raising client backs
+    onboarding"), and the same raising client backs
     that call too, so this also exercises Step 9b's own except branch — not
     just the public-synthesis one — which is why `private_profile_seed` below
     still comes back None.
@@ -348,7 +348,7 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
 async def test_profile_pipeline_update_branch_repairs_a_previously_truncated_title(
     db_session, monkeypatch
 ):
-    """#22 I5: the insert loop's existing-row branch used to refresh only
+    """The insert loop's existing-row branch used to refresh only
     `doi`, so a publication row stored before the itertext() parser fix kept
     its title truncated at the first inline tag forever ("Role of " for
     "Role of <i>TP53</i> in cancer") -- those stored DB rows, not the live
@@ -425,7 +425,7 @@ async def test_profile_pipeline_update_branch_repairs_a_previously_truncated_tit
 async def test_profile_pipeline_update_branch_does_not_blank_an_existing_abstract(
     db_session, monkeypatch
 ):
-    """#22 I5: the refresh must be additive only -- a fresh PubMed record
+    """The refresh must be additive only -- a fresh PubMed record
     missing an abstract (e.g. newly indexed metadata-only) must never blank a
     value the stored row already has, even while title/journal/year DO
     refresh from the same fresh, non-empty record."""
@@ -762,13 +762,13 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
 async def test_profile_pipeline_discarded_synthesis_does_not_record_the_new_abstracts_hash(
     db_session, monkeypatch
 ):
-    """#22 COR-22 residual (c): raw_abstracts_hash is change-detection INPUT,
+    """raw_abstracts_hash is change-detection INPUT,
     meant to describe the run whose OUTPUT was actually stored (see the model
     comment on ResearcherProfile.evidence_pub_count, which distinguishes the
-    two). Before this fix it was written unconditionally at step 9, so a
+    two). It must not be written unconditionally at step 9: a
     refresh whose synthesis failed validation twice and was discarded —
-    exactly the scenario above — still recorded ITS abstracts as the last-seen
-    input. A later run over that same (still-failing) input would then look
+    exactly the scenario above — must not record ITS abstracts as the last-seen
+    input, or a later run over that same (still-failing) input would look
     unchanged by anything comparing hashes, and could skip regenerating a
     profile whose good version-1 synthesis was never actually replaced. This
     pins: the discard path leaves raw_abstracts_hash exactly as the last
@@ -1033,14 +1033,14 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
 async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
     db_session, monkeypatch
 ):
-    """V1-16b/c: one ORCID works listing naming the same PMID twice must not
-    db.add() two Publication rows (post-0025 that is an IntegrityError that
+    """One ORCID works listing naming the same PMID twice must not
+    db.add() two Publication rows (that is an IntegrityError that
     aborts the whole pipeline run), and must not feed the same publication
-    into the synthesis context twice (fix-round Minor 3: `_dedup_pmids`
+    into the synthesis context twice. `_dedup_pmids`
     upstream dedupes the PMID *list*, but `fetch_pubmed_records` can itself
     hand back the same record more than once for one requested PMID — that is
     what actually exercises the in-loop `existing_pubs[pmid] = pub` update,
-    not `_dedup_pmids`)."""
+    not `_dedup_pmids`."""
     _install_fakes(monkeypatch)
 
     async def dupe_works(orcid_id):
@@ -1091,14 +1091,14 @@ async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
 
 
 async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatch, tmp_path):
-    """COR-23: an admin-seeded lab whose PI never visits /onboarding/private-profile
+    """An admin-seeded lab whose PI never visits /onboarding/private-profile
     must still get agent instructions on disk from the pipeline's own seed write.
 
     This is the only test in this file with an AgentRegistry, so it is also the only
     one that reaches the export at all — hence the explicit export-dir patching (the
     rest of the file never writes, so it never needed it).
 
-    Control for the fix-round gate on Step 9b's GENERATION (contrast with
+    Control for Step 9b's GENERATION gate (contrast with
     test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed):
     onboarding_complete=False (an admin-seeded PI who never onboarded) still
     gets a seed generated and exported.
@@ -1128,14 +1128,14 @@ async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatc
 async def test_first_run_exports_the_private_seed_via_the_configured_profiles_dir(
     db_session, monkeypatch, tmp_path
 ):
-    """REV4-1 (audit 2026-09-08): same scenario as
+    """Same scenario as
     test_first_run_exports_the_private_seed_to_disk, but WITHOUT monkeypatching
     profile_export.PROFILES_DIR/PRIVATE_PROFILES_DIR directly -- only
     COPI_PROFILES_DIR + get_settings.cache_clear(), exactly like a real deployment
     that sets the env var. run_profile_pipeline's own private-seed adoption/export
-    call sites (src/services/profile_pipeline.py) used to read the module
-    constants directly, which stayed None and raised TypeError even though the
-    accessor-based settings path was configured correctly.
+    call sites (src/services/profile_pipeline.py) must resolve the directories
+    through the accessor-based settings path, not module constants that stay
+    None and raise TypeError.
     """
     from src.config import get_settings
 
@@ -1167,7 +1167,7 @@ async def test_first_run_exports_the_private_seed_via_the_configured_profiles_di
 async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
     db_session, monkeypatch, tmp_path
 ):
-    """Fix round (COR-23): a PI who has completed onboarding and then cleared
+    """A PI who has completed onboarding and then cleared
     both private_profile_md and private_profile_seed — POST
     /onboarding/private-profile with a blank form does exactly that, and also
     sets onboarding_complete=True (onboarding.py:save_private_profile) — must
@@ -1314,7 +1314,7 @@ async def test_a_backfilled_private_revision_is_not_read_as_a_clear(
 async def test_bump_profile_version_is_emitted_after_the_private_seed_synthesis_call(
     db_session, monkeypatch, tmp_path
 ):
-    """#22 I6: bump_profile_version's `UPDATE ... RETURNING` takes a row lock on
+    """bump_profile_version's `UPDATE ... RETURNING` takes a row lock on
     researcher_profiles that is only released when the worker commits this
     transaction (src/worker/main.py). Emitting it right after apply_synthesis
     used to hold that lock across Step 9b's synthesize_private_profile LLM call
@@ -1373,7 +1373,7 @@ async def test_bump_profile_version_is_emitted_after_the_private_seed_synthesis_
 async def test_disk_only_private_profile_survives_a_pipeline_run(
     db_session, monkeypatch, tmp_path
 ):
-    """#22 C1: an admin-seeded/pilot lab with a hand-authored
+    """An admin-seeded/pilot lab with a hand-authored
     profiles/private/{agent_id}.md and NULL private_profile_md/_seed — the
     state onboarding.py's GET /onboarding/private-profile documents and
     reads — must not have that file deleted or overwritten by a pipeline
@@ -1418,10 +1418,10 @@ async def test_disk_only_private_profile_survives_a_pipeline_run(
 async def test_a_json_array_synthesis_response_does_not_crash_the_pipeline(
     db_session, monkeypatch
 ):
-    """Minor 2 (fix round): extract_json's ```json fenced-block branch parses
+    """extract_json's ```json fenced-block branch parses
     whatever valid JSON is inside the fence, so a malformed LLM response whose
     fence wraps a JSON ARRAY (not an object) makes synthesize_profile return a
-    list. Before the isinstance guard added in this fix round, that list
+    list. Without an isinstance guard, that list
     passed profile.get(...)-free through `_validate_profile`'s try/except as
     validated=False (truthy, non-empty), which then made `if not validated and
     synthesized:` retry, and once the retry's response ran out too (raising

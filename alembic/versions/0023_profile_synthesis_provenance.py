@@ -2,7 +2,6 @@
 
 Revision ID: 0023
 Revises: 0022
-Create Date: 2026-07-31 00:00:00.000000
 
 Two defects in src/services/profile_pipeline.py were invisible because the
 pipeline wrote down nothing about *how* a profile was produced:

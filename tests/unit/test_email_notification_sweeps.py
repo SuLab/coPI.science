@@ -3,9 +3,9 @@ No DB: session_factory is a small fake that records commit()/rollback() calls in
 in for "a second user's failure must not be able to discard an earlier user's already-committed
 work" without needing real Postgres to reproduce the shared-session hazard.
 
-Fix round 1 (#21 V4-1 review Critical #1): each sweep now captures only plain ids before the
-loop and re-loads the row inside the guarded block (src/worker/main.py's reap_stale_jobs
-pattern), rather than reading an attribute off the object the bulk query returned. These fakes'
+Each sweep captures only plain ids before the loop and re-loads the row inside
+the guarded block (src/worker/main.py's reap_stale_jobs pattern), rather than
+reading an attribute off the object the bulk query returned. These fakes'
 `execute()` therefore has to answer TWO different query shapes in order: the initial bulk
 SELECT (`.scalars().all()`), then one per-item reload (`.scalar_one_or_none()`) for each id in
 turn -- a fake has no SQL to introspect, so it distinguishes purely by call order, which is
@@ -334,7 +334,7 @@ async def test_send_proposal_notification_never_reaches_ses_for_a_blocked_recipi
     assert any("suppressed by outbound allowlist" in r.getMessage() for r in caplog.records)
 
 
-# --- RC-4 follow-up: _expire_lapsed_outstanding must not trust its callers ---------
+# --- _expire_lapsed_outstanding must not trust its callers ---------
 
 
 class _Notif:
@@ -357,9 +357,9 @@ class _NoFlushDB:
 
 @pytest.mark.asyncio
 async def test_expire_lapsed_outstanding_leaves_an_in_window_row_alone(monkeypatch):
-    """Opus review, RC-4 follow-up: the helper previously trusted its caller's earlier
-    age check (40 lines away in `_process_user_notifications`) to guarantee any row
-    reaching it was already past the reply window. It must re-check `sent_at` against
+    """The helper must not trust its caller's earlier age check (40 lines away
+    in `_process_user_notifications`) to guarantee any row reaching it was
+    already past the reply window. It must re-check `sent_at` against
     `settings.email_notification_expiry_days` itself, so correctness does not depend on
     control flow the reader has to trace elsewhere."""
     from datetime import UTC, datetime

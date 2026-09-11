@@ -1,7 +1,6 @@
 """The cohort gate and the Slack mirror together.
 
-`.notes/cohort-thorough-test-plan.md` excluded this block by instruction and noted it
-was not testable anyway: no agent carried a bot token. With three probe bots it is.
+This block is only testable with real bot tokens; with three probe bots it is.
 
 The claim that matters is a distinction the Slack-off suite structurally cannot make:
 the gate filters **reads**, never **writes**. Every agent's message must reach Slack —
@@ -127,7 +126,7 @@ async def test_the_gate_filters_reads_and_never_the_mirror(cohort_engine):
     for text in ("from su", "from cravatt", "from wiseman"):
         assert text in live, f"{text!r} never reached Slack: {live}"
 
-    # And every row landed, un-gated (§6.2: ingestion is never gated).
+    # And every row landed, un-gated (ingestion is never gated).
     async with factory() as db:
         rows = (await db.execute(select(AgentMessage).where(
             AgentMessage.simulation_run_id == run_id))).scalars().all()
@@ -190,7 +189,7 @@ async def test_a_cross_cohort_mention_is_stripped_in_the_message_slack_receives(
 async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack(
     cohort_engine
 ):
-    """§8 calls the resumed run the normal path, because the DB rebuild reconstructs
+    """Grandfathering calls the resumed run the normal path, because the DB rebuild reconstructs
     threads gate-blind before the first recompute. This is the only test that exercises
     that with Slack present.
     """
@@ -289,7 +288,7 @@ async def test_a_private_channel_is_polled_only_by_a_member_bot(cohort_engine, s
 
 
 async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, slack_clients):
-    """§7 end to end with the mirror on: two agents in DIFFERENT cohorts, maximally
+    """The private-channel exemption end to end with the mirror on: two agents in DIFFERENT cohorts, maximally
     gated, still converse in the channel the PI made for them — and the messages are
     really in Slack.
 

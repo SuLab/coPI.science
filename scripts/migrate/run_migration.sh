@@ -30,9 +30,9 @@
 #   ./scripts/migrate/run_migration.sh                      # rehearse, write nothing
 #   ./scripts/migrate/run_migration.sh --apply              # back up, migrate, verify
 #   ./scripts/migrate/run_migration.sh --apply \
-#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested 2026-08-04"
+#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested"
 #   ./scripts/migrate/run_migration.sh --via-run --apply \
-#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested 2026-08-04"
+#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested"
 #
 # --via-run runs every in-container step (Step 1's import checks, preflight, alembic,
 # postflight) as a one-off `docker compose run --rm` container built from the CURRENT
@@ -160,8 +160,8 @@ fi
 # image's runtime user, since the prod compose sets no `user:` override on `migrate`
 # or one-off `run`s). On the prod host $BACKUP_DIR (default `backups/`) is owned by
 # the operator, not 10001, so writing the default path there fails closed with
-# EACCES (#27 Critical 1) — R.5 already chowns data/ to 10001:10001 for the
-# profiles/data bind mounts, so default the snapshot there instead under --via-run.
+# EACCES — data/ is already chowned to 10001:10001 for the profiles/data bind
+# mounts, so default the snapshot there instead under --via-run.
 # An explicit MIGRATE_SNAPSHOT always wins, in either mode; the non---via-run default
 # (an `exec` into an already-running, non-10001-restricted container) is unchanged.
 if [[ "$VIA_RUN" == "1" ]]; then

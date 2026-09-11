@@ -35,7 +35,7 @@ class ThreadState:
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     foa_number: str | None = None  # FOA number for funding threads
     funding_reject_count: int = 0  # drafts rejected by funding-rules validators
-    authorship_reject_count: int = 0  # drafts rejected by the authorship guard (issue #29)
+    authorship_reject_count: int = 0  # drafts rejected by the authorship guard
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
     # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
     # the owning agent (membership changed, or — on every resumed run — the DB
@@ -43,7 +43,6 @@ class ThreadState:
     # A grandfathered thread still gets Phase 4 replies so the conversation can
     # conclude, but it is barred from the reactive-priority tier so it cannot
     # outrank gate-compliant work. Cleared if the partner becomes permitted again.
-    # See .notes/cohort-system-v2.md §8.
     grandfathered: bool = False
     # Consecutive Slack post refusals (client connected, result is None — a
     # deterministic error like is_archived/not_in_channel/invalid_auth/
@@ -52,8 +51,7 @@ class ThreadState:
     # every turn forever and the thread can never reach the 12-message
     # timeout close. Reconstructed on rebuild from the trailing DB-only
     # (slack_ts IS NULL) rows this agent authored in the thread, capped at 2 —
-    # see SimulationEngine._derive_post_failure_count (RC-9b, #20 audit
-    # 2026-09-08).
+    # see SimulationEngine._derive_post_failure_count.
     post_failure_count: int = 0
     # Consecutive AGENT TURNS this thread has spent parked (_is_parked_thread),
     # i.e. post_failure_count >= 2 and has_pending_reply False. Reset to 0 the
@@ -62,7 +60,7 @@ class ThreadState:
     # on rebuild — a restart gives a still-parked thread a fresh count, which
     # only delays eviction by at most one restart's worth of turns; it never
     # un-parks a thread outright the way post_failure_count resetting would.
-    # Drives PARKED_THREAD_MAX_TURNS eviction (RC-9a): a thread parked for
+    # Drives PARKED_THREAD_MAX_TURNS eviction: a thread parked for
     # that many of the agent's own turns is dropped from active_threads
     # entirely — it generates no LLM work while parked, so leaving it in
     # active_threads forever wastes a permanent slot on a conversation that
@@ -81,7 +79,7 @@ class ProposalRef:
     summary_text: str  # the :memo: Summary content
     proposed_at: float
     reviewed: bool = False
-    thread_decision_id: uuid.UUID | None = None  # unifies the rebuild/tick review key — COR-13
+    thread_decision_id: uuid.UUID | None = None  # unifies the rebuild/tick review key
 
 
 @dataclass
@@ -100,13 +98,13 @@ class AgentState:
     # accounting (it feeds the run summary and SimulationRun.total_api_calls),
     # while call_times is the LIVE throttle and its entries age out. Only the
     # latter gates eligibility, which is why throttling can no longer be
-    # permanent. See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2.
+    # permanent.
     call_times: deque[float] = field(default_factory=deque)
 
     # True while the agent is rate-limited. Tracked only so the transition into
     # throttling can be logged once instead of once per scheduler tick — a silent
     # throttle is what turned the original incident into a 2.5-hour undetected
-    # outage. See design §6.
+    # outage.
     throttled: bool = False
 
     # Phase 5 throttling (state-change gate + skip backoff)

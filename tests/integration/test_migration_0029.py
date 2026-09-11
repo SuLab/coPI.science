@@ -1,16 +1,14 @@
-"""Integration test for migration 0029 (#20 COR-5 + COR-10(3)).
+"""Integration test for migration 0029.
 
 0029 carries exactly two nullable columns and nothing else:
 
   * ``thread_decisions.pi_engaged_at`` — the carrier for the implicit PI review
     that ``proposal_reviews`` cannot hold (its ``user_id`` is
     ``ondelete="CASCADE"`` to ``users``, so a PI deletion would erase the
-    engine's own block-clearing markers). See
-    ``docs/plans/2026-09-04-decisions/task-8.md``.
+    engine's own block-clearing markers).
   * ``agent_messages.pi_inbound_state`` — the durable handled-marker the DB
     inbound poller needs once the log append moves *ahead* of the handler, so
-    dedup stops keying on the MessageLog entry's presence. See
-    ``docs/plans/2026-09-04-decisions/task-7.md``.
+    dedup stops keying on the MessageLog entry's presence.
 
 Both are nullable with no server default and no backfill: NULL means "unknown",
 and every reader must treat unknown as today's behaviour.
@@ -254,4 +252,4 @@ async def test_0029_downgrade_is_idempotent_when_the_columns_are_already_gone(sc
 # real_tree`, which reads `pf.DEFAULT_TARGET` rather than a literal) exist to
 # keep current for whichever revision is actually the head, so it is not
 # re-pinned here under a name that would go stale again at the next
-# migration. See docs/plans/2026-09-08-audit-fixes.md RC-1/RC-2.
+# migration.

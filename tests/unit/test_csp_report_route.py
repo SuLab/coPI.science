@@ -1,11 +1,11 @@
-"""Unit coverage for `POST /api/csp-report` (#27 I5, audit 2026-09-08 RC-5).
+"""Unit coverage for `POST /api/csp-report`.
 
-nginx's Report-Only CSP header (nginx/nginx.conf) now carries `report-uri
+nginx's Report-Only CSP header (nginx/nginx.conf) carries `report-uri
 /api/csp-report`, so browsers that violate the reported directives POST a
-violation report here. Before this route existed, nothing collected those
-reports at all — the header had no `report-uri`/`report-to`, so violations
-went nowhere (see tests/unit/test_nginx_config.py for the nginx-side half of
-RC-5). The route must be public (no auth), accept both report content types
+violation report here (see tests/unit/test_nginx_config.py for the nginx-side
+half). Without this route, nothing collects those reports — the header would
+have no `report-uri`/`report-to`, so violations would go nowhere. The route
+must be public (no auth), accept both report content types
 browsers actually send, cap the body so it can't be used to fill request logs
 or memory, and never 500 on a malformed report.
 """
@@ -113,8 +113,8 @@ async def test_csp_report_endpoint_does_not_500_on_malformed_json():
 async def test_csp_report_endpoint_rejects_a_chunked_oversized_body_with_413(
     monkeypatch,
 ):
-    """REV3-4 (opus review, audit 2026-09-08): a chunked POST with no
-    Content-Length skips the header-based size check entirely, and
+    """A chunked POST with no Content-Length skips the header-based size
+    check entirely, and
     `await request.body()` buffers the WHOLE body before the len() check
     after it ever runs -- so a chunked body could push an unbounded amount
     into memory first. Read via the stream and abort once more than
@@ -186,11 +186,12 @@ async def test_csp_report_endpoint_is_excluded_from_badge_middleware(monkeypatch
     assert r.status_code == 204
 
 
-# --- Opus review of RC-5 (2026-09-08) --------------------------------------------
-# 1. Content-type enforcement was only DOCUMENTED, never actually checked -- any
-#    content-type reached the JSON parser. 2. Logged fields came straight from an
-#    attacker-controlled JSON body with no length cap or newline stripping, so a
-#    crafted document-uri could inject fake log lines (CRLF log injection).
+# --- Content-type enforcement and log-injection hardening -----------------------
+# Content-type enforcement must be actually checked, not just documented -- any
+# content-type must not reach the JSON parser unchecked. Logged fields come
+# straight from an attacker-controlled JSON body, so they need a length cap
+# and newline stripping to prevent a crafted document-uri injecting fake log
+# lines (CRLF log injection).
 
 
 async def test_csp_report_endpoint_accepts_application_json():
@@ -241,8 +242,8 @@ async def test_csp_report_endpoint_sanitizes_an_embedded_newline_in_logged_field
 
 
 async def test_csp_report_endpoint_strips_non_printable_chars_from_logged_fields(caplog):
-    # SEC2-3 (audit 2026-09-08): \n/\r were not the only way to forge a fake
-    # log line or corrupt a terminal/log viewer -- an ANSI escape sequence and
+    # \n/\r are not the only way to forge a fake log line or corrupt a
+    # terminal/log viewer -- an ANSI escape sequence and
     # Unicode's U+2028 LINE SEPARATOR are both non-printable and neither was
     # stripped by the old CR/LF-only replace().
     injected = json.dumps(

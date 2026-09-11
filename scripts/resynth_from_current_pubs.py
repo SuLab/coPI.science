@@ -82,7 +82,7 @@ async def _process(orcid: str, db: AsyncSession) -> str:
         # stored one (validated=False), or the response carried none of the
         # fields apply_synthesis writes — and in that second case
         # apply_synthesis has already logged its keys, immediately above this
-        # line, instead of blanking the profile with it (issue #22 V6).
+        # line, instead of blanking the profile with it.
         return (
             f"{user.name}: kept existing profile (validated={validated}); "
             "the new synthesis was not applied"

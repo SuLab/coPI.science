@@ -2,8 +2,7 @@
 
 Dependency-free on purpose (no src.models, no DB) so the resolution rules are
 unit-testable without a database, and so src/agent/agent.py can import it
-without pulling the ORM into the Agent class. See
-docs/specs/2026-08-05-hub-bot-customization-design.md.
+without pulling the ORM into the Agent class.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ DEFAULT_ROLE = "pi_lab"
 
 # Explicit, NOT "every tool in TOOL_DEFINITIONS": if the default were "all tools",
 # adding a new tool to that list would silently hand it to every agent. Explicit
-# default keeps every new tool opt-in. See design §4.1.
+# default keeps every new tool opt-in.
 DEFAULT_TOOLS: frozenset[str] = frozenset(
     {"retrieve_profile", "retrieve_abstract", "retrieve_full_text", "retrieve_foa"}
 )
@@ -36,7 +35,7 @@ class RoleSpec:
     tools: frozenset[str]
     # Optional per-role override for Settings.llm_calls_per_load_per_window.
     # None means "use the global setting". This exists to pin a specific agent;
-    # it is NOT the mechanism — the load signal is (design §4.4). No role sets it.
+    # it is NOT the mechanism — the load signal is. No role sets it.
     calls_per_load_per_window: int | None = None
     # Layer 1 of post-type gating: what this role may emit as a NEW top-level
     # post. Defaults to DEFAULT_POST_TYPES, which IS the pi_lab set (pi_lab has

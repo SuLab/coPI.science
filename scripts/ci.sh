@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 #
 # Local CI gate. Run manually, or automatically before every push once you have
-# installed the hook (scripts/install-hooks.sh). There is NO server-side CI and no
-# GitHub-side hooks by design — this script is the whole gate, and it runs on push.
-# This is a deliberate stance, not an oversight — revisit only if the team decides it
-# wants a redundant/remote runner (see issue #27 I1).
+# installed the hook (scripts/install-hooks.sh). CI is deliberately local-only:
+# this script, run by the pre-push hook, is the whole gate; there is no
+# server-side CI.
 #
 # Steps:
 #   1. Alembic sanity: exactly one head, no duplicate revision ids. Cheap, offline,
 #      and first because it catches the one class of breakage that a clean `git merge`
-#      and a fully green test suite both miss. See .notes/cohort-system-v2.md §14.
+#      and a fully green test suite both miss.
 #   2. Alembic round trip: upgrade -> downgrade -> upgrade against a THROWAWAY
-#      Postgres that this step starts and destroys itself. On by default since
-#      2026-08-04; set CI_MIGRATION_DB=none to skip.
+#      Postgres that this step starts and destroys itself. On by default; set
+#      CI_MIGRATION_DB=none to skip.
 #   3. ruff lint of the test suite. New test code is kept spotless — zero findings.
 #   4. ruff lint of src/ against a CEILING (SRC_LINT_MAX) rather than zero. src/
 #      carries pre-existing style debt, so this is a ratchet: it blocks NEW debt
@@ -20,17 +19,17 @@
 #   5. requirements.lock consistency: every direct dependency in pyproject.toml is in
 #      the lock, pinned at a version its specifier allows (scripts/check_lockfile.py) —
 #      offline and deterministic, so a pyproject.toml edit can't silently drift from
-#      what actually gets installed (#27 I4). It deliberately does NOT compare against
+#      what actually gets installed. It deliberately does NOT compare against
 #      a fresh pip-compile: that made the gate red whenever any upstream package
 #      published, with no repo change (see the step's own comment). LOCKCHECK=none
 #      skips it; LOCKCHECK=strict adds the fresh-resolve comparison as a NOTE.
 #   6. Lock smoke test — OPT-IN, OFF BY DEFAULT. Step 5 proves the lock MATCHES
 #      pyproject.toml; this proves it actually INSTALLS and IMPORTS on the same
-#      Python 3.11 requirements.lock was cut against (#27 I6). Set LOCK_SMOKE=1 to
+#      Python 3.11 requirements.lock was cut against. Set LOCK_SMOKE=1 to
 #      run it; it costs minutes (a full throwaway-venv dependency install), which is
 #      why it does not run on every push.
 #   7. mypy lint of src/ against a CEILING (MYPY_MAX), same ratchet shape as the ruff
-#      ceiling above (#27 I1).
+#      ceiling above.
 #   8. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
@@ -59,27 +58,25 @@ cd "$REPO_ROOT"
 CI_VOLS_BEFORE="$(docker volume ls -q 2>/dev/null | sort)"
 
 VENV_PY="${VENV_PY:-$REPO_ROOT/.venv-test/bin/python}"
-# Coverage floor. Re-baselined 35 -> 60 on 2026-08-04. The old 35 was not a judgement
-# about this suite; it was measured at 35.66% against a broken tracer. bd68fae added
-# `concurrency = ["thread", "greenlet"]` to [tool.coverage.run] — without it coverage
+# Coverage floor, not a target. `concurrency = ["thread", "greenlet"]` in
+# [tool.coverage.run] is required for this to mean anything — without it coverage
 # loses the frame across SQLAlchemy's greenlet switch and stops recording an async
-# handler at its first `await db.execute(...)`. The true figure on the same suite and
-# the same commit is 61.638% (1167 passed, 120 skipped). 60 leaves ~1.6 points of slack
-# so the gate does not go red on ordering noise. Raise as coverage grows, never lower.
+# handler at its first `await db.execute(...)`, understating the true figure. The
+# floor leaves a couple of points of slack so the gate does not go red on ordering
+# noise. Raise as coverage grows, never lower.
 COV_MIN="${COV_MIN:-60}"
 
-# Ceiling on ruff findings in src/, NOT a target. Measured 2026-08-04 with the same
-# command the ratchet below runs, so the numbers are comparable: origin/main 292, this
-# branch's pre-repair tip (8515f65) 308, HEAD 260.
+# Ceiling on ruff findings in src/, NOT a target: src/ carries pre-existing style
+# debt that this gate does not demand be paid off all at once, but it blocks NEW
+# debt from getting in.
 #
-# LOWER THIS AS DEBT IS PAID; NEVER RAISE IT. Raising it to make a push go through is
-# precisely how those 16 findings got into admin.py in the first place — a ceiling that
-# moves up to meet the code is not a gate, it is a logbook.
+# LOWER THIS AS DEBT IS PAID; NEVER RAISE IT. Raising it to make a push go through
+# turns a gate into a logbook that moves up to meet whatever the code already does.
 SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 
 # Ceiling on mypy findings (`: error:` lines) in src/, same ratchet shape as
 # SRC_LINT_MAX above: a MEASURED COUNT, not a target — lower it as debt is paid.
-# mypy itself is capped in pyproject.toml's dev extra (mypy>=2.3,<2.4, #27 I7)
+# mypy itself is capped to a narrow range in pyproject.toml's dev extra
 # precisely so this number does not move out from under an unrelated push when
 # a new mypy release adds a check. If you deliberately bump the mypy cap,
 # re-measure with the exact command this step runs (`mypy src
@@ -93,58 +90,32 @@ SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 # restate all of it whenever this default moves. tests/unit/test_ci_gate.py checks
 # that the three numbers below stay arithmetically consistent with the default,
 # so a raise that does not re-measure fails the gate rather than passing quietly.
+# MEASURE A CLEAN EXPORT (`git archive <commit> src pyproject.toml`), NEVER THE
+# WORKING TREE — a working-tree measurement can carry an uncommitted fix and get
+# mislabelled with the wrong commit.
 #   measured : 138 findings ("Found 138 errors in 25 files (checked 81 source files)")
-#   at commit: 45d1198 — measured on a CLEAN `git archive 45d1198 src pyproject.toml`
-#              export, NEVER the working tree (see the correction below)
+#   at commit: 45d1198
 #   with     : mypy 2.3.1, python_version = "3.11" from pyproject's [tool.mypy]
 #   command  : mypy src --ignore-missing-imports  (identical to the step below)
-#   on       : 2026-09-04
 #   ceiling  : 150 findings (slack 12)
 #
-# The 138 are ~30,656 LOC of largely un-annotated FastAPI/SQLAlchemy code; most
-# of the debt is Optional/`| None` narrowing (SQLAlchemy relationship attributes,
-# dict `.get()` results) rather than missing annotations outright.
+# The 138 findings are largely un-annotated FastAPI/SQLAlchemy code; most of the
+# debt is Optional/`| None` narrowing (SQLAlchemy relationship attributes, dict
+# `.get()` results) rather than missing annotations outright.
 #
-# WHY FIVE OF SLACK, and not one. (a) The mypy cap is a RANGE, so a rebuilt
-# .venv-test may resolve a 2.3.x patch that adds a check; requirements.lock is
-# runtime-only and does not pin dev extras, so `<2.4` is the whole bound — a
-# separate dev lockfile would be a much larger change than this ceiling needs.
-# (b) The slack is 12 here, not the 5 this comment carried at 9cbfc00, and that
-# widening is DEBT PAID rather than a ceiling relaxed: the default has never
-# moved off 150, while the measured count fell 147 -> 145 -> 140 -> 138 as this
-# branch's fix rounds landed. 79cee44 fixed the `tuple[Publication | None, bool]`
-# annotation that had cost two findings; e700dac widened
-# `_notify_instruction_failure`'s `to_email` to `str | None` (five); 1aeaf0a
-# widened `_send_html_email`'s the same way (three). None of them was silenced
-# with a `type: ignore`.
+# The slack exists because the mypy cap is a RANGE, so a rebuilt .venv-test may
+# resolve a later patch that adds a check; requirements.lock is runtime-only and
+# does not pin dev extras, so the cap's upper bound is the whole guard. Slack
+# should widen only as debt is genuinely paid down (the measured count falling
+# while the ceiling default stays put), never because a ceiling was relaxed.
 #
-# Twelve over 138 is 8.7 %, looser than SRC_LINT_MAX's 3.6 % (260 over 251), and
-# a slack nobody can justify is the same auditability defect as a bare number.
-# It is left at 150 for THIS branch because tightening a ratchet in the same
-# change that closes 36 tasks would make an unrelated red the last thing a
-# reviewer sees. 145 (slack 7, 5.1 %) is the right value once this merges, and
-# lowering it is a one-line follow-up whose own commit message can carry the
-# re-measurement. Lower it further when the debt is paid.
+# 145 findings (slack 7) is the right ceiling once this branch merges, so the
+# current slack of 12 is a temporary allowance, not the steady-state target.
 #
-# MEASURE A CLEAN EXPORT, NOT THE WORKING TREE — the previous version of this
-# comment is the cautionary tale. It read "(commit 2170efb) ... 145 findings";
-# 2170efb re-measures at 147. Nothing drifted: the two extra findings there are
-# http_retry.py's `Exception must be derived from BaseException`, fixed three
-# minutes later by c1429e2. The 145 was read off a working tree that already
-# carried that uncommitted fix and was then labelled with the sha at HEAD.
-# Bisected 2026-09-04 on clean exports, one venv, the command above:
-#   2170efb 147 | f9541ba 145 | 42f03f4 147 | f29e295 147 | 5090322 147 |
-#   79cee44 145 | d7ce1a5 145 | 962aa6c 145 | 9cbfc00 145
-# The 145 -> 147 step is 42f03f4 adding two `tuple[Publication | None, bool]`
-# [return-value] findings in profile_pipeline.py; 79cee44 fixed that annotation
-# and the count returned to 145. Every move this ceiling has made was caused by
-# this repository's own code, never by mypy and never by PyPI.
-#
-# The test does NOT re-run mypy and demand equality with 145. That would be
-# #27 I4-e's mistake in a new place: a gate that goes red because a later commit
-# legitimately paid off two findings, or because a 2.3.x patch found one more,
-# is a gate that gets deleted. The ceiling is the gate; the block above is the
-# audit trail for it, and 145 is what it measured on the date it says.
+# The test does NOT re-run mypy and demand equality with the measured count:
+# a gate that goes red because a later commit legitimately paid off findings, or
+# because a point-release mypy found one more, is a gate that gets deleted. The
+# ceiling is the gate; the block above is the audit trail for it.
 MYPY_MAX="${MYPY_MAX:-150}"
 
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
@@ -165,18 +136,14 @@ MIGRATION_FLOOR="${MIGRATION_FLOOR:-0018}"
 LINT_TARGETS=(
   tests/conftest.py tests/factories.py tests/fakes.py
   tests/unit tests/integration tests/characterization tests/contract
-  # tests/e2e was the one test directory the gate never linted. Added 2026-08-04,
-  # when that tier was first run end to end; it was already at zero findings, so
-  # this closes the hole without paying anything down. Two of its nine tests need
-  # no server and run in the offline suite, so it is gate-relevant either way.
+  # Two of tests/e2e's nine tests need no server and run in the offline suite, so
+  # it is gate-relevant either way.
   tests/e2e
   # The production migration tooling. Not tests, but it is the code an operator runs
   # against a live database during an outage window, so it gets held to the same bar.
-  # Verified at zero findings when added 2026-08-04.
   scripts/migrate
   # The backup tooling, same reasoning: it runs as root on the host against both
-  # production databases and decides what gets deleted. Added 2026-08-18 at zero
-  # findings. See docs/specs/2026-08-18-postgres-backup-verification-design.md.
+  # production databases and decides what gets deleted.
   scripts/backup
 )
 
@@ -188,7 +155,7 @@ if [ ! -x "$VENV_PY" ]; then
 fi
 
 if ! "$VENV_PY" -c 'import mypy' >/dev/null 2>&1; then
-  echo "ERROR: mypy not installed in ${VENV_PY}'s environment (#27 I1)." >&2
+  echo "ERROR: mypy not installed in ${VENV_PY}'s environment." >&2
   echo "Install it with: uv pip install --python $VENV_PY mypy" >&2
   exit 1
 fi
@@ -225,13 +192,12 @@ if [ "$heads_n" -ne 1 ]; then
 fi
 echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 
-# Round trip against a THROWAWAY database. ON BY DEFAULT since 2026-08-04.
+# Round trip against a THROWAWAY database. ON BY DEFAULT.
 #
 # The unit tests already pin the migrations' static properties (single head, no
 # duplicate ids, every drop guarded with if_exists). What this adds is the one thing
 # static analysis cannot show: that upgrade -> downgrade -> upgrade actually RUNS
-# clean. It was gated behind an unset CI_MIGRATION_DB for the entire life of the
-# cohort branch, so 0022 and 0023 were never round-tripped by the gate at all.
+# clean.
 #
 # The step brings its own database SERVER — a throwaway postgres:15 container whose
 # port is published on 127.0.0.1 and which is destroyed by the EXIT trap below. That
@@ -239,14 +205,12 @@ echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 # the HOST, and both obvious DSNs are wrong:
 #
 #   * `...@postgres:5432/...` is the compose-INTERNAL hostname. On the host it either
-#     does not resolve, or — verified 2026-08-04 on this developer's machine — it
-#     resolves to an unrelated real server (`postgres.int.hueb.org`) via the LAN's
-#     search domain. A migration round trip that DROPs and re-CREATEs schema must
-#     never be one DNS record away from someone else's database.
+#     does not resolve, or resolves to an unrelated real server via the LAN's search
+#     domain. A migration round trip that DROPs and re-CREATEs schema must never be
+#     one DNS record away from someone else's database.
 #   * `...@localhost:5432/...` is refused: docker-compose.yml publishes NO host port
 #     for the postgres service (only app's 8001), so the dev database is simply not
-#     reachable from the host. This is what the plan for this change assumed, and it
-#     does not work.
+#     reachable from the host.
 #
 # Publishing our own port makes `localhost` true by construction, and owning the
 # server means this step cannot touch the dev database even in principle.
@@ -265,9 +229,9 @@ migcheck_cleanup() { docker rm -f "$MIGCHECK_CONTAINER" >/dev/null 2>&1 || true;
 #   * A bare prune would delete copi_pgdata, copi-prod_pgdata, copi-python_grantbot_data
 #     and collab-platform_mongodb_data — real, unreferenced, un-backed-up production data.
 #   * `--filter label=org.testcontainers=true` matches ZERO volumes: testcontainers labels
-#     the container, not its anonymous volume. (Verified 2026-08-18.)
+#     the container, not its anonymous volume.
 #   * Anonymity alone is not enough either: copi-python-certbot-1's live volume is also
-#     anonymous. (Verified 2026-08-18.)
+#     anonymous.
 #
 # So the reclaim is triple-guarded. A volume is removed only if it (a) did not exist when
 # this script started, (b) is referenced by no container at all, and (c) is anonymous.
@@ -368,10 +332,9 @@ fi
 # The rc check above is not enough on its own. A missing or unreadable path is NOT an
 # error exit: ruff emits a single E902 diagnostic and still exits 1, so an I/O problem
 # is indistinguishable from "that file has one finding" — and it makes the count go
-# DOWN. Measured 2026-08-04: `chmod 000 src/routers/admin.py` takes the total from 260
-# to 193, because that file's 68 findings disappear and one E902 replaces them. The
-# ratchet would pass, and the next person would "helpfully" re-baseline the ceiling to
-# 193 and lock the loss in. So refuse to produce a number at all.
+# DOWN (an unreadable file's own findings disappear and one E902 replaces them). A
+# ratchet that would pass on that basis invites re-baselining the ceiling down to lock
+# the loss in. So refuse to produce a number at all.
 if printf '%s' "$src_lint_out" | grep -q 'E902'; then
   echo "ERROR: ruff could not read part of src/ (E902), so the finding count is not a" >&2
   echo "measurement. Fix the path or the permissions. Do NOT re-baseline SRC_LINT_MAX" >&2
@@ -393,11 +356,11 @@ echo "    ${src_findings} findings (ceiling ${SRC_LINT_MAX})"
 # base), never $VENV_PY's 3.12: an explicit LOCKCHECK_PYTHON pin, else
 # `uv python find 3.11` with no downloads, else empty so the caller SKIPs.
 #
-# Restored here after f9541ba deleted the definition while leaving BOTH call sites
-# (the LOCKCHECK=strict branch and the LOCK_SMOKE step). Under `set -euo pipefail` an
-# undefined function is exit 127, so `LOCK_SMOKE=1 ./scripts/ci.sh` died at the smoke
-# step -- before mypy and before the entire test suite -- while a default run passed.
-# Found by the over-implementation audit.
+# Both the LOCKCHECK=strict branch and the LOCK_SMOKE step call this. Under
+# `set -euo pipefail` an undefined function exits 127, so if this definition is ever
+# dropped while its call sites remain, `LOCK_SMOKE=1 ./scripts/ci.sh` dies at the
+# smoke step — before mypy and before the entire test suite — while a default run
+# still passes.
 find_lock_python() {
   local spec="${LOCKCHECK_PYTHON:-}"
   if [ -z "$spec" ]; then
@@ -407,17 +370,14 @@ find_lock_python() {
 }
 
 echo "==> lockfile consistency (requirements.lock matches pyproject.toml)"
-# What this does NOT do: compare the lock against a fresh `pip-compile`. That was the
-# first implementation, and it cannot be a gate — it compares the committed lock against
-# whatever PyPI holds at this instant, so any of ~200 transitive packages publishing a
-# release turns the gate red with no change to this repository. Measured 2026-09-04:
-# `alembic 1.19.2` was published at 17:10:12Z and the gate went red within the hour,
-# reporting "pyproject.toml changed without regenerating it" when nobody had touched it.
-# It was not even reproducible on one machine — two back-to-back runs of the same command
-# disagreed (alembic 1.19.1 vs 1.19.2, rich 14.3.4 vs 15.0.0) depending on which HTTP
-# cache the ephemeral environment saw. Since this script IS the whole gate and the
-# pre-push hook runs it (D17), such a check does not protect the lock: it just blocks
-# pushes on PyPI's schedule and teaches everyone to set LOCKCHECK=none.
+# What this does NOT do: compare the lock against a fresh `pip-compile`. That cannot be
+# a gate — it compares the committed lock against whatever PyPI holds at this instant,
+# so any of ~200 transitive packages publishing a release turns the gate red with no
+# change to this repository, and the result is not even reproducible on one machine
+# (a resolve can disagree with itself run to run depending on which HTTP cache the
+# ephemeral environment sees). Since this script IS the whole gate and the pre-push
+# hook runs it, such a check does not protect the lock: it just blocks pushes on
+# PyPI's schedule and teaches everyone to set LOCKCHECK=none.
 #
 # The drift that matters is inside the repo — a dependency edited in pyproject.toml
 # without regenerating the lock — and that is decided by the two files alone. So it is
@@ -473,22 +433,18 @@ echo "==> lock smoke test (opt-in: LOCK_SMOKE=1)"
 # The freshness check above proves requirements.lock MATCHES pyproject.toml; it
 # proves nothing about whether the lock actually WORKS. .venv-test (this whole
 # script's $VENV_PY) is Python 3.12 resolved fresh from pyproject.toml, while the
-# Dockerfile installs requirements.lock on Python 3.11 — measured drift on
-# 2026-09-04: anthropic 0.117.0 vs 0.125.0, fastapi 0.139.2 vs 0.141.1, alembic
-# 1.18.5 vs 1.19.1, sqlalchemy 2.0.51 vs 2.0.52, slack-sdk 3.43.0 vs 3.44.1,
-# uvicorn 0.51.0 vs 0.52.4, boto3 1.43.51 vs 1.43.88 (#27 I6). With no server-side
-# CI (D17) the prod image is the first thing that ever executes those exact pins.
+# Dockerfile installs requirements.lock on Python 3.11, so several direct
+# dependencies resolve to different versions between the two. With no server-side
+# CI the prod image is the first thing that ever executes those exact pins.
 #
 # OFF BY DEFAULT — set LOCK_SMOKE=1 to run it. This installs requirements.lock
 # (with --require-hashes, the same as the Dockerfile) into a throwaway Python 3.11
 # venv and imports src.main, src.worker.main and src.agent.main, then discards the
 # venv. It is not on by default because a cold `uv` cache means downloading and
 # verifying the hashes of every one of the ~80 pinned wheels, which is real network
-# time this gate should not add to every push (measured 2026-09-04 with a WARM uv
-# cache: 5.9s wall, all three modules imported cleanly with exit 0 — see this
-# task's report for the cold-cache caveat). Reuses find_lock_python() (defined
-# above, for the freshness check) rather than duplicating the interpreter-discovery
-# order.
+# time this gate should not add to every push (a warm cache costs only a few seconds).
+# Reuses find_lock_python() (defined above, for the freshness check) rather than
+# duplicating the interpreter-discovery order.
 if [ "${LOCK_SMOKE:-}" != "1" ]; then
   echo "    skipped (opt-in — set LOCK_SMOKE=1 to prove requirements.lock actually installs and imports)"
 elif ! command -v uv >/dev/null 2>&1; then
@@ -570,17 +526,17 @@ echo "==> gated tiers this gate did NOT run"
 # workspace credentials are absent, and to every `live_api` test when LIVE_API_TESTS is
 # unset. That is deliberate — a skip reports "skipped" where a collection filter would
 # report the ambiguous "no tests ran" — but its cost is that both tiers land inside the
-# "N skipped" tally above, indistinguishable from an ordinary skip. What that silence
-# buys is measurable: the COR-1b data-loss regression (issue #20) reached HEAD while the
-# test that catches it sat green and unrun in the live Slack tier.
+# "N skipped" tally above, indistinguishable from an ordinary skip. That silence is how
+# a data-loss regression once reached HEAD while the test that catches it sat green
+# and unrun in the live Slack tier.
 #
 # The counts are MEASURED here, never written down. A literal count in this file would
 # be the same defect as a stale provenance comment: right on the day it is typed,
 # silently wrong the first time somebody adds a test to a tier, and wrong in the
 # direction that under-reports what was skipped. `--collect-only` imports the test
 # modules and stops — no credentials, no fixtures, no test body; nothing is posted to
-# any Slack workspace and no third-party API is called. Cost measured on 2026-09-04: a
-# few seconds per tier (the whole suite is collected either way) against an ~8-minute
+# any Slack workspace and no third-party API is called, and it costs only a few
+# seconds per tier (the whole suite is collected either way) against an ~8-minute
 # gate. tests/unit/test_ci_gate.py runs the same two collections and fails if what this
 # step prints differs from what they find, so the notice cannot drift.
 #

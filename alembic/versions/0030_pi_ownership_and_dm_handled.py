@@ -2,78 +2,29 @@
 
 Revision ID: 0030
 Revises: 0029
-Create Date: 2026-09-08 00:00:00.000000
 
-Two columns, one per open item on audit findings RC-1 and RC-2
-(docs/plans/2026-09-08-audit-fixes.md).
+Two columns, fixing two ownership gaps:
 
-agent_messages.sender_user_id (RC-1 / #20 COR-5)
--------------------------------------------------
-``agent_messages`` carries no sender identity, so
-``SimulationEngine._handle_pi_inbound_entry`` used the thread's own
-participants as a stand-in for "who is allowed to act on this thread" —
-which means PI A, acting in a thread A's agent shares with B's agent, could
-clear B's pending-proposal block, set B's ``pi_context``, or drive B's @bot
-tag route. This column records who actually wrote the row (NULL for every
-bot-authored row, and for every row written before this migration — there is
-no way to recover that identity, so no backfill is attempted). The engine
-resolves it to an owned-agent set via ``AgentRegistry.user_id`` and
-``AgentDelegate`` and gates every side effect on that set instead of on
-thread membership.
+``agent_messages.sender_user_id`` records who actually wrote a row (NULL for bot
+rows and pre-migration rows, which cannot be recovered), so the engine can gate
+PI-only side effects (clearing a pending-proposal block, setting ``pi_context``,
+the @bot tag route) on the actual writer's owned agents instead of on thread
+membership — previously any PI sharing a thread with another PI's agent could
+trigger that agent's side effects. ``ON DELETE SET NULL``: deleting a PI's
+account must not delete the historical record of what they said.
 
-``ON DELETE SET NULL``, not CASCADE: deleting a PI's account must not delete
-the historical record of what they said in a thread another PI's agent is
-also a party to. A NULL ``sender_user_id`` after this migration means either
-a bot row, a pre-migration row, or a since-deleted user — all three get no
-ownership-gated side effect from that row, which is the correct (fail-closed)
-answer for all three.
+``pi_dm_messages.handled_at`` is a durable, timestamp-based "has this inbound DM
+been processed" marker, replacing three in-memory/cursor mechanisms that all
+reset on restart and could each drop a PI message sent while ``agent-run`` was
+down. Backfilled to ``created_at`` for existing inbound rows (already handled,
+unrecoverable otherwise) so this migration does not replay the DM channel's
+entire history; outbound rows are left NULL (unused).
 
-pi_dm_messages.handled_at (RC-2)
----------------------------------
-Three cooperating mechanisms conspired to lose every side effect of a PI
-message written while ``agent-run`` was down: ``record_pi_message`` never
-marked a row as needing attention, ``_seed_pi_dm_cursor``/``_seed_pi_inbox_cursor``
-jump their cursors to ``max(created_at)`` at startup (skipping anything older),
-and the in-memory dedup sets (``_pi_dm_seen``) reset to empty on every restart
-so they could not remember what was already handled even within the lookback
-window. ``handled_at`` is the durable, timestamp-based counterpart of
-``agent_messages.pi_inbound_state`` for the DM channel: NULL means "no
-``_poll_pi_dms_from_db`` tick has processed this row yet", set once (success
-or failure — a DM gets one attempt) after ``PIHandler.handle_dm`` returns.
-
-Backfilled for existing inbound rows in this same migration
-(``handled_at = created_at`` where ``direction = 'inbound' AND handled_at IS
-NULL``): every one of those rows has already been through the handler (or is
-long enough in the past to be unrecoverable), and leaving them NULL would
-have a deploy of this fix re-run ``handle_dm`` against the DM channel's
-entire history the moment the new query ships. Outbound rows are left NULL
-(the column is meaningless for them; nothing reads it).
-
-Sizing: two ADD COLUMNs (ADD COLUMN ... NULL, no default) are catalogue-only,
-no table rewrite, under a brief ACCESS EXCLUSIVE lock, regardless of table
-size — same shape as 0028/0029. The backfill UPDATE is bounded by the number
-of existing inbound ``pi_dm_messages`` rows (small: one per DM ever sent while
-Slack/the web DM path has been live) and runs under the same migration
-transaction as the two ADD COLUMNs.
-
-The sizing note above is only the ADD COLUMNs; the two other statements
-against ``agent_messages`` are not catalogue-only and do not share that
-bound. ``create_foreign_key`` for ``agent_messages_sender_user_id_fkey``
-validates the new constraint by scanning every existing ``agent_messages``
-row (a table scan, done while still holding the ACCESS EXCLUSIVE lock the
-ADD COLUMN took), and ``create_index`` on ``sender_user_id`` (a plain,
-non-``CONCURRENTLY`` index build) blocks writes to ``agent_messages`` for its
-duration. Measured against a local copy of the production database
-(``copi-prodtest-db``, checked 2026-09-10, opus review SEC-F4):
-``SELECT count(*) FROM agent_messages`` = 8,460 rows. At that size both
-statements are sub-second and the lock window is not a practical concern —
-this migration's shape (validate-inline FK + plain index) is fine as written.
-If ``agent_messages`` ever grows past roughly 5 million rows, re-split this
-into ``create_foreign_key(..., postgresql_not_valid=True)`` followed by a
-separate ``VALIDATE CONSTRAINT`` (or just leave it NOT VALID for new rows
-only) and ``create_index(..., postgresql_concurrently=True)`` outside the
-migration's transaction, so neither statement holds an exclusive lock across
-a full-table pass.
+Sizing: the two ADD COLUMNs are catalogue-only. The FK and index on
+``agent_messages.sender_user_id`` each scan/lock the full table once; both are
+sub-second at current table sizes. If ``agent_messages`` grows very large,
+split these into a NOT VALID FK + separate VALIDATE CONSTRAINT and a
+CONCURRENTLY index build instead.
 
 Downgrade is idempotent (if_exists) per the 0022+ convention.
 """

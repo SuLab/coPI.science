@@ -2,7 +2,6 @@
 
 Revision ID: 0019
 Revises: 0018
-Create Date: 2026-07-20 00:00:00.000000
 
 Makes the local DB the primary store for agent conversations: agent_messages now
 carries the message body and sender metadata (previously only in Slack + the

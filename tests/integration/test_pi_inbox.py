@@ -57,7 +57,7 @@ async def test_record_pi_message_resolves_channel_and_writes_human_row(db_sessio
     assert msg.visibility == "collab_private"
     assert msg.phase == "new_post"       # top-level (no thread_ts)
     assert msg.posted_at > 0 and msg.message_ts
-    # RC-1: the ownership carrier _agent_ids_owned_by_user resolves against.
+    # The ownership carrier _agent_ids_owned_by_user resolves against.
     assert msg.sender_user_id == user.id
 
     row = (await db_session.execute(
@@ -66,7 +66,7 @@ async def test_record_pi_message_resolves_channel_and_writes_human_row(db_sessio
     assert row.content == "please prioritize the kinase panel"
     assert row.sender_name == "Dr Smoke (PI)"
     assert row.sender_user_id == user.id
-    # RC-2: stamped 'pending' at insert time so a down agent-run's cursor
+    # Stamped 'pending' at insert time so a down agent-run's cursor
     # jump can never make this row permanently invisible to the poller.
     assert row.pi_inbound_state == "pending"
 
@@ -136,7 +136,7 @@ async def test_pi_may_reply_in_thread_false_for_unknown_thread(db_session):
 async def test_pi_may_reply_in_thread_false_when_the_participant_is_in_another_channel(
     db_session,
 ):
-    """SEC-F5 (opus review, audit 2026-09-08): the root-existence check is scoped to
+    """The root-existence check is scoped to
     `channel_name`, but the participant check previously was not -- an agent_id that
     happens to share the same `thread_ts` value in a DIFFERENT channel's (unrelated)
     thread must not authorize a reply against this channel's root."""
@@ -155,7 +155,7 @@ async def test_pi_may_reply_in_thread_false_when_the_participant_is_in_another_c
     ) is False
 
 
-# --- pi_may_post_to_channel (SEC3-5, audit 2026-09-10) ----------------------
+# --- pi_may_post_to_channel ----------------------
 #
 # An unknown channel name previously resolved to True (the "unknown channel
 # names are public" fallback) and _resolve_channel then mints a `local:<name>`
@@ -215,7 +215,7 @@ async def test_pi_may_post_to_channel_false_for_a_private_non_member(db_session)
     ) is False
 
 
-# --- SEC3-5 follow-up (opus review, audit 2026-09-10): agent_channels rows are
+# --- agent_channels rows are
 # only ever written for seeded channels and collab_private channels
 # (record_channel_created) -- an ordinary topic channel an agent created on
 # its own and posted public messages into has no agent_channels row at all,

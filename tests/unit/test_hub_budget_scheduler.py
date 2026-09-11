@@ -1,18 +1,17 @@
 """Load-proportional budget and scheduling for star topologies.
 
-Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
-§8. Organised by design section so a failure names the rule it broke:
+Organised by topic so a failure names the rule it broke:
 
-- TestAgentLoad            §4.1  the shared load signal
-- TestRoleRateOverride     §4.4  optional per-role allowance
-- TestCallLedger           §4.2  record_api_call maintains both counters
-- TestRateLimiter          §4.2  sliding-window eligibility, and that it self-heals
-- TestRestartRebuild       §4.2  step 4b repopulates call_times from llm_call_logs
-- TestScheduler            §4.3  load-proportional weight, reactive tiebreak
-- TestStallIsTransient     F1    a throttled roster must NOT end the run
-- TestPIHandlerAccounting  F2    PI-DM LLM calls go through record_api_call
-- TestRateSettingGuards    F4    non-positive rate settings are clamped, loudly
-- TestProductionRegression §8    the exact run-4f1e8395 state
+- TestAgentLoad            the shared load signal
+- TestRoleRateOverride     optional per-role allowance
+- TestCallLedger           record_api_call maintains both counters
+- TestRateLimiter          sliding-window eligibility, and that it self-heals
+- TestRestartRebuild       step 4b repopulates call_times from llm_call_logs
+- TestScheduler            load-proportional weight, reactive tiebreak
+- TestStallIsTransient     a throttled roster must NOT end the run
+- TestPIHandlerAccounting  PI-DM LLM calls go through record_api_call
+- TestRateSettingGuards    non-positive rate settings are clamped, loudly
+- TestProductionRegression a real observed hub/spoke imbalance
 """
 
 import inspect
@@ -83,9 +82,9 @@ def _drive_loop(eng, monkeypatch, *, stop_after=4):
 
     for name in _TICK_IO:
         monkeypatch.setattr(eng, name, _noop)
-    # N-3 (opus review, audit 2026-09-10): _sync_profiles_from_disk is now
-    # async (it awaits the DB-authoritative per-agent helper for a
-    # force-cleared private profile), so the stub must be a coroutine too.
+    # _sync_profiles_from_disk is async (it awaits the DB-authoritative
+    # per-agent helper for a force-cleared private profile), so the stub must
+    # be a coroutine too.
     monkeypatch.setattr(eng, "_sync_profiles_from_disk", _noop)
 
     sleeps: list[int] = []
@@ -644,7 +643,7 @@ class TestSendDmGuardsTheSlackCall:
     _send_dm — slack_sdk re-raises non-HTTP transport failures unchanged
     (_call_with_retry only catches SlackApiError), and this is the real
     unguarded raise on the _poll_inbound_from_db -> handle_channel_tag ->
-    _send_dm chain. See COR-10(3)."""
+    _send_dm chain."""
 
     async def test_a_transport_error_does_not_stop_the_dm(self):
         from src.agent import pi_handler as ph
@@ -708,8 +707,8 @@ class TestRateSettingGuards:
 
 
 class TestProductionRegression:
-    """Reconstructs the exact state of run 4f1e8395 (2026-08-05), in which the
-    blackbird hub took 0 of 161 turns while 56 spokes took 3-5 each.
+    """Reconstructs a real observed run in which the hub took 0 of 161 turns
+    while 56 spokes took 3-5 each.
 
     Measured then: hub 42 LLM calls, next-busiest agent 9, cap 40.
     """

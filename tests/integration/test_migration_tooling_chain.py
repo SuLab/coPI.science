@@ -85,7 +85,7 @@ async def test_postflight_expected_constraint_defs_at_head(engine):
 
 
 # --------------------------------------------------------------------------- #
-# check_publication_duplicates against a real DB (#22 I3)
+# check_publication_duplicates against a real DB
 # --------------------------------------------------------------------------- #
 
 
@@ -100,7 +100,7 @@ async def test_check_publication_duplicates_passes_at_head(engine):
 
 async def test_check_publication_duplicates_warns_with_a_seeded_duplicate(scratch_db):
     """Before 0025 has run, a real duplicate (user_id, pmid) pair can exist; the
-    check must WARN and name it, not silently pass (#22 I3's whole point)."""
+    check must WARN and name it, not silently pass."""
     _run_alembic(scratch_db, "0024")
 
     engine = create_async_engine(scratch_db, poolclass=NullPool)
@@ -136,7 +136,7 @@ async def test_check_publication_duplicates_warns_with_a_seeded_duplicate(scratc
 
 
 # --------------------------------------------------------------------------- #
-# 0026 resolves the PCM user_id FK name from the catalog (#25 I1)
+# 0026 resolves the PCM user_id FK name from the catalog
 # --------------------------------------------------------------------------- #
 
 
@@ -186,7 +186,7 @@ async def test_0026_resolves_a_renamed_fk_and_round_trips(scratch_db):
 
 
 # --------------------------------------------------------------------------- #
-# postflight must verify WHICH rows 0025 deleted, not how many (#22, audit C1)
+# postflight must verify WHICH rows 0025 deleted, not how many
 #
 # A count cannot detect a concurrent deleter working inside a duplicate group:
 # every row it removes reduces 0025's own delete count by exactly one, so the net
@@ -317,7 +317,7 @@ async def test_postflight_refuses_a_snapshot_from_another_database(scratch_db, t
 
 async def test_preflight_records_no_deletion_licence_when_0025_is_not_pending(scratch_db, tmp_path):
     """An expectation recorded for a chain that will not run 0025 would license
-    arbitrary deletions of that many rows (audit I2)."""
+    arbitrary deletions of that many rows."""
     _run_alembic(scratch_db, "0024")
     engine = create_async_engine(scratch_db, poolclass=NullPool)
     try:

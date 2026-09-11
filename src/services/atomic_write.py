@@ -7,8 +7,7 @@ with no error. `os.replace` on the same filesystem is atomic: readers see
 either the old complete file or the new complete file, never a partial one.
 This guarantees no torn file if the PROCESS dies mid-write; it does not add an
 `fsync`, so it does not guarantee durability across a machine crash/power loss
-(out of scope — V6-24a is about truncation, not power-loss durability).
-See issue #22 COR-24.
+(out of scope — this is about truncation, not power-loss durability).
 """
 
 import os

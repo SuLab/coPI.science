@@ -1,11 +1,11 @@
-"""SEC-F3 (opus review, audit 2026-09-08): agent_blocking_account_delete's SELECT
-must lock the row it reads (FOR UPDATE) so the check and the subsequent delete in
-the same session cannot race an admin activating the agent concurrently -- without
-a lock, an admin's UPDATE ... SET status='active' could commit between this read
-and the caller's delete, orphaning the very agent this guard exists to protect.
+"""agent_blocking_account_delete's SELECT must lock the row it reads (FOR UPDATE) so
+the check and the subsequent delete in the same session cannot race an admin
+activating the agent concurrently -- without a lock, an admin's UPDATE ... SET
+status='active' could commit between this read and the caller's delete, orphaning
+the very agent this guard exists to protect.
 
-SEC2-2 (audit 2026-09-08) tightens this further: the lock has to be taken by
-owner (``user_id``) alone, not ``user_id AND status IN (...)``. A status
+The lock has to be taken by owner (``user_id``) alone, not ``user_id AND status
+IN (...)``. A status
 predicate in the WHERE clause locks nothing when the agent is currently
 inactive, so a concurrent activation of that same row is free to commit and
 slip past the guard entirely -- the status check has to happen in Python,
@@ -63,8 +63,8 @@ async def test_the_agent_lookup_locks_the_row_for_update():
 
     await agent_blocking_account_delete(session, _U())
 
-    # REV4-3 (audit 2026-09-08): a second statement now locks the users row too --
-    # the agent lookup stays first and unchanged.
+    # A second statement locks the users row too -- the agent lookup stays first
+    # and unchanged.
     assert len(session.statements) == 2
     compiled = _compiled(session.statements[0])
     assert "FOR UPDATE" in compiled.upper(), (
@@ -119,7 +119,7 @@ async def test_for_update_false_skips_the_lock_for_the_read_only_confirmation_pa
         )
 
 
-# --- REV4-3 (audit 2026-09-08) ------------------------------------------------------
+# --- users-row locking ---------------------------------------------------------------
 # FOR UPDATE on `agents` locks nothing when the user owns no agent row at all -- the
 # SELECT simply returns no rows, so there is nothing to lock. A concurrent self-service
 # signup inserting a brand-new `agents` row with `user_id` pointing at this user (the

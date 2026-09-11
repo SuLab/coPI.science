@@ -3,8 +3,8 @@
 Ported from src/services/slack_web.py's `_call` (float + try/except + cap), which already gets this
 right for the web-layer Slack client. src/agent/slack_client.py's engine-side `_call_with_retry` used a
 raw `int(header)` that raised ValueError for an HTTP-date, a float-string, or a negative value — from
-inside an `except SlackApiError:` block, so the ValueError escaped as an unrelated exception type
-(issue #23 V7e). This module gives both that call site and Part 24's provisioning-loop cap one place to
+inside an `except SlackApiError:` block, so the ValueError escaped as an unrelated exception type.
+This module gives both that call site and the provisioning-loop cap one place to
 get it right.
 """
 
@@ -20,7 +20,7 @@ from src.agent.retry_after import parse_retry_after
     ("garbage", 5.0),                # unparseable falls back to default
     (None, 5.0),                     # missing header falls back to default
     ("0", 5.0),                      # zero is not a positive number -> default, not a hot retry
-    ("-5", 5.0),                     # negative falls back to default (#24 Minor 2), not 0.0
+    ("-5", 5.0),                     # negative falls back to default, not 0.0
     ("nan", 5.0),                    # NaN is not a finite number -> default
     ("inf", 5.0),                    # +inf is not a *finite* number -> default (still ends up capped)
     ("-inf", 5.0),                   # -inf falls back to default, not a hot retry

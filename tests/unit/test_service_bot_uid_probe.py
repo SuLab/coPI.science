@@ -1,5 +1,4 @@
-"""GrantBot uid-probe token resolution (#23 COR-26c / D10, queued from the
-23.3-23.5 review).
+"""GrantBot uid-probe token resolution.
 
 ``_resolve_service_bot_uids`` must resolve grantbot's Slack token DB-first
 (``get_agent_bot_token(db, "grantbot")``, the same precedence grantbot.py

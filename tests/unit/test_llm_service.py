@@ -143,8 +143,8 @@ async def test_make_decision_parses_json_from_response(monkeypatch):
 
 
 def test_extract_json_is_public():
-    """issue #26 C4: scripts/generate_sparsedata_user.py imported the private
-    _extract_json because no public alternative existed. extract_json must be
+    """scripts/generate_sparsedata_user.py must not need to import the private
+    _extract_json for lack of a public alternative. extract_json must be
     the same function as _extract_json (an alias, not a copy), so the two
     names can never drift apart."""
     assert llm.extract_json is llm._extract_json

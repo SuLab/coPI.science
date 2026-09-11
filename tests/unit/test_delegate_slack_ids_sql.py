@@ -1,4 +1,4 @@
-"""Unit tests for src/services/delegate_slack_ids.py (issue #22 C1)."""
+"""Unit tests for src/services/delegate_slack_ids.py."""
 
 import uuid
 

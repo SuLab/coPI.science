@@ -426,7 +426,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     )
     assert state.attempts == 3
     assert state.completed_at is None, (
-        "an exhausted (failed) job got a completed_at stamp (COR-18d) — it never completed, "
+        "an exhausted (failed) job got a completed_at stamp — it never completed, "
         "and templates/admin/jobs.html's 'Completed' column would lie about it"
     )
     row = await wk.job(jid)
@@ -459,7 +459,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
 
 
 async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk, monkeypatch):
-    """COR-18c: after a failure that leaves a job 'pending', process_job must not return so fast
+    """After a failure that leaves a job 'pending', process_job must not return so fast
     that the very next claim_job reclaims the SAME job with zero delay — all max_attempts would
     burn back-to-back. Drives three retries of the SAME job to pin the actual exponential
     ladder (base * 2**(attempts-1), capped), not just "some delay happened":
@@ -501,7 +501,7 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
     await worker_main.process_job(job2.id, job2.type, job2.attempts, job2.max_attempts, wk.factory)
     elapsed2 = time.monotonic() - start2
 
-    # Increment-based, not absolute bounds and not a ratio (#21 V2). Absolute bounds like
+    # Increment-based, not absolute bounds and not a ratio. Absolute bounds like
     # `1.0 <= elapsed2 < 2.0` are flaky under load. A RATIO (`elapsed2 > 1.5 * elapsed`) is
     # flaky for a subtler reason and did fail a full-suite run: each measurement is
     # `overhead + sleep`, where overhead is this harness's real DB work (~0.25s, and higher
@@ -844,12 +844,12 @@ async def test_the_job_is_marked_completed_only_after_the_profile_row_exists(wk,
 
 
 async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch):
-    """T5.4 (crash half) — the inverse of the ordering test.
+    """The inverse of the ordering test: the crash half.
 
     A pipeline that gets partway (profile row added and flushed) and then raises must
     not leave the job 'completed'. It must be retryable.
 
-    COR-17 fixed: `process_job`'s except branch now rolls back before recording the
+    `process_job`'s except branch must roll back before recording the
     failure, so a pipeline's partial (flushed-but-uncommitted) writes are discarded
     along with the failed transaction, instead of being committed alongside the
     failure bookkeeping.
@@ -888,17 +888,17 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     assert (await wk.job_state(jid2)).status == "completed"
     assert await wk.profile_count(uid2) == 1
 
-    # COR-17 fixed: the except branch now rolls back before recording the failure, so a
+    # The except branch must roll back before recording the failure, so a
     # pipeline's partial (flushed-but-uncommitted) writes are discarded along with the
     # failed transaction instead of being committed alongside the failure bookkeeping.
     assert leaked == 0, (
         "a partial profile write from a crashed pipeline attempt survived the failure "
-        "commit — COR-17's rollback should have discarded it along with that transaction"
+        "commit — the rollback should have discarded it along with that transaction"
     )
 
 
 async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retried(wk, monkeypatch):
-    """COR-17: a flush-time DB error (unique violation on researcher_profiles.user_id, the real
+    """A flush-time DB error (unique violation on researcher_profiles.user_id, the real
     pipeline's own failure mode at step 6 if two generate_profile jobs for one user ever race) must
     not escape process_job. Rolling back before writing the failure record lets that same commit
     succeed, so the job ends 'pending' (retryable) with last_error recorded — not stranded in
@@ -930,7 +930,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retri
         "retried like any other failure, not leave the job stranded in 'processing'"
     )
     assert state.completed_at is None, (
-        "a retried (pending) job got a completed_at stamp (COR-18d) — it has not completed"
+        "a retried (pending) job got a completed_at stamp — it has not completed"
     )
     row = await wk.job(jid)
     assert row.last_error, (
@@ -946,12 +946,12 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retri
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", plain_error)
     # Not _one_round(): job1 just went back to 'pending' with attempts < max_attempts, and
-    # claim_job orders by enqueued_at with no backoff-elapsed filter (Task 21.3's Coordinator
-    # note: option (a) delays job1's OWN retries but does not let claim_job skip an
-    # in-backoff job for a different one) — job1, enqueued first, would win the very next
+    # claim_job orders by enqueued_at with no backoff-elapsed filter — a backoff delay
+    # on job1's own retries does not let claim_job skip an in-backoff job for a
+    # different one, so job1, enqueued first, would win the very next
     # claim_job() call every time, so _one_round() here would silently re-process job1
-    # again instead of job2. Drive job2 directly by id instead (the same shape Task 21.3's
-    # own new tests use), which isolates this control from job1's queue position.
+    # again instead of job2. Drive job2 directly by id instead, which isolates this
+    # control from job1's queue position.
     await worker_main.process_job(jid2, "generate_profile", 0, 3, wk.factory)
     state2 = await wk.job_state(jid2)
     assert state2.status == "pending"
@@ -964,7 +964,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retri
 
 
 async def test_reap_stale_jobs_requeues_a_job_stuck_in_processing(wk):
-    """COR-18a/b: a job whose worker died mid-run (crash, OOM, SIGKILL) is left 'processing'
+    """A job whose worker died mid-run (crash, OOM, SIGKILL) is left 'processing'
     forever — claim_job only ever looks at 'pending' rows, so nothing else in the system will
     ever pick it back up. The reaper uses the started_at column claim_job already writes and
     nothing else reads.
@@ -997,8 +997,8 @@ async def test_reap_stale_jobs_requeues_a_job_stuck_in_processing(wk):
 
 async def test_reap_stale_jobs_marks_an_exhausted_stale_job_failed_not_pending(wk):
     """A stale job that already used its last attempt must not be re-queued into an infinite
-    claim/crash loop — it goes to the same terminal 'failed' state COR-18e gives an exhausted job
-    on the normal failure path (Task 21.3)."""
+    claim/crash loop — it goes to the same terminal 'failed' state an exhausted job gets
+    on the normal failure path."""
     assert await wk.foreign_processing_jobs() == 0, (
         "there are 'processing' jobs in this database that this file did not enqueue; "
         "reap_stale_jobs has no payload->>'tag' filter and would touch them"

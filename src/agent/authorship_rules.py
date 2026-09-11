@@ -1,18 +1,16 @@
 """Pure-function validators grounding authorship claims in publication records.
 
-GitHub issue #29: an agent publicly claimed first-person co-authorship of a
-paper its PI is not an author on. The claim originated with ANOTHER agent
-(whose lab genuinely is an author), was confirmed sycophantically, persisted
-through working-memory synthesis for six weeks, and finally re-emitted as a
-:newspaper: post. These validators run on the emit paths (phase 4 + phase 5 +
-_post_message) and on memory synthesis.
+Fixes issue #29's defect: an agent's fabricated first-person co-authorship claim
+propagated unchecked through sycophantic confirmation and memory synthesis before
+being re-emitted as a public post. These validators run on the emit paths
+(phase 4 + phase 5 + _post_message) and on memory synthesis.
 
 Design rules:
 - FAIL CLOSED: a lab with no publication records cannot verify any claim, so
   every first-person authorship claim from it is rejected.
 - A co-authorship claim that tags other labs is checked against the TAGGED
-  labs' records too — the issue-#29 origin message cited a DOI genuinely in
-  the sender's own record set; the fabricated part was the claimed co-author.
+  labs' records too, since a fabricated claim can cite a real DOI from the
+  sender's own record set while inventing the co-author.
 - Deterministic and conservative: a false rejection costs one regenerated
   draft; a false pass costs a fabricated credential in a real PI's name.
 """
@@ -40,9 +38,9 @@ class AuthorshipVerdict:
 
 
 # --- text normalization -----------------------------------------------------
-# Slack renders *bold*/_italic_/~strike~ by wrapping (or splitting) words; the
-# 2026-08-11 audit's pinned incident text wrapped the verb itself
-# ("*recently co-authored*"), which pushed a "*" inside what the claim grammar
+# Slack renders *bold*/_italic_/~strike~ by wrapping (or splitting) words —
+# e.g. wrapping the verb itself ("*recently co-authored*") pushes a "*" inside
+# what the claim grammar
 # expects to be a word boundary. Unicode hyphens (co‐authored, U+2010) and
 # apostrophes (we’ve, U+2019) similarly dodge "co-?" and "'ve". Both are folded
 # away before any claim matching. Normalized text is used for DETECTION only —
@@ -70,8 +68,8 @@ def normalize_claim_text(text: str) -> str:
 # --- first-person authorship grammar -----------------------------------------
 # Runs against normalize_claim_text() output. Subjects are first-person only —
 # "we", "I", "ours", "our/my lab|labs|team|group" — so mentions of *other*
-# people's work ("your paper", "the Su lab published") do not match. Widened
-# per the 2026-08-11 audit (finding C1): auxiliaries ("has co-authored"),
+# people's work ("your paper", "the Su lab published") do not match. Also
+# covers auxiliaries ("has co-authored"),
 # contractions ("we've"), noun forms ("we're co-authors on", "as a co-author
 # of", "I was senior author on"), "behind the ... paper", "contribution to the
 # ... paper", "a paper of ours", and dash/paren inserts between subject and
@@ -119,8 +117,8 @@ _FIRST_PERSON_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Co-authorship phrasing, any subject. Not just the literal "co-author" stem
-# (audit finding I2): joint-authorship synonyms — "wrote ... together with",
+# Co-authorship phrasing, any subject. Not just the literal "co-author" stem —
+# joint-authorship synonyms — "wrote ... together with",
 # "our joint paper with", "published ... with" — assert the same shared-credit
 # relationship and must trigger the tagged-lab records check.
 _COAUTHOR_STEM_RE = re.compile(
@@ -281,7 +279,7 @@ def validate_authorship_claims(
 # with an authorship verb survives only if it either (a) names another lab as
 # the explicit subject immediately before the verb — AND does not smuggle a
 # self co-authorship claim in via "with our lab"/"with us" or by naming the
-# agent's OWN lab as the third-person subject (audit finding I5) — or
+# agent's OWN lab as the third-person subject — or
 # (b) cites DOI(s) all present in this lab's own records.
 
 _AUTHORSHIP_VERB_LINE_RE = re.compile(
@@ -344,8 +342,8 @@ def _compile_self_lab_re(self_names: tuple[str, ...] | list[str]) -> re.Pattern[
 # co-authored" — the lab-name subject must sit directly before the verb
 # (an intervening table-cell "|" breaks the match, by design).
 # The capitalized-token run is bounded at 6 tokens: the unbounded "*" form
-# backtracked quadratically on long capitalized runs (audit finding M1 —
-# ~85s at 20k tokens, on the event loop). No real lab-name subject is longer.
+# backtracked quadratically on long capitalized runs (~85s at 20k tokens, on
+# the event loop). No real lab-name subject is longer.
 _OTHER_LAB_SUBJECT_RE = re.compile(
     r"\b(?!(?:Our|My)\s)[A-Z][\w.'-]*(?:\s+(?:and\s+)?[A-Z][\w.'-]*){0,6}\s+[Ll]abs?\b"
     r"(?:\s*\(@\w+\))?\s+(?:recently\s+)?co-?(?:authored|wrote)",
@@ -367,7 +365,7 @@ def strip_ungrounded_authorship_lines(
 
     Returns ``(cleaned_text, stripped_lines)``. Conservative by construction:
     a stripped true fact costs one lost memory note; a kept false fact is
-    re-injected into every future prompt (see issue #29).
+    re-injected into every future prompt.
     """
     self_lab_re = _compile_self_lab_re(self_names)
     kept: list[str] = []

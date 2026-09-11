@@ -70,8 +70,7 @@ async def pi_may_post_to_channel(
     membership revokes write access.
 
     A channel name with no ``agent_channels`` row for this run is refused
-    UNLESS (SEC3-5, audit 2026-09-10; broadened by the follow-up review the
-    same day):
+    UNLESS:
 
     * it is one of the app's own ``SEEDED_CHANNELS`` -- their
       ``agent_channels`` row is only materialized lazily, on first
@@ -158,8 +157,8 @@ async def pi_may_reply_in_thread(
     participant clause to also accept ``is_bot IS FALSE`` rows whose
     ``sender_name == f"{pi_name} (PI)"``. The participant clause is deliberately
     ts-only (no ``sender_name``/user check) to mirror how ``MessageLog.get_thread_history``
-    resolves a thread's membership, but IS scoped to ``channel_name`` (SEC-F5, opus
-    review, audit 2026-09-08) — the same scoping the root-existence check above
+    resolves a thread's membership, but IS scoped to ``channel_name`` — the same
+    scoping the root-existence check above
     uses — so an agent_id that happens to share this ``thread_ts`` value via an
     unrelated thread in a DIFFERENT channel cannot authorize a reply here.
     """
@@ -206,21 +205,21 @@ async def record_pi_message(
     of what the PI wrote, so a caller that rolls back after calling this loses the
     guidance silently and must re-create the row in its recovery arm. Measured
     open on one caller (``reopen_proposal``'s legacy Slack-off branch, whose lost-
-    race arm re-binds ``refined_in_channel`` but not this row — #24 V5 iii).
+    race arm re-binds ``refined_in_channel`` but not this row).
 
     Committing here instead would be wrong: the e-mail twin
     (``email_inbound._handle_instruction``) depends on this row riding the same
     commit that retires the notification, so an early commit would let a retried
-    S3 delivery write a second guidance row (the #21 COR-19.6 shape).
+    S3 delivery write a second guidance row.
 
     ``sender_user_id`` is required (though ``None`` is an accepted value) so no
     caller can silently omit it: it is the ownership carrier
     ``SimulationEngine._handle_pi_inbound_entry`` uses to decide which agent(s)
-    this message is allowed to act on (RC-1 / #20 COR-5) — a row written with
+    this message is allowed to act on — a row written with
     ``None`` gets no ownership-gated side effect at all, only a logged warning,
     so every real caller must pass the acting user's id.
 
-    ``pi_inbound_state`` is stamped ``'pending'`` at insert time (RC-2): the
+    ``pi_inbound_state`` is stamped ``'pending'`` at insert time: the
     durable marker that tells ``_poll_inbound_from_db`` to fetch this row
     regardless of how far its cursor has advanced, so a message written while
     ``agent-run`` is down is not silently skipped once the row ages past the

@@ -136,8 +136,8 @@ class TestEvictDeadThread:
         engine, dead_ts, a, b = engine_with_agents
         # slack_ts=dead_ts: this thread WAS born on Slack (a legitimately
         # dead thread — the parent was deleted), unlike the DB-only-root
-        # case covered by test_refuses_to_evict_a_db_only_thread below (#20
-        # C1). Eviction must still proceed for this one.
+        # case covered by test_refuses_to_evict_a_db_only_thread below.
+        # Eviction must still proceed for this one.
         engine.message_log.append(LogEntry(
             ts=dead_ts, channel="single-cell-omics", sender_agent_id="other",
             sender_name="OtherBot", content="dead root", posted_at=0.0, is_bot=True,
@@ -172,7 +172,7 @@ class TestEvictDeadThread:
         # Unlike engine_with_agents' fixture (which pre-closes dead_ts before
         # eviction runs), this thread was never in _closed_thread_ids — the
         # .add() must still land, and the new tombstone (_dead_thread_ids)
-        # must be set regardless of prior closed-state. See COR-1c fix round 1.
+        # must be set regardless of prior closed-state.
         dead_ts = "1776900000.000200"
         agent = Agent(agent_id="su", pi_name="Su", bot_name="SuBot")
         engine = SimulationEngine(agents=[agent], slack_clients={})
@@ -185,7 +185,7 @@ class TestEvictDeadThread:
         assert dead_ts in engine._dead_thread_ids
 
     def test_refuses_to_evict_a_db_only_thread(self):
-        # #20 C1: a thread rooted while Slack was off (slack_ts is None) has
+        # A thread rooted while Slack was off (slack_ts is None) has
         # never been seen by Slack, so a ThreadNotFound for it is a
         # mistranslation upstream, not evidence the thread is dead. Evicting
         # it purges the working log and permanently black-holes future PI

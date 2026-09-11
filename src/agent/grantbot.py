@@ -232,7 +232,7 @@ Respond with ONLY a JSON array of FOA numbers:
 
     user_msg = f"""## Funding Opportunities\n\n{opp_list}"""
 
-    # The LLM call itself is deliberately OUTSIDE the try/except below (issue #23 I2): a
+    # The LLM call itself is deliberately OUTSIDE the try/except below: a
     # transport failure (429/529/timeout) here must propagate rather than hard-fail to `[]`,
     # because `_run_grantbot_with_session` completing normally marks the day complete
     # (`_mark_run_complete()`), and `_should_run_today()` is then False until tomorrow — one
@@ -276,8 +276,8 @@ Respond with ONLY a JSON array of FOA numbers:
         logger.info("Selected %d of %d opportunities", len(validated), len(opportunities))
         return validated[:max_select]
     except Exception as exc:
-        # Hard-fail (issue #23 COR-26a/COR-26b): the old fallback posted every
-        # opportunity's key on ANY parse failure — up to `max_select` UNVETTED
+        # Hard-fail: falling back to posting every
+        # opportunity's key on ANY parse failure would post up to `max_select` UNVETTED
         # FOAs, exactly what a selection step exists to prevent. Returning []
         # means this run posts nothing AND (because run_grantbot returns
         # normally) the scheduler marks the day complete, so the next attempt is
@@ -288,7 +288,7 @@ Respond with ONLY a JSON array of FOA numbers:
         # re-querying can't fix a bug in how we parse an already-received
         # answer. A transport failure (LLM 429/529/timeout) is the opposite
         # case and is handled above, outside this try, by letting the
-        # exception propagate instead of landing here (issue #23 I2).
+        # exception propagate instead of landing here.
         logger.error(
             "Selection failed (%s) — refusing to post unvetted opportunities this run",
             exc,
@@ -491,9 +491,9 @@ async def _run_grantbot_with_session(
     # 4. Fetch details for selected opportunities
     #
     # The fallback to the search-shaped `opp` is deliberate — a post with no
-    # description beats no post. But it used to be SILENT, and that hid an
-    # upstream outage completely: measured 2026-08-04, grants.gov's detail
-    # backend answered every id with an outer "Webservice Succeeds" wrapping an
+    # description beats no post. But a silent fallback would hide an
+    # upstream outage completely: grants.gov's detail
+    # backend has been observed answering every id with an outer "Webservice Succeeds" wrapping an
     # inner "No response received ... at the backend server", so
     # fetch_opportunity_detail returned None for 5/5 real ids. Search hits carry
     # no description either, so every drafted post went to the LLM with an empty
@@ -568,7 +568,7 @@ async def _run_grantbot_with_session(
                 settings, "slack_bot_token_grantbot", ""
             )
             if not is_valid_token(candidate):
-                # Do NOT fall back to SuBot's token (issue #23 COR-26c): a post made on a
+                # Do NOT fall back to SuBot's token: a post made on a
                 # borrowed token carries that bot's Slack uid, so the engine's _bot_uid_map
                 # (roster bots resolve first, by design) attributes GrantBot's funding posts
                 # to `su`. Refuse rather than publish under the wrong identity — the per-FOA
@@ -585,7 +585,7 @@ async def _run_grantbot_with_session(
                 # run_slack_call: the helper is sync and makes paginated Slack
                 # calls with backoff, and this caller is async. Run inline it
                 # would hold the event loop for the whole listing plus any
-                # retry; the dedicated Slack executor (R-2) also keeps it off
+                # retry; the dedicated Slack executor also keeps it off
                 # the process-wide default to_thread pool.
                 await run_slack_call(
                     _ensure_channel_membership,

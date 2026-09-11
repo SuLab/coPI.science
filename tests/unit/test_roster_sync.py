@@ -196,10 +196,10 @@ class TestSyncRosterFromDb:
     async def test_surviving_agent_that_gains_a_token_gets_a_client(self, monkeypatch):
         """Regression: a roster agent provisioned AFTER startup stayed Slack-less.
 
-        Measured 2026-08-06 on the blackbird deployment: 48 bots were installed
-        while the engine ran, their tokens landed in AgentRegistry, and not one
-        of them ever connected — ``Connected as`` stayed at the 7 that had tokens
-        at process start. Cause: ``main.py`` puts EVERY active agent into
+        Observed on a real deployment: bots provisioned while the engine ran
+        had their tokens land in AgentRegistry, but not one of them ever
+        connected — ``Connected as`` stayed at the count that had tokens at
+        process start. Cause: ``main.py`` puts EVERY active agent into
         ``self.agents`` regardless of token, so a later-provisioned agent is in
         neither ``to_add`` nor ``to_remove``, the sync early-returns, and clients
         are only ever built in the ``to_add`` loop. The docstring's promise that
@@ -321,7 +321,7 @@ class TestSyncRosterFromDb:
         assert engine.message_log._bot_name_to_id.get("grantbot") == "grantbot"
 
     async def test_existing_client_is_rebuilt_when_its_token_rotates(self, monkeypatch):
-        """Red-team residual: the old `continue` on 'aid in self.slack_clients'
+        """The old `continue` on 'aid in self.slack_clients'
         skipped a TOKEN ROTATION on an already-connected agent entirely — the
         agent kept posting with the stale (about-to-be-revoked) token until a
         restart. Rebuild the client when the desired token no longer matches
@@ -338,7 +338,7 @@ class TestSyncRosterFromDb:
         assert after.bot_token == "xoxb-rotated"
 
     async def test_message_log_name_map_flushed_after_rename(self, monkeypatch):
-        """#26 DOC-B fix round 1: the engine's own _bot_name_to_id already
+        """The engine's own _bot_name_to_id already
         picked up a rename (test_surviving_agent_bot_name_and_pi_name_edits_go_live
         above), but message_log holds a COPY taken by set_bot_name_map — the
         early-return path must flush that copy too, or the poller (which reads
@@ -357,7 +357,7 @@ class TestSyncRosterFromDb:
     async def test_name_map_self_heals_on_the_next_tick_after_a_later_step_raises(
         self, monkeypatch,
     ):
-        """#26 I2: unlike set_bot_uid_map (already unconditional in this same
+        """Unlike set_bot_uid_map (already unconditional in this same
         no-add/no-remove fast path), the name-map flush only ran `if
         bot_name_changed`. bot_name_changed is only True on the SAME tick as
         the rename, so if a LATER step in that tick (_recompute_allowed_sender_ids)
@@ -479,8 +479,7 @@ class TestSyncRosterFromDb:
         Before the fix, _load_publication_records shared the roster query's
         try/except, so any exception from it (AgentRegistry/Publication join
         failing) was caught by the OUTER handler and silently no-op'd the whole
-        tick — new agents never got added, removals never propagated. See
-        issue #29 review.
+        tick — new agents never got added, removals never propagated.
         """
         _patch_client(monkeypatch)
         engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
@@ -501,7 +500,7 @@ class TestSyncRosterFromDb:
         session but must have its own try/except, same rationale as the
         publication-record load just above it: before the fix it shared the
         outer try/except, so a failure there silently no-op'd the whole
-        tick — a newly active agent was never added. See #29 review.
+        tick — a newly active agent was never added.
         """
         _patch_client(monkeypatch)
         rows = [_row("su"), _row("wiseman")]
@@ -516,7 +515,7 @@ class TestSyncRosterFromDb:
 
 
 class TestRosterSyncDoesNotBlockTheLoop:
-    """S-1 (audit 2026-09-10): AgentSlackClient.connect() is a blocking Slack
+    """AgentSlackClient.connect() is a blocking Slack
     Web API call that can sit in a retry/backoff loop for up to
     RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under a sustained throttle. Calling
     it directly (not through run_slack_call) inside _sync_roster_from_db

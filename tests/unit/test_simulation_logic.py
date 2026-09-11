@@ -14,9 +14,9 @@ from src.agent.simulation import (
 
 
 async def _async_noop(*_args, **_kwargs) -> None:
-    """Stand-in for _phase1_channel_discovery, now an async method (S-1,
-    audit 2026-09-10): its join_channel Slack call was moved onto
-    run_slack_call so it can no longer block the event loop.
+    """Stand-in for _phase1_channel_discovery, an async method whose
+    join_channel Slack call runs on run_slack_call so it cannot block the
+    event loop.
     """
     return None
 
@@ -274,8 +274,7 @@ The actual message.
 class _FakeDbResult:
     """Scripts `db.execute(...)` by call order for
     `_sync_one_agent_private_profile_from_db`'s two sequential selects
-    (AgentRegistry, then ResearcherProfile) -- N-3 (opus review, audit
-    2026-09-10)."""
+    (AgentRegistry, then ResearcherProfile)."""
 
     def __init__(self, value):
         self._value = value
@@ -314,14 +313,14 @@ class TestSyncProfilesFromDisk:
 
     _profile_mtimes stores a per-agent, per-sub-profile (exists, mtime)
     signature rather than a scalar mtime max — a max can only stay the same
-    or grow, so it cannot represent a deletion (#22 COR-23 / #29) — and,
-    since the RC-7 follow-up (audit 2026-09-08), private and public are
-    tracked and reloaded independently rather than as one combined
-    signature. A single combined signature meant ANY change to either file
-    called ``Agent.reload_profiles()``, clearing both caches: an unrelated
-    public-profile edit could resurrect a stale private file over one whose
-    disk write had just failed but whose in-memory cache correctly held the
-    new content (see TestPrivateReloadIsolatedFromPublicChange below).
+    or grow, so it cannot represent a deletion — and
+    private and public are tracked and reloaded independently rather than as
+    one combined signature. A single combined signature would have called
+    the (since-removed) profile reload on ANY change to either file,
+    clearing both caches: an unrelated public-profile edit could resurrect a
+    stale private file over one whose disk write had just failed but whose
+    in-memory cache correctly held the new content (see
+    TestPrivateReloadIsolatedFromPublicChange below).
     """
 
     @pytest.fixture
@@ -335,9 +334,8 @@ class TestSyncProfilesFromDisk:
         priv = tmp_path / "private" / "su.md"
         priv.write_text("Focus on aging.")
 
-        # Point the sync method at the temp profiles tree. N-3 (opus review,
-        # audit 2026-09-10): `_sync_profiles_from_disk`'s force-cleared
-        # branch now defers to `_sync_one_agent_private_profile_from_db`,
+        # Point the sync method at the temp profiles tree. `_sync_profiles_from_disk`'s
+        # force-cleared branch defers to `_sync_one_agent_private_profile_from_db`,
         # which imports `_profiles_dir` from src.agent.agent (a DIFFERENT
         # module-level `PROFILES_DIR` than this one) -- both must point at
         # the same temp tree or that helper's unlink()/read acts on the real
@@ -421,14 +419,14 @@ class TestSyncProfilesFromDisk:
         assert calls == {"private": [1], "public": []}
 
     async def test_deleted_private_file_triggers_reload(self, setup):
-        """Task H3's clear-after-write behaviour (commit a080900) unlinks
+        """The web UI's clear-after-write behaviour unlinks
         profiles/private/{id}.md when a PI blanks their private instructions.
-        The pre-fix scalar-mtime-max algorithm missed this: deleting the file
+        A scalar-mtime-max algorithm misses this: deleting the file
         drops the observed max back to the public file's mtime (or 0.0 if
         that's absent too), which is never greater than the previously
-        recorded max, so `mtime > prev` stayed False and reload_profiles()
-        was never called — the live agent kept serving the cached private
-        instructions until restart (#22 COR-23, #29)."""
+        recorded max, so `mtime > prev` stays False and reload_profiles()
+        is never called — the live agent would keep serving the cached private
+        instructions until restart."""
         engine, agent, priv, calls = setup
         await engine._sync_profiles_from_disk()  # baseline: private present
 
@@ -466,22 +464,20 @@ class TestSyncProfilesFromDisk:
     async def test_force_cleared_private_profile_is_not_resurrected_by_the_watcher(
         self, setup, monkeypatch,
     ):
-        """M-3 (opus review, audit 2026-09-10): once `force_clear_private_profile()`
-        has run (an unlink() failure on a genuine clear, L-3), the cache holds
+        """Once `force_clear_private_profile()`
+        has run (an unlink() failure on a genuine clear), the cache holds
         the default "cleared" text directly, NOT `None` — a subsequent mtime
         bump on the file that could not be removed must not send the watcher
         back through `reload_private_profile()`, which would re-read that
         same stale file and resurrect the very instruction the PI cleared.
 
-        O-3 (audit 2026-09-10): this test used to be vacuous after N-3, which
-        made the watcher's force-cleared branch defer to
-        `_sync_one_agent_private_profile_from_db` — that helper early-returns
+        The watcher's force-cleared branch defers to
+        `_sync_one_agent_private_profile_from_db`, which early-returns
         immediately when `session_factory` is `None` (the `setup` fixture's
-        default), so nothing ran regardless of whether the guard this test
-        pins actually worked. Stub a session confirming
-        `ResearcherProfile.private_profile_md == ""` so the DB-empty path
-        actually executes, and keep the unlink retry failing (as the real
-        L-3 scenario requires) so this exercises the "still un-removable"
+        default) — so this test must stub a session confirming
+        `ResearcherProfile.private_profile_md == ""` for the DB-empty path to
+        actually execute, and keep the unlink retry failing (the scenario
+        under test) so this exercises the "still un-removable"
         branch rather than the "retry succeeded" one already covered by
         `test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds`.
         """
@@ -528,7 +524,7 @@ class TestSyncProfilesFromDisk:
         )
 
     async def test_force_cleared_marker_is_dropped_once_the_retry_unlink_succeeds(self, setup):
-        """N-3 (opus review, audit 2026-09-10): once the DB-authoritative
+        """Once the DB-authoritative
         recheck confirms ResearcherProfile.private_profile_md is STILL empty,
         the retried unlink() actually removes the file and the agent is no
         longer tracked as force-cleared -- a later external rewrite of the
@@ -561,7 +557,7 @@ class TestSyncProfilesFromDisk:
     async def test_a_later_legitimate_edit_after_a_force_clear_is_kept_not_reunlinked(
         self, setup,
     ):
-        """N-3 (opus review, audit 2026-09-10): the watcher's mtime signature
+        """The watcher's mtime signature
         cannot distinguish "still the same un-removable stale file" from "a
         legitimate later web edit landing after the clear" (a PI writes new
         instructions after having cleared them) -- both look like a bump on
@@ -600,7 +596,7 @@ class TestSyncProfilesFromDisk:
     async def test_a_reached_verdict_that_rewrites_the_file_does_not_log_a_spurious_later_edit(
         self, setup,
     ):
-        """O-4 (audit 2026-09-10): when the DB has content and
+        """When the DB has content and
         `_sync_one_agent_private_profile_from_db` rewrites the disk file, the
         watcher must re-stat afterward rather than record the pre-write mtime
         it captured before calling the helper — otherwise the NEXT tick's
@@ -641,7 +637,7 @@ class TestSyncProfilesFromDisk:
     async def test_a_transient_non_verdict_does_not_advance_the_signature_so_the_next_tick_retries(
         self, setup,
     ):
-        """P-6 (opus review, audit 2026-09-10): a TRANSIENT non-verdict (an
+        """A TRANSIENT non-verdict (an
         exception talking to the DB, or no `session_factory`) must not
         advance the watcher's mtime signature for this bump — advancing it
         anyway would make the bump look already-handled forever, since a
@@ -649,8 +645,7 @@ class TestSyncProfilesFromDisk:
         the "nothing changed" fast path would never call back into the
         helper again, permanently losing the retry.
 
-        This supersedes O-4's original version of this test, which used "no
-        linked user_id" as its non-verdict case — P-6 reclassifies that as a
+        "No linked user_id" is NOT a transient non-verdict here — it is a
         DEFINITIVE non-verdict that DOES advance (see
         ``test_a_definitive_non_verdict_advances_the_signature_and_does_not_retry_every_tick``
         below); only a genuinely transient failure belongs here.
@@ -701,8 +696,8 @@ class TestSyncProfilesFromDisk:
     async def test_a_definitive_non_verdict_advances_the_signature_and_does_not_retry_every_tick(
         self, setup,
     ):
-        """P-6 / Q-2 (opus reviews, audit 2026-09-10): "no `ResearcherProfile`
-        row" is a DEFINITIVE answer, not a transient failure — a real query ran
+        """No `ResearcherProfile`
+        row is a DEFINITIVE answer, not a transient failure — a real query ran
         and came back conclusively empty. (An UNLINKED registry row is NOT
         definitive: user_id is populated later by signup/activation while the
         sim is live, so that case stays transient — see the test below.) Unlike
@@ -756,7 +751,7 @@ class TestSyncProfilesFromDisk:
     async def test_a_missing_registry_row_is_definitive_and_is_not_re_queried_every_tick(
         self, setup,
     ):
-        """R-1 (opus review of Q-2): no AgentRegistry row at all is definitive —
+        """No AgentRegistry row at all is definitive —
         the roster is registry-derived, so the row will not appear for a
         running agent — and must advance the signature (one query, not one per
         tick)."""
@@ -786,7 +781,7 @@ class TestSyncProfilesFromDisk:
     async def test_an_unlinked_registry_row_is_transient_and_is_re_queried_on_the_next_bump(
         self, setup,
     ):
-        """Q-2 (opus review of P-6): `AgentRegistry.user_id` is filled in later
+        """`AgentRegistry.user_id` is filled in later
         by the signup/activation flow while the sim runs, so "no linked user"
         must not freeze the watcher's signature — the next tick re-consults
         the DB."""
@@ -816,19 +811,19 @@ class TestSyncProfilesFromDisk:
 
 
 class TestPrivateReloadIsolatedFromPublicChange:
-    """RC-7 follow-up (audit 2026-09-08, reviewer-reproduced): a failed
-    private-profile disk write must not be reverted by an unrelated public
-    change.
+    """A failed private-profile disk write must not be reverted by an unrelated
+    public change.
 
-    Root cause: `_sync_profiles_from_disk` used to build ONE (private,
-    public) signature per agent and call `agent.reload_profiles()` — which
-    clears BOTH caches — whenever anything in it changed. A failed private
-    write leaves the on-disk private file's mtime unchanged (atomic_write_text
+    A combined (private, public) signature per agent calling
+    `agent.reload_profiles()` — which clears BOTH caches — whenever anything in
+    it changes would fail this: a failed private write leaves the on-disk
+    private file's mtime unchanged (atomic_write_text
     only calls os.replace on success) while the in-memory cache correctly
-    holds the new, unsaved-to-disk content. But the next *public* profile
-    export still flips the combined signature, triggers reload_profiles(),
-    and clobbers the private cache back to None — the next read re-loads the
-    stale on-disk file, silently discarding the PI's accepted instruction.
+    holds the new, unsaved-to-disk content. The next *public* profile
+    export would then still flip the combined signature, trigger reload_profiles(),
+    and clobber the private cache back to None — the next read re-loading the
+    stale on-disk file, silently discarding the PI's accepted instruction. Private
+    and public signatures must therefore be tracked independently.
     """
 
     async def test_a_failed_private_write_survives_an_unrelated_public_change(
@@ -854,7 +849,7 @@ class TestPrivateReloadIsolatedFromPublicChange:
         engine = SimulationEngine(agents=[agent], slack_clients={})
         await engine._sync_profiles_from_disk()  # baseline signatures
 
-        # A DB-first-then-disk write (RC-7) whose DB half succeeded but whose
+        # A DB-first-then-disk write whose DB half succeeded but whose
         # disk half failed: the in-memory cache holds the new content, the
         # on-disk file is untouched (still "old instruction").
         monkeypatch.setattr(
@@ -1202,7 +1197,7 @@ class TestPrivateChannelFinalization:
 
 # ---------------------------------------------------------------
 # _check_thread_outcome — a ✅ must confirm the other agent's MOST RECENT
-# message, not any stale :memo: (#20 COR-3)
+# message, not any stale :memo:
 # ---------------------------------------------------------------
 
 class TestCheckThreadOutcomeRequiresTheMostRecentMemo:
@@ -1276,8 +1271,8 @@ class TestCheckThreadOutcomeRequiresTheMostRecentMemo:
     async def test_a_reply_carrying_both_a_tick_and_a_memo_stays_closed(self):
         # A confirm-plus-revised-summary reply (both ✅ and :memo: in the same
         # message) must not fall through into the :memo:/⏸️ re-checks below
-        # the ✅ branch and un-close (or double-close) the thread. See COR-3's
-        # `break`-vs-`return` regression.
+        # the ✅ branch and un-close (or double-close) the thread -- a `break`
+        # (not `return`) after a match is what would let that fall-through happen.
         engine, a, thread = self._engine_with_thread()
 
         await engine._check_thread_outcome(a, thread, "Agreed ✅ — :memo: Summary: v2")
@@ -1287,7 +1282,7 @@ class TestCheckThreadOutcomeRequiresTheMostRecentMemo:
 
 
 # ---------------------------------------------------------------
-# _is_finalize_marker — shared by the public and private ✅ checks (#20 COR-4)
+# _is_finalize_marker — shared by the public and private ✅ checks
 # ---------------------------------------------------------------
 
 class TestFinalizeMarkerIsSharedAcrossPublicAndPrivate:
@@ -1299,7 +1294,7 @@ class TestFinalizeMarkerIsSharedAcrossPublicAndPrivate:
     def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
         """_close_thread ends in _update_agent_memory, which calls the real
         Anthropic API and writes profiles/memory/<id>/public.md. Stub both:
-        this is tests/unit. See red-team B2."""
+        this is tests/unit."""
         from unittest.mock import AsyncMock
 
         import src.agent.agent as agent_mod
@@ -1341,7 +1336,7 @@ class TestFinalizeMarkerIsSharedAcrossPublicAndPrivate:
 
 # ---------------------------------------------------------------
 # _close_thread — idempotent, and its dedup-context entry carries
-# thread_id (#20 COR-7)
+# thread_id
 # ---------------------------------------------------------------
 
 class TestCloseThreadIsIdempotent:
@@ -1353,7 +1348,7 @@ class TestCloseThreadIsIdempotent:
     def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
         """_close_thread ends in _update_agent_memory, which calls the real
         Anthropic API and writes profiles/memory/<id>/public.md. Stub both:
-        this is tests/unit. See red-team B2 (both tests below drive
+        this is tests/unit (both tests below drive
         _close_thread at least once)."""
         from unittest.mock import AsyncMock
 
@@ -1395,13 +1390,13 @@ class TestCloseThreadIsIdempotent:
 
 # ---------------------------------------------------------------
 # _close_thread's ThreadDecision write — retried in-call, then queued rather
-# than lost outright (M-7, opus review, audit 2026-09-10)
+# than lost outright
 # ---------------------------------------------------------------
 
 class _FakeDecisionSession:
     """Minimal async-session double for a ThreadDecision insert.
 
-    N-4 (opus review, audit 2026-09-10): `_insert_thread_decision_row` now
+    `_insert_thread_decision_row`
     issues an `INSERT ... ON CONFLICT (id) DO NOTHING` (a `pg_insert`
     statement, not `db.add()`) followed by a re-select confirming the id
     landed. This double recognizes the pg_insert by type, extracts its bound
@@ -1642,7 +1637,7 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
 
     @pytest.mark.asyncio
     async def test_deferred_review_replays_even_for_an_agent_off_the_live_roster(self):
-        """S-3 (audit 2026-09-10): `if not a: continue` used to skip the
+        """`if not a: continue` would skip the
         deferred-implicit-review replay AND removal whenever the agent had
         since left the live roster (self.agents) while its decision was
         still pending -- dropping the queued PI engagement for good and
@@ -1681,7 +1676,7 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
     async def test_a_commit_that_lands_server_side_but_raises_client_side_is_not_duplicated(
         self, monkeypatch,
     ):
-        """N-4 (opus review, audit 2026-09-10): a commit that actually landed
+        """A commit that actually landed
         server-side but raised on the CLIENT side (e.g. the connection dying
         right after COMMIT, before the ack reaches this process) must not
         insert a second row when the caller retries -- the retry has to be
@@ -1786,7 +1781,7 @@ class TestCloseThreadDecisionWriteRetriesAndParks:
 
 
 class TestPendingThreadDecisionsCap:
-    """N-6 (opus review, audit 2026-09-10): _pending_thread_decisions must
+    """_pending_thread_decisions must
     not grow without bound during a sustained DB outage -- capped at
     PENDING_THREAD_DECISIONS_MAX, dropping the OLDEST entries with one ERROR
     per overflowing enqueue (mirrors LLM_LOG_REQUEUE_MAX_ROWS's pattern)."""
@@ -1827,11 +1822,11 @@ class TestPendingThreadDecisionsCap:
     def test_overflow_purge_keeps_a_deferred_review_if_another_pending_payload_shares_its_thread_id(
         self,
     ):
-        """P-5 (opus review, audit 2026-09-10): the overflow purge used to
+        """The overflow purge must not
         drop a `_deferred_implicit_reviews` pair whenever ANY payload for its
-        thread_id was among the dropped (oldest) entries -- even when a
+        thread_id is among the dropped (oldest) entries -- even when a
         SECOND, still-pending payload for that SAME thread_id survives the
-        purge. That pair could still be legitimately replayed against the
+        purge. That pair can still be legitimately replayed against the
         surviving payload once it flushes, so dropping it lost a real
         PI-engagement review for no reason. Only purge a pair when NO
         remaining payload has its thread_id.
@@ -1869,7 +1864,7 @@ class TestPendingThreadDecisionsCap:
     def test_overflow_purge_drops_a_deferred_review_whose_surviving_payload_has_a_different_pair(
         self,
     ):
-        """Q-1 (opus review of P-5): survival is PAIR-level. A surviving payload
+        """Survival is PAIR-level. A surviving payload
         for the same thread_id but a disjoint agent pair can never replay the
         pair (the flush matches agent_id against agent_a/agent_b), so keeping
         it would leak in _deferred_implicit_reviews forever."""
@@ -1892,7 +1887,7 @@ class TestPendingThreadDecisionsCap:
 
 
 class TestFlushSkipsInCallRetryBudget:
-    """N-6 (opus review, audit 2026-09-10): _flush_pending_thread_decisions
+    """_flush_pending_thread_decisions
     must give each entry exactly ONE attempt per tick -- it is itself the
     retry mechanism (called again every tick), so paying the in-call
     multi-attempt budget (with its blocking backoff sleeps) for every
@@ -2270,7 +2265,6 @@ class TestPostMessageSuppressesEmptyText:
 
 # ---------------------------------------------------------------
 # _post_message — a synchronous Slack call must not block the event loop
-# (M-8, opus review, audit 2026-09-10)
 # ---------------------------------------------------------------
 
 class TestPostMessageDoesNotBlockTheEventLoop:
@@ -2329,9 +2323,9 @@ class TestPostMessageDoesNotBlockTheEventLoop:
 
 
 class TestPostMessageSerializesPerAgent:
-    """N-8 (opus review, audit 2026-09-10): after M-8, two `_post_message`
+    """Two `_post_message`
     calls for the SAME agent run their Slack call on separate slack-io
-    worker threads concurrently -- nothing serialized them once they left
+    worker threads concurrently -- nothing serializes them once they leave
     the event loop, which could land two replies from one agent on Slack out
     of order. A per-agent asyncio.Semaphore(1) around the Slack call must
     keep them ordered while leaving cross-agent calls fully concurrent.
@@ -2424,7 +2418,7 @@ class TestPostMessageSerializesPerAgent:
 
 # ---------------------------------------------------------------
 # _post_message — a connected client's genuinely failed post must not be
-# confused with the disconnected/MOCK path (#20 COR-1b).
+# confused with the disconnected/MOCK path.
 # ---------------------------------------------------------------
 
 class TestPostMessageDistinguishesConnectedFailureFromMock:
@@ -2433,18 +2427,15 @@ class TestPostMessageDistinguishesConnectedFailureFromMock:
     don't count the turn, close threads or mint proposals.
 
     The message itself is still recorded, as a DB-only row (`slack_ts=None`, locally
-    minted canonical id) — the DB is the durable store. Issue #20's COR-1b names the
-    harm precisely: "_post_message mints a local id, persists the row and returns
-    **True**, so a connected client whose post failed is indistinguishable from the
-    Slack-off path: the turn counts, threads close and proposals mint for a message
-    absent from Slack", and its Fix is "signal the Slack failure distinctly from the
-    mock path". The return value is the defect; the row is not.
-
-    This class originally asserted that nothing was written at all, which went beyond
-    what the issue asked and silently deleted the agent's text on any Slack refusal.
-    tests/integration/test_slack_lifecycle_live.py::test_posting_to_an_archived_channel_does_not_crash
-    pinned that as data loss and passes at 18ba52c — but it only runs when the
-    copi-test credentials are exported, so the regression was invisible to the gate."""
+    minted canonical id) — the DB is the durable store. If `_post_message` instead
+    minted a local id, persisted the row and returned **True**, a connected client
+    whose post failed would be indistinguishable from the
+    Slack-off path: the turn would count, threads would close and proposals would
+    mint for a message absent from Slack. The fix must signal the Slack failure
+    distinctly from the mock path. The return value is the defect; the row is not
+    -- deleting the agent's text on any Slack refusal is itself data loss (see
+    tests/integration/test_slack_lifecycle_live.py::test_posting_to_an_archived_channel_does_not_crash,
+    which only runs when the copi-test credentials are exported)."""
 
     def _engine_with_failing_client(self, error_code="msg_too_long"):
         from unittest.mock import MagicMock
@@ -2473,8 +2464,9 @@ class TestPostMessageDistinguishesConnectedFailureFromMock:
         entry = engine.message_log._entries[0]
         assert entry.content == "a real message"
         assert entry.slack_ts is None, (
-            "a refused post must not carry a Slack ts — that is the phantom row COR-1b "
-            "is about; the row itself is the durable record of what the agent said"
+            "a refused post must not carry a Slack ts — a phantom Slack ts would claim "
+            "an identity the post never got; the row itself is the durable record of "
+            "what the agent said"
         )
 
     @pytest.mark.asyncio
@@ -2491,10 +2483,8 @@ class TestPostMessageDistinguishesConnectedFailureFromMock:
 
     @pytest.mark.asyncio
     async def test_thread_not_found_also_returns_false_and_evicts_the_dead_thread(self):
-        # COR-1a's own fix (a reply to a deleted parent returns False rather
-        # than minting a phantom entry) already landed at 18ba52c, but no
-        # test pins it — this task builds the exact doubles needed to add one
-        # at near-zero cost. See red-team m7 (coverage-matrix gap).
+        # A reply to a deleted parent must return False rather
+        # than minting a phantom entry.
         from src.agent.message_log import LogEntry
 
         engine = self._engine_with_failing_client("thread_not_found")
@@ -2513,7 +2503,7 @@ class TestPostMessageDistinguishesConnectedFailureFromMock:
 
 
 # ---------------------------------------------------------------
-# ProposalRef.thread_decision_id — COR-13 unified review key
+# ProposalRef.thread_decision_id — unified review key
 # ---------------------------------------------------------------
 
 class TestProposalRefCarriesThreadDecisionId:
@@ -2538,15 +2528,15 @@ class TestProposalRefCarriesThreadDecisionId:
 
 # ---------------------------------------------------------------
 # _sync_proposal_reviews_from_db — the web-guidance reopen mint must be
-# idempotent across restarts (COR-13 / red-team B6)
+# idempotent across restarts
 # ---------------------------------------------------------------
 
 class TestWebGuidanceReopenMintIsIdempotentAcrossRestarts:
     """The synthetic 'PI (via web)' guidance row must be minted once, ever —
-    not once per restart. Before this fix, _db_reopened_thread_ids reset to
-    empty on every process start, so this whole block re-ran unconditionally
-    on the first post-restart tick and re-appended another copy of the same
-    guidance message forever. See COR-13 / red-team B6."""
+    not once per restart. If `_db_reopened_thread_ids` reset to
+    empty on every process start, this whole block would re-run unconditionally
+    on the first post-restart tick and re-append another copy of the same
+    guidance message forever."""
 
     def _engine_with_pending_reopen(self):
         import uuid as uuid_mod
@@ -2613,11 +2603,11 @@ class TestWebGuidanceReopenMintIsIdempotentAcrossRestarts:
 
 
 # ---------------------------------------------------------------
-# _check_private_channel_outcome must run only when the post landed — COR-1d
+# _check_private_channel_outcome must run only when the post landed
 # ---------------------------------------------------------------
 
 class TestPrivateChannelOutcomeRunsOnlyWhenPosted:
-    """A suppressed Phase 5 post (COR-1b's new failure path, an empty-after-strip
+    """A suppressed Phase 5 post (a Slack refusal, an empty-after-strip
     draft, or an authorship rejection) must not still trigger the private-channel
     finalization handshake — nothing was actually said in the channel."""
 
@@ -2627,7 +2617,7 @@ class TestPrivateChannelOutcomeRunsOnlyWhenPosted:
         from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
         # Hermetic against a local .env with PHASE5_SKIP_PROBABILITY set
-        # nonzero (red-team m7): neither test below has a pi_priority
+        # nonzero: neither test below has a pi_priority
         # candidate to bypass the random skip on its own, and both assert the
         # LLM path actually ran, which a random skip would intermittently
         # prevent under a non-default setting. Default is 0.0
@@ -2689,7 +2679,7 @@ class TestRunTurnAdvancesCursorFromTheLog:
     """The scan cursor must never advance past the newest message actually in
     the log — a wall-clock cursor can outrun a message an external writer
     (Slack human, the web app, GrantBot) posts with a lagging or skewed clock,
-    filtering it out of every future scan forever. See COR-6."""
+    filtering it out of every future scan forever."""
 
     def _engine_with_stubbed_phases(self):
         from unittest.mock import AsyncMock
@@ -2840,7 +2830,6 @@ class TestPhase3ActivationSetsMessageCountOffset:
 
 # ---------------------------------------------------------------
 # Tombstoned dead threads must not be resurrected by the inbound DB poller
-# — COR-1c fix round 1 (C1)
 # ---------------------------------------------------------------
 
 class TestTombstonedThreadIsNotResurrected:
@@ -2924,13 +2913,13 @@ class TestTombstonedThreadIsNotResurrected:
     async def test_a_tombstoned_row_is_only_stamped_handled_after_max_attempts(
         self, monkeypatch,
     ):
-        """REV3-2 (opus review, audit 2026-09-08): a tombstone must not stamp
+        """A tombstone must not stamp
         HANDLED on the very first match — _dead_thread_ids is in-process only
         and reset on restart, so a thread wrongly tombstoned by a TRANSIENT
         ThreadNotFound must get a bounded number of retries (a restart before
         the cap clears the tombstone entirely). Only past
         PI_INBOUND_MAX_ATTEMPTS does it become terminal, same shape as
-        SEC2-1's handler-failure cap."""
+        the handler-failure cap below."""
         from unittest.mock import AsyncMock
 
         from src.agent.simulation import PI_INBOUND_MAX_ATTEMPTS
@@ -2957,9 +2946,9 @@ class TestTombstonedThreadIsNotResurrected:
     async def test_a_failed_handled_write_keeps_the_attempt_count_for_a_tombstoned_row(
         self, monkeypatch,
     ):
-        """K-7 (audit 2026-09-10): if the terminal HANDLED write itself fails,
+        """If the terminal HANDLED write itself fails,
         the attempt counter must NOT be popped — popping unconditionally would
-        forget every attempt already spent and let SEC2-1's cap restart from
+        forget every attempt already spent and let the handler-failure cap restart from
         zero on the very next poll of the same still-'ingested'/'pending' row."""
         from unittest.mock import AsyncMock
 
@@ -2998,7 +2987,7 @@ class TestTombstonedThreadIsNotResurrected:
 
 # ---------------------------------------------------------------
 # _check_pi_proposal_review only clears a proposal the sender is verified
-# to own, and persists a ProposalReview row — COR-5
+# to own, and persists a ProposalReview row
 # ---------------------------------------------------------------
 
 class TestCheckPiProposalReviewRequiresAuthorization:
@@ -3006,7 +2995,7 @@ class TestCheckPiProposalReviewRequiresAuthorization:
     block cleared — the caller is responsible for proving the actual sender
     owns that agent. Without this, any message landing in the right
     thread_id clears the block for whichever agent(s) happen to be waiting
-    on it, regardless of who sent it. See COR-5."""
+    on it, regardless of who sent it."""
 
     def _engine_with_pending_proposal(self):
         from src.agent.agent import Agent
@@ -3056,7 +3045,7 @@ class TestCheckPiProposalReviewRequiresAuthorization:
 
 
 class TestDeferredImplicitProposalReview:
-    """N-5 (opus review, audit 2026-09-10): a PI engagement can clear a
+    """A PI engagement can clear a
     proposal's block (`proposal.reviewed = True`) WHILE the same thread's
     ThreadDecision write is still deferred (`proposal.thread_decision_id is
     None`, queued in `_pending_thread_decisions`) --
@@ -3096,9 +3085,8 @@ class TestDeferredImplicitProposalReview:
     def _queue_pending_decision(self, engine):
         """A matching `_pending_thread_decisions` entry, as `_close_thread`
         would have already queued by the time a PI's message reaches
-        `_check_pi_proposal_review` in a real run (O-2, audit 2026-09-10:
-        `_check_pi_proposal_review` only records a deferred-review pair when
-        it can actually find one)."""
+        `_check_pi_proposal_review` in a real run (`_check_pi_proposal_review`
+        only records a deferred-review pair when it can actually find one)."""
         engine._pending_thread_decisions.append({
             "thread_id": "1.0", "channel": "general",
             "agent_a": "a", "agent_b": "b",
@@ -3121,7 +3109,7 @@ class TestDeferredImplicitProposalReview:
 
     @pytest.mark.asyncio
     async def test_a_queued_payload_for_a_different_pair_does_not_record_a_deferred_review(self):
-        """R-3 (opus review of Q-1): the record site must use the SAME pair-level
+        """The record site must use the SAME pair-level
         predicate as the flush — a queued payload for this thread_id whose
         agent_a/agent_b do not include this agent can never replay the pair."""
         from unittest.mock import AsyncMock
@@ -3140,7 +3128,7 @@ class TestDeferredImplicitProposalReview:
 
     @pytest.mark.asyncio
     async def test_no_session_factory_never_records_a_deferred_review(self):
-        """O-2 (audit 2026-09-10): with `session_factory=None`, `_close_thread`
+        """With `session_factory=None`, `_close_thread`
         never enqueues anything into `_pending_thread_decisions` (see its own
         guard), so `proposal.thread_decision_id` stays `None` forever --
         recording a pair here would leak into `_deferred_implicit_reviews` for
@@ -3194,13 +3182,13 @@ class TestDeferredImplicitProposalReview:
 
 
 class TestHandlePiInboundEntryRequiresOwnership:
-    """RC-1 / #20 COR-5: ``_handle_pi_inbound_entry`` gates every side effect
+    """``_handle_pi_inbound_entry`` gates every side effect
     on the set of agents the row's ``sender_user_id`` actually owns
     (``_agent_ids_owned_by_user``), intersected with the thread's own
-    participants — never on thread participation alone. Before migration
-    0030 this used to trust "any agent that ever posted in this thread" by
-    itself, which let PI A, acting in a thread A's agent shares with B's
-    agent, clear B's pending-proposal block."""
+    participants — never on thread participation alone. Trusting "any agent
+    that ever posted in this thread" by itself would let PI A, acting in a
+    thread A's agent shares with B's agent, clear B's pending-proposal
+    block."""
 
     def _engine_with_two_agents_sharing_a_thread(self):
         from src.agent.agent import Agent
@@ -3301,7 +3289,7 @@ class TestHandlePiInboundEntryRequiresOwnership:
 class TestAgentIdsOwnedByUser:
     """_agent_ids_owned_by_user is the DB/web/email inbound path's equivalent
     of the Slack map (_pi_slack_id_to_agent_ids): registry ownership UNION
-    delegate access. See RC-1 / #20 COR-5."""
+    delegate access."""
 
     class _FakeResult:
         def __init__(self, rows):
@@ -3389,7 +3377,7 @@ class TestAgentIdsOwnedByUser:
 
     @pytest.mark.asyncio
     async def test_a_db_failure_raises_instead_of_failing_closed(self):
-        """K-1 (audit 2026-09-10): a DB error is NOT the same as "nothing to
+        """A DB error is NOT the same as "nothing to
         authorize against" (a NULL user id) — it must raise so the caller
         retries the row instead of the poller stamping it HANDLED after a
         single transient blip. See test_none_user_id_short_circuits_without_a_db_call
@@ -3416,7 +3404,7 @@ class TestAgentIdsOwnedByUser:
 class TestPersistImplicitProposalReview:
     """_persist_implicit_proposal_review writes a rating=-1 ProposalReview row
     keyed on the ProposalRef's own thread_decision_id (the same unified key
-    _sync_proposal_reviews_from_db uses — COR-13), never overwrites an
+    _sync_proposal_reviews_from_db uses), never overwrites an
     existing row for that (thread_decision_id, agent_id) pair, and is a
     no-op (not an error) when there is nothing to key against."""
 
@@ -3493,7 +3481,7 @@ class TestPersistImplicitProposalReview:
         # counter (rather than a factory that raises) is load-bearing: a
         # raising factory would be silently swallowed by the function's own
         # blanket `except Exception`, making the test pass even if the early
-        # guard were deleted. See COR-5 fix round 1 (I1).
+        # guard were deleted.
         from src.agent.agent import Agent
 
         engine = SimulationEngine(agents=[Agent("victim", "VictimBot", "Victim PI")], slack_clients={})
@@ -3557,9 +3545,9 @@ class TestPersistImplicitProposalReview:
 
     @pytest.mark.asyncio
     async def test_no_registered_pi_user_records_pi_engaged_at_instead(self):
-        # #20 COR-5: a NULL AgentRegistry.user_id used to return before writing
-        # anything, so the cleared block was in-memory only. proposal_reviews
-        # still cannot carry it (user_id is NOT NULL, and making it nullable was
+        # A NULL AgentRegistry.user_id must not return before writing
+        # anything, or the cleared block would be in-memory only. proposal_reviews
+        # cannot carry it (user_id is NOT NULL, and making it nullable was
         # rejected — it is ondelete="CASCADE" to users, so deleting a PI would
         # erase the engine's own markers), so the carrier is
         # thread_decisions.pi_engaged_at. Still no ProposalReview row; a real,
@@ -3608,9 +3596,8 @@ class TestPersistImplicitProposalReview:
 
     @pytest.mark.asyncio
     async def test_no_registered_pi_user_logs_at_info_naming_the_agent(self, caplog):
-        # #20 I3 raised this to WARNING while the branch really was in-memory
-        # only. COR-5 now persists it, so a WARNING would be crying wolf on a
-        # path that works — but the operator still wants to know that this
+        # A WARNING would be crying wolf on a
+        # path that persists and works — but the operator still wants to know that this
         # agent's review is carried on thread_decisions rather than in
         # proposal_reviews (no dashboard, no review e-mail and no admin count
         # reads that carrier). INFO, naming the agent and the decision.
@@ -3636,7 +3623,7 @@ class TestPersistImplicitProposalReview:
 
 
 # ---------------------------------------------------------------
-# COR-5: the implicit review of an agent with no linked PI user, end to end
+# The implicit review of an agent with no linked PI user, end to end
 # ---------------------------------------------------------------
 
 class _FixtureSessionFactory:
@@ -3664,21 +3651,22 @@ class _FixtureSessionFactory:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
-    """#20 COR-5, both halves, against a real database.
+    """Both halves of the implicit-review-persistence invariant, against a real
+    database.
 
     An agent whose ``AgentRegistry.user_id`` is NULL can never have a
     ``proposal_reviews`` row — that column is NOT NULL, and making it nullable
     was rejected because it is ``ondelete="CASCADE"`` to ``users``, so deleting
-    a PI would erase the engine's own block-clearing markers. The engine used
-    to log and return, leaving the cleared block in memory only; the issue's
-    own words for the consequence are "``_rebuild_agent_state`` re-blocks on
-    restart", which is the second assertion here and the one that matters.
+    a PI would erase the engine's own block-clearing markers. If the engine
+    were to log and return instead of persisting, the cleared block would live
+    in memory only, and ``_rebuild_agent_state`` would re-block it on
+    restart, which is the second assertion here and the one that matters.
 
     ``wiseman`` is the control. ``pi_engaged_at`` lives on the shared
     ``ThreadDecision``, so it is per-decision where a review row is per-agent:
     reading it for an agent that DOES have a linked PI would let su's PI clear
-    wiseman's block, which is exactly the cross-lab unblock COR-5's *first*
-    half exists to stop.
+    wiseman's block, which is exactly the cross-lab unblock this test's
+    first half exists to stop.
     """
     from sqlalchemy import select as sa_select
 
@@ -3689,7 +3677,7 @@ async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
 
     run = await factories.make_simulation_run(db_session)
     pi = await factories.make_user(db_session)
-    # No `user=` — this is the population COR-5 is about.
+    # No `user=` — this is the population an agent with no linked PI user represents.
     await factories.make_agent(
         db_session, agent_id="su", bot_name="SuBot", status="active",
     )
@@ -3737,7 +3725,7 @@ async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
                if p.thread_id == td.thread_id]
     assert len(su_refs) == 1
     assert su_refs[0].reviewed is True, (
-        "_rebuild_agent_state re-blocked the proposal on restart — the half COR-5 names"
+        "_rebuild_agent_state re-blocked the proposal on restart"
     )
 
     wiseman_refs = [p for p in restarted.agents["wiseman"].state.pending_proposals
@@ -3745,11 +3733,11 @@ async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
     assert len(wiseman_refs) == 1
     assert wiseman_refs[0].reviewed is False, (
         "su's PI engagement cleared wiseman's block too — wiseman has its own "
-        "linked PI and only its own review row may clear it (COR-5's first half)"
+        "linked PI and only its own review row may clear it"
     )
 
     # The roster-flip rebuild reads the same carrier: an inactive->active flip
-    # rebuilds one agent's state from scratch (E6(2)) and must not re-block it
+    # rebuilds one agent's state from scratch and must not re-block it
     # either.
     flipped = _engine()
     await flipped._rebuild_one_agent_state("su")
@@ -3762,7 +3750,7 @@ async def test_a_userless_agents_implicit_review_survives_a_rebuild(db_session):
 
 
 # ---------------------------------------------------------------
-# _poll_pi_dms per-agent guard (COR-10(1))
+# _poll_pi_dms per-agent guard
 # ---------------------------------------------------------------
 
 class TestPollPiDmsGuardsPerAgent:
@@ -3770,7 +3758,7 @@ class TestPollPiDmsGuardsPerAgent:
     error the slack_sdk re-raises unchanged — see slack_client.py's
     _call_with_retry, which only catches SlackApiError) must not kill the
     whole simulation. Both sibling pollers already guard per-item; this one
-    didn't. See COR-10(1)."""
+    must too."""
 
     class _RaisingDmClient:
         is_connected = True
@@ -3814,14 +3802,14 @@ class TestPollPiDmsGuardsPerAgent:
 
 
 # ---------------------------------------------------------------
-# _poll_pi_dms_from_db's durable handled_at marker (RC-2, #20 audit 2026-09-08)
+# _poll_pi_dms_from_db's durable handled_at marker
 # ---------------------------------------------------------------
 
 class TestPollPiDmsFromDbUsesTheHandledAtMarker:
-    """A PI DM written while agent-run is down used to lose its side effects
-    forever: nothing durable recorded "needs handling", `_seed_pi_dm_cursor`
-    jumped the cursor to max(created_at) at startup, and the in-memory
-    `_pi_dm_seen` dedup set reset to empty on every restart. `handled_at`
+    """A PI DM written while agent-run is down would otherwise lose its side effects
+    forever: nothing durable records "needs handling" if `_seed_pi_dm_cursor`
+    jumps the cursor to max(created_at) at startup, and the in-memory
+    `_pi_dm_seen` dedup set resets to empty on every restart. `handled_at`
     (migration 0030) is the durable, timestamp-based marker: NULL means
     unprocessed, and the poller fetches such a row regardless of how far
     behind the cursor it has fallen."""
@@ -3955,15 +3943,11 @@ class TestPollPiDmsFromDbUsesTheHandledAtMarker:
 
 
 # ---------------------------------------------------------------
-# _poll_inbound_from_db handler guard (COR-10(3))
+# _poll_inbound_from_db handler guard
 # ---------------------------------------------------------------
 
 class TestPollInboundFromDbGuardsTheHandler:
-    """COR-10(3), as ruled in ``docs/plans/2026-09-04-decisions/task-7.md``
-    (option (a) — it supersedes Decision D25 *and* this session's ``c4de842``
-    ordering).
-
-    The MessageLog append is what records the PI's **text** durably, so it runs
+    """The MessageLog append is what records the PI's **text** durably, so it runs
     BEFORE ``_handle_pi_inbound_entry`` and the cursor advance runs after it.
     Dedup therefore can no longer key on the log entry's presence
     (``MessageLog.append`` is not idempotent — keying on it would skip the retry,
@@ -4048,7 +4032,7 @@ class TestPollInboundFromDbGuardsTheHandler:
                         if r.id == params.get("id_1"):
                             r.pi_inbound_state = params.get("pi_inbound_state")
                 return _R([])
-            # Mirrors the real WHERE clause (RC-2): the lookback window OR a
+            # Mirrors the real WHERE clause: the lookback window OR a
             # row explicitly marked 'pending' at write time, however far
             # behind the cursor it has fallen.
             floor = self._engine._pi_inbox_cursor - PI_INBOX_LOOKBACK
@@ -4075,7 +4059,7 @@ class TestPollInboundFromDbGuardsTheHandler:
         only its two observable side effects stubbed — so "the tag route did
         not re-run" is an assertion about the production code path.
 
-        ``_agent_ids_owned_by_user`` is stubbed too (RC-1): its own DB-backed
+        ``_agent_ids_owned_by_user`` is stubbed too: its own DB-backed
         resolution is covered separately (TestAgentIdsOwnedByUser /
         tests/integration/test_state_rebuild.py), and these tests are about
         the poller's dedup/marker contract, not ownership resolution itself.
@@ -4236,7 +4220,7 @@ class TestPollInboundFromDbGuardsTheHandler:
     async def test_a_deterministically_raising_handler_gives_up_after_max_attempts(
         self, caplog,
     ):
-        """SEC2-1 (audit 2026-09-08): a handler that raises on every attempt
+        """A handler that raises on every attempt
         must not be re-run forever — it is capped at PI_INBOUND_MAX_ATTEMPTS
         in-process retries, after which the row is stamped HANDLED (terminal)
         and one give-up ERROR is logged."""
@@ -4272,10 +4256,10 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_failed_handled_write_keeps_the_attempt_count_after_giving_up(self):
-        """K-7 (audit 2026-09-10): the handler-failure give-up branch pops the
-        attempt counter unconditionally today even when the terminal HANDLED
-        write itself fails — losing track of how many attempts were already
-        spent and letting the row's cap restart from zero on the next poll."""
+        """The handler-failure give-up branch must not pop the
+        attempt counter unconditionally, even when the terminal HANDLED
+        write itself fails — doing so would lose track of how many attempts were already
+        spent and let the row's cap restart from zero on the next poll."""
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock
 
@@ -4297,9 +4281,10 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_persistently_failing_ingested_marker_write_is_capped(self):
-        """K-8 (audit 2026-09-10): before this fix, a persistently failing
-        INGESTED marker write `continue`d with NO attempt accounting at all —
-        an unbounded, silent retry loop that never engaged SEC2-1's cap, unlike
+        """A persistently failing
+        INGESTED marker write must not `continue` with NO attempt accounting at all —
+        that would be an unbounded, silent retry loop that never engages the
+        handler-failure cap, unlike
         every other give-up path in this poller. It must be capped the same
         way: record an attempt, and once exhausted, stamp the row HANDLED."""
         from datetime import UTC, datetime
@@ -4329,10 +4314,10 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_persistently_failing_handled_write_does_not_rerun_the_handler(self):
-        """K-2 follow-up #2 (opus review, audit 2026-09-10): the success path
-        used to pop the attempt counter unconditionally BEFORE even trying the
-        HANDLED write — a persistently failing write left the counter forever
-        empty, so SEC2-1's cap never engaged and the handler re-ran (repeating
+        """The success path must not
+        pop the attempt counter unconditionally BEFORE even trying the
+        HANDLED write — a persistently failing write would then leave the counter forever
+        empty, so the handler-failure cap would never engage and the handler would re-run (repeating
         any non-idempotent side effect, e.g. a DM) every tick forever. It must
         instead run the handler once, then only retry the WRITE on later
         ticks, giving up (terminal, via the id-based path) once
@@ -4379,10 +4364,10 @@ class TestPollInboundFromDbGuardsTheHandler:
     async def test_a_write_that_starts_failing_only_after_the_handler_retried_gets_its_own_full_budget(
         self, caplog,
     ):
-        """L-5 (opus review, audit 2026-09-10): the handler and the HANDLED
-        write share one counter keyed on ``message_ts``. Before this fix, a
+        """The handler and the HANDLED
+        write share one counter keyed on ``message_ts``. If a
         handler that failed a few times before succeeding left that counter
-        already part-spent, so a persistently-failing write (a DIFFERENT
+        already part-spent, a persistently-failing write (a DIFFERENT
         failure than the handler's) hit ``PI_INBOUND_MAX_ATTEMPTS`` far
         sooner than a write whose handler had succeeded on the first try —
         starving the write's own retry budget for reasons that have nothing
@@ -4452,14 +4437,14 @@ class TestPollInboundFromDbGuardsTheHandler:
     async def test_a_persistently_failing_fallback_stamp_is_parked_after_the_write_gives_up(
         self, caplog,
     ):
-        """M-5 (opus review, audit 2026-09-10): once the HANDLED marker write
+        """Once the HANDLED marker write
         itself is exhausted (WARNING, above), the give-up branch falls back to
-        `_mark_pi_inbound_row_handled(r.id)`. Before this fix, a persistently
-        failing fallback stamp was simply never accounted for: the row stayed
-        in `_pi_inbound_handled_pending_mark`, `_record_pi_inbound_attempt`
-        kept incrementing past the cap forever, and the same WARNING (and a
-        `_mark_pi_inbound_row_handled` call) repeated on every single poll —
-        an unbounded retry loop with no terminal state, unlike every other
+        `_mark_pi_inbound_row_handled(r.id)`. A persistently
+        failing fallback stamp must not be left unaccounted for: leaving the row
+        in `_pi_inbound_handled_pending_mark` while `_record_pi_inbound_attempt`
+        keeps incrementing past the cap forever, with the same WARNING (and a
+        `_mark_pi_inbound_row_handled` call) repeating on every single poll,
+        would be an unbounded retry loop with no terminal state, unlike every other
         give-up path in this poller.
 
         It must instead track its OWN attempt budget and, once THAT is
@@ -4516,7 +4501,7 @@ class TestPollInboundFromDbGuardsTheHandler:
     async def test_attempt_entries_for_rows_no_longer_in_the_batch_are_pruned(self, monkeypatch):
         """The per-message_ts attempt dict is bounded by the polled batch: an
         entry whose row no longer appears (stamped terminal, superseded) is
-        dropped on the next poll. No time window is involved (REV4-5 follow-up)."""
+        dropped on the next poll. No time window is involved."""
         from unittest.mock import AsyncMock
 
         engine = self._engine([], AsyncMock())
@@ -4528,7 +4513,7 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_parked_entries_for_rows_no_longer_in_the_batch_are_pruned(self):
-        """N-7 (opus review, audit 2026-09-10): `_pi_inbound_parked` is bounded
+        """`_pi_inbound_parked` is bounded
         by the polled batch too, same as `_pi_inbound_attempts` above --
         without this it grows by one entry per newly-parked row for the life
         of the process, since a parked row's whole point is that both its
@@ -4543,10 +4528,10 @@ class TestPollInboundFromDbGuardsTheHandler:
         assert engine._pi_inbound_parked == set()
 
     def test_attempts_accumulate_regardless_of_the_gap_between_polls(self, monkeypatch):
-        """Opus review of REV4-5: a decay keyed on the last attempt made the cap
-        unreachable when consecutive polls were >PI_INBOX_LOOKBACK_S apart (one
-        throttled agent turn), so a deterministically failing row re-ran forever.
-        The counter is now a plain count."""
+        """A decay keyed on the last attempt would make the cap
+        unreachable when consecutive polls are >PI_INBOX_LOOKBACK_S apart (one
+        throttled agent turn), letting a deterministically failing row re-run forever.
+        The counter must be a plain count."""
         import itertools
         from unittest.mock import AsyncMock
 
@@ -4603,7 +4588,7 @@ class TestPollInboundFromDbGuardsTheHandler:
         what a deploy that migrates before the code lands, or that rolls the
         code back, keeps doing.
 
-        Carries a real ``sender_user_id`` (RC-1): the tag route is gated on
+        Carries a real ``sender_user_id``: the tag route is gated on
         ownership now, independent of the ``pi_inbound_state`` marker this
         test is actually about — see the sibling
         ``test_a_row_with_no_sender_user_id_gets_no_side_effects`` for the
@@ -4625,7 +4610,7 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_row_with_no_sender_user_id_gets_no_side_effects(self):
-        """RC-1 (#20 COR-5): a row with no recorded sender — every pre-0030
+        """A row with no recorded sender — every pre-0030
         row, and any future write path that forgets to stamp it — must not
         fall back to "everyone in the thread is authorized" (the pre-fix
         behaviour). It gets no ownership-gated side effect at all, only a
@@ -4651,7 +4636,7 @@ class TestPollInboundFromDbGuardsTheHandler:
 
     @pytest.mark.asyncio
     async def test_a_pending_row_is_fetched_however_far_behind_the_cursor_it_is(self):
-        """RC-2 (#20 audit 2026-09-08): record_pi_message now stamps
+        """record_pi_message stamps
         ``pi_inbound_state='pending'`` at insert time. A PI message written
         while agent-run is down must not be silently skipped once the
         process comes back and its cursor has advanced (via other traffic)
@@ -4707,11 +4692,11 @@ class TestPollInboundFromDbGuardsTheHandler:
 class TestPollInboundFromDbSeparatesLookupFailuresFromHandlerAttempts(
     TestPollInboundFromDbGuardsTheHandler,
 ):
-    """S-4 (audit 2026-09-10): PiOwnershipLookupFailed (a transient DB
-    failure resolving PI ownership) used to share `_pi_inbound_attempts`
+    """PiOwnershipLookupFailed (a transient DB
+    failure resolving PI ownership) must not share `_pi_inbound_attempts`
     with a deterministically-failing handler, capped at
-    PI_INBOUND_MAX_ATTEMPTS == 3 -- a 30s DB blip spanning 3 unlucky polls
-    could permanently drop a genuine PI directive. It must instead spend its
+    PI_INBOUND_MAX_ATTEMPTS == 3 -- sharing the counter would let a 30s DB blip spanning 3 unlucky polls
+    permanently drop a genuine PI directive. It must instead spend its
     own, much larger PI_INBOUND_MAX_LOOKUP_FAILURES budget.
 
     Inherits `_Row`/`_FakeDB`/`_engine` from
@@ -4768,15 +4753,15 @@ class TestPollInboundFromDbSeparatesLookupFailuresFromHandlerAttempts(
 
 
 # ---------------------------------------------------------------
-# _flush_llm_logs re-queue on failure (COR-11)
+# _flush_llm_logs re-queue on failure
 # ---------------------------------------------------------------
 
 class TestFlushLlmLogsRequeuesOnFailure:
-    """A failed flush must not drop the batch — the #30 sliding-window rate
+    """A failed flush must not drop the batch — the sliding-window rate
     limiter rebuilds call_times from llm_call_logs on restart
     (_rebuild_agent_state step 4b), so a silently dropped flush under-counts
     an agent's in-window calls and lets it exceed its allowance after a
-    restart. See COR-11."""
+    restart."""
 
     class _FailingDB:
         async def __aenter__(self):
@@ -4851,7 +4836,7 @@ class TestFlushLlmLogsRequeuesOnFailure:
     async def test_a_repeatedly_failing_flush_cannot_grow_the_buffer_forever(
         self, caplog,
     ):
-        """COR-11 traded a bounded loss for unbounded retention.
+        """The re-queue trades a bounded loss for unbounded retention, which must itself be bounded.
 
         Before the re-queue, a failed flush dropped at most `_llm_log_flush_size`
         (10) rows. The re-queue prepends the whole failed batch back with no
@@ -4860,8 +4845,8 @@ class TestFlushLlmLogsRequeuesOnFailure:
         container's `mem_limit: 768m`. A DB outage that spans a few hundred
         flushes therefore turns an observability gap into an OOM.
 
-        The bound must drop the OLDEST rows: the reason COR-11 wanted the
-        re-queue at all is that `_rebuild_agent_state` step 4b rebuilds
+        The bound must drop the OLDEST rows: the re-queue exists at all because
+        `_rebuild_agent_state` step 4b rebuilds
         `call_times` from `llm_call_logs` over the rate-limit *window*, so it is
         the newest rows that still carry limiter signal.
         """
@@ -4949,7 +4934,7 @@ class TestFlushLlmLogsRequeuesOnFailure:
 
 # ---------------------------------------------------------------
 # _phase5_new_post — a reply's channel must come from the target post, not
-# the LLM's free-form field (#20 COR-9b)
+# the LLM's free-form field
 # ---------------------------------------------------------------
 
 class TestPhase5ReplyChannelComesFromTheTargetPost:
@@ -4957,7 +4942,7 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
     the LLM's free-form `channel` field — otherwise a reply 'targeting' a
     collab_private post while declaring 'general' posts publicly and
     persists as public, leaking private-channel content into the public
-    memory-synthesis segment. See COR-9b."""
+    memory-synthesis segment."""
 
     def _engine(self, monkeypatch):
         from src.agent.agent import Agent
@@ -4966,7 +4951,7 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
         # Hermetic against a local .env with PHASE5_SKIP_PROBABILITY set
-        # nonzero (red-team m7) — agent "a" has no pi_priority candidate to
+        # nonzero: agent "a" has no pi_priority candidate to
         # bypass the random skip on its own, and the test below asserts the
         # LLM path actually ran. Default is 0.0 (config.py:330).
         monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
@@ -5034,13 +5019,13 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         # the test — pre-fix this same call landed in #general, threaded onto
         # the private root's ts, and persisted visibility='public', leaking a
         # collab_private reply's content into the public memory-synthesis
-        # segment. See red-team B5.
+        # segment.
         assert posts[0].thread_ts is None
         assert posts[0].visibility == VISIBILITY_COLLAB_PRIVATE
 
     @pytest.mark.asyncio
     async def test_public_reply_still_threads_when_the_llm_agrees_on_channel(self, monkeypatch):
-        # Control (finding I1): the target-post-channel correction must not
+        # Control: the target-post-channel correction must not
         # change the ordinary public-to-public reply path — a reply to a
         # public post whose LLM-declared channel matches the target's real
         # channel still threads onto the target and persists as public.
@@ -5065,7 +5050,7 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
     async def test_public_reply_lands_in_the_targets_channel_not_the_llms_declared_channel(
         self, monkeypatch,
     ):
-        # Control (finding I1): the LLM declares a DIFFERENT public channel
+        # Control: the LLM declares a DIFFERENT public channel
         # than the target's — the fix must still route to the target's real
         # channel (channel-a), not the LLM's free-form field (channel-b).
         from unittest.mock import AsyncMock
@@ -5088,7 +5073,7 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
 
 # ---------------------------------------------------------------
 # A permanently-failing Slack post must back off, not regenerate an LLM
-# reply every turn forever — #20 I1
+# reply every turn forever
 # ---------------------------------------------------------------
 
 class TestPhase4PostFailureBackoff:
@@ -5167,7 +5152,7 @@ class TestPhase5PostFailureBackoff:
     private-channel reply. Failures are tracked per (agent_id,
     target_post_id) on the engine instead (_phase5_post_failure_counts), with
     the same two-strike shape: drop target_post_id from interesting_posts
-    after the 2nd consecutive failure. #20 I1."""
+    after the 2nd consecutive failure."""
 
     def _engine_with_interesting_post(self, monkeypatch, *, private=False):
         from src.agent.agent import Agent
@@ -5274,8 +5259,7 @@ class TestPhase5StrikesAreKeyedPerAgent:
     target_post_id alone shares one count across the whole roster: agent A's
     refusals accumulate against agent B's next attempt on the same post, and
     B's success clears A's. Both halves are wrong — the counter exists to stop
-    *one agent* re-costing an LLM call on a target it cannot post to. #20
-    COR-1b."""
+    *one agent* re-costing an LLM call on a target it cannot post to."""
 
     def _engine_with_two_agents_eyeing_one_post(self, monkeypatch):
         """Two roster agents, one third-party root post both may reply to.
@@ -5380,18 +5364,18 @@ class TestPhase5StrikesAreKeyedPerAgent:
 
 # ---------------------------------------------------------------
 # LogEntry writers that must stamp visibility from the channel, not take
-# the dataclass default of 'public' (#20 COR-9a residual)
+# the dataclass default of 'public'
 # ---------------------------------------------------------------
 
 class TestRemainingLogEntryWritersStampVisibility:
-    """_post_message already stamps visibility from the channel (COR-9a,
-    fixed). These two other writers still take the LogEntry default of
+    """_post_message already stamps visibility from the channel. These two
+    other writers must not still take the LogEntry default of
     'public' regardless of the channel's real visibility class."""
 
     @pytest.mark.asyncio
     async def test_proposal_thread_poller_stamps_private_visibility(self):
         # async def + await, not asyncio.run — this file's convention
-        # (asyncio_mode = "auto"); see red-team m7.
+        # (asyncio_mode = "auto").
         from src.agent.agent import Agent
         from src.agent.state import ProposalRef
         from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
@@ -5435,19 +5419,16 @@ class TestRemainingLogEntryWritersStampVisibility:
         class _Row:
             def __init__(self, **kw):
                 self.__dict__.update(kw)
-                # Task 20.10 adds thread_decision_id to the SELECT, and this
-                # task runs AFTER 20.10 in the execution order (phase 3, then
-                # phase 4) — not before, so the real code already reads it
-                # back via the unified (thread_decision_id, agent_id)
-                # reviewed_set key (red-team m7 corrects the ordering this
-                # comment originally had backwards). Giving the row a random,
+                # The SELECT carries thread_decision_id, so the real code reads
+                # it back via the unified (thread_decision_id, agent_id)
+                # reviewed_set key. Giving the row a random,
                 # non-None uuid here — while the ProposalRef below leaves
                 # thread_decision_id at its None default — means this
                 # proposal's key never matches reviewed_set, so
                 # `newly_reviewed` stays empty and this path does not reach
                 # _update_agent_memory on its own. The explicit stub below is
                 # what actually guarantees no live call, though — don't rely
-                # on the key mismatch alone (see red-team B2).
+                # on the key mismatch alone.
                 self.thread_decision_id = kw.get("thread_decision_id", uuid_mod.uuid4())
 
         rows = [_Row(
@@ -5472,7 +5453,7 @@ class TestRemainingLogEntryWritersStampVisibility:
         # _sync_proposal_reviews_from_db can end in a real Anthropic call via
         # _update_agent_memory -> generate_agent_response; this is tests/unit
         # and must not depend on either the network or the key-mismatch
-        # reasoning above. See red-team B2.
+        # reasoning above.
         engine._update_agent_memory = AsyncMock()
         agent.state.pending_proposals.append(ProposalRef(
             thread_id="100.0", channel="priv-chan", other_agent_id="b",
@@ -5488,7 +5469,7 @@ class TestRemainingLogEntryWritersStampVisibility:
 
 # ---------------------------------------------------------------
 # _poll_proposal_threads_for_pi must translate the canonical thread id to
-# the Slack ts before polling — #20 C1
+# the Slack ts before polling
 # ---------------------------------------------------------------
 
 class TestProposalThreadPollerTranslatesTs:
@@ -5681,7 +5662,7 @@ class TestMidTurnRateGate:
 
 # ---------------------------------------------------------------
 # A roster re-add restores state from the DB instead of a fresh, empty
-# Agent — E6(2)
+# Agent
 # ---------------------------------------------------------------
 
 class TestRebuildOneAgentState:
@@ -5690,7 +5671,7 @@ class TestRebuildOneAgentState:
     call_times/api_call_count all reset to zero. This restores exactly one
     agent's state from the DB + message_log, without touching anyone else's
     (see design note above for why _rebuild_agent_state() itself is unsafe
-    to call mid-simulation). See E6(2)."""
+    to call mid-simulation)."""
 
     def _ordered_fake_db(self, responses):
         class _FakeDB:
@@ -5743,14 +5724,13 @@ class TestRebuildOneAgentState:
             id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
             agent_a="su", agent_b="wiseman", outcome="proposal",
             summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
-            pi_engaged_at=None,   # COR-5's carrier; unset on an unreviewed proposal
+            pi_engaged_at=None,   # unset on an unreviewed proposal
         )
-        # 6 DB reads, in the order _rebuild_one_agent_state issues them (red-team
-        # M3 — this task's original single unscoped/unwindowed LlmCallLog read
-        # is corrected to the same shape _rebuild_agent_state's steps 4/4b use):
+        # 6 DB reads, in the order _rebuild_one_agent_state issues them, the same
+        # shape _rebuild_agent_state's steps 4/4b use:
         # ThreadDecision rows, ProposalReview rows (none yet — unreviewed),
         # this agent's own AgentRegistry.user_id (a real uuid: su HAS a linked
-        # PI, so COR-5's pi_engaged_at carrier does not apply to it), the
+        # PI, so the pi_engaged_at carrier does not apply to it), the
         # (thread_id, reopened_at) rows for the B6 restoration (none reopened here),
         # an all-time-scoped-to-this-run COUNT(*) scalar, and a SEPARATE windowed
         # query — which a real DB would already have filtered to just the
@@ -5817,7 +5797,7 @@ class TestRebuildOneAgentState:
             id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
             agent_a="su", agent_b="wiseman", outcome="proposal",
             summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
-            pi_engaged_at=None,   # COR-5's carrier; unset on an unreviewed proposal
+            pi_engaged_at=None,   # unset on an unreviewed proposal
         )
         responses = [
             [decision],
@@ -5866,7 +5846,7 @@ class TestRebuildOneAgentState:
         # _closed_thread_ids (:4166-4186) before a roster re-add can ever
         # happen — the test above never exercises that guard (its thread
         # starts with _closed_thread_ids empty, a combination production
-        # cannot reach). See red-team m6.
+        # cannot reach).
         import uuid as uuid_mod
 
         from src.agent.agent import Agent
@@ -5897,7 +5877,7 @@ class TestRebuildOneAgentState:
 
     @pytest.mark.asyncio
     async def test_a_reopened_threads_pi_context_rejects_a_non_pi_unattributed_row(self):
-        # #20 I2: mirrors _rebuild_agent_state's fail-closed pi_context check.
+        # Mirrors _rebuild_agent_state's fail-closed pi_context check.
         # A row with sender_agent_id None is not automatically the PI's — it
         # must also be non-bot and carry one of the thread's PI-name forms.
         # Positive control: "Andrew Su" (su's own pi_name) IS accepted.
@@ -5955,7 +5935,7 @@ class TestRebuildOneAgentState:
 
 # ---------------------------------------------------------------
 # The daily post cap must not block a PI-priority, funding, or
-# private-channel candidate — #20 E7a
+# private-channel candidate
 # ---------------------------------------------------------------
 
 class TestDailyCapDoesNotBlockBypassEligibleCandidates:
@@ -6070,7 +6050,7 @@ class TestDailyCapDoesNotBlockBypassEligibleCandidates:
         # availability loop above — it must not unlock the cap for an
         # otherwise-capped turn, or the agent burns an Opus call every turn
         # for the rest of the day only for the post-LLM re-check to reject
-        # whatever the LLM chooses. See fix round 1, I1.
+        # whatever the LLM chooses.
         from unittest.mock import AsyncMock
 
         from src.agent.message_log import LogEntry
@@ -6154,7 +6134,7 @@ class TestDailyCapDoesNotBlockBypassEligibleCandidates:
 
 # ---------------------------------------------------------------
 # has_pi_directive must survive a turn where Phase 5 ran but made no
-# LLM call — #20 E7b
+# LLM call
 # ---------------------------------------------------------------
 
 class TestHasPiDirectiveClearedOnlyWhenActedOn:
@@ -6201,7 +6181,7 @@ class TestHasPiDirectiveClearedOnlyWhenActedOn:
 
 # ---------------------------------------------------------------
 # thread.pi_context must not survive past the one prompt it was
-# injected into — #20 E7c
+# injected into
 # ---------------------------------------------------------------
 
 class TestPiContextClearedAfterInjection:
@@ -6257,7 +6237,7 @@ class TestPiContextClearedAfterInjection:
         # generate_with_tools (as an earlier draft of this task had it), the
         # guidance would be lost having reached no prompt at all. The
         # corrected placement (right after the call succeeds) must leave
-        # pi_context untouched here, for a later turn to retry. See red-team m4.
+        # pi_context untouched here, for a later turn to retry.
         from unittest.mock import AsyncMock
 
         from src.agent.agent import Agent
@@ -6287,7 +6267,7 @@ class TestPiContextClearedAfterInjection:
 
 # ---------------------------------------------------------------
 # The interesting_posts swap during Phase-5 prompt-building must be
-# restored even if prompt-building raises — #20 E7d
+# restored even if prompt-building raises
 # ---------------------------------------------------------------
 
 class TestInterestingPostsRestoredOnException:
@@ -6336,11 +6316,11 @@ class TestInterestingPostsRestoredOnException:
 
 # ---------------------------------------------------------------
 # A thread parked by the two-strike post back-off must stop counting as a
-# live conversational obligation — #20 COR-1b (AH3)
+# live conversational obligation
 # ---------------------------------------------------------------
 
 class TestAParkedThreadDoesNotConsumeARegularSlot:
-    """The two-strike back-off (7647438) clears has_pending_reply but leaves the
+    """The two-strike back-off clears has_pending_reply but leaves the
     ThreadState in active_threads with status='active'. Nothing else ever removes
     it when the counterpart is silent (off-roster, at cap, or simply not posting):
     _phase4_reply_threads re-enqueues only on `has_new or has_pending_reply`, and
@@ -6360,8 +6340,7 @@ class TestAParkedThreadDoesNotConsumeARegularSlot:
     thread Slack will never accept) and the thread is NOT closed — a close would
     write outcome='timeout' into a PI DM ("reached message limit without a
     conclusion", pi_handler.py:380-384), into /admin/discussions and into both
-    agents' prompt-fed working memory, all of it false. See
-    docs/plans/2026-09-04-decisions/task-5.md."""
+    agents' prompt-fed working memory, all of it false."""
 
     def _engine_with_threads(self, count=3, *, pending=True):
         from src.agent.agent import Agent
@@ -6522,7 +6501,6 @@ class TestAParkedThreadDoesNotConsumeARegularSlot:
 
 # ---------------------------------------------------------------
 # Parked threads never exited parking; PARKED_THREAD_MAX_TURNS eviction
-# (RC-9a, #20 audit 2026-09-08)
 # ---------------------------------------------------------------
 
 class TestEvictStaleParkedThreads:
@@ -6636,12 +6614,12 @@ class TestEvictStaleParkedThreads:
 
 
 class TestPhase5NewPostNeverDefaultsToGeneral:
-    """Live copi-test run 2026-09-10: a real model omitted `channel` on a new_post and
-    the engine defaulted it to '#general' — a channel that did not exist in that
+    """A real model can omit `channel` on a new_post; the engine must not
+    default it to '#general', since that channel may not exist in the
     workspace. A missing or unknown channel on a new_post is an unparseable
-    response, not a licence to post somewhere the model never named (audit
-    2026-09-08 RC-15). Replies are unaffected: their channel comes from the
-    target post (COR-9b)."""
+    response, not a licence to post somewhere the model never named.
+    Replies are unaffected: their channel comes from the
+    target post."""
 
     def _engine(self, monkeypatch):
         from src.agent.agent import Agent
@@ -6691,7 +6669,7 @@ class TestPhase5NewPostNeverDefaultsToGeneral:
     async def test_the_refusal_increments_the_skip_streak_without_resetting_it(
         self, monkeypatch, action_json,
     ):
-        """REV4-4 (audit 2026-09-08): the RC-15 refusal branch must behave like every
+        """The refusal branch must behave like every
         sibling rejection below it (back-to-back private post, blocked-for-regular,
         daily cap, authorship guard, funding-thread validators) -- increment
         consecutive_phase5_skips, not silently reset the backoff streak to 0 as if a
@@ -6729,7 +6707,7 @@ class TestPhase5NewPostNeverDefaultsToGeneral:
     async def test_a_new_post_naming_another_pairs_private_channel_is_refused(
         self, monkeypatch,
     ):
-        """K-6 (audit 2026-09-10, RC-15 residual): `_channel_visibility` is a
+        """`_channel_visibility` is a
         single process-wide map holding every collab_private channel
         discovered for EVERY pair this run, not just ones this agent belongs
         to. Membership there alone (the pre-fix check) let an agent name

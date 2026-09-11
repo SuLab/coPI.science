@@ -1,15 +1,15 @@
-"""SEC-F1 (opus review, audit 2026-09-08): a resend for the same
+"""A resend for the same
 (user, thread_decision, category) must mint a fresh reply_token, not reuse the
 earlier one.
 
-Before this fix, `send_proposal_notification` and `_send_new_proposal_email`
-looked up any existing EmailNotification row for the (user, proposal,
-category) key and reused its `reply_token` verbatim on every resend, only
-bumping `sent_at`. That left the FIRST e-mail's reply address permanently
+`send_proposal_notification` and `_send_new_proposal_email` must not
+look up any existing EmailNotification row for the (user, proposal,
+category) key and reuse its `reply_token` verbatim on every resend while only
+bumping `sent_at`. That would leave the FIRST e-mail's reply address permanently
 redeemable (`process_inbound_email` looks up purely by token, with no
 per-send identity) and let an already-`expired` row flip back to `sent`
-carrying the same, already-superseded token — defeating RC-4's 14-day expiry
-window, which is measured from `sent_at`.
+carrying the same, already-superseded token — defeating the reply-token's
+expiry window, which is measured from `sent_at`.
 """
 
 import uuid

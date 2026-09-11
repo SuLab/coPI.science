@@ -4,7 +4,7 @@ The EXPLORE/DECIDE/CONCLUDE strings used to be hardcoded in
 src/agent/agent.py with no role branch, which meant the Blackbird scouting hub —
 an agent with no lab and no collaborations to propose — was told to pitch its
 lab's capabilities and to close every interview with a :memo: collaboration
-proposal. See docs/plans/2026-08-06-blackbird-rubric-alignment.md (F3).
+proposal.
 
 Dependency-free on purpose (no DB, no Agent import) so the branching is
 unit-testable in isolation.

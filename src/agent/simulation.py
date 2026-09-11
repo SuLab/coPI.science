@@ -65,8 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 class PiOwnershipLookupFailed(Exception):
-    """Raised when ``_agent_ids_owned_by_user`` cannot query the DB (audit
-    2026-09-10 K-1).
+    """Raised when ``_agent_ids_owned_by_user`` cannot query the DB.
 
     Distinct from the fail-closed empty-set return used for a NULL
     ``sender_user_id`` (nothing to authorize against) so a transient DB
@@ -82,8 +81,6 @@ def _visibility_permits(origin: str, current: str) -> bool:
     Implements the ordering `public < collab_private` from G3:
     - public origins are visible in any context.
     - collab_private origins are visible only in a collab_private context.
-
-    See specs/privacy-and-channel-visibility.md §G3.
     """
     if origin == VISIBILITY_PUBLIC:
         return True
@@ -118,23 +115,14 @@ def _restored_slack_ts(row: AgentMessage) -> str | None:
 
     Restoring this mapping is what lets ``_slack_parent_ts`` tell a Slack-backed
     thread from a DB-origin one after a restart. The column is the only evidence:
-    a NULL means the message is not on Slack.
-
-    This used to *infer* a missing mapping — "a row stored against a real Slack
-    ``channel_id`` was born on Slack, so its canonical id is its Slack ts" — to
-    cover pre-Stage-6 rows written before the mapping was recorded. That
-    inference is unsound, because a DB-origin message can also carry a real Slack
-    channel id: a PI message written through the web inbox resolves ``channel_id``
-    from the ``agent_channels`` row (Slack's id when Slack is on), and so does an
-    agent post whose Slack mirror failed. Both mint a *local* canonical id, and
-    inferring turns that id into a Slack ts Slack never issued — which
-    ``_slack_parent_ts`` then hands to ``chat.postMessage`` as a ``thread_ts``,
-    producing an orphan post, a ``ThreadNotFound`` and an evicted thread. Nothing
-    in the row distinguishes the two cases, so the guess is now refused.
-
-    Legacy rows are repaired by ``scripts/backfill_slack_ts.py``, a one-time pass
-    that asks Slack which timestamps actually exist rather than assuming. Run it
-    before deploying this change on a workspace with pre-Stage-6 history.
+    a NULL means the message is not on Slack. A missing mapping is never
+    inferred from the row's ``channel_id`` (a DB-origin message can carry a real
+    Slack channel id too), since guessing a ts Slack never issued produces an
+    orphan post and an evicted thread. ``scripts/backfill_slack_ts.py`` repairs
+    legacy rows with NULL ``slack_ts`` by asking Slack which timestamps exist.
+    Run it before deploying on a workspace with legacy NULL-``slack_ts``
+    history; until it runs, replies to threads rooted on those rows are kept
+    off Slack.
     """
     return row.slack_ts
 
@@ -172,7 +160,6 @@ ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
 # How often to log the reactive:proactive selection split. Starvation under the
 # reactive-priority tier should be observable, not inferred.
-# See .notes/cohort-system-v2.md §10.3.
 SELECTION_RATIO_LOG_EVERY = 100
 
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
@@ -180,10 +167,9 @@ SELECTION_RATIO_LOG_EVERY = 100
 # cache would re-read role.toml from disk on every tick for every default role.
 _UNSET = object()
 
-# REV3-6 (opus review, audit 2026-09-08): a module attribute of THIS module,
-# independent from src.agent.agent's own PROFILES_DIR — `from ... import
-# PROFILES_DIR` would otherwise capture agent.py's value once at import time,
-# which is exactly the staleness REV3-6 closes there. None by default
+# A module attribute of THIS module, independent from src.agent.agent's own
+# PROFILES_DIR — `from ... import PROFILES_DIR` would otherwise capture
+# agent.py's value once at import time and go stale. None by default
 # (existing tests monkeypatch this attribute directly to a tmp_path); the
 # accessor re-reads get_settings() on every call unless overridden.
 PROFILES_DIR: Path | None = None
@@ -196,15 +182,15 @@ def _profiles_dir() -> Path:
 # timestamp is stamped at row *creation*, not commit. A row written by another
 # process (a PI web message) can therefore become visible only after this process
 # has already advanced its cursor past that timestamp — a read-committed
-# visibility race that would silently, permanently skip the row (PR #19 review
-# H2). To close it, the pollers query a lookback window behind the cursor and
-# dedup by identity (the message log for channels, a seen-set for DMs), so a
+# visibility race that would otherwise silently, permanently skip the row. To
+# close it, the pollers query a lookback window behind the cursor and dedup by
+# identity (the message log for channels, a seen-set for DMs), so a
 # late-committing row is re-queried within the window and ingested exactly once.
 # Polls are LLM-paced, so the re-scan is cheap; the window is sized far above any
 # realistic write-to-commit latency.
 #
-# The cursor axis is ``created_at``, not ``posted_at`` (R3). posted_at derives
-# from the *writing process's* clock (it is float(minted ts)), so a cursor over it
+# The cursor axis is ``created_at``, not ``posted_at``. posted_at derives from
+# the *writing process's* clock (it is float(minted ts)), so a cursor over it
 # only works while every writer's clock agrees with the engine's to within this
 # window — true on one host, not guaranteed across hosts, and a skewed writer's
 # messages would be dropped silently and forever. created_at is
@@ -214,22 +200,21 @@ def _profiles_dir() -> Path:
 PI_INBOX_LOOKBACK_S = 300.0
 PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 
-# agent_messages.pi_inbound_state (migration 0029) values — PI_INBOUND_INGESTED,
-# PI_INBOUND_HANDLED, PI_INBOUND_PENDING, PI_INBOUND_MAX_ATTEMPTS. REV3-7 (opus
-# review, audit 2026-09-08): moved to the dependency-free src.agent.inbound_state
-# so src.services.pi_inbox (the web/worker request path that writes a PI message
-# row) does not have to import this whole engine module just to read a string
-# constant. Imported at the top of this file and re-exported under their
-# original names, so every existing ``from src.agent.simulation import
-# PI_INBOUND_*`` keeps working unchanged — see inbound_state.py for what each
-# value means.
+# agent_messages.pi_inbound_state values — PI_INBOUND_INGESTED,
+# PI_INBOUND_HANDLED, PI_INBOUND_PENDING, PI_INBOUND_MAX_ATTEMPTS. Defined in
+# the dependency-free src.agent.inbound_state so src.services.pi_inbox (the
+# web/worker request path that writes a PI message row) does not have to
+# import this whole engine module just to read a string constant. Imported
+# at the top of this file and re-exported under their original names, so
+# every existing ``from src.agent.simulation import PI_INBOUND_*`` keeps
+# working unchanged — see inbound_state.py for what each value means.
 
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 
 # The run's total_messages / total_api_calls are cosmetic counters shown in the
 # admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
-# wasteful once a run accumulates many rows (B1), so refresh the run-stats row at
+# wasteful once a run accumulates many rows, so refresh the run-stats row at
 # most this often (a final refresh is forced on shutdown). The message rows
 # themselves are still upserted every flush.
 RUN_STATS_UPDATE_INTERVAL = 30.0
@@ -237,19 +222,18 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # Max rows per agent_messages upsert statement. Postgres binds at most 32767
 # parameters per statement and each row here binds one per column, so a single
 # VALUES list covering the whole buffer breaks once the buffer is a few thousand
-# entries. That is not hypothetical: a resumed run reconciles its Slack backlog
-# into the buffer before turn 1, so the very first flush of a busy workspace
-# carries thousands of rows. Because a failed flush is re-queued in full rather
-# than dropped (see _flush_persisted), an oversized batch is a poison pill — it
-# fails identically on every retry and the buffer never drains, leaving every
-# message in volatile memory while the DB is supposed to be the durable store.
-# Observed in production 2026-08-14: 6,988 buffered rows x 16 columns = ~112k
-# parameters, failing every turn. The effective chunk is also floored against the
-# real column count at call time, so adding columns cannot reintroduce the limit.
+# entries. A resumed run reconciles its Slack backlog into the buffer before
+# turn 1, so the very first flush of a busy workspace can carry thousands of
+# rows. Because a failed flush is re-queued in full rather than dropped (see
+# _flush_persisted), an oversized batch is a poison pill — it fails identically
+# on every retry and the buffer never drains, leaving every message in volatile
+# memory while the DB is supposed to be the durable store. The effective chunk
+# is also floored against the real column count at call time, so adding
+# columns cannot reintroduce the limit.
 PERSIST_MAX_ROWS_PER_STMT = 500
 _PG_MAX_BIND_PARAMS = 32767
 
-# Ceiling on the LLM-call-log re-queue (COR-11). _flush_llm_logs prepends a
+# Ceiling on the LLM-call-log re-queue. _flush_llm_logs prepends a
 # failed batch back onto self._llm_log_buffer rather than dropping it, because
 # the sliding-window rate limiter rebuilds call_times from llm_call_logs on
 # restart. Unbounded, that trades a bounded loss (<= _llm_log_flush_size rows
@@ -263,24 +247,22 @@ _PG_MAX_BIND_PARAMS = 32767
 # in-window view, and the newest rows are the ones still inside that window.
 LLM_LOG_REQUEUE_MAX_ROWS = 1000
 
-# M-7 (opus review, audit 2026-09-10): in-call retry budget for
-# _close_thread's ThreadDecision write (see _write_thread_decision_with_retry).
-# A short, DB-scoped backoff — this covers a transient connection blip, not a
-# Slack-scale throttle, so it does not need PI_INBOUND_MAX_ATTEMPTS/
-# THREAD_DECISION_RETRY_BACKOFF_S's Slack-poller counterparts' longer windows.
+# In-call retry budget for _close_thread's ThreadDecision write (see
+# _write_thread_decision_with_retry). A short, DB-scoped backoff — this covers
+# a transient connection blip, not a Slack-scale throttle, so it does not need
+# the Slack-poller counterparts' longer windows.
 THREAD_DECISION_WRITE_MAX_ATTEMPTS = 3
 THREAD_DECISION_RETRY_BACKOFF_S = 0.2
 
-# N-6 (opus review, audit 2026-09-10): ceiling on `_pending_thread_decisions`
-# (mirrors LLM_LOG_REQUEUE_MAX_ROWS above) -- a DB outage long enough to
-# persistently fail every ThreadDecision write would otherwise buffer one
-# entry per closed thread in RAM indefinitely. Overflow drops the OLDEST
-# entries with one ERROR per overflowing append, same rationale as
-# LLM_LOG_REQUEUE_MAX_ROWS: a decision from long ago is both the least
-# actionable (its conversation is stale) and the one blocking a legitimate
-# recent PI review — see _persist_implicit_proposal_review /
-# TestDeferredImplicitProposalReview (N-5) for why a decision this drops can
-# also permanently lose an already-cleared PI engagement review.
+# Ceiling on `_pending_thread_decisions` (mirrors LLM_LOG_REQUEUE_MAX_ROWS
+# above) -- a DB outage long enough to persistently fail every ThreadDecision
+# write would otherwise buffer one entry per closed thread in RAM
+# indefinitely. Overflow drops the OLDEST entries with one ERROR per
+# overflowing append, same rationale as LLM_LOG_REQUEUE_MAX_ROWS: a decision
+# from long ago is both the least actionable (its conversation is stale) and
+# the one blocking a legitimate recent PI review — see
+# _persist_implicit_proposal_review for why a decision this drops can also
+# permanently lose an already-cleared PI engagement review.
 PENDING_THREAD_DECISIONS_MAX = 500
 
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
@@ -296,26 +278,25 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
 UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
-# RC-9a (#20 audit 2026-09-08): a thread parked for this many of its agent's
-# own turns is dropped from active_threads entirely. _is_parked_thread already
-# excludes a parked thread from load/rate accounting, but nothing previously
-# evicted it — a counterpart that never posts again left the ThreadState
-# sitting in active_threads forever, and Phase 3 can always re-activate the
-# conversation later if the counterpart does come back. No decision is
-# written and no DM is sent (task-5's ruling stands: a parked thread is not
-# closed, since it never reached outcome=timeout).
+# A thread parked for this many of its agent's own turns is dropped from
+# active_threads entirely. _is_parked_thread already excludes a parked thread
+# from load/rate accounting, but nothing else evicts it — a counterpart that
+# never posts again would leave the ThreadState sitting in active_threads
+# forever, and Phase 3 can always re-activate the conversation later if the
+# counterpart does come back. No decision is written and no DM is sent: a
+# parked thread is not closed, since it never reached outcome=timeout.
 PARKED_THREAD_MAX_TURNS = 20
 
 # Prose-named lab mentions ("the Good lab", "Su Lab's") for the authorship
-# guard (audit finding I4): a fabricated co-author named in prose instead of
-# @-tagged must still be resolved against the roster. Possessive/article
-# words that precede "lab(s)" without naming one are excluded.
+# guard: a fabricated co-author named in prose instead of @-tagged must still
+# be resolved against the roster. Possessive/article words that precede
+# "lab(s)" without naming one are excluded.
 _PROSE_LAB_RE = re.compile(r"\b([A-Z][\w-]+)(?:['’]s)?\s+[Ll]abs?\b")
 
 # Same tag pattern as BOT_TAG_RE, wrapped for _strip_disallowed_tags: consumes
 # leading whitespace, and a negative lookbehind so "a@subot.example" or a URL
 # path is never mangled. Built from BOT_TAG_RE.pattern rather than duplicating
-# the literal string, so the two can never drift again (COR-8).
+# the literal string, so the two can never drift apart.
 _DISALLOWED_TAG_STRIP_RE = re.compile(
     rf"[ \t]*(?<![\w./@-]){BOT_TAG_RE.pattern}", re.IGNORECASE,
 )
@@ -401,18 +382,18 @@ class SimulationEngine:
         # agent_id -> the token _resolve_service_bot_uids last probed with.
         # Lets _sync_roster_from_db notice a DB-side token rotation on a
         # service bot (no AgentRegistry status=='active' row, so it never
-        # appears in the roster diff) and re-run the probe. See #23 COR-26c/D10.
+        # appears in the roster diff) and re-run the probe.
         self._service_bot_tokens: dict[str, str] = {}
         self.message_log.set_bot_uid_map(self._bot_uid_map())
 
         # agent_id → LabPublicationRecord (publications-table ground truth for
         # the authorship emit guard). Populated by _load_publication_records at
         # roster sync; an agent absent from this dict has NO records and every
-        # first-person authorship claim from it fails closed. See issue #29.
+        # first-person authorship claim from it fails closed.
         self._agent_publications: dict[str, LabPublicationRecord] = {}
 
         # LLM call log buffer. Bounded on the failure path by
-        # LLM_LOG_REQUEUE_MAX_ROWS — see _flush_llm_logs (COR-11).
+        # LLM_LOG_REQUEUE_MAX_ROWS — see _flush_llm_logs.
         self._llm_log_buffer: list[dict] = []
         self._llm_log_flush_size = 10
 
@@ -435,38 +416,36 @@ class SimulationEngine:
         self._closed_thread_ids: set[str] = set()
         # Thread ids whose Slack parent is confirmed gone (ThreadNotFound /
         # silent thread_ts drop), set by _evict_dead_thread. In-process only,
-        # deliberately not persisted or derived on rebuild — a durable marker
-        # is a follow-up. Unlike _closed_thread_ids (which _reopen_thread
-        # legitimately discards for a PI-reopened thread), a dead thread must
-        # never be un-tombstoned: _poll_inbound_from_db and
-        # _handle_pi_inbound_entry consult this set to refuse to re-hydrate or
-        # reopen a thread whose history was purged from the log, which is what
-        # closed the resurrection loop found in COR-1c fix round 1 (C1) — a
-        # PI row inside the 5-minute inbound lookback would otherwise
-        # re-trigger _hydrate_thread_from_db + _reopen_thread every tick.
+        # deliberately not persisted or derived on rebuild. Unlike
+        # _closed_thread_ids (which _reopen_thread legitimately discards for a
+        # PI-reopened thread), a dead thread must never be un-tombstoned:
+        # _poll_inbound_from_db and _handle_pi_inbound_entry consult this set
+        # to refuse to re-hydrate or reopen a thread whose history was purged
+        # from the log — otherwise a PI row inside the inbound lookback window
+        # would re-trigger _hydrate_thread_from_db + _reopen_thread every tick.
         self._dead_thread_ids: set[str] = set()
         # Already-accounted-for marker for the _prior_threads append (Phase 5
         # dedup context) — like _closed_thread_ids, but ALSO covers a
         # reopened-and-not-yet-reclosed thread, which _rebuild_agent_state
         # must not add to _closed_thread_ids (that set means "definitely
-        # done"). See COR-13 / red-team B6.
+        # done").
         self._prior_thread_accounted: set[str] = set()
 
-        # #20 I1: consecutive Slack-post-failure count for a Phase 5 reply
-        # target, keyed by (agent_id, target_post_id). Phase 4's equivalent
-        # counter lives on ThreadState (post_failure_count) because a
-        # ThreadState always already exists there; Phase 5's two reply branches
-        # attempt to post to a target BEFORE any ThreadState exists for it (one
-        # is only ever created on a SUCCESSFUL threaded reply, and never for a
-        # flat private-channel reply), so there is nothing to hang a per-thread
-        # field on until a post actually lands. The agent_id is part of the key
-        # because this map is engine-level while the thing it counts is
+        # Consecutive Slack-post-failure count for a Phase 5 reply target,
+        # keyed by (agent_id, target_post_id). Phase 4's equivalent counter
+        # lives on ThreadState (post_failure_count) because a ThreadState
+        # always already exists there; Phase 5's two reply branches attempt to
+        # post to a target BEFORE any ThreadState exists for it (one is only
+        # ever created on a SUCCESSFUL threaded reply, and never for a flat
+        # private-channel reply), so there is nothing to hang a per-thread
+        # field on until a post actually lands. The agent_id is part of the
+        # key because this map is engine-level while the thing it counts is
         # per-agent: several agents can hold the same post in
         # interesting_posts, and on a post-id-only key one agent's refusals
-        # would back another agent off after a single failure of its own, while
-        # one agent's success would clear every other agent's strikes (#20
-        # COR-1b). Popped on that agent's success or once its two-strike drop
-        # fires — never grows unbounded.
+        # would back another agent off after a single failure of its own,
+        # while one agent's success would clear every other agent's strikes.
+        # Popped on that agent's success or once its two-strike drop fires —
+        # never grows unbounded.
         self._phase5_post_failure_counts: dict[tuple[str, str], int] = {}
 
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
@@ -495,20 +474,19 @@ class SimulationEngine:
         # profiles/{private,public}/{id}.md on a shared volume; this process
         # caches profile content per Agent, so a per-turn signature check
         # tells us when an external edit — including a deletion — happened
-        # and the cache must be invalidated. Tracked per sub-profile (RC-7
-        # follow-up, audit 2026-09-08) rather than as one combined signature
-        # — see _sync_profiles_from_disk for why a combined signature let an
-        # unrelated public edit resurrect a stale private file.
+        # and the cache must be invalidated. Tracked per sub-profile rather
+        # than as one combined signature — see _sync_profiles_from_disk for
+        # why a combined signature let an unrelated public edit resurrect a
+        # stale private file.
         self._profile_mtimes: dict[str, dict[str, tuple[bool, float | None]]] = {}
 
         # Agent ids whose private-profile cache was last set via
         # `Agent.force_clear_private_profile()` because a genuine clear's
-        # `unlink()` failed (L-3, audit 2026-09-10) — the stale file is still
-        # on disk. `_sync_profiles_from_disk` (M-3, opus review, audit
-        # 2026-09-10) consults this so a later mtime bump on that same
-        # un-removable file re-applies the force-clear (and retries the
-        # unlink) instead of calling `reload_private_profile()`, which would
-        # re-read the file and resurrect the very instruction that was
+        # `unlink()` failed — the stale file is still on disk.
+        # `_sync_profiles_from_disk` consults this so a later mtime bump on
+        # that same un-removable file re-applies the force-clear (and retries
+        # the unlink) instead of calling `reload_private_profile()`, which
+        # would re-read the file and resurrect the very instruction that was
         # supposed to be cleared.
         self._force_cleared_private: set[str] = set()
 
@@ -523,21 +501,21 @@ class SimulationEngine:
         self._reactive_streak: int = 0
         # Running reactive/proactive selection tallies. Logged every
         # SELECTION_RATIO_LOG_EVERY selections so starvation is observable rather
-        # than inferred. See .notes/cohort-system-v2.md §10.3.
+        # than inferred.
         self._reactive_selections: int = 0
         self._proactive_selections: int = 0
 
-        # --- Cohort gate bookkeeping (.notes/cohort-system-v2.md) -------------
+        # --- Cohort gate bookkeeping -------------------------------------
         # True once a recompute has actually applied a gate to at least one agent.
         self._cohort_gate_active: bool = False
-        # Set to the preflight refusal reason while isolation is being forced off
-        # (§5.3); None when clean. Surfaced on /admin/cohorts.
+        # Set to the preflight refusal reason while isolation is being forced
+        # off; None when clean. Surfaced on /admin/cohorts.
         self._cohort_preflight_error: str | None = None
         # Last logged (cohorts, memberships, gated, isolated) signature, so the
         # per-resync INFO line fires on change rather than every 30s.
         self._cohort_log_signature: tuple | None = None
         # Per-agent count of outbound @mentions stripped because the target was
-        # outside the sender's cohort (§9). Exposed in the admin UI: a high rate
+        # outside the sender's cohort. Exposed in the admin UI: a high rate
         # means the topology disagrees with what the agents want to do.
         self._cohort_tags_stripped: dict[str, int] = {}
 
@@ -558,36 +536,34 @@ class SimulationEngine:
         # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
         # writer slot so its ids can never collide with the web app's or
         # GrantBot's, which mint into the same agent_messages table from other
-        # processes (R1). See mint_ts and src/agent/ids.py.
+        # processes. See mint_ts and src/agent/ids.py.
         self._ts_minter = TsMinter(WRITER_ENGINE)
-        # High-water mark (created_at — the DB server's clock, not any writer's;
-        # see PI_INBOX_LOOKBACK_S / R3) for the DB inbound poller: the Slack-
-        # independent path by which messages written by other processes (PI web
-        # interface, private-channel handover) enter the simulation. See
-        # _poll_inbound_from_db.
+        # High-water mark (created_at — the DB server's clock, not any
+        # writer's; see PI_INBOX_LOOKBACK_S) for the DB inbound poller: the
+        # Slack-independent path by which messages written by other processes
+        # (PI web interface, private-channel handover) enter the simulation.
+        # See _poll_inbound_from_db.
         self._pi_inbox_cursor: datetime = EPOCH_UTC
-        # SEC2-1: in-process attempt counter for _poll_inbound_from_db's
-        # handler, keyed by message_ts, value (attempts, last_attempt_monotonic).
-        # Pruned on give-up (row stamped HANDLED) or successful handling — see
-        # PI_INBOUND_MAX_ATTEMPTS. REV4-5 (audit 2026-09-08): the monotonic
-        # timestamp lets a failure that recurs only after more than
-        # PI_INBOX_LOOKBACK_S has elapsed be treated as a fresh incident
-        # (attempts reset to 1) rather than accumulate toward the terminal
-        # cap across unrelated, widely-spaced failures — and lets
-        # _prune_stale_pi_inbound_attempts drop entries nobody has touched
-        # recently, so this dict cannot grow without bound.
+        # In-process attempt counter for _poll_inbound_from_db's handler,
+        # keyed by message_ts, value (attempts, last_attempt_monotonic).
+        # Pruned on give-up (row stamped HANDLED) or successful handling —
+        # see PI_INBOUND_MAX_ATTEMPTS. The monotonic timestamp lets a failure
+        # that recurs only after more than PI_INBOX_LOOKBACK_S has elapsed be
+        # treated as a fresh incident (attempts reset to 1) rather than
+        # accumulate toward the terminal cap across unrelated, widely-spaced
+        # failures — and lets _prune_stale_pi_inbound_attempts drop entries
+        # nobody has touched recently, so this dict cannot grow without bound.
         self._pi_inbound_attempts: dict[str, tuple[int, float]] = {}
-        # S-4 (audit 2026-09-10): a SEPARATE, much larger budget for
-        # PiOwnershipLookupFailed (a transient DB failure resolving PI
-        # ownership, not a deterministic handler bug) so a 30s DB blip
-        # cannot exhaust the same PI_INBOUND_MAX_ATTEMPTS cap a genuinely
-        # broken handler uses and get a real PI directive dropped after only
-        # PI_INBOUND_MAX_ATTEMPTS attempts. Same (count, last_attempt_
-        # monotonic) shape and pruning lifecycle as `_pi_inbound_attempts`.
+        # A SEPARATE, much larger budget for PiOwnershipLookupFailed (a
+        # transient DB failure resolving PI ownership, not a deterministic
+        # handler bug) so a DB blip cannot exhaust the same
+        # PI_INBOUND_MAX_ATTEMPTS cap a genuinely broken handler uses and get
+        # a real PI directive dropped after only PI_INBOUND_MAX_ATTEMPTS
+        # attempts. Same (count, last_attempt_monotonic) shape and pruning
+        # lifecycle as `_pi_inbound_attempts`.
         self._pi_inbound_lookup_failures: dict[str, tuple[int, float]] = {}
         # message_ts values whose handler has already run successfully but
-        # whose HANDLED marker write has not yet committed (K-2 follow-up #2 /
-        # simulation-poller review, audit 2026-09-10). Without this,
+        # whose HANDLED marker write has not yet committed. Without this,
         # `_poll_inbound_from_db` cannot tell "the handler hasn't run yet"
         # apart from "the handler already ran; only the write is failing" —
         # both look identical as `pi_inbound_state == 'ingested'` on the next
@@ -600,12 +576,12 @@ class SimulationEngine:
         self._pi_inbound_handled_pending_mark: set[str] = set()
         # Attempt counter for the id-based fallback stamp used by the
         # "give up on the HANDLED marker write" branch of
-        # `_poll_inbound_from_db` (M-5, opus review, audit 2026-09-10) --
-        # separate from `_pi_inbound_attempts` because that counter is
-        # already AT its own cap by the time the fallback runs (that is why
-        # the fallback runs at all). Without its own budget, a fallback stamp
-        # that itself persistently fails would retry forever, once per poll,
-        # with no terminal state -- unlike every other give-up path here.
+        # `_poll_inbound_from_db` — separate from `_pi_inbound_attempts`
+        # because that counter is already AT its own cap by the time the
+        # fallback runs (that is why the fallback runs at all). Without its
+        # own budget, a fallback stamp that itself persistently fails would
+        # retry forever, once per poll, with no terminal state -- unlike
+        # every other give-up path here.
         self._pi_inbound_fallback_attempts: dict[str, int] = {}
         # message_ts values whose fallback stamp exhausted ITS OWN attempt
         # budget (see `_pi_inbound_fallback_attempts` above). `_poll_inbound_from_db`
@@ -617,37 +593,37 @@ class SimulationEngine:
         self._pi_inbound_parked: set[str] = set()
 
         # ThreadDecision payloads whose write exhausted _close_thread's own
-        # in-call retry budget (M-7, opus review, audit 2026-09-10). Each
-        # entry is the plain dict of column values needed to retry the
-        # insert; _flush_pending_thread_decisions() retries these at the
-        # start of every main-loop tick and in the shutdown flush, so a DB
-        # outage longer than _close_thread's own budget still eventually
-        # gets the row written instead of losing the decision permanently.
+        # in-call retry budget. Each entry is the plain dict of column values
+        # needed to retry the insert; _flush_pending_thread_decisions()
+        # retries these at the start of every main-loop tick and in the
+        # shutdown flush, so a DB outage longer than _close_thread's own
+        # budget still eventually gets the row written instead of losing the
+        # decision permanently.
         self._pending_thread_decisions: list[dict] = []
-        # N-5 (opus review, audit 2026-09-10): (agent_id, thread_id) pairs
-        # whose PI-engagement review (`_check_pi_proposal_review`) fired
-        # while the SAME thread's ThreadDecision write was still deferred —
-        # `proposal.thread_decision_id` was `None` at the time, so
-        # `_persist_implicit_proposal_review` no-op'd immediately. Without
-        # this, the review was lost forever: `proposal.reviewed` is already
-        # `True` by the time `_persist_implicit_proposal_review` runs, so
+        # (agent_id, thread_id) pairs whose PI-engagement review
+        # (`_check_pi_proposal_review`) fired while the SAME thread's
+        # ThreadDecision write was still deferred — `proposal.thread_decision_id`
+        # was `None` at the time, so `_persist_implicit_proposal_review`
+        # no-op'd immediately. Without this, the review was lost forever:
+        # `proposal.reviewed` is already `True` by the time
+        # `_persist_implicit_proposal_review` runs, so
         # `_check_pi_proposal_review`'s own `not proposal.reviewed` guard
         # would never call it again for this thread.
         # `_flush_pending_thread_decisions` re-runs the persist for any entry
         # here once it assigns that thread's `thread_decision_id`.
         self._deferred_implicit_reviews: list[tuple[str, str]] = []
-        # N-8 (opus review, audit 2026-09-10): per-agent asyncio.Semaphore(1),
-        # lazily created, guarding the actual Slack call in `_post_message`.
-        # After M-8, multiple `_post_message` calls for the SAME agent (e.g.
-        # two turns racing, or a Phase 4 reply overlapping a Phase 5 post) run
-        # their `run_slack_call` on separate slack-io worker threads
-        # concurrently, on the SAME `AgentSlackClient` -- nothing serialized
-        # them once they left the event loop. That let two posts for one
-        # agent land out of order on Slack, and let a `_resolve_channel_id`
-        # cache miss (which itself calls Slack) fan out into one call per
-        # concurrent post instead of resolving once. Keyed by agent_id so
-        # cross-agent parallelism (the whole point of the M-8 pool) is
-        # unaffected -- only replies from the SAME agent serialize.
+        # Per-agent asyncio.Semaphore(1), lazily created, guarding the actual
+        # Slack call in `_post_message`. Multiple `_post_message` calls for
+        # the SAME agent (e.g. two turns racing, or a Phase 4 reply
+        # overlapping a Phase 5 post) run their `run_slack_call` on separate
+        # slack-io worker threads concurrently, on the SAME
+        # `AgentSlackClient` -- nothing else serializes them once they leave
+        # the event loop, which could let two posts for one agent land out of
+        # order on Slack, or let a `_resolve_channel_id` cache miss (which
+        # itself calls Slack) fan out into one call per concurrent post
+        # instead of resolving once. Keyed by agent_id so cross-agent
+        # parallelism is unaffected -- only replies from the SAME agent
+        # serialize.
         self._post_message_semaphores: dict[str, asyncio.Semaphore] = {}
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
@@ -658,16 +634,16 @@ class SimulationEngine:
         self._pi_dm_cursor: datetime = EPOCH_UTC
         # Identity dedup for the DM poller's lookback re-scan (ts -> created_at),
         # so a DM is processed exactly once even though the query re-scans a
-        # window behind the cursor (H2). Pruned to the lookback window each poll.
+        # window behind the cursor. Pruned to the lookback window each poll.
         self._pi_dm_seen: dict[str, datetime] = {}
         # Wall-clock of the last cosmetic run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
-        # _flush_persisted (B1).
+        # _flush_persisted.
         self._last_run_stats_update: float = 0.0
         # Set by request_stop() (the signal handler's sync entry point) to both
         # end the main loop and cut short an in-progress idle-backoff sleep, so
         # the final flush happens well inside the container's stop grace period.
-        # See _sleep / request_stop (R2).
+        # See _sleep / request_stop.
         self._stop_event = asyncio.Event()
 
     # ------------------------------------------------------------------
@@ -708,14 +684,13 @@ class SimulationEngine:
 
         A parked thread is not closed. Closing it would write outcome="timeout"
         into a PI DM, into ``/admin/discussions`` and into both agents'
-        prompt-fed working memory, none of which happened — see
-        docs/plans/2026-09-04-decisions/task-5.md (#20 COR-1b).
+        prompt-fed working memory, none of which happened.
         """
         return thread.post_failure_count >= 2 and not thread.has_pending_reply
 
     def _evict_stale_parked_threads(self, agent: Agent) -> None:
         """Drop a thread parked for PARKED_THREAD_MAX_TURNS of this agent's
-        own turns (RC-9a, #20 audit 2026-09-08).
+        own turns.
 
         A parked thread (``_is_parked_thread``) already generates no LLM work
         and is excluded from load/rate accounting, but nothing previously
@@ -724,8 +699,8 @@ class SimulationEngine:
         conversation that can only be revived by a restart's Phase 3
         re-hydration or the counterpart posting again. This only removes THIS
         agent's ``ThreadState``; it writes no decision and sends no DM (a
-        parked thread never reached outcome=timeout — task-5's ruling stands),
-        so the counterpart's own side (if any) and the persisted message
+        parked thread never reached outcome=timeout), so the counterpart's
+        own side (if any) and the persisted message
         history are untouched, and Phase 3 can re-activate the thread later.
         """
         for thread_id, thread in list(agent.state.active_threads.items()):
@@ -746,20 +721,17 @@ class SimulationEngine:
 
         The shared signal behind BOTH the rate allowance (``_within_rate_limit``)
         and the selection weight (``_select_agent``). Deriving both from one
-        number is the point: the failure this fixes was the limiter and the
-        scheduler holding contradictory views of what a hub deserves — the
-        reactive tier gave the blackbird hub a 7x boost while the cumulative cap
-        benched it for 161 consecutive turns, and the cap won, silently. See
-        docs/specs/2026-08-06-hub-budget-scheduler-design.md §1.4.
+        number keeps the limiter and the scheduler from holding contradictory
+        views of what a hub deserves.
 
         Floors at 1 so an idle agent stays eligible. Ceilings at
         ``active_thread_threshold`` so nothing can inflate its own allowance past
         the thread cap it is already bound by — that clamp is what stops a
-        thread-opening runaway from financing itself (§4.1).
+        thread-opening runaway from financing itself.
 
         Threads parked by the post back-off are not obligations: they generate no
-        LLM call until the counterpart speaks, so counting them handed the agent
-        allowance and selection weight for work it cannot do (#20 COR-1b).
+        LLM call until the counterpart speaks, so counting them would hand the
+        agent allowance and selection weight for work it cannot do.
         """
         live = sum(
             1 for t in agent.state.active_threads.values()
@@ -773,7 +745,7 @@ class SimulationEngine:
         Cached by role NAME, so an agent flipping roles at runtime simply looks
         up a different key and needs no invalidation. The only staleness is a
         role.toml edited mid-run, which matches get_settings() already being
-        lru_cached — both need a container recreate (design §5).
+        lru_cached — both need a container recreate.
 
         The cache exists because load_role() reads TOML from disk on every call
         and this runs for every agent on every scheduler tick.
@@ -790,9 +762,8 @@ class SimulationEngine:
         """Sliding-window LLM rate check — the LIVE throttle.
 
         allowance = _calls_per_load(agent) * _agent_load(agent), over
-        llm_rate_window_seconds. Unlike the cumulative cap this replaces, it
-        self-heals: entries age out, so an agent throttled now is eligible later.
-        See design §4.2.
+        llm_rate_window_seconds. Unlike a cumulative cap, it self-heals:
+        entries age out, so an agent throttled now is eligible later.
         """
         allowance = self._calls_per_load(agent) * self._agent_load(agent)
         window_start = now - get_settings().llm_rate_window_seconds
@@ -822,7 +793,7 @@ class SimulationEngine:
         close and never leaves ``active_threads``, so counting it took the slot
         permanently — three of them put the agent into ``blocked_for_regular``
         for the rest of the run, after which Phase 5 returns before the LLM call
-        whenever nothing funding/PI-priority/private is available (#20 COR-1b).
+        whenever nothing funding/PI-priority/private is available.
         """
         return sum(
             1 for t in agent.state.active_threads.values()
@@ -899,13 +870,13 @@ class SimulationEngine:
         # from the previous process get grandfathered and stale banked posts get
         # pruned. The loop's roster sync would also reach it (_last_roster_poll
         # starts at 0.0), but doing it here means no turn can ever run with an
-        # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
+        # unset gate while isolation is on.
         await self._recompute_allowed_sender_ids()
         # AFTER the gate, never before: the filter inside reads
         # agent.allowed_sender_ids, which is None until the line above runs.
         self.refresh_lab_directories()
         # Record which topology this run actually started with, so the run's output
-        # stays attributable to its configuration (v2 §13.1).
+        # stays attributable to its configuration.
         await self._record_topology_snapshot()
 
         # Backfill FOA cache for any previously posted opportunities
@@ -946,15 +917,12 @@ class SimulationEngine:
     def _terminal_stall_reason(self) -> str | None:
         """Why an empty selection should END the run — or None when it is transient.
 
-        ``_select_agent()`` returning None used to break the loop unconditionally.
-        Under the sliding-window limiter that is wrong and actively dangerous:
-        both remaining live gates LAPSE WITH TIME. ``_within_rate_limit`` expires
-        entries as the window slides, and the per-agent ``turn_delay_seconds``
-        cooldown expires by the clock. Breaking on either turns "one agent is
-        benched for a while" into "the container exits and stays exited" — a
-        strictly worse failure than the one this branch was written to fix, and
-        one that bites every roster small enough for aggregate demand to reach
-        aggregate allowance (e.g. 7 token-holding agents at 8 calls/600s).
+        ``_select_agent()`` returning None must not break the loop
+        unconditionally: under the sliding-window limiter, both remaining live
+        gates LAPSE WITH TIME (``_within_rate_limit`` expires entries as the
+        window slides, and the per-agent ``turn_delay_seconds`` cooldown
+        expires by the clock), so breaking on either would turn "one agent is
+        benched for a while" into "the container exits and stays exited."
 
         Only two conditions can never recover on their own:
 
@@ -962,7 +930,7 @@ class SimulationEngine:
         - the LEGACY cumulative ``--budget`` cap, armed (> 0) and blown by EVERY
           agent. ``api_call_count`` only ever increases within a process, and
           ``_rebuild_state_from_db`` restores it across restarts, so this one
-          really is permanent. It is also opt-in and deprecated (design §6).
+          really is permanent. It is also opt-in and deprecated.
 
         ``max_runtime`` and SIGTERM still end the run through the loop condition;
         this predicate is only about the selection stall.
@@ -1014,7 +982,7 @@ class SimulationEngine:
             await self._sync_profiles_from_disk()
 
             # Retry any ThreadDecision writes _close_thread could not commit
-            # even after its own in-call retry budget (M-7, audit 2026-09-10).
+            # even after its own in-call retry budget.
             await self._flush_pending_thread_decisions()
 
             # Select agent
@@ -1093,7 +1061,6 @@ class SimulationEngine:
             # just ran becomes ineligible for the delay while every other agent
             # stays selectable. Sleeping the loop instead stalled Slack polling, DB
             # ingestion and every other agent for one agent's cooldown.
-            # See .notes/cohort-system-v2.md §10.3.
 
             # Flush buffered message-log entries + LLM logs periodically
             await self._flush_persisted()
@@ -1155,7 +1122,7 @@ class SimulationEngine:
         proactive pool, so 1:1 conversations conclude promptly rather than waiting
         for a random re-selection. Reuses the same primitive Phase 4 uses.
 
-        Two cohort rules apply here and nowhere else (v2 §8):
+        Two cohort rules apply here and nowhere else:
 
         - **Grandfathered threads are skipped.** A thread whose partner has left the
           cohort still gets answered by Phase 4 so it can conclude, but it must not
@@ -1185,13 +1152,13 @@ class SimulationEngine:
 
         - within the LEGACY cumulative cap. Inert by default (``budget_cap``
           defaults to 0, and ``_agent_within_budget`` short-circuits at <= 0);
-          armed only when an operator passes ``--budget``. Retained, not removed,
-          for back-compat — see design §6;
+          armed only when an operator passes ``--budget``. Retained for
+          back-compat;
         - within its sliding-window rate limit. This is the live throttle;
         - past its per-agent cooldown. ``turn_delay_seconds`` throttles an
           individual agent's tempo; enforcing it here (rather than as a global
           ``asyncio.sleep`` after every productive turn) leaves the rest of the
-          roster free to act while one agent sits out. See v2 §10.3.
+          roster free to act while one agent sits out.
         """
         if not self._agent_within_budget(agent):
             # Ordering is deliberate and must not change: the legacy cap decides
@@ -1222,15 +1189,14 @@ class SimulationEngine:
            without a wasted skip-tick. A fairness valve
            (`max_consecutive_reactive_turns`, default 3) forces a proactive turn
            after a run of reactive ones so new-conversation formation isn't
-           starved — at the original default of 8, a single live pair took 24 of
-           27 turns. See .notes/cohort-system-v2.md §10.3.
+           starved.
         2. **Proactive** — staleness-weighted random, scaled by load:
            P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
            for agents that have repeatedly skipped Phase 5
            (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
            a star's hub — one endpoint of every conversation — draw a share that
            tracks the edges it actually sits on, instead of the 1/N a uniform
-           weighting gave it. See design §4.3.
+           weighting would give it.
 
         Both tiers draw from the same eligibility pool (`_turn_eligible`): budget
         plus the per-agent `turn_delay_seconds` cooldown.
@@ -1256,7 +1222,6 @@ class SimulationEngine:
                 # min(last_selected) it lost every tiebreak to a long-idle spoke,
                 # i.e. it was penalised precisely for being the busiest agent.
                 # Still "longest wait wins", now scaled by obligation count.
-                # See design §1.3 / §4.3.
                 return max(
                     owed,
                     key=lambda a: (now - a.state.last_selected) * self._agent_load(a),
@@ -1296,7 +1261,7 @@ class SimulationEngine:
         settings = get_settings()
         api_calls_before = agent.api_call_count
 
-        # RC-9a: evict a thread that has been parked too long before it can
+        # Evict a thread that has been parked too long before it can
         # occupy any of this turn's other phases.
         self._evict_stale_parked_threads(agent)
 
@@ -1352,14 +1317,12 @@ class SimulationEngine:
         # real LLM call this turn. If Phase 5 bailed out early (daily cap,
         # random skip, blocked with nothing available) the directive is
         # preserved so a later turn retries it, instead of being silently
-        # dropped having influenced no prompt at all. See E7b.
-        # Known trade-off (red-team m5): this is a latch, not a retry-with-
-        # backoff — an agent PERMANENTLY unable to get Phase 5 to act (stuck
-        # blocked with nothing bypass-eligible available, or sustained
-        # rate-limiting) never clears the flag. Cheap (no LLM cost — Phase 5
-        # still bails out before any API call in that state) but unbounded;
-        # a turn counter or TTL would cap it if that ever proves to matter in
-        # practice.
+        # dropped having influenced no prompt at all.
+        # This is a latch, not a retry-with-backoff — an agent PERMANENTLY
+        # unable to get Phase 5 to act (stuck blocked with nothing
+        # bypass-eligible available, or sustained rate-limiting) never clears
+        # the flag. Cheap (no LLM cost — Phase 5 still bails out before any
+        # API call in that state) but unbounded.
         if agent.state.has_pi_directive and phase5_acted:
             agent.state.has_pi_directive = False
 
@@ -1376,8 +1339,7 @@ class SimulationEngine:
         # that moment; a row that commits after the cursor advanced but stays
         # below the log's max is still filtered by `posted_at <= since`
         # elsewhere. `_poll_inbound_from_db`'s `PI_INBOX_LOOKBACK` window is
-        # the real belt-and-braces for that narrower residual case (red-team
-        # m3). See COR-6.
+        # the real belt-and-braces for that narrower residual case.
         agent.state.last_seen_cursor = self.message_log.latest_timestamp
 
         return agent.api_call_count > api_calls_before
@@ -1402,11 +1364,7 @@ class SimulationEngine:
                 if ch_id:
                     client = self.slack_clients.get(agent.agent_id)
                     if client:
-                        # run_slack_call: join_channel is a blocking Slack Web
-                        # API call and this coroutine runs on the process's
-                        # single event loop every turn — a direct call here
-                        # can starve shutdown handling exactly like the
-                        # roster-sync connect() calls (S-1, audit 2026-09-10).
+                        # Runs off the event loop; see run_slack_call's docstring.
                         await run_slack_call(client.join_channel, ch_id)
             agent.state.subscribed_channels.update(new_channels)
             logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
@@ -1572,7 +1530,7 @@ class SimulationEngine:
                 # the web reopen): a thread already at or near the message cap
                 # when this agent is first tagged/replied-into it must not
                 # instantly close as "timeout" before the agent gets a chance
-                # to post. See COR-2.
+                # to post.
                 existing_count = self.message_log.get_thread_message_count(thread_id)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
@@ -1659,7 +1617,7 @@ class SimulationEngine:
             # of the cohort — abandoning it mid-flight would waste every call
             # already spent on it, and thread participation rules already bound who
             # may post here. What a grandfathered thread does NOT get is reactive
-            # *priority*; that is enforced in _owes_reply. See v2 §8.
+            # *priority*; that is enforced in _owes_reply.
             has_new = self.message_log.has_new_reply_from_other(
                 thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
                 allowed_sender_ids=None,
@@ -1686,20 +1644,17 @@ class SimulationEngine:
             agent.agent_id, len(threads_to_reply),
         )
 
-        # Mid-turn rate gate (E6-1): _within_rate_limit was previously
-        # consulted only once, at turn selection (_turn_eligible, :891/893).
-        # Phase 4 fans every active thread out in one gather with per-retry
-        # booking, so a turn could overshoot the sliding-window allowance by
-        # as many threads as were open.
-        #
-        # Fix-round-1 (I1): a per-thread `_within_rate_limit()` loop here is
-        # semantically all-or-nothing, not a real cap — nothing books a call
-        # between iterations (that only happens once each dispatched thread's
-        # generate_agent_response call actually lands, well after this whole
-        # batch has been dispatched), so _within_rate_limit(agent, now) is
-        # pure and returns the SAME answer on every iteration: either every
-        # thread passes or (once the deque is pruned) every thread fails.
-        # Measured: allowance 1 + three pending threads dispatched all three.
+        # Mid-turn rate gate: _within_rate_limit is otherwise only consulted
+        # once, at turn selection (_turn_eligible). Phase 4 fans every active
+        # thread out in one gather with per-retry booking, so a turn could
+        # overshoot the sliding-window allowance by as many threads as were
+        # open. A per-thread `_within_rate_limit()` loop here would not be a
+        # real cap — nothing books a call between iterations (that only
+        # happens once each dispatched thread's generate_agent_response call
+        # actually lands, well after this whole batch has been dispatched),
+        # so `_within_rate_limit(agent, now)` is pure and returns the SAME
+        # answer on every iteration: either every thread passes or (once the
+        # deque is pruned) every thread fails.
         #
         # A headroom slice, not a per-item re-check: call _within_rate_limit
         # once for its pruning side effect (it drops expired entries from
@@ -1875,16 +1830,16 @@ class SimulationEngine:
                     return
 
                 # The draft cleared both funding validators this turn. Reset
-                # here rather than only on a later successful post (issue #23
-                # COR-28b'): a draft suppressed for an unrelated reason (dedup,
-                # a transient Slack failure) used to leave a stale reject
-                # streak in place, so two rejections caused by the ack/
-                # announcement detectors' known false positives could
-                # permanently back the thread off even after it recovered.
+                # here rather than only on a later successful post, so a draft
+                # suppressed for an unrelated reason (dedup, a transient Slack
+                # failure) does not leave a stale reject streak in place —
+                # otherwise two rejections caused by the ack/announcement
+                # detectors' known false positives could permanently back the
+                # thread off even after it recovered.
                 thread.funding_reject_count = 0
 
-            # Authorship guard (issue #29): reject drafts claiming authorship
-            # the publication records cannot verify — mirrors the funding
+            # Authorship guard: reject drafts claiming authorship the
+            # publication records cannot verify — mirrors the funding
             # validators' reject-and-back-off pattern, but applies to EVERY
             # thread, funding or not.
             authorship_reason = self._reject_ungrounded_authorship(agent, response_text)
@@ -1909,17 +1864,17 @@ class SimulationEngine:
                 thread_ts=thread.thread_id,
             )
             if not posted:
-                # #20 I1: a deterministic Slack refusal (is_archived,
-                # not_in_channel, invalid_auth, recurring msg_too_long) used
-                # to just log here forever — has_pending_reply stayed True
-                # and message_count never advanced, so the thread could never
-                # reach the 12-message timeout close and burned one LLM call
-                # per turn indefinitely. Mirrors authorship_reject_count's
-                # two-strike pattern.
+                # A deterministic Slack refusal (is_archived, not_in_channel,
+                # invalid_auth, recurring msg_too_long) must not just be
+                # logged and left: without a two-strike counter,
+                # has_pending_reply stays True and message_count never
+                # advances, so the thread could never reach the 12-message
+                # timeout close and would burn one LLM call per turn
+                # indefinitely. Mirrors authorship_reject_count's two-strike
+                # pattern.
                 thread.post_failure_count += 1
-                # "nothing persisted" until f29e295, which restored the
-                # DB-only row (slack_ts=None) a refused post writes — the text
-                # survives, only the Slack identity and the turn do not.
+                # A refused post still writes a DB-only row (slack_ts=None) —
+                # the text survives, only the Slack identity and the turn do not.
                 logger.info(
                     "[%s] Suppressed post in #%s — turn not counted, kept as a "
                     "DB-only row (post_failure_count=%d)",
@@ -1927,11 +1882,10 @@ class SimulationEngine:
                 )
                 if thread.post_failure_count >= 2:
                     # Park the thread: nothing re-enqueues it until the
-                    # counterpart posts (:1402). _is_parked_thread reads exactly
+                    # counterpart posts. _is_parked_thread reads exactly
                     # this state so the parked thread stops spending one of the
                     # agent's regular discussion slots and stops inflating its
-                    # rate allowance — see #20 COR-1b and
-                    # docs/plans/2026-09-04-decisions/task-5.md.
+                    # rate allowance.
                     thread.has_pending_reply = False
                     logger.info(
                         "[%s] Phase 4: Backing off thread %s after %d post failures",
@@ -1962,7 +1916,7 @@ class SimulationEngine:
         for the unicode form (agent.py, prompts/phase4-thread-reply.md,
         prompts/agent-system.md) but nothing stops it emitting the shortcode
         on its own, and a missed match here means a silent grind to the
-        12-message timeout close instead of a clean finalize. See COR-4.
+        12-message timeout close instead of a clean finalize.
         Shared by the public (_check_thread_outcome) and private
         (_check_private_channel_outcome) paths so they can't drift again.
         """
@@ -1981,7 +1935,7 @@ class SimulationEngine:
             # thread — not merely the most recent one of theirs that happens
             # to contain :memo:. If they have said anything else since (a
             # renegotiation, a question, anything), that memo is stale and
-            # this ✅ is not confirming it. See COR-3.
+            # this ✅ is not confirming it.
             history = self.message_log.get_thread_history(thread.thread_id)
             for entry in reversed(history):
                 if entry.sender_agent_id != thread.other_agent_id:
@@ -2009,7 +1963,7 @@ class SimulationEngine:
                     await self._close_thread(agent, thread, "proposal", summary_text)
                     return
                 # The other agent's latest message is NOT a memo — this ✅ is
-                # not confirming anything. Stop before an older memo. (COR-3)
+                # not confirming anything. Stop before an older memo.
                 break
 
         # Check if this agent posted a :memo: Summary
@@ -2034,20 +1988,16 @@ class SimulationEngine:
         """One DB attempt to insert a ThreadDecision row from ``payload``.
 
         Raises on any failure (caller retries); returns the row's id on
-        success. Split out of ``_write_thread_decision_with_retry`` (M-7,
-        opus review, audit 2026-09-10) so the retry loop stays readable.
+        success. Split out of ``_write_thread_decision_with_retry`` so the
+        retry loop stays readable.
 
-        N-4 (opus review, audit 2026-09-10): idempotent by ``payload["id"]``
-        (pre-computed once per payload by the caller and stable across every
-        retry, including a later ``_flush_pending_thread_decisions`` pass —
-        see that pre-computation for the full rationale). A plain INSERT here
-        would double the row on a retry that follows a commit which actually
-        landed server-side but raised client-side (e.g. the connection dying
-        right after COMMIT, before the ACK reaches this process) --
-        ``INSERT ... ON CONFLICT (id) DO NOTHING`` (the pattern established
-        for a different table by
-        ``profile_pipeline._insert_publication_tolerating_conflict``) makes a
-        retry of an already-landed insert a no-op instead of a duplicate.
+        Idempotent by ``payload["id"]`` (pre-computed once per payload by the
+        caller and stable across every retry). A plain INSERT would double
+        the row on a retry that follows a commit which actually landed
+        server-side but raised client-side (e.g. the connection dying right
+        after COMMIT, before the ACK reaches this process) --
+        ``INSERT ... ON CONFLICT (id) DO NOTHING`` makes a retry of an
+        already-landed insert a no-op instead of a duplicate.
         """
         from sqlalchemy import select as sa_select
         from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -2093,47 +2043,33 @@ class SimulationEngine:
     async def _write_thread_decision_with_retry(
         self, payload: dict, *, max_attempts: int | None = None,
     ) -> uuid.UUID | None:
-        """Insert a ThreadDecision row, retrying transient failures in-call
-        (M-7, opus review, audit 2026-09-10).
+        """Insert a ThreadDecision row, retrying transient failures in-call.
 
         The decision is the product of the whole conversation this thread
-        represents — a single try/except-and-give-up dropped it outright on
-        any DB error, logged with a plain ``%s`` that renders EMPTY for an
-        exception whose ``str()`` is empty (e.g. a bare ``TimeoutError()`` —
-        exactly what a 30s blocking Slack retry sleep starving the event loop
-        produced in a live run's log, see docs/plans/2026-09-08-audit-fixes.md
-        §M). ``%r`` plus ``type(exc).__name__`` below make the log line
-        diagnosable regardless of whether the exception carries a message.
+        represents, so a DB error must not drop it outright. ``%r`` plus
+        ``type(exc).__name__`` in the log line keep it diagnosable even for
+        an exception whose ``str()`` is empty (e.g. a bare ``TimeoutError()``).
 
         Returns ``None`` once every attempt (``THREAD_DECISION_WRITE_MAX_ATTEMPTS``)
         is exhausted; the caller (``_close_thread`` or
         ``_flush_pending_thread_decisions``) is responsible for queuing or
         re-queuing the payload rather than losing it.
 
-        N-4 (opus review, audit 2026-09-10): mints ``payload["id"]`` ONCE, the
-        first time this payload is seen, and reuses it for every retry
-        thereafter -- including retries across separate calls to this method
-        for the SAME payload dict (``_close_thread``'s in-call attempts here,
-        then ``_flush_pending_thread_decisions`` re-passing the identical,
-        still-queued dict on a later tick). Without a stable id, a commit that
-        actually landed server-side but raised client-side (e.g. the
-        connection dying right after COMMIT) would insert a SECOND row on the
-        next retry, since a plain auto-generated primary key gives the retry
-        no way to tell "did my last attempt already succeed?" from "it never
-        ran". ``_insert_thread_decision_row``'s ``ON CONFLICT (id) DO NOTHING``
-        + re-select makes a retry of an already-landed insert a no-op instead.
+        Mints ``payload["id"]`` ONCE, the first time this payload is seen,
+        and reuses it for every retry thereafter -- including retries across
+        separate calls to this method for the SAME payload dict. Without a
+        stable id, a commit that actually landed server-side but raised
+        client-side would insert a SECOND row on the next retry,
+        since a plain auto-generated primary key gives the retry no way to
+        tell "did my last attempt already succeed?" from "it never ran".
+        ``_insert_thread_decision_row``'s ``ON CONFLICT (id) DO NOTHING`` +
+        re-select makes a retry of an already-landed insert a no-op instead.
 
-        N-6 (opus review, audit 2026-09-10): ``max_attempts`` lets
-        ``_flush_pending_thread_decisions`` override
+        ``max_attempts`` lets ``_flush_pending_thread_decisions`` override
         ``THREAD_DECISION_WRITE_MAX_ATTEMPTS`` down to a single attempt per
-        entry per tick. Without this, a DB outage spanning many queued
-        entries paid this method's full in-call retry budget (3 attempts,
-        each with a blocking backoff sleep) for EVERY entry, EVERY tick --
-        turning what should be one blocked tick into
-        `len(_pending_thread_decisions) * (THREAD_DECISION_WRITE_MAX_ATTEMPTS
-        - 1) * THREAD_DECISION_RETRY_BACKOFF_S` seconds of the main loop not
-        polling Slack, PI DMs, or anything else, an outage-proportional stall
-        entirely disjoint from the DB outage itself.
+        entry per tick, so a DB outage spanning many queued entries does not
+        pay this method's full in-call retry budget (with its blocking
+        backoff sleeps) for EVERY entry, EVERY tick.
         """
         payload["id"] = payload.get("id") or uuid.uuid4()
         attempts = THREAD_DECISION_WRITE_MAX_ATTEMPTS if max_attempts is None else max_attempts
@@ -2163,16 +2099,16 @@ class SimulationEngine:
 
     def _enqueue_pending_thread_decision(self, payload: dict) -> None:
         """Queue a ThreadDecision payload for retry, capped at
-        ``PENDING_THREAD_DECISIONS_MAX`` (N-6, opus review, audit 2026-09-10).
+        ``PENDING_THREAD_DECISIONS_MAX``.
 
         Mirrors ``LLM_LOG_REQUEUE_MAX_ROWS``'s drop-oldest-with-one-ERROR
         pattern (see ``_flush_llm_call_logs``): a DB outage long enough to
         persistently fail every ThreadDecision write would otherwise buffer
         one entry per closed thread in RAM for as long as the outage lasts.
         Drops the OLDEST entries on overflow -- an old decision's
-        conversation is the most stale, and (per N-5) an old queued entry can
-        also be the one blocking a legitimate, already-cleared PI engagement
-        review (`_deferred_implicit_reviews`) from ever being replayed.
+        conversation is the most stale, and an old queued entry can also be
+        the one blocking a legitimate, already-cleared PI engagement review
+        (`_deferred_implicit_reviews`) from ever being replayed.
         """
         self._pending_thread_decisions.append(payload)
         overflow = len(self._pending_thread_decisions) - PENDING_THREAD_DECISIONS_MAX
@@ -2186,22 +2122,21 @@ class SimulationEngine:
                 PENDING_THREAD_DECISIONS_MAX, overflow,
                 [d["thread_id"] for d in dropped],
             )
-            # O-2 (audit 2026-09-10): a dropped payload can never be
-            # replayed by `_flush_pending_thread_decisions`, so any
-            # `_deferred_implicit_reviews` entry recorded against it would
-            # otherwise sit in that list forever, never matching a
-            # decision_id. Drop the matching entries too.
+            # A dropped payload can never be replayed by
+            # `_flush_pending_thread_decisions`, so any
+            # `_deferred_implicit_reviews` entry recorded against it must be
+            # dropped too, or it sits in that list forever, never matching a
+            # decision_id.
             #
-            # P-5 (opus review, audit 2026-09-10): only purge a pair when NO
-            # remaining (i.e. NOT dropped) payload still shares its
-            # thread_id. A thread_id can appear on more than one queued
-            # payload (e.g. two closed sub-threads under the same logical
-            # thread, or a retry that re-enqueued before the original was
-            # flushed) -- purging by "this thread_id appeared somewhere in
-            # the dropped set" discarded a deferred review that could still
-            # be legitimately replayed against a SURVIVING payload for the
-            # same thread_id.
-            # Survival is PAIR-level (Q-1, opus review of P-5): the replay in
+            # Only purge a pair when NO remaining (i.e. NOT dropped) payload
+            # still shares its thread_id. A thread_id can appear on more than
+            # one queued payload (e.g. two closed sub-threads under the same
+            # logical thread, or a retry that re-enqueued before the original
+            # was flushed) -- purging by "this thread_id appeared somewhere
+            # in the dropped set" would discard a deferred review that could
+            # still be legitimately replayed against a SURVIVING payload for
+            # the same thread_id.
+            # Survival is checked at the PAIR level: the replay in
             # _flush_pending_thread_decisions matches (agent_id, thread_id)
             # against a payload's agent_a/agent_b, so a surviving payload for
             # the same thread_id but a different agent pair can never replay
@@ -2217,8 +2152,8 @@ class SimulationEngine:
         """True while some queued ThreadDecision payload could replay ``pair``
         -- the SAME predicate ``_flush_pending_thread_decisions`` uses
         (``thread_id`` match AND the agent is ``agent_a``/``agent_b``). Used by
-        both the record site and the overflow purge (Q-1/R-3) so they cannot
-        drift apart again."""
+        both the record site and the overflow purge so they cannot drift
+        apart."""
         aid, tid = pair
         return any(
             p["thread_id"] == tid and aid in (p.get("agent_a"), p.get("agent_b"))
@@ -2227,8 +2162,7 @@ class SimulationEngine:
 
     async def _flush_pending_thread_decisions(self) -> None:
         """Retry any ThreadDecision rows queued by ``_close_thread`` after
-        exhausting its own in-call retry budget (M-7, opus review, audit
-        2026-09-10).
+        exhausting its own in-call retry budget.
 
         Called at the start of every main-loop tick and from the shutdown
         flush, so a DB outage that outlasts ``_close_thread``'s own budget
@@ -2236,29 +2170,23 @@ class SimulationEngine:
         permanently. A successful write here propagates ``decision_id`` onto
         any CURRENT ``ProposalRef`` for the same thread on either side — the
         ref was left with ``thread_decision_id=None`` when ``_close_thread``
-        itself could not obtain an id (documented behaviour: the ref reads
-        as "not yet reviewed against a decision" until this flush succeeds).
+        itself could not obtain an id.
 
-        N-5 (opus review, audit 2026-09-10): a PI engagement that reviewed a
-        proposal in this same thread WHILE its decision id was still deferred
-        (`_check_pi_proposal_review` queued it in
-        `_deferred_implicit_reviews`, since `_persist_implicit_proposal_review`
-        no-ops on a `None` id) is re-run here for any matching agent now that
-        a real id exists — otherwise that engagement's review would be lost
-        forever (`proposal.reviewed` is already `True`, so the caller's own
-        guard never calls the persist again for this thread).
+        A PI engagement that reviewed a proposal in this same thread WHILE
+        its decision id was still deferred (`_check_pi_proposal_review`
+        queued it in `_deferred_implicit_reviews`, since
+        `_persist_implicit_proposal_review` no-ops on a `None` id) is re-run
+        here for any matching agent now that a real id exists — otherwise
+        that engagement's review would be lost forever (proposal.reviewed is
+        already True, so the caller's own guard never calls the persist again
+        for this thread).
 
-        N-6 (opus review, audit 2026-09-10): each entry gets exactly ONE
-        attempt here (``max_attempts=1``), not
-        ``_close_thread``'s own ``THREAD_DECISION_WRITE_MAX_ATTEMPTS``-attempt
-        budget. This method already IS the retry mechanism, called again
-        every tick — paying a multi-attempt, multi-sleep budget for every
-        still-failing entry on every single tick would stall the main loop
-        (Slack polling, PI DMs, everything) for
-        ``len(_pending_thread_decisions) * (in-call attempts - 1) *
-        THREAD_DECISION_RETRY_BACKOFF_S`` seconds per tick during a
-        sustained outage, proportional to queue size on top of the outage
-        itself.
+        Each entry gets exactly ONE attempt here (``max_attempts=1``), not
+        ``_close_thread``'s own multi-attempt budget: this method already IS
+        the retry mechanism, called again every tick, so paying a
+        multi-attempt, multi-sleep budget for every still-failing entry every
+        tick would stall the main loop proportional to queue size, on top of
+        the outage itself.
         """
         if not self._pending_thread_decisions:
             return
@@ -2276,8 +2204,8 @@ class SimulationEngine:
                     for p in a.state.pending_proposals:
                         if p.thread_id == payload["thread_id"]:
                             p.thread_decision_id = decision_id
-                # S-3 (audit 2026-09-10): the deferred-review replay needs
-                # only `aid` and the now-known `decision_id`, not a live
+                # The deferred-review replay needs only `aid` and the
+                # now-known `decision_id`, not a live
                 # Agent object — `_persist_implicit_proposal_review` reads
                 # from the DB. It must run even when `aid` has since been
                 # removed from the live roster (self.agents), or the queued
@@ -2298,13 +2226,12 @@ class SimulationEngine:
     ) -> None:
         """Close a thread and log the decision."""
         if thread.status == "closed":
-            # Idempotency guard (COR-7): a second call against the same
-            # ThreadState instance would otherwise double the ThreadDecision
-            # row, the PI DM, both agents' memory updates, and the
-            # _prior_threads dedup-context entry. Placed before the DB write
-            # (Task 20.10/COR-13 reordered this method so that write happens
-            # first) rather than after it, since the write itself is one of
-            # the things a repeat call must not re-trigger. A genuine reopen
+            # Idempotency guard: a second call against the same ThreadState
+            # instance would otherwise double the ThreadDecision row, the PI
+            # DM, both agents' memory updates, and the _prior_threads
+            # dedup-context entry. Placed before the DB write rather than
+            # after it, since the write itself is one of the things a repeat
+            # call must not re-trigger. A genuine reopen
             # builds a NEW ThreadState (see _reopen_thread / the web reopen
             # in _sync_proposal_reviews_from_db), so a legitimately reopened
             # and re-closed thread is unaffected — it runs this method on a
@@ -2318,15 +2245,14 @@ class SimulationEngine:
         self._closed_thread_ids.add(thread.thread_id)
         self._prior_thread_accounted.add(thread.thread_id)
 
-        # Log to DB FIRST (moved ahead of the dedup-context append and the
+        # Log to DB FIRST (ahead of the dedup-context append and the
         # other-agent close) so decision.id is available for the
-        # ProposalRef(s) constructed below. See COR-13.
+        # ProposalRef(s) constructed below.
         # decision.id is readable after commit because every session factory
-        # in this codebase sets expire_on_commit=False (src/database.py:41,
-        # src/agent/main.py, src/worker/main.py, src/agent/grantbot.py,
-        # tests/conftest.py) — stated explicitly so a later "cleanup" does not
-        # move this read before the commit under the mistaken belief it is
-        # needed to dodge an expired-attribute refresh (red-team m7).
+        # in this codebase sets expire_on_commit=False — stated explicitly so
+        # a later "cleanup" does not move this read before the commit under
+        # the mistaken belief it is needed to dodge an expired-attribute
+        # refresh.
         decision_id: uuid.UUID | None = None
         if self.session_factory and self.simulation_run_id:
             payload = {
@@ -2337,12 +2263,9 @@ class SimulationEngine:
                 "outcome": outcome,
                 "summary_text": summary_text,
             }
-            # M-7 (opus review, audit 2026-09-10): a single try/except here
-            # used to log-and-drop the decision outright on any DB error —
-            # the live run's log showed a bare `TimeoutError()` (str() is
-            # empty) following a 30s blocking Slack retry sleep, losing the
-            # ThreadDecision (the product of the whole conversation) with no
-            # trace it ever existed. _write_thread_decision_with_retry()
+            # A single try/except here must not log-and-drop the decision
+            # outright on any DB error — the ThreadDecision is the product of
+            # the whole conversation. _write_thread_decision_with_retry()
             # retries in-call; a decision that still fails every attempt is
             # queued in `_pending_thread_decisions` instead of dropped — see
             # `_flush_pending_thread_decisions()`.
@@ -2350,9 +2273,9 @@ class SimulationEngine:
             if decision_id is None:
                 self._enqueue_pending_thread_decision(payload)
 
-        # Track for Phase 5 dedup context. Carries thread_id (missing before —
-        # COR-7) so a future reader can tell two entries apart or dedup by it;
-        # the idempotency guard above is what actually prevents an accidental
+        # Track for Phase 5 dedup context. Carries thread_id so a future
+        # reader can tell two entries apart or dedup by it; the idempotency
+        # guard above is what actually prevents an accidental
         # duplicate append for the same close event.
         pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
         self._prior_threads.setdefault(pair_key, []).append({
@@ -2414,7 +2337,7 @@ class SimulationEngine:
         # Update working memory for both agents
         # summary_text is derived from a cross-agent conversation, so fence it
         # as untrusted before it lands in working memory (which is later fed
-        # back into prompts) (SEC-14).
+        # back into prompts).
         event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
         if summary_text:
             event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
@@ -2568,7 +2491,7 @@ class SimulationEngine:
         re-polled and replied-to forever, producing noisy error logs and —
         worse — cascading top-level posts.
 
-        Defensive (#20 C1): refuse when the root is DB-only (``slack_ts`` is
+        Defensive: refuse when the root is DB-only (``slack_ts`` is
         ``None``) — Slack has never seen this thread, so a ``ThreadNotFound``
         for it is a caller mistranslation, not proof the thread is dead.
         Every current caller already translates via ``_slack_parent_ts``
@@ -2602,30 +2525,28 @@ class SimulationEngine:
             if removed:
                 evicted_from += 1
         self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
-        # NOT a discard, and an ADD rather than a no-op (red-team m1): a dead
-        # thread (Slack deleted the parent) must come out of this eviction
-        # CLOSED regardless of whether it already was — it gains nothing from
-        # being reopenable (its history is gone from the log two lines below).
-        # The old `.discard()` here un-closed a thread the outcome machinery
-        # had already finalized, which is what let a stale ThreadDecision keep
-        # scheduling replies to a grave. See COR-1c.
+        # This must ADD, not discard-then-leave-unset: a dead thread (Slack
+        # deleted the parent) must come out of this eviction CLOSED
+        # regardless of whether it already was — it gains nothing from being
+        # reopenable (its history is gone from the log two lines below).
+        # Un-closing a thread the outcome machinery had already finalized
+        # would let a stale ThreadDecision keep scheduling replies to a grave.
         #
         # Both this marker and _dead_thread_ids below are in-process only:
         # _rebuild_agent_state derives its closed-thread set from
         # ThreadDecision rows, and eviction writes none, so a restart still
-        # re-hydrates a dead thread from the DB (pre-existing behaviour, not a
-        # regression this task introduces — a durable eviction marker is a
-        # deliberate follow-up, not in scope here).
+        # re-hydrates a dead thread from the DB (a durable eviction marker is
+        # a deliberate follow-up, not in scope here).
         self._closed_thread_ids.add(thread_id)
         # Tombstone: unlike _closed_thread_ids, NEVER discarded for this
-        # thread_id. Without it, _poll_inbound_from_db's 5-minute lookback
+        # thread_id. Without it, _poll_inbound_from_db's lookback window
         # would re-ingest a PI's DB row for this now-purged thread (the
         # dedup-by-get_entry check no longer finds it) and
         # _handle_pi_inbound_entry would see thread_id in _closed_thread_ids
         # and call _hydrate_thread_from_db + _reopen_thread — resurrecting a
         # thread whose Slack parent is gone, which fails to post again,
         # re-evicts, and repeats every tick until the row ages out of the
-        # lookback. See COR-1c fix round 1 (C1).
+        # lookback.
         self._dead_thread_ids.add(thread_id)
         purged = self.message_log.purge_thread(thread_id)
         if evicted_from or purged:
@@ -2815,10 +2736,9 @@ class SimulationEngine:
     ) -> dict[str, list[dict]]:
         """Return {other_agent_id: [thread summaries]} visible at the given visibility level.
 
-        Implements G3 (visibility-filtered dedup context): a thread_decision
+        Implements visibility-filtered dedup context: a thread_decision
         with ``origin_visibility='collab_private'`` never surfaces in a
-        ``public``-channel Phase 5 prompt. See
-        specs/privacy-and-channel-visibility.md §G3.
+        ``public``-channel Phase 5 prompt.
         """
         result: dict[str, list[dict]] = {}
         for (a, b), threads in self._prior_threads.items():
@@ -2837,7 +2757,7 @@ class SimulationEngine:
         return result
 
     def _note_phase5_post_failure(self, agent: Agent, target_post_id: str) -> None:
-        """Two-strike backoff for a Slack-refused Phase 5 reply (#20 I1).
+        """Two-strike backoff for a Slack-refused Phase 5 reply.
 
         Mirrors ThreadState.post_failure_count's shape, tracked per
         (agent_id, target_post_id) on the engine instead — see
@@ -3072,10 +2992,10 @@ class SimulationEngine:
         finally:
             # Restore unconditionally — a raise anywhere above must not
             # permanently narrow interesting_posts to this turn's filtered
-            # subset. See E7d.
+            # subset.
             agent.state.interesting_posts = original_posts
 
-        # Mid-turn rate gate (E6-1) — see _phase4_reply_threads for the same
+        # Mid-turn rate gate — see _phase4_reply_threads for the same
         # check and its rationale. Phase 5 runs after Phase 4 in the same
         # turn, so it needs its own check even though _turn_eligible already
         # passed at turn selection.
@@ -3131,21 +3051,19 @@ class SimulationEngine:
             post_type = action_data.get("post_type", "")
 
             # A new post goes only where the model actually named a channel this
-            # engine knows. The old `.get("channel", "general")` default turned a
-            # malformed response into a post in #general — a channel that need
-            # not even exist in the workspace (seen live on copi-test, where the
-            # roster is collapsed to one probe channel). Missing or unknown is
-            # unparseable, exactly like a missing `action` above. Replies are
-            # not gated here: their channel comes from the target post (COR-9b).
-            # See audit 2026-09-08 RC-15. This check runs BEFORE the skip-backoff
-            # reset below (REV4-4) so a refused new_post increments
+            # engine knows: defaulting a missing/malformed channel to
+            # "general" could post there even if it doesn't exist in the
+            # workspace. Missing or unknown is unparseable, exactly like a
+            # missing `action` above. Replies are not gated here: their
+            # channel comes from the target post. This check runs BEFORE the
+            # skip-backoff reset below so a refused new_post increments
             # consecutive_phase5_skips and leaves last_phase5_action_time alone,
             # exactly like every sibling rejection further down this method,
             # instead of being counted as a real action that never happened.
             if action == "new_post":
-                # K-6 (audit 2026-09-10 RC-15 residual): `_channel_visibility`
-                # is a single process-wide map holding every collab_private
-                # channel discovered for EVERY pair this run, not just ones
+                # `_channel_visibility` is a single process-wide map holding
+                # every collab_private channel discovered for EVERY pair this
+                # run, not just ones
                 # this agent belongs to — membership there alone would let an
                 # agent name another pair's private channel and pass this
                 # check. A private channel is only "known" to THIS agent via
@@ -3177,7 +3095,6 @@ class SimulationEngine:
             # publicly while still threading onto the private root's ts. Falls
             # back to the LLM's value only if the target isn't in the log
             # (e.g. windowed out) — better to trust it than refuse to reply.
-            # See COR-9b.
             if action == "reply" and target_post_id:
                 target_entry = self.message_log.get_entry(target_post_id)
                 if target_entry:
@@ -3229,7 +3146,7 @@ class SimulationEngine:
             # action the LLM actually chose, exactly as blocked_for_regular
             # does above — otherwise one funding/PI-priority candidate in
             # interesting_posts makes the cap unenforceable for the rest of
-            # the day. See red-team M4.
+            # the day.
             if today_posts >= settings.daily_post_cap:
                 cap_exempt = (
                     post_type == "funding_collab"
@@ -3256,12 +3173,11 @@ class SimulationEngine:
             if self._llm_log_buffer:
                 self._llm_log_buffer[-1]["channel"] = channel
 
-            # Authorship guard (issue #29) — one gate for both the reply and
-            # new-post branches below. Runs on the ORIGINAL draft, BEFORE the
+            # Authorship guard — one gate for both the reply and new-post
+            # branches below. Runs on the ORIGINAL draft, BEFORE the
             # cohort-tag strip: stripping a disallowed co-author's @tag first
             # would blind the tagged-co-author check to exactly the
-            # fabrication it exists to catch (audit finding I1). The gate is
-            # read-only, so the swap is safe.
+            # fabrication it exists to catch.
             authorship_reason = self._reject_ungrounded_authorship(agent, message_text)
             if authorship_reason:
                 logger.warning(
@@ -3377,7 +3293,7 @@ class SimulationEngine:
                 # New top-level post
                 posted = await self._post_message(agent.agent_id, channel, message_text)
                 if not posted:
-                    # #20 I1: unlike the two reply branches above, there is no
+                    # Unlike the two reply branches above, there is no
                     # target_post_id/PostRef and no ThreadState here — each
                     # turn's "new post" is a fresh LLM decision with no
                     # persistent object across turns to hang a two-strike
@@ -3407,9 +3323,8 @@ class SimulationEngine:
             # finalizes the refined proposal (the flat path has no
             # _check_thread_outcome). Runs for either action since both post flat.
             # Gated on `posted`: a suppressed post (empty after strip, an
-            # authorship rejection, or COR-1b's connected-client-failed path)
+            # authorship rejection, or a connected-client-failed path)
             # never reached the channel, so there is nothing to finalize against.
-            # See COR-1d.
             if (
                 posted
                 and message_text
@@ -3432,14 +3347,14 @@ class SimulationEngine:
         Phase 4 replies, Phase 5 posts, private-channel messages — rather than just
         the one call site Phase 5 used to have.
 
-        Three deliberate behaviours (.notes/cohort-system-v2.md §9):
+        Three deliberate behaviours:
 
         - The whole mention is removed and the surrounding whitespace normalised.
           Keeping the bare name ("Great point WisemanBot") reads like an addressed
           message that isn't one.
         - An unknown bot name is left alone and logged at WARNING. A name missing
           from ``_bot_name_to_id`` means the roster is lagging, which is an
-          operational problem, not a policy decision — fail open, loudly (§5.1).
+          operational problem, not a policy decision — fail open, loudly.
         - Self-mentions are never stripped.
 
         Strips are counted per agent and surfaced in the admin UI: a high rate means
@@ -3519,7 +3434,7 @@ class SimulationEngine:
                 continue
             tagged[bot_name] = self._lab_record_for(target_id)
 
-        # Prose-named labs (audit finding I4): "co-authored ... with the Good
+        # Prose-named labs — "co-authored ... with the Good
         # lab" dodges the @-tag scan above. Resolve capitalized "<Name> lab"
         # mentions through the roster (PI last name or agent_id) and enforce
         # their records exactly like a tagged bot's. Deliberately
@@ -3676,8 +3591,7 @@ class SimulationEngine:
                 continue
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
-                # M-8 (opus review, audit 2026-09-10): off the event loop —
-                # see the identical note on _post_message's post_message call.
+                # Runs off the event loop; see run_slack_call's docstring.
                 messages = await run_slack_call(client.poll_channel_messages, ch_id, oldest=oldest)
                 # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
                 # a parent once it has replies, and the transport nulls that at ingest
@@ -3764,7 +3678,7 @@ class SimulationEngine:
                     # Check if PI message references a proposal (clears pending block).
                     # pi_agent_ids (computed above at the human-message branch) is the
                     # authorization: only agents THIS Slack user is a registered PI/
-                    # delegate for. See COR-5.
+                    # delegate for.
                     await self._check_pi_proposal_review(
                         entry, authorized_agent_ids=set(pi_agent_ids),
                     )
@@ -3794,7 +3708,7 @@ class SimulationEngine:
                       # PI tagged their bot in a top-level post or reply —
                       # either the literal "@BotName" form or a real Slack
                       # <@Uxxx> mention (what a human typing in Slack actually
-                      # produces once autocomplete fires). See COR-8.
+                      # produces once autocomplete fires).
                       tagged_agent_ids = {
                           self._bot_name_to_id.get(m, m)
                           for m in extract_bot_mentions(
@@ -3814,20 +3728,19 @@ class SimulationEngine:
     def _record_pi_inbound_attempt(self, message_ts: str) -> int:
         """Increment the in-process attempt counter for ``message_ts``.
 
-        A plain count with no time decay (REV4-5 was reverted by the follow-up
-        review): a decay keyed on the last attempt made PI_INBOUND_MAX_ATTEMPTS
-        unreachable whenever consecutive polls were further apart than the
-        window — which one throttled agent turn can be — so a deterministically
-        failing row was re-run forever. Entries live until the row is stamped
-        terminal, succeeds, or drops out of the polled batch (see
-        _prune_stale_pi_inbound_attempts)."""
+        A plain count with no time decay: decaying by the last-attempt time
+        would make PI_INBOUND_MAX_ATTEMPTS unreachable whenever consecutive
+        polls were further apart than the window — which one throttled agent
+        turn can be — so a deterministically failing row would be re-run
+        forever. Entries live until the row is stamped terminal, succeeds, or
+        drops out of the polled batch (see _prune_stale_pi_inbound_attempts)."""
         attempts = self._pi_inbound_attempts.get(message_ts, (0, 0.0))[0] + 1
         self._pi_inbound_attempts[message_ts] = (attempts, time.monotonic())
         return attempts
 
     def _record_pi_inbound_lookup_failure(self, message_ts: str) -> int:
         """Increment the SEPARATE PiOwnershipLookupFailed counter for
-        ``message_ts`` (S-4, audit 2026-09-10).
+        ``message_ts``.
 
         Deliberately its own dict/cap, not `_record_pi_inbound_attempt`'s:
         a transient DB failure resolving PI ownership must not spend the
@@ -3847,28 +3760,22 @@ class SimulationEngine:
         bounds the dict for every other exit path without any time window."""
         for ts in [ts for ts in self._pi_inbound_attempts if ts not in current_batch]:
             del self._pi_inbound_attempts[ts]
-        # S-4 (audit 2026-09-10): same bounding for the lookup-failure counter.
+        # Same bounding for the lookup-failure counter.
         for ts in [ts for ts in self._pi_inbound_lookup_failures if ts not in current_batch]:
             del self._pi_inbound_lookup_failures[ts]
         self._pi_inbound_handled_pending_mark &= current_batch
-        # M-5 (opus review, audit 2026-09-10): same bounding for the
-        # fallback-stamp attempt counter.
+        # Same bounding for the fallback-stamp attempt counter.
         for ts in [ts for ts in self._pi_inbound_fallback_attempts if ts not in current_batch]:
             del self._pi_inbound_fallback_attempts[ts]
-        # N-7 (opus review, audit 2026-09-10, correcting M-5's rationale
-        # above): `_pi_inbound_parked` IS pruned here too. The M-5 comment
-        # this replaces reasoned "once it ages out of the batch entirely
-        # there is nothing left to prune it FOR" -- but a parked row's whole
-        # point is that both its durable write paths are dead, so nothing
-        # ever moves it to HANDLED; if it keeps satisfying the
-        # cursor-independent PENDING/INGESTED branch of `_poll_inbound_from_db`'s
-        # query it never leaves the batch at all, and this set grows by one
-        # entry per newly-parked row for the life of the process. Pruning
-        # whenever a row DOES leave the batch (superseded, deleted, or
-        # actually resolved some other way) is a pure bound with no downside:
-        # if the same message_ts is later polled again, it is simply
-        # re-parked from scratch (a fresh terminal failure re-derives the
-        # same outcome; see M-5's original parking logic below).
+        # `_pi_inbound_parked` is pruned here too: a parked row's whole point
+        # is that both its durable write paths are dead, so nothing ever
+        # moves it to HANDLED. If it keeps satisfying the cursor-independent
+        # PENDING/INGESTED branch of `_poll_inbound_from_db`'s query it never
+        # leaves the batch at all, so pruning must happen whenever a row DOES
+        # leave the batch (superseded, deleted, or actually resolved some
+        # other way) rather than relying on it aging out. If the same
+        # message_ts is later polled again, it is simply re-parked from
+        # scratch (a fresh terminal failure re-derives the same outcome).
         self._pi_inbound_parked &= current_batch
 
     async def _poll_inbound_from_db(self) -> None:
@@ -3895,18 +3802,17 @@ class SimulationEngine:
                         sa_or(
                             # Cursor over created_at (the DB server's clock), with a
                             # lookback so a row that committed after the cursor
-                            # advanced past its stamp is still caught (H2). Re-scanned
+                            # advanced past its stamp is still caught. Re-scanned
                             # rows are free — the log dedup below skips anything
-                            # already ingested. See PI_INBOX_LOOKBACK_S (H2 + R3).
+                            # already ingested. See PI_INBOX_LOOKBACK_S.
                             AgentMessage.created_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK,
-                            # A row explicitly marked 'pending' at write time (RC-2)
+                            # A row explicitly marked 'pending' at write time
                             # is fetched regardless of how far behind the cursor it
                             # is — this is exactly the recovery path for a PI
                             # message written while agent-run was down, which would
                             # otherwise age past the lookback window before the
                             # process ever came back to see it. 'ingested' is ORed
-                            # in too (SEC-F2, opus review, audit 2026-09-08): a row
-                            # whose handler was interrupted mid-flight (process
+                            # in too: a row whose handler was interrupted mid-flight (process
                             # restart between the INGESTED write and HANDLED)
                             # committed 'ingested', not 'pending', and without this
                             # the cursor-independent recovery path would never see
@@ -3929,14 +3835,13 @@ class SimulationEngine:
         self._prune_stale_pi_inbound_attempts({r.message_ts for r in rows if r.message_ts})
 
         for r in rows:
-            # M-5 (opus review, audit 2026-09-10): a row whose id-based
-            # fallback stamp itself persistently failed has already been
-            # logged once (ERROR) and parked -- both durable write paths for
-            # it are established dead ends, so skip it entirely rather than
-            # re-attempt anything or re-log every poll.
+            # A row whose id-based fallback stamp itself persistently failed
+            # has already been logged once (ERROR) and parked -- both durable
+            # write paths for it are established dead ends, so skip it
+            # entirely rather than re-attempt anything or re-log every poll.
             if r.message_ts and r.message_ts in self._pi_inbound_parked:
                 continue
-            # COR-10(3): dedup for a PI row reads the durable handled-marker,
+            # Dedup for a PI row reads the durable handled-marker,
             # not the log entry, because the append now runs ahead of the
             # handler. NULL means "no inbound poller has claimed this row",
             # which is every pre-0029 row and every row _poll_channels appended
@@ -3957,7 +3862,7 @@ class SimulationEngine:
                 # prior poll ingested it) — skip re-processing, but the cursor
                 # still advances: this row is fully accounted for.
                 #
-                # A4 (opus review, audit 2026-09-08): a 'pending'/'ingested' row
+                # A 'pending'/'ingested' row
                 # can only land in THIS branch via `not r.message_ts` (state
                 # None/HANDLED already fall out of the cursor-independent
                 # disjunct or the dedup check above) — stamp it HANDLED so it
@@ -3976,18 +3881,16 @@ class SimulationEngine:
                 # this row would otherwise be re-ingested every tick within the
                 # lookback window. Re-appending it (and, for a PI row, running
                 # _handle_pi_inbound_entry) would re-hydrate and reopen a
-                # thread whose Slack parent is gone — a resurrection loop. See
-                # COR-1c fix round 1 (C1).
+                # thread whose Slack parent is gone — a resurrection loop.
                 #
-                # REV3-2 (opus review, audit 2026-09-08): route through the
-                # SEC2-1 attempt counter rather than stamping HANDLED on the
-                # very first tombstone match. _dead_thread_ids is in-process
-                # only and reset on restart, so a thread wrongly tombstoned by
-                # a TRANSIENT ThreadNotFound must not be permanently buried —
-                # a restart before the cap is reached clears the tombstone and
-                # the row is processed normally on the next poll. Only past
-                # PI_INBOUND_MAX_ATTEMPTS is it stamped terminal (A4's
-                # original concern: otherwise a genuinely dead thread's row
+                # Route through the attempt counter rather than stamping
+                # HANDLED on the very first tombstone match. _dead_thread_ids
+                # is in-process only and reset on restart, so a thread
+                # wrongly tombstoned by a TRANSIENT ThreadNotFound must not be
+                # permanently buried — a restart before the cap is reached
+                # clears the tombstone and the row is processed normally on
+                # the next poll. Only past PI_INBOUND_MAX_ATTEMPTS is it
+                # stamped terminal (otherwise a genuinely dead thread's row
                 # is re-selected via the cursor-independent 'pending'/
                 # 'ingested' disjunct forever).
                 if not r.is_bot:
@@ -3998,12 +3901,12 @@ class SimulationEngine:
                             "thread after %d attempts",
                             r.channel_name, r.message_ts, attempts,
                         )
-                        # K-7 (audit 2026-09-10): only forget the attempt
-                        # count if the HANDLED write actually committed — a
-                        # failed write leaves the row 'ingested'/'pending', so
-                        # popping unconditionally would forget every attempt
-                        # already spent and let SEC2-1's cap restart from zero
-                        # on the very next poll of the same row.
+                        # Only forget the attempt count if the HANDLED write
+                        # actually committed — a failed write leaves the row
+                        # 'ingested'/'pending', so popping unconditionally
+                        # would forget every attempt already spent and let the
+                        # cap restart from zero on the very next poll of the
+                        # same row.
                         if await self._mark_pi_inbound_row_handled(r.id):
                             self._pi_inbound_attempts.pop(r.message_ts, None)
                 if r.created_at and r.created_at > self._pi_inbox_cursor:
@@ -4023,33 +3926,31 @@ class SimulationEngine:
             )
             if not r.is_bot:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
-                # SEC-F2/A1 (opus review, audit 2026-09-08): a 'pending' (or
-                # legacy NULL-state) row is marked INGESTED before the append,
-                # and a failed mark write skips the append AND the handler
-                # entirely this tick — leaving the row's DB state untouched so
-                # it is refetched next poll. Without this, a swallowed mark
-                # failure could still let the append run, and a NULL-state row
-                # that is now `in_log` matches the pre-0029 fallback
-                # `state is None and in_log` skip below forever, on top of
-                # A1's original bug: an INGESTED marker written only for
-                # `state is None` never covered a row already stamped
-                # 'pending' at insert (RC-2's default), so a raising handler
-                # left it looking untouched instead of recording that an
-                # attempt was made.
+                # A 'pending' (or legacy NULL-state) row is marked INGESTED
+                # before the append, and a failed mark write skips the append
+                # AND the handler entirely this tick — leaving the row's DB
+                # state untouched so it is refetched next poll. Without this,
+                # a swallowed mark failure could still let the append run, and
+                # a NULL-state row that is now `in_log` would match the
+                # legacy `state is None and in_log` skip below forever; an
+                # INGESTED marker written only for `state is None` would also
+                # never cover a row already stamped 'pending' at insert, so a
+                # raising handler would leave it looking untouched instead of
+                # recording that an attempt was made.
                 if state is None or state == PI_INBOUND_PENDING:
                     marked = await self._mark_pi_inbound_state(
                         r.message_ts, PI_INBOUND_INGESTED
                     )
                     if not marked:
-                        # K-8 (audit 2026-09-10): a persistently failing
-                        # INGESTED write used to `continue` with no attempt
-                        # accounting at all — an unbounded, silent retry that
-                        # never engaged SEC2-1's cap (unlike every other
-                        # give-up path in this loop). Record an attempt here
-                        # too, and once it is exhausted, give up the same way:
-                        # stamp the row HANDLED (only forgetting the count if
-                        # that write itself commits — see K-7) so it stops
-                        # being cursor-independently re-selected forever.
+                        # A persistently failing INGESTED write must not
+                        # `continue` with no attempt accounting at all — that
+                        # would be an unbounded, silent retry that never
+                        # engages the cap (unlike every other give-up path in
+                        # this loop). Record an attempt here too, and once it
+                        # is exhausted, give up the same way: stamp the row
+                        # HANDLED (only forgetting the count if that write
+                        # itself commits) so it stops being
+                        # cursor-independently re-selected forever.
                         attempts = self._record_pi_inbound_attempt(r.message_ts)
                         if attempts >= PI_INBOUND_MAX_ATTEMPTS:
                             logger.error(
@@ -4070,22 +3971,17 @@ class SimulationEngine:
                             r.message_ts, attempts, PI_INBOUND_MAX_ATTEMPTS,
                         )
                         continue
-                # COR-10(3), ruled option (a): the append is what records the
-                # PI's TEXT, so it happens BEFORE the handler and the cursor
-                # advance happens after it — "apply side effects before ... the
-                # cursor advance", with the row itself never at risk. The
-                # marker, not the log entry, is what keeps the retry from
-                # re-applying side effects, so appending first no longer
-                # re-creates the defect COR-10(3) was filed for. This supersedes
-                # Decision D25 (which kept the row but lost the triggers) and
-                # this session's c4de842 ordering (which ran the handler first
-                # and so lost the row outright once it aged past
-                # PI_INBOX_LOOKBACK_S). Ruling:
-                # docs/plans/2026-09-04-decisions/task-7.md.
+                # The append is what records the PI's TEXT, so it happens
+                # BEFORE the handler, and the cursor advance happens after it
+                # — apply side effects before advancing the cursor, with the
+                # row itself never at risk. The marker, not the log entry, is
+                # what keeps the retry from re-applying side effects, so
+                # appending first does not risk losing the row: running the
+                # handler first, instead, could lose the row outright once it
+                # aged past PI_INBOX_LOOKBACK_S.
                 if not in_log:
                     self.message_log.append(entry)
-                # K-2 follow-up #2 (opus review, audit 2026-09-10): if the
-                # handler already succeeded on a prior tick and only the
+                # If the handler already succeeded on a prior tick and only the
                 # HANDLED write below kept failing, this row's message_ts is
                 # in `_pi_inbound_handled_pending_mark` — skip straight to
                 # retrying the write rather than re-running the handler and
@@ -4094,27 +3990,26 @@ class SimulationEngine:
                 if not already_applied:
                     try:
                         await self._handle_pi_inbound_entry(entry)
-                        # L-5 (opus review, audit 2026-09-10): pop the
-                        # counter the MOMENT the handler succeeds, before the
-                        # HANDLED write below is even attempted. The handler
-                        # and the write share this same message_ts-keyed
-                        # counter; without popping here, a handler that had
-                        # to retry a few times before succeeding leaves the
-                        # write starting from whatever the handler already
-                        # spent — a write failure unrelated to the handler's
-                        # own transient errors could then hit
-                        # PI_INBOUND_MAX_ATTEMPTS on its very first attempt.
-                        # Popping only on this success path (not on a later
-                        # already-applied poll, which never reaches this
-                        # line) still preserves K-2 follow-up #2's guarantee
-                        # that a persistently-failing write is capped on its
-                        # own, since the counter is left alone on every
-                        # subsequent already_applied=True poll.
+                        # Pop the counter the MOMENT the handler succeeds,
+                        # before the HANDLED write below is even attempted.
+                        # The handler and the write share this same
+                        # message_ts-keyed counter; without popping here, a
+                        # handler that had to retry a few times before
+                        # succeeding would leave the write starting from
+                        # whatever the handler already spent — a write
+                        # failure unrelated to the handler's own transient
+                        # errors could then hit PI_INBOUND_MAX_ATTEMPTS on its
+                        # very first attempt. Popping only on this success
+                        # path (not on a later already-applied poll, which
+                        # never reaches this line) still guarantees that a
+                        # persistently-failing write is capped on its own,
+                        # since the counter is left alone on every subsequent
+                        # already_applied=True poll.
                         self._pi_inbound_attempts.pop(r.message_ts, None)
                         self._pi_inbound_lookup_failures.pop(r.message_ts, None)
                     except PiOwnershipLookupFailed as exc:
-                        # S-4 (audit 2026-09-10): a transient DB failure
-                        # resolving PI ownership must not spend the same
+                        # A transient DB failure resolving PI ownership must
+                        # not spend the same
                         # small PI_INBOUND_MAX_ATTEMPTS budget a
                         # deterministically failing handler uses — a 30s DB
                         # blip during a run of unlucky polls could otherwise
@@ -4152,9 +4047,9 @@ class SimulationEngine:
                                 entry.channel, entry.thread_ts or entry.ts, attempts, exc,
                             )
                             # Terminal: stop the cursor-independent 'ingested'
-                            # disjunct from re-selecting this row forever (SEC2-1).
+                            # disjunct from re-selecting this row forever.
                             # The PI's text is already in the log either way.
-                            # K-7 (audit 2026-09-10): only forget the attempt
+                            # Only forget the attempt
                             # count once the HANDLED write actually commits — a
                             # failed write leaves the row retryable, so popping
                             # unconditionally would reset the cap to zero on the
@@ -4180,14 +4075,13 @@ class SimulationEngine:
                         # non-idempotent side effect (e.g. a DM) that the failed
                         # attempt already ran.
                         continue
-                # K-2 follow-up #2 (opus review, audit 2026-09-10): the
-                # attempt counter used to be popped here unconditionally,
-                # before even trying this write — a persistently failing
-                # HANDLED write left the counter permanently empty, so the
-                # SEC2-1 cap never engaged and (pre `already_applied`, above)
-                # the handler re-ran every tick forever. It is now popped
-                # exactly once, on the success path above (L-5, same-day
-                # follow-up) — BEFORE this write is attempted, so the write
+                # The attempt counter must not be popped here
+                # unconditionally, before even trying this write — a
+                # persistently failing HANDLED write would leave the counter
+                # permanently empty, so the cap never engages and (pre
+                # `already_applied`, above) the handler re-runs every tick
+                # forever. It is instead popped exactly once, on the success
+                # path above, BEFORE this write is attempted, so the write
                 # gets its own full budget rather than whatever the handler's
                 # own retries already spent — and left alone on every
                 # subsequent already_applied=True poll, so the pending-mark
@@ -4206,8 +4100,7 @@ class SimulationEngine:
                     self._pi_inbound_handled_pending_mark.add(r.message_ts)
                     attempts = self._record_pi_inbound_attempt(r.message_ts)
                     if attempts >= PI_INBOUND_MAX_ATTEMPTS:
-                        # L-5 (opus review, audit 2026-09-10): WARNING, not
-                        # ERROR — the PI's side effects already ran
+                        # WARNING, not ERROR — the PI's side effects already ran
                         # successfully; only the durable marker write is
                         # exhausted, and the id-based fallback below still
                         # gets the row to terminal. That is strictly less
@@ -4224,13 +4117,12 @@ class SimulationEngine:
                             self._pi_inbound_handled_pending_mark.discard(r.message_ts)
                             self._pi_inbound_fallback_attempts.pop(r.message_ts, None)
                         else:
-                            # M-5 (opus review, audit 2026-09-10): the
-                            # id-based fallback stamp itself failed. This
-                            # branch used to do nothing here — the row stayed
-                            # in `_pi_inbound_handled_pending_mark`, and since
-                            # `_pi_inbound_attempts` was already AT
-                            # PI_INBOUND_MAX_ATTEMPTS, the very next poll hit
-                            # this SAME give-up branch again, forever: one
+                            # The id-based fallback stamp itself failed. This
+                            # branch must not do nothing here — otherwise the
+                            # row stays in `_pi_inbound_handled_pending_mark`,
+                            # and since `_pi_inbound_attempts` is already AT
+                            # PI_INBOUND_MAX_ATTEMPTS, the very next poll would
+                            # hit this SAME give-up branch again, forever: one
                             # WARNING and one fallback-stamp attempt per poll,
                             # with no terminal state. Track the fallback's OWN
                             # budget and park the row once IT is exhausted.
@@ -4277,8 +4169,7 @@ class SimulationEngine:
         ``(simulation_run_id, message_ts)``, which is the table's own unique
         constraint.
 
-        Returns whether the write committed (SEC-F2, opus review, audit
-        2026-09-08). A write failure is logged and swallowed rather than
+        Returns whether the write committed. A write failure is logged and swallowed rather than
         raised — ``_run_main_loop`` does not guard its pollers — but the
         caller marking INGESTED must see the failure: it skips running the
         handler this tick rather than risk appending the entry into the log
@@ -4309,8 +4200,7 @@ class SimulationEngine:
             return False
 
     async def _mark_pi_inbound_row_handled(self, row_id: uuid.UUID) -> bool:
-        """Stamp HANDLED on a PI row by primary key (A4, opus review, audit
-        2026-09-08).
+        """Stamp HANDLED on a PI row by primary key.
 
         A terminal skip branch in ``_poll_inbound_from_db`` (a falsy
         ``message_ts``, or a thread already tombstoned) has nothing left to do
@@ -4340,7 +4230,7 @@ class SimulationEngine:
             return False
 
     async def _agent_ids_owned_by_user(self, user_id: uuid.UUID | None) -> set[str]:
-        """Agents this user actually owns or represents (RC-1 / #20 COR-5).
+        """Agents this user actually owns or represents.
 
         The DB/web (and now e-mail) inbound path has a real sender identity
         since migration 0030 (``agent_messages.sender_user_id``), so ownership
@@ -4357,7 +4247,7 @@ class SimulationEngine:
         same empty set — it raises ``PiOwnershipLookupFailed`` so the caller
         treats this row as a failed attempt and retries it, rather than the
         handler returning normally and the poller stamping the row HANDLED
-        on what may be a transient DB blip (audit 2026-09-10 K-1).
+        on what may be a transient DB blip.
         """
         if not user_id or not self.session_factory:
             return set()
@@ -4395,11 +4285,10 @@ class SimulationEngine:
         ``_agent_ids_owned_by_user``). Every side effect below — clearing a
         pending-proposal block, reopening a closed thread, setting
         ``pi_context``/``has_pending_reply``/``has_pi_directive`` on an active
-        thread, and the ``@bot`` tag route — is restricted to that set. Before
-        migration 0030 this used to trust the thread's own participants
-        instead (any agent that had ever posted in the thread), which let PI A
-        drive PI B's agent in a thread the two agents share. See #20 COR-5 /
-        docs/plans/2026-09-08-audit-fixes.md RC-1.
+        thread, and the ``@bot`` tag route — is restricted to that set. Trusting
+        the thread's own participants instead (any agent that had ever posted
+        in the thread) would let PI A drive PI B's agent in a thread the two
+        agents share.
 
         A row with ``sender_user_id IS NULL`` — a bot-authored row (never
         reaches here; callers only invoke this for ``is_bot=False`` rows), a
@@ -4413,7 +4302,7 @@ class SimulationEngine:
         # (_evict_dead_thread). _poll_inbound_from_db already skips tombstoned
         # rows before calling here, but this guard is defense-in-depth against
         # any other caller — no hydrate, no reopen of a thread whose history
-        # was purged from the log. See COR-1c fix round 1 (C1).
+        # was purged from the log.
         if entry.ts in self._dead_thread_ids or (
             entry.thread_ts and entry.thread_ts in self._dead_thread_ids
         ):
@@ -4494,7 +4383,7 @@ class SimulationEngine:
         Without this, any message landing in the right thread_id cleared the
         block for whichever agent was waiting on it, regardless of who sent
         it — including another lab's PI, or (on the Slack channel poller) any
-        workspace human at all. See COR-5.
+        workspace human at all.
         """
         thread_ts = entry.thread_ts
         if not thread_ts or not authorized_agent_ids:
@@ -4517,8 +4406,7 @@ class SimulationEngine:
                         agent.agent_id, thread_ts,
                     )
                     if proposal.thread_decision_id is None:
-                        # N-5 (opus review, audit 2026-09-10): the
-                        # ThreadDecision write for this thread is still
+                        # The ThreadDecision write for this thread is still
                         # deferred (queued in `_pending_thread_decisions`) --
                         # `proposal.reviewed` is already `True` now, so this
                         # method's own guard above would never call this
@@ -4526,7 +4414,7 @@ class SimulationEngine:
                         # `_flush_pending_thread_decisions` can re-run the
                         # persist once it assigns a real id.
                         #
-                        # O-2 (audit 2026-09-10): only when that thread's
+                        # Only record it when that thread's
                         # payload is ACTUALLY queued in
                         # `_pending_thread_decisions` -- e.g. with
                         # `session_factory=None`, `_close_thread` never
@@ -4553,7 +4441,7 @@ class SimulationEngine:
         engagement rather than the explicit review form.
 
         `thread_decision_id` comes straight off the `ProposalRef` (the same
-        unified review key `_sync_proposal_reviews_from_db` uses — COR-13),
+        unified review key `_sync_proposal_reviews_from_db` uses),
         not a fresh lookup by thread_id: after a re-propose cycle mints a new
         ThreadDecision for the same thread_id, re-deriving by thread_id could
         pick the wrong (stale) decision. `None` (a proposal whose ThreadDecision
@@ -4561,7 +4449,7 @@ class SimulationEngine:
 
         An agent with no linked ``AgentRegistry.user_id`` gets the record on
         ``thread_decisions.pi_engaged_at`` instead of a review row — see the
-        branch below and docs/plans/2026-09-04-decisions/task-8.md.
+        branch below.
 
         rating=-1 is a dedicated sentinel — never confused with the explicit
         1-4 star rating or the reopen-with-guidance sentinel rating=0 (see
@@ -4588,19 +4476,17 @@ class SimulationEngine:
                     sa_select(AgentRegistry.user_id).where(AgentRegistry.agent_id == agent_id)
                 )).scalar_one_or_none()
                 if not user_id:
-                    # #20 COR-5. ProposalReview.user_id is NOT NULL, so a
+                    # ProposalReview.user_id is NOT NULL, so a
                     # backfilled/bulk-provisioned agent — or one whose PI
                     # deleted their account — can never get a review row here.
-                    # Making that column nullable was the obvious fix and was
-                    # rejected: it is ForeignKey("users.id",
-                    # ondelete="CASCADE") (models/agent_registry.py:82-84), so
-                    # deleting a PI would destroy the engine's own
-                    # block-clearing markers and every proposal that PI had
-                    # engaged with would re-block on the next restart. The
-                    # carrier is thread_decisions.pi_engaged_at instead — a
-                    # timestamp on the thread's own decision row, which
-                    # cascades from simulation_runs only. Ruling and rejected
-                    # alternatives: docs/plans/2026-09-04-decisions/task-8.md.
+                    # Making that column nullable is not an option: it is
+                    # ForeignKey("users.id", ondelete="CASCADE"), so deleting
+                    # a PI would destroy the engine's own block-clearing
+                    # markers and every proposal that PI had engaged with
+                    # would re-block on the next restart. The carrier is
+                    # thread_decisions.pi_engaged_at instead — a timestamp on
+                    # the thread's own decision row, which cascades from
+                    # simulation_runs only.
                     #
                     # The `IS NULL` predicate makes this write-once: a later
                     # engagement must not move the timestamp off the one that
@@ -4717,7 +4603,7 @@ class SimulationEngine:
         every restart — which is what forced the reopen mechanisms to redo
         their whole side effect (a fresh synthetic PI-guidance row, a fresh
         reply budget) every restart, forever. Best-effort: never raises,
-        matching _close_thread's own DB-write error handling. See COR-13.
+        matching _close_thread's own DB-write error handling.
         """
         if not self.session_factory:
             return
@@ -4766,12 +4652,10 @@ class SimulationEngine:
                 # slack_sdk re-raises non-HTTP transport failures (socket/SSL/
                 # DNS errors) unchanged — _call_with_retry only catches
                 # SlackApiError (slack_client.py:310-341) — so an unguarded
-                # call here kills the whole simulation on one flaky network
-                # blip. Both sibling pollers already guard per-item; this one
-                # didn't. See COR-10(1).
+                # call here would kill the whole simulation on one flaky
+                # network blip; guard per-item like the sibling pollers.
                 try:
-                    # M-8 (opus review, audit 2026-09-10): off the event loop
-                    # — see the identical note on _post_message's call.
+                    # Runs off the event loop; see run_slack_call's docstring.
                     messages = await run_slack_call(client.poll_dm_messages, pi_slack_id, oldest=oldest)
                 except Exception as exc:
                     logger.error("[%s] Failed to poll PI DMs: %s", agent_id, exc)
@@ -4799,10 +4683,10 @@ class SimulationEngine:
     async def _seed_pi_dm_cursor(self) -> None:
         """Start the DM poller's window past existing inbound DMs on startup.
 
-        Seeds only the cursor (max created_at — the DB server's clock, see
-        R3), which bounds the query window for performance. It no longer also
-        seeds ``_pi_dm_seen`` from the DB (RC-2): dedup against a row already
-        processed is now the durable ``handled_at`` column, which — unlike the
+        Seeds only the cursor (max created_at — the DB server's clock), which
+        bounds the query window for performance. It does not also seed
+        ``_pi_dm_seen`` from the DB: dedup against a row already
+        processed is instead the durable ``handled_at`` column, which — unlike the
         in-memory seen-set — survives a restart, so an unhandled DM older than
         the window is still found by ``_poll_pi_dms_from_db``'s ``handled_at
         IS NULL`` clause instead of being silently skipped. ``_pi_dm_seen``
@@ -4829,7 +4713,7 @@ class SimulationEngine:
             logger.warning("PI DM cursor seed failed: %s", exc)
 
     async def _mark_pi_dm_handled(self, dm_id: uuid.UUID) -> None:
-        """Durably mark one pi_dm_messages row as handled (RC-2).
+        """Durably mark one pi_dm_messages row as handled.
 
         Set once, after ``PIHandler.handle_dm`` returns OR after a handler
         exception is logged — one attempt, unlike the channel path's two-state
@@ -4868,16 +4752,15 @@ class SimulationEngine:
         instruction / feedback / question), then flips has_pi_directive so
         Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
 
-        RC-2: dedup is keyed on the durable ``handled_at`` column, not on
+        Dedup is keyed on the durable ``handled_at`` column, not on
         presence in the in-memory ``_pi_dm_seen`` set or on the lookback
-        window alone — both reset to nothing on every restart, which is
-        exactly how a DM written while ``agent-run`` was down used to lose its
-        side effects forever (the cursor jumps past it at startup, and the
-        window never reaches back far enough once enough time has passed).
+        window alone — both reset to nothing on every restart, which would
+        let a DM written while ``agent-run`` was down lose its side effects
+        forever (the cursor jumps past it at startup, and the window never
+        reaches back far enough once enough time has passed).
         The query still ORs in the existing lookback window, mirroring the
         channel poller's own 'pending' OR clause, so a late-committing row is
-        still caught even though its ``handled_at`` write hasn't landed yet
-        (H2).
+        still caught even though its ``handled_at`` write hasn't landed yet.
         """
         if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
             return
@@ -4895,9 +4778,9 @@ class SimulationEngine:
                         PiDmMessage.direction == "inbound",
                         sa_or(
                             # created_at, not posted_at, so the window doesn't
-                            # depend on the writing process's clock (R3).
+                            # depend on the writing process's clock.
                             PiDmMessage.created_at > floor,
-                            # The durable marker (RC-2): an unhandled row is
+                            # The durable marker: an unhandled row is
                             # always re-fetched, however far behind the
                             # cursor it has fallen — this is the recovery
                             # path for a DM written while agent-run was down.
@@ -4907,8 +4790,7 @@ class SimulationEngine:
                     .order_by(PiDmMessage.created_at.asc())
                 )).scalars().all()
 
-                # REV3-1 (opus review, audit 2026-09-08): resolve which
-                # unrostered agent_ids among the fetched rows genuinely have
+                # Resolve which unrostered agent_ids among the fetched rows genuinely have
                 # no AgentRegistry row at all, in the SAME session as the
                 # SELECT above so this stays one round trip per poll. Cheaper
                 # than a query per row, and self.agents alone is not the
@@ -4944,8 +4826,7 @@ class SimulationEngine:
                     # ran) — leave handled_at NULL so a later tick, once the
                     # roster catches up, can still process it.
                     continue
-                # A5 (opus review, audit 2026-09-08); REV3-1 tightens the
-                # test to "no AgentRegistry row at all": this agent_id does
+                # This test is "no AgentRegistry row at all": this agent_id does
                 # not exist, so nothing will ever process this row — mark it
                 # handled (terminal) rather than leave handled_at NULL, or it
                 # keeps matching the durable-marker recovery clause above and
@@ -5032,15 +4913,13 @@ class SimulationEngine:
             # (:3841). A DB-only root (slack_ts is None — minted while Slack
             # was off) has never been seen by Slack: polling it with the
             # canonical id gets a real thread_not_found, which downstream
-            # would misread as the thread being dead. Skip it instead. See
-            # #20 C1.
+            # would misread as the thread being dead. Skip it instead.
             slack_ts = self._slack_parent_ts(thread_id)
             if slack_ts is None:
                 continue
 
             try:
-                # M-8 (opus review, audit 2026-09-10): off the event loop —
-                # see the identical note on _post_message's call.
+                # Runs off the event loop; see run_slack_call's docstring.
                 replies = await run_slack_call(client.get_thread_replies, ch_id, slack_ts, oldest=oldest)
             except ThreadNotFound:
                 self._evict_dead_thread(thread_id)
@@ -5092,8 +4971,7 @@ class SimulationEngine:
                 # Mark proposal as reviewed — only for agents this PI actually
                 # owns. The `user_id not in pi_user_ids` guard above only
                 # proves the sender is SOME registered PI, not that they own
-                # the specific agent whose proposal is on this thread. See
-                # COR-5.
+                # the specific agent whose proposal is on this thread.
                 pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
                 await self._check_pi_proposal_review(
                     entry, authorized_agent_ids=set(pi_agent_ids),
@@ -5128,7 +5006,7 @@ class SimulationEngine:
 
     def _get_post_message_semaphore(self, agent_id: str) -> asyncio.Semaphore:
         """Lazily create and return the per-agent semaphore serializing the
-        Slack call in ``_post_message`` (N-8, opus review, audit 2026-09-10).
+        Slack call in ``_post_message``.
 
         ``setdefault`` on a plain dict, not a lock-guarded creation: the
         engine's own turn-taking already ensures at most one coroutine is
@@ -5179,7 +5057,7 @@ class SimulationEngine:
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
 
-        # Authorship guard, chokepoint pass (issue #29). The phase gates have
+        # Authorship guard, chokepoint pass. The phase gates have
         # already run for phase-4/phase-5 drafts (they own the backoff
         # counters); this pass exists so no future call site can bypass the
         # guard. Idempotent — a clean draft validates twice at negligible
@@ -5197,7 +5075,7 @@ class SimulationEngine:
         # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
         # messages — and cannot be bypassed by a new call site. Idempotent, so the
         # extra Phase 5 pass (which needs the cleaned text locally) is harmless.
-        # No-op when the gate is off for this agent. See v2 §9.
+        # No-op when the gate is off for this agent.
         if agent is not None:
             text = self._strip_disallowed_tags(text, agent) or text
 
@@ -5218,26 +5096,18 @@ class SimulationEngine:
             )
         elif client and client.is_connected:
             try:
-                # M-8 (opus review, audit 2026-09-10): routed through
-                # run_slack_call rather than called directly on the event
-                # loop -- a synchronous chat.postMessage blocked on a Slack
-                # Retry-After backoff (up to RATE_LIMIT_WAIT_BUDGET_SECONDS)
-                # used to stall every coroutine, timer, and asyncpg
-                # connection in the process for its whole duration. Exception
-                # identity/propagation is unchanged (run_slack_call
-                # guarantees this for a synchronous callable).
+                # Runs off the event loop; see run_slack_call's docstring.
                 #
-                # N-8 (opus review, audit 2026-09-10): the per-agent
-                # semaphore serializes concurrent `_post_message` calls for
-                # THIS agent on THIS same `AgentSlackClient` -- without it,
-                # M-8's pool lets two such calls run their `run_slack_call`
-                # on separate worker threads at once, which could land them
-                # on Slack out of order and let a `_resolve_channel_id` cache
-                # miss inside `client.post_message` fan out into one Slack
-                # call per concurrent post instead of resolving once.
-                # Cross-agent parallelism (the whole point of the M-8 pool)
-                # is unaffected -- only two calls for the SAME agent_id ever
-                # contend on this semaphore.
+                # The per-agent semaphore serializes concurrent
+                # `_post_message` calls for THIS agent on THIS same
+                # `AgentSlackClient` -- without it, two such calls could run
+                # their `run_slack_call` on separate worker threads at once,
+                # landing them on Slack out of order and letting a
+                # `_resolve_channel_id` cache miss inside `client.post_message`
+                # fan out into one Slack call per concurrent post instead of
+                # resolving once. Cross-agent parallelism is unaffected --
+                # only two calls for the SAME agent_id ever contend on this
+                # semaphore.
                 async with self._get_post_message_semaphore(agent_id):
                     result = await run_slack_call(
                         client.post_message, channel, text, thread_ts=slack_parent,
@@ -5266,22 +5136,17 @@ class SimulationEngine:
                 # mode); this is a connected client that tried and failed. Falling
                 # through to the shared mint-a-ts-and-persist logic below would
                 # count the turn and let the thread-outcome checks act on a
-                # message that does not exist on Slack. See COR-1b.
+                # message that does not exist on Slack.
                 # ...but do not DROP the message either. The DB is the durable store
-                # (specs/local-db-conversations.md), and returning False here without
-                # persisting lost the text outright — pinned as data loss by
-                # test_slack_lifecycle_live.py::test_posting_to_an_archived_channel_does_not_crash,
-                # which passes at 18ba52c and failed once COR-1b landed. That live test
-                # is skipped unless the copi-test credentials are exported, which is why
-                # the regression reached this branch unnoticed.
+                # (specs/local-db-conversations.md), and returning False here
+                # without persisting would lose the text outright.
                 #
                 # Record it the way the Slack-off path already does: a DB-only row with
                 # slack_ts=None and a locally-minted canonical id, so nothing claims a
                 # Slack identity the message does not have (`_slack_parent_ts` returns
                 # None for it and the mirror is correctly skipped). Then still report
                 # failure to the caller, so the turn is not counted and the two-strike
-                # post-failure backoff applies. That satisfies COR-1b's actual
-                # requirement — no phantom Slack row — without the data loss.
+                # post-failure backoff applies — no phantom Slack row, no data loss.
                 logger.error(
                     "[%s] Slack post to #%s failed (connected client, no result) "
                     "— recording it as a DB-only row and reporting the post as failed",
@@ -5319,9 +5184,8 @@ class SimulationEngine:
         #   - the G2 memory-synthesis filter, which is meant to keep private-channel
         #     content out of the public memory segment.
         #
-        # Found by a real multi-turn run: the private-channel messages persisted with
+        # Without it, private-channel messages could persist with
         # visibility='public' while the AgentChannel row said collab_private.
-        # See .notes/cohort-system-v2.md §7.
         visibility = self._resolve_channel_visibility(channel)
         sender_name = agent.bot_name if agent else f"{agent_id}Bot"
         root_ts: str | None = None
@@ -5886,14 +5750,14 @@ class SimulationEngine:
         """Learn the Slack uid of each service bot (grantbot today).
 
         A service bot never holds an AgentRegistry status=='active' row, so it
-        is never a roster slot and no roster client carries its uid — the
-        inbound paths cannot attribute its posts: production shows all 315 of
-        grantbot's :moneybag: posts persisted with agent_id NULL, which
-        _entry_allowed fails closed on. One throwaway auth.test is the only way
-        to get the uid.
+        is never a roster slot and no roster client carries its uid — without
+        this, the inbound paths cannot attribute its posts, and grantbot's
+        :moneybag: posts persist with agent_id NULL, which _entry_allowed
+        fails closed on. One throwaway auth.test is the only way to get the
+        uid.
 
-        Token resolution is DB-first, same precedence as grantbot.py itself
-        (#23 COR-26c / D10, Task 23.4): ``get_agent_bot_token(db, "grantbot")``
+        Token resolution is DB-first, same precedence as grantbot.py itself:
+        ``get_agent_bot_token(db, "grantbot")``
         reads the AgentRegistry row's slack_bot_token column (the documented
         /admin/agents provisioning path) when a session_factory is available,
         falling back to the dedicated ``slack_bot_token_grantbot`` settings
@@ -5936,12 +5800,8 @@ class SimulationEngine:
         # it were an agent.
         probe = AgentSlackClient(agent_id="grantbot", bot_token=token)
         try:
-            # run_slack_call: this coroutine is awaited from
-            # _sync_roster_from_db, which runs on the process's single event
-            # loop — a synchronous connect() here can block that loop for up
-            # to RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under a throttle,
-            # starving shutdown handling the same way the roster add/remove
-            # connect() calls did (S-1, audit 2026-09-10).
+            # Runs off the event loop; see run_slack_call's docstring — same
+            # SIGTERM-starvation concern as the roster add/remove connect() calls.
             connected = await run_slack_call(probe.connect)
         except Exception as exc:
             # connect() only handles SlackApiError; DNS/SSL/socket errors escape it.
@@ -5967,9 +5827,9 @@ class SimulationEngine:
         """Slack bot_user_id -> agent_id for every bot whose posts we can attribute.
 
         Roster clients first; service bots merged in with setdefault so they can
-        never override a roster entry. The collision was real until `dd82c91`
-        (#23 COR-26c) stopped grantbot borrowing SuBot's token; posts already
-        made that way are still su's, so the roster answer stays the true one.
+        never override a roster entry. grantbot no longer borrows SuBot's
+        token, but posts made that way historically are still su's, so the
+        roster answer stays the true one.
         """
         # getattr, not attribute access: this is now called from __init__ (see
         # set_bot_uid_map above), and `slack_clients` legitimately holds
@@ -6122,7 +5982,7 @@ class SimulationEngine:
         writer's ``f"{current_user.name} (PI)"`` (``src/routers/agent_page.py``),
         and a Slack-native PI reply's own resolved display name — which is the
         PI's plain name, i.e. ``Agent.pi_name`` for one of the thread's two
-        participants. Used to fail closed on an unattributed row (#20 I2):
+        participants. Used to fail closed on an unattributed row:
         without this, ANY sender_agent_id-None row — an arbitrary workspace
         human, or an unattributed bot post — was accepted as authoritative PI
         guidance on rebuild.
@@ -6149,9 +6009,9 @@ class SimulationEngine:
         record (``_reopen_thread``, the web-guidance block in
         ``_sync_proposal_reviews_from_db``). On a REBUILD it is not: the
         replies the reopen already paid for are in the log too, and counting
-        them as prior history refunds them — COR-13's "plus a fresh reply
-        budget each time", which the per-tick dedup set stopped and the
-        rebuild did not.
+        them as prior history would refund a fresh reply budget every
+        restart, which the per-tick dedup set stops on a live reopen but not
+        here.
 
         ``reopened_at`` is durable (``thread_decisions.reopened_at``,
         migration 0028) and ``posted_at`` is on every log entry, so the spent
@@ -6164,12 +6024,11 @@ class SimulationEngine:
     def _derive_post_failure_count(
         self, agent_id: str, thread_id: str, history: list[LogEntry]
     ) -> int:
-        """Reconstruct the two-strike post-failure backoff on rebuild (RC-9b,
-        #20 audit 2026-09-08).
+        """Reconstruct the two-strike post-failure backoff on rebuild.
 
-        ``ThreadState.post_failure_count`` is in-memory only, so a restart
-        used to hand a still-failing thread a fresh two strikes every time —
-        silently undoing the #20 COR-1b back-off (the thread re-enters
+        ``ThreadState.post_failure_count`` is in-memory only, so without this
+        a restart would hand a still-failing thread a fresh two strikes every
+        time — silently undoing the back-off (the thread re-enters
         ``active_threads`` unparked and burns another LLM call per turn until
         it fails twice again). A trailing run of this agent's own DB-only rows
         (``slack_ts IS NULL``) at the tail of the thread history is exactly
@@ -6184,7 +6043,7 @@ class SimulationEngine:
         every restart. Only a connected client's refusal is evidence of an
         actual failure.
 
-        Also gated (A3/RC-9, opus review, audit 2026-09-08) on the THREAD's
+        Also gated on the THREAD's
         root actually having Slack presence: ``slack_ts IS NULL`` is not
         evidence of a failure for a thread whose ROOT never had one either —
         ``_post_message`` writes DB-only rows deliberately (``can_mirror=False``)
@@ -6211,12 +6070,11 @@ class SimulationEngine:
 
     async def _sync_private_profiles_from_db(self) -> None:
         """DB ``private_profile_md`` is authoritative over the on-disk private
-        profile file at every engine startup (K-4, audit 2026-09-10 — RC-7
-        residual).
+        profile file at every engine startup.
 
         ``Agent.update_private_profile``/``persist_private_profile_to_db``
         apply a standing instruction to disk and DB independently, each
-        best-effort (RC-7, audit 2026-09-08): a DB-succeeded/disk-failed write
+        best-effort: a DB-succeeded/disk-failed write
         leaves the DB row — the one that survives a restart — ahead of the
         stale on-disk file that ``Agent.private_profile`` reads on a cache
         miss. Every subsequent restart re-loads that stale file via
@@ -6229,7 +6087,7 @@ class SimulationEngine:
         set the in-memory cache to the DB content either way, so the engine
         never runs even one tick a stale on-disk file.
 
-        Two follow-ups from an opus review (same-day, 2026-09-10):
+        Two follow-ups:
 
         1. Compares ``.strip()``ped content. ``update_private_profile`` (and
            ``export_private_profile``) always write ``content + "\\n"`` to
@@ -6246,8 +6104,8 @@ class SimulationEngine:
            next read falls back to the same in-code default text a brand-new
            agent would see.
 
-        L-4 (opus review, audit 2026-09-10, same day): the actual per-agent
-        work now lives in ``_sync_one_agent_private_profile_from_db``, which
+        The actual per-agent
+        work lives in ``_sync_one_agent_private_profile_from_db``, which
         ``_rebuild_one_agent_state`` (the OTHER rebuild path — an
         inactive->active roster re-add, not startup) also calls, so a
         re-added agent gets the same DB-is-authoritative treatment a startup
@@ -6258,15 +6116,15 @@ class SimulationEngine:
             await self._sync_one_agent_private_profile_from_db(agent)
 
     async def _sync_one_agent_private_profile_from_db(self, agent: "Agent") -> bool:
-        """Reconcile ONE agent's private profile against the DB (L-4 split
-        of ``_sync_private_profiles_from_db``, opus review, audit 2026-09-10).
+        """Reconcile ONE agent's private profile against the DB (split
+        of ``_sync_private_profiles_from_db``).
 
         See ``_sync_private_profiles_from_db`` for the full rationale; this
         holds the actual per-agent logic so both rebuild paths — startup's
         loop over every agent, and ``_rebuild_one_agent_state``'s single
         re-added agent — share it exactly.
 
-        O-4 (audit 2026-09-10): returns whether this call reached a verdict.
+        Returns whether this call reached a verdict.
         The watcher's force-cleared branch (``_sync_profiles_from_disk``)
         uses this to decide whether it is safe to advance its mtime
         signature — advancing it after a non-verdict would silence any
@@ -6274,8 +6132,8 @@ class SimulationEngine:
         signature would already match and the watcher's own "nothing
         changed" fast path would never call back in here again.
 
-        P-6 (opus review, audit 2026-09-10): "reached a verdict" splits into
-        two cases that this method used to conflate as a single ``False``:
+        "Reached a verdict" splits into
+        two cases that must not be conflated as a single ``False``:
 
         - DEFINITIVE non-verdict — no ``AgentRegistry`` row at all (the roster
           is registry-derived; a running agent's row is not going to appear
@@ -6310,8 +6168,7 @@ class SimulationEngine:
                         AgentRegistry.agent_id == agent.agent_id
                     )
                 )).scalar_one_or_none()
-                # P-6 / Q-2 / R-1 (opus reviews, audit 2026-09-10): no
-                # AgentRegistry row at all is DEFINITIVE -- the roster is
+                # No AgentRegistry row at all is DEFINITIVE -- the roster is
                 # registry-derived, so a running agent's missing row will not
                 # appear later; returning True lets the watcher advance its
                 # signature instead of re-querying every tick. A row whose
@@ -6327,14 +6184,14 @@ class SimulationEngine:
                         ResearcherProfile.user_id == agent_reg.user_id
                     )
                 )).scalar_one_or_none()
-            # L-2 (opus review, audit 2026-09-10): a MISSING ResearcherProfile
+            # A MISSING ResearcherProfile
             # row is NOT the same event as a PI clearing their standing
-            # instruction — both used to compute db_content == "", so the
-            # cleared branch below ran (and unrecoverably unlinked the disk
+            # instruction — conflating both as db_content == "" would run the
+            # cleared branch below (and unrecoverably unlink the disk
             # file) for a user who simply never had a profile row created.
             # Only a REAL row whose content is empty/NULL authorizes that.
             #
-            # P-6 (opus review, audit 2026-09-10): still a DEFINITIVE
+            # Still a DEFINITIVE
             # non-verdict, same reasoning as the no-user_id branch above —
             # the query ran and conclusively found no row, so this returns
             # True (reached a verdict) rather than False.
@@ -6342,9 +6199,9 @@ class SimulationEngine:
                 return True
             db_content = (profile.private_profile_md or "").strip()
             if db_content:
-                # N-3 (opus review, audit 2026-09-10): the DB now holds real
+                # The DB now holds real
                 # content, so this is no longer "the same un-removable stale
-                # file" a prior force-clear (L-3) left behind -- even if this
+                # file" a prior force-clear left behind -- even if this
                 # call was only reached because a MTIME BUMP on that file
                 # looked identical to the stale-file case from
                 # `_sync_profiles_from_disk`'s point of view (it only ever
@@ -6354,7 +6211,7 @@ class SimulationEngine:
                 self._force_cleared_private.discard(agent.agent_id)
                 if agent.private_profile.strip() == db_content:
                     return True
-                # M-4 (opus review, audit 2026-09-10): update_private_profile()
+                # update_private_profile()
                 # returns False when the disk write itself failed (the cache
                 # is still updated to new_profile either way, per its own
                 # docstring) -- an unconditional "resynced" INFO here claimed
@@ -6391,11 +6248,11 @@ class SimulationEngine:
                     agent.agent_id,
                 )
                 agent.reload_private_profile()
-                # M-3: a prior force-clear for this agent (if any) is moot
+                # A prior force-clear for this agent (if any) is moot
                 # now that the file is actually gone.
                 self._force_cleared_private.discard(agent.agent_id)
             except OSError as exc:
-                # L-3 (opus review, audit 2026-09-10): the disk removal is
+                # The disk removal is
                 # best-effort, but the cache must NOT keep serving the stale
                 # content just because the removal failed. `reload_private_profile()`
                 # alone is not enough here — the next read would just re-load
@@ -6410,7 +6267,7 @@ class SimulationEngine:
                     agent.agent_id, exc,
                 )
                 agent.force_clear_private_profile()
-                # M-3 (opus review, audit 2026-09-10): mark this agent so
+                # Mark this agent so
                 # _sync_profiles_from_disk's mtime watcher does not later
                 # `reload_private_profile()` from the very file we could not
                 # remove — that would resurrect the cleared instruction.
@@ -6442,7 +6299,7 @@ class SimulationEngine:
         # idempotency accounting as a closed thread, though, so they get their
         # own local set here and are folded into the shared
         # _prior_thread_accounted marker below, instead of reusing
-        # _closed_thread_ids for that purpose. See COR-13 / red-team B6.
+        # _closed_thread_ids for that purpose.
         reopened_thread_ids: set[str] = set()
         # thread_id -> the reopen instant, as a posted_at-comparable epoch
         # float. The reply budget a reopen grants is SPENT by the replies that
@@ -6458,8 +6315,7 @@ class SimulationEngine:
                     # Latest decision per thread_id: a thread reopened after its
                     # ORIGINAL close (reopened_at set on that row) must not be
                     # treated as still-closed on rebuild — unless a NEWER
-                    # ThreadDecision (a genuine re-close) supersedes it. See
-                    # COR-13 / migration 0028.
+                    # ThreadDecision (a genuine re-close) supersedes it.
                     latest_for_thread: dict[str, ThreadDecision] = {}
                     for td in all_decisions:
                         current = latest_for_thread.get(td.thread_id)
@@ -6500,11 +6356,11 @@ class SimulationEngine:
                         })
                     self._closed_thread_ids.update(closed_thread_ids)
                     self._prior_thread_accounted.update(closed_thread_ids | reopened_thread_ids)
-                    # COR-13 (closure blocker 1): _db_reopened_thread_ids is
+                    # _db_reopened_thread_ids is
                     # in-memory only and always starts empty, so without this
                     # seed a restart forgets every reopen and
                     # _sync_proposal_reviews_from_db's per-tick reopen block
-                    # (keyed the same way, on thread_id — :6139/:6221) fires
+                    # (keyed the same way, on thread_id) fires
                     # again on the next tick: it re-grants
                     # message_count_offset = len(history), a fresh reply
                     # budget every restart, so a reopened thread could never
@@ -6563,20 +6419,20 @@ class SimulationEngine:
                 history = self.message_log.get_thread_history(thread_id)
                 last_sender = history[-1].sender_agent_id if history else None
                 has_pending = last_sender is not None and last_sender != aid
-                # A reopened-but-not-since-re-closed thread (COR-13) needs its
+                # A reopened-but-not-since-re-closed thread needs its
                 # remaining reply budget and its PI guidance restored here, or
-                # the very next Phase 4 recompute (len(history) - offset,
-                # :1348) immediately hits max_thread_messages and closes it as
+                # the very next Phase 4 recompute (len(history) - offset)
+                # immediately hits max_thread_messages and closes it as
                 # "timeout", and pi_context — never itself persisted — is
                 # simply gone. Mirrors what a LIVE (same-process) reopen
                 # already does in _reopen_thread / the web-guidance reopen
-                # block (Step 3i). See red-team B6.
+                # block.
                 #
                 # REMAINING, not fresh: the offset is the reopen point, not
                 # the current message count. Re-granting the full budget on
-                # every rebuild is the half of COR-13 that survived ac218fb —
-                # a reopened thread could then never reach the timeout close,
-                # because each restart refunded the replies since the reopen.
+                # every rebuild would mean a reopened thread could never reach
+                # the timeout close, because each restart would refund the
+                # replies since the reopen.
                 # See _reopen_offset. A thread with no reopened_at keeps
                 # offset 0, exactly as before.
                 offset = 0
@@ -6624,16 +6480,16 @@ class SimulationEngine:
                     reviewed_set = {
                         (r.thread_decision_id, r.agent_id) for r in reviewed_result
                     }
-                    # thread_decisions.pi_engaged_at is COR-5's carrier for an
+                    # thread_decisions.pi_engaged_at is the carrier for an
                     # agent with no linked AgentRegistry.user_id, which can
                     # never have a proposal_reviews row (that table's user_id
                     # is NOT NULL — see _persist_implicit_proposal_review).
                     # It sits on the DECISION, so it is per-decision where a
                     # review row is per-agent, and a decision has two agents:
                     # honouring it for an agent that DOES have a linked PI
-                    # would let one lab's PI clear the other lab's block, the
-                    # exact cross-lab unblock COR-5's first half exists to
-                    # stop. So scope the read to the population that produces
+                    # would let one lab's PI clear the other lab's block — a
+                    # cross-lab unblock that must be prevented. So scope the
+                    # read to the population that produces
                     # the write. Selecting the LINKED agents (rather than the
                     # unlinked ones) keeps reader and writer symmetric for an
                     # agent_id with no AgentRegistry row at all: the writer's
@@ -6732,8 +6588,8 @@ class SimulationEngine:
         # Deliberately SEPARATE from step 4, which stays an all-time COUNT(*):
         # api_call_count is lifetime accounting (run summary,
         # SimulationRun.total_api_calls) while call_times is the live throttle.
-        # Folding these together is the bug — it is what made an over-budget
-        # agent over-budget again on every restart, forever. See design §4.2.
+        # Folding these together would make an over-budget
+        # agent over-budget again on every restart, forever.
         if self.session_factory and self.simulation_run_id:
             try:
                 from sqlalchemy import select as sa_select
@@ -6816,7 +6672,7 @@ class SimulationEngine:
         agent = self.agents.get(agent_id)
         if not agent or not self.session_factory or not self.simulation_run_id:
             return
-        # L-4 (opus review, audit 2026-09-10): a roster re-add builds a fresh
+        # A roster re-add builds a fresh
         # `Agent()` whose private_profile cache is whatever it happened to
         # read off disk at construction — this rebuild path never ran the
         # DB-is-authoritative reconciliation startup's `_rebuild_agent_state`
@@ -6851,20 +6707,19 @@ class SimulationEngine:
                     )
                 )
                 reviewed_ids = {r.thread_decision_id for r in reviewed_result}
-                # The same COR-5 carrier _rebuild_agent_state's step 3 reads
+                # The same carrier _rebuild_agent_state's step 3 reads
                 # (see the note there). Without it an inactive->active roster
                 # flip re-blocks exactly the proposal a restart no longer
-                # re-blocks — E6(2) rebuilt every other piece of this agent's
-                # state for that reason. Scoped to THIS agent's own link
+                # re-blocks. Scoped to THIS agent's own link
                 # state, so a linked agent stays governed by its own review row.
                 has_linked_pi = (await db.execute(
                     sa_select(AgentRegistry.user_id).where(
                         AgentRegistry.agent_id == agent_id
                     )
                 )).scalar_one_or_none() is not None
-                # Reopened-and-not-since-re-closed threads for this agent (COR-13 / B6):
-                # the same restoration _rebuild_agent_state's "2." loop does (Task 20.10),
-                # or a re-added agent's reopened thread comes back with no reply budget
+                # Reopened-and-not-since-re-closed threads for this agent:
+                # without the same restoration _rebuild_agent_state's "2." loop
+                # does here, a re-added agent's reopened thread comes back with no reply budget
                 # and no PI guidance and is re-closed as 'timeout' on its first Phase 4.
                 reopened_rows = (await db.execute(
                     sa_select(ThreadDecision.thread_id, ThreadDecision.reopened_at).where(
@@ -6893,12 +6748,10 @@ class SimulationEngine:
                     stamp = r.reopened_at.timestamp()
                     if stamp > reopened_at_by_thread.get(r.thread_id, 0.0):
                         reopened_at_by_thread[r.thread_id] = stamp
-                # Mirrors _rebuild_agent_state's steps 4 and 4b exactly (red-team
-                # M3): an all-time COUNT scoped to THIS simulation_run_id for
+                # Mirrors _rebuild_agent_state's steps 4 and 4b exactly:
+                # an all-time COUNT scoped to THIS simulation_run_id for
                 # api_call_count, and a SEPARATE windowed query for the live
-                # throttle. Unscoped-by-run + unwindowed (this task's original
-                # single `sa_select(LlmCallLog.created_at).where(agent_id==...)`
-                # read) would give a re-added agent a LIFETIME cross-run
+                # throttle. Unscoped-by-run + unwindowed would give a re-added agent a LIFETIME cross-run
                 # api_call_count — immediately benching it under any non-zero
                 # --budget via _agent_within_budget, and corrupting
                 # SimulationRun.total_api_calls — while also pulling every
@@ -6953,14 +6806,14 @@ class SimulationEngine:
                 for r in window_rows:
                     agent.state.call_times.append(r.created_at.timestamp())
 
-                # K-6 follow-up (opus review, audit 2026-09-10): a re-added
+                # A re-added
                 # agent gets a fresh `Agent()` with an EMPTY
                 # `subscribed_channels`, and `_sync_private_channels_from_db`
                 # only populates it for a channel the engine has never seen
                 # before — it `continue`s past any channel already in
                 # `_channel_id_map`, which every collab_private channel this
                 # agent belonged to before the flip already is. Without this,
-                # K-6's `new_post` gate (which now trusts `_channel_visibility`
+                # the `new_post` gate (which trusts `_channel_visibility`
                 # only for a PUBLIC entry, exactly because it cannot tell one
                 # pair's private channel from another's) rejects a legitimate
                 # post to this agent's OWN, already-discovered private
@@ -6980,13 +6833,13 @@ class SimulationEngine:
                         PrivateChannelMember.role == "bot",
                         PrivateChannelMember.removed_at.is_(None),
                         AgentChannel.archived_at.is_(None),
-                        # L-6 (opus review, audit 2026-09-10): mirror
+                        # Mirror
                         # `_sync_private_channels_from_db`'s own gate — only a
                         # collab_private channel is ever subscribed this way.
                         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE,
                     )
                 )).scalars().all()
-                # L-6 (opus review, audit 2026-09-10): intersect with
+                # Intersect with
                 # `_channel_id_map`, the same restriction
                 # `_sync_private_channels_from_db` applies (it only
                 # integrates a channel this ENGINE has actually discovered).
@@ -7040,13 +6893,13 @@ class SimulationEngine:
                 offset = 0
                 pi_context = None
                 if thread_id in reopened_thread_ids:
-                    # Task 20.10's restoration: a reopened thread gets its reply
+                    # A reopened thread gets its reply
                     # budget from the reopen point and carries the PI's guidance.
                     # From the reopen POINT, not from now: `offset = msg_count`
                     # here would hand a re-added agent a full budget for a
                     # thread the restart path counts as nearly spent, and the
                     # two would drift further apart on every flip. Same
-                    # derivation, same helper — see _reopen_offset / COR-13.
+                    # derivation, same helper — see _reopen_offset.
                     offset = self._reopen_offset(
                         history, reopened_at_by_thread[thread_id],
                     )
@@ -7167,7 +7020,6 @@ class SimulationEngine:
             # an agent's in-window calls and lets it exceed its allowance
             # after a restart. Prepend so entries buffered while this flush
             # was in flight stay in chronological order after the retry.
-            # See COR-11.
             self._llm_log_buffer[0:0] = batch
             logger.warning(
                 "Failed to flush %d LLM call logs, re-queued for retry: %s",
@@ -7205,18 +7057,17 @@ class SimulationEngine:
         per file, cheap (two stat() calls per agent, no DB round-trip) and
         tied to exactly what the agent reads, catches deletions too.
 
-        Private and public are tracked and reloaded independently (RC-7
-        follow-up, audit 2026-09-08 — reviewer-reproduced): the previous
-        combined signature over both files called ``agent.reload_profiles()``
+        Private and public are tracked and reloaded independently: a
+        combined signature over both files would call ``agent.reload_profiles()``
         — clearing BOTH caches — for a change to EITHER one. A failed private
         disk write leaves the on-disk file's mtime unchanged (see
         ``atomic_write.py``: it only calls ``os.replace`` on success) while
         the in-memory cache correctly holds the newly-accepted instruction —
-        but the next *public* edit still flipped the combined signature,
-        triggered a full reload, and clobbered that private cache back to
-        None, so the next read resurrected the stale on-disk private file and
-        silently discarded the PI's instruction. Reloading only the
-        sub-profile whose own signature changed removes that coupling.
+        but the next *public* edit would still flip a combined signature,
+        trigger a full reload, and clobber that private cache back to
+        None, so the next read would resurrect the stale on-disk private file
+        and silently discard the PI's instruction. Reloading only the
+        sub-profile whose own signature changed avoids that coupling.
         """
         for agent in self.agents.values():
             agent_sigs = self._profile_mtimes.setdefault(agent.agent_id, {})
@@ -7236,24 +7087,24 @@ class SimulationEngine:
                     continue
                 if new_sig != prev_sig:
                     if sub == "private" and agent.agent_id in self._force_cleared_private:
-                        # N-3 (opus review, audit 2026-09-10): this method has
+                        # This method has
                         # no DB session of its own and only ever compares
                         # (exists, mtime) signatures, never content -- so it
                         # cannot tell "still the same un-removable stale file
-                        # from a prior force-clear (L-3)" apart from "a
+                        # from a prior force-clear" apart from "a
                         # LEGITIMATE later web edit that landed after the
                         # clear" (a PI writes new instructions after having
                         # cleared them). Blindly re-unlinking on every bump
-                        # (the pre-fix behaviour) silently discarded that kind
+                        # would silently discard that kind
                         # of real edit. Defer to the existing DB-authoritative
                         # per-agent helper instead: it keeps the new content
                         # when ResearcherProfile.private_profile_md is now
                         # non-empty, and only retries the unlink when the DB
                         # confirms it is still empty.
                         #
-                        # O-4 (audit 2026-09-10): only advance this
+                        # Only advance this
                         # sub-profile's signature when the helper actually
-                        # reached a verdict. P-6/Q-2 (audit 2026-09-10): a
+                        # reached a verdict. A
                         # DEFINITIVE non-verdict (no registry row, or no
                         # ResearcherProfile row) counts as a verdict here and
                         # DOES advance the signature -- that fact will not
@@ -7302,7 +7153,7 @@ class SimulationEngine:
         _entry_allowed attribute GrantBot's own posts).
 
         A full rebuild (rather than an incremental pop/set on the one changed
-        key) is the fix for #26 DOC-B's residual bug: a roster agent that had
+        key) fixes a residual bug: a roster agent that had
         claimed a service-bot name (the roster answer legitimately overrides
         the seed while it holds the name) and is then renamed AWAY from it
         must not leave the seed permanently missing — rebuilding from
@@ -7363,7 +7214,7 @@ class SimulationEngine:
                 # preferable to a silently no-op'd roster tick — leave
                 # _agent_publications (and each Agent's db_publication_dois)
                 # exactly as they were on failure; absent agents still fail
-                # closed regardless. See issue #29 review.
+                # closed regardless.
                 try:
                     await self._load_publication_records(db)
                 except Exception as exc:
@@ -7375,15 +7226,14 @@ class SimulationEngine:
                 # grantbot is a service bot (no status=='active' row above, so
                 # it never appears in `rows`/`desired`); read its token here,
                 # on the session already open, so a rotation can be noticed
-                # below without a second DB round trip. See #23 COR-26c/D10.
+                # below without a second DB round trip.
                 #
                 # Isolated from the roster query above, same rationale as the
                 # publication-record load just above: a failure here (this is
                 # its own single-column select, separate from the roster read
                 # that already succeeded) must never abort the add/remove/
                 # role-diff work still to come — that would silently no-op a
-                # newly active agent's admission for the whole tick. See #29
-                # review.
+                # newly active agent's admission for the whole tick.
                 if self.slack_enabled:
                     try:
                         grantbot_db_token = await get_agent_bot_token(db, "grantbot")
@@ -7399,9 +7249,9 @@ class SimulationEngine:
             # Role/name-diff for surviving agents (agents present in both current
             # and desired). Must run even when to_add/to_remove are empty, or a
             # reassignment on a running agent is invisible until the next
-            # add/remove. bot_name/pi_name used to be read only in the to_add
-            # branch below (#26 DOC-B): a DB rename of a live agent never
-            # reached the Agent object or _bot_name_to_id until a restart.
+            # add/remove. Reading bot_name/pi_name only in the to_add
+            # branch below would mean a DB rename of a live agent never
+            # reaches the Agent object or _bot_name_to_id until a restart.
             roster_changed = False
             bot_name_changed = False
             for aid, agent in self.agents.items():
@@ -7437,9 +7287,7 @@ class SimulationEngine:
             # AFTER startup is in neither to_add nor to_remove: the membership
             # diff below early-returns and the client-building loop (which only
             # runs over to_add) never sees it. It then posts DB-only, silently,
-            # until the process restarts. Measured 2026-08-06: 48 bots installed
-            # mid-run, tokens all in AgentRegistry, and `Connected as` never rose
-            # above the 7 that had tokens at boot. Adopt them here, before the
+            # until the process restarts. Adopt them here, before the
             # early return, so the docstring's promise is actually true.
             #
             # clients_changed tracks whether ANY Slack client was (re)built this
@@ -7476,13 +7324,9 @@ class SimulationEngine:
                     if existing is not None and getattr(existing, "bot_token", None) == token:
                         continue  # already connected with the current token
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    # run_slack_call, not a direct call: connect() does a
-                    # blocking auth.test that can sit in Slack's retry/backoff
-                    # loop for up to RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under
-                    # a sustained throttle. Calling it synchronously here blocks
-                    # THIS event loop for that long — starving every other
-                    # coroutine on it, including the SIGTERM-driven shutdown
-                    # logic in main.py (S-1, audit 2026-09-10).
+                    # Runs off the event loop; see run_slack_call's docstring.
+                    # connect()'s blocking auth.test would otherwise starve
+                    # SIGTERM-driven shutdown under a sustained Slack throttle.
                     if not await run_slack_call(client.connect):
                         logger.warning(
                             "[roster] Slack %s failed for %s — will retry",
@@ -7504,8 +7348,7 @@ class SimulationEngine:
             # and `desired` never see it — a DB-side token rotation on its row
             # would otherwise go unnoticed until a restart. Compare against the
             # token the last probe ATTEMPTED (success or failure) — a dead
-            # token must be probed once, not on every tick forever (#23
-            # COR-26c/D10).
+            # token must be probed once, not on every tick forever.
             if (
                 self.slack_enabled
                 and is_valid_token(grantbot_db_token)
@@ -7529,7 +7372,7 @@ class SimulationEngine:
                 # *contents* (pi_name headings, bot_name lookups) without moving
                 # the gate at all.
                 await self._recompute_allowed_sender_ids()
-                # Unconditional, exactly like set_bot_uid_map below (#26 I2): a
+                # Unconditional, exactly like set_bot_uid_map below: a
                 # flush skipped this tick by a later exception (e.g.
                 # _recompute_allowed_sender_ids raising) has no other way to
                 # self-heal — bot_name_changed is only True on the SAME tick as
@@ -7579,9 +7422,8 @@ class SimulationEngine:
                         )
                         continue
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    # See the run_slack_call comment on the reconnect branch
-                    # above — same 180s-blocking-call/SIGTERM-starvation
-                    # concern applies to a brand-new agent's first connect().
+                    # Same SIGTERM-starvation concern as the reconnect branch
+                    # above applies to a brand-new agent's first connect().
                     if not await run_slack_call(client.connect):
                         logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
                         continue
@@ -7625,7 +7467,7 @@ class SimulationEngine:
         (lowercase, trailing punctuation stripped) so emit-guard set
         membership works. A lab with registry rows but zero publications is
         deliberately ABSENT from the map — the guard treats that as
-        "cannot verify → fail closed" (issue #29 acceptance criterion).
+        "cannot verify → fail closed".
         """
         from sqlalchemy import select as sa_select
 
@@ -7652,7 +7494,7 @@ class SimulationEngine:
             agent.db_publication_dois = record.dois if record else set()
 
     def _disable_all_gates(self) -> None:
-        """Set every agent's gate to None (no filtering). See v2 §5.4."""
+        """Set every agent's gate to None (no filtering)."""
         for agent in self.agents.values():
             agent.allowed_sender_ids = None
 
@@ -7664,10 +7506,10 @@ class SimulationEngine:
         is on.
 
         The decision logic lives in ``src.services.cohorts.compute_gates`` so the
-        engine and the admin UI's preview cannot drift — the whole point of v2 is
-        that a documented rule and the running code agreed. This method is the I/O
+        engine and the admin UI's preview cannot drift — a documented rule and
+        the running code must agree. This method is the I/O
         and side-effect wrapper: read memberships, apply the computed gates, log on
-        change, then reconcile in-memory state (§8 grandfathering, §6.1 pruning).
+        change, then reconcile in-memory state (grandfathering, pruning).
 
         On a transient DB error the existing gates are left in place: flapping the
         gate open on every blip would be worse than a briefly stale topology.
@@ -7771,7 +7613,7 @@ class SimulationEngine:
         self.refresh_lab_directories()
         if topology_changed:
             # The topology moved mid-run — snapshot the new one so the run stays
-            # attributable to every configuration it actually ran under (v2 §13.1).
+            # attributable to every configuration it actually ran under.
             await self._record_topology_snapshot()
 
     def _apply_cohort_gate_to_state(self) -> None:
@@ -7780,15 +7622,15 @@ class SimulationEngine:
         Two jobs, both required because the gate is a *read-time* filter and state
         outlives a membership change:
 
-        1. **Grandfather** active threads whose partner is no longer permitted
-           (v2 §8). They still get Phase 4 replies — an open conversation is
+        1. **Grandfather** active threads whose partner is no longer permitted.
+           They still get Phase 4 replies — an open conversation is
            entitled to conclude rather than waste the calls already spent — but
            they are barred from the reactive-priority tier so they cannot outrank
            gate-compliant work. This is also the path that marks a *resumed* run's
            threads: the DB rebuild runs before the first recompute, so every
            restart reconstructs its open partnerships gate-blind.
         2. **Prune** banked ``interesting_posts`` whose author is no longer
-           permitted (v2 §6.1). Read-time filtering never removes posts that were
+           permitted. Read-time filtering never removes posts that were
            already accepted, so without this a membership change leaves stale posts
            driving Phase 5 forever.
         """
@@ -7817,7 +7659,7 @@ class SimulationEngine:
                         thread.grandfathered = False
                     continue
                 if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
-                    # PI-created pairing outranks the gate (v2 §7) — never
+                    # PI-created pairing outranks the gate — never
                     # grandfather a private-channel collaboration.
                     thread.grandfathered = False
                     continue
@@ -7856,12 +7698,12 @@ class SimulationEngine:
 
         Written to cohort_audit_events at run start and on every mid-run topology
         change, so a finished run stays attributable to every configuration it
-        actually ran under (v2 §13.1). Derived from the live in-memory gate rather
+        actually ran under. Derived from the live in-memory gate rather
         than re-querying, so it records what the engine actually applied — including
         a preflight override.
 
         Also carries the counters the admin UI cannot otherwise see: they live in
-        this process's memory, and the web app is a different process (v2 §9.4/§13).
+        this process's memory, and the web app is a different process.
         """
         settings = get_settings()
         grandfathered = sorted(
@@ -7947,12 +7789,12 @@ class SimulationEngine:
                 rows = list(result)
 
             # Keyed by (thread_decision_id, agent_id) — the same key the
-            # rebuild uses (:4295 `(td.id, aid) in reviewed_set`). Previously
-            # this was (agent_id, thread_id): after a re-propose cycle mints a
-            # NEW ThreadDecision for the same thread_id, the rebuild (keyed on
-            # decision id) correctly blocked on the new decision while this
-            # tick (keyed on thread_id) matched the OLD decision's review row
-            # and silently unblocked it. See COR-13.
+            # rebuild uses (`(td.id, aid) in reviewed_set`). Keying this on
+            # (agent_id, thread_id) instead would break after a re-propose
+            # cycle mints a NEW ThreadDecision for the same thread_id: the
+            # rebuild (keyed on decision id) would correctly block on the new
+            # decision while this tick (keyed on thread_id) matched the OLD
+            # decision's review row and silently unblocked it.
             reviewed_set = {(r.thread_decision_id, r.agent_id) for r in rows}
             # Thread IDs of proposals that have been migrated to a private
             # channel. Any agent with a pending proposal on such a thread is
@@ -8056,9 +7898,8 @@ class SimulationEngine:
                 # in thread history and the agents can see it — UNLESS the
                 # thread history already carries this exact guidance (a prior
                 # process minted it and the rebuild/hydrate above already
-                # reloaded it from the DB; re-minting it every restart is the
-                # duplicate-row half of the bug COR-13 exists to fix). See
-                # red-team B6.
+                # reloaded it from the DB; re-minting it every restart would
+                # duplicate the row).
                 already_minted = any(
                     e.sender_name == "PI (via web)" and e.content == guidance
                     for e in self.message_log.get_thread_history(thread_id)
@@ -8242,7 +8083,7 @@ class SimulationEngine:
         try:
             # Gather recent activity for context — filter the message log to
             # entries with matching visibility. Public syntheses never see
-            # private-channel messages, and vice-versa. See §G2.
+            # private-channel messages, and vice-versa.
             agent_entries = [
                 e for e in self.message_log._entries
                 if e.sender_agent_id == agent.agent_id
@@ -8299,7 +8140,7 @@ your own lab as an author of a paper unless it appears in your own publication l
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
                 return
 
-            # Authorship hygiene (issue #29): a false authorship note written
+            # Authorship hygiene: a false authorship note written
             # here is re-injected into every future prompt. Strip lines the
             # publication records can't back before persisting.
             own_db = self._agent_publications.get(agent.agent_id)

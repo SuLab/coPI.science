@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # Redeploy app/worker/grantbot against a migrated schema, without ever serving
-# requests against a schema `migrate` has not applied yet (audit 2026-09-08 RC-6,
-# #27 I2; audit 2026-09-10 R-4 added grantbot to the service set).
+# requests against a schema `migrate` has not applied yet.
 #
 # ROOT CAUSE THIS SCRIPT FIXES: `docker compose $C up -d --build app worker` on an
 # ALREADY RUNNING stack does not guarantee `migrate` reruns before the new app/worker
@@ -15,15 +14,12 @@
 # schema) can end up serving requests during the window the new migration was
 # supposed to cover.
 #
-# R-4 (audit 2026-09-10): `grantbot` has the exact same `depends_on: migrate:
-# condition: service_completed_successfully` shape as app/worker in
-# docker-compose.prod.yml, so it is exposed to the identical race -- and before this
-# fix this script did not build/stop/start it at all, meaning a redeploy left the OLD
-# grantbot image running (and serving Slack posts) against the newly migrated schema
-# for as long as the process kept running. `agent` is deliberately excluded: it is a
-# one-off (`docker compose run`, not a long-running service in this compose file's
-# default service set) with its own restart runbook in CLAUDE.md, not something this
-# script starts.
+# `grantbot` has the exact same `depends_on: migrate: condition:
+# service_completed_successfully` shape as app/worker in docker-compose.prod.yml, so
+# it is exposed to the identical race and is built/stopped/started alongside them.
+# `agent` is deliberately excluded: it is a one-off (`docker compose run`, not a
+# long-running service in this compose file's default service set) with its own
+# restart runbook in CLAUDE.md, not something this script starts.
 #
 # THE FIX IS ORDERING, ENFORCED EXPLICITLY, NOT LEFT TO depends_on:
 #   1. build migrate, app, worker, grantbot (new images)
@@ -33,13 +29,12 @@
 #      runs
 #   3. start migrate and wait for it to exit; abort on nonzero (old containers stay
 #      stopped -- refusing is safer than guessing). The exit code is read via `docker
-#      wait <container id>`, NOT `docker compose wait migrate` (opus review,
-#      2026-09-08): the latter looks up the service by PROJECT state, and measured
-#      against a `migrate` that has already exited by the time `wait` runs, it fails
-#      with "no containers for project" in >=0.3 s instead of reporting the exit code
-#      -- which would abort this script with app/worker left stopped even though
-#      migrate actually succeeded. `docker wait` on the container's own id talks to
-#      the Engine API directly and has no such race.
+#      wait <container id>`, NOT `docker compose wait migrate`: the latter looks up
+#      the service by PROJECT state, and against a `migrate` that has already exited
+#      by the time `wait` runs, it fails with "no containers for project" instead of
+#      reporting the exit code -- which would abort this script with app/worker left
+#      stopped even though migrate actually succeeded. `docker wait` on the
+#      container's own id talks to the Engine API directly and has no such race.
 #   4. start the NEW app/worker/grantbot only once migrate is verified to have
 #      exited 0, and wait for the new app container to report Docker-healthy
 #      (bounded; see APP_HEALTH_TIMEOUT_SECONDS) before declaring success -- `up -d`
@@ -81,18 +76,16 @@ die() {
 
 # Every compose file this invocation would ACTUALLY use once `compose()` runs.
 #
-# S-2 (audit 2026-09-10): `docker compose` ignores $COMPOSE_FILE entirely the moment
-# ANY `-f`/`--file` flag is passed (this is documented `docker compose` behaviour).
-# The prior version of this function unconditionally UNIONED $COMPOSE_FILE with the
-# -f args before the guard below checked for both prod files -- so
-# `COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml ./scripts/redeploy.sh
-# -f docker-compose.prod.yml` passed the guard (the override came from $COMPOSE_FILE)
-# even though the real invocation only ever sees `-f docker-compose.prod.yml`, missing
-# the override entirely -- every service would come up on the prod file's bare
-# `logging.driver: awslogs` and die immediately with AccessDeniedException (see
-# CLAUDE.md "Compose file set"). Only fall back to $COMPOSE_FILE when NO -f/--file was
-# given at all; once any -f is present, it is the exhaustive list and $COMPOSE_FILE is
-# ignored, matching `docker compose`'s own precedence.
+# `docker compose` ignores $COMPOSE_FILE entirely the moment ANY `-f`/`--file` flag is
+# passed (documented `docker compose` behaviour) -- unioning $COMPOSE_FILE with any -f
+# args before checking for both prod files would let a caller who passes only
+# `-f docker-compose.prod.yml` pass the guard on the strength of an unrelated
+# $COMPOSE_FILE, while the real invocation never sees the override file and every
+# service comes up on the prod file's bare `logging.driver: awslogs`, dying immediately
+# with AccessDeniedException (see CLAUDE.md "Compose file set"). Only fall back to
+# $COMPOSE_FILE when NO -f/--file was given at all; once any -f is present, it is the
+# exhaustive list and $COMPOSE_FILE is ignored, matching `docker compose`'s own
+# precedence.
 _known_files() {
   local files=""
   local i=0
@@ -152,23 +145,23 @@ compose stop -t 30 app worker grantbot
 
 echo "==> [3/6] running migrate"
 compose up -d migrate
-# REV3-5 (opus review, audit 2026-09-08): `compose ps -aq migrate` can return SEVERAL
-# ids -- a stale one-off `migrate` container from an earlier `docker compose run`
-# left alongside the one `up -d migrate` just created. Passing the whole
-# newline-joined blob to `docker wait "$MIGRATE_CID"` as a single argument is exactly
-# what real `docker wait` rejects (no parseable exit code, non-zero exit), tripping
-# the "failed to report an exit code" abort below even after a SUCCESSFUL migration.
+# `compose ps -aq migrate` can return SEVERAL ids -- a stale one-off `migrate`
+# container from an earlier `docker compose run` left alongside the one `up -d
+# migrate` just created. Passing the whole newline-joined blob to `docker wait
+# "$MIGRATE_CID"` as a single argument is exactly what real `docker wait` rejects (no
+# parseable exit code, non-zero exit), tripping the "failed to report an exit code"
+# abort below even after a SUCCESSFUL migration.
 #
-# REV4-2 (audit 2026-09-08): selecting by list POSITION (`tail -n1`, on the assumption
-# compose always lists them oldest-first) is not reliable -- a stale one-off
-# `<proj>-migrate-run-<hash>` container can sort AFTER the persistent
-# `<proj>-migrate-1` service container this run actually cares about. Select by the
-# `com.docker.compose.oneoff` label instead (`False` on the service container `up -d`
-# creates, `True` on every `docker compose run`/`exec`-style one-off) -- that is what
-# actually distinguishes them, not creation order. Kept dependency-free (no jq, no
-# project-name derivation): `compose ps -aq migrate` already scopes the id list to
-# this project's `migrate` service, so only the oneoff label needs checking, via
-# `docker inspect` (already used below for the app healthcheck).
+# Selecting by list POSITION (`tail -n1`, on the assumption compose always lists them
+# oldest-first) is not reliable either -- a stale one-off `<proj>-migrate-run-<hash>`
+# container can sort AFTER the persistent `<proj>-migrate-1` service container this
+# run actually cares about. Select by the `com.docker.compose.oneoff` label instead
+# (`False` on the service container `up -d` creates, `True` on every `docker compose
+# run`/`exec`-style one-off) -- that is what actually distinguishes them, not creation
+# order. Kept dependency-free (no jq, no project-name derivation): `compose ps -aq
+# migrate` already scopes the id list to this project's `migrate` service, so only the
+# oneoff label needs checking, via `docker inspect` (already used below for the app
+# healthcheck).
 MIGRATE_CIDS="$(compose ps -aq migrate)"
 if [ -z "$MIGRATE_CIDS" ]; then
   die "no migrate container found after \`up -d migrate\` -- cannot verify its exit code.
@@ -191,8 +184,7 @@ if [ -z "$MIGRATE_CID" ]; then
   # No candidate carried an explicit oneoff=False. With a SINGLE candidate that is
   # the container `up -d migrate` just made, so use it. With several, guessing by
   # list position could elect a stale one-off whose old exit code (usually 0) would
-  # green-light app/worker against an un-migrated schema -- fail closed instead
-  # (REV5-1 follow-up).
+  # green-light app/worker against an un-migrated schema -- fail closed instead.
   if [ "$(printf '%s\n' "$MIGRATE_CIDS" | grep -c .)" -gt 1 ]; then
     die "several migrate containers exist and none carries com.docker.compose.oneoff=False
   (docker inspect could not read the label). Refusing to guess which one this deploy ran.
@@ -214,11 +206,11 @@ if [ "$WAIT_RC" -ne 0 ] || [ -z "$MIGRATE_EXIT" ]; then
   die "\`docker wait $MIGRATE_CID\` failed to report an exit code (rc=$WAIT_RC) --
   cannot confirm migrate succeeded. app/worker/grantbot remain stopped."
 fi
-# K-3: `[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value (e.g. `docker wait`
-# printing garbage) makes `[` print "integer expression expected" to stderr and
-# return exit status 2 -- which `if` treats identically to a clean "false",
-# falling through as though migrate had exited 0. Reject anything that is not
-# a plain non-negative integer before the numeric comparison ever runs.
+# `[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value (e.g. `docker wait` printing
+# garbage) makes `[` print "integer expression expected" to stderr and return exit
+# status 2 -- which `if` treats identically to a clean "false", falling through as
+# though migrate had exited 0. Reject anything that is not a plain non-negative
+# integer before the numeric comparison ever runs.
 case "$MIGRATE_EXIT" in
   ''|*[!0-9]*)
     die "\`docker wait $MIGRATE_CID\` reported a non-numeric exit code

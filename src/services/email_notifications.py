@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 # Frequency ladder for auto-downgrade (ordered from most to least frequent).
 # "monthly" is user-selectable (routers/settings.py's VALID_FREQUENCIES,
 # templates/settings.html) and FREQUENCY_INTERVALS already carries it (below) --
-# omitting it here made FREQUENCY_LADDER.index() raise ValueError for a monthly
-# subscriber once MISSED_THRESHOLD became reachable (#21 I1 / V4-4a).
+# omitting it here makes FREQUENCY_LADDER.index() raise ValueError for a
+# monthly subscriber once MISSED_THRESHOLD becomes reachable.
 FREQUENCY_LADDER = ["daily", "twice_weekly", "weekly", "biweekly", "monthly", "off"]
 
 # How often each frequency should send (minimum interval in hours)
@@ -178,7 +178,7 @@ async def _get_unreviewed_proposals_for_user(
             # agent_page.py:509 and email_inbound.py:383 both reject anything outside 1-4).
             # Excluding only -1 meant a proposal the PI had explicitly REOPENED counted as
             # reviewed, so no further reminder about it was ever sent. Same predicate as
-            # admin.py:656/:865 (Task 16, docs/plans/2026-09-04-decisions/task-16.md).
+            # admin.py:656/:865.
             review_result = await db.execute(
                 select(ProposalReview).where(
                     ProposalReview.thread_decision_id == td.id,
@@ -211,7 +211,7 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
                 User.email.isnot(None),
             )
         )
-        # V4-1 fix round 1: ids only -- NOT the ORM objects -- are captured before the
+        # ids only -- NOT the ORM objects -- are captured before the
         # loop. Session.rollback() expires every object in the identity map, not just
         # the one that failed, so a pre-loaded object from THIS bulk query can be
         # expired by an EARLIER iteration's rollback by the time this iteration reads
@@ -233,10 +233,10 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
                 sent = await _process_user_notifications(user, db)
                 if sent:
                     sent_count += 1
-                # Per-item commit (V4-1): the sweep shares ONE session, so a later
+                # Per-item commit: the sweep shares ONE session, so a later
                 # user's failure must not be able to discard a row for a user whose
                 # email has ALREADY gone out. Commit each item, roll back only the
-                # item that failed. (Dossier C.7 per-item poller pattern.)
+                # item that failed.
                 await db.commit()
             except Exception as exc:
                 await db.rollback()
@@ -259,11 +259,11 @@ async def _expire_lapsed_outstanding(
     *,
     reason: str,
 ) -> None:
-    """Mark an outstanding proposal_review row `expired` (RC-4), if there is one AND it
+    """Mark an outstanding proposal_review row `expired`, if there is one AND it
     is actually past the reply window.
 
     Re-checks `sent_at` against `settings.email_notification_expiry_days` itself
-    (RC-4 follow-up, opus review) rather than trusting that a caller's earlier check
+    rather than trusting that a caller's earlier check
     still holds -- callers currently only reach here after the reply-window check
     earlier in `_process_user_notifications` has already let a non-None
     `outstanding_notification` fall through, but correctness must not depend on
@@ -320,11 +320,11 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
             # engagement and maybe downgrade, but don't pile on a second reminder.
             await _check_engagement_and_downgrade(user, tracker, db)
             return False
-        # V4-3/V4-4a: the PI never answered within the reply window, so the slot is free again
+        # The PI never answered within the reply window, so the slot is free again
         # and we fall through — a new reminder can go out and continue the missed-email tally
         # (the increment on a successful send, below) instead of being stuck here forever after
         # the very first miss. The re-send below reconciles THIS SAME row rather than inserting
-        # a new one (Task 21.11's upsert) — a plain second INSERT would collide with
+        # a new one -- a plain second INSERT would collide with
         # uq_email_notification_user_thread_category.
         #
         # What must NOT happen here is the status write itself. THREE of the paths below reach
@@ -334,7 +334,7 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
         # reply+<token> address of the e-mail the PI is still holding, since
         # email_inbound.process_inbound_email drops any reply whose notification is not 'sent'.
         # So the write is deferred to after the send (see the `if success:` block below),
-        # mirroring the ordering Task 21.11 established for row CREATION: persist only once SES
+        # mirroring row CREATION's ordering: persist only once SES
         # has accepted. Reaching that block with a non-None outstanding_notification means
         # exactly this branch ran, because the in-window branch above returns.
         logger.info(
@@ -346,10 +346,10 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     # Get unreviewed proposals
     proposals = await _get_unreviewed_proposals_for_user(user, db)
     if not proposals:
-        # RC-4 (#21 V4-3): reaching here with a non-None `outstanding_notification` means
+        # Reaching here with a non-None `outstanding_notification` means
         # the age check above already fell through (it's past the reply window), and
         # there is nothing left to review that would ever replace it. Retiring it is now
-        # safe: email_inbound.process_inbound_email (RC-4) refuses a reply whose
+        # safe: email_inbound.process_inbound_email refuses a reply whose
         # `sent_at` is past the window on its own, independent of `status` -- so this
         # write changes bookkeeping, not what a stray reply to the old token would do.
         await _expire_lapsed_outstanding(
@@ -369,7 +369,7 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(user.email):
         tracker.last_notification_sent_at = datetime.now(timezone.utc)
-        # RC-4: same reasoning as the no-proposals bail above -- nothing will ever
+        # Same reasoning as the no-proposals bail above -- nothing will ever
         # replace this row while the allowlist keeps blocking this recipient, and it
         # is already past the reply window, so email_inbound refuses a reply to it
         # regardless of `status`.
@@ -461,15 +461,14 @@ async def send_proposal_notification(
     # reminder, or a resend of an expired row) reconciles this SAME row rather
     # than inserting a new one.
     #
-    # SEC-F1 (opus review, audit 2026-09-08): every (re)send mints a FRESH
-    # reply_token, written onto the reconciled row below. I2 (#21 fix round B)
-    # used to REUSE the existing token here so a PI who answered the first
+    # Every (re)send mints a FRESH reply_token, written onto the reconciled row
+    # below. Reusing the existing token here (so a PI who answered the first
     # reminder after a second had gone out wasn't told "No notification found
-    # for token" — but that left the first e-mail's reply address permanently
+    # for token") left the first e-mail's reply address permanently
     # redeemable (process_inbound_email looks up purely by token, with no
     # per-send identity) and let an `expired` row flip back to `sent` carrying
-    # its already-superseded token, defeating RC-4's 14-day expiry window
-    # (measured from `sent_at`). Only the most-recently-sent e-mail's token may
+    # its already-superseded token, defeating the reply token's own expiry
+    # window (measured from `sent_at`). Only the most-recently-sent e-mail's token may
     # be valid; a reply to a stale token now fails the same "No notification
     # found" lookup that an unrelated stranger's token would.
     result = await db.execute(
@@ -484,7 +483,7 @@ async def send_proposal_notification(
 
     # Build email. Soliciting a reply is only honest when the inbound pipeline
     # is actually on — otherwise PIs answer a dead reply domain and get
-    # silence (this is exactly what happened on prod through 2026-08).
+    # silence.
     reply_enabled = settings.enable_inbound_email
     reply_to = build_reply_address(reply_token) if reply_enabled else None
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
@@ -496,7 +495,7 @@ async def send_proposal_notification(
     channel = thread_decision.channel or "unknown"
 
     # HTML-escaped copies for the HTML body: bot names are PI-chosen and the
-    # summary is LLM-written, so both are untrusted in an HTML context (SEC-13).
+    # summary is LLM-written, so both are untrusted in an HTML context.
     # The plain-text body keeps the raw values.
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
@@ -632,14 +631,14 @@ async def send_proposal_notification(
             agent.bot_name,
             thread_decision.id,
         )
-        # Log the notification only now that SES actually accepted it (V4-2). The write
+        # Log the notification only now that SES actually accepted it. The write
         # must not be able to un-send mail that already went out:
-        # uq_email_notification_user_thread_category (migration 0016) means a PREVIOUS
-        # row for this (user, proposal, 'proposal_review') — e.g. one Task 21.12's expiry
+        # uq_email_notification_user_thread_category means a PREVIOUS
+        # row for this (user, proposal, 'proposal_review') — e.g. one the expiry
         # sweep just marked 'expired', or one an earlier _handle_instruction failure
-        # already marked 'responded' for a still-unreviewed proposal (M1) — makes a plain
+        # already marked 'responded' for a still-unreviewed proposal — makes a plain
         # INSERT fail. Reconcile that row instead of blindly inserting. `notification`
-        # was already looked up above — reuse it rather than re-querying, and (SEC-F1)
+        # was already looked up above — reuse it rather than re-querying, and
         # write the freshly minted `reply_token` onto it: the e-mail that was just sent
         # carries THIS token, and the row's previous token (if any) must stop working.
         if notification is None:
@@ -792,8 +791,7 @@ async def mark_notification_responded(
 
 
 class SendOutcome(Enum):
-    """The distinguishable outcomes of ``send_html_email_outcome`` (R-3, split
-    further by an opus-review follow-up, audit 2026-09-10).
+    """The distinguishable outcomes of ``send_html_email_outcome``.
 
     ``_send_html_email``'s single bool return conflated several different things
     a caller might want to react to differently: suppressed before any SES call
@@ -838,7 +836,7 @@ def send_html_email_outcome(
     # `User.email` is nullable (a private-ORCID account has none) and all four call sites
     # pass one straight through, so the parameter has to admit None -- and then say so
     # rather than handing SES a None address, which it reports as an opaque client error.
-    # Same shape as _notify_instruction_failure (e700dac).
+    # Same shape as _notify_instruction_failure.
     if not to_email:
         logger.info("Email suppressed: no recipient address on record (subject=%r)", subject)
         return SendOutcome.SUPPRESSED
@@ -957,7 +955,7 @@ async def check_and_send_status_overviews(session_factory: async_sessionmaker) -
         result = await db.execute(
             select(User).options(selectinload(User.agent)).where(User.email.isnot(None))
         )
-        # V4-1 fix round 1: re-load by id inside the guarded block below -- see the
+        # Re-load by id inside the guarded block below -- see the
         # comment in check_and_send_notifications above for why the pre-loaded object
         # cannot be trusted after an earlier iteration's rollback.
         user_ids = [u.id for u in result.scalars().all()]
@@ -1109,7 +1107,7 @@ async def _send_status_overview(
 
     # Escape the untrusted parts for the HTML body: pair is built from
     # PI-chosen bot names and summary from the LLM (status is a fixed label).
-    # The plain-text body above uses the raw values (SEC-13).
+    # The plain-text body above uses the raw values.
     idea_html = "".join(
         f'<li style="margin-bottom: 8px;"><span style="color:#4f46e5;font-weight:600;">'
         f'{esc(pair)}</span><br><span style="color:#374151;">{esc(summary)}</span> '
@@ -1170,7 +1168,7 @@ async def check_and_send_new_proposal_emails(session_factory: async_sessionmaker
                 ThreadDecision.decided_at >= cutoff,
             )
         )
-        # V4-1 fix round 1: only plain ids are captured before the loop -- see the
+        # Only plain ids are captured before the loop -- see the
         # comment in check_and_send_notifications above for why the pre-loaded object
         # cannot be trusted after an earlier iteration's rollback. Unlike the other two
         # sweeps, each td has TWO guarded slots (one per agent side), each with its own
@@ -1276,7 +1274,7 @@ async def _send_new_proposal_email(
     settings = get_settings()
 
     # Same shape as send_proposal_notification above — look up any existing row for
-    # this (user, proposal, category). SEC-F1 (opus review, audit 2026-09-08): every
+    # this (user, proposal, category). Every
     # (re)send mints a FRESH reply_token (written onto the reconciled row below)
     # rather than reusing the old one — see send_proposal_notification's comment for
     # why reuse was wrong.
@@ -1302,7 +1300,7 @@ async def _send_new_proposal_email(
     settings_url = f"{settings.base_url}/settings"
 
     # HTML-escaped copies for the HTML body (PI-chosen bot names + LLM summary
-    # are untrusted in an HTML context) (SEC-13).
+    # are untrusted in an HTML context).
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
     channel_html = esc(channel)
@@ -1356,12 +1354,12 @@ async def _send_new_proposal_email(
         reply_to=reply_to, unsubscribe_url=unsubscribe_url,
     )
     if sent:
-        # Log the notification only now that _send_html_email actually sent it (V4-2): its
+        # Log the notification only now that _send_html_email actually sent it: its
         # OWN allowlist check runs before this point, so a suppressed recipient never gets a
         # phantom row that would block a resend once the allowlist is widened. Same
         # reconcile-not-insert shape as send_proposal_notification, and for the same reason
-        # (uq_email_notification_user_thread_category, B3/M1). `notification` was already
-        # looked up above — reuse it rather than re-querying, and (SEC-F1) write the
+        # (uq_email_notification_user_thread_category). `notification` was already
+        # looked up above — reuse it rather than re-querying, and write the
         # freshly minted `reply_token` onto it, retiring whatever token the row carried
         # before.
         if notification is None:

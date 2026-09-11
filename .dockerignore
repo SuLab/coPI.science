@@ -17,12 +17,11 @@ venv
 .env
 .env.*
 
-# Bloat + secrets that COPY . . would otherwise bake into every image layer
-# (#27 I3). backups/ is the sharp one: it holds full production pg_dumps AND,
-# as of 2026-08-10, a plaintext prod .env (125 SLACK_BOT_TOKEN_*,
-# POSTGRES_PASSWORD, SLACK_CONFIG_TOKEN/_REFRESH_TOKEN) that the .env/.env.*
-# patterns above do not catch — it has no leading dot and sits two
-# directories down. See scratchpad findings/issue_27.md I3-b.
+# Bloat + secrets that COPY . . would otherwise bake into every image layer.
+# backups/ is the sharp one: it holds full production pg_dumps AND a
+# plaintext prod .env (SLACK_BOT_TOKEN_* per agent, POSTGRES_PASSWORD,
+# SLACK_CONFIG_TOKEN/_REFRESH_TOKEN) that the .env/.env.* patterns above do
+# not catch — it has no leading dot and sits two directories down.
 backups
 .venv-test
 .venv*
@@ -34,26 +33,24 @@ build
 .ruff_cache
 .coverage
 .mutmut-cache
-# 58 MB, 34 files, created by ci.sh's mypy stage — measured at 88% of the
-# built image's /app tree before this line existed (#27 I5).
+# Created by ci.sh's mypy stage — large relative to the built image's /app
+# tree, and not something any runtime process reads.
 .mypy_cache
 # A stray uv.lock (a `uv` command run without --no-project writes one) is a second,
-# competing lockfile; requirements.lock is the only one the image installs (#27 I5).
+# competing lockfile; requirements.lock is the only one the image installs.
 uv.lock
 .playwright-mcp
 copi.egg-info
 .superpowers
 **/.env*
 docs/specs
-# The one-off implementation plans and their evidence subtrees. Measured in a
-# real build of this Dockerfile: docs/plans 2,846,970 bytes / 65 files and
-# docs/superpowers 392,423 bytes / 8 files — 41% of /app's 7,845,067 bytes,
-# for text no process reads. Nothing under src/, scripts/, templates/ or
-# alembic/ opens a path below docs/; every reference is a comment or a
-# docstring (`grep -rn 'docs/' src/ scripts/ templates/ alembic/`), which is
-# the same reasoning that already excludes docs/specs above. docs/ itself is
-# deliberately NOT excluded: docs/production-migration.md and
-# docs/inbound-email.md are operator runbooks worth having next to the code
-# in a shell inside the container (#27 I3).
+# The one-off implementation plans and their evidence subtrees — a large
+# fraction of /app's tree for text no process reads. Nothing under src/,
+# scripts/, templates/ or alembic/ opens a path below docs/; every reference
+# is a comment or a docstring (`grep -rn 'docs/' src/ scripts/ templates/
+# alembic/`), which is the same reasoning that already excludes docs/specs
+# above. docs/ itself is deliberately NOT excluded: docs/production-migration.md
+# and docs/inbound-email.md are operator runbooks worth having next to the
+# code in a shell inside the container.
 docs/plans
 docs/superpowers

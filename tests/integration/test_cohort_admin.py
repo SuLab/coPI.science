@@ -1,8 +1,8 @@
 """Live integration tests for the cohort admin surface.
 
 Real ASGI requests, real Postgres, real Jinja templates. Covers the granular
-topology control (.notes/cohort-system-v2.md §12), the audit trail (§4.1/§13.1),
-the delete guard, and the rule that the gate never becomes access control (§6.2).
+topology control, the audit trail, the delete guard, and the rule that the
+gate never becomes access control.
 """
 
 import base64
@@ -290,7 +290,7 @@ async def test_service_agent_is_addable_without_a_registry_row(client, db_sessio
     assert [m.agent_id for m in members] == ["grantbot"]
     assert members[0].added_by == admin.id
 
-    # The bypass must not skip the audit write — that is the whole trail for §4.1.
+    # The bypass must not skip the audit write — that is the whole trail.
     events = (await db_session.execute(
         select(CohortAuditEvent).where(CohortAuditEvent.cohort_id == c.id)
     )).scalars().all()
@@ -464,7 +464,7 @@ def _all_cell_values(html: str) -> set[str]:
 async def test_rendered_cells_are_exactly_the_marker_cross_product(
     client, db_session, admin, roster
 ):
-    """Structural safety property (audit finding F5): the ``present_agent`` /
+    """Structural safety property: the ``present_agent`` /
     ``present_cohort`` markers the save route trusts to reconstruct ``rendered``
     must equal the ACTUAL cross product of cells the table drew, or a save can
     silently delete memberships for a cell that was never shown (see
@@ -668,7 +668,7 @@ async def test_inactive_agent_is_labelled_not_unrestricted(
 async def test_pi_facing_thread_view_is_never_cohort_filtered(
     client, db_session, admin, roster
 ):
-    """A cohort must never change what a human can read (v2 §6.2).
+    """A cohort must never change what a human can read.
 
     Two agents in different cohorts exchange messages; the admin discussion view
     must still show both.
@@ -689,7 +689,7 @@ async def test_pi_facing_thread_view_is_never_cohort_filtered(
     assert r.status_code == 200
 
 
-# --- §11: what takes effect immediately and what needs a restart ------------
+# --- what takes effect immediately and what needs a restart -----------------
 
 
 def _ticked_cells(html: str) -> set[str]:
@@ -725,7 +725,7 @@ def test_ticked_cells_helper_distinguishes_checked_from_unchecked():
 
 
 async def test_membership_is_live_but_settings_are_cached(client, db_session, admin, roster):
-    """§11's asymmetry, both halves, so neither can pass alone.
+    """The immediate-vs-cached asymmetry, both halves, so neither can pass alone.
 
     A topology edit takes effect on the engine's next roster sync (~30s, no restart).
     The flag and the policy do not, because get_settings() is lru_cached — that is why
@@ -742,8 +742,8 @@ async def test_membership_is_live_but_settings_are_cached(client, db_session, ad
     os.environ["COHORT_ISOLATION_ENABLED"] = "true" if not before else "false"
     try:
         assert get_settings().cohort_isolation_enabled is before, (
-            "get_settings() is no longer cached — §11 and the admin banner's "
-            "'restart required' wording are both wrong"
+            "get_settings() is no longer cached — the admin banner's "
+            "'restart required' wording is now wrong"
         )
         # Control: a FRESH Settings() DOES see the env var. Without this leg the
         # assertion above is also satisfied by an env var that never took effect.

@@ -1,4 +1,4 @@
-"""Unit test: profile_version bump uses an atomic SQL-side increment (issue #22 C1)."""
+"""Unit test: profile_version bump uses an atomic SQL-side increment."""
 
 import pathlib
 import re
@@ -24,8 +24,8 @@ def test_bump_is_a_sql_side_coalesce_plus_one_with_returning():
 
 
 # ---------------------------------------------------------------------------
-# Mutation guard (fix round 1, Important 1): every call site that bumps
-# profile_version must go through the atomic `bump_profile_version` helper,
+# Mutation guard: every call site that bumps profile_version must go through
+# the atomic `bump_profile_version` helper,
 # not a Python-side read-modify-write. `X.profile_version = (X.profile_version
 # or 0) + 1` silently drops a concurrent writer's increment — see the two-
 # session race pinned in tests/integration/test_profile_version_race.py.

@@ -819,13 +819,12 @@ def test_backfill_with_no_profile_directories_is_a_clean_no_op(db, runner, monke
 
 
 def test_backfill_honors_a_relocated_profiles_dir(db, runner, tmp_path, monkeypatch):
-    """RC-13 L2 (opus review, audit 2026-09-08): `backfill-profile-revisions` hardcoded
-    "profiles/{public,private,memory}" literally, independent of `Settings.profiles_dir`
-    (env COPI_PROFILES_DIR) -- every other profile path builder was converted for RC-13,
-    but this one was missed. Points `profiles_dir` at a directory OTHER than
-    "<cwd>/profiles" and confirms the command finds files there, not at the CWD-relative
-    default (the CWD here has no "profiles/" dir at all, so a fix that still reads the
-    hardcoded literal would find nothing and report 0)."""
+    """`backfill-profile-revisions` must resolve paths through `Settings.profiles_dir`
+    (env COPI_PROFILES_DIR), not a hardcoded "profiles/{public,private,memory}" literal.
+    Points `profiles_dir` at a directory OTHER than "<cwd>/profiles" and confirms the
+    command finds files there, not at the CWD-relative default (the CWD here has no
+    "profiles/" dir at all, so a command that still reads the hardcoded literal would
+    find nothing and report 0)."""
     from src import config
 
     agent_id = f"{AGENT_PREFIX}relocated"

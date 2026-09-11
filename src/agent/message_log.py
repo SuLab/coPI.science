@@ -25,9 +25,9 @@ class LogEntry:
     posted_at: float = 0.0  # Unix timestamp (float(ts))
     is_bot: bool = True
     # Visibility class of the channel this entry was posted in. Drives memory-
-    # synthesis filtering (G2) — private-channel entries never feed the public
+    # synthesis filtering — private-channel entries never feed the public
     # memory segment. Default 'public' is safe for all existing callers.
-    # See specs/privacy-and-channel-visibility.md §G2.
+    # See specs/privacy-and-channel-visibility.md.
     visibility: str = "public"
     # Slack-mirror mapping — set when this message was posted to (or came from)
     # Slack. In pure Slack-on mode slack_ts == ts. Persisted to the DB row so the
@@ -45,7 +45,7 @@ class LogEntry:
     # entry and for a PI row with no recorded sender (a pre-migration row, or a
     # since-deleted user). SimulationEngine._handle_pi_inbound_entry resolves
     # this to an owned-agent set and gates every side effect on it instead of
-    # on thread membership. See docs/plans/2026-09-08-audit-fixes.md RC-1.
+    # on thread membership.
     sender_user_id: uuid.UUID | None = None
 
 
@@ -55,7 +55,7 @@ def is_funding_post(content: str) -> bool:
 
 
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:
-    """Cohort gate for one log entry. See .notes/cohort-system-v2.md §5.1.
+    """Cohort gate for one log entry.
 
     Returns True (entry is visible to the viewing agent) when:
 
@@ -96,7 +96,7 @@ class MessageLog:
     All posts and replies are recorded here. Agents query it to find
     new posts since their last turn, thread histories, etc.
 
-    **Cohort-gate classification (.notes/cohort-system-v2.md §6).** Every public
+    **Cohort-gate classification.** Every public
     read method is classified GATED or UNGATED below, and the classification is
     repeated in each method's docstring. ``tests/unit/test_cohort_isolation.py``
     fails if a new public ``get_*``/``has_*`` method appears without one, so the
@@ -114,7 +114,7 @@ class MessageLog:
 
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
-    all of them at once. The gate belongs at the per-agent read. See v2 §6.2.
+    all of them at once. The gate belongs at the per-agent read.
     """
 
     def __init__(self) -> None:
@@ -123,7 +123,7 @@ class MessageLog:
         # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
         self._bot_name_to_id: dict[str, str] = {}
         # Slack bot_user_id -> agent_id, set by SimulationEngine (mirrors
-        # _bot_name_to_id but for real Slack <@Uxxx> mentions). See COR-8.
+        # _bot_name_to_id but for real Slack <@Uxxx> mentions).
         self._bot_uid_to_agent: dict[str, str] = {}
         # Optional persistence hook, invoked once per *new* append. The engine
         # registers this to mirror the log into the DB (the primary store).
@@ -140,7 +140,7 @@ class MessageLog:
         self._bot_name_to_id = dict(mapping)
 
     def set_bot_uid_map(self, mapping: dict[str, str]) -> None:
-        """Register Slack bot_user_id -> agent_id mapping (COR-8)."""
+        """Register Slack bot_user_id -> agent_id mapping."""
         self._bot_uid_to_agent = dict(mapping)
 
     def set_persist_callback(self, cb: Callable[[LogEntry], None] | None) -> None:
@@ -217,10 +217,10 @@ class MessageLog:
                 kept.append(entry)
         self._entries = kept
         if removed:
-            # latest_timestamp (:504-513) returns _max_posted_at directly —
-            # recompute it so a purge of the newest thread doesn't leave the
-            # cursor Task 20.7 derives from latest_timestamp sitting above
-            # every surviving entry (red-team m1). Conservative either way
+            # latest_timestamp returns _max_posted_at directly —
+            # recompute it so a purge of the newest thread doesn't leave a
+            # cursor derived from latest_timestamp sitting above
+            # every surviving entry. Conservative either way
             # (nothing gets re-scanned that shouldn't be), but state and log
             # would otherwise silently disagree.
             self._max_posted_at = max(
@@ -272,7 +272,7 @@ class MessageLog:
         posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
 
         COHORT-GATE: UNGATED by design — once a thread is open its full history
-        is context, including a partner who has since left the cohort (v2 §8).
+        is context, including a partner who has since left the cohort.
         """
         root = self._by_ts.get(thread_ts)
         replies = sorted(
@@ -324,7 +324,7 @@ class MessageLog:
         hand the turn to the wrong bot. Ties keep the later insertion, matching
         the previous behaviour when posted_at values collide.
                 COHORT-GATE: UNGATED by design — turn-taking within one channel, and the
-        only callers are collab_private channels, which the gate exempts (v2 §7).
+        only callers are collab_private channels, which the gate exempts.
         """
         best: LogEntry | None = None
         for entry in self._entries:
@@ -419,9 +419,9 @@ class MessageLog:
         # EVERY tagged agent reserves a slot, not just the first: a PI who tags
         # two bots addressed both, and keeping only the first left the second
         # burning one Phase-5 LLM call per turn on a thread it could never post
-        # in (#20 COR-8). Returning None here instead would open the thread to
-        # the whole roster, which specs/agent-system.md §Thread Participation
-        # Rules forbids ("No third agent may join").
+        # in. Returning None here instead would open the thread to
+        # the whole roster, which specs/agent-system.md's Thread Participation
+        # Rules forbid ("No third agent may join").
         tagged = [a for a in self._extract_tagged_agents(root.content) if a != poster_id]
         if tagged:
             return {poster_id, *tagged} if poster_id else set(tagged)
@@ -523,12 +523,13 @@ class MessageLog:
 
         COHORT-GATE: GATED via allowed_sender_ids.
 
-        See .notes/cohort-system-v2.md §6, §8. This is the read that drives
-        both the reactive-priority tier (``_owes_reply``) and the Phase 4 reply
-        decision, so leaving it ungated made the scheduler prioritise exactly the
-        threads the gate had rejected. Callers pass ``allowed_sender_ids=None`` for
-        a thread that is already open and not grandfathered — an open conversation
-        is entitled to conclude (v2 §8) — and pass the agent's gate otherwise.
+        This is the read that drives both the reactive-priority tier
+        (``_owes_reply``) and the Phase 4 reply decision, so leaving it
+        ungated would make the scheduler prioritise exactly the threads the
+        gate had rejected. Callers pass ``allowed_sender_ids=None`` for a
+        thread that is already open and not grandfathered — an open
+        conversation is entitled to conclude — and pass the agent's gate
+        otherwise.
         """
         for entry in self._entries:
             if entry.thread_ts != thread_ts:

@@ -10,9 +10,8 @@ from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-# See src/agent/agent.py's PROFILES_DIR — same setting, same defaults (audit
-# 2026-09-08 RC-13).
-# REV3-6 (audit 2026-09-08): None by default, resolved lazily via the
+# See src/agent/agent.py's PROFILES_DIR — same setting, same defaults.
+# None by default, resolved lazily via the
 # accessors below — see agent.py's own accessor for the full rationale.
 PROFILES_DIR: Path | None = None
 PRIVATE_PROFILES_DIR: Path | None = None
@@ -152,17 +151,17 @@ def export_private_profile(
     profiles/private/{agent_id}.md.
 
     Returns the path written, or None if the user has no AgentRegistry entry or
-    there is no private content of either kind (COR-23: a seed with nothing
+    there is no private content of either kind (a seed with nothing
     exported yet must not read to the agent as "no private instructions").
 
     `remove_if_empty` defaults to False: a run_profile_pipeline call has no
-    empty-content case to delete (#22 C1) — the pipeline adopts a disk-only
+    empty-content case to delete — the pipeline adopts a disk-only
     private profile into `profile.private_profile_md` before ever calling
     this, so `content` is only empty here for a PI who has genuinely never
     written one. Pass `remove_if_empty=True` only from a real "the PI just
     cleared this" write path (onboarding.py's save_private_profile) so that,
     and only that, path removes a previously exported file rather than
-    leaving a stale one in place (#29): src/agent/agent.py's private_profile
+    leaving a stale one in place: src/agent/agent.py's private_profile
     property falls back to "No private instructions yet." only when the file
     is ABSENT, so a cleared profile that left a stale file on disk would keep
     the agent honouring instructions the PI deleted.

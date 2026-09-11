@@ -7,8 +7,7 @@ grants.gov catalogue, and ``tests/conftest.py`` skips the whole module unless
 catalogue, the LLM selection/draft stages and grants.gov's detail endpoint are
 all stubbed, exactly like ``test_grantbot_live.py``'s own Slack-transport
 tests — so gating it behind ``LIVE_API_TESTS=1`` would mean ``./scripts/ci.sh``'s
-full pytest run (issue #23 COR-26c's only regression coverage) never actually
-executes it.
+full pytest run never actually executes its regression coverage.
 """
 
 import logging
@@ -32,12 +31,12 @@ pytestmark = pytest.mark.integration
 class _CountingWebClient:
     """Records every construction; never talks to a real Slack transport.
 
-    Replaces ``_ExplodingWebClient`` for this file's negative-path test (opus review of
-    23.3-23.5, finding 1). The exploding double discriminates on a side effect — its
-    ``AssertionError`` message getting caught by grantbot's own ``except``/log/continue
-    handling and landing in ``caplog`` — and that indirection is exactly what let a stale
-    FOA number's literal "TOKEN" substring make an earlier version of this test pass
-    against unfixed code for the wrong reason (see commit dd82c91). Counting construction
+    Replaces ``_ExplodingWebClient`` for this file's negative-path test. The exploding
+    double discriminates on a side effect — its ``AssertionError`` message getting
+    caught by grantbot's own ``except``/log/continue handling and landing in
+    ``caplog`` — and that indirection is exactly what let a stale FOA number's
+    literal "TOKEN" substring make an earlier version of this test pass against
+    unfixed code for the wrong reason. Counting construction
     and asserting the count is zero is a direct behavioural check: pre-fix,
     ``_ensure_channel_membership`` reaches ``src.services.slack_web._client(token)`` with
     the borrowed token, so this double gets built at least once — RED on behaviour, not on
@@ -66,7 +65,7 @@ class _CountingWebClient:
 
 class _NoGrantbotTokenSettings:
     """Real settings, but with an empty/placeholder grantbot token and a genuine (fake) SuBot
-    token — the exact shape that used to trigger the SuBot fallback (issue #23 COR-26c)."""
+    token — the exact shape that used to trigger the SuBot fallback."""
 
     def __init__(self, real, su_token: str = "xoxb-fake-su-token"):
         self._real, self._su_token = real, su_token
@@ -94,12 +93,12 @@ def _stub_detail_fetch(monkeypatch) -> None:
 async def test_no_grantbot_token_refuses_to_post_as_subot(
     db_session, monkeypatch, tmp_path, caplog,
 ):
-    """COR-26c: GrantBot must never publish funding posts under SuBot's Slack identity. The old
-    code fell back to slack_bot_token_su whenever slack_bot_token_grantbot was missing/placeholder,
-    and the engine's _bot_uid_map resolves roster bots first, so those posts were attributed to
-    `su`, not `grantbot`. The fix must refuse to post, release the FOA's claim so a future run
-    with a real token can still post it, and log the refusal — all without ever constructing a
-    Slack transport.
+    """GrantBot must never publish funding posts under SuBot's Slack identity: a
+    fallback to slack_bot_token_su whenever slack_bot_token_grantbot is missing/placeholder
+    would combine with the engine's _bot_uid_map, which resolves roster bots first,
+    to attribute those posts to `su`, not `grantbot`. It must instead refuse to post,
+    release the FOA's claim so a future run with a real token can still post it, and
+    log the refusal — all without ever constructing a Slack transport.
     """
     # cache_foa (grantbot.py step 4b) writes into the repo's data/ directory before the
     # token check is ever reached — redirect it, same as test_grantbot_live.py's

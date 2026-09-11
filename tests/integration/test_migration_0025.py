@@ -1,4 +1,4 @@
-"""Integration test for migration 0025 (issue #22 COR-16): publications
+"""Integration test for migration 0025: publications
 (user_id, pmid) dedup + unique constraint.
 
 Uses its own scratch database, stamped to 0024 and then upgraded, rather than the
@@ -82,7 +82,7 @@ async def test_0025_dedups_existing_rows_then_adds_unique_constraint(scratch_db)
                 ),
                 {"id": user_id, "orcid": f"0000-0000-0000-{uuid.uuid4().hex[:4]}"},
             )
-            # Two publications sharing (user_id, pmid) — the exact shape COR-16 produces
+            # Two publications sharing (user_id, pmid) — the exact shape produced
             # when an ORCID works list lists the same PMID twice (profile_pipeline.py:115).
             for pub_id, title in ((lower_id, "Kept (lowest id)"), (higher_id, "Dropped (dup)")):
                 await conn.execute(
@@ -149,7 +149,7 @@ async def _insert_user(conn, user_id) -> None:
 
 
 async def test_0025_keeps_the_earliest_created_row_not_the_lowest_uuid(scratch_db):
-    """#22 I2 reproduction: Publication.id is uuid4, uncorrelated with insertion
+    """Publication.id is uuid4, uncorrelated with insertion
     order, so ``p.id > p2.id`` can delete the richer, earlier row and keep a
     title-only row created later. Use a UUID pair whose ordering is the REVERSE of
     created_at ordering to prove the keeper is chosen by created_at, not id.

@@ -112,7 +112,7 @@ async def run_profile_pipeline(
         orcid_works = []
         works_lookup_failed = True
 
-    # Extract PMIDs for works that have them. Deduplicated (COR-16): ORCID lists a
+    # Extract PMIDs for works that have them. Deduplicated: ORCID lists a
     # work once per activities-summary source, so the same paper linked to two
     # co-author affiliations reaches this loop as the same PMID twice.
     pmids, seen_pmids = _dedup_pmids(orcid_works)
@@ -189,9 +189,8 @@ async def run_profile_pipeline(
     new_publications: list[Publication] = []
     pubs_for_synthesis: list[dict[str, Any]] = []
     # Tracks which PMIDs already have a record in pubs_for_synthesis, so a PMID
-    # whose pubmed_records entry appears more than once (issue #22 COR-16
-    # residual) contributes its abstract to the synthesis context once, not
-    # once per duplicate record.
+    # whose pubmed_records entry appears more than once contributes its abstract
+    # to the synthesis context once, not once per duplicate record.
     synthesis_pmids_seen: set[str] = set()
 
     for rec in pubmed_records:
@@ -224,13 +223,13 @@ async def run_profile_pipeline(
             # Apply the validated DOI if it changed.
             if doi and pub.doi != doi:
                 pub.doi = doi
-            # Refresh title/abstract/journal/year from the fresh PubMed record
-            # (issue #22 I5): rows stored before the itertext() parser fix keep
-            # a title truncated at the first inline tag ("Role of " for
-            # "Role of <i>TP53</i> in cancer") forever, because this branch
-            # used to touch only `doi` -- and it is these stored DB rows, not
-            # the live parser, that profile_export.py and the synthesis
-            # context read. Only overwrite when the fresh value is non-empty,
+            # Refresh title/abstract/journal/year from the fresh PubMed record:
+            # rows stored before an itertext() parser fix keep a title
+            # truncated at the first inline tag ("Role of " for "Role of
+            # <i>TP53</i> in cancer") forever unless this branch also
+            # refreshes it -- it is these stored DB rows, not the live parser,
+            # that profile_export.py and the synthesis context read. Only
+            # overwrite when the fresh value is non-empty,
             # so a PubMed hiccup (or a record genuinely missing an abstract)
             # can never blank a value already on the row. None of these four
             # columns is human-curated (scripts/vet_publications.py only
@@ -244,7 +243,7 @@ async def run_profile_pipeline(
             if rec.get("year"):
                 pub.year = rec["year"]
         else:
-            # COR-16 Note: tolerates a concurrent writer that already committed
+            # Tolerates a concurrent writer that already committed
             # this same (user_id, pmid) between our existing_pubs SELECT above
             # and this INSERT -- see _insert_publication_tolerating_conflict.
             written, inserted = await _insert_publication_tolerating_conflict(
@@ -270,10 +269,10 @@ async def run_profile_pipeline(
             else:
                 if inserted:
                     new_publications.append(written)
-                # COR-16: a PMID repeated later in this same loop (e.g. two ORCID
+                # A PMID repeated later in this same loop (e.g. two ORCID
                 # works resolving to one PMID) must hit the update branch above,
                 # not attempt a second insert that collides with
-                # uq_publications_user_pmid (migration 0025).
+                # uq_publications_user_pmid.
                 existing_pubs[pmid] = written
 
         if is_research and rec.get("abstract") and pmid not in synthesis_pmids_seen:
@@ -386,48 +385,24 @@ async def run_profile_pipeline(
                 context_text + "\n\nIMPORTANT: Ensure research_summary is 150-250 words.",
                 user.name,
             )
-            # Same non-dict normalization as the first attempt (Minor 2).
+            # Same non-dict normalization as the first attempt.
             if not isinstance(synthesized, dict):
                 synthesized = {}
             validated = _validate_profile(synthesized)
         except Exception as exc:
             logger.error("Retry synthesis failed: %s", exc)
 
-    # Step 9: Store.
-    #
-    # `validated` is READ here. It used to gate only the retry above: step 9 stored
-    # on `if synthesized:` alone, so the retry's validation result was computed and
-    # thrown away, and a profile that failed _validate_profile twice was persisted
-    # as though it had passed. Nothing recorded the difference, so no test could
-    # see it — hardwiring _validate_profile to `return True` changed no observable
-    # behaviour at all. Two columns now record the decision (migration 0023):
-    # `synthesis_validated`, and the evidence counts that say what the stored
-    # fields are grounded in.
-    #
-    # The failure mode on a double validation failure is deliberate: store the
-    # draft and MARK it, rather than raise or store nothing.
-    #   * Raising is loud in the log and silent in the UI. execute_generate_profile
-    #     lets the exception reach process_job, which retries up to
-    #     Job.max_attempts (default 3) — three more full LLM+NCBI runs for a
-    #     formatting miss the retry above already tried to fix — and then sets
-    #     status='failed' (#21 COR-18e/f). templates/onboarding/profile_review.html
-    #     keys its "Try Again" control on exactly that job_status == 'failed', so a
-    #     job that exhausts its attempts here now reaches that control and the PI
-    #     sees the retry button and an explanation, not the blank body this comment
-    #     used to describe. Raising would also skip step 9b, the markdown export and
-    #     create_revision below, costing the private-profile seed and the audit trail.
-    #   * Storing nothing is indistinguishable from "the pipeline never ran" and
-    #     throws away the only draft the PI has to edit. (It would not cause the
-    #     /onboarding re-enqueue loop: that self-heal is gated on `job is None and
-    #     profile is None`, and step 6 above always creates the row first.)
-    #   * Storing + marking keeps onboarding moving — the PI edits the draft and
-    #     POSTs /onboarding/save-profile — while being distinguishable (one column,
-    #     one ERROR log, one job-progress entry) and recoverable (POST
-    #     /onboarding/retry, or the next monthly_refresh).
-    #
-    # What it will NOT do is let a worse synthesis overwrite a better stored one.
-    # A monthly refresh that fails validation, or one that runs while PubMed is
-    # down, keeps the profile that is already there.
+    # Step 9: Store. `validated` (not just `synthesized`) gates this, so a profile
+    # that fails _validate_profile twice is still stored but MARKED
+    # (`synthesis_validated`, plus evidence counts recording what the stored fields
+    # are grounded in) rather than raised or dropped: raising would reach
+    # process_job's retry budget for a formatting miss already retried once and
+    # skip step 9b's markdown export/audit trail; storing nothing would discard the
+    # only draft the PI has to edit. Storing + marking keeps onboarding moving
+    # (the PI can edit and save the draft) while staying recoverable via
+    # /onboarding/retry or the next monthly_refresh. It will NOT let a worse
+    # synthesis overwrite a better stored one — a failed validation or a run
+    # during a PubMed outage keeps the profile that is already there.
     update_progress("step9", "Saving profile to database...")
     profile.grant_titles = grant_titles or profile.grant_titles
 
@@ -441,11 +416,11 @@ async def run_profile_pipeline(
     evidence_pub_count = len(pubs_for_synthesis)
 
     # Tracks whether apply_synthesis actually applied new fields, so the version
-    # bump (issue #22 I6) can be deferred to just before the final flush below
-    # without losing track of whether it is owed.
+    # bump can be deferred to just before the final flush below without losing
+    # track of whether it is owed.
     synthesis_applied = False
     # Whether this run produced a synthesis that was then explicitly thrown
-    # away to protect a better stored profile (issue #22 COR-22 residual (c)).
+    # away to protect a better stored profile.
     # raw_abstracts_hash is change-detection INPUT for the run whose output was
     # actually kept -- a discarded run's abstracts must not be recorded, or a
     # later run over that same (still-failing) input would look unchanged
@@ -534,22 +509,18 @@ async def run_profile_pipeline(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id = agent_reg.agent_id if agent_reg else None
 
-    # Adopt a disk-only private profile into the DB (#22 C1), BEFORE Step 9b's
-    # gate below is evaluated. A pilot lab admin-seeded with hand-authored
+    # Adopt a disk-only private profile into the DB, BEFORE Step 9b's gate
+    # below is evaluated. A pilot lab admin-seeded with hand-authored
     # instructions in profiles/private/{agent_id}.md and NULL
-    # private_profile_md/_seed is a state onboarding.py's GET
-    # /onboarding/private-profile already documents and reads with this same
-    # fallback order. Without adopting it here first, Step 9b would see "no
-    # private content" and synthesize a fresh LLM seed, which the unconditional
-    # export used to write straight over the hand-authored file. Reading the
-    # disk content into private_profile_md makes Step 9b's
-    # `not profile.private_profile_md` condition false, so no seed is
-    # generated, and the export call below simply re-writes the adopted
-    # content back unchanged. This cannot resurrect a deliberate clear: both
-    # clear routes delete the file as they null the columns —
-    # onboarding.py:save_private_profile via remove_if_empty=True, and
-    # agent_page.py:save_private_profile via profile_path.unlink — so there is
-    # nothing here to adopt for a PI who cleared.
+    # private_profile_md/_seed needs that file read in first, or Step 9b would
+    # see "no private content" and synthesize a fresh LLM seed, overwriting
+    # the hand-authored file on export. Reading the disk content into
+    # private_profile_md makes Step 9b's `not profile.private_profile_md`
+    # condition false, so no seed is generated and the export call below just
+    # re-writes the adopted content back unchanged. This cannot resurrect a
+    # deliberate clear: both clear routes (onboarding.py:save_private_profile,
+    # agent_page.py:save_private_profile) delete the file as they null the
+    # columns, so there is nothing here to adopt for a PI who cleared.
     from src.services.profile_export import _private_profiles_dir, export_private_profile
     private_seed_generated = False
     if not profile.private_profile_md and not profile.private_profile_seed and agent_id:
@@ -560,33 +531,24 @@ async def run_profile_pipeline(
             )
 
     # Step 9b: Generate the private profile seed, but ONLY for a PI who has
-    # never recorded a private-instructions decision (issue #22 COR-23). The
-    # seed is model-authored and the export below writes it to the very file
-    # the agent reads, so regenerating one for a PI who deliberately turned
-    # private instructions off silently undoes that on the next run (a
+    # never recorded a private-instructions decision. The seed is
+    # model-authored and the export below writes it to the very file the
+    # agent reads, so regenerating one for a PI who deliberately turned
+    # private instructions off would silently undo that on the next run (a
     # regenerate, an admin re-enqueue, a monthly refresh).
     #
-    # There are exactly two clear routes, and each leaves a DIFFERENT record —
-    # keying this gate on either one alone misses the other (over-impl R1):
-    #   * `POST /onboarding/private-profile` submitted blank clears both
-    #     columns and sets onboarding_complete=True
-    #     (onboarding.py:save_private_profile), and records no revision at all
-    #     (`if agent_reg and content.strip()`), so the flag is its only trace.
-    #   * `POST /agent/{agent_id}/profile/save` submitted blank
-    #     (agent_page.py:save_private_profile, open to the PI *or* a delegate)
-    #     clears both columns, unlinks the file and records an EMPTY private
-    #     revision — and never touches onboarding_complete. Keyed on the flag
-    #     alone, this gate therefore missed every PI who never finished
-    #     onboarding: 36 of 53 active agents on the production copy (113 of 144
-    #     users), because every admin-seeded pilot lab is in that state. That is
-    #     the common case, not the corner.
-    # So the cleared state itself is consulted, with the flag kept only for the
+    # There are two clear routes and each leaves a different record: the
+    # onboarding route's blank submission only sets onboarding_complete=True
+    # and records no revision, while the agent-page route also unlinks the
+    # file and records an EMPTY private revision without touching
+    # onboarding_complete. Keying this gate on the onboarding flag alone would
+    # miss every PI who cleared via the agent-page route but never finished
+    # onboarding, so the cleared state itself is consulted via
+    # `_private_profile_was_cleared`, with the flag kept only for the
     # onboarding route that records nothing else.
     #
     # An admin-seeded PI who never onboarded and never cleared anything is
-    # unaffected and still gets a seed generated and exported — including one
-    # whose only private revision is a non-empty `backfill-profile-revisions`
-    # row (cli.py), which records that instructions once existed, not a clear.
+    # unaffected and still gets a seed generated and exported.
     if (
         not profile.private_profile_md
         and not profile.private_profile_seed
@@ -603,8 +565,8 @@ async def run_profile_pipeline(
         except Exception as exc:
             logger.error("Private profile seed generation failed for %s: %s", user.name, exc)
 
-    # Bump profile_version here, not at the point apply_synthesis was applied
-    # (issue #22 I6): bump_profile_version's `UPDATE ... RETURNING` takes a row
+    # Bump profile_version here, not at the point apply_synthesis was applied:
+    # bump_profile_version's `UPDATE ... RETURNING` takes a row
     # lock on researcher_profiles that is only released when the worker commits
     # this transaction (src/worker/main.py). Emitting it immediately after
     # apply_synthesis held that lock across Step 9b's synthesize_private_profile
@@ -618,14 +580,12 @@ async def run_profile_pipeline(
 
     await db.flush()
 
-    # Export private profile to disk (COR-23). The issue asks to "export the seed
-    # itself at generation time (or fall back to the seed in the exporter)" — both
-    # halves are done: the exporter falls back to private_profile_seed, and the call
-    # here fires when this run GENERATED one. It used to fire unconditionally, which
-    # reverted any hand-edit of profiles/private/{agent_id}.md that was ahead of the
-    # DB on every unrelated run — a PI clicking "regenerate my profile" silently
-    # rolled back operator-written agent instructions. Found by the
-    # over-implementation audit.
+    # Export private profile to disk only when this run GENERATED a seed (the
+    # exporter itself falls back to private_profile_seed). Firing
+    # unconditionally would revert any hand-edit of
+    # profiles/private/{agent_id}.md that was ahead of the DB on every
+    # unrelated run — a PI clicking "regenerate my profile" would silently
+    # roll back operator-written agent instructions.
     #
     # The second condition keeps disaster recovery working: if the DB holds private
     # content and the file is simply absent (a fresh container, an emptied bind
@@ -633,7 +593,7 @@ async def run_profile_pipeline(
     # there. An existing file whose content differs is left alone — the PI-facing save
     # routes export directly when they change it, so the pipeline does not need to.
     #
-    # remove_if_empty stays at its default False (#22 C1): this call must never delete
+    # remove_if_empty stays at its default False: this call must never delete
     # a disk-only private profile it did not itself create.
     _private_path = _private_profiles_dir() / f"{agent_id}.md" if agent_id else None
     if private_seed_generated or (_private_path is not None and not _private_path.exists()):
@@ -666,7 +626,7 @@ async def run_profile_pipeline(
     return profile
 
 
-# NOTE (audit D3): there is deliberately no SQL whitespace class here any more.
+# NOTE: there is deliberately no SQL whitespace class here any more.
 #
 # This guard used to ask Postgres `btrim(content, ' \t\n\r\f\v') = ''`, on the premise
 # that those six were "whitespace a browser can actually submit in a textarea". That
@@ -774,7 +734,7 @@ def _build_synthesis_context(
 
 
 def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]]:
-    """PMIDs from an ORCID works listing, first occurrence only (issue #22 COR-16).
+    """PMIDs from an ORCID works listing, first occurrence only.
 
     ORCID lists a work once per activities-summary source, so a paper linked to two
     co-author affiliations arrives here as the same PMID twice. Returns the ordered
@@ -795,12 +755,11 @@ async def _insert_publication_tolerating_conflict(
     db: AsyncSession, user_id: uuid.UUID, pmid: str, **fields: Any
 ) -> tuple[Publication | None, bool]:
     """INSERT a new Publication row, tolerating a concurrent writer that already
-    committed the same (user_id, pmid) (issue #22 COR-16 Note: the new
-    uq_publications_user_pmid constraint (migration 0025) makes two overlapping
-    pipeline runs for one user race on this INSERT -- without this, the SECOND
-    run's plain `await db.flush()` raises IntegrityError and fails the whole
-    job instead of double-inserting; it self-heals on the worker's retry, but
-    burns a full NCBI pass to get there).
+    committed the same (user_id, pmid). The uq_publications_user_pmid
+    constraint makes two overlapping pipeline runs for one user race on this
+    INSERT -- without this, the SECOND run's plain `await db.flush()` raises
+    IntegrityError and fails the whole job instead of double-inserting; it
+    self-heals on the worker's retry, but burns a full NCBI pass to get there.
 
     Uses `INSERT ... ON CONFLICT DO NOTHING` (the pattern already established
     for a different table by `_claim_foa` in src/agent/grantbot.py) rather than
@@ -811,7 +770,7 @@ async def _insert_publication_tolerating_conflict(
     NOTHING never raises in the first place, so there is nothing to recover
     from.
 
-    The in-run dedup from COR-16 (`_dedup_pmids` + the in-loop `existing_pubs`
+    The in-run dedup (`_dedup_pmids` + the in-loop `existing_pubs`
     update in the caller below) still applies FIRST and prevents THIS run from
     ever attempting to insert the same PMID twice, so the conflict this
     tolerates is specifically an *other* session's writer, not a duplicate
@@ -824,11 +783,9 @@ async def _insert_publication_tolerating_conflict(
     come back empty (`Session.get` and `.first()` are each `Publication | None`)
     if the row this statement conflicted with was itself deleted between the
     INSERT and the SELECT — which is exactly the concurrent-writer window this
-    function exists for, only with a DELETE in it. The annotation used to
-    promise a `Publication` regardless, which was both dishonest and the two
-    `[return-value]` findings that moved the branch's mypy ceiling from 145 to
-    147 (issue #27 I1); the caller handles the `None` rather than dereferencing
-    it and raising `AttributeError` on the next repeat of that PMID.
+    function exists for, only with a DELETE in it. The caller handles the
+    `None` rather than dereferencing it and raising `AttributeError` on the
+    next repeat of that PMID.
     """
     new_id = uuid.uuid4()
     stmt = (
@@ -850,7 +807,7 @@ async def _insert_publication_tolerating_conflict(
 
     logger.warning(
         "Publication (user_id=%s, pmid=%s) already inserted by a concurrent "
-        "writer; using its row instead of double-inserting (issue #22 COR-16 Note)",
+        "writer; using its row instead of double-inserting",
         user_id, pmid,
     )
     winner = await db.execute(
@@ -863,9 +820,8 @@ async def _insert_publication_tolerating_conflict(
 
 def _stored_is_worth_keeping(profile: ResearcherProfile) -> bool:
     """Whether `profile` already holds a synthesis worth protecting from being
-    overwritten by a new one that failed validation or lost evidence (issue
-    #22 COR-22 residual: this predicate used to be duplicated verbatim between
-    `run_profile_pipeline` and `apply_synthesis`).
+    overwritten by a new one that failed validation or lost evidence. Shared
+    by `run_profile_pipeline` and `apply_synthesis`.
 
     A stored profile already known to have failed validation is not worth
     protecting. NULL (legacy/unknown, or PI-edited) is.
@@ -891,7 +847,7 @@ def _validate_profile(profile: dict[str, Any] | None) -> bool:
     # comes back as a non-dict. vet_publications.py and
     # resynth_from_current_pubs.py call this function directly on their own
     # extract_json result before ever reaching apply_synthesis's own guard, so
-    # this has to reject non-dicts too (#22 COR-22 fix-round review).
+    # this has to reject non-dicts too.
     if not isinstance(profile, dict):
         return False
     if not profile:
@@ -961,13 +917,13 @@ def _usable_synthesized_fields(
       production as a response that PASSES `_validate_profile` (which checks
       only research_summary/techniques/disease_areas) while omitting
       `keywords`/`key_targets`/`experimental_models`; the old per-field
-      `synthesized.get(field, [])` then wrote `[]` over curated values (issue
-      #22 V6). An omission is not an instruction to empty a column.
+      `synthesized.get(field, [])` then wrote `[]` over curated values. An
+      omission is not an instruction to empty a column.
     * **Mistyped** — the key is present with a value of the wrong type. Storing
-      it is the per-character corruption `beae171` fixed (a bare `"cancer"` for
+      it is the per-character corruption (a bare `"cancer"` for
       `disease_areas` iterated onto the column as `['c','a','n','c','e','r']`,
       and a non-iterable raised `StatementError` at flush, failing the whole
-      job); coercing it to `[]`, as `beae171` then did, blanks the same curated
+      job); coercing it to `[]` blanks the same curated
       values the omitted case does. A value of the wrong type says nothing about
       the stored one, so it is rejected without being stored.
 
@@ -1005,9 +961,9 @@ def apply_synthesis(
     """Apply a synthesized profile's fields to `profile` if it passes the same
     keep-what-you-have gate `run_profile_pipeline` uses, so a script-driven
     resynthesis can't do what only the pipeline used to protect against:
-    overwrite a stored, validated profile with one that failed validation
-    (issue #22 COR-22 residual — the four scripts/ synthesizers previously wrote
-    `profile.research_summary` etc. directly with no gate and no provenance).
+    overwrite a stored, validated profile with one that failed validation.
+    Without this gate the four scripts/ synthesizers would write
+    `profile.research_summary` etc. directly with no gate and no provenance.
 
     Does NOT touch `evidence_pmid_count`/`evidence_pub_count` — those describe
     *how the synthesis was grounded*, which only `run_profile_pipeline` (the only
@@ -1030,8 +986,7 @@ def apply_synthesis(
     # top-level value) parses fine and comes back as a non-dict. The pipeline's
     # own two synthesize_profile call sites normalize for this before this
     # function ever sees `synthesized`, but the four scripts/ callers pass their
-    # own extract_json result straight through, so this guard has to be here too
-    # (issue #22 COR-22/COR-23 residual).
+    # own extract_json result straight through, so this guard has to be here too.
     if not isinstance(synthesized, dict):
         return False
 
@@ -1050,8 +1005,7 @@ def apply_synthesis(
         # log at INFO to the console, so the operator sees this line.
         logger.warning(
             "Synthesized profile is incomplete: omitted %s, wrong type for %s. "
-            "Keeping the stored value for each rather than blanking it "
-            "(issue #22 V6).",
+            "Keeping the stored value for each rather than blanking it.",
             omitted or "nothing", mistyped or "nothing",
         )
 
@@ -1087,7 +1041,7 @@ def bump_profile_version_stmt(profile_id: uuid.UUID) -> Update:
 
 async def bump_profile_version(db: AsyncSession, profile_id: uuid.UUID) -> int:
     """Atomically increment ResearcherProfile.profile_version and return the new
-    value (issue #22 C1). SQL-side `COALESCE(...) + 1`, not a Python
+    value. SQL-side `COALESCE(...) + 1`, not a Python
     read-modify-write — the profile row is loaded well before this point (often
     many awaited calls earlier), so `(profile.profile_version or 0) + 1` in
     Python silently drops a concurrent writer's increment.

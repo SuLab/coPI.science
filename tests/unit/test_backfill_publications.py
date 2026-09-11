@@ -126,7 +126,7 @@ async def test_pmid_with_no_pubmed_record_is_reported(db_session):
 
 
 async def test_a_pmid_listed_twice_for_one_agent_is_fetched_and_inserted_once(db_session):
-    """#22 I4a: with uq_publications_user_pmid (0025) a repeated input PMID would
+    """With uq_publications_user_pmid (0025) a repeated input PMID would
     otherwise abort the whole --apply run at flush() with an IntegrityError, instead
     of being the harmless no-op it was before the constraint existed. The curated
     mapping is hand-written JSON, so copy/paste repeats are expected input.

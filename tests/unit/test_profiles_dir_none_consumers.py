@@ -1,15 +1,16 @@
-"""REV4-1 (audit 2026-09-08): PRIVATE_PROFILES_DIR/PROFILES_DIR default to None
-(REV3-6's lazy-accessor pattern), but two consumers still read the module
-constants directly instead of going through the accessor:
+"""PRIVATE_PROFILES_DIR/PROFILES_DIR default to None (a lazy-accessor
+pattern), so two consumers must not read the module constants directly
+instead of going through the accessor:
 
   * src/routers/onboarding.py's GET /onboarding/private-profile disk fallback
   * src/services/profile_pipeline.py's private-seed adoption/export logic
 
 Neither test here monkeypatches the constant -- only COPI_PROFILES_DIR +
 get_settings.cache_clear(), exactly like scripts/live_slack_preflight.py's
-runtime check and test_profiles_dir_setting.py's REV3-6 coverage. Before the
-fix both raise TypeError (`NoneType / str`); after the fix both resolve under
-the env-configured directory.
+runtime check and test_profiles_dir_setting.py's coverage of the same
+accessor. Reading the module constant directly raises TypeError
+(`NoneType / str`); going through the accessor resolves under the
+env-configured directory.
 """
 
 from types import SimpleNamespace

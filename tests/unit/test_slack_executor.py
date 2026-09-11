@@ -1,10 +1,9 @@
 """``run_slack_call`` runs on its own bounded pool, isolated from every other
-``asyncio.to_thread`` user in the process (audit 2026-09-10 R-2).
+``asyncio.to_thread`` user in the process.
 
-O-1 (audit 2026-09-10): rewritten for the single process-wide
-``slack_client.SHUTDOWN_REQUESTED`` event, replacing the per-pool
-event/thread-local/pending-flag design (K-2/M-2/N-2) that regressed in three
-consecutive review rounds. There is now exactly one sticky shutdown signal;
+Uses a single process-wide ``slack_client.SHUTDOWN_REQUESTED`` event, not a
+per-pool event/thread-local/pending-flag design, which regressed across
+several attempts. There is exactly one sticky shutdown signal;
 ``shutdown_slack_executor()`` sets it and drops the pool reference (without
 cancelling queued work); ``_get_executor()`` never touches the event.
 
@@ -43,8 +42,8 @@ def _reset_shutdown_state():
     shuts down whatever pool a test leaves assigned to the module global
     (real or a throwaway substituted via ``monkeypatch``).
 
-    P-4 (opus review, audit 2026-09-10): does NOT also clear
-    ``SHUTDOWN_REQUESTED`` any more — ``shutdown_slack_executor()`` sets it as
+    Does NOT also clear
+    ``SHUTDOWN_REQUESTED`` — ``shutdown_slack_executor()`` sets it as
     a side effect, but tests/conftest.py's autouse
     ``_clear_slack_shutdown_requested`` fixture clears it after every test
     regardless, so doing it again here was redundant.
@@ -61,7 +60,7 @@ def test_the_slack_pool_is_a_bounded_dedicated_executor():
 
 
 def test_slack_io_max_workers_exceeds_one_reopen_flows_sequential_call_count():
-    """Opus review follow-up, audit 2026-09-10: sized to comfortably exceed the
+    """Sized to comfortably exceed the
     ~8 sequential run_slack_call's one migrate_public_thread_to_private reopen
     makes by itself, so a second concurrent flow is not left queuing behind the
     first for every worker thread."""
@@ -106,7 +105,7 @@ async def test_an_exception_from_the_call_propagates_unchanged():
     assert exc_info.value is marker
 
 
-# --- shutdown (O-1, audit 2026-09-10) ---------------------------------------
+# --- shutdown -----------------------------------------------------------
 #
 # `_SLACK_EXECUTOR` is a process-wide singleton, so these tests substitute a
 # throwaway executor via monkeypatch rather than shutting down the real one out
@@ -129,7 +128,7 @@ def test_shutdown_slack_executor_sets_the_shared_shutdown_event(monkeypatch):
 
 
 async def test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool(monkeypatch):
-    """K-9 (audit 2026-09-10): a shut-down pool is lazily replaced with a
+    """A shut-down pool is lazily replaced with a
     fresh one on the next call rather than raising, so a process sharing one
     interpreter across more than one lifespan (most concretely the test
     suite) does not permanently kill this singleton for every later test."""
@@ -146,7 +145,7 @@ async def test_run_slack_call_after_shutdown_lazily_creates_a_fresh_pool(monkeyp
 
 
 def test_a_new_pool_created_after_shutdown_does_not_clear_the_event(monkeypatch):
-    """O-1 requirement (b): the shutdown event is sticky for the process's
+    """The shutdown event is sticky for the process's
     life — `_get_executor()` must not clear it just because it minted a
     fresh pool."""
     fresh = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-io-test")
@@ -164,7 +163,7 @@ def test_a_new_pool_created_after_shutdown_does_not_clear_the_event(monkeypatch)
 
 
 async def test_queued_run_slack_call_is_not_cancelled_by_shutdown(monkeypatch):
-    """O-1 requirement (c): `shutdown_slack_executor()` must call
+    """`shutdown_slack_executor()` must call
     `pool.shutdown(wait=False, cancel_futures=False)` — a queued
     `run_slack_call` still runs (and aborts quickly via the event) rather
     than raising `CancelledError` into whatever awaits it."""

@@ -7,7 +7,7 @@ window — see the window constants in src/routers/public.py).
 
 plotly is NOT installed anywhere the app runs. It is an optional extra
 (pyproject.toml's `scripts`), deliberately kept out of requirements.lock and so
-out of all four images (#27 I4) — this script is its only importer. Install it
+out of all four images — this script is its only importer. Install it
 wherever you run this, or the run stops with a message saying so:
 
   pip install '.[scripts]'
@@ -22,7 +22,7 @@ bind-mounted by docker-compose.yml, so no `docker cp` is needed:
 
   # Schultz alumni reunion window:
   docker compose exec app python scripts/build_cabo_sankey.py \
-      --start 2026-06-06 --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
+      --start <window-start-date> --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
 
 Output (sankey.html + sankey.png) lands in --out inside the container; retrieve
 with `docker cp app:/app/data/schultz_viz ./data/`.
@@ -54,7 +54,7 @@ def _load_plotly() -> ModuleType:
     Imported here rather than at module scope so that `--help` — the command
     the header above documents — still works in an image that has no plotly,
     and so that a real run stops with an actionable line before it opens a DB
-    connection instead of a bare ModuleNotFoundError (#27 I4).
+    connection instead of a bare ModuleNotFoundError.
     """
     try:
         import plotly.graph_objects as go
@@ -62,7 +62,7 @@ def _load_plotly() -> ModuleType:
         raise SystemExit(
             "plotly is not installed in this interpreter, and this script needs "
             "it to draw the Sankey. It is an optional extra, kept out of the "
-            "runtime image on purpose (#27 I4):\n"
+            "runtime image on purpose:\n"
             "    pip install '.[scripts]'\n"
             "Inside a container, prod runs as UID 10001 and cannot write "
             "site-packages, so use: "

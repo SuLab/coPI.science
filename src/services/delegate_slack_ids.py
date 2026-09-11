@@ -1,4 +1,4 @@
-"""Atomic UPDATE statements for AgentRegistry.delegate_slack_ids (issue #22 C1).
+"""Atomic UPDATE statements for AgentRegistry.delegate_slack_ids.
 
 Both routes that mutate this ARRAY column (agent_page.py's connect-slack / delegate-remove,
 invite.py's accept-invitation) used to read the column into a Python list, mutate it, and

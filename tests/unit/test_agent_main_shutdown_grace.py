@@ -1,24 +1,22 @@
-"""M-1 (opus review, audit 2026-09-10): the agent-run process's SIGTERM/SIGINT
-handler used to call ``signal_shutdown()`` at t=0, aborting ANY in-flight
-Slack retry sleep instantly -- including a typical ~10s Retry-After backoff
-that would otherwise finish comfortably inside the runbook's `docker stop -t
-30` grace window. That turned an ordinary throttle into a permanently
-DB-only thread (`_post_message` records `slack_ts=None` when the post never
-reaches Slack), breaking that thread's Slack mirror forever.
+"""The agent-run process's SIGTERM/SIGINT handler must not call
+``signal_shutdown()`` at t=0, since that would abort ANY in-flight Slack retry
+sleep instantly -- including a typical ~10s Retry-After backoff that would
+otherwise finish comfortably inside the runbook's `docker stop -t 30` grace
+window. Aborting one turns an ordinary throttle into a permanently DB-only
+thread (`_post_message` records `slack_ts=None` when the post never reaches
+Slack), breaking that thread's Slack mirror forever.
 
-The fix delays the abort by ``SHUTDOWN_SLACK_ABORT_GRACE_SECONDS`` (20s,
+Instead the abort is delayed by ``SHUTDOWN_SLACK_ABORT_GRACE_SECONDS`` (20s,
 comfortably under the 30s stop grace) on the FIRST signal, via
 ``loop.call_later``, so a short in-flight sleep can finish naturally. A
-SECOND signal (operator impatience, or a slow shutdown) aborts immediately,
-same as before.
+SECOND signal (operator impatience, or a slow shutdown) aborts immediately.
 
 ``_make_shutdown_handler`` is factored out of ``_run_simulation`` precisely so
 this can be pinned without a full DB session factory / agent roster (see
 ``test_agent_main_shutdown.py``'s docstring for why standing that up here
 would be out of proportion).
 
-O-1 (audit 2026-09-10): the handler now calls
-``slack_client.signal_shutdown()`` directly (not
+The handler calls ``slack_client.signal_shutdown()`` directly (not
 ``shutdown_slack_executor()`` -- the agent-run process does not own that
 pool's lifecycle). There is a single process-wide
 ``slack_client.SHUTDOWN_REQUESTED`` event shared by every caller regardless
@@ -35,8 +33,8 @@ from src.agent import main as _main_module
 from src.agent.slack_client import SHUTDOWN_REQUESTED, SlackShuttingDown, _sleep_interruptibly
 from src.services.slack_executor import run_slack_call
 
-# P-4 (opus review, audit 2026-09-10): SHUTDOWN_REQUESTED is cleared before
-# and after every test by tests/conftest.py's autouse
+# SHUTDOWN_REQUESTED is cleared before and after every test by
+# tests/conftest.py's autouse
 # `_clear_slack_shutdown_requested` fixture; no per-file fixture needed here.
 
 
@@ -101,11 +99,11 @@ def test_shutdown_slack_abort_grace_seconds_is_documented_under_the_stop_grace()
 
 
 async def test_a_pool_bound_slack_call_aborts_promptly_after_the_second_signal():
-    """After M-8, this process's hottest per-tick Slack calls (_post_message,
-    the channel/DM/proposal-thread pollers) run through
+    """This process's hottest per-tick Slack calls (_post_message, the
+    channel/DM/proposal-thread pollers) run through
     src.services.slack_executor's dedicated pool, not directly on this
-    event-loop thread. O-1 (audit 2026-09-10): there is a single process-wide
-    shutdown event shared by every caller, so the handler's plain
+    event-loop thread. There is a single process-wide shutdown event shared
+    by every caller, so the handler's plain
     `signal_shutdown()` call aborts a pool-bound sleeper just as promptly as
     a main-thread one.
     """
@@ -137,8 +135,8 @@ async def test_a_pool_bound_slack_call_aborts_promptly_after_the_second_signal()
 
 
 async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
-    """S-1 (audit 2026-09-10): the handler is now installed via
-    ``signal.signal`` rather than ``loop.add_signal_handler`` precisely so it
+    """The handler is installed via ``signal.signal`` rather than
+    ``loop.add_signal_handler`` precisely so it
     still runs (and the second-signal branch still fires) even when the
     calling thread is not the loop's own thread -- the scenario that matters
     is the loop thread being blocked inside a synchronous Slack call, which
@@ -160,8 +158,8 @@ async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
     t.join(timeout=2.0)
 
     assert not t.is_alive()
-    # T-3: the flag flip is synchronous (works even against a blocked loop);
-    # the full request_stop() (which may touch the loop) is deferred to the
+    # The flag flip is synchronous (works even against a blocked loop); the
+    # full request_stop() (which may touch the loop) is deferred to the
     # loop's own turn via call_soon_threadsafe.
     assert fake_engine._running is False
     await asyncio.sleep(0)
@@ -173,9 +171,9 @@ async def test_second_signal_sets_the_event_even_from_a_non_loop_thread():
 
 
 def test_a_signal_after_the_loop_closed_sets_the_event_and_does_not_raise(monkeypatch):
-    """T-1 (opus review of S-1): signal.signal handlers outlive asyncio.run(); a
-    signal during post-loop teardown must not raise 'Event loop is closed' and
-    must not be swallowed."""
+    """signal.signal handlers outlive asyncio.run(); a signal during post-loop
+    teardown must not raise 'Event loop is closed' and must not be
+    swallowed."""
     import asyncio
     import signal as _signal
 
@@ -197,7 +195,7 @@ def test_a_signal_after_the_loop_closed_sets_the_event_and_does_not_raise(monkey
 
 
 def test_a_second_signal_restores_the_default_action_for_a_third(monkeypatch):
-    """T-2: after the immediate abort on the second signal, a third signal must
+    """After the immediate abort on the second signal, a third signal must
     reach the default action (terminate / KeyboardInterrupt) rather than an
     inert handler against a wedged flush."""
     import asyncio
@@ -220,9 +218,9 @@ def test_a_second_signal_restores_the_default_action_for_a_third(monkeypatch):
 
 
 def test_signal_defaults_are_restored_only_after_the_run_status_commit():
-    """U-1 (opus review of T): restoring SIG_DFL before the SimulationRun status
-    update let a signal during teardown kill the process with the run row stuck
-    at status='running'. The restore must be the last thing in the finally."""
+    """Restoring SIG_DFL before the SimulationRun status update would let a
+    signal during teardown kill the process with the run row stuck at
+    status='running'. The restore must be the last thing in the finally."""
     import inspect
 
     from src.agent.main import _run_simulation
@@ -233,7 +231,7 @@ def test_signal_defaults_are_restored_only_after_the_run_status_commit():
 
 
 def test_sigint_is_restored_to_the_raising_default_handler(monkeypatch):
-    """U-2: SIG_DFL for SIGINT is the OS default (terminate, no unwinding); the
+    """SIG_DFL for SIGINT is the OS default (terminate, no unwinding); the
     Python-level default_int_handler raises KeyboardInterrupt instead."""
     import signal as _signal
 

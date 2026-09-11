@@ -2,7 +2,6 @@
 
 Revision ID: 0028
 Revises: 0027
-Create Date: 2026-09-02 00:00:00.000000
 
 _sync_proposal_reviews_from_db reopens a thread whenever a PI submits a
 rating=0 (reopen-with-guidance) review, and _reopen_thread reopens one when a
@@ -22,7 +21,7 @@ already gets. It also lets the web-guidance reopen flow in
 _sync_proposal_reviews_from_db recognise, via the message log content the
 rebuild already reloaded, that a prior process already minted this thread's
 synthetic PI-guidance row — so every process restores the ThreadState, but
-no process re-mints the row. See COR-13.
+no process re-mints the row.
 
 Nullable, no backfill: NULL means "never reopened", which is the correct
 value for every existing row.

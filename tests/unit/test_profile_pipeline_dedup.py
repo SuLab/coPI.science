@@ -1,4 +1,4 @@
-"""Unit tests for the in-run publication dedup fix (issue #22 COR-16)."""
+"""Unit tests for the in-run publication dedup fix."""
 
 import pytest
 from sqlalchemy import select
@@ -19,10 +19,10 @@ def test_pmids_are_deduplicated_across_orcid_works_preserving_order():
 
 
 async def test_a_concurrent_writer_inserting_the_same_pmid_does_not_raise(db_session):
-    """#22 COR-16 Note: the new uq_publications_user_pmid constraint (migration
-    0025) makes two overlapping pipeline runs for one user race on this INSERT.
-    Before this fix the second writer's `await db.flush()` raised IntegrityError
-    and failed the whole job instead of just recognizing the row already exists.
+    """The uq_publications_user_pmid constraint (migration 0025) makes two
+    overlapping pipeline runs for one user race on this INSERT. The second
+    writer's `await db.flush()` must not raise IntegrityError and fail the
+    whole job instead of just recognizing the row already exists.
     Simulated here as two inserts of the SAME (user_id, pmid) in one session,
     which is the same conflict a second session's committed row would produce."""
     user = await factories.make_user(db_session, name="Concurrent Lovelace")

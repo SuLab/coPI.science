@@ -1,8 +1,7 @@
-"""Static Dockerfile structure checks for #27 I3 (layer order, multi-stage,
-non-root — Tasks 27.6/27.7/27.8). No `docker build` here: these assert the
-*text* is ordered/shaped correctly. Real image-build verification is a manual
-step noted in each task's Deploy note (mirrors nginx's `nginx -t` check in
-Task 27.12)."""
+"""Static Dockerfile structure checks: layer order, multi-stage build, and
+non-root user. No `docker build` here: these assert the *text* is
+ordered/shaped correctly. Real image-build verification is a manual step,
+mirroring nginx's `nginx -t` check."""
 
 from pathlib import Path
 

@@ -1,6 +1,6 @@
 """Static text/structure checks over nginx/nginx.conf — no nginx binary
 needed for these. The full `nginx -t` syntax check is a manual verification
-step, noted in Task 27.12's Deploy note once all nginx tasks have landed."""
+step."""
 
 import re
 from pathlib import Path
@@ -131,9 +131,9 @@ def test_csp_report_only_lines_are_byte_identical_across_vhosts():
     assert len(csp_lines) == 1, f"{CSP_RO} lines differ across vhosts: {csp_lines}"
 
 
-# The enforcing header (audit 2026-09-08 RC-5, #27 I5). Report-Only alone collected
-# nothing usable: it had no report-uri/report-to, so violations went nowhere, and
-# nothing was ever actually blocked. Scoped to directives that cannot break rendering
+# The enforcing CSP header. Report-Only alone collects nothing usable without a
+# report-uri/report-to, and never actually blocks anything. Scoped to directives that
+# cannot break rendering
 # regardless of what base.html's inline PostHog bootstrap or the Tailwind CDN <script>
 # do (frame-ancestors/base-uri/form-action/object-src never affect same-origin script
 # or style execution) — default-src/script-src/style-src stay Report-Only only until
@@ -187,7 +187,7 @@ def test_csp_enforcing_lines_are_byte_identical_across_vhosts():
 
 
 def test_csp_enforcing_header_never_restricts_form_action():
-    # Opus review of RC-5 (2026-09-08): Chromium (and Firefox) apply `form-action` to
+    # Chromium (and Firefox) apply `form-action` to
     # the REDIRECT a form submission's response returns, not just the form's own
     # `action` attribute. The admin Provision button
     # (templates/admin/agent_detail.html:107-129) POSTs to
@@ -208,8 +208,8 @@ def test_csp_enforcing_header_never_restricts_form_action():
 
 def test_general_timeout_stays_120s():
     # The general reverse-proxy location (and the graph-routes location) must
-    # keep the original 120s timeout — Task 27.12 only lengthens the timeout
-    # for the Slack-provisioning route, not the whole site (#27 I5-b).
+    # keep the original 120s timeout — only the Slack-provisioning route gets a
+    # longer timeout, not the whole site.
     block = _https_block(_nginx_conf(), "${DOMAIN}")
     general_idx = block.index("location / {")
     general_block = block[general_idx : block.index("}", general_idx) + 1]
@@ -249,7 +249,7 @@ def test_provisioning_location_inherits_same_proxy_headers_and_upstream_as_gener
 
 
 def test_blackbird_vhost_has_req_graph_limit_for_collaboration_graph_routes():
-    # Minor follow-up to #27 I5: blackbird serves the same collaboration-graph
+    # blackbird serves the same collaboration-graph
     # routes as the primary vhost (via its own blackbird_app upstream), so it
     # needs the same req_graph rate limit — not just the general one.
     block = _https_block(_nginx_conf(), "blackbird.copi.science")
@@ -260,13 +260,13 @@ def test_blackbird_vhost_has_req_graph_limit_for_collaboration_graph_routes():
     assert "proxy_pass http://blackbird_app;" in loc_block
 
 
-# #27 Minor 16: req_general/req_graph/conn_perip were single zones shared across
-# all three vhosts, so one IP's burst against devel or blackbird consumed the
-# primary site's budget (and vice versa). Each vhost must get its own zone.
-# SEC2-4 (audit 2026-09-08): /api/csp-report is public and unauthenticated
-# (like the collaboration-graph routes above) but had no rate limit tighter
-# than the whole-site general zone, big enough that a burst of forged reports
-# could still fill the request pool ahead of it.
+# req_general/req_graph/conn_perip must each get their own zone per vhost — a
+# shared zone would let one IP's burst against devel or blackbird consume the
+# primary site's budget (and vice versa).
+# /api/csp-report is public and unauthenticated (like the collaboration-graph
+# routes above), so it needs a rate limit tighter than the whole-site general
+# zone, which is big enough that a burst of forged reports could still fill
+# the request pool ahead of it.
 def test_csp_report_zone_is_declared():
     text = _nginx_conf()
     assert re.search(
@@ -290,8 +290,8 @@ def test_csp_report_location_present_and_rate_limited_on_all_three_vhosts():
 
 
 def test_csp_report_location_proxy_settings_match_general_location():
-    # "Keep proxy settings identical to location /" (SEC2-4) -- same upstream,
-    # headers and timeouts as the vhost's own general reverse proxy.
+    # /api/csp-report must keep proxy settings identical to location / -- same
+    # upstream, headers and timeouts as the vhost's own general reverse proxy.
     text = _nginx_conf()
     for name in VHOSTS:
         block = _https_block(text, name)
@@ -361,15 +361,12 @@ def test_each_vhost_uses_only_its_own_rate_limit_zones():
 
 
 # ---------------------------------------------------------------------------
-# Shared-memory arithmetic (#27 I5, over-implementation R9)
+# Shared-memory arithmetic
 #
-# `88d1b25` sized nginx's cgroup against "40 MiB of shared zones (three
-# limit_*_zone 10m + ssl_session_cache)"; `1a430c0` then split those three
-# zones into eight, one set per vhost, and revisited neither the cap nor the
-# comment. Both files ended up carrying a stale total — docker-compose.prod.yml
-# said 40 MiB and nginx.conf's own header said "8x10m = 80m", which omits the
-# SSL zone entirely. The tests below DERIVE the total from the declarations
-# instead of restating it, so no future zone edit can leave a figure behind.
+# nginx's cgroup memory cap must cover the sum of every declared shared zone
+# (limit_*_zone blocks plus ssl_session_cache). Restating that sum by hand in
+# a comment goes stale the moment a zone is added, split, or resized — so the
+# tests below DERIVE the total from the actual declarations instead.
 # ---------------------------------------------------------------------------
 
 COMPOSE_PROD = REPO_ROOT / "docker-compose.prod.yml"

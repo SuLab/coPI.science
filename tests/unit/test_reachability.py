@@ -36,7 +36,7 @@ Known false negative in general (see the general argument below), but the specif
 this note used to cite is now FIXED: ``POST /onboarding/retry``
 (src/routers/onboarding.py:317) has exactly one control in the app — the "Try Again" form
 at templates/onboarding/profile_review.html:53, inside ``{% elif job_status == 'failed' %}``
-— and as of #21 COR-18e/f, src/worker/main.py DOES write 'failed' on exhaustion, so this
+— and src/worker/main.py DOES write 'failed' on exhaustion, so this
 control is now reachable at runtime. This gate is still static (it cannot evaluate the
 Jinja condition a link sits under in general), so a DIFFERENT branch could still hide a
 live control from it the same way this one used to — the general argument for why the

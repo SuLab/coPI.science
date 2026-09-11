@@ -169,7 +169,7 @@ def extract_json(text: str) -> dict[str, Any]:
     raise ValueError(f"Could not extract JSON from LLM response: {text[:200]}")
 
 
-_extract_json = extract_json  # back-compat alias (#26 C4) — same function, not a copy.
+_extract_json = extract_json  # back-compat alias — same function, not a copy.
 
 
 async def generate_agent_response(

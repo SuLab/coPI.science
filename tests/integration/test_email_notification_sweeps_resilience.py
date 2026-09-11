@@ -1,14 +1,13 @@
-"""V4-1 fix round 1 (review Critical #1): Session.rollback() expires EVERY object in the
+"""Session.rollback() expires EVERY object in the
 identity map, not just the item that failed. The three sweeps in email_notifications.py
 pre-load all their rows with one bulk SELECT and then, at the top of each loop iteration,
 read an attribute off the PRE-LOADED object (e.g. `user.id`, `td.id`) to capture an id for
-logging/keying. After ANY earlier iteration's rollback, that read lands on an expired
-instance and this async session raises MissingGreenlet instead of transparently re-querying
--- the plain Exception escapes the whole sweep (past the `async with session_factory()`
-block), which aborts every user/proposal ordered after the first failure. A fake session has
-no real identity map or expiry semantics and cannot reproduce this -- these are
-real-Postgres tests. See src/worker/main.py's reap_stale_jobs (commit 75f265b) for the
-re-load-by-id pattern this fix round ports into the three sweeps.
+logging/keying. After ANY earlier iteration's rollback, that read must not land on an
+expired instance and raise MissingGreenlet on this async session instead of transparently
+re-querying -- an escaping plain Exception would abort every user/proposal ordered after
+the first failure. A fake session has no real identity map or expiry semantics and cannot
+reproduce this -- these are real-Postgres tests. See src/worker/main.py's reap_stale_jobs
+for the re-load-by-id pattern the three sweeps also use.
 """
 
 import pytest

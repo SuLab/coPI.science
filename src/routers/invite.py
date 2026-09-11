@@ -28,7 +28,6 @@ def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
     Binds acceptance to the invited address so a forwarded or leaked invite link
     cannot let a different logged-in account claim delegate access (read/write on
     the PI's proposals and profile). Fails closed when either address is missing.
-    See SEC-6.
     """
     invited = (invitation.email or "").strip().lower()
     account = (getattr(user, "email", None) or "").strip().lower()
@@ -175,7 +174,7 @@ async def _accept_invitation(
     """Create the delegation relationship and mark invitation accepted."""
     # Enforce the email binding at the mutation chokepoint (defense in depth
     # behind the GET-side check): never grant delegate access to an account
-    # whose email differs from the invited address. See SEC-6.
+    # whose email differs from the invited address.
     if not _invite_matches_user(invitation, user):
         logger.warning(
             "Rejecting invite acceptance: invitation %s for %r, user %s has %r",
@@ -247,10 +246,10 @@ async def _accept_invitation(
                     agent_slug, user.email,
                 )
         except Exception as exc:
-            # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
-            # delegate is useful without a Slack id. But LOG it — a bare `pass`
-            # here hid an ImportError for an unknown length of time, and the
-            # whole sync was dead code with nothing to show for it.
+            # Best-effort by design: a delegate is useful without a Slack id. But
+            # LOG it — a bare `pass` here would silently hide failures (an
+            # ImportError, previously) and leave the sync dead with nothing to
+            # show for it.
             logger.warning(
                 "Delegate Slack-ID sync failed for agent %s: %s", agent_slug, exc
             )

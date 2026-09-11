@@ -1,7 +1,7 @@
 """Live integration tests for the agent page — all 19 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
-flows. Task T8 of .notes/full-system-test-plan.md.
+flows.
 
 Nothing external is real: Slack (`slack_sdk.WebClient` and the copy bound inside
 `src.agent.slack_client`), SES (`send_delegate_invitation`) and the whole httpx
@@ -315,7 +315,7 @@ async def _agent_of(db, user) -> AgentRegistry | None:
 
 
 async def test_signup_creates_a_pending_agent_row(client, db_session):
-    """The documented self-service path (CLAUDE.md §Adding New PIs)."""
+    """The documented self-service signup path creates a pending agent row."""
     user, r = await _signup(client, db_session, "Ada Zephyr", "ada@example.org")
     assert r.status_code == 302 and r.headers["location"] == "/agent"
 
@@ -364,8 +364,7 @@ async def test_signup_third_same_initial_collision_gets_a_numeric_suffix(
     """A third same-initial namesake collides on the initial-prefixed id too
     ('pwu' is already taken by the second Wu). The fallback must append the
     numeric suffix to THAT prefixed candidate ('pwu2'), not restart from the
-    bare stem ('wu2') — issue #26 C1/C2. Before the fix there was no numeric
-    branch at all: this hit the agent_id unique constraint on commit -> 500.
+    bare stem ('wu2'), or the id collides and signup fails.
     """
     first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
     second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
@@ -383,8 +382,7 @@ async def test_signup_fourth_same_initial_collision_extends_the_numeric_suffix(
     client, db_session
 ):
     """A fourth same-initial namesake collides on 'pwu2' too; the suffix must
-    keep extending to 'pwu3', not restart or repeat (#26 audit-issue-26.md
-    Minor 4 — the fourth collision was previously unpinned)."""
+    keep extending to 'pwu3', not restart or repeat."""
     first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
     second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
     third, _ = await _signup(client, db_session, "Pei Wu", "pei@example.org")
@@ -404,7 +402,7 @@ async def test_derive_agent_identity_raises_409_when_the_numeric_range_is_exhaus
 ):
     """derive_agent_identity's last-resort loop is range(2, 20); once every
     candidate from 'wu' through 'pwu19' is taken it must raise a clean 409,
-    not fall through and return a colliding id (#26 Minor 4)."""
+    not fall through and return a colliding id."""
     await factories.make_agent(db_session, agent_id="wu", bot_name="WuBot", pi_name="Wu")
     await factories.make_agent(db_session, agent_id="pwu", bot_name="PWuBot", pi_name="Wu")
     for i in range(2, 20):
@@ -423,8 +421,7 @@ async def test_signup_returns_409_on_a_lost_identity_race(client, db_session, mo
     before either commits (TOCTOU on the agent_id unique constraint). Force
     the race by making derive_agent_identity return an id that's already
     taken, and assert the handler converts the resulting IntegrityError into
-    a 409, not a raw 500 (issue #26 C1: no try/except existed on this commit
-    at all)."""
+    a 409, not a raw 500."""
     monkeypatch.setattr(
         "src.routers.agent_page.derive_agent_identity",
         AsyncMock(return_value=("racer", "RacerBot")),
@@ -578,19 +575,16 @@ async def test_reopen_records_a_rating_zero_review_carrying_the_guidance(
     ],
 )
 async def test_reopen_rejects_empty_guidance(client, db_session, world, slack, body):
-    """phase8 M2: the handler's own coded 400 has to be the answer for an EMPTY box too.
+    """The handler's own coded 400 must be the answer for an EMPTY guidance box too,
+    not just a whitespace-only one.
 
-    `guidance` was `Form(...)`. Starlette's form parser hands an empty `guidance=` to
-    FastAPI as a MISSING field, so the two non-whitespace cases below never reached the
-    handler at all — they answered a raw
+    `guidance` must be declared `Form("")` rather than `Form(...)`: an empty
+    `guidance=` field is otherwise reported by Starlette's form parser as a MISSING
+    field, so FastAPI answers a raw
     `{"detail":[{"type":"missing","loc":["body","guidance"],"msg":"Field required",...}]}`
-    422, which the reopen form has no rendering for, and the `Guidance text is required`
-    branch was unreachable from a browser. Only the whitespace case (a box with a space
-    in it) got that far. `Form("")` collapses all three onto the same coded rejection —
-    the same fix `7cc2ea3` made on `profile/save`'s `content`.
-
-    The other eight required-`str` Form fields the audit lists are follow-up F4; this
-    task deliberately fixes only this site.
+    422 (which the reopen form has no rendering for) instead of reaching the handler's
+    `Guidance text is required` branch. Only the whitespace case (a box with a space
+    in it) reaches that branch under `Form(...)`.
     """
     r = await client.post(
         f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/reopen",
@@ -863,8 +857,7 @@ async def test_a_delegate_can_review_a_proposal_and_a_stranger_cannot(
     assert allowed.status_code == 302
     review = (await _reviews(db_session, OWNER_AGENT))[0]
     assert review.rating == 4
-    # Attribution: the review belongs to the PI, the delegate is recorded
-    # alongside (specs/web-delegates.md §Changes to ProposalReview).
+    # Attribution: the review belongs to the PI, the delegate is recorded alongside.
     assert review.user_id == world.pi.id
     assert review.delegate_user_id == delegated.user.id
     assert review.reviewed_by_user_id == delegated.user.id
@@ -955,7 +948,7 @@ async def test_a_delegate_can_link_their_slack_account(client, db_session, world
 async def test_connecting_slack_twice_is_idempotent(client, db_session, world, delegated, slack):
     """POST /delegates/connect-slack twice with the same stubbed Slack id must not append
     a second entry — exercises append_delegate_slack_id_stmt's NOT ... ANY() guard at the
-    route level, not just in the unit-level compiled-SQL test (issue #22 C1)."""
+    route level, not just via the compiled SQL directly."""
     world.agent.slack_bot_token = "xoxb-fake-for-tests"
     await db_session.flush()
     slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
@@ -1043,13 +1036,12 @@ async def test_removing_a_delegate_also_removes_their_slack_id(
 async def test_removing_a_delegate_removes_authority_even_if_the_in_memory_gate_is_stale(
     client, db_session, world, delegated, slack
 ):
-    """Minor 1 (fix round 1): the route's gate used to read
-    `if delegate_email and agent.delegate_slack_ids:` — when this session's in-memory `agent`
-    was loaded before a concurrent append (e.g. a connect-slack landing in another
-    session/transaction), `agent.delegate_slack_ids` reads stale (None/empty) even though the
-    DB row already holds the id. The old gate then skipped the Slack lookup and the
-    array_remove entirely, so a removed delegate's Slack id stayed in the array and kept
-    agent-command authority (src/agent/simulation.py ~4011-4021).
+    """Removing a delegate must revoke Slack-command authority even when this session's
+    in-memory `agent.delegate_slack_ids` is stale relative to the DB row — a gate that
+    reads `if delegate_email and agent.delegate_slack_ids:` would skip the Slack lookup
+    and the array_remove entirely when the in-memory attribute reads empty/None despite
+    the DB row already holding the id (src/agent/simulation.py ~4011-4021), leaving a
+    removed delegate's Slack id in the array with agent-command authority.
 
     Simulated here with a raw UPDATE that bypasses the ORM session (so the already-loaded
     `world.agent` instance is never touched/expired) — leaving the in-memory attribute at its
@@ -1136,7 +1128,7 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
 async def test_dashboard_still_shows_review_form_for_implicit_minus_one_review(
     client, db_session, world
 ):
-    """Issue #20 COR-5/COR-13 residual (Task 20.9c): the engine's implicit
+    """The engine's implicit
     `rating=-1` marker (written when a PI merely engages a proposal thread,
     without giving an explicit verdict) must not move the proposal into the
     "reviewed" bucket — the PI would then never see the review form again.
@@ -1162,7 +1154,7 @@ async def test_dashboard_still_shows_review_form_for_implicit_minus_one_review(
 async def test_a_legacy_rating_zero_marker_is_not_labelled_as_a_score_or_a_reopen(
     client, db_session, world
 ):
-    """#20 blocker 5 / audit D1. rating=0 is a MARKER with two populations.
+    """rating=0 is a MARKER with two populations.
 
     Measured on the production copy: of 233 rating=0 rows only **6** carry a
     '[Reopened]' comment; the other **227** are a 2026-04-30/05-01 bulk backfill with no
@@ -1239,11 +1231,11 @@ async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     assert msg.sender_name == "Pat Owner (PI)"
     assert msg.content == "@OwnerBot Let's aim at the assay."  # tag_bot prepends
     assert msg.visibility == "public"
-    # RC-1 (#20 COR-5): the ownership carrier _agent_ids_owned_by_user
-    # resolves against — must be the acting PI's own id, not NULL.
+    # The ownership carrier _agent_ids_owned_by_user resolves against — must be
+    # the acting PI's own id, not NULL.
     assert msg.sender_user_id == world.pi.id
-    # RC-2: stamped 'pending' at insert time so a down agent-run's cursor
-    # jump can never make this row permanently invisible to the poller.
+    # Stamped 'pending' at insert time so a down agent-run's cursor jump can
+    # never make this row permanently invisible to the poller.
     assert msg.pi_inbound_state == "pending"
 
     # …and it is visible on the read view (control that the write is reachable).
@@ -1313,8 +1305,8 @@ async def test_a_pi_cannot_post_into_another_pairs_private_channel(
 
 
 async def test_pi_cannot_reply_into_a_thread_their_agent_never_joined(client, db_session, world):
-    """COR-5 web residual: a free-form thread_ts must belong to a thread the posting
-    PI's own agent participates in; otherwise the engine would clear another lab's
+    """A free-form thread_ts must belong to a thread the posting PI's own agent
+    participates in; otherwise the engine would clear another lab's
     proposal-review block on the PI's behalf."""
     root = await factories.make_agent_message(
         db_session, run=world.run, agent_id="alpha", channel_name="general",
@@ -1753,7 +1745,7 @@ async def test_delegate_write_access_matches_the_spec(
     client, world, delegated, ep, slack, thread_root
 ):
     """Delegates get everything except delegate management and Slack linking of
-    the PI's own account (specs/web-delegates.md §Write access differentiation).
+    the PI's own account.
 
     Both halves are in this one parametrisation: the owner-only endpoints must
     reject, and every other endpoint must accept.

@@ -6,7 +6,7 @@
     {% if blocking_agent %}
     {# The account owns an agent the delete would orphan (agents.user_id is
        ON DELETE SET NULL). Explain rather than offer a form whose POST the
-       route answers with 409. See docs/plans/2026-09-04-decisions/task-25.md. #}
+       route answers with 409. #}
     <div class="bg-white rounded-xl shadow-sm border border-amber-200 p-8">
         <h1 class="text-2xl font-bold text-amber-700 mb-4">Delete Account</h1>
         <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-sm text-amber-800">

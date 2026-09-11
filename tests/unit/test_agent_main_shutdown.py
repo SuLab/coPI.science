@@ -1,6 +1,6 @@
-"""L-1 (opus review, audit 2026-09-10): the agent-run process's SIGTERM/SIGINT
-path must abort an in-flight Slack retry sleep on the main event-loop thread,
-not just flip the simulation's stop flag.
+"""The agent-run process's SIGTERM/SIGINT path must abort an in-flight Slack
+retry sleep on the main event-loop thread, not just flip the simulation's stop
+flag.
 
 `AgentSlackClient` calls made directly from `_run_simulation`'s coroutine
 (src/agent/main.py) and from `SimulationEngine`'s (src/agent/simulation.py,
@@ -19,10 +19,10 @@ to run end to end, so this pins the fix at the source level instead (mirroring
 harness for the whole startup/shutdown block is out of proportion to what a
 missing one-line call site needs).
 
-M-1 (opus review, audit 2026-09-10) moved the actual `shutdown` closure out of
-`_run_simulation` into `_make_shutdown_handler` (so the grace-delay behaviour
-could be pinned behaviourally in `test_agent_main_shutdown_grace.py`) — this
-file now just pins that `_run_simulation` wires signal handlers up to it.
+The actual `shutdown` closure lives in `_make_shutdown_handler`, not
+`_run_simulation` (so the grace-delay behaviour can be pinned behaviourally in
+`test_agent_main_shutdown_grace.py`) — this file just pins that
+`_run_simulation` wires signal handlers up to it.
 """
 
 import ast

@@ -4,8 +4,8 @@ No database and no real Docker: a fake `docker` shim is placed first on PATH so 
 script's `docker compose ...` calls are captured instead of executed. The shim answers
 `NOT-app` to the running-services query (Step 1's "service must be running" check),
 which would BLOCK the script if that check ran — so a clean exit here proves `--via-run`
-skips it, per the brief for issue #27 I2 (the image, not a running container, carries the
-new source once `app` is stopped for the migration window).
+skips it: the image, not a running container, carries the
+new source once `app` is stopped for the migration window.
 """
 
 import os
@@ -22,9 +22,10 @@ RUN_MIGRATION_SH = REPO_ROOT / "scripts" / "migrate" / "run_migration.sh"
 #: The revision the script must migrate to when no --target is given. Read from
 #: preflight, which `test_revision_order_ends_at_the_repo_head` already pins to the
 #: alembic tree's own head -- so this file never restates a revision literal that can
-#: go stale independently of the tree (issue #27 I2: run_migration.sh shipped a pinned
-#: TARGET, and the two fake-psql shims below pinned the same number, so both went stale
-#: together when 0029 landed and neither test noticed).
+#: go stale independently of the tree. A pinned TARGET in run_migration.sh and the two
+#: fake-psql shims below pinning the same number went stale together when a new
+#: revision landed and neither test noticed, which is why this file derives the
+#: revision instead of hardcoding it.
 HEAD_REVISION = pf.DEFAULT_TARGET
 
 
@@ -268,7 +269,7 @@ def _run(tmp_path, *args):
 
 
 def test_the_default_target_is_derived_from_the_alembic_tree_not_a_pinned_literal(tmp_path):
-    """#27 I2 / F23: a bare `--apply` must migrate to the tree's head.
+    """A bare `--apply` must migrate to the tree's head.
 
     `TARGET="0028"` was pinned in the script while the tree's head moved to 0029, so a
     bare `--apply` migrated to 0028, stamped it, verified it, and reported success --

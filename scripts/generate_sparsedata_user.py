@@ -174,7 +174,7 @@ def _bot_name_for(agent_id: str, name: str) -> str:
     ModuleNotFoundError for the operator while still passing under pytest.
     `tests/unit/test_generate_sparsedata_user.py` pins the two copies to agree.
 
-    Issue #26 I1: the previous inline version used `agent_id[0]` literally, so a
+    The previous inline version used `agent_id[0]` literally, so a
     third same-initial namesake ("pwu2") produced "PWuBot" — a duplicate of the
     second Wu's bot name, with no unique constraint on `agents.bot_name` to catch it.
     """
@@ -198,9 +198,9 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == prefixed))
     if coll.scalar_one_or_none() is None:
         return prefixed
-    # Last resort: numeric suffix appended to the PREFIXED candidate (issue
-    # #26 C2/D22 — this used to restart from the bare stem, diverging from
-    # agent_page.derive_agent_identity on a third same-initial collision).
+    # Last resort: numeric suffix appended to the PREFIXED candidate — restarting
+    # from the bare stem would diverge from agent_page.derive_agent_identity on
+    # a third same-initial collision.
     for i in range(2, 20):
         candidate = f"{prefixed}{i}"
         coll = await db.execute(
@@ -362,9 +362,8 @@ async def _disambiguate(
       2. that author's first initial matches the input name's first initial
       3. that author's affiliation matches one of the input affiliations
 
-    The first-initial requirement (added 2026-06-03) is critical for common
-    surnames like Chen/Liu where surname + affiliation alone matched many
-    distinct researchers.
+    The first-initial requirement is critical for common surnames like Chen/Liu
+    where surname + affiliation alone matched many distinct researchers.
     """
     if not pmids:
         return [], 0
@@ -636,11 +635,10 @@ async def _persist(
     agent = agent_result.scalar_one_or_none()
     if agent is None:
         agent_id = await _resolve_agent_id(row.name, db)
-        # Digit-aware bot-name derivation (issue #26 I1): the inline version
-        # here mirrored agent_id[0] literally, so a third same-initial
-        # namesake ('pwu2') collided with the second Wu's 'PWuBot'. Reuse
-        # backfill_agents._bot_name_for, which already strips the numeric
-        # suffix before deriving the initial.
+        # Digit-aware bot-name derivation: mirroring agent_id[0] literally would
+        # make a third same-initial namesake ('pwu2') collide with the second
+        # Wu's 'PWuBot'. Reuse backfill_agents._bot_name_for, which already
+        # strips the numeric suffix before deriving the initial.
         bot_name = _bot_name_for(agent_id, row.name)
         agent = AgentRegistry(
             agent_id=agent_id,

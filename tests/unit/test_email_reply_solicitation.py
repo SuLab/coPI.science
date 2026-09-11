@@ -1,9 +1,9 @@
 """Reply-soliciting email copy must be gated on inbound email being enabled.
 
-Prod (2026-08-11): review emails told PIs "reply to this email to rate it"
-while ENABLE_INBOUND_EMAIL was off and the reply pipeline (MX record, S3
-bucket, receipt rule) did not exist — every PI who replied got silence plus a
-bounce. Until inbound is provisioned AND enabled, outbound mail must direct
+Review emails must not tell PIs "reply to this email to rate it" while
+ENABLE_INBOUND_EMAIL is off and the reply pipeline (MX record, S3 bucket,
+receipt rule) does not exist — otherwise every PI who replies gets silence
+plus a bounce. Until inbound is provisioned AND enabled, outbound mail must direct
 PIs to the web dashboard only, and must not carry a Reply-To pointing at the
 dead reply domain.
 """

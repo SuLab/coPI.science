@@ -1,5 +1,5 @@
-"""Doc-accuracy check for CLAUDE.md's "Last-name collisions" paragraph
-(issue #26 DOC-C). ``derive_agent_identity`` (src/routers/agent_page.py) and
+"""Doc-accuracy check for CLAUDE.md's "Last-name collisions" paragraph.
+``derive_agent_identity`` (src/routers/agent_page.py) and
 ``_resolve_agent_id``/``_bot_name_for`` (scripts/backfill_agents.py) both
 handle a THIRD same-initial namesake by appending a numeric suffix to the
 prefixed candidate (``pwu2`` / ``PWu2Bot``), but CLAUDE.md previously stopped
@@ -23,9 +23,9 @@ def test_last_name_collisions_documents_third_collision_suffix():
 
 
 def test_readme_adding_new_pis_also_documents_third_collision_suffix():
-    """issue #26 Minor 5: README's "Adding new PIs" step 2 documented only the
+    """README's "Adding new PIs" step 2 must not document only the
     initial-prefix rule while CLAUDE.md also documents the third-collision
-    numeric suffix — the two runbooks disagreed in completeness."""
+    numeric suffix — the two runbooks must agree in completeness."""
     adding_new_pis = README.split("## Adding new PIs", 1)[1].split("##", 1)[0]
     assert "pwu2" in adding_new_pis
     assert "PWu2Bot" in adding_new_pis

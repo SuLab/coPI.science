@@ -1,4 +1,4 @@
-"""Issue #20 COR-5/COR-13 residual (Task 20.9c): the engine's implicit
+"""The engine's implicit
 `rating=-1` review row (written by `_persist_implicit_proposal_review` when a PI
 merely engages a proposal thread) must not silence the PI-facing readers in
 `src/services/email_notifications.py`. This module covers

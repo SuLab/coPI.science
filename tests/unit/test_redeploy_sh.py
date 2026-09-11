@@ -1,4 +1,4 @@
-"""Bash-level tests for `scripts/redeploy.sh` (audit 2026-09-08 RC-6, #27 I2).
+"""Bash-level tests for `scripts/redeploy.sh`.
 
 Root cause: `docker compose $C up -d --build app worker` on an ALREADY RUNNING stack does
 not guarantee `migrate` reruns before the new app/worker containers start — `depends_on:
@@ -38,7 +38,7 @@ def _shim(
     tmp_path: Path, *, migrate_exit: int = 0, app_health_status: str = "healthy"
 ) -> tuple[Path, Path]:
     """A `docker` on PATH that logs every invocation and fakes just enough of the real
-    CLI for redeploy.sh's post-RC-6-review flow:
+    CLI for redeploy.sh's deploy flow:
 
     - `docker compose ... ps -aq migrate` -> a fake container id (so the script has
       something to pass to `docker wait`, mirroring the real one-shot's lifecycle).
@@ -131,7 +131,7 @@ def test_refuses_with_only_the_prod_file_and_not_the_override(tmp_path):
     assert not log.exists() or log.read_text() == ""
 
 
-# --- S-2 (audit 2026-09-10) ---------------------------------------------------------
+# --- $COMPOSE_FILE and -f interaction -----------------------------------------------
 # `docker compose` ignores $COMPOSE_FILE entirely the moment ANY `-f` is given (this is
 # documented `docker compose` behaviour, not a bug in compose). The old guard's
 # `_known_files` UNIONED $COMPOSE_FILE with the -f args before checking for both prod
@@ -230,7 +230,7 @@ def test_aborts_and_does_not_start_app_worker_when_migrate_fails(tmp_path):
 
 
 def test_grantbot_is_built_stopped_and_started_alongside_app_worker(tmp_path):
-    """R-4 (audit 2026-09-10): grantbot has the same `depends_on: migrate:
+    """grantbot has the same `depends_on: migrate:
     service_completed_successfully` shape as app/worker in docker-compose.prod.yml,
     so a redeploy that omits it leaves the OLD grantbot image serving against the
     newly migrated schema. `agent` (a one-off with its own runbook) must NOT appear
@@ -270,9 +270,9 @@ def test_aborts_and_does_not_start_grantbot_when_migrate_fails(tmp_path):
     )
 
 
-# --- Opus review of RC-6 (2026-09-08) ----------------------------------------------
-# `docker compose wait migrate` returns 1 with "no containers for project" (measured
-# by the reviewer at >=0.3s) when the one-shot has ALREADY exited by the time `wait`
+# --- Reading migrate's exit code via `docker wait` -----------------------------------
+# `docker compose wait migrate` returns 1 with "no containers for project"
+# when the one-shot has ALREADY exited by the time `wait`
 # runs -- a real race, not a hypothetical, since `up -d migrate` can return before or
 # after the container finishes. That would abort the deploy with app/worker stopped
 # even though migrate actually succeeded. Fixed by reading the exit code via `docker
@@ -326,7 +326,7 @@ def test_aborts_when_migrate_container_id_cannot_be_resolved(tmp_path):
     assert "wait \"\"" not in log.read_text()
 
 
-# --- REV3-5 (opus review, audit 2026-09-08) ----------------------------------------
+# --- Selecting a single migrate container id ----------------------------------------
 # `compose ps -aq migrate` can return SEVERAL ids when a stale one-off `migrate`
 # container from an earlier `docker compose run` is still present alongside the
 # `up -d migrate` container this run just created -- compose lists them oldest-first
@@ -397,13 +397,12 @@ def test_a_stale_leftover_migrate_container_does_not_abort_a_successful_migratio
     )
 
 
-# --- REV4-2 (audit 2026-09-08) ------------------------------------------------------
-# REV3-5's `tail -n1` assumed `ps -aq migrate` always lists containers OLDEST-first, so
-# the newest (the one this run's `up -d migrate` just created) is the last line. That
-# ordering is not guaranteed: a stale one-off `<proj>-migrate-run-<hash>` container from
-# an earlier `docker compose run migrate` can sort AFTER the persistent
-# `<proj>-migrate-1` service container this run actually cares about, so `tail -n1`
-# grabs the STALE one-off instead. redeploy.sh must select by the
+# --- Selecting migrate by label, not list position -----------------------------------
+# `ps -aq migrate` list order is not guaranteed to put the newest container last: a
+# stale one-off `<proj>-migrate-run-<hash>` container from an earlier
+# `docker compose run migrate` can sort AFTER the persistent `<proj>-migrate-1` service
+# container this run actually cares about, so picking by position (e.g. `tail -n1`)
+# can grab the STALE one-off instead. redeploy.sh must select by the
 # `com.docker.compose.oneoff` label instead of by list position.
 
 REAL_MIGRATE_CID = "real-migrate-service-cid"
@@ -414,8 +413,9 @@ def _shim_with_stale_oneoff_sorting_after_the_real_container(
     tmp_path: Path, *, migrate_exit: int = 0
 ) -> tuple[Path, Path]:
     """`ps -aq migrate` lists the REAL service container first and the STALE one-off
-    SECOND -- the reverse of REV3-5's assumed ordering. `docker inspect` distinguishes
-    them by the `com.docker.compose.oneoff` label, exactly like the real CLI."""
+    SECOND, so a position-based pick would need to guess the ordering. `docker inspect`
+    distinguishes them by the `com.docker.compose.oneoff` label, exactly like the real
+    CLI."""
     log = tmp_path / "argv.log"
     shim = tmp_path / "docker"
     shim.write_text(
@@ -513,7 +513,7 @@ def test_aborts_if_the_app_container_never_becomes_healthy_within_the_bound(tmp_
 
 
 def test_several_candidates_and_an_unreadable_oneoff_label_fail_closed(tmp_path):
-    """REV5-1 follow-up: with two migrate containers and `docker inspect` unable to
+    """With two migrate containers and `docker inspect` unable to
     read the oneoff label on either, guessing by list position could elect the stale
     one-off, whose old exit code would start app/worker against an un-migrated
     schema. The script must refuse and leave app/worker stopped."""
@@ -542,7 +542,7 @@ def test_several_candidates_and_an_unreadable_oneoff_label_fail_closed(tmp_path)
     assert "up -d app worker" not in text, text
 
 
-# --- K-3 (audit 2026-09-10) ---------------------------------------------------------
+# --- Guarding a non-numeric migrate exit code -----------------------------------------
 # `[ "$MIGRATE_EXIT" -ne 0 ]` on a non-numeric value prints "integer expression
 # expected" to stderr and returns exit status 2 -- which `if` treats the same as a
 # clean "false", so the script fell through as though migrate had exited 0.

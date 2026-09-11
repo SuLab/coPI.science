@@ -126,7 +126,7 @@ async def _load_records() -> tuple[
 
     Identity (bot name, PI name, last name) lets the strip catch a self-claim
     wearing a third-person subject ("Good Lab co-authored ..." in good's own
-    memory) — audit finding I5.
+    memory).
     """
     from sqlalchemy import select
 

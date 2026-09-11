@@ -17,17 +17,17 @@ from src.services.atomic_write import atomic_write_text
 logger = logging.getLogger(__name__)
 
 # Root for public/private/memory profile files on disk. Resolved from `profiles_dir`
-# (env COPI_PROFILES_DIR, default "profiles" — audit 2026-09-08 RC-13) so a host where
+# (env COPI_PROFILES_DIR, default "profiles") so a host where
 # profiles/ is not writable from the CWD can point this elsewhere.
 #
-# REV3-6 (opus review, audit 2026-09-08): kept as a module attribute — many tests
+# Kept as a module attribute — many tests
 # monkeypatch it directly to a tmp_path — but None by default rather than resolved
 # once at import time, so a later COPI_PROFILES_DIR + get_settings.cache_clear()
 # (what scripts/live_slack_preflight.py's runtime check does) is honored. Every
 # call site below goes through _profiles_dir() instead of the constant directly.
 PROFILES_DIR: Path | None = None
 
-# L-3 (opus review, audit 2026-09-10): named so a caller that needs to force
+# Named so a caller that needs to force
 # an agent's cache to "cleared" WITHOUT going through a disk read (e.g. when
 # the disk file could not be removed) can do so without duplicating this
 # literal — see SimulationEngine._sync_one_agent_private_profile_from_db.
@@ -54,7 +54,7 @@ def _extract_dois(text: str | None) -> set[str]:
 
 
 # Private Channel Rules block — appended to the system prompt when the agent is
-# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
+# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md.
 PRIVATE_CHANNEL_RULES = """
 ## Private channel rules
 You are in a private channel with a small membership (two bots plus up to two
@@ -102,7 +102,7 @@ class Agent:
         # DB-backed ground truth (publications table), pushed in by the
         # simulation engine at roster sync. Unioned into own_publication_dois
         # so the intake guard benefits from the same grounding as the emit
-        # guard. See issue #29.
+        # guard.
         self.db_publication_dois: set[str] = set()
         self._lab_directory: str | None = None
         self.api_call_count: int = 0
@@ -156,7 +156,7 @@ class Agent:
         been created yet — safe because all legacy content derives from public
         channels (private channels didn't exist pre-partition).
 
-        See specs/privacy-and-channel-visibility.md §G2.
+        See specs/privacy-and-channel-visibility.md.
         """
         if self._public_working_memory is None:
             new_path = _profiles_dir() / "memory" / self.agent_id / "public.md"
@@ -212,9 +212,9 @@ class Agent:
     def reload_private_profile(self) -> None:
         """Invalidate the private-profile cache only, forcing a re-read from disk.
 
-        Split out from ``reload_profiles`` (RC-7, audit 2026-09-08 follow-up):
-        an external reload keyed to a single combined (private, public)
-        signature called ``reload_profiles`` — which clears both caches — for
+        Split out from ``reload_profiles``: an external reload keyed to a
+        single combined (private, public) signature called ``reload_profiles``
+        — which clears both caches — for
         ANY change to either file. That let an unrelated public-profile edit
         resurrect a stale private file: if a private disk write had just
         failed (leaving the on-disk file's mtime unchanged, per
@@ -231,8 +231,7 @@ class Agent:
 
     def force_clear_private_profile(self) -> None:
         """Set the private-profile cache directly to the default "cleared"
-        text, WITHOUT going through a disk read (L-3, opus review, audit
-        2026-09-10).
+        text, WITHOUT going through a disk read.
 
         For when the caller already knows the profile is cleared (e.g. the
         DB row says so) but could not remove the stale on-disk file — unlike
@@ -264,7 +263,7 @@ class Agent:
         visibility: the visibility class of the channel the agent is about to
         act in. When 'collab_private', the private-channel memory segment for
         ``channel_id`` is also injected and a Private Channel Rules block is
-        appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
+        appended. See specs/privacy-and-channel-visibility.md.
         """
         return self._compose_system_prompt(
             include_memory=True,
@@ -384,7 +383,7 @@ Use these to reference other labs' work in conversations. Include links when cit
 
         Public-only for public/collab_public actions; public + the specific
         private-channel segment for collab_private actions. See
-        specs/privacy-and-channel-visibility.md §G1, §G2.
+        specs/privacy-and-channel-visibility.md.
         """
         segments: list[str] = []
         public_segment = self.public_working_memory
@@ -431,7 +430,7 @@ Use these to reference other labs' work in conversations. Include links when cit
                 )
             # Post bodies come from other labs' agents — fence as untrusted
             # peer content so an injected instruction can't hijack the scan
-            # decision (SEC-14).
+            # decision.
             post_blocks.append(f"{header}\n{delimit(p['content_snippet'], 'post_content')}")
         posts_text = "\n\n".join(post_blocks)
         prompt = phase2_template.replace("{new_posts}", posts_text)
@@ -751,7 +750,7 @@ Use these to reference other labs' work in conversations. Include links when cit
 
         Public memory → profiles/memory/{agent_id}/public.md.
         Private memory → profiles/memory/{agent_id}/private/{channel_id}.md
-        (requires channel_id). See specs/privacy-and-channel-visibility.md §G2.
+        (requires channel_id). See specs/privacy-and-channel-visibility.md.
         """
         if visibility == VISIBILITY_COLLAB_PRIVATE:
             if not channel_id:
@@ -789,9 +788,9 @@ Use these to reference other labs' work in conversations. Include links when cit
         Returns True if the disk write succeeded, False otherwise (and logs an
         ERROR). Either way, the in-memory cache is set to ``new_profile`` — an
         accepted instruction must be reflected in the agent's behaviour
-        immediately, even if it could not (yet) be written to disk. See RC-7
-        (audit 2026-09-08): the old contract invalidated the cache to None on
-        failure, so the *next* read re-loaded the (unchanged, stale) file from
+        immediately, even if it could not (yet) be written to disk. Invalidating
+        the cache to None on failure instead would mean the *next* read re-loads
+        the (unchanged, stale) file from
         disk — and callers that then persisted "the current private profile"
         to the database silently overwrote a good DB copy with that stale
         content. Making the write's own argument the source of truth for the
@@ -818,11 +817,11 @@ Use these to reference other labs' work in conversations. Include links when cit
         """Sync ``content`` to the database. Returns True on success.
 
         Takes the content to persist explicitly and never reads
-        ``self.private_profile`` (disk or cache) — see RC-7 (audit 2026-09-08).
-        The old signature re-read ``self.private_profile`` here, which on a
-        cache miss re-loads the on-disk file; if a prior
+        ``self.private_profile`` (disk or cache). Re-reading
+        ``self.private_profile`` here instead would, on a
+        cache miss, re-load the on-disk file; if a prior
         ``update_private_profile`` call had just failed to write that file,
-        this method faithfully persisted the STALE file over a DB row the
+        this method would faithfully persist the STALE file over a DB row the
         caller believed it was updating with the PI's new instruction. Taking
         the content as a parameter makes this method's output depend only on
         its argument, decoupled from whatever the disk write did or did not

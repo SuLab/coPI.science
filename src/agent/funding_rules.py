@@ -23,7 +23,7 @@ from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 # a forthcoming spin-off post instead of creating it.
 #
 # The apostrophe class in the two contraction phrases covers every code point
-# this text can carry it in (issue #23 COR-28a): U+0027 apostrophe, U+2019 right
+# this text can carry it in: U+0027 apostrophe, U+2019 right
 # single quotation mark (Slack's smart-quote autocorrect and most LLM output),
 # U+02BC modifier letter apostrophe, U+2018 left single quotation mark (an LLM
 # that opens a quote and never closes it), U+00B4 acute accent (a common
@@ -105,10 +105,10 @@ _ACK_PHRASES = [
 _ACK_RE = re.compile("|".join(_ACK_PHRASES), re.IGNORECASE)
 
 # A message this long is presumed substantive even if it opens with an ack
-# phrase — see is_acknowledgment_only_funding_reply (issue #23 COR-28b).
-# 10, not a rounder-looking 12: the issue's own reproduction ("Agreed, we can
+# phrase — see is_acknowledgment_only_funding_reply.
+# 10, not a rounder-looking 12: a real ack-phrase message ("Agreed, we can
 # send the plasmids and the mice next week.") is 11 words, and a threshold
-# that does not flip that sentence does not close this finding. Verified safe
+# that does not flip that sentence does not close this gap. Verified safe
 # against every TestAcknowledgmentOnly.test_positive_cases fixture — the
 # longest ("Sounds good — see you there.") is 6 words.
 _ACK_SUBSTANTIVE_WORD_COUNT = 10
@@ -148,8 +148,8 @@ def is_acknowledgment_only_funding_reply(text: str) -> bool:
         return False
     # A reply this long is doing more than acknowledging, even one that opens
     # with an ack phrase and never touches the (necessarily incomplete) marker
-    # vocabulary above (issue #23 COR-28b): "Agreed, we can send the plasmids
-    # and the mice next week." was rejected as ack-only for lacking a listed
+    # vocabulary above: without this, "Agreed, we can send the plasmids
+    # and the mice next week." would be rejected as ack-only for lacking a listed
     # noun.
     if len(stripped.split()) >= _ACK_SUBSTANTIVE_WORD_COUNT:
         return False
@@ -211,7 +211,7 @@ def summarize_funding_thread(
 
     # Canonical (upper-case) form — see extract_foa_number. The scan below
     # compares against upper-cased bodies, so the two spellings of one FOA
-    # number cannot hide a spin-off from each other (issue #23 COR-27).
+    # number cannot hide a spin-off from each other.
     foa_number = extract_foa_number(root.content)
 
     alignments: list[tuple[str, str]] = []
@@ -242,7 +242,7 @@ def summarize_funding_thread(
             # pattern, so a case-sensitive compare here silently dropped
             # spin-offs whose casing differs from the root's — NIH's own
             # permalink lower-cases the number — and an agent that cannot see
-            # the existing spin-off posts a duplicate (issue #23 COR-27).
+            # the existing spin-off would post a duplicate.
             if foa_number not in entry.content.upper():
                 continue
             spinoffs.append((entry.ts, _first_meaningful_line(entry.content)))

@@ -531,7 +531,7 @@ class TestPiLiteralTagCheckResolvesSlackUidMentions:
     """PI-literal check inside _poll_slack_for_pi_messages must resolve a real
     Slack <@Uxxx> mention exactly like the literal "@BotName" form — a human
     typing "@SuBot" in Slack gets autocompleted to <@Uxxx> before this code
-    ever sees the text. See COR-8."""
+    ever sees the text."""
 
     def _engine_with(self, history):
         eng = _engine(

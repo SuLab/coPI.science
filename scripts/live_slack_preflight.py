@@ -20,7 +20,7 @@ non-zero:
 * checks 1-2 (environment isolation) **gate** check 3 (the network call), so a token is
   never sent anywhere from an environment we have not already proved isolated.
 
-THE FOUR CHECKS (order fixed by docs/plans/2026-09-04-close-remaining-gaps.md Task 2)
+THE FOUR CHECKS (order is fixed — later checks depend on earlier ones passing)
 =====================================================================================
 1. ``SLACK_BOT_TOKEN_CRAVATT``, ``SLACK_BOT_TOKEN_WISEMAN``, ``SLACK_CONFIG_TOKEN`` and
    ``SLACK_CONFIG_REFRESH_TOKEN`` are each **present in the environment and empty**.
@@ -42,8 +42,8 @@ THE FOUR CHECKS (order fixed by docs/plans/2026-09-04-close-remaining-gaps.md Ta
    not evidence.
 4. ``SLACK_TEST_WORKSPACE``, ``SLACK_TEST_PI_USER_ID`` and ``SLACK_TEST_BOT_TOKEN_SU``
    are set, because ``tests/conftest.py``'s ``pytest_collection_modifyitems`` skips the
-   whole tier without them. A silent skip is what let #20 COR-1b through: the tier
-   reported "skipped", nobody noticed, and the regression shipped.
+   whole tier without them. A silent skip is dangerous here: a data-loss regression
+   once reached HEAD because the tier reported "skipped" and nobody noticed.
 
 NOTHING HERE PRINTS A CREDENTIAL
 ================================
@@ -267,7 +267,7 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
     client the fixtures never built and the off-channel guard never sees, no matter how
     thoroughly the environment was blanked.
 
-    An audit of the first live run found the blast radius was bounded only by accident:
+    The blast radius of pointing this at a live database is bounded only by accident:
     `agent_registry.agent_id` is UNIQUE, so the seeded fixtures would have collided with
     any pre-existing roster and errored out. That is a lucky schema constraint, not a
     control. So: refuse when `TEST_DATABASE_URL` is set at all, and let the suite spin
@@ -285,17 +285,17 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
     # password is attacker/operator-controlled input we cannot assume is
     # well-formed. Two redaction approaches already broke on it:
     #
-    #   `re.sub(r"//[^@/]*@", ...)` (SEC3-3, audit 2026-09-10) stops at the
-    #   FIRST `@`, so a `user:pass@word@host` DSN left `word@host`
-    #   un-redacted, leaking the tail of the password.
+    #   `re.sub(r"//[^@/]*@", ...)` stops at the FIRST `@`, so a
+    #   `user:pass@word@host` DSN left `word@host` un-redacted, leaking the
+    #   tail of the password.
     #
-    #   `urlsplit(dsn)` (SEC3-3 follow-up, opus review, same day) does resolve
-    #   the host on the LAST `@` the way browsers/DSN parsers do, but its
-    #   `.port` property RAISES ValueError for a non-numeric port instead of
-    #   returning None, and a password containing `/` or `#` makes urlsplit
-    #   attribute part of the password to `.path` instead of `.netloc` --
-    #   both put unredacted password bytes in the printed detail (or crashed
-    #   the check outright, an even worse failure mode for a REFUSAL check).
+    #   `urlsplit(dsn)` does resolve the host on the LAST `@` the way
+    #   browsers/DSN parsers do, but its `.port` property RAISES ValueError
+    #   for a non-numeric port instead of returning None, and a password
+    #   containing `/` or `#` makes urlsplit attribute part of the password
+    #   to `.path` instead of `.netloc` -- both put unredacted password bytes
+    #   in the printed detail (or crashed the check outright, an even worse
+    #   failure mode for a REFUSAL check).
     #
     # So: split the authority on the LAST `@` ourselves and print everything
     # after it verbatim (host, port, and path together, whatever shape they
@@ -330,20 +330,22 @@ def check_no_operator_supplied_database(env: Mapping[str, str]) -> Check:
 
 
 def check_profiles_dir_writable(profiles_dir: Path) -> Check:
-    """Check 6 (audit 2026-09-08 RC-13) — `profiles_dir` itself must already exist
-    (refuse a mistyped/nonexistent `COPI_PROFILES_DIR` rather than silently creating
-    an arbitrary directory tree), and the `public`/`private`/`memory` subdirectories
-    are created (if missing) and confirmed writable by the current process.
+    """Check 6 — `profiles_dir` itself must already exist (refuse a
+    mistyped/nonexistent `COPI_PROFILES_DIR` rather than silently creating an
+    arbitrary directory tree), and the `public`/`private`/`memory`
+    subdirectories are created (if missing) and confirmed writable by the
+    current process.
 
-    Runs before any Slack call (see `run_checks`): a `profiles_dir` that turns out to
-    be read-only is exactly the failure mode RC-7 traced to a silent DB clobber
-    (`Agent.update_private_profile` swallowed the write error and the caller re-read
-    the stale file), and the live tier should refuse up front rather than discover it
-    mid-run with a PI told their instruction was saved when it was not.
+    Runs before any Slack call (see `run_checks`): a `profiles_dir` that turns
+    out to be read-only can silently clobber a profile write
+    (`Agent.update_private_profile` swallowing the write error and the caller
+    re-reading the stale file), and the live tier should refuse up front
+    rather than discover it mid-run with a PI told their instruction was
+    saved when it was not.
     """
-    # shlex.quote (R-5, audit 2026-09-10): profiles_dir is interpolated into a
-    # copy-paste `sudo chown -R ...` suggestion. Unquoted, a path containing a
-    # space or shell metacharacter renders a command that either chowns the wrong
+    # profiles_dir is interpolated into a copy-paste `sudo chown -R ...`
+    # suggestion; shlex.quote it because, unquoted, a path containing a space
+    # or shell metacharacter renders a command that either chowns the wrong
     # (truncated) path or does something else entirely if pasted as-is.
     remedy = (
         f"Fix with either: `sudo chown -R $(id -u):$(id -g) {shlex.quote(str(profiles_dir))}` "

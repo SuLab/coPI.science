@@ -1,6 +1,6 @@
-"""``agent_messages.pi_inbound_state`` values (migration 0029).
+"""``agent_messages.pi_inbound_state`` values.
 
-REV3-7 (opus review, audit 2026-09-08): pulled out of ``src.agent.simulation``
+Pulled out of ``src.agent.simulation``
 into a dependency-free module. ``src.services.pi_inbox`` (the web/worker request
 path that writes a PI message row) previously imported ``PI_INBOUND_PENDING``
 from ``src.agent.simulation`` inside its own function body — a request-path
@@ -23,14 +23,12 @@ work unchanged.
 # pre-0029 behaviour, i.e. dedup on log presence. That covers every legacy row
 # and, crucially, every row _poll_channels appended itself: that poller
 # re-reads those with no origin predicate, so a two-valued marker would re-run
-# handle_channel_tag on every tagged Slack message. See
-# docs/plans/2026-09-04-decisions/task-7.md (which supersedes D25) and
-# task-8.md.
+# handle_channel_tag on every tagged Slack message.
 PI_INBOUND_INGESTED = "ingested"
 PI_INBOUND_HANDLED = "handled"
 
-# A fourth state, written at INSERT time by record_pi_message (RC-2 / #20
-# blocker): "this row needs a DB inbound poller's attention no matter how far
+# A fourth state, written at INSERT time by record_pi_message:
+# "this row needs a DB inbound poller's attention no matter how far
 # behind the cursor it is". Without it, a PI message written while agent-run
 # was down could age past PI_INBOX_LOOKBACK_S (src.agent.simulation) before
 # the process came back — _seed_pi_inbox_cursor jumps the cursor to
@@ -38,11 +36,10 @@ PI_INBOUND_HANDLED = "handled"
 # older than that. 'pending' rows are fetched by _poll_inbound_from_db
 # regardless of the cursor and are never skipped by the dedup predicate (it
 # only special-cases HANDLED and the NULL-fallback), so they always reach the
-# normal ingest→handle→HANDLED path once a poller is running again. See
-# docs/plans/2026-09-08-audit-fixes.md RC-2.
+# normal ingest→handle→HANDLED path once a poller is running again.
 PI_INBOUND_PENDING = "pending"
 
-# SEC2-1 (audit 2026-09-08): a handler that raises deterministically (not a
+# A handler that raises deterministically (not a
 # transient ConnectionError) would otherwise be re-run forever — the row stays
 # 'ingested' and the cursor-independent disjunct re-selects it every tick
 # regardless of the lookback window, which only bounds the cursor-based path.
@@ -51,7 +48,7 @@ PI_INBOUND_PENDING = "pending"
 # src.agent.simulation._poll_inbound_from_db.
 PI_INBOUND_MAX_ATTEMPTS = 3
 
-# S-4 (audit 2026-09-10): PiOwnershipLookupFailed (a transient DB failure
+# PiOwnershipLookupFailed (a transient DB failure
 # resolving which agents a PI's Slack/user id owns) used to count toward the
 # same PI_INBOUND_MAX_ATTEMPTS cap as a deterministically-failing handler --
 # a 30s DB blip during a run of unlucky polls could exhaust the cap and get a

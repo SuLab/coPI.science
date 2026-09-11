@@ -1,7 +1,7 @@
 """Migration service: public thread → collab_private channel.
 
-Implements the v1 Migration Rule from specs/privacy-and-channel-visibility.md
-§"When Channels Become Private". Called by the PI Reopens a Proposal flow
+Implements the v1 Migration Rule from specs/privacy-and-channel-visibility.md's
+"When Channels Become Private" section. Called by the PI Reopens a Proposal flow
 (``POST /agent/{agent_id}/proposals/{thread_decision_id}/reopen``) to move a
 thread from its public origin into a new collab_private channel before any PI
 guidance text is posted.
@@ -25,7 +25,7 @@ Slack-side side-effects are performed before DB writes so a Slack failure
 aborts cleanly without leaving a stale AgentChannel row. If DB writes fail
 after Slack succeeds, we log — the orphan Slack channel can be archived manually.
 
-RC-14 (audit 2026-09-08): every ``AgentSlackClient`` call this module makes is
+Every ``AgentSlackClient`` call this module makes is
 synchronous and can block for as long as
 ``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s) under a sustained
 throttle. This module is called from async code — the web reopen route and
@@ -33,8 +33,7 @@ the e-mail inbound worker — so calling straight in would freeze the single
 ASGI worker (or the worker process) for that whole retry loop, not just the
 one request. Every such call therefore runs via ``run_slack_call``, which
 moves it to a thread pool dedicated to Slack I/O rather than the process-wide
-default ``asyncio.to_thread`` pool everything else shares (audit 2026-09-10
-R-2). The
+default ``asyncio.to_thread`` pool everything else shares. The
 engine's own ``_post_message`` (``src/agent/simulation.py``) is intentionally
 NOT threaded — the main-loop is synchronous by design and already isolated
 in its own process.
@@ -70,14 +69,14 @@ from src.services.slack_executor import run_slack_call
 logger = logging.getLogger(__name__)
 
 # Neutral marker closing the origin public thread. Deliberately carries none of
-# the PI's guidance text — that stays inside the private channel (§G6).
+# the PI's guidance text — that stays inside the private channel.
 _CLOSE_MARKER_TEXT = "⏸️ continuing this discussion off-channel."
 
 
 @dataclass
 class MigrationProgress:
     """Caller-owned record of whether the migration has yet done anything a retry
-    would duplicate (#21 COR-32).
+    would duplicate.
 
     A caller that must decide "retry or give up" cannot answer it from the exception:
     the same ``RuntimeError`` can come from ``auth.test`` being throttled (nothing has
@@ -129,7 +128,7 @@ def _build_slug(agent_a: str, agent_b: str, origin_channel_name: str) -> str:
 #
 # Kept below slack_client.SLACK_MAX_TEXT_CHARS deliberately: _add_handover_message
 # writes ONE DB row per call, so a post that Slack splits would desynchronise the
-# mirror (8515f65, defect 2). Pinned by
+# mirror. Pinned by
 # tests/unit/test_slack_client_contract.py::test_handover_post_budget_stays_under_the_slack_split_threshold.
 _MAX_POST_CHARS = 3500
 
@@ -446,7 +445,7 @@ async def _migrate_offline(
     # route's `rating != -1` guard then stopped any retry from repairing. Committing as
     # soon as the migration's own work is complete keeps the pointer and its target in
     # step; a caller's later failure then costs only that caller's own rows (e.g. the
-    # review row), which is recoverable. Found by the issue #24 closure audit (N1-a).
+    # review row), which is recoverable.
     await db.commit()
 
     logger.info("Slack-off migration: created private channel %s (DB-only)", new_channel_name)
@@ -474,7 +473,7 @@ async def migrate_public_thread_to_private(
     private channel is the primary artifact.
 
     Pass a ``MigrationProgress`` as ``progress`` to learn, when this raises, whether
-    anything irreversible had happened yet (#21 COR-32); see that class and the
+    anything irreversible had happened yet; see that class and the
     "point of no return" comment below. Omitting it is not an error — a caller with
     no retry to make (the web reopen route answers a human who can simply click
     again) does not need the distinction.
@@ -525,7 +524,7 @@ async def migrate_public_thread_to_private(
     simulation_run_id = await _latest_simulation_run_id(db)
 
     # --- Slack side-effects ------------------------------------------------
-    # run_slack_call everywhere below (RC-14, R-2): _make_client calls
+    # run_slack_call everywhere below: _make_client calls
     # AgentSlackClient.connect(), a blocking Slack API call.
     creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
     other_token = await _get_or_fail_bot_token(db, other_agent_id)
@@ -537,7 +536,7 @@ async def migrate_public_thread_to_private(
         raise RuntimeError(f"Could not resolve bot user ID for '{other_agent_id}'")
 
     slug = _build_slug(a, b, origin_channel_name)
-    # Point of no return (#21 COR-32). Cleared BEFORE the call, not after it: an
+    # Point of no return. Cleared BEFORE the call, not after it: an
     # exception escaping create_private_channel (a connection reset, a read timeout —
     # a SlackApiError is caught in there and returns None instead) leaves it unknown
     # whether Slack acted on the request, and the slug carries a second-resolution
@@ -712,7 +711,7 @@ async def migrate_public_thread_to_private(
     # pointing at it so no retry could repair it. Committing the DB record as soon as
     # the external side effect is real keeps the two in step; a caller's later failure
     # then costs only that caller's own rows (e.g. the review row), which is
-    # recoverable. Found by the issue #24 closure audit.
+    # recoverable.
     await db.commit()
 
     return MigrationResult(

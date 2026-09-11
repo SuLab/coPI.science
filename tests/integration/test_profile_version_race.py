@@ -1,4 +1,4 @@
-"""Integration test: two concurrent profile_version bumps both land (issue #22 C1).
+"""Integration test: two concurrent profile_version bumps both land.
 
 Pins the atomic SQL-side increment added for `bump_profile_version`
 (`src/services/profile_pipeline.py`). This must use TWO independent sessions on

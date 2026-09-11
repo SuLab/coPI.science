@@ -1,5 +1,5 @@
 """``run_blocking`` runs synchronous SES-send calls off the event loop, on its
-own bounded pool separate from Slack's (S-7, audit 2026-09-10).
+own bounded pool separate from Slack's.
 
 Mirrors tests/unit/test_slack_executor.py's shape for the equivalent module.
 """

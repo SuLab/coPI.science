@@ -1,5 +1,5 @@
 """get_with_retry / post_with_retry: shared retry/backoff for the three outbound HTTP clients
-(orcid.py, pubmed.py, grants.py) that had none (issue #23 COR-29a).
+(orcid.py, pubmed.py, grants.py) that had none.
 
 No assertion in this file is a wall-clock threshold. Other agents run pytest concurrently in this
 checkout, so "it finished within N seconds" would be flaky under load; the budget tests below drive

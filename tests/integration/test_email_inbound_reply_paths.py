@@ -1,19 +1,17 @@
-"""Reply-path fixes from the 2026-08-14 inbound email rollout.
+"""Inbound email reply-path invariants.
 
-Two defects observed live during the P2 end-to-end test:
+1. A user with no registered email (private ORCID) must not skip the
+   sender-match check — the reply token plus SPF/DKIM/DMARC are not
+   sufficient on their own. Fail closed: no registered address, no email
+   review (the dashboard remains that PI's review path).
 
-1. A user with no registered email (private ORCID) skipped the sender-match
-   check entirely — the reply token plus SPF/DKIM/DMARC were the only controls.
-   We now fail closed: no registered address, no email review (the dashboard
-   remains that PI's review path).
-
-2. The help email ("Could not process your reply") instructed the PI to reply
-   but was sent from noreply@copi.science with no Reply-To — the apex domain's
-   MX is Namecheap forwarding, so following the instructions bounced. It now
-   carries the notification's reply token in Reply-To (valid because an
+2. The help email ("Could not process your reply") must not instruct the PI
+   to reply from an address with no working Reply-To — the apex domain's MX
+   is Namecheap forwarding, so a reply to noreply@copi.science bounces. It
+   must carry the notification's reply token in Reply-To (valid because an
    unparseable reply deliberately leaves the notification at status='sent').
-   The review/instruction confirmations, whose tokens ARE consumed, instead say
-   plainly that replies are not monitored.
+   The review/instruction confirmations, whose tokens ARE consumed, instead
+   say plainly that replies are not monitored.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -48,9 +46,9 @@ def _raw_reply(token: str, from_addr: str, body: str) -> bytes:
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit(monkeypatch):
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {})
-    # Minor 8 (fix round A): without this, the one-email cap set by an earlier test
-    # in the same process leaks into a later test keyed by an unrelated notification
-    # id colliding only by bad luck — cheap insurance, mirrors the rate-limit reset.
+    # Without this, the one-email cap set by an earlier test in the same process
+    # leaks into a later test keyed by an unrelated notification id colliding
+    # only by bad luck — cheap insurance, mirrors the rate-limit reset.
     inbound._INSTRUCTION_FAILURE_EMAILS_SENT.clear()
 
 
@@ -78,7 +76,7 @@ def _classifies_as(monkeypatch, classification: dict):
 
 async def _slack_on(*a, **k):
     """Stub for `slack_tokens.slack_globally_enabled`, forcing the legacy Slack path
-    (rather than the DB-only "Slack off" branch) in the fix-round COR-32 tests below."""
+    (rather than the DB-only "Slack off" branch) in the tests below."""
     return True
 
 
@@ -110,13 +108,14 @@ async def _reviews(db_session):
     return (await db_session.execute(select(ProposalReview))).scalars().all()
 
 
-# --- 0. RC-4: a reply token expires at the consumer, not just on resend -------
+# --- 0. A reply token expires at the consumer, not just on resend -------
 #
-# Previously `expired` was written only when a REPLACEMENT reminder was sent
-# (email_notifications.py), and the inbound side checked only `status == "sent"` --
-# so a PI who never got a second reminder (nothing left to send, or suppressed by the
-# allowlist) held a bearer credential good forever. `settings.email_notification_
-# expiry_days` (default 14) is now enforced here too, measured from `sent_at`.
+# `expired` must not be written only when a REPLACEMENT reminder is sent
+# (email_notifications.py) while the inbound side checks only `status == "sent"` --
+# otherwise a PI who never gets a second reminder (nothing left to send, or
+# suppressed by the allowlist) holds a bearer credential good forever.
+# `settings.email_notification_expiry_days` (default 14) must be enforced
+# here too, measured from `sent_at`.
 
 
 async def test_a_reply_past_the_expiry_window_is_refused_and_the_row_expires(
@@ -244,10 +243,10 @@ async def test_reply_for_a_null_email_user_files_nothing(
 async def test_a_reply_to_an_unknown_token_from_a_registered_user_gets_a_bounce(
     db_session, monkeypatch
 ):
-    """REV3-3 (opus review, audit 2026-09-08): F1's token rotation means a PI
-    answering a superseded reminder now hits an unknown token and previously
-    got silence. If the From address matches a KNOWN user, send one short
-    bounce explaining the link is stale."""
+    """Token rotation means a PI answering a superseded reminder hits an
+    unknown token; it must not be met with silence. If the From address
+    matches a KNOWN user, send one short bounce explaining the link is
+    stale."""
     from src.services.email_notifications import SendOutcome
 
     bounces = []
@@ -419,13 +418,13 @@ async def test_help_emails_are_capped_per_notification(
 async def test_the_reply_rate_limit_survives_a_token_rotation(
     db_session, monkeypatch, sent_emails, caplog
 ):
-    """SEC2-5 (audit 2026-09-08): the reply-rate limiter used to be keyed on
-    the reply token itself, but RC-4 made the token rotate on resend — a
-    token-keyed limiter's window resets to empty every time the PI's
-    notification is resent, so a sender who can trigger resends (or who is
-    handed a fresh reminder mid-window) evades the per-notification cap
-    entirely. Keying on notification.id closes that: the cap holds across a
-    token rotation on the SAME underlying notification."""
+    """The reply-rate limiter must be keyed on notification.id, not the reply
+    token: since the token rotates on resend, a token-keyed limiter's window
+    resets to empty every time the PI's notification is resent, letting a
+    sender who can trigger resends (or who is handed a fresh reminder
+    mid-window) evade the per-notification cap entirely. Keying on
+    notification.id makes the cap hold across a token rotation on the SAME
+    underlying notification."""
     import logging
 
     token = "rotatecap" + "r" * 39
@@ -440,7 +439,7 @@ async def test_the_reply_rate_limit_survives_a_token_rotation(
                 _raw_reply(token, "pi.rho@scripps.edu", "still no rating"),
                 db_session,
             )
-            # Simulate RC-4's token rotation (a resend mints a new token for
+            # Simulate a token rotation (a resend mints a new token for
             # the same notification row) without actually resending.
             token = f"rotatecap{i}" + "s" * 38
             notification.reply_token = token
@@ -464,7 +463,7 @@ async def test_the_reply_rate_limit_survives_a_token_rotation(
 async def test_an_out_of_range_rating_falls_back_to_the_help_email_path(
     db_session, monkeypatch, sent_emails,
 ):
-    """COR-19.4 coercion pin: _coerce_rating(7) == 7 passes an out-of-range int
+    """_coerce_rating(7) == 7 passes an out-of-range int
     through unchanged — it IS a real int, just not a valid 1-4 rating.
     process_inbound_email's own `rating < 1 or rating > 4` guard is what rejects it,
     downgrading the category to "unparseable" so it falls into the help-email path
@@ -487,13 +486,13 @@ async def test_an_out_of_range_rating_falls_back_to_the_help_email_path(
     assert "could not process" in mail["subject"].lower()
 
 
-# --- 2b. Commit before the confirmation send (COR-19.6) ------------------------
+# --- 2b. Commit before the confirmation send ------------------------
 
 
 async def test_review_confirmation_failure_does_not_roll_back_the_already_committed_review(
     engine, monkeypatch, sent_emails,
 ):
-    """COR-19.6: db.commit() must happen before the SES confirmation send inside
+    """db.commit() must happen before the SES confirmation send inside
     process_inbound_email, so a send failure (which propagates to poll_inbound_emails'
     per-object except — it does not delete the S3 object, and retries) can't also roll
     back a review that already succeeded. Needs a REAL committing session (not the
@@ -581,7 +580,7 @@ async def test_review_confirmation_failure_does_not_roll_back_the_already_commit
             ) == 0, "this test committed a simulation_runs row it did not clean up"
 
 
-# --- 2b2. A retried inbound e-mail and the private-channel migration (COR-19.6) --
+# --- 2b2. A retried inbound e-mail and the private-channel migration --
 
 
 @pytest.fixture
@@ -624,27 +623,25 @@ def slack_migration_stub(monkeypatch):
 async def test_a_retried_inbound_email_does_not_create_a_second_private_channel(
     engine, monkeypatch, slack_migration_stub,
 ):
-    """COR-19.6: a retried inbound e-mail must not mint a second private channel.
+    """A retried inbound e-mail must not mint a second private channel.
 
     Two guards are needed, and this pins both. `migrate_public_thread_to_private`
     commits its own AgentChannel/member/handover rows and
     `thread_decisions.refined_in_channel` as soon as its Slack side effects are
-    irreversible (private_channels.py, commit 34d3c15). That alone was NOT enough, and
-    this test is what disproved it: `_handle_instruction`'s original guard only looked
-    for a ProposalReview row, never at `refined_in_channel`, and the migration never
-    flips `origin_visibility` away from 'public'. So when the OUTER
-    `process_inbound_email` commit failed after the migration's own commit had landed,
-    the review row and the notification flip were rolled back; the retry over the same
-    S3 object found `notification.status` still 'sent' and no review row, and ran the
-    migration end to end again -- two AgentChannel rows with the same channel_name, and
-    a second real Slack channel requested.
+    irreversible (private_channels.py). That alone is NOT enough: if
+    `_handle_instruction`'s guard only looked for a ProposalReview row and never
+    at `refined_in_channel`, then when the OUTER `process_inbound_email` commit
+    fails after the migration's own commit has landed, the review row and the
+    notification flip are rolled back; the retry over the same S3 object finds
+    `notification.status` still 'sent' and no review row, and reruns the
+    migration end to end -- two AgentChannel rows with the same channel_name,
+    and a second real Slack channel requested.
 
     The second guard (email_inbound.py, "Second idempotency guard") reads
-    `refined_in_channel` and skips the migration when it is already set, letting the
-    retry go on to record the review row and retire the notification. The first
-    attempt's handover already put this guidance in the private channel, so nothing is
-    re-posted. This ran as a strict xfail while the claim was false; it is a plain
-    regression pin now that both guards are in place.
+    `refined_in_channel` and skips the migration when it is already set, letting
+    the retry go on to record the review row and retire the notification. The
+    first attempt's handover already put this guidance in the private channel,
+    so nothing is re-posted.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     token = "retrychannel" + "z" * 38
@@ -750,25 +747,25 @@ async def test_a_retried_inbound_email_does_not_create_a_second_private_channel(
             await cleanup_db.commit()
 
 
-# --- 2c. A failed instruction post notifies the PI (COR-32 fix round) ----------
+# --- 2c. A failed instruction post notifies the PI ----------
 
 
 @pytest.mark.parametrize("kind", ["plain_exception", "db_flavored"])
 async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_notification(
     db_session, monkeypatch, sent_emails, kind,
 ):
-    """COR-32 fix round, Critical #1: migrate_public_thread_to_private creates a real
-    Slack channel (and DB rows) before most of its work — it is NOT idempotent. Letting
-    a failure inside it raise (21.9's original fix) meant the S3 object retried up to
-    MAX_S3_PROCESS_ATTEMPTS times, minting up to that many orphan channels. A failure
-    here must instead be terminal: notify the PI with the "will not be retried" wording
-    and return False so the caller retires the notification and commits as usual — at
-    most ONE orphan channel results, matching pre-COR-32 parity, except the PI now finds
-    out. Forces the failure on the DEFAULT-config path (enable_private_refinement=True,
-    td.origin_visibility='public', both factory defaults) — reachable in production
-    today, not just the legacy flag-off path.
+    """migrate_public_thread_to_private creates a real Slack channel (and DB
+    rows) before most of its work — it is NOT idempotent. Letting a failure
+    inside it raise means the S3 object retries up to MAX_S3_PROCESS_ATTEMPTS
+    times, minting up to that many orphan channels. A failure here must
+    instead be terminal: notify the PI with the "will not be retried" wording
+    and return False so the caller retires the notification and commits as
+    usual — at most ONE orphan channel results, and the PI finds out. Forces
+    the failure on the DEFAULT-config path (enable_private_refinement=True,
+    td.origin_visibility='public', both factory defaults) — reachable in
+    production today, not just the legacy flag-off path.
 
-    Parametrised (fix round B, audit #21 C1) over TWO failure shapes:
+    Parametrised over TWO failure shapes:
     - "plain_exception": the original RuntimeError, which leaves the session clean.
     - "db_flavored": a genuine flush-time IntegrityError (a duplicate reply_token,
       mirroring migrate_public_thread_to_private's own db.flush() in
@@ -848,8 +845,8 @@ async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_noti
 async def test_a_legacy_pre_slack_failure_still_raises_and_retries(
     db_session, monkeypatch, sent_emails,
 ):
-    """COR-32 fix round, rule 2: the three legacy failures that happen BEFORE any Slack
-    mutation (no simulation run, no bot token, channel not found) are still safe to
+    """The three legacy failures that happen BEFORE any Slack mutation (no
+    simulation run, no bot token, channel not found) are still safe to
     retry — unlike the migration failure above, nothing irreversible has happened yet.
     This exercises "no bot token": settings.enable_private_refinement=False routes into
     the legacy branch, slack_globally_enabled is stubbed True (skip the DB-only path),
@@ -876,15 +873,15 @@ async def test_a_legacy_pre_slack_failure_still_raises_and_retries(
     assert "will not be retried" not in mail["body"]
 
 
-# --- 2c-bis. A PRE-mutation migration failure is retried, not consumed (COR-32) --
+# --- 2c-bis. A PRE-mutation migration failure is retried, not consumed --
 #
 # The terminal path above exists because migrate_public_thread_to_private is not
 # idempotent ONCE IT HAS CREATED A SLACK CHANNEL. Everything it does before that --
 # resolving the run, both bot tokens, both authenticated clients, the other bot's user
 # id, and conversations.create itself when Slack answers and refuses -- leaves nothing
-# on Slack and nothing committed in the DB. Consuming the PI's instruction for one of
-# those is the COR-32 defect: a DNS blip, a throttled auth.test or a rotated token
-# silently discards a real instruction.
+# on Slack and nothing committed in the DB. A PRE-mutation failure (a DNS blip, a
+# throttled auth.test, or a rotated token) must therefore be retried, not consumed
+# as if the PI's instruction had been discarded.
 
 
 class _NoAuthClient(FakeSlackClient):
@@ -961,16 +958,16 @@ def _force_pre_mutation_failure(monkeypatch, case: str) -> list:
 async def test_a_pre_mutation_migration_failure_is_retried_not_consumed(
     db_session, monkeypatch, sent_emails, case,
 ):
-    """#21 COR-32: "on a failed post, don't mark-responded and don't delete the object".
+    """On a failed post, don't mark-responded and don't delete the object.
 
     All four cases fail inside `migrate_public_thread_to_private` before it has asked
     Slack for a channel, so nothing irreversible has happened on Slack OR in the DB.
     The instruction must therefore survive: InstructionApplyFailed propagates out of
     process_inbound_email, which leaves the notification at status='sent' and (in
-    poll_inbound_emails) leaves the S3 object in place for the next poll. Pre-fix,
-    every one of these took the terminal arm added for the post-mutation case: the
-    notification was retired, the object deleted, and the PI told their instruction
-    "will not be retried" -- for a transient DNS/throttle/token blip.
+    poll_inbound_emails) leaves the S3 object in place for the next poll. Taking the
+    terminal arm meant for the post-mutation case here would retire the notification,
+    delete the object, and tell the PI their instruction "will not be retried" -- for
+    a transient DNS/throttle/token blip.
     """
     token = f"premut{case}".ljust(48, "p")[:48]
     recipient, agent, td, notification = await _world(
@@ -1019,7 +1016,7 @@ async def test_a_retried_pre_mutation_failure_applies_the_instruction_exactly_on
     row, a retired notification, and exactly two emails to the PI -- the retry notice
     and the confirmation. Routing the exception correctly is not enough on its own: a
     retry that duplicated the channel, the review or the mail would be a worse defect
-    than the one COR-32 describes.
+    than losing the instruction.
     """
     addr = "pi.premut.retry@scripps.edu"
     token = "premutretry".ljust(48, "q")[:48]
@@ -1110,11 +1107,11 @@ async def test_a_failed_failure_notification_send_does_not_consume_the_cap(
 async def test_a_commit_failure_after_retiring_the_notification_keeps_the_cap_set(
     db_session, monkeypatch, sent_emails,
 ):
-    """Item 2 (COR-32 fix round A tidy): the cap pop() moved to AFTER the commit that
-    retires the notification, and only fires when that commit actually succeeds. Reuses
+    """The failure-email cap pop() must happen AFTER the commit that retires the
+    notification, and only fire when that commit actually succeeds. Reuses
     the terminal-migration-failure setup (which sets the cap via one successful failure
     email), then makes the RETIRING commit itself raise: process_inbound_email must
-    propagate the failure (the S3 object is retried, per COR-32) and the cap must stay
+    propagate the failure (the S3 object is retried) and the cap must stay
     set — clearing it here would let a subsequent retry's own migration failure (another
     orphan channel) re-notify the PI a second time for what looks, from their side, like
     the exact same failure."""
@@ -1122,7 +1119,7 @@ async def test_a_commit_failure_after_retiring_the_notification_keeps_the_cap_se
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.instr5@scripps.edu", token=token
     )
-    # C1 (fix round B): the migration-failure handler now unconditionally rolls back
+    # The migration-failure handler must unconditionally roll back
     # (a DB-flavored failure needs it; a plain one is a no-op rollback). Commit the
     # fixture first so that rollback only discards the failing migration's own writes,
     # not `_world`'s — matching production, where the notification row was committed
@@ -1156,7 +1153,7 @@ async def test_a_commit_failure_after_retiring_the_notification_keeps_the_cap_se
 async def test_a_fault_inside_the_terminal_notify_still_returns_false(
     db_session, monkeypatch,
 ):
-    """Item 4 (COR-32 fix round A tidy): the terminal-migration-failure handler's own
+    """The terminal-migration-failure handler's own
     call to _notify_instruction_failure(will_retry=False) must not let a fault from
     THAT call fall through to _handle_instruction's outer blanket `except Exception` —
     that handler re-raises as InstructionApplyFailed(will_retry=True), which would turn
@@ -1193,12 +1190,12 @@ async def test_a_fault_inside_the_terminal_notify_still_returns_false(
 async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker(
     db_session, monkeypatch, sent_emails,
 ):
-    """D6/COR-13: Task 20.9 has the engine persist an implicit
+    """The engine persists an implicit
     ProposalReview(rating=-1, submitted_via="engine") the first time a PI engages a
-    proposal thread. That row is NOT "already acted on" — pre-ruling, `_handle_review`'s
-    `if existing: return` silently dropped the PI's real rating reply forever (the
-    unique constraint on (thread_decision_id, agent_id) means a second insert isn't an
-    option either). The first explicit e-mail review must upgrade that row in place."""
+    proposal thread. That row is NOT "already acted on" — `_handle_review`'s
+    `if existing: return` must not silently drop the PI's real rating reply forever
+    (the unique constraint on (thread_decision_id, agent_id) means a second insert isn't
+    an option either). The first explicit e-mail review must upgrade that row in place."""
     token = "d6review" + "a" * 41
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.d6a@scripps.edu", token=token
@@ -1242,7 +1239,7 @@ async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker
 async def test_an_email_rating_upgrades_the_reopen_sentinel_instead_of_being_discarded(
     db_session, monkeypatch, sent_emails,
 ):
-    """The rating=0 twin of the -1 case above, and the fix for audit finding D2.
+    """The rating=0 twin of the -1 case above.
 
     Three shipped behaviours have to fit together, and they do:
       * the reminder sweep CHASES a reopened proposal -- it is outstanding, the PI's
@@ -1254,8 +1251,8 @@ async def test_an_email_rating_upgrades_the_reopen_sentinel_instead_of_being_dis
         rating=0 sentinel as "already reviewed" and returned without writing, while
         `_send_review_confirmation` still replied "Got it - you rated it 4".
 
-    An audit measured 11 of 26 notifiable users in that loop: reminded, answered
-    politely, never recorded. A marker is not a review; it upgrades in place.
+    Users can get reminded, answer politely by email, and never have it recorded.
+    A marker is not a review; it upgrades in place.
     """
     token = "d6reopen0" + "a" * 40
     recipient, agent, td, notification = await _world(
@@ -1287,7 +1284,7 @@ async def test_an_email_rating_upgrades_the_reopen_sentinel_instead_of_being_dis
     assert review.id == sentinel_id, "the same row must be reused (upsert, not a second insert)"
     assert review.rating == 4, (
         "the PI's rating was discarded: the reopen sentinel was read as a completed "
-        "review, which is the reminder loop the audit measured"
+        "review, which is exactly the reminder-loop failure this test guards against"
     )
     assert review.comment == "much better"
     assert review.submitted_via == "email"
@@ -1302,10 +1299,11 @@ async def test_an_email_rating_upgrades_the_reopen_sentinel_instead_of_being_dis
 async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker(
     db_session, monkeypatch, sent_emails,
 ):
-    """D6/COR-13: same rule for the other writer in this file. Pre-ruling,
-    `_handle_instruction`'s `if already: return False` treated the engine's implicit
-    rating=-1 row as a completed reopen and silently dropped the PI's real instruction —
-    the guidance post never ran and the PI was told nothing."""
+    """Same rule for the other writer in this file:
+    `_handle_instruction`'s `if already: return False` must not treat the engine's
+    implicit rating=-1 row as a completed reopen and silently drop the PI's real
+    instruction — that would leave the guidance post never run and the PI told
+    nothing."""
     token = "d6instr" + "b" * 43
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.d6b@scripps.edu", token=token

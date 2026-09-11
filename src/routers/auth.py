@@ -308,7 +308,7 @@ async def logout(request: Request):
     cross-site request-forgery target (a third-party page could log a victim
     out via an <img>/<a> to /logout). SameSite=lax on the session cookie blocks
     forged cross-site POSTs, so the "Sign out" control posts this form
-    (see base.html). (SEC-8)
+    (see base.html).
     """
     request.session.clear()
     response = RedirectResponse(url="/login", status_code=302)

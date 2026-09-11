@@ -1,6 +1,6 @@
-"""Lab counts drift constantly (issue #26 DOC-3/A10: AGENT.md says 10 labs in
-one place, 8 bots/8 pilot labs in three others, README says 14+; orcids.txt
-has 48). Current-state claims must stop hardcoding a number and instead point
+"""Lab counts drift constantly: AGENT.md has said 10 labs in one place, 8
+bots/8 pilot labs in three others, README 14+, and orcids.txt 48.
+Current-state claims must stop hardcoding a number and instead point
 at the live source of truth, /admin/agents. Historical snapshots (the dated
 Decisions Log entry and ORCID table) are deliberately left alone — this test
 only checks the current-state lines.

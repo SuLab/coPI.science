@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Cap on a CSP violation report's body (#27 I5 RC-5): /api/csp-report is public and
+# Cap on a CSP violation report's body: /api/csp-report is public and
 # unauthenticated, so an unbounded body is a way to push arbitrary bytes into the app
 # logs. Real reports (either format) are well under 1 KB.
 CSP_REPORT_MAX_BODY_BYTES = 8 * 1024
@@ -35,31 +35,29 @@ CSP_REPORT_MAX_BODY_BYTES = 8 * 1024
 # The only content types a real CSP violation report arrives with: the legacy
 # `application/csp-report` (older Chrome/Firefox), the newer Reporting API's
 # `application/reports+json`, and `application/json` (some browsers/versions send
-# plain JSON). Anything else is refused with 415 before the body is even parsed
-# (opus review, audit 2026-09-08 RC-5: this was documented but never enforced).
+# plain JSON). Anything else is refused with 415 before the body is even parsed.
 CSP_REPORT_ALLOWED_CONTENT_TYPES = frozenset(
     {"application/csp-report", "application/reports+json", "application/json"}
 )
 
-# Cap on one logged CSP-report field (opus review, audit 2026-09-08 RC-5): every field
-# below comes straight from an unauthenticated, attacker-controlled request body.
+# Cap on one logged CSP-report field: every field below comes straight from an
+# unauthenticated, attacker-controlled request body.
 # Truncating AND stripping \n/\r before it reaches the logger closes CRLF log
 # injection (a crafted document-uri could otherwise forge additional log lines).
 CSP_REPORT_LOG_FIELD_MAX_CHARS = 200
 
 
 def _sanitize_csp_log_field(value: object) -> str:
-    # SEC2-3 (audit 2026-09-08): \n/\r were not the only way to forge a fake
-    # log line or corrupt a terminal/log viewer — ANSI escapes (\x1b[...) and
-    # Unicode line/paragraph separators (U+2028/U+2029) are non-printable
-    # too. Strip every non-printable character rather than special-casing
-    # CR/LF.
+    # \n/\r are not the only way to forge a fake log line or corrupt a
+    # terminal/log viewer — ANSI escapes (\x1b[...) and Unicode line/paragraph
+    # separators (U+2028/U+2029) are non-printable too. Strip every
+    # non-printable character rather than special-casing CR/LF.
     text = str(value)[:CSP_REPORT_LOG_FIELD_MAX_CHARS]
     return "".join(c if c.isprintable() else " " for c in text)
 
-# Bounds the /api/health DB probe (#27 I2 review): without this, a stalled
-# Postgres (TCP open, no query response) piles orphaned probe coroutines and
-# connections against the pool instead of failing fast.
+# Bounds the /api/health DB probe: without this, a stalled Postgres (TCP open,
+# no query response) piles orphaned probe coroutines and connections against
+# the pool instead of failing fast.
 HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
 
 # `asyncio.wait_for` alone does NOT deliver that bound. SQLAlchemy's asyncpg adapter
@@ -99,8 +97,8 @@ def get_health_engine():
 
         # A tiny dedicated pool, not NullPool. NullPool opens a fresh connection per
         # probe, and /api/health is publicly reachable — one request to one Postgres
-        # connection is an amplifier a load generator can point at the database
-        # (over-implementation audit). pool_size=1/max_overflow=0 keeps the probe off
+        # connection is an amplifier a load generator can point at the database.
+        # pool_size=1/max_overflow=0 keeps the probe off
         # the request pool (its whole purpose) while capping it at a single connection;
         # concurrent probes queue behind it, and pool_timeout keeps that queue bounded
         # well inside HEALTH_PROBE_TIMEOUT_SECONDS.
@@ -109,19 +107,16 @@ def get_health_engine():
             pool_size=1,
             max_overflow=0,
             pool_timeout=HEALTH_PROBE_CONNECT_TIMEOUT_SECONDS,
-            # Deliberately NOT pool_pre_ping, and this is measured, not assumed.
-            # The pooled connection really does go stale — a Postgres restart or an
-            # idle reaper leaves a dead socket in the pool and the next probe reports
-            # a healthy database unavailable — but SQLAlchemy runs the pre-ping inside
-            # engine.connect(), which is OUTSIDE the probe's asyncio bound below, and
-            # against a FROZEN server (`docker pause`) asyncpg's own command_timeout
-            # does not rescue it: the driver's cancel handshake needs a second
-            # connection to the same frozen server. Measured in one pause window
-            # against the disposable production copy: this engine answered 503 in
-            # 5.00s, the same engine with pool_pre_ping=True never answered at all
-            # (>15s and >25s in two runs) — i.e. pre-ping reopens phase-8 audit C2,
-            # the Critical this probe's timeouts exist to close. The stale connection
-            # is handled where it can be bounded instead: see the retry in /api/health.
+            # Deliberately NOT pool_pre_ping. The pooled connection really does go
+            # stale — a Postgres restart or an idle reaper leaves a dead socket in
+            # the pool and the next probe reports a healthy database unavailable —
+            # but SQLAlchemy runs the pre-ping inside engine.connect(), which is
+            # OUTSIDE the probe's asyncio bound below, and against a frozen server
+            # asyncpg's own command_timeout does not rescue it: the driver's cancel
+            # handshake needs a second connection to the same frozen server, so
+            # pre-ping can hang past the timeout this probe exists to enforce. The
+            # stale connection is handled where it can be bounded instead: see the
+            # retry in /api/health.
             pool_pre_ping=False,
             connect_args={
                 "command_timeout": HEALTH_PROBE_COMMAND_TIMEOUT_SECONDS,
@@ -156,7 +151,7 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
 
                     # Honor the impersonate cookie only for admins — it is an
                     # unsigned client cookie, so without this gate any logged-in
-                    # user could read another user's badge count (SEC-12). This
+                    # user could read another user's badge count. This
                     # mirrors the is_admin check in get_current_user. The extra
                     # query runs only when the cookie is actually present.
                     impersonate_id = request.cookies.get("copi-impersonate")
@@ -200,12 +195,10 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                             reviewed_result = await db.execute(
                                     # Scope the reviewed count to the SAME rows the total
                                     # counts: proposals this agent participated in. Counting
-                                    # every ProposalReview bearing this agent_id also counted
+                                    # every ProposalReview bearing this agent_id also counts
                                     # reviews of decisions whose outcome later moved off
-                                    # 'proposal', so `total - reviewed` went negative for 22 of
-                                    # 53 active agents on production data and the badge silently
-                                    # clamped real outstanding work to 0 (issue #20 closure audit;
-                                    # measured 166 outstanding roster-wide vs 98 reported).
+                                    # 'proposal', which can make `total - reviewed` go negative
+                                    # and silently clamp real outstanding work to 0.
                                 select(func.count(ProposalReview.id))
                                 .join(
                                     ThreadDecision,
@@ -214,14 +207,11 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                                 .where(
                                     ProposalReview.agent_id == aid,
                                     # Both sentinels, not just -1: neither is
-                                    # submittable (agent_page.py:509,
-                                    # email_inbound.py:383), so counting 0 as a review
-                                    # hid outstanding work from the badge for 12 of 53
-                                    # active agents on the production copy (wiseman by
-                                    # 89). A reopened proposal IS outstanding -- the PI's
-                                    # attention is needed for the refinement, and their
-                                    # rating arrives by e-mail reply, not the web form
-                                    # (see task-D1-D2.md).
+                                    # submittable, so counting 0 as a review would hide
+                                    # outstanding work from the badge. A reopened
+                                    # proposal IS outstanding -- the PI's attention is
+                                    # needed for the refinement, and their rating
+                                    # arrives by e-mail reply, not the web form.
                                     ProposalReview.rating.notin_((-1, 0)),
                                     ThreadDecision.outcome == "proposal",
                                     (ThreadDecision.agent_a == aid)
@@ -244,22 +234,20 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """No startup work of its own; shuts the Slack I/O executor down on exit.
+    """No startup work of its own; shuts the Slack and email I/O executors down on exit.
 
-    Opus review follow-up (audit 2026-09-10) to the slack_executor addition: a
-    bare module-level ``ThreadPoolExecutor`` is never torn down on its own, and
-    an in-flight Slack call blocked on a sustained throttle (up to
-    ``RATE_LIMIT_WAIT_BUDGET_SECONDS``, 180s) could hold interpreter shutdown
-    open past ``docker stop -t 30``'s grace period, which then SIGKILLs the
-    process — losing whatever that thread was doing instead of letting it
-    fail cleanly. Module scope (not nested in ``create_app``) so it is
-    importable and testable on its own, per ``tests/unit/test_main_lifespan.py``.
+    A bare module-level ``ThreadPoolExecutor`` is never torn down on its own, and an
+    in-flight call blocked on a sustained throttle (up to
+    ``RATE_LIMIT_WAIT_BUDGET_SECONDS``, 180s) could hold interpreter shutdown open
+    past ``docker stop -t 30``'s grace period, which then SIGKILLs the process —
+    losing whatever that thread was doing instead of letting it fail cleanly. Module
+    scope (not nested in ``create_app``) so it is importable and testable on its own,
+    per ``tests/unit/test_main_lifespan.py``.
     """
     yield
     shutdown_slack_executor()
-    # S-7 (audit 2026-09-10): the outbound-email (SES) pool gets the same
-    # shutdown treatment as the Slack pool, for the same reason -- see
-    # src/services/io_executor.py's module docstring.
+    # The outbound-email (SES) pool gets the same shutdown treatment as the Slack
+    # pool, for the same reason -- see src/services/io_executor.py's module docstring.
     shutdown_io_executor()
 
 
@@ -268,7 +256,7 @@ def create_app() -> FastAPI:
 
     # Claim the web process's canonical-id writer slot, so PI messages and DMs
     # written here can never collide with ids minted by the engine or GrantBot
-    # processes (R1). See src/agent/ids.py.
+    # processes. See src/agent/ids.py.
     set_default_writer_id(WRITER_WEB)
 
     application = FastAPI(
@@ -309,18 +297,17 @@ def create_app() -> FastAPI:
 
     @application.get("/api/health")
     async def health():
-        """Health check endpoint. Probes the DB so a broken schema or a
-        downed Postgres is never reported healthy (#27 I2 — on 2026-07-30
-        this route returned 200 while every ORM read of agent_messages
-        raised UndefinedColumnError, and nginx's depends_on: service_healthy
-        let traffic through regardless)."""
+        """Health check endpoint. Probes the DB so a broken schema or a downed
+        Postgres is never reported healthy — a schema mismatch that breaks every
+        ORM read must not report 200 while nginx's depends_on: service_healthy
+        lets traffic through regardless."""
 
         async def probe_once() -> None:
             # `engine.connect()` is inside this coroutine (not wrapped in its own
             # wait_for) so the caller can bound BOTH connect and execute under one
             # deadline — a probe that only bounded conn.execute() left connect() (and,
             # on retry, a second full connect+execute) free to run past
-            # HEALTH_PROBE_TIMEOUT_SECONDS (#27 I2 audit RC-10).
+            # HEALTH_PROBE_TIMEOUT_SECONDS.
             async with get_health_engine().connect() as conn:
                 await conn.execute(text("SELECT 1"))
 
@@ -354,13 +341,12 @@ def create_app() -> FastAPI:
 
     @application.post("/api/csp-report", include_in_schema=False)
     async def csp_report(request: Request) -> Response:
-        """Collects violation reports for the Report-Only CSP header nginx sends
-        (`report-uri /api/csp-report`; #27 I5, audit RC-5 — the header previously had
-        no report-uri/report-to at all, so nothing was enforced OR collected). Public
-        and unauthenticated: the browser sending a report never carries this app's
-        session cookie. Accepts only the content types browsers actually send for a
-        report (`CSP_REPORT_ALLOWED_CONTENT_TYPES`) — anything else is refused with
-        415 before the body is read; a malformed or oversized body is refused or
+        """Collects violation reports for the Report-Only CSP header nginx sends via
+        `report-uri /api/csp-report`. Public and unauthenticated: the browser sending
+        a report never carries this app's session cookie. Accepts only the content
+        types browsers actually send for a report
+        (`CSP_REPORT_ALLOWED_CONTENT_TYPES`) — anything else is refused with 415
+        before the body is read; a malformed or oversized body is refused or
         dropped, never a 500."""
         content_type = request.headers.get("content-type", "")
         media_type = content_type.split(";", 1)[0].strip().lower()
@@ -375,11 +361,10 @@ def create_app() -> FastAPI:
             except ValueError:
                 pass  # malformed header; the actual-length check below still applies
 
-        # REV3-4 (opus review, audit 2026-09-08): `request.body()` buffers the
-        # WHOLE body before this handler ever sees it, so a chunked POST with
-        # no Content-Length (the size check above never fires) could push an
-        # unbounded amount into memory before the len() check after it ever
-        # ran. Read via the stream instead and abort as soon as more than
+        # `request.body()` buffers the WHOLE body before this handler ever sees it,
+        # so a chunked POST with no Content-Length (the size check above never
+        # fires) could push an unbounded amount into memory before the len() check
+        # after it ever ran. Read via the stream instead and abort as soon as more than
         # CSP_REPORT_MAX_BODY_BYTES have arrived, so at most one chunk over
         # the cap is ever held in memory.
         chunks = []

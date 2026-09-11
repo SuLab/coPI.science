@@ -73,31 +73,29 @@ def reconcile_pub_doi(
     return auth, "corrected"
 
 # Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
-# traffic at 10 req/s. TWO SEPARATE MECHANISMS enforce that, and conflating them
-# is how the original defect (COR-29c) arose:
+# traffic at 10 req/s. TWO SEPARATE MECHANISMS enforce that:
 #   * the semaphore below bounds CONCURRENCY — how many NCBI requests may be in
 #     flight at once. It does NOT bound the aggregate rate: N slots each sleeping
-#     `interval` seconds allowed up to N/interval requests per second, well past
-#     the ceiling (keyless peaked at ~5.9 req/s against a 3 req/s limit).
+#     `interval` seconds would allow up to N/interval requests per second, well
+#     past the ceiling.
 #   * `_pace_ncbi` below bounds RATE — a monotonic-clock gate that spaces request
 #     STARTS at least `interval` apart, process-wide, no matter how many callers
 #     are in flight or which event loop they run on.
-# The slot is now taken per ATTEMPT (via get_with_retry's `attempt_context`), not
+# The slot is taken per ATTEMPT (via get_with_retry's `attempt_context`), not
 # once around the whole retry loop, so a caller backing off after a 429 no longer
-# occupies a slot while it is issuing no request at all (over-impl R4). That
+# occupies a slot while it is issuing no request at all. That
 # cannot raise the in-flight count above the slot count: a retry has to
 # re-acquire before it may send anything.
 #
-# The semaphores are per EVENT LOOP, not per process (closure-23 R7). Like
+# The semaphores are per EVENT LOOP, not per process. Like
 # `asyncio.Lock`, an `asyncio.Semaphore` binds to a loop not at construction but
 # at its first *contended* acquire — `Semaphore.acquire` only reaches
-# `self._get_loop()` on the branch where it has to wait (checked against CPython
-# 3.11's and 3.12's asyncio/locks.py). A module-level singleton therefore
-# survives any number of `asyncio.run()` calls right up until the day one of them
-# contends it, and then raises "bound to a different event loop" in every later
-# loop. Keying on the running loop removes the hazard instead of documenting it,
-# and lets the contract tests drop the per-test rebinding that used to paper over
-# it. The keys are weak, so a finished loop's entry goes away with the loop.
+# `self._get_loop()` on the branch where it has to wait. A module-level singleton
+# therefore survives any number of `asyncio.run()` calls right up until the day
+# one of them contends it, and then raises "bound to a different event loop" in
+# every later loop. Keying on the running loop removes the hazard instead of
+# documenting it. The keys are weak, so a finished loop's entry goes away with
+# the loop.
 _NCBI_SEMAPHORE_SIZES = {True: 8, False: 2}
 _ncbi_semaphores: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[bool, asyncio.Semaphore]
@@ -123,68 +121,33 @@ def _ncbi_semaphore(has_key: bool) -> asyncio.Semaphore:
 
 
 # Seconds between request STARTS, i.e. the inverse of the aggregate rate ceiling
-# `_pace_ncbi` enforces. NCBI's policy is 10 req/s keyed, 3 req/s keyless:
-#   keyed   1/0.105 = 9.52 req/s = 95.2% of 10  (was 0.12 = 8.33 req/s = 83.3%;
-#           over-impl R4 — throttling ourselves 17% below the ceiling costs
-#           throughput on the profile pipeline and buys nothing)
-#   keyless 1/0.34  = 2.94 req/s = 98.0% of 3   (unchanged — already at ceiling)
-#
-# CORRECTED (audit D5). The sentence that stood here — "the gate only ever DELAYS a
-# start, so the achieved rate is always <= 1/interval: at or under the policy
-# ceiling, never over it" — is FALSE, and it is the claim that let a 17-requests-in-
-# one-second regression pass review. Two separate errors:
-#
-#   1. It conflates the reservation SCHEDULE with the DEPARTURES. `_pace_ncbi` hands
-#      out start times at least `interval` apart, but it can only delay a start
-#      relative to a loop that is actually running. Block the loop — as building an
-#      `httpx.AsyncClient` per call did, ~32 ms of synchronous SSL work — and every
-#      reservation that came due during the stall departs in the same tick. Measured
-#      at N=30: 17 starts in one second against the keyed ceiling of 10, and 5
-#      against the keyless ceiling of 3.
-#   2. `1/interval` is an ASYMPTOTIC AVERAGE, not the worst case NCBI meters. The
-#      most starts that fit in a 1 s window is `floor(1/interval) + 1`, because ten
-#      starts spaced 0.105 s apart span only 0.945 s. So even a perfectly-running
-#      loop put 10 in a second at the old interval — exactly the ceiling.
-#
-# What is actually true: the gate bounds the schedule, and the burst bound is
-# `floor(1/interval) + 1`. Both are pinned by tests
+# `_pace_ncbi` enforces. NCBI's policy is 10 req/s keyed, 3 req/s keyless. The
+# gate only bounds the start SCHEDULE, not the departures: if the event loop
+# itself stalls (e.g. building a fresh httpx.AsyncClient per call, ~32ms of
+# blocking SSL work), every reservation that came due during the stall departs
+# in the same tick, bursting past the ceiling. And `1/interval` is only an
+# asymptotic average — the worst case NCBI actually meters in a 1s window is
+# `floor(1/interval) + 1` starts, since N starts spaced `interval` apart span
+# less than N*interval seconds. Both properties are pinned by tests
 # (`test_the_keyed_burst_bound_is_one_under_the_policy_ceiling` and
-# `test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling`), because pinning
-# the average alone is what failed here.
-#: Built ONCE at import. `httpx.AsyncClient(...)` otherwise does ~32 ms of synchronous,
-#: event-loop-BLOCKING work per call (SSL context + certifi CA bundle parse) -- measured
-#: here: median 31.9 ms, min 27.8, max 33.9 over 12 builds with the caches already warm;
-#: with a shared context, 0.15 ms.
-#:
-#: That block defeats `_pace_ncbi`, which is why this is not a micro-optimisation. The gate
-#: can only delay a start relative to a loop that is actually RUNNING. `asyncio.gather` puts
-#: every `_ncbi_get` coroutine in the ready queue and each runs to its first real await only
-#: after building its client, so the loop stalls for N x 32 ms and every reservation that
-#: came due during the stall departs in the same tick. Measured before this fix: 17 starts
-#: inside one second against NCBI's 10 req/s keyed ceiling at N=30 (min gap 0.15 ms), and 5
-#: inside one second against the 3 req/s keyless ceiling.
-#:
-#: `httpx.create_ssl_context()` rather than a hand-rolled `ssl.create_default_context(...)`:
-#: the two were compared and match exactly on this httpx (0.28.1) -- check_hostname=True,
-#: verify_mode=CERT_REQUIRED, minimum_version=MINIMUM_SUPPORTED -- but only httpx's own
-#: cannot drift away from httpx's defaults and silently weaken TLS. An `ssl.SSLContext` is
-#: not an asyncio object, so unlike a shared `AsyncClient` it does not reintroduce the
-#: event-loop affinity bug closure-23 R7 fixed for the semaphore (verified across two
-#: successive `asyncio.run()` calls).
+# `test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling`).
+
+# Built ONCE at import and shared across calls: building a fresh
+# `httpx.AsyncClient` (and its SSL context) per call blocks the event loop long
+# enough to defeat `_pace_ncbi` above, since `asyncio.gather` builds every
+# client before any of them yields at their first real await. Uses
+# `httpx.create_ssl_context()` rather than a hand-rolled context so it cannot
+# drift from httpx's own TLS defaults. An `ssl.SSLContext` is not an asyncio
+# object, so unlike a shared `AsyncClient` it can be built once at import
+# without binding to an event loop (the loop-affinity bug the semaphore above
+# works around).
 _NCBI_SSL_CONTEXT = httpx.create_ssl_context()
 
-#: Keyed: 0.112 s, not the 0.105 this shipped with. NCBI meters ARRIVALS per second, and the
-#: worst-case number of starts a gate spacing them `interval` apart admits inside a 1 s
-#: window is `floor(1/interval) + 1` -- ten starts at 0.105 s span 0.945 s and all land in
-#: the same second. So 0.105 sat at exactly 10, the ceiling itself, with no tolerance for
-#: any jitter between our start and NCBI's arrival. 0.112 > 1/9 puts the worst case at 9,
-#: one request of margin, for 8.93 req/s average (89.3% of the granted ceiling -- still well
-#: above the 83.3% that over-impl R4 / closure-23 R2 filed as wasteful).
-#:
-#: Keyless stays at 0.34 (2.94 req/s, worst-case burst 3 = its ceiling). Buying the same
-#: one-request margin there needs interval > 0.5 s, i.e. a third of the throughput, on a
-#: fallback path production does not use -- so that path is held AT its ceiling rather than
-#: under it, and the asymmetry is deliberate.
+# Keyed: 0.112s, chosen so the worst-case burst (`floor(1/interval) + 1`) stays
+# one request under the keyed ceiling of 10/s rather than landing exactly on it
+# with no jitter margin. Keyless stays at 0.34s (worst-case burst 3, its own
+# ceiling) — a fallback path production doesn't use, so it is held at its
+# ceiling rather than under it.
 _NCBI_PACING_SECONDS = {True: 0.112, False: 0.34}
 
 # Total retry budget for ONE logical `_ncbi_get`, in seconds (over-impl R3: the
@@ -214,7 +177,7 @@ _RETRY_BACKOFF = 0.5
 # else can run between two non-`await` statements — so concurrent callers can't
 # race it, and the cursor itself is never bound to any loop at all — which is why
 # it stays a single process-wide value while the semaphores above have to be
-# rebuilt per loop (closure-23 R7), and why the RATE ceiling still holds
+# rebuilt per loop, and why the RATE ceiling still holds
 # process-wide even though the CONCURRENCY bound is now per loop.
 _ncbi_next_start = 0.0
 
@@ -227,8 +190,7 @@ async def _pace_ncbi(interval: float) -> None:
     N slots each sleeping `interval` allow N/interval requests per second. Reserves
     the next start slot on `_ncbi_next_start` with a single atomic
     read-modify-write (no lock, nothing loop-bound — see the module-level comment
-    above), then sleeps out whatever wait that reservation implies. (#23 COR-29b,
-    review fix round 2.)
+    above), then sleeps out whatever wait that reservation implies.
     """
     global _ncbi_next_start
     now = time.monotonic()
@@ -249,9 +211,9 @@ _NCBI_TOOL = "copi-science"
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     """Make a rate-limited, identified, retried GET request to NCBI.
 
-    Retries a transient failure (COR-29a) through the shared ``get_with_retry`` helper. Pacing
-    (COR-29b) happens via ``_pace_ncbi``, passed in as ``get_with_retry``'s ``before_request`` hook
-    rather than called once here directly (issue #23 I1) — the hook fires at the top of EVERY loop
+    Retries a transient failure through the shared ``get_with_retry`` helper. Pacing
+    happens via ``_pace_ncbi``, passed in as ``get_with_retry``'s ``before_request`` hook
+    rather than called once here directly — the hook fires at the top of EVERY loop
     iteration, including the first, so every attempt (not just the initial request) reserves a
     pacing slot. This replaces, rather than supplements, the old single pre-call
     ``await _pace_ncbi(...)``: keeping both would reserve twice for the first attempt. A retry's own
@@ -261,9 +223,9 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     concurrency).
 
     The concurrency slot is likewise passed in as ``attempt_context`` rather than wrapped around
-    the whole call, so it is held for one attempt and released across the backoff (over-impl R4),
+    the whole call, so it is held for one attempt and released across the backoff,
     and it is resolved per attempt through ``_ncbi_semaphore`` so it belongs to the loop actually
-    running (closure-23 R7). ``deadline`` caps the total retry budget (over-impl R3).
+    running. ``deadline`` caps the total retry budget.
     """
     settings = get_settings()
     has_key = bool(settings.ncbi_api_key)
@@ -394,7 +356,7 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
 
         # Title. itertext() (not .text) so inline markup (<i>, <sub>, <sup> — gene
         # symbols, chemical formulas, italicized species names) doesn't truncate
-        # the title at the first child element (issue #22 COR-16).
+        # the title at the first child element.
         title_el = article.find(".//ArticleTitle")
         record["title"] = "".join(title_el.itertext()) if title_el is not None else ""
 
@@ -430,9 +392,9 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         record["pub_types"] = pub_types
 
         # Authors — count for position heuristics, names for tool output.
-        # Names let an agent CHECK authorship before claiming it (issue #29:
-        # the origin exchange retrieved this very paper and the tool answer
-        # had no author list to falsify the false co-authorship claim).
+        # Names let an agent CHECK authorship before claiming it: without an
+        # author list in the tool answer, an agent has no way to falsify a
+        # false co-authorship claim about a paper it just retrieved.
         authors = article.findall(".//Author")
         record["author_count"] = len(authors)
         names: list[str] = []
@@ -639,7 +601,7 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         "authors": rec.get("authors", []),
         # The paper's own DOI (article-scoped, see _parse_pubmed_xml). Cited
         # by the retrieve tools so an agent sharing its own paper can satisfy
-        # the emit gate's DOI requirement (issue #29).
+        # the emit gate's DOI requirement.
         "doi": rec.get("doi", ""),
     }
 
