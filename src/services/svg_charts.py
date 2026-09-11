@@ -1,347 +1,220 @@
-"""Dependency-free SVG/HTML chart primitives for the simulation control panel.
+"""Dependency-free HTML/SVG chart primitives for the simulation control panel.
 
-Every renderer takes plain Python values and returns a plain `str` of
-already-escaped markup -- no template engine, no client-side JS, and no
-dependency beyond the standard library plus `markupsafe.escape` (already a
-transitive dependency via Jinja2, so this module adds nothing new to
-`pyproject.toml`).
+Contract (tests/unit/test_svg_charts.py): every renderer returns ONE
+well-formed, already-escaped fragment. Every value is VISIBLE as text; the
+per-mark `title` tooltip and the `<details>` table twin are additions, never
+the only place a number lives. Every bar chart draws an axis with 0 / mid /
+max ticks and names its unit; every multi-series chart has a legend; text
+never wears a series colour and never sits inside a coloured fill (stacked
+segments print their values in a text line beside the bar).
 
-Rules baked in throughout, taken from the dataviz skill's reference palette
-and house style:
-
-* **One axis.** Every chart here is a single bar/line scale; there is no
-  chart that plots two independent axes against each other.
-* **Thin marks, 2px gaps.** Bars are drawn thin, and `stacked_hbar` /
-  `diverging_hbar` separate adjacent segments by exactly 2 pixels rather than
-  scaling the gap into the value-encoded width.
-* **Text in text tokens, never series colors.** Labels, captions and table
-  fallback text always render in `TEXT_PRIMARY`/`TEXT_MUTED`; the palette
-  colors are reserved for the data marks themselves (bars, segments, points).
-* **A `<title>` per mark.** Every individual bar/segment/point carries its
-  own `<title>` child -- the no-JS floor for a hover tooltip.
-* **A `<details>` table fallback.** Every chart that renders a data series
-  (everything except `stat_tile`, which has no series to tabulate) is paired
-  with a `<details><summary>table view</summary>...</details>` holding the
-  same data as plain text/table markup, so nothing here is graphical-only.
-
-Colors are pinned to the values below; do not invent additional hexes.
+Colours are pinned here and nowhere else (dataviz reference palette; the
+diverging midpoint was darkened from #f0efec to #a8a29e on 2026-09-11
+because the lighter step was invisible on a white card).
 """
+from __future__ import annotations
+
+from collections.abc import Callable
+from math import ceil
 
 from markupsafe import escape
 
-# Categorical palette (light surface), 7 slots.
+from src.services.display_format import compact, duration, percent, whole
+
 CATEGORICAL_COLORS: tuple[str, ...] = (
-    "#2a78d6",
-    "#eb6834",
-    "#1baf7a",
-    "#eda100",
-    "#e87ba4",
-    "#008300",
-    "#4a3aa7",
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7",
 )
+SEQUENTIAL_COLORS: tuple[str, ...] = ("#d7e6f7", "#aecbef", "#7fabe3", "#4f8bd9", "#2a78d6")
+DIVERGING_NEG = "#e34948"
+DIVERGING_MID = "#a8a29e"
+DIVERGING_POS = "#2a78d6"
+METER_TRACK = SEQUENTIAL_COLORS[0]
+AXIS = "#6b7280"
+GRID = "#e5e7eb"
+TEXT_PRIMARY = "#1f2937"
+TEXT_SECONDARY = "#4b5563"
 
-# Sequential palette: tints of categorical slot 1 (blue), light to full.
-SEQUENTIAL_COLORS: tuple[str, ...] = (
-    "#d7e6f7",
-    "#aecbef",
-    "#7fabe3",
-    "#4f8bd9",
-    "#2a78d6",
-)
-
-# Diverging pair, pre-validated (dataviz reference palette): red = blocking,
-# blue = adequate, with a neutral gray midpoint for gap. These three hexes
-# are the only ones `diverging_hbar` ever emits.
-DIVERGING_NEG = "#e34948"  # blocking
-DIVERGING_MID = "#f0efec"  # gap
-DIVERGING_POS = "#2a78d6"  # adequate
-
-# Text tokens. Labels/values/notes always render in these, never in a series
-# color -- the palette above is reserved for data marks.
-TEXT_PRIMARY = "#1a1a1a"
-TEXT_MUTED = "#6b6b6b"
-
-_DEFAULT_BAR_COLOR = CATEGORICAL_COLORS[0]
-
-# --------------------------------------------------------------------------
-# shared helpers
-# --------------------------------------------------------------------------
-
-_HBAR_MAX_WIDTH = 220
-_HBAR_HEIGHT = 14
-_HBAR_ROW_GAP = 4
-
-_STACK_MAX_WIDTH = 220
-_STACK_HEIGHT = 16
-_STACK_GAP = 2
-
-_METER_TRACK_WIDTH = 200
-_METER_HEIGHT = 10
-
-_GANTT_MAX_WIDTH = 320
-_GANTT_ROW_HEIGHT = 14
-_GANTT_ROW_GAP = 8
-_GANTT_BAR_THICKNESS = 8
+_METER_W, _METER_H = 200, 10
 
 
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+def _pct(part: float, whole_: float) -> float:
+    if whole_ <= 0:
+        return 0.0
+    return round(max(0.0, min(1.0, part / whole_)) * 100, 1)
 
 
-def _details_table(rows_html: str, *, caption: str | None = None) -> str:
-    caption_html = f"<caption>{escape(caption)}</caption>" if caption else ""
+def _details(inner_table: str, *, key: str) -> str:
     return (
-        '<details class="sc-chart-fallback"><summary>table view</summary>'
-        f"<table>{caption_html}<tbody>{rows_html}</tbody></table>"
-        "</details>"
+        f'<details class="sc-chart-fallback" data-sc-key="{escape(key)}">'
+        f"<summary>Show as table</summary>{inner_table}</details>"
     )
 
 
-# --------------------------------------------------------------------------
-# stat_tile
-# --------------------------------------------------------------------------
+def table_twin(head: list[str], rows: list[list[str]], *, caption: str, key: str) -> str:
+    thead = "<thead><tr>" + "".join(f"<th>{escape(h)}</th>" for h in head) + "</tr></thead>"
+    tbody = "".join(
+        "<tr>" + f'<th scope="row">{escape(r[0])}</th>' + "".join(f"<td>{escape(c)}</td>" for c in r[1:]) + "</tr>"
+        for r in rows
+    )
+    return _details(f"<table><caption>{escape(caption)}</caption>{thead}<tbody>{tbody}</tbody></table>", key=key)
 
 
 def stat_tile(label: str, value: str, note: str | None = None, *, warn: bool = False) -> str:
-    """A single KPI tile: a muted label, a big value, and an optional note.
-
-    No series data to plot, so no `<details>` fallback -- everything here is
-    already plain text.
-    """
-    classes = "sc-tile sc-tile--warn" if warn else "sc-tile"
+    cls = "sc-tile sc-tile--warn" if warn else "sc-tile"
     note_html = f'<div class="sc-tile-note">{escape(note)}</div>' if note else ""
-    return (
-        f'<div class="{classes}">'
-        f'<div class="sc-tile-label">{escape(label)}</div>'
-        f'<div class="sc-tile-value">{escape(value)}</div>'
-        f"{note_html}"
-        "</div>"
+    return (f'<div class="{cls}"><div class="sc-tile-label">{escape(label)}</div>'
+            f'<div class="sc-tile-value">{escape(value)}</div>{note_html}</div>')
+
+
+def meter(label: str, fraction: float, detail: str, *, value_text: str | None = None, warn: bool = False) -> str:
+    clamped = max(0.0, min(1.0, fraction))
+    fill_w = f"{_METER_W * clamped:g}"
+    shown = value_text if value_text is not None else percent(clamped)
+    cls = "sc-tile sc-tile--meter" + (" sc-tile--warn" if warn else "")
+    svg = (f'<svg class="sc-meter" viewBox="0 0 {_METER_W} {_METER_H}" width="{_METER_W}" height="{_METER_H}" '
+           f'role="img" aria-label="{escape(label)} {escape(shown)}">'
+           f'<rect class="sc-meter-track" x="0" y="0" width="{_METER_W}" height="{_METER_H}" fill="{METER_TRACK}"/>'
+           f'<rect class="sc-meter-fill" x="0" y="0" width="{fill_w}" height="{_METER_H}" fill="{CATEGORICAL_COLORS[0]}">'
+           f"<title>{escape(detail)}</title></rect></svg>")
+    return (f'<div class="{cls}"><div class="sc-tile-label">{escape(label)}</div>'
+            f'<div class="sc-tile-value">{escape(shown)}</div>{svg}<div class="sc-tile-note">{escape(detail)}</div></div>')
+
+
+def legend(items: list[tuple[str, str]]) -> str:
+    spans = "".join(
+        f'<span class="sc-legend-item"><i class="sc-swatch" style="background:{escape(h)}"></i>{escape(label)}</span>'
+        for label, h in items
     )
+    return f'<div class="sc-legend">{spans}</div>'
 
 
-# --------------------------------------------------------------------------
-# meter
-# --------------------------------------------------------------------------
+def _axis(unit: str, max_value: float, axis_fmt: Callable[[float], str]) -> str:
+    return ('<div class="sc-axis" aria-hidden="true"><span class="sc-axis-label"></span><span class="sc-axis-track">'
+            f'<span class="sc-tick sc-tick--0">{escape(axis_fmt(0.0))}</span>'
+            f'<span class="sc-tick sc-tick--mid">{escape(axis_fmt(max_value / 2))}</span>'
+            f'<span class="sc-tick sc-tick--max">{escape(axis_fmt(max_value))}</span></span>'
+            f'<span class="sc-axis-unit">{escape(unit)}</span></div>')
 
 
-def meter(label: str, fraction: float, detail: str) -> str:
-    """A single-track proportional bar, clamped to `[0, 1]`."""
-    clamped = _clamp(fraction, 0.0, 1.0)
-    fill_width = round(_METER_TRACK_WIDTH * clamped, 2)
-    svg = (
-        f'<svg class="sc-meter" viewBox="0 0 {_METER_TRACK_WIDTH} {_METER_HEIGHT}" '
-        f'width="{_METER_TRACK_WIDTH}" height="{_METER_HEIGHT}" role="img" '
-        f'aria-label="{escape(label)}">'
-        f'<rect class="sc-meter-track" x="0" y="0" width="{_METER_TRACK_WIDTH}" '
-        f'height="{_METER_HEIGHT}" fill="{DIVERGING_MID}"/>'
-        f'<rect class="sc-meter-fill" x="0" y="0" width="{fill_width}" '
-        f'height="{_METER_HEIGHT}" fill="{_DEFAULT_BAR_COLOR}">'
-        f"<title>{escape(detail)}</title>"
-        "</rect>"
-        "</svg>"
+def hbar_list(rows: list[tuple[str, float, str]], *, unit: str, axis_fmt: Callable[[float], str],
+              color: str = CATEGORICAL_COLORS[0], caption: str | None = None) -> str:
+    max_value = max((v for _, v, _ in rows), default=0.0)
+    body = []
+    for label, value, display in rows:
+        body.append('<div class="sc-hbar-row">'
+                    f'<span class="sc-hbar-label">{escape(label)}</span>'
+                    f'<span class="sc-hbar-track"><span class="sc-hbar-fill" style="width:{_pct(value, max_value)}%;background:{escape(color)}" '
+                    f'title="{escape(label)}: {escape(display)}"></span></span>'
+                    f'<span class="sc-hbar-value">{escape(display)}</span></div>')
+    twin = table_twin(["Row", unit], [[label, display] for label, _, display in rows],
+                      caption=caption or "Values", key=caption or "hbar")
+    return f'<div class="sc-chart sc-hbar">{"".join(body)}{_axis(unit, max_value, axis_fmt)}{twin}</div>'
+
+
+def stacked_hbar(label: str, segments: list[tuple[str, float, str]], *, scale_max: float,
+                 value_fmt: Callable[[float], str] = compact, table: bool = True) -> str:
+    total = sum(v for _, v, _ in segments)
+    segs = "".join(
+        f'<span class="sc-stack-seg" style="width:{_pct(v, scale_max)}%;background:{escape(h)}" '
+        f'title="{escape(seg_label)}: {escape(value_fmt(v))}"></span>'
+        for seg_label, v, h in segments
     )
-    rows_html = (
-        f'<tr><th scope="row">{escape(label)}</th>'
-        f"<td>{clamped:.0%}</td>"
-        f"<td>{escape(detail)}</td></tr>"
+    values = "".join(
+        f'<span class="sc-legend-item"><i class="sc-swatch" style="background:{escape(h)}"></i>{escape(value_fmt(v))}</span>'
+        for _, v, h in segments
     )
-    return f'<div class="sc-chart sc-chart-meter">{svg}{_details_table(rows_html)}</div>'
+    twin = table_twin(["Series", "Value"], [[s, value_fmt(v)] for s, v, _ in segments], caption=label, key=label) if table else ""
+    return (f'<div class="sc-chart sc-stack">'
+            f'<div class="sc-stack-bar" role="img" aria-label="{escape(label)}: {escape(value_fmt(total))}">{segs}</div>'
+            f'<span class="sc-stack-total">{escape(value_fmt(total))}</span>'
+            f'<div class="sc-stack-values">{values}</div>{twin}</div>')
 
 
-# --------------------------------------------------------------------------
-# hbar_list
-# --------------------------------------------------------------------------
+def diverging_hbar(label: str, neg: float, mid: float, pos: float, labels: tuple[str, str, str], *,
+                   scale_max: float, table: bool = True) -> str:
+    return stacked_hbar(label, [(labels[0], max(neg, 0.0), DIVERGING_NEG), (labels[1], max(mid, 0.0), DIVERGING_MID),
+                                (labels[2], max(pos, 0.0), DIVERGING_POS)],
+                        scale_max=scale_max, value_fmt=whole, table=table)
 
 
-def hbar_list(rows: list[tuple[str, float, str]], *, color: str = _DEFAULT_BAR_COLOR) -> str:
-    """A list of horizontal bars, one per row, widths normalized to the max value."""
-    max_value = max((value for _, value, _ in rows), default=0.0)
-    row_height = _HBAR_HEIGHT + _HBAR_ROW_GAP
-    total_height = row_height * len(rows) if rows else _HBAR_HEIGHT
-
-    bars = []
-    table_rows = []
-    for i, (label, value, display) in enumerate(rows):
-        width = 0.0 if max_value <= 0 else (value / max_value) * _HBAR_MAX_WIDTH
-        y = i * row_height
-        bars.append(
-            f'<rect x="0" y="{y}" width="{round(width, 2)}" height="{_HBAR_HEIGHT}" '
-            f'fill="{escape(color)}">'
-            f"<title>{escape(label)}: {escape(display)}</title>"
-            "</rect>"
-        )
-        table_rows.append(
-            f'<tr><th scope="row">{escape(label)}</th><td>{value}</td>'
-            f"<td>{escape(display)}</td></tr>"
-        )
-
-    svg = (
-        f'<svg class="sc-hbar-list" viewBox="0 0 {_HBAR_MAX_WIDTH} {total_height}" '
-        f'width="{_HBAR_MAX_WIDTH}" height="{total_height}" role="img">'
-        + "".join(bars)
-        + "</svg>"
-    )
-    return (
-        f'<div class="sc-chart sc-chart-hbar">{svg}{_details_table("".join(table_rows))}</div>'
-    )
+_ML, _MR, _MT, _MB = 56, 16, 12, 28
 
 
-# --------------------------------------------------------------------------
-# stacked_hbar
-# --------------------------------------------------------------------------
-
-
-def stacked_hbar(label: str, segments: list[tuple[str, float, str]]) -> str:
-    """A single row of stacked segments, separated by a fixed 2px gap."""
-    total = sum(value for _, value, _ in segments)
-    gap_total = _STACK_GAP * max(len(segments) - 1, 0)
-    drawable = max(_STACK_MAX_WIDTH - gap_total, 0)
-
-    rects = []
-    table_rows = []
-    x = 0.0
-    for seg_label, value, hex_color in segments:
-        width = 0.0 if total <= 0 else (value / total) * drawable
-        rects.append(
-            f'<rect x="{round(x, 2)}" y="0" width="{round(width, 2)}" '
-            f'height="{_STACK_HEIGHT}" fill="{escape(hex_color)}">'
-            f"<title>{escape(seg_label)}: {value}</title>"
-            "</rect>"
-        )
-        table_rows.append(f'<tr><th scope="row">{escape(seg_label)}</th><td>{value}</td></tr>')
-        x += width + _STACK_GAP
-
-    svg = (
-        f'<svg class="sc-stacked-hbar" viewBox="0 0 {_STACK_MAX_WIDTH} {_STACK_HEIGHT}" '
-        f'width="{_STACK_MAX_WIDTH}" height="{_STACK_HEIGHT}" role="img" '
-        f'aria-label="{escape(label)}">' + "".join(rects) + "</svg>"
-    )
-    table = _details_table("".join(table_rows), caption=label)
-    return f'<div class="sc-chart sc-chart-stacked">{svg}{table}</div>'
-
-
-# --------------------------------------------------------------------------
-# diverging_hbar
-# --------------------------------------------------------------------------
-
-
-def diverging_hbar(
-    label: str,
-    neg: float,
-    mid: float,
-    pos: float,
-    labels: tuple[str, str, str],
-) -> str:
-    """A three-segment bar on the pinned blocking/gap/adequate palette.
-
-    `labels` is `(blocking_label, gap_label, adequate_label)`, matched
-    positionally to `(neg, mid, pos)`. Implemented as a `stacked_hbar` with
-    the three segment colors fixed to the diverging pair plus its neutral
-    midpoint, so the two share their gap/tooltip/fallback-table behavior.
-    """
-    segments = [
-        (labels[0], max(neg, 0.0), DIVERGING_NEG),
-        (labels[1], max(mid, 0.0), DIVERGING_MID),
-        (labels[2], max(pos, 0.0), DIVERGING_POS),
-    ]
-    return stacked_hbar(label, segments)
-
-
-# --------------------------------------------------------------------------
-# sparkline
-# --------------------------------------------------------------------------
-
-
-def sparkline(points: list[float], *, width: int = 240, height: int = 40) -> str:
-    """A thin line with a small marker circle per point; safe on 0 or 1 points."""
+def line_chart(points: list[tuple[str, float | None]], *, unit: str, value_fmt: Callable[[float], str],
+               width: int = 560, height: int = 180, none_label: str = "∞",
+               none_table_label: str | None = None) -> str:
     n = len(points)
-    if n == 0:
-        svg = (
-            f'<svg class="sc-sparkline" viewBox="0 0 {width} {height}" '
-            f'width="{width}" height="{height}" role="img"/>'
-        )
-        return f'<div class="sc-chart sc-chart-sparkline">{svg}{_details_table("")}</div>'
+    finite = [v for _, v in points if v is not None]
+    y_max = max(finite) if finite and max(finite) > 0 else 1.0
+    plot_w, plot_h = width - _ML - _MR, height - _MT - _MB
 
-    lo = min(points)
-    hi = max(points)
-    span = hi - lo
+    def x_at(i: int) -> float:
+        return round(_ML + (plot_w / 2 if n <= 1 else i * plot_w / (n - 1)), 2)
 
-    def _xy(i: int, value: float) -> tuple[float, float]:
-        x = width / 2 if n == 1 else (i / (n - 1)) * width
-        y = height / 2 if span <= 0 else height - ((value - lo) / span) * height
-        return round(x, 2), round(y, 2)
+    def y_at(v: float) -> float:
+        return round(_MT + plot_h - v / y_max * plot_h, 2)
 
-    coords = [_xy(i, v) for i, v in enumerate(points)]
+    parts = []
+    for frac in (0.0, 0.5, 1.0):
+        y = y_at(y_max * frac)
+        parts.append(f'<line x1="{_ML}" y1="{y}" x2="{width - _MR}" y2="{y}" stroke="{GRID}" stroke-width="1"/>')
+        parts.append(f'<text class="sc-tick" x="{_ML - 6}" y="{y + 4}" text-anchor="end" fill="{TEXT_SECONDARY}">'
+                     f"{escape(value_fmt(y_max * frac))}</text>")
+    parts.append(f'<line x1="{_ML}" y1="{_MT + plot_h}" x2="{width - _MR}" y2="{_MT + plot_h}" stroke="{AXIS}" stroke-width="1"/>')
+    parts.append(f'<text class="sc-axis-unit" x="{_ML - 6}" y="{_MT - 2}" text-anchor="end" fill="{TEXT_SECONDARY}">{escape(unit)}</text>')
 
-    polyline = ""
-    if n > 1:
-        points_attr = " ".join(f"{x},{y}" for x, y in coords)
-        polyline = (
-            f'<polyline points="{points_attr}" fill="none" '
-            f'stroke="{_DEFAULT_BAR_COLOR}" stroke-width="1.5"/>'
-        )
+    k = max(1, ceil(n / 6)) if n else 1
+    coords: list[tuple[float, float, float]] = []
+    for i, (xl, v) in enumerate(points):
+        x = x_at(i)
+        if i % k == 0 or i == n - 1:
+            parts.append(f'<text class="sc-tick sc-tick--x" x="{x}" y="{height - 8}" text-anchor="middle" '
+                         f'fill="{TEXT_SECONDARY}">{escape(xl)}</text>')
+        if v is None:
+            y = y_at(y_max)
+            parts.append(f'<circle class="sc-none-marker" cx="{x}" cy="{y}" r="4" fill="none" '
+                         f'stroke="{CATEGORICAL_COLORS[0]}" stroke-width="2"><title>{escape(xl)}: {escape(none_label)}</title></circle>')
+            parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="middle" fill="{TEXT_PRIMARY}">{escape(none_label)}</text>')
+        else:
+            coords.append((x, y_at(v), v))
+    if len(coords) > 1:
+        parts.append(f'<polyline points="{" ".join(f"{x},{y}" for x, y, _ in coords)}" fill="none" '
+                     f'stroke="{CATEGORICAL_COLORS[0]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+    for (x, y, v), (xl, _) in zip(coords, [p for p in points if p[1] is not None], strict=True):
+        parts.append(f'<circle cx="{x}" cy="{y}" r="4" fill="{CATEGORICAL_COLORS[0]}" stroke="#ffffff" stroke-width="2">'
+                     f"<title>{escape(xl)}: {escape(value_fmt(v))}</title></circle>")
+    if coords:
+        x, y, v = coords[-1]
+        parts.append(f'<text class="sc-point-label" x="{x}" y="{y - 8}" text-anchor="middle" fill="{TEXT_PRIMARY}">{escape(value_fmt(v))}</text>')
 
-    marks = "".join(
-        f'<circle cx="{x}" cy="{y}" r="1.5" fill="{_DEFAULT_BAR_COLOR}">'
-        f"<title>{escape(points[i])}</title>"
-        "</circle>"
-        for i, (x, y) in enumerate(coords)
-    )
-    svg = (
-        f'<svg class="sc-sparkline" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" role="img">' + polyline + marks + "</svg>"
-    )
-    table_rows = "".join(
-        f'<tr><th scope="row">{i}</th><td>{v}</td></tr>' for i, v in enumerate(points)
-    )
-    return f'<div class="sc-chart sc-chart-sparkline">{svg}{_details_table(table_rows)}</div>'
+    svg = (f'<svg class="sc-line-svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
+           f'aria-label="{escape(unit)} over time">{"".join(parts)}</svg>')
+    rows = [[xl, value_fmt(v) if v is not None else (none_table_label or none_label)] for xl, v in points]
+    return f'<div class="sc-chart sc-line">{svg}{table_twin(["Hour", unit], rows, caption=unit, key=unit)}</div>'
 
 
-# --------------------------------------------------------------------------
-# gantt
-# --------------------------------------------------------------------------
-
-
-def gantt(rows: list[tuple[str, float, float, str, str]], t0: float, t1: float) -> str:
-    """One thin bar per row on a shared `[t0, t1]` scale; spans are clamped to it."""
+def gantt(rows: list[tuple[str, float, float, str, str]], t0: float, t1: float, *,
+          tick_fmt: Callable[[float], str], legend_items: list[tuple[str, str]]) -> str:
     span = t1 - t0
-    row_height = _GANTT_ROW_HEIGHT + _GANTT_ROW_GAP
-    total_height = row_height * len(rows) if rows else _GANTT_ROW_HEIGHT
 
-    def _x(value: float) -> float:
-        if span <= 0:
-            return 0.0
-        clamped = _clamp(value, t0, t1)
-        return ((clamped - t0) / span) * _GANTT_MAX_WIDTH
+    def pos(t: float) -> float:
+        return _pct(max(t0, min(t1, t)) - t0, span)
 
-    bars = []
-    table_rows = []
-    for i, (label, start, end, hex_color, title) in enumerate(rows):
-        x_start = _x(start)
-        x_end = _x(end)
-        left = min(x_start, x_end)
-        bar_width = abs(x_end - x_start)
-        y = i * row_height
-        bars.append(
-            f'<g class="sc-gantt-row">'
-            f'<text x="0" y="{y + _GANTT_BAR_THICKNESS}" class="sc-chart-label" '
-            f'fill="{TEXT_PRIMARY}">{escape(label)}</text>'
-            f'<rect x="{round(left, 2)}" y="{y + _GANTT_BAR_THICKNESS + 2}" '
-            f'width="{round(bar_width, 2)}" height="{_GANTT_BAR_THICKNESS}" '
-            f'fill="{escape(hex_color)}">'
-            f"<title>{escape(title)}</title>"
-            "</rect>"
-            "</g>"
-        )
-        table_rows.append(
-            f'<tr><th scope="row">{escape(label)}</th><td>{start}</td><td>{end}</td>'
-            f"<td>{escape(title)}</td></tr>"
-        )
-
-    svg = (
-        f'<svg class="sc-gantt" viewBox="0 0 {_GANTT_MAX_WIDTH} {total_height}" '
-        f'width="{_GANTT_MAX_WIDTH}" height="{total_height}" role="img">'
-        + "".join(bars)
-        + "</svg>"
-    )
-    return f'<div class="sc-chart sc-chart-gantt">{svg}{_details_table("".join(table_rows))}</div>'
+    body, twin_rows = [], []
+    for label, start, end, h, title in rows:
+        left, right = pos(start), pos(end)
+        w = round(max(0.0, right - left), 1)
+        dur = max(0.0, min(t1, end) - max(t0, start)) if span > 0 else 0.0
+        body.append('<div class="sc-gantt-row">'
+                    f'<span class="sc-gantt-label">{escape(label)}</span>'
+                    f'<span class="sc-gantt-track"><span class="sc-gantt-bar" style="left:{left}%;width:{w}%;background:{escape(h)}" '
+                    f'title="{escape(title)}"></span></span>'
+                    f'<span class="sc-gantt-dur">{escape(duration(dur))}</span></div>')
+        twin_rows.append([label, tick_fmt(start), tick_fmt(end), duration(dur), title])
+    ticks = "".join(f'<span class="sc-tick" style="left:{p}%">{escape(tick_fmt(t0 + span * p / 100))}</span>'
+                    for p in (0, 25, 50, 75, 100))
+    axis = (f'<div class="sc-gantt-axis" aria-hidden="true"><span class="sc-gantt-label"></span>'
+            f'<span class="sc-gantt-track">{ticks}</span><span class="sc-gantt-dur"></span></div>')
+    twin = table_twin(["Interview", "First reply", "Last message", "Span", "Outcome"], twin_rows,
+                      caption="Interview timeline", key="interview-timeline")
+    return f'<div class="sc-chart sc-gantt">{legend(legend_items)}{"".join(body)}{axis}{twin}</div>'
