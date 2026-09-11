@@ -36,6 +36,7 @@ away at a lint ceiling that later tasks still need headroom under (see
 import hashlib
 import logging
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -48,7 +49,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_review_user, get_staff_user
-from src.models import USER_ROLE_PI, AgentRegistry, PromptChangeSuggestion, User
+from src.models import (
+    USER_ROLE_PI,
+    AgentRegistry,
+    PiGrant,
+    PromptChangeSuggestion,
+    ResearcherProfile,
+    User,
+)
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_mute import set_agent_mute_state
@@ -61,12 +69,14 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
+from src.services.grant_resolution import GrantRecord, derive_grant_titles
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import (
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
 )
 from src.services.profile_edit import apply_profile_edits
+from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
 
 logger = logging.getLogger(__name__)
@@ -113,16 +123,19 @@ def _template_context(
     agent_page.py / settings.py.
 
     Templates DO now key controls off the user (Task 3): pi_detail.html's
-    mute buttons and Edit Profile form, and pis.html's Add-PI form, are all
-    gated on `effective_user.is_staff and not impersonation_banner` in the
-    template, never on `current_user` — because an admin CAN impersonate a
-    reviewer (the impersonate cookie carries no role restriction), and under
-    impersonation this dict's `current_user` is swapped back to the real
-    admin. A `current_user.is_staff` gate would therefore render write forms
-    for an admin impersonating a reviewer that then 403 on submission.
-    `effective_user` (base.html's `impersonation_banner or current_user`) is
-    what those controls gate on; `current_user` here still only decides the
-    banner/nav, and the swap above is unchanged.
+    mute buttons and Edit Profile form, pis.html's Add-PI form and
+    slack_bots.html's per-row actions are all gated on
+    `effective_user.is_staff` in the template, never on `current_user` —
+    because an admin CAN impersonate a reviewer (the impersonate cookie
+    carries no role restriction), and under impersonation this dict's
+    `current_user` is swapped back to the real admin. A `current_user.is_staff`
+    gate would therefore render write forms for an admin impersonating a
+    reviewer that then 403 on submission. `effective_user` (base.html's
+    `impersonation_banner or current_user`) is what those controls gate on;
+    `current_user` here still only decides the banner/nav, and the swap above
+    is unchanged. Impersonation itself hides NOTHING (operator decision
+    2026-09-11): an admin impersonating a manager sees and may use every
+    control that manager has, attributed to the impersonated account.
     """
     impersonated = getattr(current_user, "_is_impersonated", False)
     real_admin = getattr(current_user, "_real_admin", None)
@@ -214,6 +227,7 @@ async def manager_pi_detail(
             profile=detail["profile"],
             publications=detail["publications"],
             jobs=detail["jobs"],
+            grants=detail["grants"],
             tenure_start=tenure_start,
             slack_ok=request.query_params.get("slack_ok"),
             slack_error=request.query_params.get("slack_error"),
@@ -359,6 +373,33 @@ async def manager_unmute_pi(
     return await _manager_set_mute(user_id, db, current_user, muted=False)
 
 
+@router.post("/pis/{user_id}/grants/{grant_id}/veto")
+async def manager_veto_grant(
+    user_id: uuid.UUID, grant_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it."""
+    grant = (await db.execute(
+        select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
+    )).scalar_one_or_none()
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    grant.vetoed_at = datetime.now(UTC)
+    remaining = (await db.execute(
+        select(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None))
+    )).scalars().all()
+    profile = (await db.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+    )).scalar_one_or_none()
+    if profile is not None:
+        profile.grant_titles = derive_grant_titles([
+            GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})
+            for g in remaining
+        ])
+    await db.commit()
+    return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
+
+
 async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegistry:
     """The pending ``pi_lab`` agent of a PI account, or 404.
 
@@ -402,8 +443,6 @@ async def manager_provision_slack(
     baked into every issued manifest and cannot move — which branches its own
     redirect back to /manager/pis for a manager caller.
     """
-    if getattr(current_user, "_is_impersonated", False):
-        raise HTTPException(status_code=403, detail="Disabled while impersonating.")
     agent = await _pending_pi_agent(db, user_id)
     try:
         url = await start_provisioning(db, agent, initiated_by=current_user)
@@ -430,8 +469,6 @@ async def manager_activate_agent(
     manager surface would make the gate advisory for the role most likely to
     be working through a bulk onboarding list.
     """
-    if getattr(current_user, "_is_impersonated", False):
-        raise HTTPException(status_code=403, detail="Disabled while impersonating.")
     agent = await _pending_pi_agent(db, user_id)
     if not agent.slack_bot_token:
         return RedirectResponse(
@@ -446,6 +483,53 @@ async def manager_activate_agent(
     await db.commit()
     return RedirectResponse(
         url=f"/manager/pis/{user_id}?activated=1", status_code=302
+    )
+
+
+@router.get("/slack-bots", response_class=HTMLResponse)
+async def manager_slack_bots(
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """One page for every PI lab bot's Slack state (2026-09-11).
+
+    Read-only listing — the actions it offers post to the existing per-PI
+    routes (provision / activate / mute / unmute), so the write allowlist
+    (design D1) is unchanged. Staff-only: token presence and pending
+    onboarding state are operational detail a reviewer has no use for.
+    """
+    rows = (
+        await db.execute(
+            select(AgentRegistry, User)
+            .outerjoin(User, User.id == AgentRegistry.user_id)
+            .where(AgentRegistry.role == "pi_lab")
+            .order_by(AgentRegistry.status, AgentRegistry.bot_name)
+        )
+    ).all()
+    bots = [
+        {
+            "agent": agent,
+            "pi": pi if pi is not None and pi.user_role == USER_ROLE_PI else None,
+            "has_token": bool(token_for_agent_row(agent)),
+        }
+        for agent, pi in rows
+    ]
+    counts = {"active": 0, "pending": 0, "inactive": 0, "other": 0}
+    for b in bots:
+        counts[b["agent"].status if b["agent"].status in counts else "other"] += 1
+    return templates.TemplateResponse(
+        request,
+        "manager/slack_bots.html",
+        _template_context(
+            request,
+            current_user,
+            active_manager="slack-bots",
+            bots=bots,
+            counts=counts,
+            slack_error=request.query_params.get("slack_error"),
+            slack_ok=request.query_params.get("slack_ok"),
+        ),
     )
 
 

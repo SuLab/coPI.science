@@ -54,10 +54,12 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these six, named exactly. A future
-    accidental seventh write route still fails this test loudly. The two
+    have non-GET routes now, but only these seven, named exactly. A future
+    accidental eighth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
+    The grant veto joined 2026-09-11 (Task 5 of the PI-external-enrichment
+    plan): a manager may mark one NIH RePORTER grant as "not this PI".
     """
     allowed_post_paths = {
         "/pis",
@@ -66,6 +68,7 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/unmute",
         "/pis/{user_id}/slack/provision",
         "/pis/{user_id}/activate",
+        "/pis/{user_id}/grants/{grant_id}/veto",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
@@ -747,3 +750,56 @@ async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
     assert "export" not in body.lower()
     assert 'name="export"' not in body
     assert "/admin/" not in body
+
+
+async def test_impersonating_admin_sees_every_manager_control(client, db_session):
+    """Operator decision 2026-09-11: nothing on the manager surface is hidden
+    while impersonating. The Add-PI form, the Edit Profile form and the
+    mute button all render for an admin wearing a manager."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Imp")
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Imp")
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_agent(db_session, user=pi, status="active")
+    await db_session.flush()
+    db_session.expire(pi)  # so the detail page's `target_user.agent` loads the new row
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+
+    pis_body = (await client.get("/manager/pis", headers=headers)).text
+    assert 'action="/manager/pis"' in pis_body
+    assert 'action="/admin/impersonate/stop"' in pis_body  # banner still shown
+
+    detail_body = (await client.get(f"/manager/pis/{pi.id}", headers=headers)).text
+    assert f'action="/manager/pis/{pi.id}/profile"' in detail_body
+    assert f'action="/manager/pis/{pi.id}/mute"' in detail_body
+
+
+async def test_slack_bots_page_lists_every_pi_lab_bot_with_the_right_action(
+    client, db_session
+):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    p1 = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Pending NoToken")
+    p2 = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Pending Token")
+    p3 = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Active One")
+    p4 = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Muted One")
+    await factories.make_agent(db_session, user=p1, status="pending", role="pi_lab")
+    await factories.make_agent(
+        db_session, user=p2, status="pending", role="pi_lab", slack_bot_token="xoxb-t2",
+    )
+    await factories.make_agent(db_session, user=p3, status="active", role="pi_lab")
+    await factories.make_agent(db_session, user=p4, status="inactive", role="pi_lab")
+    await factories.make_agent(
+        db_session, agent_id="blackbird", bot_name="HubOnlyBot", role="scout_hub", status="active",
+    )
+    await db_session.flush()
+
+    r = await client.get("/manager/slack-bots", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    body = r.text
+    assert 'href="/manager/slack-bots"' in body  # linked from the sub-nav
+    assert "Pending NoToken" in body and "Active One" in body
+    assert "HubOnlyBot" not in body  # hub is not a PI lab bot
+    assert f'action="/manager/pis/{p1.id}/slack/provision"' in body
+    assert f'action="/manager/pis/{p2.id}/activate"' in body
+    assert f'action="/manager/pis/{p3.id}/mute"' in body
+    assert f'action="/manager/pis/{p4.id}/unmute"' in body

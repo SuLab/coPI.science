@@ -27,6 +27,7 @@ from src.models import (
     AgentMessage,
     AssessmentDrop,
     OpportunityAssessment,
+    PiGrant,
     Publication,
     SimulationRun,
     ThreadDecision,
@@ -223,11 +224,17 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     )
     publications = pub_result.scalars().all()
 
+    grants = (await db.execute(
+        select(PiGrant).where(PiGrant.user_id == user_id)
+        .order_by(PiGrant.vetoed_at.is_(None).desc(), PiGrant.last_fy.desc().nullslast())
+    )).scalars().all()
+
     return {
         "user": user,
         "profile": user.profile,
         "publications": publications,
         "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
+        "grants": grants,
     }
 
 
