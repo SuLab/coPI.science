@@ -54,7 +54,9 @@ async def test_container_is_migrated(engine):
         # 0046 slack_app_provisions.initiated_by_user_id (which staff account
         #      started an install, so the OAuth callback can refuse to land a
         #      token for an install someone else began)
-        assert v == "0046"
+        # 0047 pi_grants / pi_industry_evidence / pi_industry_scores +
+        #      enrich_grants/industry_evidence job types
+        assert v == "0047"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -504,6 +504,20 @@ generation job is dead, unless the logged "activate anyway" override is
 checked (`src/services/agent_activation.py`). The CLI `seed-profiles` path
 below still works but creates NO agent row and derives NO tenure entry.
 
+The `generate_profile` job now enqueues two follow-on jobs of its own,
+`enrich_grants` and `industry_evidence`, which run on the worker independently
+of the corpus pipeline and never block or fail the profile it followed. The
+first pulls NIH RePORTER grants for the PI, tenure-filters them, and
+supplements (never replaces) the ORCID-fundings seed in `grant_titles`; the
+second scores industry interest from OpenAlex/PubMed/USPTO/ClinicalTrials.gov
+evidence. Neither writes anything a prompt or a profile export reads — the
+grants panel and the industry-interest score are manager-only surfaces on
+`/manager/pis/{id}`, each row individually vetoable ("not this PI's") via the
+two veto routes below. `scripts/enqueue_enrichment.py` backfills both jobs for
+PIs who predate this feature — it previews by default, needs `--apply` to
+enqueue for real, and takes `--only grants` / `--only industry` and
+`--orcid` to scope a run.
+
 ### 1. Create user records and generate profiles
 
 Look up each PI's ORCID ID (search orcid.org or the ORCID public API). Add them to `orcids.txt` with a comment line, then seed:
@@ -628,13 +642,15 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly six write routes — `POST
+  original all-GET guarantee (design D1) adds exactly eight write routes — `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
-  profile fields), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent), and
+  profile fields), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
   `/manager/pis/{id}/slack/provision` / `/activate` (install a pending PI's Slack
-  bot and bring the agent live) — and nothing else;
+  bot and bring the agent live), and `/manager/pis/{id}/grants/{grant_id}/veto` /
+  `/manager/pis/{id}/industry/{evidence_id}/veto` (mark a RePORTER-derived grant
+  or a piece of industry evidence as not this PI's) — and nothing else;
   `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a seventh.
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a ninth.
   **Still cannot impersonate** or set roles (both stay admin-only), and there is
   deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
   bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —
@@ -1229,6 +1245,45 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > Per the control-plane section, `$DC up -d agent` brings the supervisor back
 > **IDLE**: starting a run afterwards is a separate, explicit operator action
 > from `/admin/simulation`.
+
+> **Deploy order for `0047_pi_grants_and_industry_evidence` — migrate BEFORE the
+> new code serves.** `0047` adds three tables (`pi_grants`,
+> `pi_industry_evidence`, `pi_industry_scores`) and two `job_type_enum` values
+> (`enrich_grants`, `industry_evidence`). Additive, so *old code against the new
+> schema* is safe. The reverse: `/manager/pis` and `/manager/pis/{id}` select the
+> new tables (`UndefinedTable`), and the worker's two new handlers fail every
+> job they're given. The engine is untouched by this change — the **agent**
+> image needs no rebuild for it alone — but the **worker** image (the two new
+> job handlers run there) and the **app** image (the new manager panels) both
+> do.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0047)
+>     $DC up -d blackbird-app worker
+>     $DC exec -T blackbird-app python scripts/enqueue_enrichment.py          # preview
+>     $DC exec -T blackbird-app python scripts/enqueue_enrichment.py --apply  # backfill existing PIs
+>
+> Two new manager POSTs — `/manager/pis/{user_id}/grants/{grant_id}/veto` and
+> `/manager/pis/{user_id}/industry/{evidence_id}/veto` — bring the explicit
+> write allowlist (see the Account Types section) to **eight**.
+> `ResearcherProfile.grant_titles` is now RePORTER-derived and tenure-filtered
+> once the `enrich_grants` job has run for a PI (the ORCID-fundings seed is
+> never wiped by an empty RePORTER result — it is only supplemented); the
+> industry-interest score is manager-only and has no import path into profiles
+> or prompts (`tests/unit/test_enrichment_isolation.py` is the tripwire).
+> RePORTER silently ignores unknown criteria keys and returns the whole
+> database rather than erroring, so `src/services/nih_reporter.py` refuses any
+> key outside `ALLOWED_CRITERIA` and aborts when `meta.total` exceeds a cap
+> instead of paging through it blind. A PI with no recorded tenure start gets
+> grants labelled `org_only` (JHU affiliation cannot be tenure-scoped) and an
+> industry score of **Unscored** (`reason: no_tenure_start`); a field
+> percentile additionally needs at least three other scored PIs in the same
+> `primary_field` or it stays `reason: cohort_too_small`. Enum values cannot be
+> dropped in Postgres; a downgrade drops the three tables and leaves the two
+> `job_type_enum` values in place, exactly as `0039` does for
+> `review_feedback_analysis`.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
