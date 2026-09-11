@@ -1,5 +1,6 @@
 """OpenAlex-derived industry evidence: company co-authors and company funders."""
 import logging
+import re
 
 import httpx
 
@@ -17,8 +18,15 @@ def _oaid(url: str | None) -> str:
     return (url or "").rsplit("/", 1)[-1]
 
 
+_ORCID_RE = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+
+
 def _pi_authorship(work: dict, pi_orcid: str) -> dict | None:
+    if not pi_orcid:
+        return None
     tail = pi_orcid.rsplit("/", 1)[-1]
+    if not _ORCID_RE.search(tail):
+        return None
     for a in work.get("authorships") or []:
         if (a.get("author") or {}).get("orcid", "") and a["author"]["orcid"].endswith(tail):
             return a

@@ -52,10 +52,16 @@ def evidence_from_record(rec: dict, *, pi_year_ok: bool) -> list[EvidenceItem]:
     year = rec.get("year")
     seen: set[str] = set()
     for sent in _sentences(rec.get("coi_statement") or ""):
-        if _NEG.search(sent):
-            continue
         companies = [m.group(1).strip(" ,.") for m in _COMPANY_SUFFIX.finditer(sent)]
         if not companies:
+            # Only a company-free sentence can be a pure negative disclosure
+            # ("The authors declare no competing interests."). A sentence
+            # that also names a company — "... is an employee of Paratek
+            # Pharmaceuticals, Inc. and has no other competing interests." —
+            # must not have its genuine relationship swallowed by the
+            # trailing boilerplate negation.
+            continue
+        if _NEG.search(sent) and not any(rx.search(sent) for _, rx in _REL):
             continue
         rel = next((name for name, rx in _REL if rx.search(sent)), "other")
         for c in companies:

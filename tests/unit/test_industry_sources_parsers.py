@@ -56,3 +56,15 @@ def test_coi_positive_statement_extracts_company_and_relationship():
 
 def test_coi_negative_statement_yields_nothing():
     assert evidence_from_record({"pmid": "1", "year": 2024, "coi_statement": "The authors declare no competing interests.", "affiliations": []}, pi_year_ok=True) == []
+
+
+def test_coi_positive_relationship_survives_trailing_boilerplate_negation():
+    rec = {"pmid": "2", "year": 2024,
+           "coi_statement": "J.S. is an employee of Paratek Pharmaceuticals, Inc. and has no other competing interests."}
+    items = evidence_from_record(rec, pi_year_ok=True)
+    coi = next(i for i in items if i.kind == "coi_relationship")
+    assert coi.evidence["relationship"] == "employee" and "Paratek" in coi.company_name
+
+
+def test_empty_pi_orcid_never_matches_any_author():
+    assert evidence_from_work(work(2021, ["I145311948"], [("I4210091798", "Paratek Pharmaceuticals (United States)")]), "", 2018, company_funder_ids=set()) == []

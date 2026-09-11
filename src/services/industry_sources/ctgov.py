@@ -4,7 +4,11 @@ from src.services.industry_sources import EvidenceItem
 from src.services.industry_sources.companies import classify_company
 
 BASE = "https://clinicaltrials.gov/api/v2/studies"
-_FIELDS = "NCTId,BriefTitle,LeadSponsorName,LeadSponsorClass,CollaboratorName,CollaboratorClass,OverallOfficialName,StartDate,Condition"
+# The v2 legacy flat field names (NCTId, BriefTitle, ...) do NOT return the
+# nested protocolSection.* shape evidence_from_study parses — requesting the
+# module names directly does (verified live 2026-09-11).
+_FIELDS = ("protocolSection.identificationModule,protocolSection.sponsorCollaboratorsModule,"
+           "protocolSection.statusModule,protocolSection.conditionsModule")
 _JHU_SPONSOR_MARKERS = ("johns hopkins", "sidney kimmel")
 
 
@@ -33,7 +37,10 @@ def evidence_from_study(study: dict, tenure_start: int | None, pi_conditions: se
     for c in (ps.get("sponsorCollaboratorsModule") or {}).get("collaborators") or []:
         if c.get("class") != "INDUSTRY":
             continue
-        items.append(EvidenceItem("ctgov", "trial_industry_collab", f"{nct}:{c['name'].lower()}", c["name"], None,
-                                  classify_company(c["name"], "company"), year, "overall_official", True,
+        name = c.get("name")
+        if not name or not nct:
+            continue
+        items.append(EvidenceItem("ctgov", "trial_industry_collab", f"{nct}:{name.lower()}", name, None,
+                                  classify_company(name, "company"), year, "overall_official", True,
                                   {"nct_id": nct, "title": (ps.get("identificationModule") or {}).get("briefTitle"), "lead_sponsor": lead.get("name")}))
     return items
