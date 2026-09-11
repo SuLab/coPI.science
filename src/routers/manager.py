@@ -55,6 +55,7 @@ from src.models import (
     PiGrant,
     PiIndustryEvidence,
     PromptChangeSuggestion,
+    Publication,
     ResearcherProfile,
     User,
 )
@@ -78,6 +79,7 @@ from src.services.pi_onboarding import (
     find_or_create_pi_by_orcid,
 )
 from src.services.profile_edit import apply_profile_edits
+from src.services.profile_export import export_profile_to_markdown
 from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
 
@@ -377,6 +379,36 @@ async def manager_unmute_pi(
     return await _manager_set_mute(user_id, db, current_user, muted=False)
 
 
+async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """Best-effort re-export of profiles/public/{agent_id}.md after a veto.
+
+    A grant veto changes ``ResearcherProfile.grant_titles``, and without this
+    the running agent's persona keeps serving the vetoed grant's title until
+    some unrelated profile edit happens to re-export it. Mirrors
+    ``apply_profile_edits``'s own export call (``src/services/profile_edit.py``)
+    but never raises: an export failure must not turn a successful veto
+    commit into a 500, so the caller sees this as fire-and-forget.
+    """
+    try:
+        agent = (await db.execute(
+            select(AgentRegistry).where(AgentRegistry.user_id == user_id)
+        )).scalar_one_or_none()
+        if agent is None:
+            return
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        profile = (await db.execute(
+            select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+        )).scalar_one_or_none()
+        if user is None or profile is None:
+            return
+        publications = (await db.execute(
+            select(Publication).where(Publication.user_id == user_id)
+        )).scalars().all()
+        export_profile_to_markdown(user, profile, agent.agent_id, publications=list(publications))
+    except Exception:
+        logger.exception("Failed to re-export profile markdown for user %s after veto", user_id)
+
+
 @router.post("/pis/{user_id}/grants/{grant_id}/veto")
 async def manager_veto_grant(
     user_id: uuid.UUID, grant_id: uuid.UUID, request: Request,
@@ -396,11 +428,22 @@ async def manager_veto_grant(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
     )).scalar_one_or_none()
     if profile is not None:
-        profile.grant_titles = derive_grant_titles([
+        new_titles = derive_grant_titles([
             GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})
             for g in remaining
         ])
+        if new_titles:
+            profile.grant_titles = new_titles
+        else:
+            # No RePORTER-derived grant remains eligible, but grant_titles
+            # may still carry ORCID/publication-sourced titles that never
+            # came from a PiGrant row at all — derive_grant_titles([]) == []
+            # would wipe those too, so only the vetoed title is removed.
+            profile.grant_titles = [
+                t for t in (profile.grant_titles or []) if t != grant.title
+            ]
     await db.commit()
+    await _reexport_profile_markdown_best_effort(db, user_id)
     return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
 
 
@@ -410,7 +453,8 @@ async def manager_veto_industry_evidence(
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
     """'Not this PI / not industry' veto on one evidence row; persisted and
-    rescored immediately."""
+    rescored immediately. Idempotent: a replayed POST on an already-vetoed
+    row is a no-op redirect, so a double-click never rescores twice."""
     row = (await db.execute(
         select(PiIndustryEvidence).where(
             PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
@@ -418,14 +462,24 @@ async def manager_veto_industry_evidence(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Evidence not found")
-    row.vetoed_at = datetime.now(UTC)
-    row.vetoed_by_user_id = current_user.id
-    agent = (await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == user_id)
-    )).scalar_one_or_none()
-    tenure = await get_tenure_start(db, user_id, agent_id=agent.agent_id if agent else None)
-    await rescore_user(db, user_id, tenure)
-    await db.commit()
+    if row.vetoed_at is None:
+        row.vetoed_at = datetime.now(UTC)
+        # `current_user` is the EFFECTIVE user (`_STAFF` = `get_staff_user`),
+        # which is the impersonated manager while an admin is impersonating
+        # one — so the attribution column, per branch convention, still
+        # names the worn account. The real actor is recorded only in this
+        # log line, keyed off the session itself (unaffected by the
+        # impersonation cookie) rather than off `current_user`.
+        row.vetoed_by_user_id = current_user.id
+        if getattr(current_user, "_is_impersonated", False):
+            logger.warning(
+                "Industry-evidence veto on %s recorded under impersonated "
+                "user %s; real session holder is %s",
+                evidence_id, current_user.id, request.session.get("user_id"),
+            )
+        # No tenure_start passed: rescore_user re-reads it itself when omitted.
+        await rescore_user(db, user_id)
+        await db.commit()
     return RedirectResponse(url=f"/manager/pis/{user_id}#industry", status_code=302)
 
 
