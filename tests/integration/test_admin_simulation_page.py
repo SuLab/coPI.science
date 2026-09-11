@@ -32,6 +32,7 @@ from src.models import (
     USER_ROLE_MANAGER,
     AdminAuditEvent,
     AppSetting,
+    AssessmentDrop,
     OpportunityAssessment,
     SimulationCommand,
     SimulationProcessStatus,
@@ -675,3 +676,114 @@ async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(cl
     assert "No classified turns yet" in resp.text
     assert "No per-call breakdown yet" in resp.text
     assert "Internal Server Error" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — the new chart contract: captions, readability scale, labelled
+# bars, pipeline funnel, UTC timestamps, keyed refresh.
+# ---------------------------------------------------------------------------
+
+_CAPTIONED_CARDS = [
+    "Cumulative cost", "Tokens per hour", "Cost by agent", "Cost by model", "Cost by phase",
+    "Cost by interview stage", "Cost by specialist consult", "Cost by call kind", "Funnel",
+    "Drops by reason", "Specialist mix", "Panel fan-out", "Stop-reason taxonomy", "Latency",
+    "Per-agent activity", "Interview timeline", "Hub : lab token burn ratio",
+]
+
+
+async def test_live_tab_every_chart_card_has_a_heading_and_a_caption(client, db_session):
+    admin = await _admin(db_session, "sim-admin-cap@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    for title in _CAPTIONED_CARDS:
+        assert html.count(f">{title}</h2>") == 1, title
+        i = html.index(f">{title}</h2>")
+        assert 'class="sc-caption"' in html[i:i + 400], f"{title} has no caption"
+
+
+async def test_the_page_uses_the_readability_scale_throughout(client, db_session):
+    admin = await _admin(db_session, "sim-admin-type@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    # Bounded to the #sim-body content itself: base.html's site-wide footer
+    # (outside this div) legitimately carries text-gray-400 and is not part
+    # of the chart panel's readability contract.
+    page = html[html.index('id="sim-body"'):html.index("<!-- #sim-body -->")]
+    for banned in ("text-gray-400", "text-gray-500", "bg-gray-400", "uppercase"):
+        assert banned not in page, banned
+    for m in re.finditer(r'class="([^"]*\btext-xs\b[^"]*)"', page):
+        assert "rounded-full" in m.group(1), f"text-xs outside a chip: {m.group(1)}"
+    assert ".sc-tile-value" in html and "font-size: 14px" in html   # stylesheet shipped, chart text ≥ 14px
+
+
+async def test_live_tab_bars_carry_visible_labels_values_and_a_numeric_axis(client, db_session):
+    admin = await _admin(db_session, "sim-admin-bars@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="blackbird", role="scout_hub")
+    common = dict(cache_read_input_tokens=0, cache_creation_input_tokens=0, output_tokens=0, model="claude-opus-5")
+    await factories.make_llm_call_log(db_session, run=run, agent_id="blackbird", phase="thread_reply", input_tokens=1_000_000, **common)
+    await factories.make_llm_call_log(db_session, run=run, agent_id="labbot", phase="new_post", input_tokens=500_000, **common)
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    card = html[html.index(">Cost by agent</h2>"):html.index(">Cost by model</h2>")]
+    assert card.index("blackbird") < card.index("labbot")                       # sorted by cost, desc
+    assert '<span class="sc-hbar-value">$5.00 (1 call)</span>' in card
+    assert 'style="width:100.0%' in card and 'style="width:50.0%' in card
+    assert '<span class="sc-tick sc-tick--0">$0.00</span>' in card
+    assert '<span class="sc-tick sc-tick--mid">$2.50</span>' in card
+    assert '<span class="sc-tick sc-tick--max">$5.00</span>' in card
+    assert '<span class="sc-axis-unit">US$</span>' in card
+    assert re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d\d:\d\d", html)  # hour labels
+
+
+async def test_live_tab_funnel_is_in_pipeline_order_and_drops_are_visible(client, db_session):
+    admin = await _admin(db_session, "sim-admin-funnel@example.org")
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+                                         thread_id="T1", recommendation="advance", summary_posted_at=None))
+    db_session.add(AssessmentDrop(simulation_run_id=run.id, agent_id="blackbird", thread_id="T2",
+                                  reason="empty_reply", detail="x"))
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    # Bounded to the chart itself (from its sc-chart wrapper), not the card's
+    # caption paragraph — the caption's own prose ("Headlines owed should
+    # read 0 on a healthy run.") names "Headlines owed" ahead of the bars.
+    funnel_start = html.index('class="sc-chart sc-hbar"', html.index(">Funnel</h2>"))
+    funnel = html[funnel_start:html.index(">Drops by reason</h2>")]
+    assert funnel.index("Interviews opened") < funnel.index("Verdicts stored") < funnel.index("Headlines owed")
+    drops = html[html.index(">Drops by reason</h2>"):html.index(">Specialist mix</h2>")]
+    assert "<details" not in drops.split("</table>")[0]
+    assert "empty_reply" in drops and '<td class="sc-num">1</td>' in drops
+
+
+async def test_live_tab_timestamps_are_minute_precision_utc(client, db_session):
+    admin = await _admin(db_session, "sim-admin-ts@example.org")
+    run = await factories.make_simulation_run(db_session, started_at=datetime(2026, 9, 9, 18, 48, 1, 880209, tzinfo=UTC))
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    assert "2026-09-09 18:48 UTC" in html and "18:48:01.880209" not in html
+
+
+async def test_live_tab_refresh_script_preserves_open_details_by_key(client, db_session):
+    admin = await _admin(db_session, "sim-admin-js@example.org")
+    html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    assert "details[open][data-sc-key]" in html and "el.dataset.scKey" in html
+
+
+async def test_live_tab_latency_and_progress_render_with_real_data(client, db_session):
+    admin = await _admin(db_session, "sim-admin-lat@example.org")
+    run = await factories.make_simulation_run(
+        db_session, status="stopped", config={"max_runtime": 60},
+        started_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC), ended_at=datetime(2026, 1, 1, 11, 4, 9, tzinfo=UTC))
+    await factories.make_llm_call_log(
+        db_session, run=run, model="claude-opus-5", phase="thread_reply",
+        input_tokens=10, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        call_stats=[{"seq": 0, "kind": "final", "latency_ms": 133820, "stop_reason": "end_turn"},
+                    {"seq": 1, "kind": "retry", "latency_ms": 500, "stop_reason": "end_turn"}])
+    await db_session.commit()
+    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    assert "Internal Server Error" not in html
+    assert "P50 (ms)" in html and '<td class="sc-num">2</td>' in html   # n, thousands-separated cells elsewhere
+    assert '<div class="sc-tile-value">107%</div>' in html and "overran the limit" in html
