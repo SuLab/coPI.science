@@ -16,6 +16,7 @@ from src.services.jhu_rules import get_tenure_start
 from src.services.nih_reporter import (
     JHU_ORG_EXACT,
     PROJECT_FIELDS,
+    ReporterFirehoseError,
     publications_for_cores,
     search_projects,
 )
@@ -32,13 +33,15 @@ def _split_name(name: str) -> tuple[str, str]:
 async def enqueue_enrichment_jobs(db: AsyncSession, user_id: uuid.UUID, orcid: str) -> None:
     for jtype in ("enrich_grants", "industry_evidence"):
         pending = await db.execute(
-            select(Job.id).where(
+            select(Job.id)
+            .where(
                 Job.user_id == user_id,
                 Job.type == jtype,
                 Job.status.in_(("pending", "processing")),
             )
+            .limit(1)
         )
-        if pending.scalar_one_or_none() is None:
+        if pending.scalars().first() is None:
             db.add(Job(type=jtype, user_id=user_id, payload={"user_id": str(user_id), "orcid": orcid}))
 
 
@@ -52,11 +55,20 @@ async def execute_enrich_grants(job: Job, db: AsyncSession) -> None:
     first, last = _split_name(user.name)
 
     append_job_progress(job, "grants1", f"RePORTER name search for {last}")
-    candidates = await search_projects(
-        {"pi_names": [{"last_name": last}], "org_names_exact_match": [JHU_ORG_EXACT]},
-        PROJECT_FIELDS,
-        max_total=2000,
-    )
+    try:
+        candidates = await search_projects(
+            {"pi_names": [{"last_name": last}], "org_names_exact_match": [JHU_ORG_EXACT]},
+            PROJECT_FIELDS,
+            max_total=2000,
+        )
+    except ReporterFirehoseError:
+        append_job_progress(
+            job,
+            "grants_done",
+            "no_reporter_match: surname too common for name search (total > cap); "
+            "pin reporter_profile_id manually",
+        )
+        return
     if not candidates:
         append_job_progress(job, "grants_done", "no_reporter_match: no JHU projects for this surname")
         return
@@ -108,7 +120,7 @@ async def execute_enrich_grants(job: Job, db: AsyncSession) -> None:
         await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))
     ).scalar_one_or_none()
     if profile is not None:
-        profile.grant_titles = derive_grant_titles(kept)
+        profile.grant_titles = derive_grant_titles(kept) or profile.grant_titles
     await db.flush()
     append_job_progress(
         job,

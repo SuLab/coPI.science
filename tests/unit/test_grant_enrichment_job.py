@@ -4,6 +4,7 @@ from sqlalchemy import select
 from src.models import Job, PiGrant, Publication, ResearcherProfile, User
 from src.services import grant_enrichment as ge
 from src.services.jhu_rules import set_tenure_start
+from src.services.nih_reporter import ReporterFirehoseError
 
 pytestmark = pytest.mark.integration
 JHU = {"org_name": "JOHNS HOPKINS UNIVERSITY"}
@@ -69,3 +70,68 @@ async def test_no_candidates_completes_without_rows(db_session, monkeypatch):
     assert (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all() == []
     progress = job.payload.get("progress") or []
     assert progress and "no_reporter_match" in progress[-1]["detail"]
+
+
+async def test_ineligible_activity_code_does_not_wipe_orcid_seed(db_session, monkeypatch):
+    u = User(orcid="0000-0003-0000-0003", name="Ineligible Codes", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    db_session.add(ResearcherProfile(user_id=u.id, grant_titles=["orcid title"]))
+    db_session.add(Publication(user_id=u.id, pmid="11112222", title="p"))
+    job = Job(type="enrich_grants", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
+    db_session.add(job)
+    await db_session.flush()
+
+    async def fake_search(criteria, fields, max_total=500):
+        if "pi_names" in criteria:
+            return [_row("U54XX000001", 2020, 42)]
+        return [_row("U54XX000001", 2020, 42)]
+
+    async def fake_links(cores):
+        return {"U54XX000001": {"11112222"}}
+
+    monkeypatch.setattr(ge, "search_projects", fake_search)
+    monkeypatch.setattr(ge, "publications_for_cores", fake_links)
+
+    await ge.execute_enrich_grants(job, db_session)
+
+    grants = (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all()
+    assert {g.core_project_num for g in grants} == {"U54XX000001"}
+    prof = (await db_session.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == u.id))).scalar_one()
+    assert prof.grant_titles == ["orcid title"]
+
+
+async def test_common_surname_firehose_completes_cleanly(db_session, monkeypatch):
+    u = User(orcid="0000-0004-0000-0004", name="Common Smith", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    job = Job(type="enrich_grants", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
+    db_session.add(job)
+    await db_session.flush()
+
+    async def blow_up(*a, **k):
+        raise ReporterFirehoseError("meta.total exceeded the per-PI ceiling")
+
+    monkeypatch.setattr(ge, "search_projects", blow_up)
+
+    await ge.execute_enrich_grants(job, db_session)
+
+    assert (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all() == []
+    progress = job.payload.get("progress") or []
+    assert progress and "too common" in progress[-1]["detail"]
+
+
+async def test_enqueue_tolerates_duplicate_pending_rows(db_session):
+    u = User(orcid="0000-0005-0000-0005", name="Duplicate Pending", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    db_session.add(Job(type="enrich_grants", user_id=u.id, status="pending", payload={}))
+    db_session.add(Job(type="enrich_grants", user_id=u.id, status="pending", payload={}))
+    await db_session.flush()
+
+    await ge.enqueue_enrichment_jobs(db_session, u.id, u.orcid)
+    await db_session.flush()
+
+    jobs = (await db_session.execute(select(Job).where(Job.user_id == u.id))).scalars().all()
+    assert len([j for j in jobs if j.type == "enrich_grants"]) == 2
+    assert len([j for j in jobs if j.type == "industry_evidence"]) == 1
