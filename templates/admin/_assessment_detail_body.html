@@ -36,10 +36,10 @@
    the colour they always had. #}
 {% set signal_chip = {
     'blocking': 'bg-red-100 text-red-700',
-    'gap': 'bg-amber-100 text-amber-700',
-    'adequate': 'bg-green-100 text-green-700',
-    'caution': 'bg-amber-100 text-amber-700',
-    'clear': 'bg-green-100 text-green-700',
+    'gap': 'bg-amber-100 text-amber-800',
+    'adequate': 'bg-green-100 text-green-800',
+    'caution': 'bg-amber-100 text-amber-800',
+    'clear': 'bg-green-100 text-green-800',
 } %}
 
 {# ---------------------------------------------------------------------------
@@ -51,16 +51,21 @@
    must render exactly as informative as it did before, with no empty states.
    --------------------------------------------------------------------------- #}
 <nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
-    <a class="hover:text-indigo-600" href="#brief">Brief</a>
-    {% if a.rationale %}<a class="hover:text-indigo-600" href="#rationale">Rationale</a>{% endif %}
-    <a class="hover:text-indigo-600" href="#panel">Panel</a>
-    <a class="hover:text-indigo-600" href="#scores">Scores</a>
-    <a class="hover:text-indigo-600" href="#review">Review</a>
-    <a class="hover:text-indigo-600" href="#timeline">Timeline</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
+    {% if a.rationale %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#rationale">Rationale</a>{% endif %}
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#panel">Panel</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#scores">Scores</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#review">Review</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline">Timeline</a>
+    {# Real buttons, not links: they act on the page rather than navigating, and
+       a <button> is keyboard-operable and focusable without any extra wiring.
+       The script at the bottom of this include is what they drive. #}
+    <button type="button" data-details-toggle="open" class="ml-auto text-sm text-indigo-700 underline-offset-2 hover:underline">Expand all</button>
+    <button type="button" data-details-toggle="close" class="text-sm text-indigo-700 underline-offset-2 hover:underline">Collapse all</button>
 </nav>
 
-<div id="brief" class="assessment-brief bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-    <h2 class="text-xl font-semibold text-gray-900">
+<div id="brief" class="assessment-brief scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="assessment-headline text-2xl font-semibold text-gray-900">
         {{ a.headline or a.company_or_project or "—" }}
         {% if a.confidence %}
             {# Brackets stripped before re-wrapping, the same way the
@@ -75,42 +80,54 @@
     {% if a.headline and a.company_or_project %}
     <div class="assessment-brief-label text-sm text-gray-600 mt-1">{{ a.company_or_project }}</div>
     {% endif %}
-    {% if a.elevator_pitch %}
-    <div class="mt-4">
-        <div class="text-sm font-semibold text-gray-600 uppercase">In one minute</div>
-        {# Same write-time `prose_format` stamp and the same safe fallback as
-           Rationale below: NULL means legacy plain text, which may contain a
-           literal `*` in a scientific identifier that a markdown pass would
-           corrupt by reading as emphasis. #}
-        <div class="assessment-prose mt-1">
-        {% if a.prose_format == 'markdown' %}
-        <div class="assessment-brief-pitch md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
-        {% else %}
-        <p class="assessment-brief-pitch whitespace-pre-line">{{ a.elevator_pitch }}</p>
-        {% endif %}
-        </div>
-    </div>
-    {% endif %}
-    {% if a.key_points is mapping %}
-    <div class="mt-4">
-        <div class="text-sm font-semibold text-gray-600 uppercase">Key points</div>
-        <div class="assessment-brief-points assessment-prose mt-1 space-y-2">
-            {% for key, label in key_point_groups %}
-            {% if a.key_points.get(key) %}
-            <div><span class="font-semibold">{{ label }}</span>
-                <ul class="list-disc list-inside">
-                {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
-                </ul></div>
+    {# Two columns (2026-09-11 readability plan, Task A1): the pitch reads
+       LEFT, the key points RIGHT. Either half may be absent — every row
+       written before 0043 has both NULL — so the grid collapses to one
+       column rather than leaving an empty cell, which reads as missing data
+       rather than as data that was never asked for. The whole grid is
+       skipped when neither half exists. #}
+    {% if a.elevator_pitch or a.key_points %}
+    <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and a.key_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
+        {% if a.elevator_pitch %}
+        <div class="assessment-brief-pitch">
+            <div class="text-sm font-semibold text-gray-600">In one minute</div>
+            {# Same write-time `prose_format` stamp and the same safe fallback as
+               Rationale below: NULL means legacy plain text, which may contain a
+               literal `*` in a scientific identifier that a markdown pass would
+               corrupt by reading as emphasis. #}
+            {# `max-w-none`: .assessment-prose caps at 68ch, which is wider than
+               this column — the column itself is the measure here. #}
+            <div class="assessment-prose max-w-none mt-1">
+            {% if a.prose_format == 'markdown' %}
+            <div class="assessment-brief-pitch-body md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
+            {% else %}
+            <p class="assessment-brief-pitch-body whitespace-pre-line">{{ a.elevator_pitch }}</p>
             {% endif %}
-            {% endfor %}
+            </div>
         </div>
-    </div>
-    {% elif a.key_points %}
-    <div class="mt-4">
-        <div class="text-sm font-semibold text-gray-600 uppercase">Key points</div>
-        <ul class="assessment-brief-points assessment-prose mt-1 list-disc list-inside space-y-0.5">
-            {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
-        </ul>
+        {% endif %}
+        {% if a.key_points is mapping %}
+        <div class="assessment-brief-keypoints">
+            <div class="text-sm font-semibold text-gray-600">Key points</div>
+            <div class="assessment-brief-points assessment-prose max-w-none mt-1 space-y-2">
+                {% for key, label in key_point_groups %}
+                {% if a.key_points.get(key) %}
+                <div><span class="font-semibold">{{ label }}</span>
+                    <ul class="list-disc list-inside">
+                    {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                    </ul></div>
+                {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        {% elif a.key_points %}
+        <div class="assessment-brief-keypoints">
+            <div class="text-sm font-semibold text-gray-600">Key points</div>
+            <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
+                {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
     </div>
     {% endif %}
 </div>
@@ -122,7 +139,7 @@
    than showing "none". #}
 {% if a.recommended_next_experiment %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">The ask</h3>
+    <h3 class="text-base font-semibold text-gray-900 mb-2">The ask</h3>
     {# Same write-time stamp and same safe fallback as Rationale below. #}
     <div class="assessment-prose">
     {% if a.prose_format == 'markdown' %}
@@ -231,18 +248,18 @@
             {% if a.recommendation %}
                 {% set rec_chip = {
                     'advance': 'bg-green-100 text-green-700',
-                    'conditional': 'bg-amber-100 text-amber-700',
+                    'conditional': 'bg-amber-100 text-amber-800',
                     'route-to-incubation': 'bg-teal-100 text-teal-700',
                     'pass': 'bg-gray-100 text-gray-600',
                 } %}
-                <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-600') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
             {% else %}
                 <span class="text-sm text-gray-600">no recommendation</span>
             {% endif %}
             <div class="mt-2">
                 <span class="text-2xl font-bold
-                    {% if a.band == 'advance' %}text-green-600
-                    {% elif a.band == 'conditional' %}text-amber-600
+                    {% if a.band == 'advance' %}text-green-700
+                    {% elif a.band == 'conditional' %}text-amber-700
                     {% else %}text-gray-600{% endif %}">
                     {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
                 </span>
@@ -250,8 +267,8 @@
                    "pass", and unlabelled it reads as the opposite of the
                    decline it records. #}
                 <span class="band-label ml-1.5 text-sm font-medium uppercase tracking-wide align-middle
-                    {% if a.band == 'advance' %}text-green-600
-                    {% elif a.band == 'conditional' %}text-amber-600
+                    {% if a.band == 'advance' %}text-green-700
+                    {% elif a.band == 'conditional' %}text-amber-700
                     {% else %}text-gray-600{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
             </div>
             <div class="text-sm text-gray-600 mt-1">
@@ -316,7 +333,7 @@
    error in a different place. Pinned by
    test_the_panel_banner_is_never_inside_a_collapsed_details and
    test_a_non_empty_red_flag_list_is_never_collapsed. #}
-<div id="panel" class="mb-6 rounded-xl border p-4 text-sm
+<div id="panel" class="scroll-mt-16 mb-6 rounded-xl border p-4 text-base leading-relaxed
     {% if panel_state == 'gap' %}border-orange-300 bg-orange-50 text-orange-900
     {% elif panel_state == 'unverified' %}border-gray-300 bg-gray-50 text-gray-700
     {% elif panel_state == 'not_owed' %}border-slate-300 bg-slate-50 text-slate-700
@@ -335,6 +352,7 @@
             Specialist panel: not recorded
         {% endif %}
     </div>
+    <div class="max-w-[68ch]">
     {% if panel_state == 'gap' %}
         Never consulted: <span class="font-mono">{{ (a.missing_domains or [])|join(', ') or '(unnamed)' }}</span>.
         The verdict is recorded but not fully vetted — treat the score as provisional.
@@ -358,6 +376,7 @@
         Any consults below were made anyway — read them as what the panel happened to
         say, not as a completed panel.
     {% endif %}
+    </div>
     {% if panel_summary %}
         <div class="mt-2 flex flex-wrap gap-2">
             {% for entry in panel_summary %}
@@ -387,25 +406,31 @@
    Gating is dense evidence and moves behind a disclosure; Red flags is a
    WARNING (see the N8 comment above the panel banner) and stays a plain,
    always-expanded card. #}
-<details id="gating" class="mb-6">
-<summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Gating criteria</summary>
+<details id="gating" class="scroll-mt-16 mb-6">
+<summary class="cursor-pointer text-lg font-semibold text-gray-900">Gating criteria</summary>
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
     {% if a.gating %}
         {% for key, gate_state in a.gating.items() %}
-        <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-sm py-0.5">
+        <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-base py-0.5">
+            {# Each glyph carries BOTH an aria-label and its original title: the
+               title is a hover affordance a touch user never gets, and the
+               legend below is the visible answer for everyone. #}
             {% if gate_state == 'met' %}
-                <span class="text-green-600" title="Met">&#9989;</span>
+                <span class="text-green-700" title="Met" aria-label="Met">&#9989;</span>
             {% elif gate_state == 'not_met' %}
-                <span class="text-red-600" title="Not met">&#10060;</span>
+                <span class="text-red-600" title="Not met" aria-label="Not met">&#10060;</span>
             {% elif gate_state == 'unconfirmed' %}
-                <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
+                <span class="text-blue-700" title="Unconfirmed — never asked" aria-label="Unconfirmed — never asked">&#10067;</span>
             {% else %}
-                <span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
+                <span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}" aria-label="Unrecognized gating value">&bull;</span>
             {% endif %}
             {{ key.replace("_", " ") }}
         </div>
         {% endfor %}
-        <p class="text-sm text-gray-600 mt-2">
+        <p class="gating-legend text-sm text-gray-600 mt-2">
+            &#9989; met &middot; &#10060; not met &middot; &#10067; unconfirmed &mdash; the PI was not asked
+        </p>
+        <p class="text-sm text-gray-600 mt-2 max-w-[68ch]">
             "not met" (asked and failed) and "unconfirmed" (never asked) are
             different answers; only the first can license discounting an idea.
         </p>
@@ -416,12 +441,12 @@
 </details>
 
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">
+    <h3 class="text-base font-semibold text-gray-900 mb-3">
         Red flags
         {% if a.red_flags %}<span class="text-amber-700">({{ a.red_flags | length }})</span>{% endif %}
     </h3>
     {% if a.red_flags %}
-        <ul class="assessment-red-flags list-disc list-inside text-sm text-gray-700 space-y-1">
+        <ul class="assessment-red-flags list-disc list-inside text-base leading-relaxed text-gray-700 space-y-1 max-w-[68ch]">
             {% for flag in a.red_flags %}<li>{{ flag }}</li>{% endfor %}
         </ul>
     {% else %}
@@ -430,8 +455,8 @@
 </div>
 
 {% if a.rationale %}
-<details id="rationale" class="mb-6">
-<summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Full rationale ({{ a.rationale.split('\n\n') | length }} paragraph{{ '' if a.rationale.split('\n\n') | length == 1 else 's' }})</summary>
+<details id="rationale" class="scroll-mt-16 mb-6" open>
+<summary class="cursor-pointer text-lg font-semibold text-gray-900">Full rationale ({{ a.rationale.split('\n\n') | length }} paragraph{{ '' if a.rationale.split('\n\n') | length == 1 else 's' }})</summary>
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
     {# `prose_format` is the write-time stamp (0040), replayed here rather than
        re-derived: 'markdown' means the hub wrote this under the markdown-
@@ -444,7 +469,12 @@
     {% if a.prose_format == 'markdown' %}
     <div class="assessment-rationale md-content" data-markdown="{{ a.rationale | e }}"></div>
     {% else %}
-    <p class="assessment-rationale whitespace-pre-line">{{ a.rationale }}</p>
+    {# Legacy plain text: one <p> per blank-line-separated paragraph rather
+       than a single `whitespace-pre-line` block, so the prose stylesheet's
+       paragraph spacing applies. Still autoescaped, still never markdown. #}
+    <div class="assessment-rationale">
+        {% for para in a.rationale.split('\n\n') %}<p class="whitespace-pre-line">{{ para }}</p>{% endfor %}
+    </div>
     {% endif %}
     </div>
 </div>
@@ -464,8 +494,8 @@
    fact. An unscored dimension shows an empty track and "not scored", never a
    zero-length bar that reads as a scored zero — it counts as ZERO in the
    weighted score, which is a different statement from "scored 0". #}
-<details id="scores" class="mb-6">
-<summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Dimension scores</summary>
+<details id="scores" class="scroll-mt-16 mb-6" open>
+<summary class="cursor-pointer text-lg font-semibold text-gray-900">Dimension scores</summary>
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
     <div class="space-y-1.5">
         {% for d in dimensions %}
@@ -557,7 +587,7 @@
             </label>
             <details class="mt-0.5">
                 <summary class="cursor-pointer text-sm text-indigo-600">What the scale means here</summary>
-                <p class="mt-1 text-sm text-gray-600">{{ d.anchors }}</p>
+                <p class="mt-1 text-base leading-relaxed text-gray-600 max-w-[68ch]">{{ d.anchors }}</p>
             </details>
         </div>
     </div>
@@ -567,9 +597,9 @@
 
 {% set effective_user = impersonation_banner or current_user %}
 {% set can_write = true %}
-<div id="review" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
-    <p class="review-rubric-instructions text-sm text-gray-600 mb-3">
+<div id="review" class="scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Human review</h2>
+    <p class="review-rubric-instructions text-sm text-gray-600 mb-3 max-w-[68ch]">
         Scores here rate the proposal's own scientific and strategic quality, not
         how well the bot performed. Review it against Blackbird's rubric
         (<span class="font-mono">{{ review_rubric.version }}</span>): read the
@@ -603,7 +633,7 @@
        resets the status back to no verdict, so the two states are the same
        fact from a reader's point of view. #}
     <div class="mb-4">
-        <span class="text-sm font-semibold text-gray-600 uppercase">Status</span>
+        <span class="text-sm font-semibold text-gray-600">Status</span>
         <div class="review-status mt-1 text-sm flex items-center gap-2 flex-wrap">
             {% if review_status is none or review_status.action == 'cleared' %}
                 <span class="text-gray-600">Unreviewed</span>
@@ -653,7 +683,7 @@
         <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
         <button type="submit" name="action" value="approved" class="text-sm font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
         <button type="submit" name="action" value="disapproved" class="text-sm font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
-        <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Clear</button>
+        <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Clear</button>
     </form>
     {% endif %}
 
@@ -663,7 +693,7 @@
        app renders as markdown elsewhere, and treating it as such would be an
        HTML-injection surface via `{{ }}`'s own escaping being routed around. #}
     <div class="mb-4">
-        <span class="text-sm font-semibold text-gray-600 uppercase">
+        <span class="text-sm font-semibold text-gray-600">
             Feedback{% if review_feedback %} ({{ review_feedback | length }}){% endif %}
         </span>
         {% if review_feedback %}
@@ -688,7 +718,7 @@
                     <span data-utc="{{ review.created_at.isoformat() }}" data-utc-fmt="short">{{ review.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
                 </div>
                 {% if review.comment %}
-                <p class="review-comment mt-1 text-sm text-gray-700 whitespace-pre-line">{{ review.comment }}</p>
+                <p class="review-comment mt-1 text-base leading-relaxed text-gray-700 whitespace-pre-line max-w-[68ch]">{{ review.comment }}</p>
                 {% endif %}
                 {% if review.dimension_rows %}
                 <ul class="review-dimension-list mt-1 text-sm text-gray-600 space-y-0.5">
@@ -777,7 +807,7 @@
        (never a reviewer — a reviewer may score an assessment but does not
        manage who else is on it). #}
     <div>
-        <span class="text-sm font-semibold text-gray-600 uppercase">
+        <span class="text-sm font-semibold text-gray-600">
             Assigned{% if review_assignments %} ({{ review_assignments | length }}){% endif %}
         </span>
         {% if review_assignments %}
@@ -814,8 +844,8 @@
 {# ---------------------------------------------------------------------------
    Interview timeline
    --------------------------------------------------------------------------- #}
-<details id="timeline" class="mb-6">
-<summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Interview timeline</summary>
+<details id="timeline" class="scroll-mt-16 mb-6">
+<summary class="cursor-pointer text-lg font-semibold text-gray-900">Interview timeline</summary>
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
     <p class="text-sm text-gray-600 mb-4">
         The thread this verdict came out of, interleaved with the specialist panel
@@ -859,7 +889,7 @@
                        same as the discussions pages: if /static/js/markdown.js itself fails to load,
                        this div renders empty — accepted for parity with the existing data-markdown
                        surfaces rather than inventing a second rendering path here. #}
-                    <div class="md-content text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
+                    <div class="md-content text-base leading-relaxed text-gray-800 max-h-64 overflow-y-auto max-w-[68ch]" data-markdown="{{ m.content | e }}"></div>
 
                     {% if admin_view and entry.tool_turns %}
                     <div class="mt-2 pt-2 border-t border-gray-200">
@@ -920,12 +950,12 @@
                     </div>
                     {% endif %}
                     {% if c.question %}
-                    <div class="text-sm text-gray-600 mb-1">
+                    <div class="text-base leading-relaxed text-gray-600 mb-1 max-w-[68ch]">
                         <span class="font-medium text-gray-600">Asked:</span> {{ c.question }}
                     </div>
                     {% endif %}
                     {% if c.concerns %}
-                    <div class="text-sm text-gray-700">
+                    <div class="text-base leading-relaxed text-gray-700 max-w-[68ch]">
                         <span class="font-medium text-gray-600">Concerns:</span>
                         <ul class="list-disc list-inside">
                             {% for concern in c.concerns %}<li>{{ concern }}</li>{% endfor %}
@@ -933,7 +963,7 @@
                     </div>
                     {% endif %}
                     {% if c.questions_to_ask %}
-                    <div class="text-sm text-gray-700 mt-1">
+                    <div class="text-base leading-relaxed text-gray-700 mt-1 max-w-[68ch]">
                         <span class="font-medium text-gray-600">Questions to ask the PI:</span>
                         <ul class="list-disc list-inside">
                             {% for q in c.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
@@ -958,7 +988,7 @@
            what the hub did, and silently discarding it would make this page
            look complete when it is not. #}
         <div class="mt-5 pt-4 border-t border-gray-200">
-            <h4 class="text-sm font-semibold text-gray-600 uppercase mb-2">
+            <h4 class="text-base font-semibold text-gray-900 mb-2">
                 Unplaced turns ({{ unplaced_turns | length }})
             </h4>
             <p class="text-sm text-gray-600 mb-2">
@@ -980,3 +1010,19 @@
     {% endif %}
 </div>
 </details>
+
+{# Expand all / Collapse all (readability plan, Task A3). Plain DOM, no
+   framework: the two buttons in the jump nav above set or clear `open` on
+   every <details> in the page body. Scoped to <main> when there is one so
+   the site chrome's own disclosures, if any are ever added, are left alone. #}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var root = document.querySelector('main') || document;
+    document.querySelectorAll('[data-details-toggle]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var open = btn.getAttribute('data-details-toggle') === 'open';
+            root.querySelectorAll('details').forEach(function (d) { d.open = open; });
+        });
+    });
+});
+</script>

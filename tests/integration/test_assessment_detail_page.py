@@ -1326,6 +1326,22 @@ async def test_the_truncated_marking_survives_a_manager_render(
 _DETAILS_TAG_RE = re.compile(r"<details\b|</details>", re.IGNORECASE)
 
 
+def _main(html: str) -> str:
+    """The page's own `<main>` region.
+
+    Everything these template tests are about lives inside `<main>`; the
+    wrappers' `<style>` and `<script>` blocks and base.html's chrome do not.
+    Both legitimately MENTION the body template's own class names and tag
+    names as plain text — `.assessment-brief-pitch { ... }` in a print rule,
+    and the words "CSS cannot open a <details>" in a comment — so a
+    whole-document substring or tag scan reads stylesheet prose as rendered
+    markup. Falls back to the whole string when there is no `<main>` (the
+    synthetic-HTML unit test below)."""
+    if "<main" not in html:
+        return html
+    return html.split("<main", 1)[1].split("</main>", 1)[0]
+
+
 def _top_level_details_contents(html: str) -> str:
     """Concatenate the full contents of every TOP-LEVEL <details>...</details>
     element on the page, including everything nested inside it.
@@ -1458,8 +1474,9 @@ async def test_a_pre_0043_row_renders_the_brief_without_empty_states(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "ONLY-LABEL-MARKER" in html
-    assert "assessment-brief-pitch" not in html
-    assert "assessment-brief-points" not in html
+    body = _main(html)
+    assert "assessment-brief-pitch" not in body
+    assert "assessment-brief-points" not in body
 
 
 async def test_the_panel_banner_is_never_inside_a_collapsed_details(
@@ -1479,7 +1496,7 @@ async def test_the_panel_banner_is_never_inside_a_collapsed_details(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     # Everything inside any <details>...</details> must not contain the banner.
-    inside = _top_level_details_contents(html)
+    inside = _top_level_details_contents(_main(html))
     # Positive control: prove the scan actually covered the region we think it
     # did, not just that the banner text happens to be absent from it — an
     # empty or wrongly-scoped `inside` would make the assertion below pass for
@@ -1501,7 +1518,7 @@ async def test_a_non_empty_red_flag_list_is_never_collapsed(
     html = (await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
-    inside = _top_level_details_contents(html)
+    inside = _top_level_details_contents(_main(html))
     # Positive control: same reasoning as the panel-banner test above — prove
     # the scan covered the region we think it did before trusting an absence
     # assertion against it.
@@ -1604,3 +1621,107 @@ async def test_the_detail_body_uses_readable_type_sizes(client, db_session, mana
     assert body.count("text-xs") <= 13, body.count("text-xs")
     assert 'class="assessment-prose' in body
     assert "text-gray-400" not in body
+    assert "bg-gray-400" not in body
+    assert "text-gray-500" not in body
+    assert "text-base" in body
+
+
+# ---------------------------------------------------------------------------
+# Readability pass (2026-09-11 plan, Task A)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_brief_is_two_columns_pitch_left_points_right(
+    client, db_session, admin
+):
+    """The operator's layout: "In one minute" is the LEFT column and the key
+    points the RIGHT one. With no key points there is no second column at
+    all — an empty grid cell reads as missing data."""
+    run, assessment = await _seed(db_session)
+    assessment.elevator_pitch = "PITCH-MARKER. Hopkins has data on 124 patients."
+    assessment.key_points = ["POINT-ONE-MARKER", "POINT-TWO-MARKER"]
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    body = _main(html)
+    assert "assessment-brief-grid" in body
+    assert "assessment-brief-pitch" in body
+    assert "assessment-brief-keypoints" in body
+    assert body.index("assessment-brief-pitch") < body.index(
+        "assessment-brief-keypoints"
+    )
+
+    assessment.key_points = None
+    await db_session.flush()
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    body = _main(html)
+    assert "assessment-brief-pitch" in body
+    assert "assessment-brief-keypoints" not in body
+
+
+async def test_rationale_and_scores_are_open_by_default(client, db_session, admin):
+    """Rationale and dimension scores are what a reviewer came for; gating and
+    the timeline stay collapsed."""
+    run, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    html = _main(html)
+    assert re.search(r'<details[^>]*id="rationale"[^>]*\bopen\b', html)
+    assert re.search(r'<details[^>]*id="scores"[^>]*\bopen\b', html)
+    for section in ("gating", "timeline"):
+        m = re.search(rf'<details[^>]*id="{section}"[^>]*>', html)
+        assert m, section
+        assert "open" not in m.group(), section
+
+
+async def test_expand_all_controls_render(client, db_session, admin):
+    """Two real <button>s in the jump nav, keyboard-operable by nature."""
+    run, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    nav = _main(html).split('class="assessment-jump-nav', 1)[1].split("</nav>", 1)[0]
+    assert 'data-details-toggle="open"' in nav
+    assert 'data-details-toggle="close"' in nav
+    assert nav.count('<button type="button"') >= 2
+    assert "Expand all" in nav and "Collapse all" in nav
+
+
+async def test_legacy_rationale_renders_paragraphs(client, db_session, admin):
+    """A `prose_format=None` row is plain text, and its blank-line-separated
+    paragraphs must render as separate <p> elements rather than one block."""
+    run, assessment = await _seed(db_session)
+    assessment.prose_format = None
+    assessment.rationale = "LEGACY-PARA-ONE text.\n\nLEGACY-PARA-TWO text."
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    block = html.split("assessment-rationale", 1)[1].split("</div>", 1)[0]
+    assert block.count("<p") >= 2, block
+    assert "LEGACY-PARA-ONE" in block and "LEGACY-PARA-TWO" in block
+
+
+async def test_gating_legend_is_visible_text(client, db_session, admin):
+    """Glyph meanings were `title` tooltips only — invisible to touch, and to
+    anyone who does not hover. They are visible text now, and each glyph
+    carries an aria-label as well as its title."""
+    run, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "gating-legend" in html
+    assert "met" in html and "not met" in html and "unconfirmed" in html
+    assert 'aria-label="Unconfirmed' in html
