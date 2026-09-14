@@ -139,6 +139,10 @@ LINT_TARGETS=(
   # Two of tests/e2e's nine tests need no server and run in the offline suite, so
   # it is gate-relevant either way.
   tests/e2e
+  # Playwright structural tier (mobile-through-desktop layout assertions). It skips
+  # itself when Chromium is absent and FAILS when the compiled stylesheet is absent —
+  # run scripts/build-css.sh before this gate.
+  tests/responsive
   # The production migration tooling. Not tests, but it is the code an operator runs
   # against a live database during an outage window, so it gets held to the same bar.
   scripts/migrate
