@@ -1,0 +1,116 @@
+{#
+  Shared UI macros. Import with:
+      {% import "_components.html" as ui with context %}
+
+  Every class name below is a complete literal token so the compiled Tailwind build
+  (assets/css/app.css scans templates/) picks it up. Variant/tone arguments are looked
+  up in dict literals inside each macro for the same reason: never interpolate a
+  fragment of a utility name.
+
+  Touch-target rule: controls are 44 px tall below the `sm` breakpoint (the phone
+  widths the responsive tier measures) and shrink to their desktop size from `sm` up.
+#}
+
+{% macro page_header(title, subtitle=None) -%}
+<div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div class="min-w-0">
+        <h1 class="text-2xl font-bold text-gray-900 md:text-3xl">{{ title }}</h1>
+        {% if subtitle %}<p class="mt-1 text-sm text-gray-500">{{ subtitle }}</p>{% endif %}
+    </div>
+    {% if caller %}
+    <div class="flex flex-wrap items-center gap-2">{{ caller() }}</div>
+    {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro card(padding='md') -%}
+{% set pad = {'none': '', 'sm': 'p-4', 'md': 'p-4 sm:p-6', 'lg': 'p-6 sm:p-8'}[padding] %}
+<div class="rounded-xl border border-gray-200 bg-white shadow-xs {{ pad }}">{{ caller() }}</div>
+{%- endmacro %}
+
+{% macro stat_grid(cols=4) -%}
+{% set grid = {2: 'grid-cols-2', 3: 'grid-cols-2 sm:grid-cols-3', 4: 'grid-cols-2 lg:grid-cols-4', 5: 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5', 6: 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-6'}[cols] %}
+<div class="mb-6 grid gap-3 {{ grid }}">{{ caller() }}</div>
+{%- endmacro %}
+
+{% macro stat(value, label, tone='neutral') -%}
+{% set color = {'neutral': 'text-gray-900', 'ok': 'text-green-600', 'info': 'text-blue-600', 'warn': 'text-yellow-600', 'danger': 'text-red-600', 'muted': 'text-gray-500', 'brand': 'text-indigo-600'}[tone] %}
+<div class="rounded-lg border border-gray-200 bg-white p-3 text-center sm:p-4">
+    <div class="text-2xl font-bold {{ color }}">{{ value }}</div>
+    <div class="mt-1 text-xs text-gray-500">{{ label }}</div>
+</div>
+{%- endmacro %}
+
+{% macro button(label, variant='primary', size='md', type='button', href=None, full=False, testid=None) -%}
+{% set variants = {
+    'primary': 'bg-indigo-600 text-white hover:bg-indigo-700',
+    'secondary': 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-50',
+    'danger': 'bg-red-600 text-white hover:bg-red-700',
+    'ghost': 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+} %}
+{% set sizes = {'sm': 'px-2.5 py-1.5 text-xs', 'md': 'px-3 py-2 text-sm', 'lg': 'px-4 py-2.5 text-base'} %}
+{% set classes = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500 sm:min-h-6 ' ~ variants[variant] ~ ' ' ~ sizes[size] ~ (' w-full sm:w-auto' if full else '') %}
+{% if href %}<a href="{{ href }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}>{{ label }}</a>{% else %}<button type="{{ type }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}{% for k, v in kwargs.items() %} {{ k }}="{{ v }}"{% endfor %}>{{ label }}</button>{% endif %}
+{%- endmacro %}
+
+{% macro field(label, name, type='text', value='', help=None, error=None) -%}
+{% set fid = kwargs.pop('id', 'field-' ~ name) %}
+{% set describe = ((fid ~ '-help ') if help else '') ~ ((fid ~ '-error') if error else '') %}
+{% set describe = describe.strip() %}
+{% set control = 'mt-1 block w-full min-h-11 rounded-md border px-3 py-2 text-base focus:border-indigo-500 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 sm:min-h-6 sm:text-sm ' ~ ('border-red-400' if error else 'border-gray-300') %}
+<div>
+    <label for="{{ fid }}" class="block text-sm font-medium text-gray-700">{{ label }}</label>
+    {% if type == 'textarea' %}
+    <textarea id="{{ fid }}" name="{{ name }}" class="{{ control }}"{% if describe %} aria-describedby="{{ describe }}"{% endif %}{{ kwargs | xmlattr }}>{{ value }}</textarea>
+    {% else %}
+    <input id="{{ fid }}" type="{{ type }}" name="{{ name }}" value="{{ value }}" class="{{ control }}"{% if describe %} aria-describedby="{{ describe }}"{% endif %}{{ kwargs | xmlattr }}>
+    {% endif %}
+    {% if help %}<p id="{{ fid }}-help" class="mt-1 text-sm text-gray-500">{{ help }}</p>{% endif %}
+    {% if error %}<p id="{{ fid }}-error" class="mt-1 text-sm text-red-600">{{ error }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro badge(text, tone='neutral') -%}
+{% set tones = {
+    'neutral': 'bg-gray-100 text-gray-700',
+    'ok': 'bg-green-100 text-green-700',
+    'info': 'bg-blue-100 text-blue-700',
+    'warn': 'bg-yellow-100 text-yellow-700',
+    'amber': 'bg-amber-100 text-amber-700',
+    'danger': 'bg-red-100 text-red-700',
+    'brand': 'bg-indigo-100 text-indigo-700',
+    'purple': 'bg-purple-100 text-purple-700'
+} %}
+<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ tones[tone] }}">{{ text }}</span>
+{%- endmacro %}
+
+{% macro data_table(caption, id) -%}
+<div role="region" aria-labelledby="{{ id }}-cap" tabindex="0"
+     class="data-table-region overflow-x-auto rounded-xl border border-gray-200 bg-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500">
+    <table id="{{ id }}" class="min-w-full text-sm [&_td:first-child]:sticky [&_td:first-child]:left-0 [&_td:first-child]:bg-white [&_th:first-child]:sticky [&_th:first-child]:left-0 [&_th:first-child]:bg-gray-50">
+        <caption id="{{ id }}-cap" class="sr-only">{{ caption }}</caption>
+        {{ caller() }}
+    </table>
+</div>
+{%- endmacro %}
+
+{#- `name` is kept for call-site symmetry; the pill carries no hidden input — the
+    enclosing editor owns one joined hidden field per name (duplicate names would
+    otherwise let the last pill win in the form payload). -#}
+{% macro tag_pill(text, name) -%}
+<span class="inline-flex items-center gap-1 rounded-full bg-indigo-50 py-0.5 pl-2.5 pr-1 text-xs text-indigo-700" data-tag="{{ text }}">
+    <span>{{ text }}</span>
+    <button type="button" aria-label="Remove {{ text }}" data-remove-tag
+            class="-my-2 inline-flex h-11 w-11 items-center justify-center rounded-full text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 sm:h-6 sm:w-6">&times;</button>
+</span>
+{%- endmacro %}
+
+{% macro disclosure(summary, open=False) -%}
+<details class="group rounded-xl border border-gray-200 bg-white"{% if open %} open{% endif %}>
+    <summary class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-4 py-2 font-medium text-gray-900 [&::-webkit-details-marker]:hidden">
+        <span>{{ summary }}</span>
+        <svg class="h-4 w-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+    </summary>
+    <div class="border-t border-gray-100 px-4 py-3">{{ caller() }}</div>
+</details>
+{%- endmacro %}
