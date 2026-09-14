@@ -8,7 +8,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -51,10 +50,10 @@ from src.services.cohorts import (
 )
 from src.services.orcid import fetch_orcid_profile
 from src.services.validators import csv_safe_cell
+from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
 # Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
 # can move an already-approved agent between these from the edit page; the sim

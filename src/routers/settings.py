@@ -4,7 +4,6 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +15,10 @@ from src.services.email_notifications import (
     get_or_create_pref,
     _verify_unsubscribe_token,
 )
+from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
 VALID_FREQUENCIES = {"daily", "twice_weekly", "weekly", "biweekly", "monthly", "off"}
 

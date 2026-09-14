@@ -14,7 +14,6 @@ from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -24,10 +23,10 @@ from src.database import get_db
 from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
 from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
 from src.services.validators import is_valid_email
+from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
 # Per-IP throttle for the anonymous proposal-feedback endpoints (defense in
 # depth behind the nginx edge limits). Generous enough for a human clicking
