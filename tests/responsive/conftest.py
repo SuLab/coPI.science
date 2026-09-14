@@ -27,6 +27,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _VENDOR_DIR = Path(__file__).resolve().parent / "_vendor"
 _OUT_DIR = Path(__file__).resolve().parent / "_out"
 
+# RESPONSIVE_SERVER_ROOT=<other checkout> runs uvicorn from that tree (same test DB),
+# and RESPONSIVE_SCREENSHOT_ONLY=1 skips the assertions — together they produce the
+# "before" screenshot set for the human desktop-drift review:
+#   git worktree add /tmp/before <base-commit>
+#   RESPONSIVE_SERVER_ROOT=/tmp/before RESPONSIVE_SCREENSHOT_ONLY=1 \
+#     RESPONSIVE_OUT_SUBDIR=before pytest tests/responsive -k 1280
+SCREENSHOT_ONLY = os.environ.get("RESPONSIVE_SCREENSHOT_ONLY") == "1"
+OUT_SUBDIR = os.environ.get("RESPONSIVE_OUT_SUBDIR", "")
+
 VIEWPORTS = {
     320: dict(viewport={"width": 320, "height": 568}),
     390: dict(viewport={"width": 390, "height": 844}, is_mobile=True, device_scale_factor=2),
@@ -72,7 +81,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture(scope="module")
-def server(seeded, _migrated):
+def server(seeded, _migrated, tmp_path_factory):
     """Run the app as a uvicorn subprocess against the seeded DB.
 
     Declares ``seeded`` so pytest tears the server down before ``seed.teardown``
@@ -80,8 +89,12 @@ def server(seeded, _migrated):
     otherwise make the TRUNCATE hang).
     """
     port = _free_port()
+    # uvicorn writes one access line per request; a PIPE nobody drains fills after
+    # 64 KiB and blocks the child, so log to a file and read it only on failure.
+    log_path = tmp_path_factory.mktemp("responsive") / "uvicorn.log"
+    log_file = log_path.open("w")
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if not k.startswith("SLACK_")},
         "DATABASE_URL": _migrated,
         "ENVIRONMENT": "development",
         "ALLOW_HTTP_SESSIONS": "true",
@@ -92,9 +105,9 @@ def server(seeded, _migrated):
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        cwd=str(REPO_ROOT),
+        cwd=os.environ.get("RESPONSIVE_SERVER_ROOT", str(REPO_ROOT)),
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -121,7 +134,8 @@ def server(seeded, _migrated):
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(10)
         proc.kill()
-        output = proc.stdout.read() if proc.stdout else ""
+        log_file.close()
+        output = log_path.read_text()
         tail = "\n".join(output.splitlines()[-40:])
         pytest.fail(f"server did not become healthy within 30s; last output:\n{tail}")
 
@@ -150,6 +164,7 @@ def server(seeded, _migrated):
         proc.wait(10)
     except subprocess.TimeoutExpired:
         proc.kill()
+    log_file.close()
 
 
 @pytest.fixture(scope="module")
@@ -158,8 +173,8 @@ def pw():
 
     try:
         p = sync_playwright().start()
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Playwright unavailable: {exc!r}")
+    except ImportError as exc:
+        pytest.skip(f"Playwright package unavailable: {exc!r}")
     yield p
     p.stop()
 
@@ -169,7 +184,12 @@ def browser(pw):
     try:
         b = pw.chromium.launch()
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Playwright unavailable: {exc!r}")
+        # Only a missing browser binary is a legitimate skip; any other launch failure
+        # (crash, missing shared library, misconfiguration) must fail the gate.
+        msg = str(exc)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip(f"Chromium not installed: {msg.splitlines()[0]}")
+        raise
     yield b
     b.close()
 

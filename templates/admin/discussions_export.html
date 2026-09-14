@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>CoPI — Proposals Export</title>
-    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version | default('missing') }}">
+    <link rel="stylesheet" href="{{ request.base_url }}static/css/app.min.css?v={{ css_version() if css_version is defined else 'missing' }}">
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
             integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
             crossorigin="anonymous"></script>

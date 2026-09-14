@@ -49,5 +49,6 @@ def test_routers_import_templates_from_shared_module():
 
 def test_templates_env_has_css_version_global():
     value = templates.env.globals["css_version"]
-    assert isinstance(value, str)
-    assert value
+    # A callable, so each render re-reads the stylesheet's hash instead of freezing it.
+    assert callable(value)
+    assert isinstance(value(), str) and value()

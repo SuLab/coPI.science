@@ -129,7 +129,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (existing[i].getAttribute('data-tag').toLowerCase() === text.toLowerCase()) return;
             }
             var pill = document.createElement('span');
-            pill.className = 'inline-flex items-center gap-1 rounded-full bg-indigo-50 py-0.5 pl-2.5 pr-1 text-xs text-indigo-700';
+            pill.className = 'inline-flex min-h-11 items-center gap-1 rounded-full bg-indigo-50 py-0.5 pl-2.5 pr-1 text-xs text-indigo-700 sm:min-h-0';
             pill.setAttribute('data-tag', text);
 
             var textSpan = document.createElement('span');
@@ -141,7 +141,7 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.type = 'button';
             btn.setAttribute('aria-label', 'Remove ' + text);
             btn.setAttribute('data-remove-tag', '');
-            btn.className = '-my-2 inline-flex h-11 w-11 items-center justify-center rounded-full text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 sm:h-6 sm:w-6';
+            btn.className = 'inline-flex h-11 w-11 items-center justify-center rounded-full text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 sm:h-6 sm:w-6';
             btn.innerHTML = '&times;';
             pill.appendChild(btn);
 

@@ -45,7 +45,9 @@ def test_unsubscribe_html_links_the_compiled_stylesheet_with_a_safe_viewport():
 
 def test_discussions_export_html_links_the_compiled_stylesheet_with_a_safe_viewport():
     text = (TEMPLATES_DIR / "admin" / "discussions_export.html").read_text()
-    assert 'href="/static/css/app.min.css?v=' in text
+    # Absolute: the export is downloaded as an attachment, so a root-relative URL
+    # would resolve against file:// when the saved document is opened.
+    assert 'href="{{ request.base_url }}static/css/app.min.css?v=' in text
     _assert_safe_viewport(text)
 
 

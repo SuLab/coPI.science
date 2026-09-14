@@ -31,7 +31,7 @@
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Simulation Runs</h2>
     </div>
-    {% call ui.data_table(caption="Simulation runs", id="activity-runs-table") %}
+    {% call ui.data_table(caption="Simulation runs", id="activity-runs-table", sticky=False) %}
     <thead class="bg-gray-50">
         <tr>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Start</th>
@@ -44,7 +44,7 @@
     </thead>
     <tbody class="divide-y divide-gray-100">
         {% for run in runs %}
-        <tr class="relative hover:bg-gray-50">
+        <tr class="relative hover:bg-gray-50 cursor-pointer" data-href="/admin/activity/{{ run.id }}">
             <td class="px-4 py-3 text-sm">
                 <a href="/admin/activity/{{ run.id }}" class="after:absolute after:inset-0">
                     <span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span>

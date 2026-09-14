@@ -55,7 +55,7 @@
 </div>
 
 <!-- Users table -->
-{% call ui.data_table(caption="Registered users", id="users-table") %}
+{% call ui.data_table(caption="Registered users", id="users-table", sticky=False) %}
 <thead class="bg-gray-50">
     <tr>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
@@ -73,7 +73,7 @@
 </thead>
 <tbody class="divide-y divide-gray-100">
     {% for item in user_data %}
-    <tr class="relative hover:bg-gray-50">
+    <tr class="relative hover:bg-gray-50 cursor-pointer" data-href="/admin/users/{{ item.user.id }}">
         <td class="px-4 py-3">
             <a href="/admin/users/{{ item.user.id }}" class="after:absolute after:inset-0">
                 <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>

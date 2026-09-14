@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>{% block title %}CoPI — Research Collaboration{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version | default('missing') }}">
+    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version() if css_version is defined else 'missing' }}">
     {% block extra_head %}{% endblock %}
     {% if request.state.posthog_api_key %}
     <script>
@@ -199,6 +199,14 @@ document.querySelectorAll('.data-table-region').forEach(function(el) {
     el.addEventListener('scroll', function() {
         el.classList.toggle('is-scrolled', el.scrollLeft > 0);
     });
+});
+// Rows with data-href navigate on click anywhere in the row (the first-cell <a>
+// carries the same URL for keyboard, middle-click and assistive tech). Clicks on
+// nested interactive elements are left alone.
+document.addEventListener('click', function (e) {
+    var row = e.target.closest && e.target.closest('tr[data-href]');
+    if (!row || e.target.closest('a, button, input, select, textarea, label, form')) return;
+    location.href = row.getAttribute('data-href');
 });
 </script>
 </body>

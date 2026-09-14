@@ -20,9 +20,10 @@ _TARGET_JS = """
         // Content of a closed <details> is not rendered; only its <summary> counts.
         const closed = el.closest('details:not([open])');
         if (closed && !el.closest('summary')) continue;
-        // Inline text links (WCAG 2.5.8 exception) are skipped entirely.
-        if (el.closest("p, li, td, dd, [data-inline-link]")) continue;
-        const inlineExempt = false;
+        // Inline text links (WCAG 2.5.8 exception) are skipped entirely; buttons,
+        // inputs and selects inside the same containers are still measured.
+        const tag0 = el.tagName.toLowerCase();
+        if (tag0 === 'a' && el.closest("p, li, td, th, dd, [data-inline-link]")) continue;
         const exemptWrapper = el.closest('[data-target-exempt]');
         const measureEl = exemptWrapper ? exemptWrapper : el;
         const rect = measureEl.getBoundingClientRect();
@@ -32,7 +33,7 @@ _TARGET_JS = """
         out.push({
             tag, type,
             w: rect.width, h: rect.height,
-            inlineExempt, isCheckish,
+            isCheckish,
             text: (el.textContent || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 40),
             cls: (el.getAttribute('class') || '').slice(0, 70),
         });
@@ -103,8 +104,6 @@ def check_targets(page: Page, width: int) -> list[str]:
     min_h = 44 if width in (320, 390) else 0
     for r in rows:
         if r["isCheckish"]:
-            min_w, min_h_row = 24, 24
-        elif r["inlineExempt"]:
             min_w, min_h_row = 24, 24
         else:
             min_w, min_h_row = 24, max(24, min_h)

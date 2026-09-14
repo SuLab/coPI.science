@@ -203,14 +203,15 @@
         border-radius: 9999px;
         white-space: nowrap;
         line-height: 1.5;
+        min-height: 44px;
     }
+    @media (min-width: 640px) { .tag-pill { min-height: 0; } }
     .tag-remove {
         display: inline-flex;
         align-items: center;
         justify-content: center;
         width: 44px;
         height: 44px;
-        margin: -10px -6px -10px 0;
         border-radius: 50%;
         background: transparent;
         border: none;
@@ -220,7 +221,7 @@
         cursor: pointer;
         padding: 0;
     }
-    @media (min-width: 640px) { .tag-remove { width: 24px; height: 24px; margin: 0; } }
+    @media (min-width: 640px) { .tag-remove { width: 24px; height: 24px; } }
     .tag-remove:hover {
         background-color: #c7d2fe;
         color: #3730a3;

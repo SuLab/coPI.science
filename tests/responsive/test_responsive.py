@@ -5,14 +5,15 @@ One module so the module-scoped seed/server/browser fixtures start once (see
 """
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 from tests.e2e.session import COOKIE_NAME, forge_session_cookie
 from tests.responsive.checks import assert_all
-from tests.responsive.conftest import VIEWPORTS, get_context
+from tests.responsive.conftest import OUT_SUBDIR, SCREENSHOT_ONLY, VIEWPORTS, get_context
 
-_OUT_DIR = Path(__file__).resolve().parent / "_out"
+_OUT_DIR = Path(__file__).resolve().parent / "_out" / OUT_SUBDIR
 
 # (name, path template, who, has_h1). Path templates are formatted against the
 # ``seeded`` ids dict. ``who`` selects which forged-session cookie the shared
@@ -58,6 +59,20 @@ ROUTES = [
 
 _ROUTE_IDS = [f"{name}" for name, *_ in ROUTES]
 
+# Branch-disambiguating markers: routes that serve two templates with status 200.
+ROUTE_MARKERS = {
+    "invite_accept": "form[action$='/accept']",
+    "invite_error": "text=/invitation/i",
+    "delete_confirm": "form[action='/profile/delete-account'] input",
+    "agent_request": "h2:has-text(\"Get Your Own Lab Agent\")",
+    "agent_listing": "a[href$='/dashboard']",
+    "onboarding_review": "form[action='/onboarding/save-profile']",
+}
+ROUTE_ABSENT = {
+    "invite_accept": ("text=/invitation is no longer valid|expired|not found/i",),
+    "delete_refusal": ("form[action='/profile/delete-account'] input",),
+}
+
 
 def _attach_error_collectors(page):
     page._console_errors = []
@@ -86,10 +101,28 @@ def test_page(route, width, browser, server, seeded, contexts, out_dir):
     _attach_error_collectors(page)
     try:
         resp = page.goto(url, wait_until="networkidle")
+        if SCREENSHOT_ONLY:
+            page.screenshot(
+                path=str(out_dir / f"{name}-{width}.png"), full_page=True, animations="disabled"
+            )
+            return
         assert resp is not None and resp.status == 200, (
             f"GET {path} -> {resp.status if resp else 'no response'} "
             f"(final URL: {page.url})"
         )
+        final_path = urlparse(page.url).path
+        assert final_path == path.split("?")[0], (
+            f"GET {path} was redirected to {final_path}; the seed does not satisfy this route"
+        )
+        marker = ROUTE_MARKERS.get(name)
+        if marker is not None:
+            assert page.locator(marker).count() >= 1, (
+                f"{name}: expected marker {marker!r} not rendered (wrong branch of the route)"
+            )
+        for absent in ROUTE_ABSENT.get(name, ()):
+            assert page.locator(absent).count() == 0, (
+                f"{name}: {absent!r} rendered, meaning the other branch of the route was served"
+            )
         assert_all(page, width, has_h1=has_h1)
         page.screenshot(
             path=str(out_dir / f"{name}-{width}.png"),
@@ -168,7 +201,8 @@ def test_admin_subnav_active_link_in_view(width, browser, server, seeded, contex
     page = context.new_page()
     _attach_error_collectors(page)
     try:
-        page.goto(server + "/admin/jobs", wait_until="networkidle")
+        # Waitlist is the LAST of eight links: off-screen at 320/390 unless scrollIntoView ran.
+        page.goto(server + "/admin/waitlist", wait_until="networkidle")
         active = page.locator('#admin-subnav [aria-current="page"]')
         assert active.count() == 1
         box = active.bounding_box()
@@ -202,3 +236,27 @@ def test_nav_menu_js_off(width, browser, server, seeded):
             assert link.is_visible()
     finally:
         context.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "table_id", "detail_prefix"),
+    [("/admin/users", "users-table", "/admin/users/"), ("/admin/activity", "activity-runs-table", "/admin/activity/")],
+)
+def test_covering_row_link_makes_the_whole_row_clickable(
+    path, table_id, detail_prefix, browser, server, seeded, contexts
+):
+    """The old onclick=location.href rows became a first-cell <a> whose ::after covers
+    the row. A sticky first cell would shrink that overlay to the cell, so click the
+    LAST cell and require navigation to the detail page."""
+    context = get_context(contexts, browser, server, seeded, 1280, "admin")
+    page = context.new_page()
+    try:
+        page.goto(server + path, wait_until="networkidle")
+        last_cell = page.locator(f"#{table_id} tbody tr").first.locator("td").last
+        box = last_cell.bounding_box()
+        assert box is not None
+        with page.expect_navigation(wait_until="networkidle"):
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        assert urlparse(page.url).path.startswith(detail_prefix), page.url
+    finally:
+        page.close()

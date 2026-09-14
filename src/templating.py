@@ -6,7 +6,8 @@ from pathlib import Path
 from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger(__name__)
-CSS_PATH = Path("static/css/app.min.css")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CSS_PATH = REPO_ROOT / "static" / "css" / "app.min.css"
 
 
 def css_version(path: Path = CSS_PATH) -> str:
@@ -19,4 +20,6 @@ def css_version(path: Path = CSS_PATH) -> str:
 
 
 templates = Jinja2Templates(directory="templates")
-templates.env.globals["css_version"] = css_version()
+# Registered as a callable so each render re-reads the file: a stylesheet rebuilt under
+# `uvicorn --reload` (or built after the process started) gets a fresh cache key.
+templates.env.globals["css_version"] = css_version

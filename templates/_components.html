@@ -50,7 +50,7 @@
 } %}
 {% set sizes = {'sm': 'px-2.5 py-1.5 text-xs', 'md': 'px-3 py-2 text-sm', 'lg': 'px-4 py-2.5 text-base'} %}
 {% set classes = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500 sm:min-h-6 ' ~ variants[variant] ~ ' ' ~ sizes[size] ~ (' w-full sm:w-auto' if full else '') %}
-{% if href %}<a href="{{ href }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}>{{ label }}</a>{% else %}<button type="{{ type }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}{% for k, v in kwargs.items() %} {{ k }}="{{ v }}"{% endfor %}>{{ label }}</button>{% endif %}
+{% if href %}<a href="{{ href }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}{{ kwargs | xmlattr }}>{{ label }}</a>{% else %}<button type="{{ type }}" class="{{ classes }}"{% if testid %} data-testid="{{ testid }}"{% endif %}{{ kwargs | xmlattr }}>{{ label }}</button>{% endif %}
 {%- endmacro %}
 
 {% macro field(label, name, type='text', value='', help=None, error=None) -%}
@@ -84,10 +84,14 @@
 <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ tones[tone] }}">{{ text }}</span>
 {%- endmacro %}
 
-{% macro data_table(caption, id) -%}
+{#- sticky=False for tables whose rows carry a covering link (`after:absolute
+    after:inset-0` needs the <tr>, not a positioned first cell, as its containing
+    block) or whose first cell must keep the row's own background. -#}
+{% macro data_table(caption, id, sticky=True) -%}
+{% set col = '[&_td:first-child]:sticky [&_td:first-child]:left-0 [&_td:first-child]:bg-white [&_th:first-child]:sticky [&_th:first-child]:left-0 [&_th:first-child]:bg-gray-50' if sticky else '' %}
 <div role="region" aria-labelledby="{{ id }}-cap" tabindex="0"
      class="data-table-region overflow-x-auto rounded-xl border border-gray-200 bg-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500">
-    <table id="{{ id }}" class="min-w-full text-sm [&_td:first-child]:sticky [&_td:first-child]:left-0 [&_td:first-child]:bg-white [&_th:first-child]:sticky [&_th:first-child]:left-0 [&_th:first-child]:bg-gray-50">
+    <table id="{{ id }}" class="min-w-full text-sm {{ col }}">
         <caption id="{{ id }}-cap" class="sr-only">{{ caption }}</caption>
         {{ caller() }}
     </table>
@@ -98,10 +102,10 @@
     enclosing editor owns one joined hidden field per name (duplicate names would
     otherwise let the last pill win in the form payload). -#}
 {% macro tag_pill(text, name) -%}
-<span class="inline-flex items-center gap-1 rounded-full bg-indigo-50 py-0.5 pl-2.5 pr-1 text-xs text-indigo-700" data-tag="{{ text }}">
+<span class="inline-flex min-h-11 items-center gap-1 rounded-full bg-indigo-50 py-0.5 pl-2.5 pr-1 text-xs text-indigo-700 sm:min-h-0" data-tag="{{ text }}">
     <span>{{ text }}</span>
     <button type="button" aria-label="Remove {{ text }}" data-remove-tag
-            class="-my-2 inline-flex h-11 w-11 items-center justify-center rounded-full text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 sm:h-6 sm:w-6">&times;</button>
+            class="inline-flex h-11 w-11 items-center justify-center rounded-full text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 sm:h-6 sm:w-6">&times;</button>
 </span>
 {%- endmacro %}
 

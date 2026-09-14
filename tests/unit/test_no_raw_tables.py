@@ -5,16 +5,20 @@ every template that extends ``base.html`` (i.e. renders a real page, not a
 fragment or a component) must not contain one directly.
 """
 
+import re
 from pathlib import Path
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
+
+
+_EXTENDS_BASE = re.compile(r"""{%-?\s*extends\s*['"]base\.html['"]""")
 
 
 def _templates_extending_base() -> list[Path]:
     return [
         p
         for p in TEMPLATES_DIR.rglob("*.html")
-        if p.name != "_components.html" and '{% extends "base.html" %}' in p.read_text()
+        if p.name != "_components.html" and _EXTENDS_BASE.search(p.read_text())
     ]
 
 

@@ -24,8 +24,10 @@ COPY src/ src/
 RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 FROM debian:bookworm-slim AS css
-ARG TAILWIND_VERSION=v4.3.3
-ARG TAILWIND_SHA256=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a
+# Pinned release and digest are literals on purpose: an ARG could be retargeted with
+# --build-arg to a different binary AND its own matching hash, defeating the check.
+ENV TAILWIND_VERSION=v4.3.3 \
+    TAILWIND_SHA256=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build

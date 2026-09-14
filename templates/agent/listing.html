@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="max-w-3xl mx-auto">
-    <h1 class="text-2xl font-bold text-gray-900 mb-6">My Agents</h1>
+    {{ ui.page_header("My Agents") }}
 
     {% if own_agent %}
     <div class="mb-6">

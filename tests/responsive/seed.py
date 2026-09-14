@@ -10,6 +10,7 @@ idempotent — the responsive tier owns a scratch database for the run and tears
 down what it created rather than reconciling against existing rows.
 """
 
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -297,8 +298,27 @@ async def _seed(session: AsyncSession) -> dict:
     }
 
 
+_ALLOWED_DB_RE = re.compile(r"^copi_(test|e2e|resp\w*|x\d+|a\d+)$")
+
+
+def _assert_safe_database(url: str) -> None:
+    """Refuse to seed or TRUNCATE anything but a throwaway test database.
+
+    Mirrors tests/e2e/seed.py's allowlist. This module commits and then truncates
+    16 tables with CASCADE, so a TEST_DATABASE_URL that names the dev database or
+    a production copy must fail here, not at teardown.
+    """
+    name = url.rsplit("/", 1)[-1].split("?")[0]
+    if not _ALLOWED_DB_RE.match(name):
+        raise RuntimeError(
+            f"refusing to seed/truncate database {name!r}: the responsive tier only runs "
+            "against copi_test or a copi_x<N>/copi_a<N>/copi_resp* scratch database"
+        )
+
+
 async def run(url: str) -> dict:
     """Seed the database at ``url`` and return the ids dict."""
+    _assert_safe_database(url)
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         session = AsyncSession(engine, expire_on_commit=False)
@@ -313,7 +333,10 @@ async def run(url: str) -> dict:
 
 
 async def teardown(url: str) -> None:
-    """Truncate every table :func:`run` wrote to. Never touches alembic_version."""
+    """Truncate every table :func:`run` wrote to (CASCADE follows FKs into child tables
+    such as publications/proposal_votes; every other tier rolls back, so nothing else is
+    live). Never touches alembic_version."""
+    _assert_safe_database(url)
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with engine.begin() as conn:

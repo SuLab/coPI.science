@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Unsubscribe — CoPI</title>
-    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version | default('missing') }}">
+    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version() if css_version is defined else 'missing' }}">
 </head>
 <body class="min-h-screen bg-gray-50">
     <div class="flex min-h-screen items-center justify-center px-4">

@@ -54,7 +54,7 @@
             <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
             {% for c in cohorts %}
             <th class="px-3 py-3 text-center text-xs font-medium text-gray-500">
-                <a href="/admin/cohorts/{{ c.id }}" class="inline-flex min-h-6 items-center text-indigo-600 hover:underline">{{ c.name }}</a>
+                <a href="/admin/cohorts/{{ c.id }}" class="inline-flex min-h-11 items-center text-indigo-600 hover:underline sm:min-h-6">{{ c.name }}</a>
                 <div class="mt-1">
                     <button type="button" class="min-h-11 sm:min-h-6 text-xs font-normal text-gray-400 hover:text-gray-600"
                             data-toggle-col="{{ c.id }}">all / none</button>

@@ -10,7 +10,7 @@
             <p class="text-sm text-gray-500 mt-0.5">{{ desc }}</p>
         </div>
         <div class="flex items-center gap-3">
-            <label class="inline-flex min-h-11 items-center" data-target-exempt>
+            <label class="inline-flex min-h-11 items-center cursor-pointer" data-target-exempt data-switch-wrapper>
                 <button type="button" id="{{ key }}_toggle"
                         data-target="{{ key }}_on"
                         {% if has_freq %}data-section="{{ key }}_frequency_section"{% endif %}
@@ -125,6 +125,16 @@
     </div>
 </div>
 
+<script>
+// The 44 px label around each switch is the phone hit area; a <button> is not
+// labelable, so forward clicks on the label's padding to the switch itself.
+document.querySelectorAll('label[data-switch-wrapper]').forEach(function (wrap) {
+    wrap.addEventListener('click', function (e) {
+        var btn = wrap.querySelector('button');
+        if (btn && e.target !== btn && !btn.contains(e.target)) { e.preventDefault(); btn.click(); }
+    });
+});
+</script>
 <script>
 (function() {
     document.querySelectorAll('.notif-toggle').forEach(function(toggle) {

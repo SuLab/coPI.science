@@ -26,6 +26,9 @@ if [ ! -x "$BIN" ]; then
     chmod +x "$tmp"
     mv "$tmp" "$BIN"
 fi
+# Re-verify on every run: .cache/ is a user-writable, untracked path, so a binary
+# that passed once is not evidence about the bytes that are there now.
+echo "${TAILWIND_SHA256}  ${BIN}" | sha256sum -c - >/dev/null
 
 mkdir -p static/css
 "$BIN" -i assets/css/app.css -o static/css/app.min.css --minify "$@"
