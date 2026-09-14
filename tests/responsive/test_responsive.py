@@ -62,14 +62,14 @@ _ROUTE_IDS = [f"{name}" for name, *_ in ROUTES]
 # Branch-disambiguating markers: routes that serve two templates with status 200.
 ROUTE_MARKERS = {
     "invite_accept": "form[action$='/accept']",
-    "invite_error": "text=/invitation/i",
+    "invite_error": 'h1:has-text("Invitation Issue")',
     "delete_confirm": "form[action='/profile/delete-account'] input",
     "agent_request": "h2:has-text(\"Get Your Own Lab Agent\")",
     "agent_listing": "a[href$='/dashboard']",
     "onboarding_review": "form[action='/onboarding/save-profile']",
 }
 ROUTE_ABSENT = {
-    "invite_accept": ("text=/invitation is no longer valid|expired|not found/i",),
+    "invite_accept": ('h1:has-text("Invitation Issue")',),
     "delete_refusal": ("form[action='/profile/delete-account'] input",),
 }
 
@@ -101,11 +101,6 @@ def test_page(route, width, browser, server, seeded, contexts, out_dir):
     _attach_error_collectors(page)
     try:
         resp = page.goto(url, wait_until="networkidle")
-        if SCREENSHOT_ONLY:
-            page.screenshot(
-                path=str(out_dir / f"{name}-{width}.png"), full_page=True, animations="disabled"
-            )
-            return
         assert resp is not None and resp.status == 200, (
             f"GET {path} -> {resp.status if resp else 'no response'} "
             f"(final URL: {page.url})"
@@ -114,6 +109,13 @@ def test_page(route, width, browser, server, seeded, contexts, out_dir):
         assert final_path == path.split("?")[0], (
             f"GET {path} was redirected to {final_path}; the seed does not satisfy this route"
         )
+        if SCREENSHOT_ONLY:
+            # Baseline capture (RESPONSIVE_SERVER_ROOT): the route must still resolve, but
+            # the layout assertions and branch markers are what the baseline predates.
+            page.screenshot(
+                path=str(out_dir / f"{name}-{width}.png"), full_page=True, animations="disabled"
+            )
+            return
         marker = ROUTE_MARKERS.get(name)
         if marker is not None:
             assert page.locator(marker).count() >= 1, (
@@ -253,6 +255,7 @@ def test_covering_row_link_makes_the_whole_row_clickable(
     try:
         page.goto(server + path, wait_until="networkidle")
         last_cell = page.locator(f"#{table_id} tbody tr").first.locator("td").last
+        last_cell.scroll_into_view_if_needed()
         box = last_cell.bounding_box()
         assert box is not None
         with page.expect_navigation(wait_until="networkidle"):

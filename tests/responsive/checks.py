@@ -5,9 +5,13 @@ failing page reports every defect in one shot rather than one-at-a-time.
 ``assert_all`` joins them and fails once.
 """
 
-import json
+from __future__ import annotations
 
-from playwright.sync_api import Page
+import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
 
 _INTERACTIVE_SELECTOR = "a, button, input, select, textarea, summary, [role=button]"
 

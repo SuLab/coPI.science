@@ -206,6 +206,8 @@ document.querySelectorAll('.data-table-region').forEach(function(el) {
 document.addEventListener('click', function (e) {
     var row = e.target.closest && e.target.closest('tr[data-href]');
     if (!row || e.target.closest('a, button, input, select, textarea, label, form')) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (String(window.getSelection && window.getSelection())) return;
     location.href = row.getAttribute('data-href');
 });
 </script>

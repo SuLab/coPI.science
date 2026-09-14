@@ -46,8 +46,12 @@ VIEWPORTS = {
 
 @pytest.fixture(scope="module", autouse=True)
 def _css_built():
-    if not (REPO_ROOT / "static" / "css" / "app.min.css").exists():
-        pytest.fail("compiled stylesheet missing: run scripts/build-css.sh")
+    # Checked against the tree the server actually runs from. A RESPONSIVE_SERVER_ROOT
+    # baseline may predate the compiled build (it still styles itself via the CDN), so
+    # the guard is relaxed only in screenshot-only mode.
+    root = Path(os.environ.get("RESPONSIVE_SERVER_ROOT", REPO_ROOT))
+    if not (root / "static" / "css" / "app.min.css").exists() and not SCREENSHOT_ONLY:
+        pytest.fail(f"compiled stylesheet missing under {root}: run scripts/build-css.sh")
 
 
 def _run_in_fresh_loop(coro):
@@ -94,7 +98,9 @@ def server(seeded, _migrated, tmp_path_factory):
     log_path = tmp_path_factory.mktemp("responsive") / "uvicorn.log"
     log_file = log_path.open("w")
     env = {
-        **{k: v for k, v in os.environ.items() if not k.startswith("SLACK_")},
+        **os.environ,
+        # SLACK_ENABLED=false is the real guard: Settings also reads .env from the
+        # child's cwd, so filtering SLACK_* out of os.environ would prove nothing.
         "DATABASE_URL": _migrated,
         "ENVIRONMENT": "development",
         "ALLOW_HTTP_SESSIONS": "true",
@@ -151,10 +157,12 @@ def server(seeded, _migrated, tmp_path_factory):
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(10)
         proc.kill()
+        log_file.close()
+        tail = "\n".join(log_path.read_text().splitlines()[-40:])
         pytest.fail(
             "server sanity check failed: GET /admin/users -> "
             f"{resp.status_code} (location={resp.headers.get('location')!r}); "
-            "child is likely not on the seeded test database"
+            f"child is likely not on the seeded test database. Last output:\n{tail}"
         )
 
     yield base_url
@@ -169,12 +177,8 @@ def server(seeded, _migrated, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def pw():
-    from playwright.sync_api import sync_playwright
-
-    try:
-        p = sync_playwright().start()
-    except ImportError as exc:
-        pytest.skip(f"Playwright package unavailable: {exc!r}")
+    sync_api = pytest.importorskip("playwright.sync_api", reason="playwright not installed")
+    p = sync_api.sync_playwright().start()
     yield p
     p.stop()
 
