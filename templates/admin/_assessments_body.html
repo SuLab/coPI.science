@@ -354,11 +354,12 @@
             {% if a.elevator_pitch %}
             <div class="assessment-card-pitch rounded-lg border border-slate-200 bg-slate-50 p-3">
                 <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">In one minute</div>
-                {# `line-clamp-6`, never a server-side truncation: a 1300-char
-                   pitch is a wall on a triage card, but the DOM must still
-                   carry the whole value so nothing is lost to a CSS-off
-                   reader. The `detail →` link in the footer is the escape. #}
-                <div class="assessment-prose max-w-none mt-1 line-clamp-6">
+                {# Rendered in full, never clamped or truncated: pitches run
+                   1200-1400 chars, and a `line-clamp-6` here (removed
+                   2026-09-14) hid two thirds of every one with no visible
+                   fold — the value is in the DOM either way, so showing it
+                   costs vertical space, not bytes. #}
+                <div class="assessment-prose max-w-none mt-1">
                 {# Same write-time `prose_format` stamp and the same safe
                    fallback as the detail page: NULL means legacy plain text,
                    which may carry a literal `*` in a scientific identifier

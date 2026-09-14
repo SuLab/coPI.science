@@ -1484,7 +1484,7 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
       carries `key_points` — a purpose-built 3-5 bullet summary written for
       triage, not the dense evidence this pin was written about.
     * 2026-09-14 (Task C of the assessment-UX plan, at operator request): a
-      card also carries `elevator_pitch` (line-clamped, never truncated
+      card also carries `elevator_pitch` (rendered in full, never truncated
       server-side), `score_rationale`, and its per-dimension rubric SCORES —
       the last of which is a partial, knowing reversal of the 2026-08-27
       removal of the score chips, now behind a per-card disclosure that is
