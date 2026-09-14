@@ -6,11 +6,11 @@
     <h1 class="text-2xl font-bold text-gray-900">Cohorts</h1>
     <div class="flex items-center gap-2">
         <a href="/admin/cohorts/topology"
-           class="text-sm bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-4 py-2 rounded">
+           class="text-sm bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-4 py-2 rounded-sm">
             Topology matrix
         </a>
         <button type="button" onclick="document.getElementById('new-cohort-form').classList.toggle('hidden')"
-                class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+                class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-sm">
             New Cohort
         </button>
     </div>
@@ -36,20 +36,20 @@
         <label class="block text-sm font-medium text-gray-700">Name</label>
         <input type="text" name="name" required pattern="[a-z0-9-]{1,48}"
                placeholder="pilot-wave-1"
-               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
+               class="mt-1 block w-full rounded-md border-gray-300 shadow-xs text-sm">
         <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, hyphens. Max 48 chars.</p>
     </div>
     <div>
         <label class="block text-sm font-medium text-gray-700">Description (optional)</label>
         <textarea name="description" rows="2"
-                  class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"></textarea>
+                  class="mt-1 block w-full rounded-md border-gray-300 shadow-xs text-sm"></textarea>
     </div>
-    <button type="submit" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+    <button type="submit" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-sm">
         Create Cohort
     </button>
 </form>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     {% if cohorts %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">

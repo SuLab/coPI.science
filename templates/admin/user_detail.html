@@ -11,7 +11,7 @@
     </div>
 
     <!-- Account info -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="font-semibold text-gray-800 mb-4">Account</h2>
         <dl class="grid grid-cols-2 gap-3 text-sm">
             <div>
@@ -54,7 +54,7 @@
 
     {% if profile %}
     <!-- Profile -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <div class="flex items-center justify-between mb-4">
             <h2 class="font-semibold text-gray-800">Research Profile</h2>
             <span class="text-xs text-gray-400">Version {{ profile.profile_version }}</span>
@@ -93,7 +93,7 @@
 
     <!-- Publications -->
     {% if publications %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="font-semibold text-gray-800 mb-4">Publications ({{ publications | length }})</h2>
         <div class="space-y-3">
             {% for pub in publications %}
@@ -134,7 +134,7 @@
     </div>
 
     {% if jobs %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
         <h2 class="font-semibold text-gray-800 mb-4">Jobs</h2>
         <table class="min-w-full text-sm">
             <thead>
@@ -162,7 +162,7 @@
                 {% if job.last_error %}
                 <tr>
                     <td colspan="5" class="pb-2">
-                        <p class="text-xs text-red-600 bg-red-50 rounded p-2">{{ job.last_error[:200] }}</p>
+                        <p class="text-xs text-red-600 bg-red-50 rounded-sm p-2">{{ job.last_error[:200] }}</p>
                     </td>
                 </tr>
                 {% endif %}

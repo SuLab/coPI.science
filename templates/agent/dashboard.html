@@ -115,7 +115,7 @@
         {% for entry in unreviewed %}
         {% set p = entry.proposal %}
         {% set idx = loop.index %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-4">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 mb-4">
             <!-- Accordion header -->
             <div class="px-6 py-4 cursor-pointer flex items-center justify-between gap-4"
                  onclick="toggleProposal({{ idx }}, {{ unreviewed | length }})">
@@ -127,7 +127,7 @@
                     </div>
                 </div>
                 <svg id="prop-chevron-{{ idx }}"
-                     class="w-4 h-4 text-gray-400 flex-shrink-0 transition-transform {{ '' if loop.first else 'rotate-180' }}"
+                     class="w-4 h-4 text-gray-400 shrink-0 transition-transform {{ '' if loop.first else 'rotate-180' }}"
                      fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/>
                 </svg>
@@ -148,7 +148,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
                             </svg>
                         </button>
-                        <div id="disc-{{ idx }}" class="hidden mt-3 max-h-[32rem] overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-4">
+                        <div id="disc-{{ idx }}" class="hidden mt-3 max-h-128 overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-4">
                             {% for msg in entry.discussion %}
                             {% set is_mine = msg.agent_id == agent.agent_id %}
                             <div class="flex flex-col {{ 'items-end' if is_mine else 'items-start' }}">
@@ -157,7 +157,7 @@
                                     <span class="text-xs text-gray-400" data-utc="{{ msg.ts }}" data-utc-fmt="disc">{{ msg.ts }}</span>
                                 </div>
                                 <div class="max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed disc-bubble
-                                            {{ 'bg-indigo-600 text-white rounded-tr-sm disc-bubble-mine' if is_mine else 'bg-white text-gray-700 rounded-tl-sm border border-gray-200 shadow-sm' }}"
+                                            {{ 'bg-indigo-600 text-white rounded-tr-sm disc-bubble-mine' if is_mine else 'bg-white text-gray-700 rounded-tl-sm border border-gray-200 shadow-xs' }}"
                                      data-markdown="{{ msg.text | e }}"></div>
                             </div>
                             {% endfor %}
@@ -242,7 +242,7 @@
         {% for entry in reviewed %}
         {% set p = entry.proposal %}
         {% set rev = entry.review %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 mb-3">
             <div class="px-6 py-3 flex items-center justify-between cursor-pointer"
                  onclick="document.getElementById('reviewed-{{ loop.index }}').classList.toggle('hidden')">
                 <div class="flex items-center gap-3">

@@ -20,7 +20,7 @@
 </div>
 
 <!-- Pending -->
-<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-xs border border-amber-200 overflow-hidden mb-8">
     <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
         <h2 class="font-semibold text-amber-800">Pending</h2>
     </div>
@@ -48,10 +48,10 @@
                 <td class="px-4 py-3 text-sm text-gray-500" data-utc="{{ u.created_at.isoformat() }}" data-utc-fmt="short">{{ u.created_at.strftime('%b %d') }}</td>
                 <td class="px-4 py-3 whitespace-nowrap">
                     <form method="POST" action="/admin/access-requests/{{ u.id }}/approve" class="inline">
-                        <button type="submit" class="text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded">Approve</button>
+                        <button type="submit" class="text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-sm">Approve</button>
                     </form>
                     <form method="POST" action="/admin/access-requests/{{ u.id }}/deny" class="inline">
-                        <button type="submit" class="text-sm bg-gray-300 hover:bg-gray-400 text-gray-800 px-3 py-1 rounded">Deny</button>
+                        <button type="submit" class="text-sm bg-gray-300 hover:bg-gray-400 text-gray-800 px-3 py-1 rounded-sm">Deny</button>
                     </form>
                 </td>
             </tr>
@@ -64,7 +64,7 @@
 </div>
 
 <!-- Allowlist -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden mb-8">
     <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
         <h2 class="font-semibold text-gray-800">ORCID Allowlist</h2>
         <span class="text-xs text-gray-500">Pre-approved ORCIDs bypass the access gate</span>
@@ -72,8 +72,8 @@
     <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
         <form method="POST" action="/admin/access-allowlist/add" class="flex gap-2">
             <input type="text" name="orcid" required placeholder="0000-0000-0000-0000" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-48">
-            <input type="text" name="note" placeholder="note (optional)" class="px-3 py-2 border border-gray-300 rounded-md text-sm flex-grow">
-            <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded">Add</button>
+            <input type="text" name="note" placeholder="note (optional)" class="px-3 py-2 border border-gray-300 rounded-md text-sm grow">
+            <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-sm">Add</button>
         </form>
     </div>
     {% if allowlist %}
@@ -108,7 +108,7 @@
 
 {% if denied %}
 <!-- Denied -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden mb-8">
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Denied</h2>
     </div>

@@ -7,7 +7,7 @@
 
     {% if agent and agent.status == 'pending' %}
     <!-- State 2: Pending approval -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-8 text-center">
         <div class="text-4xl mb-4">&#9203;</div>
         <h2 class="text-lg font-semibold text-gray-800 mb-2">Agent Request Pending</h2>
         <p class="text-gray-500 mb-4">
@@ -19,7 +19,7 @@
 
     {% else %}
     <!-- State 1: No agent -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-8 text-center">
         <div class="text-4xl mb-4">&#129302;</div>
         <h2 class="text-lg font-semibold text-gray-800 mb-2">Get Your Own Lab Agent</h2>
         <p class="text-gray-500 mb-6">

@@ -12,8 +12,8 @@
     <p class="text-sm font-medium text-amber-800 mb-2">Impersonate User</p>
     <form method="POST" action="/admin/impersonate" class="flex gap-2">
         <input type="text" name="orcid" placeholder="ORCID (0000-0000-0000-0000)"
-               class="flex-1 border border-amber-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400">
-        <button type="submit" class="bg-amber-600 text-white px-4 py-2 rounded text-sm hover:bg-amber-700">
+               class="flex-1 border border-amber-300 rounded-sm px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400">
+        <button type="submit" class="bg-amber-600 text-white px-4 py-2 rounded-sm text-sm hover:bg-amber-700">
             Impersonate
         </button>
     </form>
@@ -24,7 +24,7 @@
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
         <select onchange="applyFilter()" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+                class="border border-gray-300 rounded-sm px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
             <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
@@ -34,7 +34,7 @@
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Access</label>
         <select onchange="applyFilter()" id="access-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+                class="border border-gray-300 rounded-sm px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="allowed" {% if access_filter == 'allowed' %}selected{% endif %}>Allowed</option>
             <option value="pending" {% if access_filter == 'pending' %}selected{% endif %}>Pending</option>
@@ -44,7 +44,7 @@
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
         <select onchange="applyFilter()" id="claimed-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+                class="border border-gray-300 rounded-sm px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
             <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
@@ -53,7 +53,7 @@
 </div>
 
 <!-- Users table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>

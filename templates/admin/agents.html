@@ -26,7 +26,7 @@
 
 {% if pending %}
 <!-- Pending requests -->
-<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-xs border border-amber-200 overflow-hidden mb-6">
     <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
         <h2 class="font-semibold text-amber-800">Pending Requests</h2>
     </div>
@@ -57,7 +57,7 @@
 {% endif %}
 
 <!-- Active agents -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden mb-6">
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Active Agents</h2>
     </div>
@@ -93,7 +93,7 @@
                                 <option value="{{ u.id }}">{{ u.name }}</option>
                                 {% endfor %}
                             </select>
-                            <button type="submit" class="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200">Link</button>
+                            <button type="submit" class="text-xs px-2 py-1 bg-gray-100 rounded-sm hover:bg-gray-200">Link</button>
                         </form>
                     {% endif %}
                 </td>
@@ -132,7 +132,7 @@
 
 {% if inactive %}
 <!-- Inactive (parked) agents -->
-<div class="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-xs border border-blue-100 overflow-hidden mb-6">
     <div class="px-6 py-4 border-b border-blue-100 bg-blue-50">
         <h2 class="font-semibold text-blue-800">Inactive (parked — excluded from simulation runs)</h2>
     </div>
@@ -164,7 +164,7 @@
 
 {% if suspended %}
 <!-- Suspended agents -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden mb-6">
     <div class="px-6 py-4 border-b border-gray-200 bg-gray-50">
         <h2 class="font-semibold text-gray-700">Suspended (excluded from simulation runs)</h2>
     </div>

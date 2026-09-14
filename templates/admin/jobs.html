@@ -31,7 +31,7 @@
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Status</label>
         <select onchange="applyFilter()" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+                class="border border-gray-300 rounded-sm px-2 py-1 text-sm">
             <option value="">All</option>
             {% for s in ['pending', 'processing', 'completed', 'failed', 'dead'] %}
             <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s | capitalize }}</option>
@@ -41,7 +41,7 @@
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Type</label>
         <select onchange="applyFilter()" id="type-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+                class="border border-gray-300 rounded-sm px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="generate_profile" {% if type_filter == 'generate_profile' %}selected{% endif %}>Generate Profile</option>
             <option value="monthly_refresh" {% if type_filter == 'monthly_refresh' %}selected{% endif %}>Monthly Refresh</option>
@@ -50,7 +50,7 @@
 </div>
 
 <!-- Jobs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>

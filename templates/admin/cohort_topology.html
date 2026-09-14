@@ -26,14 +26,14 @@
 {% include "admin/_cohort_gate_banner.html" %}
 
 {% if not cohorts %}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-8 text-center">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 px-6 py-8 text-center">
     <p class="text-sm text-gray-500">
         No cohorts yet. <a href="/admin/cohorts" class="text-indigo-600 hover:underline">Create one</a>
         before editing the topology.
     </p>
 </div>
 {% elif not agents %}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-8 text-center">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 px-6 py-8 text-center">
     <p class="text-sm text-gray-500">No agents in the registry yet.</p>
 </div>
 {% else %}
@@ -45,7 +45,7 @@
        cannot be diffed away — at 116 fields instead of 3,360. #}
     {% for a in agents %}<input type="hidden" name="present_agent" value="{{ a.agent_id }}">{% endfor %}
     {% for c in cohorts %}<input type="hidden" name="present_cohort" value="{{ c.id }}">{% endfor %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200">
             <thead class="bg-gray-50">
                 <tr>
@@ -86,7 +86,7 @@
                     <td class="px-3 py-3 text-center">
                         <input type="checkbox" name="cell" value="{{ cell }}"
                                data-col="{{ c.id }}"
-                               class="h-4 w-4 rounded border-gray-300 text-indigo-600"
+                               class="h-4 w-4 rounded-sm border-gray-300 text-indigo-600"
                                {% if cell in membership_set %}checked{% endif %}>
                     </td>
                     {% endfor %}
@@ -111,7 +111,7 @@
 
     <div class="mt-4 flex items-center gap-3">
         <button type="submit"
-                class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+                class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-sm">
             Save topology
         </button>
         <a href="/admin/cohorts/topology" class="text-sm text-gray-500 hover:text-gray-700">Reset</a>

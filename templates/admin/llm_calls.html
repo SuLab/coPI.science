@@ -76,7 +76,7 @@
     </form>
 
     <!-- Log entries -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200">
         <div class="p-4 border-b">
             <span class="text-sm text-gray-500">Showing {{ logs | length }} of {{ total_count }} calls</span>
         </div>
@@ -93,7 +93,7 @@
                     {{ log.phase }}
                 </span>
                 {% if log.channel %}
-                <span class="px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
+                <span class="px-2 py-0.5 rounded-sm text-xs font-medium bg-indigo-100 text-indigo-800">
                     #{{ log.channel }}
                 </span>
                 {% endif %}
@@ -135,12 +135,12 @@
     <div class="flex justify-center gap-2 mt-6">
         {% if page > 1 %}
         <a href="?page={{ page - 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}"
-           class="px-3 py-1 text-sm border rounded hover:bg-gray-100">&larr; Prev</a>
+           class="px-3 py-1 text-sm border rounded-sm hover:bg-gray-100">&larr; Prev</a>
         {% endif %}
         <span class="px-3 py-1 text-sm text-gray-500">Page {{ page }} of {{ total_pages }}</span>
         {% if page < total_pages %}
         <a href="?page={{ page + 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}"
-           class="px-3 py-1 text-sm border rounded hover:bg-gray-100">Next &rarr;</a>
+           class="px-3 py-1 text-sm border rounded-sm hover:bg-gray-100">Next &rarr;</a>
         {% endif %}
     </div>
     {% endif %}

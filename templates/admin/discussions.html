@@ -27,7 +27,7 @@
     <form method="GET" action="/admin/discussions" class="flex items-center gap-2">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
-                class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                class="text-sm border-gray-300 rounded-md shadow-xs focus:ring-indigo-500 focus:border-indigo-500">
             <option value="all" {% if selected_run_id == 'all' %}selected{% endif %}>All Runs</option>
             {% for run in runs %}
             <option value="{{ run.id }}" {% if run.id == selected_run_id %}selected{% endif %}>
@@ -67,20 +67,20 @@
 <div class="flex items-center gap-4 mb-4">
     <form method="GET" action="/admin/discussions" class="flex items-center gap-3">
         <input type="hidden" name="run_id" value="{{ selected_run_id }}">
-        <select name="channel_filter" class="text-sm border-gray-300 rounded-md shadow-sm">
+        <select name="channel_filter" class="text-sm border-gray-300 rounded-md shadow-xs">
             <option value="">All Channels</option>
             {% for ch in channels %}
             <option value="{{ ch }}" {% if channel_filter == ch %}selected{% endif %}>#{{ ch }}</option>
             {% endfor %}
         </select>
-        <select name="status_filter" class="text-sm border-gray-300 rounded-md shadow-sm">
+        <select name="status_filter" class="text-sm border-gray-300 rounded-md shadow-xs">
             <option value="">All Statuses</option>
             {% for key, meta in status_meta.items() %}
             <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ meta.label }}</option>
             {% endfor %}
         </select>
         <select name="agent_filter" multiple size="4"
-                class="text-sm border-gray-300 rounded-md shadow-sm min-w-[140px]"
+                class="text-sm border-gray-300 rounded-md shadow-xs min-w-[140px]"
                 title="Hold Ctrl/Cmd to select multiple">
             {% for a in agents %}
             <option value="{{ a }}" {% if a in agent_filter %}selected{% endif %}>{{ a | capitalize }}Bot</option>
@@ -99,7 +99,7 @@
 </div>
 
 <!-- Threads table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>

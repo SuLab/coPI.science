@@ -41,7 +41,7 @@
 
     <!-- Messages by agent -->
     {% if agent_stats %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="font-semibold text-gray-800 mb-4">Messages by Agent</h2>
         <table class="min-w-full text-sm">
             <thead class="text-xs text-gray-500 uppercase">
@@ -66,7 +66,7 @@
 
     <!-- Messages by channel -->
     {% if channel_stats %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="font-semibold text-gray-800 mb-4">Messages by Channel</h2>
         <table class="min-w-full text-sm">
             <thead class="text-xs text-gray-500 uppercase">
@@ -91,7 +91,7 @@
 
     <!-- Channels created -->
     {% if channels %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="font-semibold text-gray-800 mb-4">Channels Created</h2>
         <table class="min-w-full text-sm">
             <thead class="text-xs text-gray-500 uppercase">
@@ -118,7 +118,7 @@
 
     <!-- Message timeline -->
     {% if messages %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
         <h2 class="font-semibold text-gray-800 mb-4">Message Timeline ({{ messages | length }})</h2>
         <div class="space-y-2 max-h-96 overflow-y-auto">
             {% for msg in messages %}

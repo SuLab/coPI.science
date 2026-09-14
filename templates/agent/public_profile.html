@@ -32,7 +32,7 @@
     <form method="POST" action="/agent/{{ agent.agent_id }}/public-profile/save" id="profile-form">
 
         {% if profile %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-800 mb-4">Research Profile</h2>
 
             <div class="mb-5">
@@ -103,7 +103,7 @@
             </div>
         </div>
         {% else %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6 text-center text-gray-400 text-sm">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6 text-center text-gray-400 text-sm">
             No public profile has been generated yet. The PI needs to complete onboarding first.
         </div>
         {% endif %}
@@ -123,12 +123,12 @@
     {% else %}
     {# Read-only view #}
     {% if profile and profile.research_summary %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <h2 class="text-lg font-semibold text-gray-800 mb-3">Research Summary</h2>
         <p class="text-sm text-gray-700 leading-relaxed">{{ profile.research_summary }}</p>
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6 mb-6">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             {% if profile.techniques %}
             <div>
@@ -187,7 +187,7 @@
         </div>
     </div>
     {% else %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center text-gray-400 text-sm">
+    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-8 text-center text-gray-400 text-sm">
         No public profile content yet.
     </div>
     {% endif %}

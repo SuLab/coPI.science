@@ -4,7 +4,7 @@
 {% block content %}
 <div class="flex justify-between items-center mb-6">
     <h1 class="text-2xl font-bold text-gray-900">Waitlist</h1>
-    <a href="/admin/waitlist/export" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+    <a href="/admin/waitlist/export" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-sm">
         Export CSV
     </a>
 </div>
@@ -20,7 +20,7 @@
     </div>
 </div>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     {% if signups %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">

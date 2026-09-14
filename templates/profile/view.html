@@ -48,7 +48,7 @@
 
     {% if not profile %}
     <!-- No profile yet -->
-    <div class="bg-white rounded-xl shadow-sm border border-yellow-200 p-8 text-center">
+    <div class="bg-white rounded-xl shadow-xs border border-yellow-200 p-8 text-center">
         <h2 class="text-xl font-semibold text-gray-800 mb-2">Profile Generating</h2>
         <p class="text-gray-600">Your research profile is being generated. Check back in a few minutes.</p>
     </div>
@@ -58,7 +58,7 @@
     <div class="grid grid-cols-1 gap-6">
 
         <!-- Research Summary -->
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
             <h2 class="text-lg font-semibold text-gray-800 mb-3">Research Summary</h2>
             <p class="text-gray-700 leading-relaxed">{{ profile.research_summary or 'No summary yet.' }}</p>
             {% if profile.profile_generated_at %}
@@ -72,7 +72,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
             <!-- Techniques -->
-            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
                 <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Techniques & Methods</h3>
                 {% if profile.techniques %}
                 <div class="flex flex-wrap gap-2">
@@ -86,7 +86,7 @@
             </div>
 
             <!-- Experimental Models -->
-            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
                 <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Model Systems</h3>
                 {% if profile.experimental_models %}
                 <div class="flex flex-wrap gap-2">
@@ -100,7 +100,7 @@
             </div>
 
             <!-- Disease Areas -->
-            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
                 <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Disease Areas</h3>
                 {% if profile.disease_areas %}
                 <div class="flex flex-wrap gap-2">
@@ -114,7 +114,7 @@
             </div>
 
             <!-- Key Targets -->
-            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
                 <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Key Targets</h3>
                 {% if profile.key_targets %}
                 <div class="flex flex-wrap gap-2">
@@ -130,7 +130,7 @@
 
         {% if profile.grant_titles %}
         <!-- Grants -->
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
             <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Active Grants</h3>
             <ul class="space-y-2">
                 {% for title in profile.grant_titles %}
@@ -145,7 +145,7 @@
 
         <!-- Publications -->
         {% if publications %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-6">
             <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">
                 Publications ({{ publications | length }})
             </h3>
