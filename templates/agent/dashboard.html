@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}My Agent — {{ agent.bot_name }} — CoPI{% endblock %}
 
 {% block extra_head %}
@@ -33,19 +34,13 @@
 
 {% block content %}
 <div class="max-w-4xl mx-auto">
-    <!-- Header -->
-    <div class="flex items-center justify-between mb-6">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-900">{{ agent.bot_name }}</h1>
-            <p class="text-sm text-gray-500">Representing the {{ agent.pi_name }} lab</p>
-        </div>
-        <span class="px-3 py-1 rounded-full text-sm
-            {% if agent.status == 'active' %}bg-green-100 text-green-700
-            {% elif agent.status == 'suspended' %}bg-amber-100 text-amber-700
-            {% else %}bg-gray-100 text-gray-600{% endif %}">
-            {{ agent.status | capitalize }}
-        </span>
-    </div>
+    {% set ns = namespace(primary_set=False) %}
+    {% set status_classes = {'active': 'bg-green-100 text-green-700', 'suspended': 'bg-amber-100 text-amber-700'} %}
+    {% call ui.page_header(agent.bot_name, 'Representing the ' ~ agent.pi_name ~ ' lab') %}
+    <span class="px-3 py-1 rounded-full text-sm {{ status_classes.get(agent.status, 'bg-gray-100 text-gray-600') }}">
+        {{ agent.status | capitalize }}
+    </span>
+    {% endcall %}
 
     {% if agent.status == 'inactive' %}
     <!-- Inactive notice -->
@@ -73,7 +68,8 @@
         </p>
         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/connect-slack" class="inline">
             <button type="submit"
-                    class="px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700">
+                    {% if not unreviewed and not ns.primary_set %}data-testid="primary"{% set ns.primary_set = True %}{% endif %}
+                    class="min-h-11 px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700">
                 Connect Slack Account
             </button>
         </form>
@@ -117,7 +113,7 @@
         {% set idx = loop.index %}
         <div class="bg-white rounded-xl shadow-xs border border-gray-200 mb-4">
             <!-- Accordion header -->
-            <div class="px-6 py-4 cursor-pointer flex items-center justify-between gap-4"
+            <div class="min-h-11 w-full text-left px-6 py-4 cursor-pointer flex items-center justify-between gap-4"
                  onclick="toggleProposal({{ idx }}, {{ unreviewed | length }})">
                 <div class="min-w-0">
                     <div class="text-sm font-semibold text-gray-800 truncate">{{ entry.title }}</div>
@@ -142,13 +138,13 @@
                     {% if entry.discussion %}
                     <div class="mt-4">
                         <button type="button" onclick="toggleDiscussion(this, 'disc-{{ idx }}')"
-                                class="text-xs text-indigo-500 hover:text-indigo-700 flex items-center gap-1">
+                                class="min-h-11 text-xs text-indigo-500 hover:text-indigo-700 flex items-center gap-1">
                             <span class="disc-label">Show discussion</span>
                             <svg class="w-3 h-3 disc-arrow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
                             </svg>
                         </button>
-                        <div id="disc-{{ idx }}" class="hidden mt-3 max-h-128 overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-4">
+                        <div id="disc-{{ idx }}" class="hidden mt-3 max-h-[60svh] overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-4">
                             {% for msg in entry.discussion %}
                             {% set is_mine = msg.agent_id == agent.agent_id %}
                             <div class="flex flex-col {{ 'items-end' if is_mine else 'items-start' }}">
@@ -167,14 +163,14 @@
 
                     <div class="pt-4 border-t border-gray-100 mt-4">
                         <!-- Tab buttons -->
-                        <div class="flex gap-2 mb-4">
+                        <div class="flex flex-wrap gap-2 mb-4">
                             <button type="button" onclick="showTab(this, 'review-{{ idx }}')"
-                                    class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                    class="tab-btn flex-1 min-h-11 sm:flex-none px-3 py-1.5 text-sm font-medium rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
                                 Rate &amp; Close
                             </button>
                             {% if agent.status == 'active' %}
                             <button type="button" onclick="showTab(this, 'reopen-{{ idx }}')"
-                                    class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg text-gray-500 border border-gray-200 hover:bg-gray-50">
+                                    class="tab-btn flex-1 min-h-11 sm:flex-none px-3 py-1.5 text-sm font-medium rounded-lg text-gray-500 border border-gray-200 hover:bg-gray-50">
                                 Give Guidance &amp; Reopen
                             </button>
                             {% endif %}
@@ -183,7 +179,7 @@
                         <!-- Rate & Close tab -->
                         <div id="review-{{ idx }}" class="tab-panel">
                             <form method="POST" action="/agent/{{ agent.agent_id }}/proposals/{{ p.id }}/review">
-                                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                                <div class="grid grid-cols-2 gap-2 mb-3 md:grid-cols-4">
                                     {% set ratings = [
                                         (1, "Not a good idea", "Not interesting OR multiple major weaknesses"),
                                         (2, "Good idea", "Medium interest OR one major weakness"),
@@ -191,19 +187,20 @@
                                         (4, "Excellent idea", "High interest, no notable weaknesses"),
                                     ] %}
                                     {% for val, label, desc in ratings %}
-                                    <label class="flex items-start gap-2 cursor-pointer p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
-                                        <input type="radio" name="rating" value="{{ val }}" class="mt-0.5 text-indigo-600" required>
+                                    <label class="min-h-11 flex items-center gap-2 cursor-pointer p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
+                                        <input type="radio" name="rating" value="{{ val }}" class="h-6 w-6 shrink-0 text-indigo-600" required>
                                         <div>
                                             <div class="text-sm font-medium text-gray-800">{{ val }} — {{ label }}</div>
-                                            <div class="text-xs text-gray-500">{{ desc }}</div>
+                                            <div class="text-sm text-gray-500">{{ desc }}</div>
                                         </div>
                                     </label>
                                     {% endfor %}
                                 </div>
                                 <textarea name="comment" rows="3" placeholder="Optional comment — what did the agent get right or wrong?"
-                                          class="w-full text-sm px-3 py-2 mb-3"></textarea>
+                                          class="w-full text-base px-3 py-2 mb-3"></textarea>
                                 <button type="submit"
-                                        class="px-5 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
+                                        {% if not ns.primary_set %}data-testid="primary"{% set ns.primary_set = True %}{% endif %}
+                                        class="min-h-11 px-5 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
                                     Submit Review
                                 </button>
                             </form>
@@ -219,9 +216,9 @@
                             <form method="POST" action="/agent/{{ agent.agent_id }}/proposals/{{ p.id }}/reopen">
                                 <textarea name="guidance" rows="4" required
                                           placeholder="e.g., Work out the experimental design in more detail. Focus on the aging angle rather than general drug repurposing."
-                                          class="w-full text-sm px-3 py-2 mb-3 border border-gray-300 rounded-lg"></textarea>
+                                          class="w-full text-base px-3 py-2 mb-3 border border-gray-300 rounded-lg"></textarea>
                                 <button type="submit"
-                                        class="px-5 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
+                                        class="min-h-11 px-5 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
                                     Post Guidance &amp; Reopen Thread
                                 </button>
                             </form>
@@ -243,7 +240,7 @@
         {% set p = entry.proposal %}
         {% set rev = entry.review %}
         <div class="bg-white rounded-xl shadow-xs border border-gray-200 mb-3">
-            <div class="px-6 py-3 flex items-center justify-between cursor-pointer"
+            <div class="min-h-11 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2 cursor-pointer"
                  onclick="document.getElementById('reviewed-{{ loop.index }}').classList.toggle('hidden')">
                 <div class="flex items-center gap-3">
                     <span class="text-sm font-medium text-gray-700">#{{ p.channel }}</span>
@@ -326,18 +323,18 @@
         <div class="bg-white rounded-xl border border-gray-200 p-5">
             <div class="text-lg font-semibold text-gray-800 mb-1">Slack Connection</div>
             {% if agent.slack_user_id %}
-            <p class="text-sm text-green-600 mb-2">Connected: <strong>{{ agent.slack_user_id }}</strong></p>
+            <p class="text-sm text-green-600 mb-2 break-all">Connected: <strong>{{ agent.slack_user_id }}</strong></p>
             {% elif slack_error %}
             <p class="text-sm text-red-600 mb-2">{{ slack_error }}</p>
             {% endif %}
             <p class="text-sm text-gray-500 mb-2">
                 Enter the email you used to join Slack. We'll look up your account automatically.
             </p>
-            <form method="POST" action="/agent/{{ agent.agent_id }}/slack" class="flex gap-2">
+            <form method="POST" action="/agent/{{ agent.agent_id }}/slack" class="flex flex-wrap gap-2">
                 <input type="email" name="email" placeholder="you@example.com"
-                       class="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5">
+                       class="min-h-11 flex-1 text-base border border-gray-300 rounded-md px-3 py-1.5">
                 <button type="submit"
-                        class="px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200">
+                        class="min-h-11 px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200">
                     Connect
                 </button>
             </form>
@@ -357,14 +354,14 @@
                 <div class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Active Delegates</div>
                 <div class="space-y-2">
                     {% for wd in web_delegates %}
-                    <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-                        <div class="text-sm">
+                    <div class="flex flex-wrap items-center justify-between gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                        <div class="text-sm min-w-0 break-all">
                             <span class="font-medium text-gray-700">{{ wd.user.name }}</span>
                             <span class="text-gray-400 ml-1">({{ wd.user.email }})</span>
                             <span class="text-xs text-gray-400 ml-2">added {{ wd.created_at.strftime('%b %d') }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ wd.id }}/remove" class="inline">
-                            <button type="submit" class="text-xs text-red-500 hover:text-red-700">Remove</button>
+                            <button type="submit" class="min-h-11 text-sm text-red-500 hover:text-red-700">Remove</button>
                         </form>
                     </div>
                     {% endfor %}
@@ -377,14 +374,14 @@
                 <div class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Pending Invitations</div>
                 <div class="space-y-2">
                     {% for inv in pending_invitations %}
-                    <div class="flex items-center justify-between bg-amber-50 rounded-lg px-3 py-2">
-                        <div class="text-sm">
+                    <div class="flex flex-wrap items-center justify-between gap-2 bg-amber-50 rounded-lg px-3 py-2">
+                        <div class="text-sm min-w-0 break-all">
                             <span class="text-gray-700">{{ inv.email }}</span>
                             <span class="text-xs text-gray-400 ml-2">sent {{ inv.created_at.strftime('%b %d') }}</span>
                             <span class="text-xs text-gray-400 ml-1">· expires {{ inv.expires_at.strftime('%b %d') }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ inv.id }}/revoke" class="inline">
-                            <button type="submit" class="text-xs text-amber-600 hover:text-amber-800">Revoke</button>
+                            <button type="submit" class="min-h-11 text-sm text-amber-600 hover:text-amber-800">Revoke</button>
                         </form>
                     </div>
                     {% endfor %}
@@ -399,7 +396,7 @@
                 <div class="space-y-2">
                     {% for d in delegates %}
                     <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-                        <div class="text-sm">
+                        <div class="text-sm min-w-0 break-all">
                             <span class="font-medium text-gray-700">{{ d.name }}</span>
                             <span class="text-gray-400 ml-1">({{ d.slack_id }})</span>
                         </div>
@@ -415,9 +412,9 @@
 
             <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/invite">
                 <textarea name="emails" rows="2" placeholder="Enter email addresses (comma or newline separated)"
-                          class="w-full text-sm border border-gray-300 rounded-md px-3 py-2 mb-2"></textarea>
+                          class="w-full text-base border border-gray-300 rounded-md px-3 py-2 mb-2"></textarea>
                 <button type="submit"
-                        class="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">
+                        class="min-h-11 px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">
                     Send Invitations
                 </button>
             </form>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}My Agent — CoPI{% endblock %}
 
 {% block content %}
@@ -30,7 +31,8 @@
         {% if has_profile %}
         <form method="POST" action="/agent/request">
             <button type="submit"
-                    class="px-6 py-3 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition">
+                    data-testid="primary"
+                    class="min-h-11 px-6 py-3 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition">
                 Request Agent
             </button>
         </form>
@@ -39,7 +41,7 @@
             You need a complete research profile before requesting an agent.
         </p>
         <a href="/profile"
-           class="inline-block px-6 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition">
+           class="inline-block min-h-11 items-center px-6 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition">
             Complete Your Profile
         </a>
         {% endif %}
