@@ -131,7 +131,7 @@ def test_every_entry_carries_source_label_and_detail():
     entries = result["strengths"] + result["risks"] + result["unestablished"]
     assert entries
     for entry in entries:
-        assert set(entry) == {"source", "label", "detail", "body"}
+        assert set(entry) == {"source", "label", "detail", "body", "preview", "note"}
         assert entry["source"] in {"dimension", "gating", "red_flag", "consult"}
         assert isinstance(entry["label"], str) and entry["label"]
         assert isinstance(entry["detail"], str)
@@ -237,21 +237,21 @@ def test_thresholds_are_read_from_the_revision_scale():
 def test_a_met_gate_is_a_strength():
     result = _derive(_assessment(gating={"life_sciences_domain": "met"}))
     assert result["strengths"] == [
-        {"source": "gating", "label": "life sciences domain", "detail": "met", "body": []}
+        {"source": "gating", "label": "life sciences domain", "detail": "met", "body": [], "preview": None, "note": None}
     ]
 
 
 def test_an_unmet_gate_is_a_risk():
     result = _derive(_assessment(gating={"credible_science": "not_met"}))
     assert result["risks"] == [
-        {"source": "gating", "label": "credible science", "detail": "not met", "body": []}
+        {"source": "gating", "label": "credible science", "detail": "not met", "body": [], "preview": None, "note": None}
     ]
 
 
 def test_an_unconfirmed_gate_was_never_asked():
     result = _derive(_assessment(gating={"translational_potential": "unconfirmed"}))
     assert result["unestablished"] == [
-        {"source": "gating", "label": "translational potential", "detail": "never asked", "body": []}
+        {"source": "gating", "label": "translational potential", "detail": "never asked", "body": [], "preview": None, "note": None}
     ]
     assert result["strengths"] == []
     assert result["risks"] == []
@@ -287,7 +287,7 @@ def test_every_red_flag_is_a_risk_carrying_its_full_text():
 def test_an_adequate_consult_is_a_strength():
     result = _derive(consults=[_consult("clinical", "adequate")])
     assert result["strengths"] == [
-        {"source": "consult", "label": "clinical", "detail": "adequate", "body": []}
+        {"source": "consult", "label": "clinical", "detail": "adequate", "body": [], "preview": None, "note": None}
     ]
 
 
@@ -299,7 +299,7 @@ def test_the_historical_clear_signal_is_still_read_as_a_strength():
 def test_a_blocking_consult_is_a_risk():
     result = _derive(consults=[_consult("ip", "blocking")])
     assert result["risks"] == [
-        {"source": "consult", "label": "ip", "detail": "blocking", "body": []}
+        {"source": "consult", "label": "ip", "detail": "blocking", "body": [], "preview": None, "note": None}
     ]
 
 
@@ -598,3 +598,84 @@ def test_thresholds_are_all_none_when_the_scale_is_unknown():
     assert result["thresholds"] == {"strength": None, "risk": None, "scale_max": None}
     assert result["mid_scale_count"] == 0
 
+
+
+# ---------------------------------------------------------------------------
+# Compaction (2026-09-14): one entry per domain, previews, clipped red flags
+# ---------------------------------------------------------------------------
+
+
+def test_consults_collapse_to_one_entry_per_domain_from_the_latest():
+    """37 consults across 8 domains must not be 37 bullets. The LATEST consult
+    in a domain decides the bucket and supplies the quotes; the count is a
+    `note`, never a bullet, so it cannot read as specialist text."""
+    consults = [
+        {**_consult("clinical", "adequate"), "established": ["EARLY"]},
+        {**_consult("clinical", "gap"), "concerns": ["LATE ONE.", "LATE TWO."]},
+        {**_consult("legal", "gap"), "concerns": ["ONLY"]},
+    ]
+    result = _derive(consults=consults)
+    assert result["strengths"] == []
+    labels = [(e["label"], e["detail"], e["note"]) for e in result["risks"]]
+    assert labels == [
+        ("clinical", "gap", "latest of 2 consults"),
+        ("legal", "gap", None),
+    ]
+    assert result["risks"][0]["body"] == ["LATE ONE.", "LATE TWO."]
+    assert "EARLY" not in str(result)
+
+
+def test_a_truncated_latest_consult_moves_its_domain_to_not_established_with_the_count():
+    consults = [_consult("ip", "adequate"), _consult("ip", "gap", truncated=True)]
+    result = _derive(consults=consults)
+    assert result["strengths"] == [] and result["risks"] == []
+    entry = _sole(result["unestablished"])
+    assert (entry["label"], entry["note"]) == ("ip", "latest of 2 consults")
+
+
+def test_the_preview_is_the_first_quotes_first_sentence_clipped():
+    long = "First sentence here. " + "Second sentence that goes on and on. " * 12
+    result = _derive(consults=[{**_consult("clinical", "gap"), "concerns": [long]}])
+    entry = _sole(result["risks"])
+    assert entry["preview"] is not None
+    assert entry["preview"].startswith("First sentence here.")
+    assert len(entry["preview"]) <= 160 + 2  # `_clip_at_sentence` may append " …"
+    assert entry["body"] == [long]
+
+
+def test_an_entry_with_no_quotes_has_no_preview():
+    result = _derive(consults=[_consult("clinical", "gap")])
+    entry = _sole(result["risks"])
+    assert entry["preview"] is None and entry["body"] == []
+
+
+def test_a_long_red_flag_is_summarised_to_its_first_sentence_with_the_full_text_behind_it():
+    flag = "Freedom to operate is blocked. " + "There is a dominating patent family " * 10
+    result = _derive(_assessment(red_flags=[flag]))
+    entry = _sole(result["risks"])
+    assert entry["detail"].startswith("Freedom to operate is blocked.")
+    assert len(entry["detail"]) < len(flag)
+    assert entry["body"] == [flag.strip()]
+
+
+def test_a_short_red_flag_stays_a_plain_bullet_with_no_body():
+    result = _derive(_assessment(red_flags=["No IP position"]))
+    entry = _sole(result["risks"])
+    assert entry["detail"] == "No IP position"
+    assert entry["body"] == []
+
+
+def test_gate_and_dimension_bodies_carry_no_preview():
+    from src.services.rubric_revisions import PROVENANCE_LIVE, live_revision_view
+
+    live = live_revision_view()
+    dim = live.dimensions[0]
+    result = _derive(
+        _assessment(gating={next(iter(load_rubric().gating)): "met"}),
+        dimensions=[{"key": dim.key, "title": dim.title, "weight": dim.weight,
+                     "weight_note": dim.weight_note, "score": live.scale_max}],
+        revision=live,
+        revision_provenance=PROVENANCE_LIVE,
+    )
+    assert all(e["preview"] is None for e in result["strengths"])
+    assert all(e["body"] for e in result["strengths"])

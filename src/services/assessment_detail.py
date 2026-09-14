@@ -56,6 +56,7 @@ from src.models import (
     SpecialistConsult,
     User,
 )
+from src.services.assessment_headline import _clip_at_sentence
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, load_rubric
 from src.services.interview_transcript import load_interview_thread
 from src.services.rubric_revisions import (
@@ -649,6 +650,53 @@ def _capped_body(items: object) -> list[str]:
     return body
 
 
+#: One line of quoted text in a COLLAPSED entry: the first sentence, clipped
+#: at a sentence boundary. Stored concerns average ~380 characters and their
+#: first sentences ~150 (measured 2026-09-14), so this is what keeps a card
+#: with 30 consults readable without hiding that there is text to expand.
+PREVIEW_CHARS = 160
+
+
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _preview(text: object) -> str | None:
+    """The FIRST sentence of ``text`` (cut at the first `.`/`!`/`?` followed
+    by whitespace), then clipped to ``PREVIEW_CHARS`` at a sentence or word
+    boundary by ``_clip_at_sentence`` if that one sentence is itself too long.
+    None for a non-string or blank. `_clip_at_sentence` alone is not enough:
+    it keeps the LAST boundary that fits, so two short sentences would both
+    survive, and the preview is meant to be one line."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    first = _SENTENCE_END_RE.split(text.strip(), maxsplit=1)[0]
+    return _clip_at_sentence(first, PREVIEW_CHARS)
+
+
+def _latest_consult_per_domain(consults: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int]]:
+    """Collapse a thread's consults to ONE per domain — the most recent — in
+    first-seen domain order, each paired with how many consults that domain
+    had. ``_load_consults`` orders by ``created_at``, so the last dict seen for
+    a domain is the latest opinion, which is the one the hub concluded on.
+    An interview routinely holds 25-40 consults across 8 domains (measured
+    2026-09-14: 37 consults, 8 domains, 42,600 characters of quoted concerns
+    when every consult was its own bullet), so this is the single largest
+    reduction the card makes; the panel card further down still lists every
+    consult in full."""
+    order: list[str] = []
+    latest: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for consult in consults:
+        if not isinstance(consult, dict):
+            continue
+        domain = str(consult.get("domain") or "consult")
+        if domain not in latest:
+            order.append(domain)
+        latest[domain] = consult
+        counts[domain] = counts.get(domain, 0) + 1
+    return [(latest[d], counts[d]) for d in order]
+
+
 def derive_strengths_and_risks(
     assessment: OpportunityAssessment,
     *,
@@ -708,11 +756,18 @@ def derive_strengths_and_risks(
        brief card must never 500 a page.
 
     Returns `{"strengths": [...], "risks": [...], "unestablished": [...],
-    "scale_known": bool, "thresholds": {...}, "mid_scale_count": int}`, each
-    entry being `{"source": str, "label": str, "detail": str, "body":
-    list[str]}` with `source` one of `dimension` / `gating` / `red_flag` /
-    `consult`. `body` is ALWAYS present — an empty list when there is nothing
-    stored to quote, so the template can test truthiness without `.get`:
+    "scale_known": bool, "thresholds": {...}, "mid_scale_count": int,
+    "scored_dimension_count": int}`, each entry being `{"source": str,
+    "label": str, "detail": str, "body": list[str], "preview": str|None,
+    "note": str|None}` with `source` one of `dimension` / `gating` /
+    `red_flag` / `consult`. `body` is ALWAYS present — an empty list when
+    there is nothing stored to quote, so the template can test truthiness
+    without `.get`. The template renders an entry with a non-empty `body` as
+    a COLLAPSED `<details>` whose summary is `label — detail`, the `note`
+    badge and the one-line `preview`; an entry with an empty body is a plain
+    bullet. Consults are ONE ENTRY PER DOMAIN, from the domain's latest
+    consult (`_latest_consult_per_domain`), with `note` = "latest of N
+    consults" when N > 1:
 
     ==========================  ==========================================
     entry                       `body`
@@ -727,8 +782,9 @@ def derive_strengths_and_risks(
                                 `key` is a live gating key; otherwise `[]` and
                                 the label stays `key.replace("_", " ")`
     gating unconfirmed/other    `[]`, unchanged
-    red flag                    `[]`, unchanged (the `detail` already carries
-                                the flag's full text)
+    red flag                    `detail` is the flag's first sentence
+                                (`_preview`, 160 chars); `body` = `[full
+                                text]` ONLY when that clip shortened it
     consult adequate/clear      the consult's `established` items (non-empty
                                 list of strings only), capped at 3 with an
                                 "and N more" tail; else `[]`
@@ -762,12 +818,22 @@ def derive_strengths_and_risks(
         label: object,
         detail: object,
         body: list[str] | None = None,
+        note: str | None = None,
+        preview: str | None = None,
     ) -> None:
         bucket.append({
             "source": source,
             "label": str(label) if label else source.replace("_", " "),
             "detail": str(detail),
             "body": list(body) if body else [],
+            # One collapsed line of the quoted text (consults only); None
+            # when the entry has nothing to preview or the body is static
+            # rubric metadata that belongs behind the click.
+            "preview": preview,
+            # A non-quote annotation rendered as a badge, never as a bullet:
+            # "latest of N consults" — so it is not mistaken for text a
+            # specialist wrote.
+            "note": note,
         })
 
     # Dimensions. Skipped wholesale when the row's revision is unknown: with no
@@ -851,18 +917,24 @@ def derive_strengths_and_risks(
 
     # Red flags, full text. A non-string entry is skipped rather than coerced:
     # a rendered `None` or `{}` would read as a flag the hub never wrote.
+    # Stored flags average ~535 characters (2026-09-14), so the summary line is
+    # the first sentence and the full text sits behind the click — but ONLY
+    # when the clip actually shortened it: a short flag renders as a plain,
+    # uncollapsed bullet, which is what the red-flag card's own
+    # never-collapsed rule expects of a disqualifier a reviewer must see.
     red_flags = getattr(assessment, "red_flags", None)
     if isinstance(red_flags, list):
         for flag in red_flags:
             if isinstance(flag, str) and flag.strip():
-                _add(risks, "red_flag", "Red flag", flag)
+                full = flag.strip()
+                short = _preview(full) or full
+                _add(risks, "red_flag", "Red flag", short, body=[full] if short != full else [])
 
-    for consult in consults or ():
-        if not isinstance(consult, dict):
-            continue
+    for consult, n_in_domain in _latest_consult_per_domain(list(consults or ())):
         label = consult.get("domain") or "consult"
+        note = f"latest of {n_in_domain} consults" if n_in_domain > 1 else None
         if consult.get("reply_truncated"):
-            _add(unestablished, "consult", label, _TRUNCATED_CONSULT_DETAIL)
+            _add(unestablished, "consult", label, _TRUNCATED_CONSULT_DETAIL, note=note)
             continue
         # `read_state` (migration 0038) has THREE values, and two of them mean
         # the stored `verdict_signal` is not something a specialist said:
@@ -879,15 +951,19 @@ def derive_strengths_and_risks(
         # stays on the signal path below, which is the only answer available
         # for it.
         if consult.get("read_state") == "defaulted":
-            _add(unestablished, "consult", label, _DEFAULTED_CONSULT_DETAIL)
+            _add(unestablished, "consult", label, _DEFAULTED_CONSULT_DETAIL, note=note)
             continue
         signal = consult.get("verdict_signal")
         if isinstance(signal, str) and signal in _STRENGTH_SIGNALS:
-            _add(strengths, "consult", label, signal, body=_capped_body(consult.get("established")))
+            body = _capped_body(consult.get("established"))
+            _add(strengths, "consult", label, signal, body=body, note=note,
+                 preview=_preview(body[0]) if body else None)
         elif isinstance(signal, str) and signal in _RISK_SIGNALS:
-            _add(risks, "consult", label, signal, body=_capped_body(consult.get("concerns")))
+            body = _capped_body(consult.get("concerns"))
+            _add(risks, "consult", label, signal, body=body, note=note,
+                 preview=_preview(body[0]) if body else None)
         else:
-            _add(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL)
+            _add(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL, note=note)
 
     return {
         "strengths": strengths,

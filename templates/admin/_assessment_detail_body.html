@@ -217,17 +217,32 @@
             <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
                 {% for item in vs['strengths'] %}
                 <li class="signal-entry signal-strength signal-source-{{ item.source }}">
+                    {# An entry with quoted text is a COLLAPSED <details>: the
+                       summary is the label, the signal, an optional badge and
+                       one clipped preview line; the quotes live behind the
+                       click. An entry with nothing to quote is a plain line. #}
+                    {% if item.body %}
+                    <details class="signal-collapsible">
+                        <summary class="cursor-pointer">
+                            <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
+                            <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                            {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+                            {% if item.preview %}<span class="signal-preview block ml-5 text-sm text-gray-600">{{ item.preview }}</span>{% endif %}
+                        </summary>
+                        {% if item.source == 'consult' %}
+                        <div class="text-sm italic text-gray-600 mt-1 ml-5">what the {{ item.label }} specialist established</div>
+                        {% endif %}
+                        <ul class="signal-body mt-1 ml-5 space-y-1 text-sm text-gray-700 list-disc list-inside">
+                            {% for line in item.body %}
+                            <li>{{ line }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% if item.note %}<div class="text-sm text-gray-600 mt-1 ml-5">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
+                    </details>
+                    {% else %}
                     <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
                     <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                    {% if item.body %}
-                    {% if item.source == 'consult' %}
-                    <div class="text-sm italic text-gray-600 mt-1 ml-4">what the {{ item.label }} specialist established</div>
-                    {% endif %}
-                    <ul class="signal-body mt-1 ml-4 space-y-0.5 text-sm text-gray-600 list-disc list-inside">
-                        {% for line in item.body %}
-                        <li>{{ line }}</li>
-                        {% endfor %}
-                    </ul>
+                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
                     {% endif %}
                 </li>
                 {% endfor %}
@@ -261,17 +276,32 @@
             <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
                 {% for item in vs['risks'] %}
                 <li class="signal-entry signal-risk signal-source-{{ item.source }}">
+                    {# An entry with quoted text is a COLLAPSED <details>: the
+                       summary is the label, the signal, an optional badge and
+                       one clipped preview line; the quotes live behind the
+                       click. An entry with nothing to quote is a plain line. #}
+                    {% if item.body %}
+                    <details class="signal-collapsible">
+                        <summary class="cursor-pointer">
+                            <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
+                            <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                            {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+                            {% if item.preview %}<span class="signal-preview block ml-5 text-sm text-gray-600">{{ item.preview }}</span>{% endif %}
+                        </summary>
+                        {% if item.source == 'consult' %}
+                        <div class="text-sm italic text-gray-600 mt-1 ml-5">the {{ item.label }} specialist's concerns</div>
+                        {% endif %}
+                        <ul class="signal-body mt-1 ml-5 space-y-1 text-sm text-gray-700 list-disc list-inside">
+                            {% for line in item.body %}
+                            <li>{{ line }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% if item.note %}<div class="text-sm text-gray-600 mt-1 ml-5">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
+                    </details>
+                    {% else %}
                     <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
                     <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                    {% if item.body %}
-                    {% if item.source == 'consult' %}
-                    <div class="text-sm italic text-gray-600 mt-1 ml-4">the {{ item.label }} specialist's concerns</div>
-                    {% endif %}
-                    <ul class="signal-body mt-1 ml-4 space-y-0.5 text-sm text-gray-600 list-disc list-inside">
-                        {% for line in item.body %}
-                        <li>{{ line }}</li>
-                        {% endfor %}
-                    </ul>
+                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
                     {% endif %}
                 </li>
                 {% endfor %}
@@ -296,6 +326,7 @@
                 <li class="signal-entry signal-unestablished signal-source-{{ item.source }}">
                     <span class="text-slate-700" title="Not established" aria-label="Not established">?</span>
                     <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
                 </li>
                 {% endfor %}
             </ul>
@@ -309,7 +340,7 @@
        one-sentence provenance keeps a reader from reading a derived summary
        as something the hub wrote. #}
     <p class="signals-legend text-sm text-gray-600 mt-3">
-        &#10003; strength &middot; &#10007; risk &middot; ? not established
+        &#10003; strength &middot; &#10007; risk &middot; ? not established &middot; a row with a &#9656; opens to the quoted text
     </p>
     <p class="signals-provenance text-sm text-gray-600 mt-1 max-w-[68ch]">
         Derived from this verdict's stored dimension scores, gating states, red

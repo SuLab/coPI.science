@@ -2315,6 +2315,105 @@ async def test_hub_words_with_no_derived_entries_still_shows_the_derived_empty_s
     assert "signals-empty" in strengths
 
 
+async def test_quoted_consult_text_is_collapsed_by_default_with_a_one_line_preview(
+    client, db_session, admin
+):
+    """A consult entry that quotes specialist text is a <details> with NO
+    `open` attribute: the summary shows label, signal and the first sentence
+    only, and the full quotes sit behind the click."""
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=SUBJECT, channel_name=CHANNEL,
+        message_ts=root_ts, phase="new_post",
+        content="Root post for the compaction tests.",
+        posted_at=time.time(),
+    )
+    long_concern = (
+        "PREVIEW-FIRST-SENTENCE the control arm is missing. "
+        + "SECOND-SENTENCE-HIDDEN this text should only appear inside the details body. " * 3
+    )
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+            thread_id=root_ts, channel_name=CHANNEL, domain="clinical",
+            question="Is there a control arm?", verdict_signal="gap",
+            confidence="moderate", concerns=[long_concern],
+            raw_opinion="not shown on this page",
+        )
+    )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, slack_ts=root_ts,
+        company_or_project="Collapsed Consult Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    _strengths, risks, _unestablished = _signal_columns(body)
+    entry = re.search(r'<details class="signal-collapsible"[^>]*>(.*?)</details>', risks, re.DOTALL)
+    assert entry is not None, "the consult entry did not render as a <details>"
+    assert " open" not in entry.group(0).split(">", 1)[0]
+    summary = re.search(r"<summary.*?</summary>", entry.group(1), re.DOTALL).group(0)
+    assert "PREVIEW-FIRST-SENTENCE" in summary
+    assert "SECOND-SENTENCE-HIDDEN" not in summary
+    assert "SECOND-SENTENCE-HIDDEN" in entry.group(1)
+
+
+async def test_consults_in_one_domain_render_as_a_single_entry_from_the_latest(
+    client, db_session, admin
+):
+    """Six clinical consults are one clinical row, badged with the count and
+    quoting only the latest opinion; the panel card below still lists all."""
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=SUBJECT, channel_name=CHANNEL,
+        message_ts=root_ts, phase="new_post",
+        content="Root post for the compaction tests.",
+        posted_at=time.time(),
+    )
+    base = datetime.now(UTC)
+    for i, (signal, text) in enumerate([
+        ("adequate", "EARLY-ESTABLISHED-MARKER"), ("gap", "MIDDLE-CONCERN-MARKER"),
+        ("gap", "LATEST-CONCERN-MARKER"),
+    ]):
+        db_session.add(
+            SpecialistConsult(
+                simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+                thread_id=root_ts, channel_name=CHANNEL, domain="clinical",
+                question=f"q{i}", verdict_signal=signal, confidence="moderate",
+                concerns=[text] if signal == "gap" else None,
+                established=[text] if signal == "adequate" else None,
+                raw_opinion="not shown on this page",
+                created_at=base.replace(microsecond=i * 1000),
+            )
+        )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, slack_ts=root_ts,
+        company_or_project="Grouped Consult Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, _unestablished = _signal_columns(body)
+    assert risks.count("signal-source-consult") == 1
+    assert "latest of 3 consults" in risks
+    assert "LATEST-CONCERN-MARKER" in risks
+    assert "MIDDLE-CONCERN-MARKER" not in risks
+    assert "EARLY-ESTABLISHED-MARKER" not in strengths
+    assert "signal-source-consult" not in strengths
+
+
 async def test_the_score_rationale_pointer_is_conditional(client, db_session, admin):
     """The footnote's jump-link to `#score-rationale` only appears when the
     row has a score rationale; the anchor is added to the amber box either
