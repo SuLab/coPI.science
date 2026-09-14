@@ -1,0 +1,30 @@
+@import "tailwindcss" source(none);
+@source "../../templates";
+
+@theme {
+  --color-brand-50: var(--color-indigo-50);
+  --color-brand-100: var(--color-indigo-100);
+  --color-brand-500: var(--color-indigo-500);
+  --color-brand-600: var(--color-indigo-600);
+  --color-brand-700: var(--color-indigo-700);
+}
+
+@layer base {
+  /* v3 compat: default border/divide color was gray-200; v4 uses currentColor. */
+  *, ::after, ::before, ::backdrop, ::file-selector-button {
+    border-color: var(--color-gray-200, currentColor);
+  }
+  /* v4 Preflight sets cursor: default on buttons; v3 did not. */
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  }
+}
+
+@layer components {
+  /* Horizontal-scroll table region: shadow on the sticky first column once scrolled. */
+  .data-table-region.is-scrolled th:first-child,
+  .data-table-region.is-scrolled td:first-child {
+    box-shadow: 4px 0 6px -4px rgb(0 0 0 / 0.15);
+  }
+}

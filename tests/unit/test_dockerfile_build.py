@@ -3,6 +3,7 @@ non-root user. No `docker build` here: these assert the *text* is
 ordered/shaped correctly. Real image-build verification is a manual step,
 mirroring nginx's `nginx -t` check."""
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,17 +30,21 @@ def test_two_stage_build_with_a_slim_runtime():
     text = _dockerfile()
     lines = text.splitlines()
     from_line_indices = [i for i, line in enumerate(lines) if line.startswith("FROM ")]
-    assert len(from_line_indices) == 2, "expected exactly a builder stage and a runtime stage"
+    assert len(from_line_indices) == 3, (
+        "expected exactly three stages: the builder, the css stage, and the runtime stage"
+    )
+    assert "AS css" in text
+    assert "AS builder" in text
     assert "FROM python:3.11-slim" in text, (
         "the --no-build-isolation step depends on the base image shipping "
         "setuptools/wheel"
     )
-    assert "AS builder" in text
     assert "--from=builder" in text
     runtime_section = "\n".join(lines[from_line_indices[-1] :])
     assert "gcc" not in runtime_section
     assert "libpq-dev" not in runtime_section
     assert "libpq5" in runtime_section
+    assert "curl" not in runtime_section, "curl is only needed in the css stage"
 
 
 def test_runtime_stage_drops_to_a_non_root_fixed_uid():
@@ -102,3 +107,32 @@ def test_bytecode_is_compiled_before_dropping_root():
 def test_home_env_is_set_for_the_runtime_user():
     text = _dockerfile()
     assert "ENV HOME=/app" in text, "no-create-home leaves $HOME unset; the runtime user needs one"
+
+
+def test_css_stage_downloads_and_verifies_the_pinned_tailwind_binary():
+    text = _dockerfile()
+    assert "AS css" in text
+    assert "tailwindcss-linux-x64" in text
+    version_match = re.search(r"TAILWIND_VERSION=(v4\.\S+)", text)
+    assert version_match, "expected a pinned v4.x TAILWIND_VERSION ARG"
+    sha_match = re.search(r"TAILWIND_SHA256=([0-9a-f]{64})", text)
+    assert sha_match, "expected a 64-char lowercase-hex TAILWIND_SHA256 ARG"
+    assert "sha256sum -c" in text, "the css stage must fail closed on a checksum mismatch"
+
+
+def test_compiled_stylesheet_is_copied_in_after_the_app_tree_and_before_compileall():
+    text = _dockerfile()
+    instruction_lines = [
+        line for line in text.splitlines() if line.startswith(("COPY", "RUN", "USER"))
+    ]
+    copy_app_idx = instruction_lines.index("COPY . .")
+    css_copy_idx = next(
+        i for i, line in enumerate(instruction_lines) if line.startswith("COPY --from=css")
+    )
+    compileall_idx = next(
+        i for i, line in enumerate(instruction_lines) if "compileall" in line
+    )
+    assert copy_app_idx < css_copy_idx < compileall_idx, (
+        "the compiled CSS must be copied in after the app tree (so a stale host "
+        "build under static/css can never win) and before compileall/USER"
+    )

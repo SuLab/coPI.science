@@ -23,6 +23,20 @@ COPY src/ src/
 # third-party artifact off the network.
 RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
+FROM debian:bookworm-slim AS css
+ARG TAILWIND_VERSION=v4.3.3
+ARG TAILWIND_SHA256=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl -fsSL -o tailwindcss \
+      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
+    && echo "${TAILWIND_SHA256}  tailwindcss" | sha256sum -c - \
+    && chmod +x tailwindcss
+COPY assets/ assets/
+COPY templates/ templates/
+RUN mkdir -p /out && ./tailwindcss -i assets/css/app.css -o /out/app.min.css --minify
+
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
@@ -40,6 +54,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
+
+# Prebuilt stylesheet from the earlier build stage. Placed after the app-tree
+# copy so a stale host build under static/css can never win, and before the
+# bytecode step and the USER switch so it stays root-owned like the rest of
+# static/.
+COPY --from=css /out/app.min.css static/css/app.min.css
 
 # Bake the bytecode cache while root still owns src/ — UID 10001 (set below)
 # cannot write __pycache__ into root-owned src/, so without this every

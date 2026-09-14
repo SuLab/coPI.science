@@ -44,6 +44,12 @@ profiles/*.log
 data/
 static/
 
+# Tailwind standalone binary cache (scripts/build-css.sh)
+.cache
+
+# Playwright responsive-test screenshot output (T10)
+tests/responsive/_out/
+
 # IDE
 .idea/
 .vscode/
