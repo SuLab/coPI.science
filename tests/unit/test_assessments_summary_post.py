@@ -102,6 +102,9 @@ _LEAK_SENTINELS = (
     "SENTINEL_RAW",
     "SENTINEL_MILESTONE",
     "SENTINEL_CONFIDENCE",
+    "SENTINEL_SCORE_RATIONALE",
+    "SENTINEL_STRENGTH",
+    "SENTINEL_RISK",
 )
 
 LEAKY_VERDICT = {
@@ -112,6 +115,9 @@ LEAKY_VERDICT = {
     "raw_verdict": {"anything": "SENTINEL_RAW"},
     "suggested_derisking_milestones": ["SENTINEL_MILESTONE"],
     "confidence": "SENTINEL_CONFIDENCE",
+    "score_rationale": "SENTINEL_SCORE_RATIONALE",
+    "strengths": ["SENTINEL_STRENGTH"],
+    "risks": ["SENTINEL_RISK"],
 }
 
 

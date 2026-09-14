@@ -371,3 +371,128 @@ def test_normalize_rejects_wrong_shapes():
     assert normalize_key_points(
         {"significance": [], "innovation": [], "commercial_potential": [], "extra": []}
     ) is None
+
+
+async def test_persist_assessment_stores_strengths_and_risks(engine):
+    """Sidecar items 11/12 (0049): valid bullet lists reach their columns."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            "company_or_project": "Short label",
+            "strengths": ["S one", "S two"],
+            "risks": ["R one", "R two"],
+            "recommendation": "conditional",
+            "scores": {},
+        })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.strengths == ["S one", "S two"]
+        assert row.risks == ["R one", "R two"]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_wrong_typed_strengths_and_risks_degrade_to_null_and_keep_raw_verdict(
+    engine,
+):
+    """A20: a `strengths` that is not a list, and a `risks` list that holds a
+    non-string element, both degrade to NULL and `raw_verdict` keeps what was
+    actually emitted."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            "company_or_project": "Short label",
+            "strengths": "not a list",
+            "risks": [1, 2],
+            "recommendation": "pass",
+            "scores": {},
+        })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.strengths is None
+        assert row.risks is None
+        assert row.raw_verdict["strengths"] == "not a list"
+        assert row.raw_verdict["risks"] == [1, 2]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_five_bullet_strengths_list_still_stores_and_warns(engine, caplog):
+    """Shape checks are WARNINGS, never drops (A4): a count outside the 2-4
+    contract bound is stored verbatim and merely logged."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    five = ["S one", "S two", "S three", "S four", "S five"]
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "strengths": five,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.strengths == five
+
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "strengths carries 5 bullets" in warnings
+    finally:
+        await _delete_run(factory, run_id)

@@ -652,7 +652,7 @@ async def manager_assessment_detail(
     Same page as /admin/assessments/{id} with ``admin_view=False``, which is
     what keeps the LLM drill-down admin-only (D10): no tool activity, and no
     specialist's verbatim opinion text. The panel's substance — domain, signal,
-    confidence, concerns, questions_to_ask — IS shown; that split is plan
+    confidence, concerns, established, questions_to_ask — IS shown; that split is plan
     decision 2, and the redaction happens in the service, not just in the
     template (see ``src.services.assessment_detail``).
     """

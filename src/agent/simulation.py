@@ -63,7 +63,11 @@ from src.models import (
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
-from src.services.assessment_detail import KEY_POINT_GROUPS, normalize_key_points
+from src.services.assessment_detail import (
+    KEY_POINT_GROUPS,
+    normalize_bullets,
+    normalize_key_points,
+)
 from src.services.assessment_headline import (
     PROJECT_DISPLAY_CHARS,
     render_assessment_headline,
@@ -4609,6 +4613,39 @@ class SimulationEngine:
                     "[%s] Assessment key_points omits %d of %d groups: %s",
                     agent_id, len(absent), len(KEY_POINT_GROUPS), ", ".join(absent),
                 )
+        # Sidecar items 11/12 (0049): strengths/risks. Same soft-bound policy
+        # as key_points above — a shape violation is warned about, never a
+        # drop by itself. `normalize_bullets` is the only thing that drops the
+        # whole field, and only for a genuine type violation (A20).
+        for _field_name in ("strengths", "risks"):
+            _raw_bullets = verdict.get(_field_name)
+            if isinstance(_raw_bullets, list):
+                if not (_HUB_BULLETS_MIN <= len(_raw_bullets) <= _HUB_BULLETS_MAX):
+                    logger.warning(
+                        "[%s] Assessment %s carries %d bullets (contract asks for %d-%d)",
+                        agent_id, _field_name, len(_raw_bullets),
+                        _HUB_BULLETS_MIN, _HUB_BULLETS_MAX,
+                    )
+                for _bullet in _raw_bullets:
+                    if isinstance(_bullet, str) and len(_bullet) > _HUB_BULLET_CHARS:
+                        logger.warning(
+                            "[%s] Assessment %s bullet is %d chars (contract asks for <=%d): %s",
+                            agent_id, _field_name, len(_bullet), _HUB_BULLET_CHARS,
+                            _bullet[:80],
+                        )
+                if normalize_bullets(_raw_bullets) is None:
+                    logger.warning(
+                        "[%s] Assessment %s was DROPPED (stored NULL; the value "
+                        "survives only in raw_verdict): not a non-empty list of "
+                        "non-blank strings",
+                        agent_id, _field_name,
+                    )
+            elif _raw_bullets is not None:
+                logger.warning(
+                    "[%s] Assessment %s was DROPPED (stored NULL; the value "
+                    "survives only in raw_verdict): not a list",
+                    agent_id, _field_name,
+                )
         # Built once, up front, so a failed first attempt has a plain dict —
         # not a session-bound ORM instance — ready to hand straight to
         # _pending_assessments for a later retry.
@@ -4648,6 +4685,11 @@ class SimulationEngine:
             # whole reason it is a column of its own rather than more pitch.
             # Degrades exactly like its narrative siblings above.
             score_rationale=_str_or_none(verdict.get("score_rationale")),
+            # Sidecar items 11/12 (0049): the hub's own strengths/risks
+            # bullets. Degrades to None on a wrong type like its narrative
+            # siblings above; raw_verdict keeps the original either way.
+            strengths=normalize_bullets(verdict.get("strengths")),
+            risks=normalize_bullets(verdict.get("risks")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
             confidence=confidence,
@@ -9224,6 +9266,14 @@ _KEY_POINTS_MAX = 5
 # three named groups individually rather than the flat 3-5 total above.
 _KEY_POINT_GROUP_MIN = 1
 _KEY_POINT_GROUP_MAX = 2
+#: Sidecar items 11/12 (scout_hub >= 1.5.0): the hub's own strengths/risks
+#: bullets. SOFT bounds, same policy as the key_points groups above — a
+#: contract violation is warned about and stored as emitted, never dropped
+#: for a count/length reason alone (only `normalize_bullets` itself drops the
+#: whole field, and only for a genuine shape violation).
+_HUB_BULLETS_MIN = 2
+_HUB_BULLETS_MAX = 4
+_HUB_BULLET_CHARS = 200
 
 
 def _normalize_gating(raw: object) -> dict | None:

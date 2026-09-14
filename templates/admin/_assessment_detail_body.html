@@ -139,7 +139,7 @@
        every row written before 0048 and deliberately never backfilled, so
        the whole block is conditional rather than showing an empty state. #}
     {% if a.score_rationale %}
-    <div class="assessment-brief-score-rationale mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+    <div id="score-rationale" class="assessment-brief-score-rationale mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
         <div class="text-sm font-semibold text-amber-900">Why this score</div>
         {# Same write-time `prose_format` stamp and the same safe fallback as
            the pitch above and Rationale below: a NULL stamp means legacy
@@ -174,37 +174,118 @@
    never the only signal.
    -------------------------------------------------------------------------- #}
 {% set vs = verdict_signals or {} %}
+{% set vs_thresholds = vs.get('thresholds') or {} %}
+{# The hub's own bullets (0049). Staff-only on the page — the prompt promises
+   the model this field is never seen outside staff, and a reviewer account
+   reaches the manager route. A column is raw JSONB, so anything that is not a
+   real list (a string, a mapping) renders as nothing rather than as one
+   bullet per character or per key. #}
+{% set hub_strengths = a.strengths if (viewer_is_staff and a.strengths is iterable and a.strengths is not string and a.strengths is not mapping) else [] %}
+{% set hub_risks = a.risks if (viewer_is_staff and a.risks is iterable and a.risks is not string and a.risks is not mapping) else [] %}
 <div id="signals" class="assessment-signals scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-base font-semibold text-gray-900 mb-3">Strengths and risks</h3>
+    {% if vs.get('mid_scale_count') %}
+    {% set mid_n = vs.mid_scale_count %}
+    {% set scored_n = vs.get('scored_dimension_count') or mid_n %}
+    <p class="signals-midscale text-sm text-gray-600 mb-3">
+        {% if mid_n == scored_n and mid_n == 1 %}
+        The one scored dimension sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists it.
+        {% elif mid_n == scored_n %}
+        All {{ mid_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists them.
+        {% elif mid_n == 1 %}
+        1 of {{ scored_n }} scored dimensions sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists it.
+        {% else %}
+        {{ mid_n }} of {{ scored_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists them.
+        {% endif %}
+    </p>
+    {% endif %}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="assessment-signals-strengths rounded-lg border border-green-200 bg-green-50 p-3">
             <div class="text-sm font-semibold text-green-900">Strengths</div>
+            {% if hub_strengths %}
+            <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-2">In the hub's words</div>
+            <ul class="signal-hub-words mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+                {% for bullet in hub_strengths %}
+                <li>{{ bullet }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            {% if hub_strengths %}
+            <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-2">Derived from the stored verdict</div>
+            {% endif %}
             {% if vs.get('strengths') %}
-            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+            <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
                 {% for item in vs['strengths'] %}
                 <li class="signal-entry signal-strength signal-source-{{ item.source }}">
                     <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
                     <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                    {% if item.body %}
+                    {% if item.source == 'consult' %}
+                    <div class="text-sm italic text-gray-600 mt-1 ml-4">what the {{ item.label }} specialist established</div>
+                    {% endif %}
+                    <ul class="signal-body mt-1 ml-4 space-y-0.5 text-sm text-gray-600 list-disc list-inside">
+                        {% for line in item.body %}
+                        <li>{{ line }}</li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
                 </li>
                 {% endfor %}
             </ul>
             {% else %}
-            <p class="signals-empty mt-1 text-sm text-gray-600">No dimension scored at or above 4, and no gate met.</p>
+            <p class="signals-empty mt-1 text-sm text-gray-600">
+                {% if vs.get('scale_known') and vs_thresholds.strength is not none and vs_thresholds.scale_max is not none %}
+                No dimension scored at or above {{ "%g"|format(vs_thresholds.strength) }} of {{ "%g"|format(vs_thresholds.scale_max) }}, and no gate was met.
+                {% elif vs.get('scale_known') %}
+                Dimension scores could not be classified (this rubric revision's scale is unusable); no gate was met.
+                {% else %}
+                Dimension scores could not be classified (unknown rubric revision); no gate was met.
+                {% endif %}
+            </p>
             {% endif %}
         </div>
         <div class="assessment-signals-risks rounded-lg border border-red-200 bg-red-50 p-3">
             <div class="text-sm font-semibold text-red-900">Risks</div>
+            {% if hub_risks %}
+            <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-2">In the hub's words</div>
+            <ul class="signal-hub-words mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+                {% for bullet in hub_risks %}
+                <li>{{ bullet }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            {% if hub_risks %}
+            <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-2">Derived from the stored verdict</div>
+            {% endif %}
             {% if vs.get('risks') %}
-            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+            <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
                 {% for item in vs['risks'] %}
                 <li class="signal-entry signal-risk signal-source-{{ item.source }}">
                     <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
                     <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                    {% if item.body %}
+                    {% if item.source == 'consult' %}
+                    <div class="text-sm italic text-gray-600 mt-1 ml-4">the {{ item.label }} specialist's concerns</div>
+                    {% endif %}
+                    <ul class="signal-body mt-1 ml-4 space-y-0.5 text-sm text-gray-600 list-disc list-inside">
+                        {% for line in item.body %}
+                        <li>{{ line }}</li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
                 </li>
                 {% endfor %}
             </ul>
             {% else %}
-            <p class="signals-empty mt-1 text-sm text-gray-600">None recorded.</p>
+            <p class="signals-empty mt-1 text-sm text-gray-600">
+                {% if vs.get('scale_known') and vs_thresholds.risk is not none and vs_thresholds.scale_max is not none %}
+                No dimension scored at or below {{ "%g"|format(vs_thresholds.risk) }} of {{ "%g"|format(vs_thresholds.scale_max) }}, no gate was unmet, no red flag was raised, and no specialist signalled a gap.
+                {% elif vs.get('scale_known') %}
+                Dimension scores could not be classified (this rubric revision's scale is unusable); no gate was unmet, no red flag was raised, and no specialist signalled a gap.
+                {% else %}
+                Dimension scores could not be classified (unknown rubric revision); no gate was unmet, no red flag was raised, and no specialist signalled a gap.
+                {% endif %}
+            </p>
             {% endif %}
         </div>
         <div class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -238,6 +319,18 @@
         This row's rubric revision is not in the registry, so its dimension
         scores could not be classified as strengths or risks &mdash; only its
         gating, red flags and specialist signals are represented above.
+        {% endif %}
+        {% if hub_strengths or hub_risks %}
+        "In the hub's words" bullets are written by BlackbirdBot inside its
+        verdict sidecar; derived entries are classified from stored scores,
+        gates, flags and specialist signals and quote the specialists' stored
+        text.
+        {% else %}
+        Derived entries are classified from stored scores, gates, flags and
+        specialist signals and quote the specialists' stored text.
+        {% endif %}
+        {% if a.score_rationale %}
+        The hub's own account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
         {% endif %}
     </p>
 </div>

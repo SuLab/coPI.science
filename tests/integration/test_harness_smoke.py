@@ -59,7 +59,10 @@ async def test_container_is_migrated(engine):
         # 0048 opportunity_assessments.score_rationale (the hub's brief account
         #      of why the dimension scores came out where they did; app-only,
         #      never published to #assessments-summary)
-        assert v == "0048"
+        # 0049 opportunity_assessments.strengths/.risks (the hub's own
+        #      strengths/risks bullets, sidecar items 11/12; app-only,
+        #      never published to #assessments-summary)
+        assert v == "0049"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

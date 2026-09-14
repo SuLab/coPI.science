@@ -93,6 +93,15 @@ class OpportunityAssessment(Base):
     # not be smuggled into the pitch, which IS published. Adding it to the
     # headline is a content-policy change requiring sign-off, not a tidy-up.
     score_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sidecar items 11/12 (scout_hub 1.5.0, migration 0049): the hub's own
+    # strengths and risks bullets for this verdict. NULL means either the row
+    # predates 0049 or the hub emitted a malformed value (`normalize_bullets`
+    # rejected it) — `raw_verdict` keeps whatever was actually emitted either
+    # way. A non-NULL value is a list of the hub's own bullet strings.
+    # App-only, like `score_rationale`: never published to
+    # `#assessments-summary`.
+    strengths: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    risks: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     funnel_stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
     recommendation: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)

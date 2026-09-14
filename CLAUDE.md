@@ -1353,6 +1353,48 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > indistinguishable from one the hub wrote. Both assessment surfaces render
 > nothing when it is NULL.
 
+> **Deploy order for `0049_assessment_strengths_risks` — migrate BEFORE the
+> new code serves, and rebuild the AGENT image in the same deploy.** `0049` is
+> two additive nullable JSONB columns (`opportunity_assessments.strengths` /
+> `.risks`, sidecar items 11/12 of scout_hub prompt set 1.5.0 — the hub's own
+> two-to-four-bullet strengths and risks lists for a verdict), so *old code
+> against the new schema* is safe. The reverse breaks both ways. READ: the new
+> code **maps both columns**, so every `select(OpportunityAssessment)` — both
+> assessment list pages, both detail pages — raises `UndefinedColumn`. WRITE:
+> `_persist_assessment` names both in the INSERT, and that write is
+> best-effort, so **every verdict of a running simulation is lost** to one
+> ERROR line in a log nobody is tailing while the Slack replies keep looking
+> normal. Same shape as the `0043`/`0048` boxes above.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0049)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> **The agent rebuild is required, and the hazardous half of the pairing is
+> prompt-without-image.** `prompts/` is bind-mounted and `src/` is baked. This
+> deploy bumps the scout_hub prompt set to **1.5.0**, whose sidecar gains the
+> `strengths`/`risks` keys. Prompt-without-image (an edited prompt served by
+> an old image) writes NULL into both columns forever: the old image's parser
+> does not know the two keys, so `normalize_bullets` is never called on them
+> and `_persist_assessment` never assigns them — the hub's bullets survive
+> only inside `raw_verdict`. Image-without-prompt (a rebuilt image serving an
+> unbumped prompt) is benign: an old sidecar simply never emits `strengths` or
+> `risks`, `verdict.get(...)` reads `None`, and `normalize_bullets(None)` is
+> `None` — the columns store NULL exactly as they did before this migration.
+>
+> NULL on every pre-`0049` row and deliberately never backfilled: those
+> verdicts were never asked for strengths/risks bullets, and generated ones
+> would be indistinguishable from bullets the hub actually wrote. Both
+> assessment detail pages render an "In the hub's words" section only when the
+> column is non-NULL. Like `score_rationale`, both fields are app-only:
+> `#assessments-summary` is untouched by this migration and still renders
+> only its existing six fields — label, recommendation, band/score,
+> permalink and the clipped elevator pitch.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —

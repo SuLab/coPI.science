@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0048"
+DEFAULT_TARGET = "0049"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -117,8 +117,8 @@ DEFAULT_TARGET = "0048"
 #: a supported start, not a BLOCK. 0044 and 0045 join for the identical
 #: reason as DEFAULT_TARGET moved to 0045 and then to 0046: the revision
 #: immediately behind the target is the most likely real starting point and
-#: must never be a BLOCK. 0047 joins for that same reason as DEFAULT_TARGET
-#: moves to 0048.
+#: must never be a BLOCK. 0047 joined for that same reason as DEFAULT_TARGET
+#: moved to 0048, and 0048 joins now as DEFAULT_TARGET moves to 0049.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -135,7 +135,7 @@ DEFAULT_TARGET = "0048"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041", "0042", "0043", "0044", "0045", "0046", "0047",
+    "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -420,12 +420,15 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0047", "index", "ix_pi_industry_scores_user_id", "pi_industry_scores"),
     # 0048_assessment_score_rationale
     PlannedObject("0048", "column", "score_rationale", "opportunity_assessments"),
+    # 0049_assessment_strengths_risks
+    PlannedObject("0049", "column", "strengths", "opportunity_assessments"),
+    PlannedObject("0049", "column", "risks", "opportunity_assessments"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
+    "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049",
 )
 
 

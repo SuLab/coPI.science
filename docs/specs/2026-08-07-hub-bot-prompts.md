@@ -609,12 +609,26 @@ of it may appear anywhere in `<slack_message>` above:
     reason about the score freely — but it is still bound by the
     confidentiality rule above and must not restate a PI's unpublished
     disclosure.
+11. **Strengths.** Two to four bullets, each at most 200 characters, each a
+    complete claim that names the evidence it rests on — a result, a dataset,
+    a specialist's finding, or a fact about the team or market — never a bare
+    topic heading. Record them in `strengths` as an array of strings.
+    **Staff-only: like the score rationale, this field is never posted to
+    Slack**, so it may cite the PI's unpublished results where they are the
+    evidence — but it is still bound by the confidentiality rule above. Never
+    state a number for the weighted score or the band.
+12. **Risks.** Two to four bullets, the same length bound, each naming the
+    specific risk AND what would resolve it — the experiment, document, or
+    answer that closes it. Record them in `risks` as an array of strings.
+    **Staff-only: like the score rationale, this field is never posted to
+    Slack**, and the same confidentiality rule as item 11 applies. Never
+    state a number for the weighted score or the band.
 
 **Never write a bare `~` in any sidecar field** — not in `headline`,
-`key_points`, `elevator_pitch`, `score_rationale`, `rationale` or
-`recommended_next_experiment`. Slack reads a pair of them as strikethrough and
-silently strikes out everything between. Write "approximately", "about", or
-`≈`.
+`key_points`, `elevator_pitch`, `score_rationale`, `strengths`, `risks`,
+`rationale` or `recommended_next_experiment`. Slack reads a pair of them as
+strikethrough and silently strikes out everything between. Write
+"approximately", "about", or `≈`.
 
 **Formatting `rationale`, `recommended_next_experiment` and `elevator_pitch`.**
 Write all three fields in simple Markdown: short paragraphs separated by a
@@ -665,6 +679,8 @@ every proposal.
   "key_points": {"significance": [], "innovation": [], "clinical_actionability": [], "key_questions": [], "commercial_potential": []},
   "elevator_pitch": "",
   "score_rationale": "",
+  "strengths": [],
+  "risks": [],
   "gating": {
     "life_sciences_domain": "met",
     "credible_science": "not_met",

@@ -22,8 +22,8 @@ Two sources, deliberately kept separate:
 Everything derived from ``llm_call_logs`` is admin-only (``admin_view``), along
 with ``raw_opinion``: the LLM drill-down is an admin surface and managers
 deliberately do not get one. Managers still see each consult's domain, signal,
-confidence, concerns and questions_to_ask — the substance of what the panel
-said. That split is a recorded policy decision, not an accident.
+confidence, concerns, established and questions_to_ask — the substance of what
+the panel said. That split is a recorded policy decision, not an accident.
 
 The redaction is done HERE, by omitting the values from the returned context,
 rather than only by not rendering them in the manager template: a template that
@@ -58,7 +58,11 @@ from src.models import (
 )
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, load_rubric
 from src.services.interview_transcript import load_interview_thread
-from src.services.rubric_revisions import PROVENANCE_UNKNOWN, resolve_revision
+from src.services.rubric_revisions import (
+    PROVENANCE_LIVE,
+    PROVENANCE_UNKNOWN,
+    resolve_revision,
+)
 
 # Hard bounds. This page is a read of unbounded production data: a channel can
 # hold hundreds of hub turns and a retrieve_full_text result can be an entire
@@ -145,6 +149,25 @@ def normalize_key_points(value: object) -> list | dict | None:
     ):
         return value
     return None
+
+
+def normalize_bullets(value: object) -> list[str] | None:
+    """The hub's own ``strengths`` / ``risks`` sidecar lists (scout_hub >= 1.5.0).
+
+    A non-empty list whose every element is a non-empty ``str`` after
+    ``.strip()`` is returned stripped. Anything else — a dict, a string, an
+    empty list, a list holding a non-string or a blank string — is ``None``: a
+    malformed narrative field never costs the verdict (A20), and
+    ``raw_verdict`` keeps the original.
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        out.append(item.strip())
+    return out
 
 
 def strip_assessment_sidecar(text: str) -> str:
@@ -609,12 +632,30 @@ def _format_score(value: float, scale_max: object) -> str:
     return f"scored {_plain(value)} of {_plain(ceiling)}"
 
 
+def _capped_body(items: object) -> list[str]:
+    """The first 3 of a non-empty list of strings, plus an "and N more" tail.
+
+    Blank strings are skipped before capping. Anything else — not a list,
+    empty, or containing a non-string — quotes nothing: a `body` empty list means "no stored text to show", never a
+    fabricated summary of items that were not all strings.
+    """
+    if not isinstance(items, list) or not items or not all(isinstance(x, str) for x in items):
+        return []
+    items = [x for x in items if x.strip()]
+    body = list(items[:3])
+    remaining = len(items) - len(body)
+    if remaining > 0:
+        body.append(f"and {remaining} more")
+    return body
+
+
 def derive_strengths_and_risks(
     assessment: OpportunityAssessment,
     *,
     dimensions: list[dict[str, Any]] | None,
     consults: list[dict[str, Any]] | None,
     revision: Any,
+    revision_provenance: str | None = None,
 ) -> dict[str, Any]:
     """Three buckets, from STORED values only — never a new judgement.
 
@@ -667,20 +708,66 @@ def derive_strengths_and_risks(
        brief card must never 500 a page.
 
     Returns `{"strengths": [...], "risks": [...], "unestablished": [...],
-    "scale_known": bool}`, each entry being
-    `{"source": str, "label": str, "detail": str}` with `source` one of
-    `dimension` / `gating` / `red_flag` / `consult`.
-    """
-    strengths: list[dict[str, str]] = []
-    risks: list[dict[str, str]] = []
-    unestablished: list[dict[str, str]] = []
-    scale_known = revision is not None
+    "scale_known": bool, "thresholds": {...}, "mid_scale_count": int}`, each
+    entry being `{"source": str, "label": str, "detail": str, "body":
+    list[str]}` with `source` one of `dimension` / `gating` / `red_flag` /
+    `consult`. `body` is ALWAYS present — an empty list when there is nothing
+    stored to quote, so the template can test truthiness without `.get`:
 
-    def _add(bucket: list[dict[str, str]], source: str, label: object, detail: object) -> None:
+    ==========================  ==========================================
+    entry                       `body`
+    ==========================  ==========================================
+    dimension strength/risk     `["weight: " + weight_note]`, verbatim
+                                (dual-scale notes are not parsed), only when
+                                the dimension's `weight` is not None; else `[]`
+    dimension not scored        `[]`, unchanged
+    gating met / not_met        `[gating[key]["description"]]` and `label`
+                                becomes `gating[key]["title"]`, but ONLY when
+                                `revision_provenance == PROVENANCE_LIVE` AND
+                                `key` is a live gating key; otherwise `[]` and
+                                the label stays `key.replace("_", " ")`
+    gating unconfirmed/other    `[]`, unchanged
+    red flag                    `[]`, unchanged (the `detail` already carries
+                                the flag's full text)
+    consult adequate/clear      the consult's `established` items (non-empty
+                                list of strings only), capped at 3 with an
+                                "and N more" tail; else `[]`
+    consult blocking/gap/       the consult's `concerns` items, same cap
+    caution                     rule; else `[]`
+    consult not-established     `[]`, unchanged
+    ==========================  ==========================================
+
+    `thresholds` is `{"strength": float|None, "risk": float|None,
+    "scale_max": float|None}` — all None whenever `scale_known` is False or
+    the revision's `scale_max` is not a usable number. `mid_scale_count` is
+    the number of dimensions with a usable score strictly between the risk
+    and strength thresholds (0 when the scale is unknown), and
+    `scored_dimension_count` the number of dimensions with a usable score at
+    all — the template words the mid-scale line as "N of M" and says "All"
+    only when the two are equal.
+    """
+    strengths: list[dict[str, Any]] = []
+    risks: list[dict[str, Any]] = []
+    unestablished: list[dict[str, Any]] = []
+    scale_known = revision is not None
+    thresholds: dict[str, float | None] = {
+        "strength": None, "risk": None, "scale_max": None,
+    }
+    mid_scale_count = 0
+    scored_dimension_count = 0
+
+    def _add(
+        bucket: list[dict[str, Any]],
+        source: str,
+        label: object,
+        detail: object,
+        body: list[str] | None = None,
+    ) -> None:
         bucket.append({
             "source": source,
             "label": str(label) if label else source.replace("_", " "),
             "detail": str(detail),
+            "body": list(body) if body else [],
         })
 
     # Dimensions. Skipped wholesale when the row's revision is unknown: with no
@@ -702,33 +789,61 @@ def derive_strengths_and_risks(
     )
     if scale_known:
         scale_max = _usable_score(getattr(revision, "scale_max", None))
+        strength_threshold = risk_threshold = None
+        if scale_max is not None:
+            strength_threshold = STRENGTH_THRESHOLD_FRACTION * scale_max
+            risk_threshold = RISK_THRESHOLD_FRACTION * scale_max
+            thresholds = {
+                "strength": strength_threshold,
+                "risk": risk_threshold,
+                "scale_max": scale_max,
+            }
         for dim in dimensions or ():
             if not isinstance(dim, dict):
                 continue
             label = dim.get("title") or dim.get("key")
+            weight_body = (
+                [f"weight: {dim.get('weight_note')}"] if dim.get("weight") is not None else []
+            )
             score = _usable_score(dim.get("score"))
             if score is None:
                 _add(unestablished, "dimension", label, not_scored_detail)
                 continue
+            scored_dimension_count += 1
             if scale_max is None:
                 continue
             detail = _format_score(score, scale_max)
-            if score >= STRENGTH_THRESHOLD_FRACTION * scale_max:
-                _add(strengths, "dimension", label, detail)
-            elif score <= RISK_THRESHOLD_FRACTION * scale_max:
-                _add(risks, "dimension", label, detail)
-            # else: a mid-scale score is a real, neutral answer. No bucket.
+            if score >= strength_threshold:
+                _add(strengths, "dimension", label, detail, body=weight_body)
+            elif score <= risk_threshold:
+                _add(risks, "dimension", label, detail, body=weight_body)
+            else:
+                # A mid-scale score is a real, neutral answer. No bucket.
+                mid_scale_count += 1
 
     # Gating. The tri-state strings, plus a fourth branch for anything else —
     # `gating` is JSONB with no CHECK constraint behind it.
     gating = getattr(assessment, "gating", None)
+    # Gate title/description come from the LIVE rubric document and are shown
+    # only when this row was scored against it (`PROVENANCE_LIVE`) — an older
+    # row's gating key may not even exist in the live document, and rendering
+    # today's title/description against yesterday's decision would mislabel
+    # it the same way a hardcoded score threshold would.
+    live_gating = load_rubric().gating if revision_provenance == PROVENANCE_LIVE else {}
     if isinstance(gating, dict):
         for key, value in gating.items():
             label = str(key).replace("_", " ")
+            gate_meta = live_gating.get(key) if isinstance(key, str) else None
             if value == "met":
-                _add(strengths, "gating", label, "met")
+                if gate_meta is not None:
+                    _add(strengths, "gating", gate_meta["title"], "met", body=[gate_meta["description"]])
+                else:
+                    _add(strengths, "gating", label, "met")
             elif value == "not_met":
-                _add(risks, "gating", label, "not met")
+                if gate_meta is not None:
+                    _add(risks, "gating", gate_meta["title"], "not met", body=[gate_meta["description"]])
+                else:
+                    _add(risks, "gating", label, "not met")
             elif value == "unconfirmed":
                 _add(unestablished, "gating", label, "never asked")
             else:
@@ -768,9 +883,9 @@ def derive_strengths_and_risks(
             continue
         signal = consult.get("verdict_signal")
         if isinstance(signal, str) and signal in _STRENGTH_SIGNALS:
-            _add(strengths, "consult", label, signal)
+            _add(strengths, "consult", label, signal, body=_capped_body(consult.get("established")))
         elif isinstance(signal, str) and signal in _RISK_SIGNALS:
-            _add(risks, "consult", label, signal)
+            _add(risks, "consult", label, signal, body=_capped_body(consult.get("concerns")))
         else:
             _add(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL)
 
@@ -779,6 +894,9 @@ def derive_strengths_and_risks(
         "risks": risks,
         "unestablished": unestablished,
         "scale_known": scale_known,
+        "thresholds": thresholds,
+        "mid_scale_count": mid_scale_count,
+        "scored_dimension_count": scored_dimension_count,
     }
 
 
@@ -1009,7 +1127,11 @@ async def build_assessment_detail(
         # Request 3 / D2: the strengths-risks-not-established brief, DERIVED
         # from the three things already resolved above and stored nowhere.
         "verdict_signals": derive_strengths_and_risks(
-            assessment, dimensions=dimensions, consults=consults, revision=revision
+            assessment,
+            dimensions=dimensions,
+            consults=consults,
+            revision=revision,
+            revision_provenance=revision_provenance,
         ),
         "consult_count": len(consults),
         "retro_consult_count": retro_consult_count,
@@ -1020,6 +1142,11 @@ async def build_assessment_detail(
         "logs_scanned": logs_scanned,
         "log_scan_limit": LOG_SCAN_LIMIT,
         "admin_view": admin_view,
+        # The hub's own `strengths`/`risks` bullets (0049) are STAFF-only on
+        # the page, matching what the prompt promises the model: a reviewer
+        # account reaches the manager detail route but must not see model
+        # text the hub was told may cite unpublished results.
+        "viewer_is_staff": viewer_is_staff,
         # Human-review card (Task 6). All three review tables are ordered
         # (created_at, id) — Postgres `now()` is transaction-start, so ties
         # inside one write burst are real and `id` is the tiebreak.
@@ -1234,6 +1361,14 @@ async def _load_consults(
             # `thread_panel.py`'s card dicts, so the two card renderers still
             # read alike.
             "read_state": row.read_state,
+            # 0038's positive-evidence field, carried verbatim: NULL means
+            # "never asked", `[]` means "asked, nothing came back" (or the key
+            # was ignored — the two are indistinguishable), and only a
+            # non-empty list is evidence. Coerced to a plain list rather than
+            # left as whatever the JSONB driver hands back, so a downstream
+            # `isinstance(..., list)` check behaves the same as it does for
+            # `concerns`/`questions_to_ask` above.
+            "established": list(row.established) if isinstance(row.established, list) else None,
             "created_at": row.created_at,
         }
         for row in rows

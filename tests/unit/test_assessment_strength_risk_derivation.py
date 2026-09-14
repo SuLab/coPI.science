@@ -21,7 +21,15 @@ from src.services.assessment_detail import (
     STRENGTH_THRESHOLD_FRACTION,
     derive_strengths_and_risks,
 )
-from src.services.rubric_revisions import RevisionDimension, RubricRevisionView
+from src.services.blackbird_rubric import load_rubric
+from src.services.rubric_revisions import (
+    PROVENANCE_LIVE,
+    PROVENANCE_UNKNOWN,
+    PROVENANCE_UNSTAMPED,
+    RevisionDimension,
+    RubricRevisionView,
+    live_revision_view,
+)
 
 
 def _revision(scale_max: int = 5) -> RubricRevisionView:
@@ -72,12 +80,20 @@ def _consult(domain: str, signal: object, truncated: bool = False) -> dict:
 _DEFAULT_REVISION = object()
 
 
-def _derive(assessment=None, *, dimensions=None, consults=None, revision=_DEFAULT_REVISION):
+def _derive(
+    assessment=None,
+    *,
+    dimensions=None,
+    consults=None,
+    revision=_DEFAULT_REVISION,
+    revision_provenance=None,
+):
     return derive_strengths_and_risks(
         assessment if assessment is not None else _assessment(),
         dimensions=dimensions if dimensions is not None else [],
         consults=consults if consults is not None else [],
         revision=_revision() if revision is _DEFAULT_REVISION else revision,
+        revision_provenance=revision_provenance,
     )
 
 
@@ -98,7 +114,10 @@ def _details(entries, source: str) -> list[str]:
 
 def test_the_return_shape_is_the_pinned_contract():
     result = _derive()
-    assert set(result) == {"strengths", "risks", "unestablished", "scale_known"}
+    assert set(result) == {
+        "strengths", "risks", "unestablished", "scale_known",
+        "thresholds", "mid_scale_count", "scored_dimension_count",
+    }
     assert result["scale_known"] is True
     assert result["strengths"] == result["risks"] == result["unestablished"] == []
 
@@ -112,7 +131,7 @@ def test_every_entry_carries_source_label_and_detail():
     entries = result["strengths"] + result["risks"] + result["unestablished"]
     assert entries
     for entry in entries:
-        assert set(entry) == {"source", "label", "detail"}
+        assert set(entry) == {"source", "label", "detail", "body"}
         assert entry["source"] in {"dimension", "gating", "red_flag", "consult"}
         assert isinstance(entry["label"], str) and entry["label"]
         assert isinstance(entry["detail"], str)
@@ -218,21 +237,21 @@ def test_thresholds_are_read_from_the_revision_scale():
 def test_a_met_gate_is_a_strength():
     result = _derive(_assessment(gating={"life_sciences_domain": "met"}))
     assert result["strengths"] == [
-        {"source": "gating", "label": "life sciences domain", "detail": "met"}
+        {"source": "gating", "label": "life sciences domain", "detail": "met", "body": []}
     ]
 
 
 def test_an_unmet_gate_is_a_risk():
     result = _derive(_assessment(gating={"credible_science": "not_met"}))
     assert result["risks"] == [
-        {"source": "gating", "label": "credible science", "detail": "not met"}
+        {"source": "gating", "label": "credible science", "detail": "not met", "body": []}
     ]
 
 
 def test_an_unconfirmed_gate_was_never_asked():
     result = _derive(_assessment(gating={"translational_potential": "unconfirmed"}))
     assert result["unestablished"] == [
-        {"source": "gating", "label": "translational potential", "detail": "never asked"}
+        {"source": "gating", "label": "translational potential", "detail": "never asked", "body": []}
     ]
     assert result["strengths"] == []
     assert result["risks"] == []
@@ -268,7 +287,7 @@ def test_every_red_flag_is_a_risk_carrying_its_full_text():
 def test_an_adequate_consult_is_a_strength():
     result = _derive(consults=[_consult("clinical", "adequate")])
     assert result["strengths"] == [
-        {"source": "consult", "label": "clinical", "detail": "adequate"}
+        {"source": "consult", "label": "clinical", "detail": "adequate", "body": []}
     ]
 
 
@@ -279,7 +298,9 @@ def test_the_historical_clear_signal_is_still_read_as_a_strength():
 
 def test_a_blocking_consult_is_a_risk():
     result = _derive(consults=[_consult("ip", "blocking")])
-    assert result["risks"] == [{"source": "consult", "label": "ip", "detail": "blocking"}]
+    assert result["risks"] == [
+        {"source": "consult", "label": "ip", "detail": "blocking", "body": []}
+    ]
 
 
 def test_a_gap_consult_is_a_risk():
@@ -449,4 +470,131 @@ def test_a_partly_scored_verdict_still_says_counted_as_zero():
     assert _sole(result["unestablished"])["detail"] == (
         "not scored — counted as zero in the weighted score"
     )
+
+
+# ---------------------------------------------------------------------------
+# `body`: quoted text carried alongside an entry
+# ---------------------------------------------------------------------------
+
+
+def test_a_consult_strength_with_established_evidence_carries_it_as_body():
+    result = _derive(consults=[{
+        "domain": "clinical",
+        "verdict_signal": "adequate",
+        "reply_truncated": False,
+        "established": ["Strong prior data", "Validated in two models"],
+    }])
+    entry = _sole(result["strengths"])
+    assert entry["body"] == ["Strong prior data", "Validated in two models"]
+
+
+def test_a_consult_strength_with_empty_established_carries_no_body():
+    result = _derive(consults=[{
+        "domain": "clinical",
+        "verdict_signal": "adequate",
+        "reply_truncated": False,
+        "established": [],
+    }])
+    assert _sole(result["strengths"])["body"] == []
+
+
+def test_a_consult_strength_with_null_established_carries_no_body():
+    result = _derive(consults=[{
+        "domain": "clinical",
+        "verdict_signal": "adequate",
+        "reply_truncated": False,
+        "established": None,
+    }])
+    assert _sole(result["strengths"])["body"] == []
+
+
+def test_a_consult_risk_with_five_concerns_caps_at_three_plus_a_tally():
+    result = _derive(consults=[{
+        "domain": "ip",
+        "verdict_signal": "blocking",
+        "reply_truncated": False,
+        "concerns": ["c1", "c2", "c3", "c4", "c5"],
+    }])
+    assert _sole(result["risks"])["body"] == ["c1", "c2", "c3", "and 2 more"]
+
+
+def test_a_consult_risk_with_no_concerns_key_carries_no_body():
+    result = _derive(consults=[_consult("market", "gap")])
+    assert _sole(result["risks"])["body"] == []
+
+
+def test_a_gate_carries_the_live_title_and_description_when_provenance_is_live():
+    live = live_revision_view()
+    rubric = load_rubric()
+    key = next(iter(rubric.gating))
+    result = _derive(
+        _assessment(gating={key: "met"}),
+        revision=live,
+        revision_provenance=PROVENANCE_LIVE,
+    )
+    entry = _sole(result["strengths"])
+    assert entry["label"] == rubric.gating[key]["title"]
+    assert entry["body"] == [rubric.gating[key]["description"]]
+
+
+def test_a_gate_stays_bare_when_provenance_is_unknown():
+    live = live_revision_view()
+    rubric = load_rubric()
+    key = next(iter(rubric.gating))
+    result = _derive(
+        _assessment(gating={key: "met"}),
+        revision=live,
+        revision_provenance=PROVENANCE_UNKNOWN,
+    )
+    entry = _sole(result["strengths"])
+    assert entry["label"] == key.replace("_", " ")
+    assert entry["body"] == []
+
+
+def test_a_gate_stays_bare_when_provenance_is_unstamped():
+    live = live_revision_view()
+    rubric = load_rubric()
+    key = next(iter(rubric.gating))
+    result = _derive(
+        _assessment(gating={key: "met"}),
+        revision=live,
+        revision_provenance=PROVENANCE_UNSTAMPED,
+    )
+    entry = _sole(result["strengths"])
+    assert entry["label"] == key.replace("_", " ")
+    assert entry["body"] == []
+
+
+def test_a_dimension_body_carries_the_weight_note_verbatim_including_dual_scale():
+    result = _derive(dimensions=[{
+        "key": "significance", "title": "Significance", "weight": 6,
+        "weight_note": "6%/4% (investment/incubation)", "score": 5, "pct": 100.0,
+    }])
+    entry = _sole(result["strengths"])
+    assert entry["body"] == ["weight: 6%/4% (investment/incubation)"]
+
+
+def test_a_dimension_body_is_absent_when_weight_is_none():
+    result = _derive(dimensions=[{
+        "key": "extra", "title": "Extra", "weight": None,
+        "weight_note": None, "score": 5, "pct": 100.0,
+    }])
+    entry = _sole(result["strengths"])
+    assert entry["body"] == []
+
+
+def test_mid_scale_count_counts_only_scored_dimensions_strictly_between_thresholds():
+    result = _derive(dimensions=[
+        _dimension("significance", 5),  # strength
+        _dimension("innovation", 1),  # risk
+        _dimension("commercial_potential", 3),  # mid-scale
+        _dimension("clinical_actionability", None),  # not scored, excluded
+    ])
+    assert result["mid_scale_count"] == 1
+
+
+def test_thresholds_are_all_none_when_the_scale_is_unknown():
+    result = _derive(dimensions=[_dimension("significance", 5)], revision=None)
+    assert result["thresholds"] == {"strength": None, "risk": None, "scale_max": None}
+    assert result["mid_scale_count"] == 0
 

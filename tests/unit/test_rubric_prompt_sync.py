@@ -279,7 +279,10 @@ def test_skeleton_carries_the_narrative_fields():
     groups in that order, so a key renamed or a group dropped from the prompt
     silently empties a section of the detail page."""
     skeleton = _skeleton()
-    for key in ("headline", "key_points", "elevator_pitch", "score_rationale"):
+    for key in (
+        "headline", "key_points", "elevator_pitch", "score_rationale",
+        "strengths", "risks",
+    ):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
         "significance": [],
@@ -298,11 +301,13 @@ def test_skeleton_carries_the_narrative_fields():
     assert skeleton["headline"] == ""
     assert skeleton["elevator_pitch"] == ""
     assert skeleton["score_rationale"] == ""
+    assert skeleton["strengths"] == []
+    assert skeleton["risks"] == []
 
 
-def test_the_scout_hub_prompt_set_version_is_1_4_0_or_later():
+def test_the_scout_hub_prompt_set_version_is_1_5_0_or_later():
     manifest = tomllib.loads(Path("prompts/roles/scout_hub/role.toml").read_text())
-    assert tuple(int(x) for x in manifest["version"].split(".")) >= (1, 4, 0)
+    assert tuple(int(x) for x in manifest["version"].split(".")) >= (1, 5, 0)
 
 
 def test_phase4_bounds_the_headline_and_the_project_label():
@@ -334,6 +339,20 @@ def test_phase4_marks_the_score_rationale_staff_only():
     body = _norm(_phase4_text())
     assert "score_rationale" in body
     assert "never posted to Slack" in body
+
+
+def test_phase4_marks_strengths_and_risks_staff_only():
+    """Same staff-only rule as the score rationale (items 11/12, 0049), pinned
+    on a SLICE of the two items rather than the whole file — a whole-file
+    check would pass vacuously off item 10's own "never posted to Slack"."""
+    text = _phase4_text()
+    start = text.index("11. **")
+    end = text.index("Never write a bare", start)
+    slice_ = _norm(text[start:end])
+    assert "strengths" in slice_
+    assert "risks" in slice_
+    assert slice_.count("never posted to Slack") >= 2
+    assert slice_.count("Never state a number for the weighted score or the band") >= 2
 
 
 def test_phase4_binds_the_rationale_to_a_bolded_summary_sentence():

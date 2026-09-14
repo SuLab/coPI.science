@@ -2032,3 +2032,306 @@ async def test_the_five_key_point_groups_render_in_order(client, db_session, adm
         "Question point", "Comm point",
     ):
         assert point in block, point
+
+
+# ---------------------------------------------------------------------------
+# Layer-2 "hub's own words" bullets and the strengths/risks derivation
+# (2026-09-14 strengths/risks explanatory-bullets plan, Task B)
+# ---------------------------------------------------------------------------
+
+HUB_STRENGTH_ONE = "HUB STRENGTH ONE: the target has a validated genetic link."
+HUB_STRENGTH_TWO = "HUB STRENGTH TWO: a differentiated mechanism versus standard of care."
+HUB_RISK_ONE = "HUB RISK ONE: no in vivo efficacy data yet."
+HUB_RISK_TWO = "HUB RISK TWO: freedom-to-operate is unconfirmed."
+
+ESTABLISHED_MARKER = "ESTABLISHED SENTINEL: the assay is orthogonally validated."
+CONSULT_CONCERN_MARKER = "CONCERN SENTINEL: no isogenic control was run."
+
+
+async def test_hub_words_bullets_render_before_the_derived_list(
+    client, db_session, admin
+):
+    """A row with `strengths`/`risks` shows the hub's own bullets, under "In
+    the hub's words", before the derived list in each column."""
+    _, assessment = await _seed(db_session)
+    assessment.strengths = [HUB_STRENGTH_ONE, HUB_STRENGTH_TWO]
+    assessment.risks = [HUB_RISK_ONE, HUB_RISK_TWO]
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, _unestablished = _signal_columns(body)
+
+    assert "In the hub's words" in strengths
+    assert HUB_STRENGTH_ONE in strengths and HUB_STRENGTH_TWO in strengths
+    assert strengths.index("In the hub's words") < strengths.index(HUB_STRENGTH_ONE)
+    assert strengths.index(HUB_STRENGTH_TWO) < strengths.index("signal-derived")
+
+    assert "In the hub's words" in risks
+    assert HUB_RISK_ONE in risks and HUB_RISK_TWO in risks
+    assert risks.index("In the hub's words") < risks.index(HUB_RISK_ONE)
+    assert risks.index(HUB_RISK_TWO) < risks.index("signal-derived")
+
+
+async def test_no_hub_words_heading_when_strengths_and_risks_are_null(
+    client, db_session, admin
+):
+    """NULL on every pre-0049 row: no "In the hub's words" heading, and the
+    column looks exactly like it did before this feature."""
+    _, assessment = await _seed(db_session)
+    assessment.strengths = None
+    assessment.risks = None
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, _unestablished = _signal_columns(body)
+    assert "In the hub's words" not in strengths
+    assert "In the hub's words" not in risks
+    assert "Derived from the stored verdict" not in strengths
+    assert "Derived from the stored verdict" not in risks
+
+
+async def test_a_consults_established_items_render_as_strength_sub_bullets(
+    client, db_session, admin
+):
+    """A consult recorded `adequate` with `established` items quotes them
+    under the strength bullet, in the strengths column."""
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=SUBJECT, channel_name=CHANNEL,
+        message_ts=root_ts, phase="new_post",
+        content="Root post for the established-bullet test.",
+        posted_at=time.time(),
+    )
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id,
+            agent_id=HUB,
+            subject_agent_id=SUBJECT,
+            thread_id=root_ts,
+            channel_name=CHANNEL,
+            domain="scientific",
+            question="Is the assay orthogonally validated?",
+            verdict_signal="adequate",
+            confidence="high",
+            established=[ESTABLISHED_MARKER],
+            raw_opinion="not shown on this page",
+        )
+    )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, slack_ts=root_ts,
+        company_or_project="Established Bullet Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, _risks, _unestablished = _signal_columns(body)
+    assert ESTABLISHED_MARKER in strengths
+    assert "specialist established" in strengths
+
+
+async def test_a_consults_concerns_render_as_risk_sub_bullets(
+    client, db_session, admin
+):
+    """A consult recorded `gap` with `concerns` quotes them under the risk
+    bullet, in the risks column."""
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=SUBJECT, channel_name=CHANNEL,
+        message_ts=root_ts, phase="new_post",
+        content="Root post for the concerns-bullet test.",
+        posted_at=time.time(),
+    )
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id,
+            agent_id=HUB,
+            subject_agent_id=SUBJECT,
+            thread_id=root_ts,
+            channel_name=CHANNEL,
+            domain="scientific",
+            question="Is there an isogenic control?",
+            verdict_signal="gap",
+            confidence="moderate",
+            concerns=[CONSULT_CONCERN_MARKER],
+            raw_opinion="not shown on this page",
+        )
+    )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, slack_ts=root_ts,
+        company_or_project="Concern Bullet Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    _strengths, risks, _unestablished = _signal_columns(body)
+    assert CONSULT_CONCERN_MARKER in risks
+    assert "specialist's concerns" in risks
+
+
+async def _seed_live_stamped(db_session, *, scores=None, gating=None):
+    from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, company_or_project="Live Stamped Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+        rubric_version=RUBRIC_VERSION, rubric_content_hash=RUBRIC_CONTENT_HASH,
+        scores=scores, gating=gating,
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    return assessment
+
+
+async def test_empty_state_text_names_the_live_revisions_own_thresholds(
+    client, db_session, admin
+):
+    """No literal "4": the empty-state prose names the row's own revision
+    thresholds (4 of 5 on the live 1-5 scale)."""
+    assessment = await _seed_live_stamped(db_session)
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, _unestablished = _signal_columns(body)
+    assert "No dimension scored" in strengths
+    assert "of 5" in strengths
+    assert "at or above 4" in strengths
+    assert "of 5" in risks
+    assert "at or below 2" in risks
+
+
+async def test_a_row_with_six_mid_scale_scores_shows_the_midscale_line(
+    client, db_session, admin
+):
+    """Every scored dimension strictly between the two thresholds: neither
+    column lists any of them, and the card says so instead of looking empty
+    by omission."""
+    scores = {
+        "differentiation_unmet_need": 3, "scientific_credibility": 3,
+        "translational_path": 3, "fundable_experiment": 3,
+        "venture_potential": 3, "team_executability": 3,
+    }
+    assessment = await _seed_live_stamped(db_session, scores=scores)
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    card = _signals_card(body)
+    assert "signals-midscale" in card
+    assert "sit mid-scale" in card
+    assert "All 6 scored dimensions" in card
+
+
+async def test_a_row_with_one_high_score_reports_the_remaining_midscale_count(
+    client, db_session, admin
+):
+    """`mid_scale_count` counts scored dimensions strictly between the
+    thresholds — one dimension scored 5 still leaves five mid-scale ones, and
+    the line says "5 of 6", never "All 5": a universal over a count that
+    excludes the very dimension listed beside it would be a false claim."""
+    scores = {
+        "differentiation_unmet_need": 5, "scientific_credibility": 3,
+        "translational_path": 3, "fundable_experiment": 3,
+        "venture_potential": 3, "team_executability": 3,
+    }
+    assessment = await _seed_live_stamped(db_session, scores=scores)
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    card = _signals_card(body)
+    assert "signals-midscale" in card
+    assert "5 of 6 scored dimensions" in card
+    assert "All " not in " ".join(card.split("signals-midscale", 1)[1].split("</p>", 1)[0].split())
+
+
+async def test_the_manager_route_renders_the_signals_card(
+    client, db_session, manager
+):
+    """The manager surface shares the same body template as the admin one."""
+    _, assessment = await _seed(db_session)
+    body = _main((await client.get(
+        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+    )).text)
+    assert 'id="signals"' in body
+
+
+async def test_a_reviewer_never_sees_the_hubs_own_bullets(client, db_session):
+    """The prompt promises the hub that `strengths`/`risks` are staff-only and
+    may cite unpublished results. A reviewer reaches the manager route
+    (`get_review_user`) but is NOT staff (`is_staff` excludes the role by
+    design), so the "In the hub's words" block must be withheld for them while
+    the derived half of the card still renders. A manager, who is staff, sees
+    it."""
+    from src.models.user import USER_ROLE_REVIEWER
+
+    _, assessment = await _seed(db_session)
+    assessment.strengths = [HUB_STRENGTH_ONE]
+    assessment.risks = [HUB_RISK_ONE]
+    await db_session.flush()
+    reviewer = await factories.make_user(
+        db_session, user_role=USER_ROLE_REVIEWER, email="signals-reviewer@example.org"
+    )
+    body = _main((await client.get(
+        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+    )).text)
+    assert 'id="signals"' in body
+    assert "In the hub's words" not in body
+    assert HUB_STRENGTH_ONE not in body
+    assert HUB_RISK_ONE not in body
+
+
+async def test_hub_words_with_no_derived_entries_still_shows_the_derived_empty_state(
+    client, db_session, admin
+):
+    """Hub bullets alone must not hide the derived half: a reader has to be
+    able to tell "the derivation found nothing" from "it did not run"."""
+    _, assessment = await _seed(db_session)
+    assessment.strengths = [HUB_STRENGTH_ONE]
+    assessment.gating = None
+    assessment.scores = None
+    await db_session.flush()
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, _risks, _unestablished = _signal_columns(body)
+    assert HUB_STRENGTH_ONE in strengths
+    assert "Derived from the stored verdict" in strengths
+    assert "signals-empty" in strengths
+
+
+async def test_the_score_rationale_pointer_is_conditional(client, db_session, admin):
+    """The footnote's jump-link to `#score-rationale` only appears when the
+    row has a score rationale; the anchor is added to the amber box either
+    way, so a NULL row never dangles a link at nothing that is also absent."""
+    _, assessment = await _seed(db_session)
+    assessment.score_rationale = "A score rationale for the pointer test."
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert 'href="#score-rationale"' in body
+    assert 'id="score-rationale"' in body
+
+    assessment.score_rationale = None
+    await db_session.flush()
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert 'href="#score-rationale"' not in body
