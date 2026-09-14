@@ -1,9 +1,10 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}Access pending — CoPI{% endblock %}
 
 {% block content %}
-<div class="max-w-xl mx-auto mt-8">
-    <div class="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+<div class="max-w-xl w-full mx-auto mt-8">
+    {% call ui.card(padding='lg') %}
         <h1 class="text-2xl font-bold text-gray-800 mb-3">Thanks for signing in</h1>
         <p class="text-gray-600 mb-4">
             CoPI is in pre-release. We've received your ORCID
@@ -34,20 +35,18 @@
                 {{ email_error }}
             </div>
             {% endif %}
-            <form method="POST" action="/access-pending/email" class="flex gap-2">
-                <input type="email" name="email" required placeholder="you@university.edu"
-                       class="grow px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-hidden focus:ring-2 focus:ring-indigo-500">
-                <button type="submit"
-                        class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-md text-sm">
-                    Save
-                </button>
+            <form method="POST" action="/access-pending/email" class="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <div class="grow">
+                    {{ ui.field('Email', 'email', type='email', required=True, placeholder='you@university.edu') }}
+                </div>
+                {{ ui.button('Save', type='submit', full=True, testid='primary') }}
             </form>
         </div>
         {% endif %}
 
         <div class="mt-6 text-center">
-            <a href="/" class="text-sm text-indigo-600 hover:underline">← Back to home</a>
+            <a href="/" class="inline-flex min-h-11 items-center sm:min-h-6 text-sm text-indigo-600 hover:underline">← Back to home</a>
         </div>
-    </div>
+    {% endcall %}
 </div>
 {% endblock %}

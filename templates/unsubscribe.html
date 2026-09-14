@@ -1,44 +1,42 @@
+{% import "_components.html" as ui with context %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Unsubscribe — CoPI</title>
-    <!-- Tailwind Play CDN: the JIT build is unversioned and cannot carry an SRI
-         hash. Vendoring a compiled build is deferred. -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/css/app.min.css?v={{ css_version | default('missing') }}">
 </head>
-<body class="bg-gray-50 min-h-screen flex items-center justify-center">
-    <div class="max-w-md mx-auto text-center p-8">
-        <span class="text-2xl font-bold text-indigo-600">CoPI</span>
-        {% if state == "success" %}
-        <div class="mt-8">
-            <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribed</h1>
-            <p class="text-gray-600 text-sm">
-                You will no longer receive proposal notification emails.
-                You can re-enable notifications anytime from your
-                <a href="/settings" class="text-indigo-600 hover:text-indigo-700 underline">settings</a>.
-            </p>
+<body class="min-h-screen bg-gray-50">
+    <div class="flex min-h-screen items-center justify-center px-4">
+        <div class="max-w-md w-full mx-auto text-center">
+            <span class="text-2xl font-bold text-indigo-600">CoPI</span>
+            {% if state == "success" %}
+            <div class="mt-8">
+                <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribed</h1>
+                <p class="text-gray-600 text-sm">
+                    You will no longer receive proposal notification emails.
+                    You can re-enable notifications anytime from your
+                    <a href="/settings" class="text-indigo-600 hover:text-indigo-700 underline">settings</a>.
+                </p>
+            </div>
+            {% elif state == "confirm" %}
+            <div class="mt-8">
+                <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribe from CoPI emails?</h1>
+                <p class="text-gray-600 text-sm mb-6">
+                    Click below to stop receiving proposal notification emails.
+                </p>
+                <form method="post" action="/settings/unsubscribe/{{ token }}">
+                    {{ ui.button('Confirm unsubscribe', type='submit', full=True, testid='primary') }}
+                </form>
+            </div>
+            {% else %}
+            <div class="mt-8">
+                <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribe failed</h1>
+                <p class="text-gray-600 text-sm">{{ error }}</p>
+            </div>
+            {% endif %}
         </div>
-        {% elif state == "confirm" %}
-        <div class="mt-8">
-            <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribe from CoPI emails?</h1>
-            <p class="text-gray-600 text-sm mb-6">
-                Click below to stop receiving proposal notification emails.
-            </p>
-            <form method="post" action="/settings/unsubscribe/{{ token }}">
-                <button type="submit"
-                        class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-5 py-2 rounded-md">
-                    Confirm unsubscribe
-                </button>
-            </form>
-        </div>
-        {% else %}
-        <div class="mt-8">
-            <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribe failed</h1>
-            <p class="text-gray-600 text-sm">{{ error }}</p>
-        </div>
-        {% endif %}
     </div>
 </body>
 </html>

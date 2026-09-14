@@ -1,9 +1,10 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}Accept Invitation — CoPI{% endblock %}
 
 {% block content %}
-<div class="max-w-lg mx-auto">
-    <div class="bg-white rounded-xl shadow-xs border border-gray-200 p-8">
+<div class="max-w-lg w-full mx-auto">
+    {% call ui.card(padding='lg') %}
         <h1 class="text-xl font-semibold text-gray-800 mb-2">You've been invited</h1>
         <p class="text-gray-500 mb-6">
             <strong>{{ pi_name }}</strong> has invited you as a delegate for
@@ -21,15 +22,12 @@
         </div>
 
         <form method="POST" action="/invite/{{ token }}/accept">
-            <button type="submit"
-                    class="w-full px-5 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
-                Accept &amp; Join {{ bot_name }}
-            </button>
+            {{ ui.button('Accept & Join ' ~ bot_name, type='submit', full=True, testid='primary') }}
         </form>
 
-        <p class="text-center text-xs text-gray-400 mt-4">
+        <p class="text-center text-sm text-gray-400 mt-4 break-all">
             Invited by {{ pi_name }} &middot; {{ invitation_email }}
         </p>
-    </div>
+    {% endcall %}
 </div>
 {% endblock %}
