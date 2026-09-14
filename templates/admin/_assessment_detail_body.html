@@ -52,6 +52,7 @@
    --------------------------------------------------------------------------- #}
 <nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#signals">Strengths &amp; risks</a>
     {% if a.rationale %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#rationale">Rationale</a>{% endif %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#panel">Panel</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#scores">Scores</a>
@@ -131,9 +132,117 @@
         {% endif %}
     </div>
     {% endif %}
+    {# Sidecar item 10 (scout_hub >= 1.4.0): the hub's own one-paragraph
+       account of WHY the weighted score came out where it did. Boxed rather
+       than folded into the pitch, because the pitch is published to
+       #assessments-summary and this is app-only (plan decision D3). NULL on
+       every row written before 0048 and deliberately never backfilled, so
+       the whole block is conditional rather than showing an empty state. #}
+    {% if a.score_rationale %}
+    <div class="assessment-brief-score-rationale mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+        <div class="text-sm font-semibold text-amber-900">Why this score</div>
+        {# Same write-time `prose_format` stamp and the same safe fallback as
+           the pitch above and Rationale below: a NULL stamp means legacy
+           plain text, which may carry a literal `*` in a scientific
+           identifier that a markdown pass would corrupt. #}
+        <div class="assessment-prose max-w-none mt-1">
+        {% if a.prose_format == 'markdown' %}
+        <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+        {% else %}
+        <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+        {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </div>
 
-{# Sidecar item 10 (rubric v2.1.0) — moved directly under the brief (Task 10,
+{# --------------------------------------------------------------------------
+   Strengths and risks (request 3, plan Task B1). DERIVED from what this row
+   already stores — dimension scores, gating states, red flags and specialist
+   signals (decision D2) — so it works on every existing row without a
+   migration. `verdict_signals` is the service's single new context key
+   (contract C3): three lists of {source, label, detail} plus `scale_known`.
+
+   A plain card, never a <details> (finding S3): this is the summary a
+   reviewer reads first, and the same reasoning that keeps the red-flag card
+   and the panel banner uncollapsed applies to it.
+
+   All three columns always render. An absent column would let a reader
+   mistake "we did not classify this" for "there are none", so an empty one
+   states what its emptiness MEANS instead. Every entry carries its glyph AND
+   its words, each glyph aria-labelled, on the gating-row precedent: colour is
+   never the only signal.
+   -------------------------------------------------------------------------- #}
+{% set vs = verdict_signals or {} %}
+<div id="signals" class="assessment-signals scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-3">Strengths and risks</h3>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="assessment-signals-strengths rounded-lg border border-green-200 bg-green-50 p-3">
+            <div class="text-sm font-semibold text-green-900">Strengths</div>
+            {% if vs.get('strengths') %}
+            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['strengths'] %}
+                <li class="signal-entry signal-strength signal-source-{{ item.source }}">
+                    <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
+                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="signals-empty mt-1 text-sm text-gray-600">No dimension scored at or above 4, and no gate met.</p>
+            {% endif %}
+        </div>
+        <div class="assessment-signals-risks rounded-lg border border-red-200 bg-red-50 p-3">
+            <div class="text-sm font-semibold text-red-900">Risks</div>
+            {% if vs.get('risks') %}
+            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['risks'] %}
+                <li class="signal-entry signal-risk signal-source-{{ item.source }}">
+                    <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
+                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="signals-empty mt-1 text-sm text-gray-600">None recorded.</p>
+            {% endif %}
+        </div>
+        <div class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div class="text-sm font-semibold text-slate-900">Not established</div>
+            {% if vs.get('unestablished') %}
+            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['unestablished'] %}
+                <li class="signal-entry signal-unestablished signal-source-{{ item.source }}">
+                    <span class="text-slate-700" title="Not established" aria-label="Not established">?</span>
+                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="signals-empty mt-1 text-sm text-gray-600">Nothing left unanswered.</p>
+            {% endif %}
+        </div>
+    </div>
+    {# Legend + provenance, always visible (never behind a disclosure): the
+       glyphs are restated in words here as well as on every entry, and the
+       one-sentence provenance keeps a reader from reading a derived summary
+       as something the hub wrote. #}
+    <p class="signals-legend text-sm text-gray-600 mt-3">
+        &#10003; strength &middot; &#10007; risk &middot; ? not established
+    </p>
+    <p class="signals-provenance text-sm text-gray-600 mt-1 max-w-[68ch]">
+        Derived from this verdict's stored dimension scores, gating states, red
+        flags and specialist signals, with the score thresholds taken from the
+        rubric revision that scored this row.
+        {% if not vs.get('scale_known') %}
+        This row's rubric revision is not in the registry, so its dimension
+        scores could not be classified as strengths or risks &mdash; only its
+        gating, red flags and specialist signals are represented above.
+        {% endif %}
+    </p>
+</div>
+
+{# Sidecar item 5 (rubric v2.1.0) — moved directly under the brief (Task 10,
    design §5): it is the line staff act on, so a reviewer meets it before any
    evidence, not after the rationale and gating below it. NULL on every row
    written before 0037, which is why the whole block is conditional rather
@@ -799,6 +908,17 @@
                 <option value="learn">Learn</option>
                 <option value="log_only">Don't learn — log only</option>
             </select>
+            {# New copy (plan B3b / PS10): the mode select had no explanation at
+               all, and "Learn" was easy to read as "analyse this now". Since
+               the automatic enqueue was removed (decision D7) nothing runs off
+               this choice until a human asks for it. No absolute manager path
+               here — this file must stay free of them (see the header). #}
+            <p class="review-mode-help text-sm text-gray-600 max-w-[68ch]">
+                Choosing <span class="font-semibold">Learn</span> marks this
+                feedback as eligible for the prompt-suggestion bot and nothing
+                more. Suggestions are generated only when a human presses the
+                button on the prompt-suggestions page.
+            </p>
             <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
         </form>
     </details>

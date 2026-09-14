@@ -1,6 +1,9 @@
 """The whole review pipeline through the real worker loop with only the model
-faked: submit -> job -> claim_job -> process_job -> execute_review_analysis ->
-suggestion row + consumed_at + job completed. The existing dispatch test
+faked: submit -> manual generate -> job -> claim_job -> process_job ->
+execute_review_analysis -> suggestion row + consumed_at + job completed.
+(The "manual generate" step is ``enqueue_pending_analyses``, called
+explicitly: since F2, 2026-09-14, a review write enqueues nothing by itself.)
+The existing dispatch test
 (tests/integration/test_worker.py::test_worker_dispatches_review_feedback_analysis)
 mocks the handler; this one does not.
 
@@ -37,7 +40,7 @@ from src.models import (
     User,
 )
 from src.services import review_bot
-from src.services.assessment_reviews import submit_feedback
+from src.services.assessment_reviews import enqueue_pending_analyses, submit_feedback
 from src.worker import main as worker_main
 from tests import factories
 
@@ -115,6 +118,14 @@ async def test_learn_feedback_becomes_a_suggestion_through_the_worker(factory, m
                 score=2, comment="lab bot leaked an IC50", feedback_mode="learn",
             )
             review_id = review.id
+            # The enqueue is explicit since F2 (2026-09-14): submitting 'learn'
+            # feedback no longer creates the job as a side effect, so without
+            # this the worker would have nothing of ours to claim. Scoped to
+            # this assessment because the queue is shared and committed here.
+            enqueued, eligible = await enqueue_pending_analyses(
+                db, requested_by=reviewer, assessment_id=assessment_id
+            )
+            assert (enqueued, eligible) == (1, 1)
             await db.commit()
 
         async def _fake(*args, **kwargs):

@@ -43,6 +43,7 @@ from src.services.blackbird_rubric import (
     RUBRIC_WEIGHTS,
     load_rubric,
 )
+from src.services.rubric_revisions import RubricRevisionView, resolve_revision
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
 # the current run this is rarely close to binding — a single run's worth of
@@ -262,6 +263,80 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     }
 
 
+def _assessment_dimension_rows(
+    row: OpportunityAssessment,
+) -> tuple[list[dict[str, Any]], RubricRevisionView | None]:
+    """The per-row dimension breakdown for the list page's collapsed
+    per-card disclosure — the SAME shape (and, for a stamped row, the same
+    revision) that ``build_assessment_detail`` produces for its own
+    ``dimensions``, so the two surfaces cannot disagree about a dimension's
+    title or bar length. Mirrors that function's ``_score_value``/``_pct``
+    and its normalize-then-fall-back-to-untitled treatment of an off-rubric
+    key precisely, rather than inventing a variant.
+
+    A row with no (dict) ``scores`` at all is NOT short-circuited: it falls
+    through to the named-dimension loop and yields the revision's own
+    dimensions with ``score=None``, which is exactly what the detail page
+    renders for the same row. An earlier draft returned ``([], None)`` here,
+    which made the card say "no per-dimension scores were stored" while the
+    detail page one click away showed six "not scored" rows — the same verdict
+    with two answers, which is the drift this mirroring exists to prevent.
+    ``([], None)`` now happens only when there is nothing to say on EITHER
+    surface: no scores AND no resolvable revision.
+    """
+    scores = row.scores if isinstance(row.scores, dict) else {}
+    normalized_scores = {
+        key.strip().lower(): value
+        for key, value in scores.items()
+        if isinstance(key, str)
+    }
+    revision, _provenance = resolve_revision(row.rubric_version, row.rubric_content_hash)
+
+    def _score_value(raw: object) -> float | None:
+        return (
+            float(raw)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool)
+            else None
+        )
+
+    def _pct(value: float | None) -> float | None:
+        if revision is None:
+            return None
+        if value is None:
+            return 0.0
+        return min(100.0, max(0.0, value / revision.scale_max * 100.0))
+
+    rows: list[dict[str, Any]] = []
+    named_keys: set[str] = set()
+    if revision is not None:
+        for dim in revision.dimensions:
+            value = _score_value(normalized_scores.get(dim.key))
+            named_keys.add(dim.key)
+            rows.append({
+                "key": dim.key,
+                "title": dim.title,
+                "score": value,
+                "weight": dim.weight,
+                "weight_note": dim.weight_note,
+                "pct": _pct(value),
+            })
+    for key in sorted(normalized_scores):
+        if key in named_keys:
+            continue
+        value = _score_value(normalized_scores[key])
+        if value is None:
+            continue
+        rows.append({
+            "key": key,
+            "title": key.replace("_", " "),
+            "score": value,
+            "weight": None,
+            "weight_note": None,
+            "pct": _pct(value),
+        })
+    return rows, revision
+
+
 async def list_assessments(
     db: AsyncSession,
     run_id: str | None,
@@ -463,6 +538,19 @@ async def list_assessments(
             r.agent_id: str(r.user_id) for r in rows if r.user_id is not None
         }
 
+    # Per-dimension score rows for the card's collapsed disclosure (2026-09-14)
+    # — the exact same attach-to-row pattern as `panel_state` above, and for
+    # the exact same reason: a new top-level key would reach the admin
+    # template (which allowlists every key it forwards,
+    # `src/routers/admin.py`) or the manager template (which splats the whole
+    # view) but not both, and would render as silently-falsy Jinja `Undefined`
+    # on whichever it missed. Riding on `assessments` is the only shape that
+    # reaches both. Each row resolves its OWN rubric revision (an archived one
+    # for a stamped row, the live one for an unstamped row), so the titles and
+    # weights shown here always match the revision that actually scored it.
+    for _row in assessments:
+        _row.dimension_rows, _row.revision_view = _assessment_dimension_rows(_row)
+
     # Per-dimension distribution. Four dimensions (external_signals, ip_fto,
     # exit_thesis, chemistry_dc_path) never exceeded 2 across the 18
     # assessments of run 1787010946 — 23 of 100 weight points pinned near
@@ -566,7 +654,12 @@ async def list_assessments(
         "assessments": assessments,
         # (The per-row score chips, and the rubric_weights / row_scales keys
         # that fed them, left this view with the inline detail rows on
-        # 2026-08-27 — per-dimension scores are detail-page content.)
+        # 2026-08-27 — per-dimension scores are detail-page content. They came
+        # back on 2026-09-14, at operator request, as a collapsed per-card
+        # disclosure — but this time riding on each row as `dimension_rows` /
+        # `revision_view` (see the attach loop above) rather than as the
+        # removed `rubric_weights`/`row_scales` top-level keys, so the
+        # admin/manager split above still cannot see one without the other.)
         # The band thresholds and the decline label the page's legend states,
         # read from the rubric document rather than typed into the template.
         # The legend used to hard-code "≥4.0 / 3.0–3.9 / <3.0"; the moment

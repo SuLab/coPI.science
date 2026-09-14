@@ -9,16 +9,44 @@
    the gate. Verify with a grep for absolute admin/manager paths against this
    file — it must print nothing.
 
-   CONTRACT: an including template must define an `assessment_link(a)` macro
-   AND a `pi_link(a)` macro BEFORE the include (see either wrapper). That is
-   how the per-row links to /admin|/manager/assessments/{id} and
-   /admin|/manager/users|pis/{id} get literal URLs without one appearing
-   here. #}
+   EXCEPTION, recorded (Task C, quick scoring): literal `/reviews/...` action
+   paths ARE allowed here, unlike `/admin/...`/`/manager/...` — the same
+   exception, for the same reason, as admin/_assessment_detail_body.html. The
+   review router is not split by surface: the same routes serve admin, manager
+   and reviewer alike, and `src/routers/reviews.py`'s `_assessments_redirect`
+   (keyed on the form's `surface` hidden input) is what sends each caller back
+   to its OWN list page after the write — so a literal `/reviews/` action here
+   has none of the one-surface-only problem an `/admin/` or `/manager/`
+   literal would.
+
+   CONTRACT: an including template must define, BEFORE the include (see either
+   wrapper):
+
+     * an `assessment_link(a)` macro AND a `pi_link(a)` macro. That is how the
+       per-row links to /admin|/manager/assessments/{id} and
+       /admin|/manager/users|pis/{id} get literal URLs without one appearing
+       here.
+     * `{% set list_surface = 'admin-list' %}` (admin wrapper) or
+       `{% set list_surface = 'manager-list' %}` (manager wrapper) — contract
+       C5 of docs/plans/2026-09-14-assessment-ux-and-prompt-suggestions-
+       implementation-plan.md. It is a BARE TOKEN, never a path: the quick-
+       scoring forms below post it as `surface`, and
+       test_manager_assessments_never_links_into_admin asserts the substring
+       `/admin/` appears nowhere on a manager render, so a path-shaped
+       discriminator would fail the gate on the manager surface. Paths are
+       assembled in src/routers/reviews.py. #}
+{# The legend stays here, but the glyphs it explains now live ONE CLICK DOWN
+   inside each card's "Rubric scores &amp; gating" disclosure (Task C2,
+   operator request 2026-09-14) rather than on the card face. Saying so is the
+   point of the reworded sentence: a legend for symbols a reader cannot see is
+   worse than no legend. #}
 <p class="text-xs text-gray-400 mb-6">
     Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
     <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
     <span class="text-blue-500 font-medium">&#10067; unconfirmed</span>
     (the rubric question was never answered — distinct from a gate that failed).
+    These glyphs are inside each card's &ldquo;Rubric scores &amp; gating&rdquo;
+    disclosure, one click down, alongside that row's per-dimension scores.
 </p>
 
 {# Lost verdicts. Without this an empty page is ambiguous: "nothing screened
@@ -220,9 +248,23 @@
    added to list_assessments and not to that allowlist renders as silently-falsy
    Jinja Undefined on the admin surface ONLY. Everything below is either an
    attribute of `a` or one of the two wrapper macros. #}
+{# Contract C6's four hidden inputs, defined ONCE rather than written out in
+   each of the two quick-scoring forms on each of up to 500 cards: `surface` is
+   the bare `list_surface` token (never a path — see the CONTRACT note at the
+   top of this file) and the other three carry this page's own filter state, so
+   src/routers/reviews.py can send the writer back to the list they were
+   reading, at this card's anchor. #}
+{% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}">{% endmacro %}
 <div class="space-y-4">
 {% for a in assessments %}
-    <div class="assessment-card bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+    {# `id` BEFORE `class` (contract C13): the quick-scoring forms post a
+       `surface` token that src/routers/reviews.py turns into
+       `.../assessments?...#a-<id>`, so every card needs a fragment target.
+       tests/integration/test_assessment_queue_controls.py's `_row_slice`
+       locates `class="assessment-card "` and then the PRECEDING div open
+       tag, so
+       this ordering is safe — its two guard tests pin that behaviour. #}
+    <div id="a-{{ a.id }}" class="assessment-card bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex items-start justify-between gap-4 flex-wrap">
             <div class="min-w-0">
                 {# The story headline leads. NULL on every row written before
@@ -291,43 +333,95 @@
             </div>
         </div>
 
-        {% if a.key_points is mapping %}
-        <div class="assessment-card-points mt-3 space-y-2">
-            {% for key, label in key_point_groups %}
-            {% if a.key_points.get(key) %}
-            <div><span class="font-semibold text-gray-800">{{ label }}</span>
-                <ul class="list-disc list-inside text-sm text-gray-700">
-                {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
-                </ul></div>
+        {# Two columns, mirroring the detail page's brief (Task C1): the pitch
+           reads LEFT, the key points RIGHT, so the two surfaces cannot put the
+           same two fields in two different orders. Either half may be absent —
+           EVERY row in production today has `headline IS NULL` and
+           `key_points IS NULL` — so the grid collapses to one column rather
+           than leaving an empty cell, and the whole grid (and each tinted box
+           inside it) is skipped when its field is missing. An unconditional
+           box would fail on the entire current corpus, not on an edge case;
+           test_a_row_with_no_headline_falls_back_to_the_short_label asserts
+           `assessment-card-points` is absent for such a row.
+
+           `has_points` is the detail page's own expression, and it is a
+           CONTENT check rather than `is mapping`: a mapping of only empty
+           lists is a storable shape (normalize_key_points), and it must render
+           no box rather than an empty tinted one. #}
+        {% set has_points = (a.key_points is mapping and (a.key_points.values() | map('length') | sum) > 0) or (a.key_points is not mapping and a.key_points) %}
+        {% if a.elevator_pitch or has_points %}
+        <div class="mt-3 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-4">
+            {% if a.elevator_pitch %}
+            <div class="assessment-card-pitch rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">In one minute</div>
+                {# `line-clamp-6`, never a server-side truncation: a 1300-char
+                   pitch is a wall on a triage card, but the DOM must still
+                   carry the whole value so nothing is lost to a CSS-off
+                   reader. The `detail →` link in the footer is the escape. #}
+                <div class="assessment-prose max-w-none mt-1 line-clamp-6">
+                {# Same write-time `prose_format` stamp and the same safe
+                   fallback as the detail page: NULL means legacy plain text,
+                   which may carry a literal `*` in a scientific identifier
+                   that a markdown pass would read as emphasis. #}
+                {% if a.prose_format == 'markdown' %}
+                <div class="assessment-card-pitch-body md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
+                {% else %}
+                <p class="assessment-card-pitch-body whitespace-pre-line">{{ a.elevator_pitch }}</p>
+                {% endif %}
+                </div>
+            </div>
             {% endif %}
-            {% endfor %}
+            {% if has_points and a.key_points is mapping %}
+            <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
+                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+                <div class="mt-1 space-y-2">
+                    {% for key, label in key_point_groups %}
+                    {% if a.key_points.get(key) %}
+                    <div><span class="font-semibold text-gray-800">{{ label }}</span>
+                        <ul class="list-disc list-inside text-sm text-gray-700">
+                        {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                        </ul></div>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            {% elif has_points %}
+            <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
+                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+                <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
+                    {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
         </div>
-        {% elif a.key_points %}
-        <ul class="assessment-card-points mt-3 list-disc list-inside text-sm text-gray-700 space-y-0.5">
-            {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
-        </ul>
+        {% endif %}
+
+        {# The hub's own account of why it scored the way it did (column
+           `score_rationale`, contract C11 / migration 0048). Whole block
+           conditional: NULL on every row written before 0048, and never
+           backfilled. The eyebrow is the SAME label the detail page uses —
+           "Why this score" — so the two surfaces do not name one field two
+           ways. This is not the `rationale` field the 2026-08-27 removal
+           keeps off this page; that one stays on the detail page. #}
+        {% if a.score_rationale %}
+        <div class="assessment-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
+            <div class="text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</div>
+            <div class="assessment-prose max-w-none mt-1">
+            {% if a.prose_format == 'markdown' %}
+            <div class="assessment-card-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+            {% else %}
+            <p class="assessment-card-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+            {% endif %}
+            </div>
+        </div>
         {% endif %}
 
         <div class="mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
-            {% if a.gating %}
-            <span class="flex items-center gap-2 flex-wrap">
-                {% for key, gate_state in a.gating.items() %}
-                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-gray-600">
-                    {% if gate_state == 'met' %}
-                        <span class="text-green-600" title="Met">&#9989;</span>
-                    {% elif gate_state == 'not_met' %}
-                        <span class="text-red-600" title="Not met">&#10060;</span>
-                    {% elif gate_state == 'unconfirmed' %}
-                        <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
-                    {% else %}
-                        <span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
-                    {% endif %}
-                    {{ key.replace("_", " ") }}
-                </span>
-                {% endfor %}
-            </span>
-            {% endif %}
-
+            {# The gating glyph row moved (VERBATIM) into the collapsed
+               "Rubric scores &amp; gating" disclosure below — Task C2,
+               operator request 2026-09-14. What stays on the card FACE is
+               unchanged: flag count, panel badge, review status chip,
+               Assigned, Reviewed by, detail link. #}
             {% if a.red_flags %}
                 <span class="text-amber-700 font-medium whitespace-nowrap">{{ a.red_flags | length }} flag{{ '' if a.red_flags | length == 1 else 's' }}</span>
             {% else %}<span class="text-gray-400">no flags</span>{% endif %}
@@ -361,6 +455,117 @@
             <span class="text-gray-500">Reviewed by: {{ a.review_cols.reviewed_by_names | join(", ") if a.review_cols.reviewed_by_names else "—" }}</span>
             <span class="ml-auto">{{ assessment_link(a) }}</span>
         </div>
+
+        {# Per-dimension scores + the gating glyphs, one click down (Task C2).
+           CLOSED by default — no `open` attribute — because the card face is a
+           triage surface and six bars per row is what made the old table
+           unreadable.
+
+           `a.dimension_rows` and `a.revision_view` are attached per ROW by
+           src/services/directory.py (contract C4), never as a top-level
+           context key, and they are built from the ROW'S OWN stamped revision:
+           a row stamped with an archived revision must render that revision's
+           titles and weights, not today's. A row whose revision is not in the
+           registry (`revision_view is None`) gets no bars and no weights, and
+           says the scale is unknown rather than implying a scale it cannot
+           name; its dimension titles are the humanised score keys, matching
+           what build_assessment_detail does for an unnamed key. #}
+        <details class="assessment-card-scores mt-3 border-t border-gray-100 pt-3">
+            <summary class="cursor-pointer text-sm font-medium text-gray-700">Rubric scores &amp; gating</summary>
+            {# WHITESPACE-CONTROLLED, and not as a matter of taste. This block is
+               rendered once per card and the page renders up to
+               `assessments_limit` (500) of them, so every space of indentation
+               inside the loop is multiplied by 3000. Measured 2026-09-14: the
+               pretty-printed form of exactly this markup cost 6,676 bytes per
+               card against 2,415 for the whole card face, i.e. the indentation
+               alone was the single largest item on the page, and the 500-row
+               "All Runs" render came to 8.67 MB. The `{%-`/`-%}` trims and the
+               one-line row below take the same markup to ~2 KB with byte-
+               identical rendered output. Do not "tidy" this back into an
+               indented block without re-measuring
+               test_the_list_page_stays_under_a_size_ceiling. #}
+            {%- if a.dimension_rows %}
+            <div class="mt-2 space-y-1">
+                {%- for d in a.dimension_rows %}
+                <div class="assessment-card-score-row flex items-center gap-2 text-xs"><span class="w-48 shrink-0 text-gray-700">{{ d.title }}</span><span class="w-8 shrink-0 text-right font-semibold text-gray-800">{% if d.score is none %}&mdash;{% else %}{{ "%g"|format(d.score) }}{% endif %}</span><span class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">{% if d.pct is not none %}<span class="block h-1.5 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>{% endif %}</span><span class="w-24 shrink-0 text-gray-600">{% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}</span></div>
+                {%- endfor %}
+                {# The bar carried a `title` attribute repeating this row's own
+                   title and weight note. Dropped: unlike the detail page, every
+                   one of those facts is already VISIBLE text in the row beside
+                   it, so the tooltip added nothing a reader could not read, and
+                   it cost ~120 bytes x 6 dimensions x 500 rows. #}
+                <p class="text-xs text-gray-600">{% if a.revision_view %}Bars are the score on the {{ a.revision_view.scale_min }}&ndash;{{ a.revision_view.scale_max }} scale, from rubric {{ a.revision_view.version }} — the revision that scored this row.{% else %}This row's rubric revision is not in the registry, so its scale is unknown: no weights and no bars are shown.{% endif %}</p>
+            </div>
+            {%- else %}
+            <p class="mt-2 text-xs text-gray-600">No per-dimension scores were stored for this verdict.</p>
+            {%- endif %}
+
+            {# Moved verbatim from the card face (Task C2), including the three
+               glyphs, their `title`s and the `gating-row gating-*` classes —
+               test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face
+               and _gating_state_for both read them. #}
+            {%- if a.gating %}
+            <span class="mt-2 flex items-center gap-2 flex-wrap text-xs">
+                {%- for key, gate_state in a.gating.items() %}
+                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-gray-600">{% if gate_state == 'met' %}<span class="text-green-600" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ key.replace("_", " ") }}</span>
+                {%- endfor %}
+            </span>
+            {%- endif %}
+        </details>
+
+        {# Quick scoring (Task C3, operator request 4): the narrow review write
+           a triage reader actually wants from the queue — an overall rating, a
+           comment, a feedback mode, and the approve/disapprove/clear status —
+           without a trip to the detail page.
+
+           Deliberately NOT here:
+             * `dim_*` fields. _parse_dimension_scores then returns `{}`, which
+               _normalized_dimension_scores stores as SQL NULL — the already
+               supported path (test_posting_no_dimension_fields_at_all_still_
+               works). Per-dimension scoring stays on the detail page.
+             * an EDIT form. `edit_feedback` REPLACES `dimension_scores` from
+               the posted form, so a dimension-free edit posted from here would
+               silently WIPE scores a reviewer entered on the detail page.
+             * delete, assign and unassign — queue-side bulk management is not
+               in scope, and assignment is staff-only whereas this card is
+               visible to reviewers too.
+
+           The status control is BUTTONS, not a <select>: a card must never
+           print the words "Approved"/"Disapproved"
+           (test_list_pages_show_reviewer_columns row-scopes that), and those
+           are exactly the option strings a status select would carry. The
+           lowercase `value=` attributes are the router's own vocabulary. #}
+        {% set qs = 'qs-' ~ a.id ~ '-' %}
+        <details class="assessment-card-quickscore mt-3 border-t border-gray-100 pt-3">
+            <summary class="cursor-pointer text-sm font-medium text-indigo-700">Quick scoring</summary>
+            {# Whitespace-controlled for the same measured reason as the scores
+               block above: once per card, up to 500 cards. #}
+            <p class="mt-2 text-sm text-gray-600 max-w-[68ch]">Rates the PROPOSAL's own merit, not the bot's performance. Per-dimension rubric scoring is on the detail page.</p>
+            {%- if impersonation_banner %}
+            <p class="mt-1 text-sm text-gray-600 max-w-[68ch]">Reviewing as <strong>{{ impersonation_banner.name }}</strong>; your own account is recorded as the person who entered it.</p>
+            {%- endif %}
+            {# The four hidden inputs are contract C6: `surface` is the bare
+               `list_surface` token and the other three carry this page's own
+               filter state, so src/routers/reviews.py can send the writer back
+               to the list they were reading, at this card's anchor. #}
+            <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
+                {{ qs_filters() }}
+                <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+                <select id="{{ qs }}score" name="score" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
+                <label for="{{ qs }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
+                <textarea id="{{ qs }}comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+                <label for="{{ qs }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+                <select id="{{ qs }}mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option><option value="learn">Learn</option><option value="log_only">Don't learn — log only</option></select>
+                <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
+                <p class="text-sm text-gray-600">Adds a new note; edit or remove one on the detail page.</p>
+            </form>
+            <form method="post" action="/reviews/assessments/{{ a.id }}/status" class="mt-3 flex items-center gap-2">
+                {{ qs_filters() }}
+                <button type="submit" name="action" value="approved" class="text-sm font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
+                <button type="submit" name="action" value="disapproved" class="text-sm font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
+                <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Clear</button>
+            </form>
+        </details>
     </div>
 {% endfor %}
 </div>

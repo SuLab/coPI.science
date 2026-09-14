@@ -307,14 +307,22 @@ async def test_a_non_numeric_dimension_field_is_a_400_and_writes_nothing(
 async def test_a_dimension_only_edit_survives_an_in_flight_analysis_job(
     client, db_session
 ):
-    """A1. `edit_feedback` resets consumed_at and enqueues a new job, but the
-    in-flight job's conditional UPDATE used to match on (score, comment) alone
-    — so an edit that touched ONLY the dimension scores got re-stamped
-    consumed, and the new job then found nothing to analyze. Silent: the stamp
+    """A1. `edit_feedback` resets consumed_at, but the in-flight job's
+    conditional UPDATE used to match on (score, comment) alone — so an edit
+    that touched ONLY the dimension scores got re-stamped consumed, and the
+    next analysis pass then found nothing to analyze. Silent: the stamp
     SUCCEEDED, so the job's own `stamped != len(reviews)` warning never fired.
 
     Simulated by snapshotting the row, editing it, then running the UPDATE the
     handler runs — the same shape as the handler, without an Opus round trip.
+
+    This test is unaffected by F2 (2026-09-14) and passes unchanged: it builds
+    the UPDATE by hand and never reads the job queue. Only the narration above
+    needed correcting — `edit_feedback` no longer enqueues a replacement job
+    (nothing does, until a human presses "Generate prompt suggestions"), and
+    the guarantee this pins, `consumed_at_predicates`, is exactly what F2 did
+    NOT touch: leaving the row unconsumed is what keeps it eligible for that
+    next pass, whoever schedules it.
     """
     from sqlalchemy import update
 

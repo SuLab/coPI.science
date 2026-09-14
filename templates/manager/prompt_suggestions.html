@@ -4,21 +4,60 @@
 {% block content %}
 <div class="flex items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Prompt Suggestions</h1>
-    <form method="GET" action="/manager/prompt-suggestions" class="flex items-center gap-2">
-        <label class="text-sm text-gray-500">Status:</label>
-        <select name="status" onchange="this.form.submit()"
-                class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
-            <option value="" {% if not status_filter %}selected{% endif %}>All</option>
-            <option value="open" {% if status_filter == 'open' %}selected{% endif %}>Open</option>
-            <option value="dismissed" {% if status_filter == 'dismissed' %}selected{% endif %}>Dismissed</option>
-            <option value="implemented" {% if status_filter == 'implemented' %}selected{% endif %}>Implemented</option>
-        </select>
-    </form>
+    <div class="flex items-center gap-4">
+        <form method="GET" action="/manager/prompt-suggestions" class="flex items-center gap-2">
+            <label for="prompt-suggestions-status" class="text-sm text-gray-500">Status:</label>
+            <select id="prompt-suggestions-status" name="status" onchange="this.form.submit()"
+                    class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                <option value="" {% if not status_filter %}selected{% endif %}>All</option>
+                <option value="open" {% if status_filter == 'open' %}selected{% endif %}>Open</option>
+                <option value="dismissed" {% if status_filter == 'dismissed' %}selected{% endif %}>Dismissed</option>
+                <option value="implemented" {% if status_filter == 'implemented' %}selected{% endif %}>Implemented</option>
+            </select>
+        </form>
+        {% if effective_user.is_staff and not impersonation_banner %}
+        <form method="post" action="/reviews/suggestions/generate" class="flex flex-col items-end">
+            <button type="submit" {% if eligible_count == 0 %}disabled{% endif %}
+                    class="text-sm px-3 py-1.5 rounded-md font-medium
+                        {% if eligible_count == 0 %}bg-gray-100 text-gray-400 cursor-not-allowed{% else %}bg-indigo-600 text-white hover:bg-indigo-700{% endif %}">
+                Generate suggestions from current reviews
+            </button>
+            <span class="text-xs text-gray-400 mt-1">
+                {% if eligible_count == 0 %}
+                    Nothing to analyse
+                {% else %}
+                    {{ eligible_count }} assessment{{ '' if eligible_count == 1 else 's' }} have
+                    review feedback marked Learn that no suggestion has consumed yet.
+                    {% if eligible_count > analyses_per_press %}
+                    One press analyses the {{ analyses_per_press }} with the oldest
+                    feedback; press again for the rest.
+                    {% endif %}
+                {% endif %}
+            </span>
+        </form>
+        {% endif %}
+    </div>
 </div>
+{# Coerced to int, not reflected as given: these are autoescaped so the raw
+   form was never an XSS vector, but a hand-crafted link could otherwise show
+   staff an arbitrary string as a "Queued N of M" count. `|int` renders 0 for
+   anything non-numeric, and the pair only shows at all when both are present. #}
+{% set flash_generated = request.query_params.get('generated') %}
+{% set flash_eligible = request.query_params.get('eligible') %}
+{% if flash_generated is not none and flash_eligible is not none %}
+<p class="text-sm text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-md px-3 py-2 mb-2">
+    Queued {{ flash_generated | int }} of {{ flash_eligible | int }}
+    eligible assessment(s). The worker processes them in the background; refresh this
+    page in a minute. Any assessment already queued for analysis was skipped, and one
+    press analyses at most {{ analyses_per_press }}.
+</p>
+{% endif %}
 <p class="text-sm text-gray-500 mb-2">
-    Review-bot-drafted prompt/rubric edits, distilled from human reviewer feedback
-    (Task 10). Nothing here is ever applied automatically — the status below is
-    staff-set attribution only.
+    Suggestions are generated only when a human presses "Generate suggestions from
+    current reviews" above. Reviewer feedback marked Learn only marks an
+    assessment eligible for that analysis — it does not itself generate a
+    suggestion. Nothing here is ever applied to a prompt file automatically —
+    the status below is staff-set attribution only.
 </p>
 <p class="text-xs text-gray-400 mb-4">
     {% if total_count > suggestions_limit %}

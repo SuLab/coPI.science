@@ -13,7 +13,9 @@ the handler never reaches the real client in these tests.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -81,6 +83,26 @@ def _make_job(assessment_id) -> Job:
     return Job(type="review_feedback_analysis", payload={"assessment_id": str(assessment_id)})
 
 
+@contextlib.contextmanager
+def caplog_at_warning():
+    """Collect this module's WARNING records without the `caplog` fixture, so a
+    test can use it alongside `monkeypatch`/`db_session` without ordering
+    surprises."""
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("src.services.review_bot")
+    handler = _Collector(level=logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
 async def _suggestion_count(db) -> int:
     return await db.scalar(select(func.count()).select_from(PromptChangeSuggestion))
 
@@ -144,6 +166,127 @@ async def test_happy_path_stores_a_suggestion_and_consumes_feedback(db_session, 
     assert len(calls) == 1
     assert calls[0]["model"] == review_bot.get_settings().llm_review_model
     assert calls[0]["max_tokens"] == 8000
+
+
+# ---------------------------------------------------------------------------
+# G1/G2: role-labelled prompt blocks, and one row per proposal
+# ---------------------------------------------------------------------------
+
+
+_TWO_TARGET_RESPONSE = json.dumps(
+    {
+        "target": "scout_hub",
+        "suggestion": "S1",
+        "rationale": "R1",
+        "additional_proposals": [
+            {"target": "pi_lab", "suggestion": "S2", "rationale": "R2"},
+        ],
+    }
+)
+
+
+async def test_two_targets_store_two_rows_sharing_one_snapshot(db_session, monkeypatch):
+    """One reply with an `additional_proposals` entry becomes TWO suggestion
+    rows (D6) — one model call, one feedback snapshot, one commit."""
+    calls = _install(monkeypatch, response=_TWO_TARGET_RESPONSE)
+    assessment, _run = await _seed_assessment(db_session)
+    review = _make_review(assessment)
+    db_session.add(review)
+    await db_session.flush()
+    job = _make_job(assessment.id)
+    db_session.add(job)
+    await db_session.flush()
+
+    await review_bot.execute_review_analysis(job, db_session)
+
+    rows = (
+        await db_session.execute(
+            select(PromptChangeSuggestion).order_by(PromptChangeSuggestion.target)
+        )
+    ).scalars().all()
+    assert len(calls) == 1, "still exactly one Opus call"
+    assert [r.target for r in rows] == ["pi_lab", "scout_hub"]
+
+    by_target = {r.target: r for r in rows}
+    assert "S2" in by_target["pi_lab"].suggestion
+    assert "R2" in by_target["pi_lab"].suggestion
+    assert "S1" in by_target["scout_hub"].suggestion
+    assert "S2" not in by_target["scout_hub"].suggestion
+
+    # Everything that describes the JOB rather than the proposal is shared —
+    # including `raw_response`: the model emitted one reply and each row is a
+    # view of it.
+    for field in (
+        "feedback_snapshot", "prompt_files", "model", "transcript_available",
+        "input_truncated", "raw_response", "assessment_id",
+    ):
+        assert getattr(rows[0], field) == getattr(rows[1], field), field
+    assert rows[0].raw_response == _TWO_TARGET_RESPONSE
+    assert [f["id"] for f in rows[0].feedback_snapshot] == [str(review.id)]
+
+    await db_session.refresh(review)
+    assert review.consumed_at is not None
+
+
+async def test_additional_proposals_absent_behaves_exactly_as_today(db_session, monkeypatch):
+    """The key is optional: a reply without it stores exactly one row and logs
+    no drop warning."""
+    _install(monkeypatch)  # _HAPPY_RESPONSE has no additional_proposals
+    assessment, _run = await _seed_assessment(db_session)
+    db_session.add(_make_review(assessment))
+    await db_session.flush()
+    job = _make_job(assessment.id)
+    db_session.add(job)
+    await db_session.flush()
+
+    with caplog_at_warning() as records:
+        await review_bot.execute_review_analysis(job, db_session)
+
+    row = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
+    assert row.target == "scout_hub"
+    assert not [r for r in records if "additional_proposals" in r.getMessage()]
+    assert review_bot._parse_additional_proposals(json.loads(_HAPPY_RESPONSE)) == []
+
+
+def test_prompt_files_metadata_still_carries_only_path_and_sha256_12(monkeypatch):
+    """Finding PS7: the role label is a RENDERING concern. `prompt_files` is
+    read by `manager._prompt_file_status` by key and must keep exactly these
+    two, on present and missing files alike."""
+    monkeypatch.chdir(ROOT)
+    meta, _text = review_bot._render_prompt_files()
+    assert meta
+    for entry in meta:
+        assert set(entry) == {"path", "sha256_12"}
+    assert review_bot._LABEL_PI_LAB not in json.dumps(meta)
+
+
+def test_the_rendered_blocks_label_each_file_with_its_role(monkeypatch):
+    """G1: the two prompt sets are distinguishable in the corpus, which is the
+    whole point — `prompts/agent-system.md` and
+    `prompts/roles/scout_hub/agent-system.md` are different texts for
+    different agents under the same filename."""
+    monkeypatch.chdir(ROOT)
+    _meta, text = review_bot._render_prompt_files()
+    headers = [ln for ln in text.splitlines() if ln.startswith("--- FILE:")]
+    labelled = {
+        "prompts/agent-system.md": review_bot._LABEL_PI_LAB,
+        "prompts/roles/scout_hub/agent-system.md": review_bot._LABEL_SCOUT_HUB,
+        "prompts/roles/pi_lab/role.toml": review_bot._LABEL_PI_LAB,
+        "prompts/roles/scout_hub/role.toml": review_bot._LABEL_SCOUT_HUB,
+        "prompts/rubric/blackbird-rubric.toml": review_bot._LABEL_RUBRIC,
+        "prompts/specialists/legal.md": review_bot._LABEL_SPECIALIST,
+    }
+    for path, label in labelled.items():
+        assert any(h.startswith(f"--- FILE: {path} [{label}] ") for h in headers), path
+    # Every header carries a label, so none of them reads as an unlabelled file.
+    assert all("[" in h for h in headers)
+
+
+def test_both_role_manifests_are_in_the_prompt_file_set():
+    """Finding PS3: `post_types` and the prompt-set version live only here."""
+    files = review_bot._prompt_file_set()
+    assert "prompts/roles/pi_lab/role.toml" in files
+    assert "prompts/roles/scout_hub/role.toml" in files
 
 
 async def test_no_unconsumed_learn_feedback_is_a_silent_noop(db_session, monkeypatch):

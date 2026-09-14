@@ -63,6 +63,10 @@ from src.services.admin_provisioning import ProvisioningError, start_provisionin
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
+from src.services.assessment_reviews import (
+    MAX_ANALYSES_PER_PRESS,
+    count_pending_analysis_candidates,
+)
 from src.services.directory import (
     build_discussions_view,
     build_run_detail,
@@ -794,9 +798,10 @@ async def manager_prompt_suggestions(
     current_user: User = _STAFF,
 ):
     """The review bot's (Task 10) drafted prompt-edit queue. Read-only triage:
-    the only write this surface offers is the status action, which lives on
-    ``POST /reviews/suggestions/{id}/status`` (D1-style split — every write
-    stays off this router except the four-route allowlist)."""
+    the only writes this surface offers are the status action, which lives on
+    ``POST /reviews/suggestions/{id}/status``, and the generate action, which
+    lives on ``POST /reviews/suggestions/generate`` (D1-style split — every
+    write stays off this router except the eight-route allowlist)."""
     status_filter = status if status in _SUGGESTION_STATUSES else None
     query = select(PromptChangeSuggestion)
     if status_filter:
@@ -806,6 +811,7 @@ async def manager_prompt_suggestions(
     ).scalar_one()
     query = query.order_by(PromptChangeSuggestion.created_at.desc()).limit(SUGGESTIONS_LIMIT)
     suggestions = (await db.execute(query)).scalars().all()
+    eligible_count = await count_pending_analysis_candidates(db)
     return templates.TemplateResponse(
         request,
         "manager/prompt_suggestions.html",
@@ -817,6 +823,8 @@ async def manager_prompt_suggestions(
             status_filter=status_filter,
             total_count=total_count,
             suggestions_limit=SUGGESTIONS_LIMIT,
+            eligible_count=eligible_count,
+            analyses_per_press=MAX_ANALYSES_PER_PRESS,
         ),
     )
 

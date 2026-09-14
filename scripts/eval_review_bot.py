@@ -22,6 +22,12 @@ prompt files under test are the branch's, not the image's:
 ``--dry-run`` builds and grades nothing but reports payload sizes; ``--max-calls``
 is hard-capped at 12 in code (the operator's ceiling for this evaluation).
 
+Grading covers the PRIMARY proposal only. A reply's ``additional_proposals``
+(2026-09-14, D6 — each one becomes its own suggestion row in production) are
+recorded per repetition as ``parsed_additional_targets`` and
+``additional_suggestions`` and are deliberately not graded, so every grade in a
+report stays comparable with the reports written before that contract existed.
+
 Case schema (``scripts/review_bot_eval_cases.json`` is a list of these):
     name                     unique label
     assessment_id            opportunity_assessments.id (UUID string)
@@ -252,9 +258,20 @@ async def _run_case(db: AsyncSession, case: dict, rep: int, *, dry_run: bool, se
             settings.llm_review_model, built["system_prompt"], built["user_message"],
         )
         target, suggestion = review_bot._parse_model_output(call["raw"])
+        # The PRIMARY proposal is parsed and graded exactly as before (the
+        # 2-tuple call is deliberately untouched, D6); the multi-target extras
+        # are recorded alongside it so the eval reports the new behaviour
+        # without changing what any grade means.
+        additional = review_bot._parse_additional_proposals(
+            review_bot._parsed_object(call["raw"])
+        )
         record.update(call)
         record["parsed_target"] = target
         record["suggestion"] = suggestion
+        record["parsed_additional_targets"] = [t for t, _body in additional]
+        record["additional_suggestions"] = [
+            {"target": t, "suggestion": body} for t, body in additional
+        ]
         record["grade"] = grade(
             case, target=target, suggestion=suggestion, raw=call["raw"],
             corpus=built["corpus"], transcript_available=built["transcript_available"],
@@ -304,9 +321,11 @@ async def run(cases_path: Path, out_path: Path, *, max_calls: int, dry_run: bool
                             f"${record['cost_usd']:.3f}"
                             if record.get("cost_usd") is not None else "unpriced"
                         )
+                        extras = record.get("parsed_additional_targets") or []
+                        extras_str = ("+" + ",".join(extras)) if extras else ""
                         print(
                             f"[{calls_made}/{budget}] {case['name']}#{rep}: "
-                            f"target={record.get('parsed_target')} "
+                            f"target={record.get('parsed_target')}{extras_str} "
                             f"in={record.get('input_tokens')} out={record.get('output_tokens')} "
                             f"stop={record.get('stop_reason')} {record.get('latency_s')}s {cost_str}",
                             flush=True,

@@ -141,7 +141,7 @@ Compose a plain-text email body with these sections:
      in one line or omit this section.
   7. Recommended next action (or "none")
 
-Keep the whole body under ~400 lines. If there's truly nothing to say,
+Keep the whole body under about 400 lines. If there's truly nothing to say,
 still send the email with status OK + the activity snapshot — a daily
 heartbeat is the point.
 

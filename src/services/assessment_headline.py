@@ -18,6 +18,17 @@ accepted deliberately, not a free extension of the existing policy. Widening
 this further — interpolating a verdict wholesale, adding a "why" line — is a
 policy change requiring sign-off, not a tidy-up.
 
+The pitch segment is rendered through `_clip_at_sentence`, not `_clip`: all 8
+pitches measured in production (2026-09-14) run 1173–1406 characters against
+`PITCH_DISPLAY_CHARS = 600`, so `elevator_pitch` is routinely longer than the
+cap, and a plain `_clip` cut every one of them mid-word. The fix is to the
+CLIP, not the cap — raising `PITCH_DISPLAY_CHARS` would publish more sidecar
+prose to a public channel, which is the widening this section's policy exists
+to bound. `score_rationale`, landing in the same change set, is a new sidecar
+field and is deliberately **not** rendered here — it is not a seventh field,
+and adding it would be exactly the kind of policy widening this section warns
+against.
+
 **Why `score`/`band` can be passed in verbatim (2026-08-29, fix round 1).** The
 engine's own call site (`_post_assessment_summary`) computes band/score live
 from a verdict's `scores` dict, against whichever rubric document THIS PROCESS
@@ -39,6 +50,8 @@ unchanged.
 
 from __future__ import annotations
 
+import re
+
 from src.services.blackbird_rubric import band as _rubric_band
 from src.services.blackbird_rubric import weighted_score as _rubric_weighted_score
 
@@ -58,6 +71,11 @@ RECOMMENDATION_DISPLAY_CHARS = 30
 PITCH_DISPLAY_CHARS = 600
 
 
+#: The last whitespace-started run in a window, so the word-boundary fallback
+#: backs off to ANY whitespace rather than to a literal space only.
+_TRAILING_WHITESPACE_RUN = re.compile(r"\s\S*$")
+
+
 def _clip(value: object, max_len: int) -> str | None:
     """A non-empty string clipped to ``max_len``, else ``None``.
 
@@ -67,6 +85,89 @@ def _clip(value: object, max_len: int) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value[:max_len]
+
+
+def _clip_at_sentence(value: object, max_len: int) -> str | None:
+    """A non-empty string ending at a sentence boundary within ``max_len``,
+    else ``None`` for a non-string.
+
+    Behaviour, in order:
+
+    * ``value`` no longer than ``max_len`` → returned **unchanged**, byte-
+      identical to what `_clip` returns for the same input. Every short pitch,
+      and every pitch of exactly `PITCH_DISPLAY_CHARS`, renders exactly as it
+      does today.
+    * Over the cap → cut after the LAST sentence terminator (`". "`, `"! "`,
+      `"? "`, or a terminator at the very end of the ``max_len`` window whose
+      NEXT character is whitespace) that leaves at least half the budget, and
+      append `" …"`. The marker is unconditional on a real truncation: the
+      chosen boundary is the HIGHEST qualifying one, and the pitch contract
+      requires a citation in sentence two, so that boundary can be an
+      abbreviation ("et al. ", "e.g. ", "vs. ") rather than a sentence end. An
+      abbreviation blocklist would be a guess; "there is more" is a fact. The
+      marker is omitted only when the cut lands at the true end of the value.
+    * Over the cap, no such boundary, but whitespace exists in the window →
+      clip to ``max_len`` first, then back off to the last space and append
+      `" …"`, so a truncation reads as one rather than as a sentence that
+      stopped mid-word. The suffix is appended AFTER the `max_len` clip, so
+      the return may be `max_len + 2` characters.
+    * Over the cap, no boundary, and no whitespace at all in the window →
+      `value[:max_len]`, with NO suffix. Deliberate: reserving room for a
+      suffix inside `max_len` here would cut the run of non-whitespace
+      characters short of the cap, which is exactly what
+      `test_an_overlong_pitch_is_clipped` exists to catch.
+    * A non-string is dropped outright, exactly as `_clip` does.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    if len(value) <= max_len:
+        return value
+
+    window = value[:max_len]
+    half_budget = max_len / 2
+    boundary_ends = []
+    for terminator in (". ", "! ", "? "):
+        idx = window.rfind(terminator)
+        if idx != -1:
+            # Cut right after the punctuation mark itself, not the trailing
+            # space, so the result reads as a complete sentence.
+            boundary_ends.append(idx + 1)
+    # A terminator sitting at the very END of the window counts only when the
+    # NEXT character is whitespace (or there is no next character). Without
+    # that guard this candidate is always `max_len` — by construction the
+    # largest, so it beats every real boundary — and a pitch whose 600th
+    # character happens to be the "." of "2.5-fold" or the "." of "et al."
+    # publishes "… at 2." or "… (Smith et al." to a channel the post cannot
+    # be retracted from.
+    if window and window[-1] in ".!?" and (
+        len(value) == max_len or value[max_len].isspace()
+    ):
+        boundary_ends.append(len(window))
+
+    candidates = [end for end in boundary_ends if end >= half_budget]
+    if candidates:
+        end = max(candidates)
+        # The ellipsis is unconditional on a real truncation, which REVERSES
+        # this function's first draft ("a complete sentence needs no
+        # ellipsis"). The draft assumed the chosen boundary is always a true
+        # sentence end; it is not. `rfind` takes the HIGHEST qualifying index,
+        # and the pitch contract now requires a citation in sentence two
+        # ("DOI or PubMed link"), which is precisely where "et al. ", "e.g. ",
+        # "i.e. " and "vs. " live — so the last candidate can be an
+        # abbreviation, and a reader would have no way to tell the published
+        # fragment from the whole pitch. An abbreviation blocklist would be a
+        # guess; saying "there is more" is a fact. Omitted only when the cut
+        # lands at the true end of the value, where there is nothing more.
+        return value[:end] + ("" if end >= len(value) else " …")
+
+    # Any whitespace, not just a space: a markdown pitch (`prose_format ==
+    # 'markdown'`) separates paragraphs with newlines, and a window whose only
+    # whitespace is "\n" would otherwise fall through to the mid-word cut this
+    # function exists to remove.
+    match = _TRAILING_WHITESPACE_RUN.search(window)
+    if match is None:
+        return value[:max_len]
+    return window[: match.start()] + " …"
 
 
 def render_assessment_headline(
@@ -145,9 +246,13 @@ def render_assessment_headline(
     # empty `scores` map — every row written before 0043 has NULL here and is
     # deliberately never backfilled, so a repaired headline for one of those
     # rows must be byte-identical to what this function produced before the
-    # widening. `_clip` drops a non-string outright, so a model that answers
-    # with an object cannot have a Python repr posted to a channel humans read.
-    pitch_text = _clip(elevator_pitch, PITCH_DISPLAY_CHARS)
+    # widening. Clipped at a sentence boundary, not mid-word: all 8 pitches
+    # measured in production (2026-09-14) run well past `PITCH_DISPLAY_CHARS`,
+    # so a plain `_clip` here cut every one of them mid-word. `_clip_at_sentence`
+    # drops a non-string outright, exactly as `_clip` does, so a model that
+    # answers with an object cannot have a Python repr posted to a channel
+    # humans read.
+    pitch_text = _clip_at_sentence(elevator_pitch, PITCH_DISPLAY_CHARS)
     pitch_part = f"\n{pitch_text}" if pitch_text else ""
     return (
         f":mag: {pi_label} — {project_text} → *{display}*{score_part}{link_part}"

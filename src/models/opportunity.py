@@ -76,6 +76,23 @@ class OpportunityAssessment(Base):
         JSONB(none_as_null=True), nullable=True
     )
     elevator_pitch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sidecar item 10 (0048): the hub's own brief account of WHY the dimension
+    # scores came out where they did — the paragraph a reviewer reads before
+    # arguing with a number.
+    #
+    # NULL on every row written before 0048 and deliberately never backfilled,
+    # for the same reason as the three fields above: those verdicts were never
+    # asked for one, and a generated rationale would be indistinguishable from
+    # one the hub wrote. Every read path renders nothing when it is NULL.
+    #
+    # Deliberately NOT published to Slack. `#assessments-summary` renders
+    # exactly six fields — PI/lab name, project, recommendation, band/score,
+    # permalink and `elevator_pitch` — and the reasoning for that list lives in
+    # src/services/assessment_headline.py's module docstring. This column is an
+    # app-only field (design D3): it exists precisely so a score rationale need
+    # not be smuggled into the pitch, which IS published. Adding it to the
+    # headline is a content-policy change requiring sign-off, not a tidy-up.
+    score_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     funnel_stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
     recommendation: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -123,7 +140,7 @@ class OpportunityAssessment(Base):
     summary_posted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird should
+    # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never
     # backfilled: old verdicts were not asked for one) and for a verdict that

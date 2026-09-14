@@ -135,7 +135,7 @@ templates.env.filters["ts"] = fmt.timestamp
 # free. A test, not a filter or a global: `selectattr` takes a test name.
 templates.env.tests["truncated_stop"] = is_truncated_stop
 
-# `key_points` >= 1.3.0 is the three-group object; the (key, label) pairs also
+# `key_points` >= 1.4.0 is the five-group object (1.3.0 had three); the (key, label) pairs also
 # fix the render order on both `_assessments_body.html` and
 # `_assessment_detail_body.html`. Registered as a Jinja global rather than a
 # context key: the admin assessments handler forbids a new one (see the

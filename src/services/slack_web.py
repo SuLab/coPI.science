@@ -225,6 +225,17 @@ def post_message(
     disagree about how many messages exist — measured live at >4000 characters,
     where Slack silently splits and returns only the last ts.
 
+    **This function does NOT apply ``markdown_to_mrkdwn``**, unlike the agent
+    transport (``src/agent/slack_client.py::_post_one``). It therefore does not
+    carry the 2026-09-14 approximation-tilde neutralization either, so a caller
+    that posts model-authored prose through here can still publish a
+    ``~…~`` pair that Slack renders struck through. Left as-is deliberately:
+    this function has NO caller in ``src/`` today (verified 2026-09-14 — every
+    live Slack post goes through the agent transport), so converting here would
+    change behaviour for a hypothetical future caller with nothing exercising
+    it, including for one that passes text already in mrkdwn. If you wire a
+    caller that posts prose a model wrote, convert it first.
+
     ``thread_ts`` exists because two callers post *threaded* replies — the
     legacy PI-guidance path in ``routers/agent_page.py`` and its email
     equivalent in ``services/email_inbound.py``. Without it they could not come

@@ -229,3 +229,120 @@ def test_an_overlong_pitch_is_clipped():
     )
     assert "x" * PITCH_DISPLAY_CHARS in text
     assert "x" * (PITCH_DISPLAY_CHARS + 1) not in text
+
+
+# ---------------------------------------------------------------------------
+# `_clip_at_sentence` (P1 fix, 2026-09-14) — the pitch is clipped at a
+# sentence boundary rather than mid-word. `test_an_overlong_pitch_is_clipped`
+# above is left unchanged, per the task: it pins the no-boundary/no-whitespace
+# case, which `_clip_at_sentence` must still satisfy.
+# ---------------------------------------------------------------------------
+
+
+def test_a_short_pitch_is_byte_identical_to_the_old_clip():
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip, _clip_at_sentence
+
+    short = "Hopkins has 39-plex cytokine data on 124 ICI patients."
+    assert _clip_at_sentence(short, PITCH_DISPLAY_CHARS) == _clip(
+        short, PITCH_DISPLAY_CHARS
+    )
+
+
+def test_a_pitch_of_exactly_the_cap_is_unchanged():
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    exact = "x" * PITCH_DISPLAY_CHARS
+    assert _clip_at_sentence(exact, PITCH_DISPLAY_CHARS) == exact
+
+
+def test_a_long_pitch_is_clipped_at_a_sentence_boundary_and_marked():
+    """REVERSED from "...with_no_ellipsis" (2026-09-14 audit). The marker is
+    unconditional on a real truncation: `rfind` takes the HIGHEST qualifying
+    boundary and the pitch contract requires a citation in sentence two, so
+    that boundary can be an abbreviation ("et al. ", "e.g. ") rather than a
+    sentence end. A reader would have no way to tell the published fragment
+    from the whole pitch. See `_clip_at_sentence`."""
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    # A sentence terminator sits well past the half-budget mark (300 of 600),
+    # with no whitespace anywhere else in the window, so the boundary path is
+    # exercised unambiguously.
+    prefix = "y" * 310
+    sentence_end = "Sentence ends here. "
+    padding = "y" * 400
+    value = prefix + sentence_end + padding
+    assert len(value) > PITCH_DISPLAY_CHARS
+
+    result = _clip_at_sentence(value, PITCH_DISPLAY_CHARS)
+
+    assert result == prefix + "Sentence ends here." + " …"
+
+
+def test_a_terminator_at_the_cap_is_rejected_unless_a_space_follows_it():
+    """The end-of-window candidate is `max_len`, which is by construction the
+    LARGEST, so it used to beat every real boundary. A pitch whose 600th
+    character is the "." of "2.5-fold" or of "et al." then published
+    "... at 2." to a channel the post cannot be retracted from."""
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    head = "Some words here and more words follow along nicely. "
+    value = head + "y" * (598 - len(head)) + "2." + "5-fold more potent."
+    assert value[PITCH_DISPLAY_CHARS] == "5"  # the cap lands mid-number
+
+    result = _clip_at_sentence(value, PITCH_DISPLAY_CHARS)
+
+    assert not result.rstrip(" …").endswith("2.")
+    assert result == "Some words here and more words follow along nicely." + " …"
+
+
+def test_a_true_sentence_end_at_the_cap_is_accepted():
+    """The other side of the guard: a terminator at the cap whose next
+    character IS whitespace is a real sentence end and must be used."""
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    head = "z" * (PITCH_DISPLAY_CHARS - len(" ends right here.")) + " ends right here."
+    value = head + " And more follows."
+    # head FILLS the window, so window[-1] is its "." and the next character
+    # (the first of " And more follows.") is the space that makes it a real
+    # sentence end.
+    assert len(head) == PITCH_DISPLAY_CHARS and value[PITCH_DISPLAY_CHARS] == " "
+
+    result = _clip_at_sentence(value, PITCH_DISPLAY_CHARS)
+
+    assert result == head + " …"
+
+
+def test_a_window_whose_only_whitespace_is_a_newline_still_backs_off():
+    """A markdown pitch separates paragraphs with newlines, and the back-off
+    used to search for a literal space only — so such a window fell through to
+    the mid-word cut this function exists to remove."""
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    value = "w" * 300 + "\n" + "q" * 400
+
+    result = _clip_at_sentence(value, PITCH_DISPLAY_CHARS)
+
+    assert result == "w" * 300 + " …"
+
+
+def test_a_long_pitch_with_whitespace_but_no_boundary_clips_at_a_word():
+    from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
+
+    # No sentence terminators at all, but plenty of word breaks.
+    value = " ".join(["word"] * (PITCH_DISPLAY_CHARS // 5 + 50))
+    assert len(value) > PITCH_DISPLAY_CHARS
+
+    result = _clip_at_sentence(value, PITCH_DISPLAY_CHARS)
+
+    assert result.endswith(" …")
+    window = value[:PITCH_DISPLAY_CHARS]
+    assert result == window[: window.rfind(" ")] + " …"
+    assert len(result) <= PITCH_DISPLAY_CHARS + 2
+
+
+def test_a_non_string_pitch_is_dropped_by_clip_at_sentence():
+    from src.services.assessment_headline import _clip_at_sentence
+
+    assert _clip_at_sentence({"not": "a string"}, 600) is None
+    assert _clip_at_sentence(None, 600) is None
+    assert _clip_at_sentence("", 600) is None

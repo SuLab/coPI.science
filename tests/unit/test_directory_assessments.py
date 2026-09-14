@@ -388,3 +388,202 @@ async def test_off_rubric_rows_are_counted_not_silently_dropped(db_session):
 
     view = await list_assessments(db_session, str(run.id))
     assert view["off_rubric_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task E: per-row dimension_rows / revision_view (C4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dimension_rows_use_the_archived_revision_stamped_on_the_row(db_session):
+    """A row stamped with an archived revision's (version, content_hash) gets
+    THAT revision's titles and weights, not the live document's — the same
+    revision `build_assessment_detail` would resolve for it."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass", rubric_version="2.1.0",
+        rubric_content_hash="2f38fc9bce4d", scores={"ip_fto": 3},
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    row = view["assessments"][0]
+    assert row.revision_view is not None
+    assert row.revision_view.version == "2.1.0"
+    # Every dimension the ARCHIVED revision names renders (unscored ones with
+    # score=None, pct=0.0 — a known revision means a known scale, so an
+    # unscored dimension still gets a zero-width bar rather than an unknown
+    # one), and the one the row actually scored carries its value.
+    by_key = {d["key"]: d for d in row.dimension_rows}
+    assert set(by_key) == {
+        "differentiation", "market_unmet_need", "team", "external_signals",
+        "ip_fto", "platform", "dev_regulatory_feasibility",
+        "workplan_capital_efficiency", "exit_thesis", "mechanism_validation",
+        "toxicity_selectivity", "experimental_rigor", "chemistry_dc_path",
+    }
+    assert by_key["ip_fto"] == {
+        "key": "ip_fto",
+        "title": "IP position & FTO",
+        "score": 3.0,
+        "weight": 6,
+        "weight_note": "6%/4% (investment/incubation)",
+        "pct": 60.0,
+    }
+    assert by_key["team"]["score"] is None
+    assert by_key["team"]["pct"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_dimension_rows_use_the_live_revision_when_unstamped(db_session):
+    """An unstamped row (no rubric_version/rubric_content_hash) is read
+    against the LIVE document, exactly like the detail page's unstamped
+    fallback."""
+    from src.services.blackbird_rubric import RUBRIC_VERSION
+
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass", scores={"differentiation_unmet_need": 4},
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    row = view["assessments"][0]
+    assert row.revision_view is not None
+    assert row.revision_view.version == RUBRIC_VERSION
+    by_key = {d["key"]: d for d in row.dimension_rows}
+    assert set(by_key) == {
+        "differentiation_unmet_need", "scientific_credibility",
+        "translational_path", "fundable_experiment", "venture_potential",
+        "team_executability",
+    }
+    assert by_key["differentiation_unmet_need"] == {
+        "key": "differentiation_unmet_need",
+        "title": "Differentiation & unmet need",
+        "score": 4.0,
+        "weight": 25,
+        "weight_note": "25%",
+        "pct": 80.0,
+    }
+    assert by_key["team_executability"]["score"] is None
+    assert by_key["team_executability"]["pct"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_dimension_rows_still_render_every_stored_key_when_all_are_off_rubric(db_session):
+    """A row whose `scores` keys are all off-rubric must still yield one entry
+    per stored key — untitled/unweighted rather than dropped (the
+    pre-registry-page bug this whole change exists to avoid reintroducing)."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass", scores={"foo_bar": 3, "baz_qux": 2},
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    row = view["assessments"][0]
+    by_key = {d["key"]: d for d in row.dimension_rows}
+    # Unstamped, so resolves to the live revision — its six named dimensions
+    # still render (unscored, score=None), PLUS one entry per off-rubric
+    # stored key. Neither the pre-registry "drop what the revision doesn't
+    # name" bug nor a silent loss of the live dimensions is acceptable.
+    assert {"foo_bar", "baz_qux"} <= set(by_key)
+    assert by_key["foo_bar"]["title"] == "foo bar"
+    assert by_key["foo_bar"]["weight"] is None
+    assert by_key["foo_bar"]["weight_note"] is None
+    assert by_key["foo_bar"]["pct"] == 60.0
+    assert by_key["baz_qux"]["pct"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_no_scores_still_gets_the_revisions_dimensions(db_session):
+    """SUPERSEDES `..._are_empty_for_a_row_with_no_scores` (2026-09-14 audit).
+    `scores=None` is the ordinary state for an unscored row, and it used to
+    short-circuit to `([], None)` here — which made the card say "no
+    per-dimension scores were stored" while the detail page rendered the
+    revision's six dimensions as "not scored". Same verdict, two answers. An
+    unstamped row resolves to the LIVE revision, so it has rows; `([], None)`
+    is now reached only when there is nothing to say on either surface."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass",
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    row = view["assessments"][0]
+    assert row.revision_view is not None
+    assert row.dimension_rows, "the live revision names dimensions to render"
+    assert all(d["score"] is None for d in row.dimension_rows)
+
+
+@pytest.mark.asyncio
+async def test_the_view_returns_no_new_top_level_context_key(db_session):
+    """Guards P4 directly: `dimension_rows`/`revision_view` ride on each row in
+    `assessments`, never as a new top-level key — a new key would reach the
+    admin template (which allowlists every key it forwards,
+    `src/routers/admin.py`) or the manager template (which splats the whole
+    view) but not both."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass",
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    assert set(view.keys()) == {
+        "assessments",
+        "banding",
+        "rubric_version",
+        "runs",
+        "runs_by_id",
+        "selected_run_id",
+        "show_all_runs",
+        "sort",
+        "sort_options",
+        "lab_filter",
+        "lab_options",
+        "pi_user_ids",
+        "total_count",
+        "assessments_limit",
+        "drop_counts",
+        "drops_total",
+        "incomplete_panel_count",
+        "dimension_stats",
+        "band_counts",
+        "assessment_counts_by_run",
+        "off_rubric_count",
+    }
+
+
+async def test_a_row_with_no_scores_yields_the_same_rows_as_the_detail_page(db_session):
+    """2026-09-14 audit. `_assessment_dimension_rows` used to short-circuit to
+    `([], None)` for a row with no `scores`, so the CARD said "no per-dimension
+    scores were stored" while the detail page one click away rendered the
+    revision's six dimensions as "not scored" — the same verdict with two
+    answers, which is the drift the mirroring exists to prevent."""
+    from src.services.assessment_detail import build_assessment_detail
+    from src.services.directory import _assessment_dimension_rows
+
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="No scores at all", scores=None,
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    card_rows, card_revision = _assessment_dimension_rows(assessment)
+    detail = await build_assessment_detail(db_session, assessment.id, admin_view=True)
+
+    assert [r["key"] for r in card_rows] == [d["key"] for d in detail["dimensions"]]
+    assert [r["score"] for r in card_rows] == [d["score"] for d in detail["dimensions"]]
+    assert [r["pct"] for r in card_rows] == [d["pct"] for d in detail["dimensions"]]
+    assert card_rows, "an unstamped row resolves to the live revision, so it has rows"
+    assert card_revision is not None
+

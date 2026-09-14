@@ -1076,6 +1076,43 @@ async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
     assert "Specialist panel incomplete" not in html
 
 
+def _panel_box(html: str) -> str:
+    """The `id="panel"` div and nothing else, bounded by its own tag depth.
+
+    The three `bg-green-50` probes below used to be page-wide, on the premise —
+    stated in `test_an_unknown_panel_state_never_renders_green`'s docstring —
+    that "`bg-green-50` appears exactly once in this template, on the panel
+    box". That premise stopped being true on 2026-09-14, when the
+    strengths/risks card gained a green Strengths column, and a page-wide probe
+    then reported EVERY row as green regardless of its panel state — a probe
+    that passes for the wrong reason, which for a test whose whole job is to
+    stop an unvetted verdict reading as fine is worse than one that fails.
+
+    Scoping restores the original meaning exactly: the assertions are as strict
+    as they ever were about the panel box, and say nothing about the rest of the
+    page. Bounded by walking `<div`/`</div>` depth from the element's own
+    opening tag rather than by a sentinel, for the reason `_row_slice` in
+    tests/integration/test_assessment_queue_controls.py records at length: a
+    sentinel assumes something about what follows the element, and has silently
+    over-returned twice.
+    """
+    start = html.find('<div id="panel"')
+    assert start != -1, "the detail page no longer carries a #panel element"
+    tag_end = html.find(">", start)
+    assert tag_end != -1, "malformed #panel opening tag"
+    pos = tag_end + 1
+    depth = 1
+    for tag in re.finditer(r"</div>|<div\b", html[pos:]):
+        depth += 1 if tag.group() == "<div" else -1
+        if depth == 0:
+            # From `start`, not `pos`: the element's OWN class attribute lives in
+            # the opening tag, and `bg-green-50` is one of those classes. Slicing
+            # from after the tag would make the positive probe below unsatisfiable
+            # while leaving the negative ones passing vacuously.
+            return html[start : pos + tag.start()]
+    raise AssertionError("unbalanced #panel div")
+
+
 async def test_a_conditional_verdict_still_reports_a_verified_panel(
     client, db_session, admin
 ):
@@ -1108,8 +1145,9 @@ async def test_a_conditional_verdict_still_reports_a_verified_panel(
     # — the rubric-provenance line legitimately says a row "predates rubric
     # stamping", which is a different and checkable claim.)
     assert "predates panel" not in html.lower()
-    # Never green, whatever else it says.
-    assert "bg-green-50" not in html
+    # Never green, whatever else it says. Scoped to the panel box — see
+    # `_panel_box` for why a page-wide probe stopped meaning this.
+    assert "bg-green-50" not in _panel_box(html)
 
 
 async def test_a_floor_checked_verdict_reports_a_verified_panel(
@@ -1127,7 +1165,7 @@ async def test_a_floor_checked_verdict_reports_a_verified_panel(
     assert "Specialist panel: no gap recorded" in html
     assert "Specialist panel: not required" not in html
     assert "Specialist panel: not recorded" not in html
-    assert "bg-green-50" in html
+    assert "bg-green-50" in _panel_box(html)
 
 
 async def test_an_unknown_panel_state_never_renders_green(
@@ -1142,8 +1180,10 @@ async def test_an_unknown_panel_state_never_renders_green(
 
     Driven by forcing an off-contract state through the real render path rather
     than by reading the template source: what matters is the HTML a reader sees.
-    `bg-green-50` appears exactly once in this template — on the panel box — so
-    it is a precise probe for "did this render green".
+    `bg-green-50` is the probe for "did this render green", scoped to the panel
+    box by `_panel_box`. It used to be a page-wide check on the premise that the
+    class appeared exactly once in this template; the strengths/risks card
+    (2026-09-14) made that false, so the probe is scoped rather than weakened.
     """
     assessment = await _seed_exempt(db_session, "conditional", panel_owed=True)
     monkeypatch.setattr(
@@ -1155,7 +1195,7 @@ async def test_an_unknown_panel_state_never_renders_green(
     )
     assert resp.status_code == 200
     html = resp.text
-    assert "bg-green-50" not in html, (
+    assert "bg-green-50" not in _panel_box(html), (
         "an unhandled panel state must never render as a verified panel"
     )
     assert "Nothing the verdict's own content owed a specialist" not in html
@@ -1751,3 +1791,244 @@ async def test_gating_legend_is_visible_text(client, db_session, admin):
     legend = match.group(0)
     assert "met" in legend and "not met" in legend and "unconfirmed" in legend
     assert 'aria-label="Unconfirmed' in html
+
+
+# ---------------------------------------------------------------------------
+# Strengths / risks box, score rationale, five key-point groups
+# (2026-09-14 assessment-UX plan, Task B)
+# ---------------------------------------------------------------------------
+
+
+def _signals_card(body: str) -> str:
+    """The `#signals` card as rendered, for slicing into its three columns.
+
+    Taken by string index rather than by a tag regex: the card nests several
+    plain `<div>`s, so a non-greedy `<div id="signals".*?</div>` stops at the
+    first inner close and would report a column as missing when it is
+    present."""
+    assert 'id="signals"' in body, "the strengths/risks card did not render"
+    start = body.index('id="signals"')
+    end = body.index("signals-provenance", start)
+    return body[start:end]
+
+
+def _signal_columns(body: str) -> tuple[str, str, str]:
+    """(strengths, risks, unestablished) slices of the `#signals` card.
+
+    The three columns render in that fixed order, so slicing between their
+    class names — and ending at the always-present legend — keeps each
+    assertion scoped to ONE column. A whole-card substring check cannot tell
+    the green column from the red one, which is the entire point of the two
+    absence tests below."""
+    card = _signals_card(body)
+    i = card.index("assessment-signals-strengths")
+    j = card.index("assessment-signals-risks")
+    k = card.index("assessment-signals-unestablished")
+    legend = card.index("signals-legend")
+    assert i < j < k < legend, "the three signal columns rendered out of order"
+    return card[i:j], card[j:k], card[k:legend]
+
+
+async def test_the_strengths_and_risks_box_renders_three_columns_and_a_footnote(
+    client, db_session, admin, manager
+):
+    """B1. All three columns always render — an absent one would let a reader
+    mistake "we did not classify this" for "there are none" — and the footnote
+    names the provenance so a DERIVED summary is never read as something the
+    hub wrote. On both surfaces: this is the shared body template."""
+    _, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        body = _main((await client.get(path, headers=auth_headers(user.id))).text)
+        assert "assessment-signals" in body
+        strengths, risks, unestablished = _signal_columns(body)
+        assert "Strengths" in strengths
+        assert "Risks" in risks
+        assert "Not established" in unestablished
+        # Words, not just colour: every glyph is aria-labelled and the legend
+        # restates all three in text (the gating-legend precedent).
+        assert 'aria-label="Strength"' in body or "No dimension scored" in strengths
+        assert "signals-legend" in body
+        legend = re.search(
+            r'<p class="signals-legend[^"]*"[^>]*>.*?</p>', body, re.DOTALL
+        )
+        assert legend is not None, "signals-legend <p> not found"
+        assert "strength" in legend.group(0)
+        assert "risk" in legend.group(0)
+        assert "not established" in legend.group(0)
+        # The footnote, always visible, naming where this came from.
+        assert "signals-provenance" in body
+        assert "Derived from this verdict" in body
+        assert "dimension scores, gating states, red" in body
+        # And the jump nav reaches it.
+        assert 'href="#signals"' in body
+
+
+async def test_an_unconfirmed_gate_is_in_neither_the_green_nor_the_red_column(
+    client, db_session, admin
+):
+    """"not met" (asked and failed) and "unconfirmed" (never asked) are
+    different answers, and only the first can license discounting an idea — so
+    an unconfirmed gate must not be coloured as a risk, and must certainly not
+    be coloured as a strength. `_seed` sets `translational_potential:
+    unconfirmed` and `life_sciences_domain: met`."""
+    _, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, _unestablished = _signal_columns(body)
+    assert "translational potential" not in strengths
+    assert "translational potential" not in risks
+    # Positive control: the gate IS classified somewhere on the card, so the
+    # two absences above are about placement rather than about a card that
+    # silently dropped it.
+    assert "translational potential" in _signals_card(body)
+
+
+async def test_a_row_with_an_unknown_revision_says_its_dimensions_could_not_be_classified(
+    client, db_session, admin
+):
+    """`scale_known` is False when the row's stamp matches no entry in the
+    revision registry: the band lines and the 1-5 anchors that decide what
+    counts as a strength are not knowable, so the footnote says the dimension
+    scores could not be classified rather than classifying them against a
+    document that did not score the row."""
+    assessment = await _seed_stamped(
+        db_session, version="9.9.9", content_hash="deadbeef0000",
+        scores={"mystery_dim": 2},
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "could not be classified" in body
+    assert "not in the registry" in body
+    # Still three columns: an unclassifiable scale is not a reason to drop the
+    # gating, red-flag and specialist signals that ARE knowable.
+    _signal_columns(body)
+
+
+async def test_the_box_is_never_inside_a_collapsed_details(
+    client, db_session, admin
+):
+    """Same reasoning as the panel banner and the red-flag card: this is the
+    summary a reviewer reads first, and a summary behind a click is a summary
+    that is not read. Uses the nesting-aware scan, not a flat regex."""
+    _, assessment = await _seed(db_session)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    element = re.search(r'<div id="signals"[^>]*>', body)
+    assert element is not None, "the #signals element did not render"
+    assert "<details" not in body[: element.start()].rsplit("</details>", 1)[-1], (
+        "an unclosed <details> opens before the #signals card"
+    )
+    inside = _top_level_details_contents(body)
+    # Positive control: prove the scan covered the region we think it did
+    # before trusting the absence assertions against it.
+    assert "Full rationale" in inside
+    assert 'id="signals"' not in inside
+    assert "Strengths and risks" not in inside
+
+
+SCORE_RATIONALE_MARKER = "SCORE-RATIONALE-MARKER: **weakest** on venture potential"
+
+
+async def test_the_score_rationale_renders_markdown_only_when_stamped(
+    client, db_session, admin
+):
+    """B2. Same write-time `prose_format` gate as the pitch and the rationale:
+    a NULL stamp is legacy plain text, which may carry a literal `*` in a
+    scientific identifier that a markdown pass would corrupt."""
+    _, assessment = await _seed(db_session)
+    assessment.score_rationale = SCORE_RATIONALE_MARKER
+    assessment.prose_format = "markdown"
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "assessment-brief-score-rationale" in body
+    assert "Why this score" in body
+    assert "assessment-brief-score-rationale-body md-content" in body
+    assert "assessment-brief-score-rationale-body whitespace-pre-line" not in body
+    # It sits inside the brief card, above the strengths/risks box.
+    assert body.index("assessment-brief") < body.index(
+        "assessment-brief-score-rationale"
+    ) < body.index("assessment-signals")
+
+    assessment.prose_format = None
+    await db_session.flush()
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "assessment-brief-score-rationale-body whitespace-pre-line" in body
+    assert "assessment-brief-score-rationale-body md-content" not in body
+    assert SCORE_RATIONALE_MARKER in body
+
+
+async def test_a_pre_0048_row_renders_no_score_rationale_block(
+    client, db_session, admin
+):
+    """NULL on every row written before 0048, deliberately never backfilled:
+    the block is skipped outright rather than rendering an empty state."""
+    _, assessment = await _seed(db_session)
+    assessment.score_rationale = None
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "assessment-brief-score-rationale" not in body
+    assert "Why this score" not in body
+    # The rest of the brief is unaffected.
+    assert "assessment-brief" in body
+
+
+async def test_the_five_key_point_groups_render_in_order(client, db_session, admin):
+    """B3. The grouped branch loops `key_point_groups`, so the two groups added
+    by the five-group contract (C1) must appear with no markup change — in the
+    document's order, not the object's insertion order. Seeded out of order on
+    purpose."""
+    _, assessment = await _seed(db_session)
+    assessment.key_points = {
+        "commercial_potential": ["Comm point"],
+        "significance": ["Sig point"],
+        "key_questions": ["Question point"],
+        "innovation": ["Innov point"],
+        "clinical_actionability": ["Actionability point"],
+    }
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    # Scoped to the key-points column, which ends where the signals card
+    # begins: the rubric dimension titles further down the page must not be
+    # able to satisfy an index() lookup.
+    block = body[
+        body.index("assessment-brief-keypoints") : body.index("assessment-signals")
+    ]
+    labels = (
+        "Significance",
+        "Innovation",
+        "Clinical actionability",
+        "Key questions / experiments",
+        "Commercial potential",
+    )
+    for label in labels:
+        assert label in block, label
+    positions = [block.index(label) for label in labels]
+    assert positions == sorted(positions), dict(zip(labels, positions, strict=True))
+    for point in (
+        "Sig point", "Innov point", "Actionability point",
+        "Question point", "Comm point",
+    ):
+        assert point in block, point

@@ -1,15 +1,30 @@
-"""Review-feedback writes: submit, edit, and the enqueue dedupe that keeps
-rapid submissions/edits from buying repeated Opus calls; plus the
-approval-status audit trail and reviewer-assignment writes (Task 5).
+"""Review-feedback writes: submit, edit, the MANUAL prompt-suggestion
+scheduler, plus the approval-status audit trail and reviewer-assignment
+writes (Task 5).
+
+**Nothing here enqueues a ``review_feedback_analysis`` job as a side effect
+of a review write any more** (F2, 2026-09-14, decision D7). Submitting or
+editing 'learn' feedback records the row and stops there; a job is created
+only when a human presses "Generate prompt suggestions"
+(``POST /reviews/suggestions/generate`` → ``enqueue_pending_analyses``).
+Each job is a 70-90k-token Opus call, and paying for one per submission —
+which is what the old auto-enqueue did whenever no pending job happened to
+cover the assessment — spent real money on nobody's request.
 
 ``review_feedback_analysis`` re-reads ALL unconsumed 'learn' feedback for an
-assessment in one pass (a later task), so the job itself is the batching
-unit — enqueueing one per submission would turn N rapid reviewer edits into N
-redundant model calls over the same rows. ``enqueue_analysis_if_absent`` is
-the guard: it only inserts a new job when no PENDING ``review_feedback_analysis``
-job already names this assessment_id (a processing job has already
-snapshotted its rows and cannot cover a later one — see the function's
-docstring).
+assessment in one pass, so the job is still the batching unit and
+``enqueue_analysis_if_absent`` is still the idempotency guard: it only
+inserts a new job when no PENDING ``review_feedback_analysis`` job already
+names this assessment_id (a processing job has already snapshotted its rows
+and cannot cover a later one — see the function's docstring). That is what
+makes the new button safe to press twice.
+
+The anti-loss guarantee is UNCHANGED and was never the enqueue's job:
+``review_bot.consumed_at_predicates`` refuses to stamp a row that no longer
+reads exactly as snapshotted, so an edit made mid-call leaves the row
+unconsumed and therefore still eligible for the next manual pass.
+``count_pending_analysis_candidates`` is what lets a page say how many
+assessments that is.
 
 ``record_status_event`` is APPEND-ONLY (never an update — the history is the
 point) and ``assign_reviewer``/``unassign_reviewer`` are the reviewer-roster
@@ -41,7 +56,7 @@ import uuid
 from collections import namedtuple
 from collections.abc import Sequence
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,9 +78,9 @@ from src.services.blackbird_rubric import (
 #: Append-only history — see AssessmentReviewEvent.
 VALID_STATUS_ACTIONS = ("approved", "disapproved", "cleared")
 
-#: The only two feedback modes a reviewer may submit. 'learn' feeds the
-#: prompt-suggestion pipeline (enqueues analysis); 'log_only' is recorded but
-#: never analyzed.
+#: The only two feedback modes a reviewer may submit. 'learn' makes the
+#: assessment eligible for the prompt-suggestion pipeline (a human then
+#: enqueues it); 'log_only' is recorded but never analyzed.
 VALID_FEEDBACK_MODES = ("learn", "log_only")
 
 #: Comment rows are capped, not rejected — a reviewer pasting an overlong
@@ -171,6 +186,124 @@ async def enqueue_analysis_if_absent(
     return True
 
 
+#: Hard cap on how many assessments ONE press of "Generate suggestions from
+#: current reviews" may queue. Each queued job is a single Opus call carrying
+#: the whole prompt set plus a transcript — on the order of 70-90k input tokens
+#: (see ``src/services/review_bot.py``'s cost note) — and the size of the
+#: eligible set is controlled by the LEAST-privileged review role: a reviewer
+#: makes an assessment eligible by leaving `learn` feedback on it, and
+#: ``edit_feedback`` resets an already-consumed row's eligibility, while a
+#: reviewer cannot see the suggestions page or press the button at all. So one
+#: privileged click could otherwise spend an unbounded amount on work a
+#: non-privileged account queued up. Capped rather than rate-limited because
+#: the cap is also legible: the page reports "queued X of Y (capped at N)" and
+#: a second press picks up where the first stopped.
+MAX_ANALYSES_PER_PRESS = 25
+
+
+async def _eligible_assessment_ids(
+    db: AsyncSession, assessment_id: uuid.UUID | None = None
+) -> tuple[list[uuid.UUID], int]:
+    """``(ids_to_consider, total_eligible)`` — every assessment id with at
+    least one UNCONSUMED 'learn' review, oldest feedback first, capped.
+
+    Eligibility is deliberately blind to the job queue: whether an id already
+    has a pending job is ``enqueue_analysis_if_absent``'s question, not this
+    one's, so the caller can report "eligible" and "enqueued" as two different
+    numbers.
+
+    ``total_eligible`` is the UNCAPPED count, so the caller can say how much
+    is left. The returned list is the FULL eligible set, ordered by each id's
+    oldest unconsumed feedback — the cap is applied by the caller, to what it
+    actually enqueues, NOT here to the candidate slice. Capping the candidates
+    looked equivalent and was not: the oldest ``N`` keep their pending jobs, so
+    the next press re-picked the same ``N``, enqueued nothing, and a backlog
+    larger than the cap could never drain. The order still matters for the same
+    reason it did then — without it, which assessments get analysed would depend
+    on whatever order Postgres felt like.
+    """
+    stmt = (
+        select(
+            AssessmentReview.assessment_id,
+            func.min(AssessmentReview.created_at).label("oldest"),
+        )
+        .where(
+            AssessmentReview.feedback_mode == "learn",
+            AssessmentReview.consumed_at.is_(None),
+        )
+        .group_by(AssessmentReview.assessment_id)
+        .order_by(func.min(AssessmentReview.created_at), AssessmentReview.assessment_id)
+    )
+    if assessment_id is not None:
+        stmt = stmt.where(AssessmentReview.assessment_id == assessment_id)
+    rows = (await db.execute(stmt)).all()
+    return [r.assessment_id for r in rows], len(rows)
+
+
+async def enqueue_pending_analyses(
+    db: AsyncSession, *, requested_by: User, assessment_id: uuid.UUID | None = None
+) -> tuple[int, int]:
+    """Enqueue one ``review_feedback_analysis`` job per assessment that has at
+    least one unconsumed 'learn' review and no PENDING job. Returns
+    ``(enqueued, eligible)``. Caller commits.
+
+    The manual replacement for the auto-enqueue F2 removed. ``enqueued`` can
+    be smaller than ``eligible`` for TWO reasons, and neither is a failure:
+    an id whose job is already pending is skipped by the dedupe, and the batch
+    is capped at ``MAX_ANALYSES_PER_PRESS`` (see that constant for why). So
+    pressing the button twice costs nothing the second time for anything
+    already queued, and DOES make progress when the backlog exceeded the cap;
+    the returned pair is what makes both visible instead of silent. A ``processing`` job deliberately does NOT count as
+    covering an id, for the reason ``enqueue_analysis_if_absent``'s docstring
+    gives: it has already snapshotted its rows.
+
+    ``assessment_id``, when given, narrows to that one id (the per-assessment
+    button). ``user_id=requested_by.id`` on each job so ``/admin/jobs``
+    attributes it to whoever pressed the button — not to the reviewer whose
+    feedback it will read.
+    """
+    ids, eligible = await _eligible_assessment_ids(db, assessment_id)
+    # The already-pending set in ONE query, so the cap can be applied to ids
+    # that will actually be enqueued without walking (and issuing a dedupe
+    # SELECT for) every id in a long backlog. `enqueue_analysis_if_absent`
+    # still runs per id as the authoritative guard — this only decides which
+    # ids are worth offering it.
+    already_pending = {
+        row[0]
+        for row in await db.execute(
+            select(Job.payload["assessment_id"].astext).where(
+                Job.type == "review_feedback_analysis", Job.status == "pending"
+            )
+        )
+    }
+    enqueued = 0
+    for eligible_id in ids:
+        if enqueued >= MAX_ANALYSES_PER_PRESS:
+            break
+        if str(eligible_id) in already_pending:
+            continue
+        if await enqueue_analysis_if_absent(
+            db, assessment_id=eligible_id, user_id=requested_by.id
+        ):
+            enqueued += 1
+    return enqueued, eligible
+
+
+async def count_pending_analysis_candidates(db: AsyncSession) -> int:
+    """How many assessments a manual generate would consider right now —
+    DISTINCT ``assessment_id`` over unconsumed 'learn' reviews.
+
+    This is the ELIGIBLE count, not the would-be-enqueued count: it does not
+    subtract ids that already have a pending job, so a page can say "N
+    assessments have feedback waiting" without a second query and without
+    pretending to predict the dedupe. It is also the UNCAPPED total — one press
+    processes at most ``MAX_ANALYSES_PER_PRESS`` of them — so a page showing
+    this number alongside the cap tells a reader how many presses the backlog
+    needs.
+    """
+    return (await _eligible_assessment_ids(db))[1]
+
+
 async def submit_feedback(
     db: AsyncSession,
     *,
@@ -215,10 +348,9 @@ async def submit_feedback(
     )
     db.add(review)
     await db.flush()
-    if feedback_mode == "learn":
-        await enqueue_analysis_if_absent(
-            db, assessment_id=assessment.id, user_id=reviewer.id
-        )
+    # No enqueue here, deliberately (F2, 2026-09-14): 'learn' feedback makes
+    # the assessment ELIGIBLE for analysis, and a human presses the button
+    # that pays for it. See the module docstring.
     return review
 
 
@@ -235,8 +367,10 @@ async def edit_feedback(
     """Mutate an existing review in place. Caller commits.
 
     Author-only is the router's check, not this function's. Resets
-    ``consumed_at`` to ``None`` so an edited row is picked back up by the
-    next analysis job even if the original had already been consumed.
+    ``consumed_at`` to ``None`` so an edited row becomes eligible again even
+    if the original had already been consumed — eligible for the next MANUAL
+    generate pass (F2, 2026-09-14): this function no longer enqueues a
+    replacement job, and nothing else does on its behalf.
 
     ``recorded_by`` is the real admin when this edit happened while
     impersonating (F4, 2026-09-10) — same semantics as ``submit_feedback``,
@@ -274,10 +408,7 @@ async def edit_feedback(
     review.consumed_at = None
     if recorded_by is not None:
         review.recorded_by_user_id = recorded_by.id
-    if feedback_mode == "learn":
-        await enqueue_analysis_if_absent(
-            db, assessment_id=review.assessment_id, user_id=review.reviewer_user_id
-        )
+    # No enqueue here either (F2, 2026-09-14) — see the module docstring.
     return review
 
 

@@ -227,25 +227,83 @@ of it may appear anywhere in `<slack_message>` above:
    the PI what would change your read, record the same thing so staff and PI are working
    from one list.
 
-6. **Headline.** One sentence, at most 200 characters, written for a Blackbird
-   reviewer who has never heard of this lab. It must name the mechanism or
-   tool, the target disease or patient population, and the reason this is
-   fundable — the whole story in one line. This is NOT the project label;
-   `company_or_project` already carries that, and both are stored.
+6. **Headline.** One plain-language sentence of **at most 140 characters**,
+   written for a Blackbird reviewer who is not a specialist in this field and
+   has never heard of this lab. It must make three things obvious: **the
+   method** — what the thing physically is, in words a scientifically literate
+   non-specialist reads without stopping; **what it is for** — the disease,
+   patient population, or decision it serves; and **why it is fundable**. No
+   colon-stacked noun phrases. No slash-separated alternatives. No parenthetical
+   lab or institution suffix — the page already shows the lab separately. At
+   most one abbreviation, spelled out on first use; a chain of gene symbols is
+   not a headline. This is NOT the project label; `company_or_project` already
+   carries that, and both are stored.
+
+       Write: "A blood test taken before treatment that predicts which
+       liver-cancer patients will respond to immunotherapy."
+
+       Not: "Pre-treatment plasma IL-17F/IL-21/IL-23/IL-8 signature for
+       exceptional ICI response in HCC/biliary cancer — real association, but
+       no fitted classifier and no demonstrated edge over published IL-8
+       alone."
+
    Record it in `headline`.
-7. **Key points.** Three labelled groups, in this order, each holding ONE or
+7. **Key points.** Five labelled groups, in this order, each holding ONE or
    TWO bullets of at most 160 characters, each a complete claim rather than a
-   topic: `significance` (why the problem matters and for whom),
-   `innovation` (what is genuinely new versus the state of the art), and
-   `commercial_potential` (path to a product, IP, market or partner). Together
-   they must let a reviewer who reads nothing else state what the idea is, what
-   is established, and the deciding risk. Record them in `key_points` as an
-   object with exactly those three keys, each an array of strings.
-8. **Elevator pitch.** Three to five sentences of plain language, for a
-   scientifically literate reader who is not a specialist in this field. State
-   what exists today, what the money would buy, and why the answer matters.
-   Minimal jargon; spell out an abbreviation the first time. Record it in
-   `elevator_pitch`.
+   topic:
+   - `significance` — why the problem matters and for whom.
+   - `innovation` — what is genuinely new versus the state of the art.
+   - `clinical_actionability` — in brief: who would be treated, tested or
+     triaged differently if this worked, and at what point in their care.
+     **One bullet.**
+   - `key_questions` — the open questions and the experiments that would
+     answer them. **One bullet**, unless two are genuinely independent.
+   - `commercial_potential` — path to a product, IP, market or partner.
+
+   `clinical_actionability` and `key_questions` are **one bullet each by
+   default**: five groups of two long bullets is a wall of text, which defeats
+   the point of the groups. Together the five must let a reviewer who reads
+   nothing else state what the idea is, who it changes care for, what is
+   established, and the deciding risk. Record them in `key_points` as an object
+   with exactly those five keys, each an array of strings.
+8. **Elevator pitch.** Three to four sentences of plain language, for a
+   scientifically literate reader who is not a specialist in this field, and
+   **at most 900 characters** — the first 600 characters are posted publicly to
+   Blackbird's summary channel and the rest is app-only, so the opening
+   sentences have to stand alone. Where the two bounds conflict, cut a sentence
+   rather than run over. Sentence one names what the thing is and who it is
+   for; sentence two names **where the work comes from** — the published paper,
+   preprint or dataset the idea builds on, cited the way the lab's own public
+   profile cites it (DOI or PubMed link), or "unpublished" plainly when there is
+   none. The remaining sentences state what exists today, what the money would
+   buy, and why the answer matters; if something has to go, that is what
+   survives in the app-only tail. Minimal jargon; spell out an abbreviation the
+   first time. Do not reason about the score here — item 10 is for that. Record
+   it in `elevator_pitch`.
+9. **Project label.** `company_or_project` is the SHORT name, not a
+   description: **at most 70 characters**, what you would write as a slide
+   title or a deal name. No lab or institution suffix, no em-dash clauses, no
+   "proposed as …" framing — the headline above carries the story and the page
+   shows the lab separately. This label is the ONE project field posted to
+   Blackbird's public summary channel, where it is clipped at 120 characters, so
+   a label longer than that is published truncated. Record it in
+   `company_or_project`.
+10. **Score rationale.** Two to three sentences, at most 500 characters, saying
+    in plain language why the dimension scores you gave add up to the score
+    they do: which dimension carried the most weight in this verdict, which one
+    held it back, and what would have to change to move the band. Never state a
+    number for the weighted score or the band — those are computed server-side
+    and you never emit them. Record it in `score_rationale`. **Staff-only:
+    unlike the elevator pitch, this field is never posted to Slack**, so it may
+    reason about the score freely — but it is still bound by the
+    confidentiality rule above and must not restate a PI's unpublished
+    disclosure.
+
+**Never write a bare `~` in any sidecar field** — not in `headline`,
+`key_points`, `elevator_pitch`, `score_rationale`, `rationale` or
+`recommended_next_experiment`. Slack reads a pair of them as strikethrough and
+silently strikes out everything between. Write "approximately", "about", or
+`≈`.
 
 **Formatting `rationale`, `recommended_next_experiment` and `elevator_pitch`.**
 Write all three fields in simple Markdown: short paragraphs separated by a
@@ -293,8 +351,9 @@ every proposal.
   "company_or_project": "",
   "subject_agent_id": "",
   "headline": "",
-  "key_points": {"significance": [], "innovation": [], "commercial_potential": []},
+  "key_points": {"significance": [], "innovation": [], "clinical_actionability": [], "key_questions": [], "commercial_potential": []},
   "elevator_pitch": "",
+  "score_rationale": "",
   "gating": {
     "life_sciences_domain": "met",
     "credible_science": "not_met",

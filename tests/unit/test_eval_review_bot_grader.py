@@ -114,3 +114,51 @@ async def test_run_case_records_error_for_missing_assessment(db_session):
     assert record["name"] == "missing_assessment"
     assert record["repeat_index"] == 0
     assert record["call_attempted"] is False
+
+
+async def test_run_case_records_the_additional_proposals_but_grades_the_primary():
+    """G4: the eval keeps grading the PRIMARY proposal (`_parse_model_output`'s
+    2-tuple, unchanged) and records the multi-target extras alongside it.
+    `_build` and `_call` are stubbed, so this needs no database and no model:
+    the behaviour under test is the record the runner assembles."""
+    from src.config import get_settings
+
+    m = _load()
+    reply = json.dumps({
+        "target": "scout_hub", "suggestion": "the primary change", "rationale": "R",
+        "additional_proposals": [
+            {"target": "pi_lab", "suggestion": "the matching lab change", "rationale": "R2"},
+            {"target": "astrology", "suggestion": "dropped", "rationale": "R3"},
+        ],
+    })
+
+    async def _fake_build(db, case):
+        return {
+            "assessment_label": "lab — Project X",
+            "rubric_version": "3.2.0",
+            "system_prompt": "sys",
+            "user_message": "user",
+            "transcript_available": True,
+            "input_truncated": False,
+            "prompt_files": [],
+            "corpus": "",
+        }
+
+    async def _fake_call(model, system_prompt, user_message):
+        return {"raw": reply, "stop_reason": "end_turn", "cost_usd": None}
+
+    m._build = _fake_build
+    m._call = _fake_call
+    case = {"name": "multi_target", "assessment_id": str(uuid.uuid4()),
+            "expected_targets": ["scout_hub"]}
+    record = await m._run_case(None, case, 0, dry_run=False, settings=get_settings())
+
+    assert "error" not in record, record.get("error")
+    assert record["parsed_target"] == "scout_hub"
+    assert record["suggestion"].startswith("the primary change")
+    assert record["grade"]["target"] == "scout_hub"
+    assert record["grade"]["target_expected"] is True
+    # The invalid extra is dropped, exactly as the handler drops it.
+    assert record["parsed_additional_targets"] == ["pi_lab"]
+    assert [p["target"] for p in record["additional_suggestions"]] == ["pi_lab"]
+    assert "the matching lab change" in record["additional_suggestions"][0]["suggestion"]

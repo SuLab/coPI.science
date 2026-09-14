@@ -100,22 +100,89 @@ class SlackNotConnected(RuntimeError):
     """
 
 
+# Spans inside which a literal ``~`` must survive untouched, for the tilde pass in
+# ``markdown_to_mrkdwn``. Deliberately NARROW — see that function's docstring for why a
+# broad ``<[^<>\n]*>`` matcher re-opens the bug it was meant to close.
+#
+# One known imprecision, harmless today: ``` `[^`\n]*` ``` partially consumes an
+# *unpaired* triple fence (it matches the first two of the three backticks), so a chunk
+# that was split mid-fence protects the wrong span. No fenced content in this corpus
+# carries a tilde, so nothing rides on it.
+_PROTECTED = re.compile(
+    r"(```.*?```"                              # fenced block
+    r"|`[^`\n]*`"                             # inline code span
+    r"|<https?://[^>\s|]+(?:\|[^>\n]*)?>"      # Slack link, with or without |label
+    r"|<(?:@|#|!)[^>\s|]+(?:\|[^>\n]*)?>"      # Slack user/channel/special mention
+    r"|https?://\S+)",                        # bare URL, or a markdown link target
+    re.DOTALL,
+)
+
+
 def markdown_to_mrkdwn(text: str) -> str:
     """Convert standard Markdown to Slack mrkdwn dialect.
 
     Key differences handled:
     - **bold** -> *bold*  (double asterisks to single)
     - Standard bullet lists (- item) -> Slack bullet (• item)
+    - ``~`` -> ``≈`` outside code/link spans (see below)
 
-    Length-safe by construction: ``**x**`` -> ``*x*`` shortens by two characters
-    and ``- `` -> ``• `` keeps the same character count, so this never makes a
-    string longer. ``split_for_slack`` relies on that — it splits the *source*
-    markdown and each resulting chunk is still within the limit after conversion.
+    Length-safe by construction: ``**x**`` -> ``*x*`` shortens by two characters,
+    ``- `` -> ``• `` keeps the same character count, and ``~`` -> ``≈`` is one
+    character for one character, so this never makes a string longer.
+    ``split_for_slack`` relies on that — it splits the *source* markdown and each
+    resulting chunk is still within the limit after conversion. (That contract is
+    also why the tilde fix is a substitution and not a backtick wrap: wrapping
+    would lengthen the string and silently break the split.)
+
+    **Why the tilde pass exists.** Slack mrkdwn strikethrough is a SINGLE tilde,
+    ``~strike~`` (docs.slack.dev/messaging/formatting-message-text, confirmed
+    2026-09-14), and there is no escape for it. This corpus writes ``~`` to mean
+    "approximately": measured 2026-09-14 over ``agent_messages``, 274 of 1751
+    messages contain a tilde, 88 contain two or more, and **9 contain a same-line
+    ``~…~`` pair that Slack strikes through**. No content anywhere uses intentional
+    strikethrough. ``static/js/markdown.js`` already disabled GFM strikethrough for
+    exactly this corpus and exactly this reason; this is the same fix on the
+    transport, which was missed at the time.
+
+    **The trade, stated:** an intentional ``~strike~`` or ``~~strike~~`` now renders
+    as a literal ``≈``. Nothing in the prompt set asks for strikethrough, and this is
+    the same call ``markdown.js`` already made.
+
+    **The guards, and why they are narrow.** ``_PROTECTED`` covers inline code and
+    fenced blocks (the one place a literal ``~`` is already safe, since Slack
+    suppresses formatting inside code), Slack's own ``<url|label>`` link and
+    ``<@U…>`` / ``<#C…>`` / ``<!here>`` mention syntax, and bare URLs — a
+    model-written ``http://host/~user``, or the target of ``[label](http://host/~user)``,
+    would otherwise become ``…/≈user``, a corrupted link. The guard deliberately does
+    NOT protect an arbitrary ``<…>`` span: this corpus writes ``<`` and ``>`` as
+    inequality operators (``p<0.05``, ``<20% RH``, ``CI >0.20``), so a broad matcher
+    pairs them across prose and swallows the tilde between them, reproducing the very
+    bug this pass closes. Measured on the probe
+    ``"Retrospective cut with <25 per arm at ~$40K or bootstrap CI >0.20 is
+    uninformative."`` — broad leaves ``~$40K`` intact, narrow gives ``≈$40K``. Both
+    score 0/274 on today's stored messages, so only that adversarial probe
+    distinguishes them; it is pinned in
+    ``tests/unit/test_markdown_to_mrkdwn.py``. The current corpus has 0 tildes inside
+    any protected position, so the guards are insurance, not a fix for something
+    observed.
     """
     # Convert **bold** → *bold* (but don't touch already-single *)
     text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
     # Convert bullet-list lines: leading "- " to "• "
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
+    # Neutralize the approximation tilde outside protected spans. Explicit slicing over
+    # `finditer`, not `re.split` odd/even parity: parity is correct for a single capturing
+    # group today, but a naive `parts[1::2]` substitution inverts the fix, and this pattern
+    # will gain alternatives.
+    if "~" in text:
+        out: list[str] = []
+        pos = 0
+        for match in _PROTECTED.finditer(text):
+            out.append(text[pos:match.start()].replace("~", "≈"))
+            out.append(match.group(0))
+            pos = match.end()
+        out.append(text[pos:].replace("~", "≈"))
+        text = "".join(out)
     return text
 
 MAX_RETRIES = 3

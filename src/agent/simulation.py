@@ -64,7 +64,10 @@ from src.models import (
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.assessment_detail import KEY_POINT_GROUPS, normalize_key_points
-from src.services.assessment_headline import render_assessment_headline
+from src.services.assessment_headline import (
+    PROJECT_DISPLAY_CHARS,
+    render_assessment_headline,
+)
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
@@ -4535,6 +4538,22 @@ class SimulationEngine:
                 agent_id, len(verdict["headline"]), _HEADLINE_SOFT_LIMIT,
                 verdict["headline"][:80],
             )
+        if isinstance(verdict.get("company_or_project"), str) and len(
+            verdict["company_or_project"]
+        ) > _PROJECT_SOFT_LIMIT:
+            logger.warning(
+                "[%s] Assessment company_or_project is %d chars (contract asks "
+                "for <=%d); the #assessments-summary headline clips it at %d: %s",
+                agent_id, len(verdict["company_or_project"]), _PROJECT_SOFT_LIMIT,
+                PROJECT_DISPLAY_CHARS, verdict["company_or_project"][:80],
+            )
+        if isinstance(verdict.get("elevator_pitch"), str) and len(
+            verdict["elevator_pitch"]
+        ) > _PITCH_SOFT_LIMIT:
+            logger.warning(
+                "[%s] Assessment elevator_pitch is %d chars (contract asks for <=%d)",
+                agent_id, len(verdict["elevator_pitch"]), _PITCH_SOFT_LIMIT,
+            )
         if isinstance(key_points, list) and not (
             _KEY_POINTS_MIN <= len(key_points) <= _KEY_POINTS_MAX
         ):
@@ -4543,6 +4562,26 @@ class SimulationEngine:
                 agent_id, len(key_points), _KEY_POINTS_MIN, _KEY_POINTS_MAX,
             )
         elif isinstance(key_points, dict):
+            # The whole field is about to be DROPPED (stored NULL, kept only in
+            # `raw_verdict`) for any dict `normalize_key_points` rejects: an
+            # unknown/renamed group key, or a value that is not a list of
+            # strings. The per-group check below sees neither — with all five
+            # known keys present plus a sixth, `absent` is empty and every
+            # `isinstance(group, list)` passes. That silence is exactly the
+            # prompt-newer-than-image skew the 0048 deploy note describes, so
+            # it gets its own WARNING naming what was wrong.
+            if normalize_key_points(key_points) is None:
+                unknown = sorted(
+                    set(key_points) - {k for k, _ in KEY_POINT_GROUPS}
+                )
+                logger.warning(
+                    "[%s] Assessment key_points was DROPPED (stored NULL; the "
+                    "value survives only in raw_verdict): %s. Keys present: %s",
+                    agent_id,
+                    f"unknown group key(s) {unknown}" if unknown
+                    else "a group value is not a list of strings",
+                    sorted(key_points),
+                )
             for group_key, _label in KEY_POINT_GROUPS:
                 group = key_points.get(group_key)
                 if isinstance(group, list) and not (
@@ -4554,6 +4593,22 @@ class SimulationEngine:
                         agent_id, group_key, len(group),
                         _KEY_POINT_GROUP_MIN, _KEY_POINT_GROUP_MAX,
                     )
+            # An ABSENT group is `None`, so it fails the isinstance above and
+            # the bullet-count check cannot see it. `normalize_key_points`
+            # accepts a partial object on purpose — a subset of known keys
+            # stores, because NULLing the whole field over one missing group is
+            # the strictest possible reaction to the mildest possible defect —
+            # so without this warning the relaxation would trade a loud failure
+            # for total silence. Names the missing keys; stores either way.
+            absent = [
+                group_key for group_key, _label in KEY_POINT_GROUPS
+                if group_key not in key_points
+            ]
+            if absent:
+                logger.warning(
+                    "[%s] Assessment key_points omits %d of %d groups: %s",
+                    agent_id, len(absent), len(KEY_POINT_GROUPS), ", ".join(absent),
+                )
         # Built once, up front, so a failed first attempt has a plain dict —
         # not a session-bound ORM instance — ready to hand straight to
         # _pending_assessments for a later retry.
@@ -4587,6 +4642,12 @@ class SimulationEngine:
             headline=_str_or_none(verdict.get("headline")),
             key_points=normalize_key_points(key_points),
             elevator_pitch=_str_or_none(verdict.get("elevator_pitch")),
+            # Sidecar item 10 (0048): why the dimension scores came out where
+            # they did. App-only by design (D3) — the six-field
+            # #assessments-summary headline never renders it, which is the
+            # whole reason it is a column of its own rather than more pitch.
+            # Degrades exactly like its narrative siblings above.
+            score_rationale=_str_or_none(verdict.get("score_rationale")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
             confidence=confidence,
@@ -4599,7 +4660,7 @@ class SimulationEngine:
                 milestones if isinstance(milestones, list) else None
             ),
             rationale=_str_or_none(verdict.get("rationale")),
-            # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird
+            # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird
             # should fund next. Degrades to None on a wrong type like its Text
             # siblings; raw_verdict keeps the original either way.
             recommended_next_experiment=_str_or_none(
@@ -9145,7 +9206,18 @@ _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 #: 6-7. SOFT: exceeding one logs a WARNING and stores the value as emitted.
 #: Enforcing them by dropping would trade a long headline for a lost verdict,
 #: and the row is the archive.
-_HEADLINE_SOFT_LIMIT = 200
+_HEADLINE_SOFT_LIMIT = 140
+#: `company_or_project` is the SHORT label, and it is the only project field the
+#: public #assessments-summary headline renders — where it is clipped to
+#: PROJECT_DISPLAY_CHARS (120, src/services/assessment_headline.py). A label
+#: over this bound is stored in full and warned about; one over 120 loses its
+#: tail in Slack.
+_PROJECT_SOFT_LIMIT = 70
+#: The pitch's own soft bound. Generous enough for the 3-4 sentences the
+#: contract asks for (it was 3-5 before the 2026-09-14 rewrite, which cut a
+#: sentence to pay for the new "where the work comes from" element);
+#: PITCH_DISPLAY_CHARS (600) is where the Slack copy is clipped.
+_PITCH_SOFT_LIMIT = 900
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
 # Task 7 / F3: the grouped (>= 1.3.0) key_points shape bounds each of the

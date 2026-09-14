@@ -104,27 +104,43 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
-#: Task 7 / F3. scout_hub >= 1.3.0 emits `key_points` as three named groups
-#: rather than one flat 3-5 bullet list; the (key, label) order here is also
-#: the render order on both assessment surfaces. Registered as a Jinja global
-#: (see the `templates = Jinja2Templates(...)` site) rather than threaded
-#: through every context dict, per the admin assessments handler's
-#: no-new-context-key rule.
+#: Task 7 / F3. scout_hub >= 1.3.0 emits `key_points` as named groups rather
+#: than one flat 3-5 bullet list; since scout_hub 1.4.0 there are FIVE of them
+#: (`clinical_actionability` and `key_questions` joined the original three).
+#: The (key, label) order here is also the render order on both assessment
+#: surfaces. Registered as a Jinja global (see the
+#: `templates = Jinja2Templates(...)` site) rather than threaded through every
+#: context dict, per the admin assessments handler's no-new-context-key rule.
 KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
     ("significance", "Significance"),
     ("innovation", "Innovation"),
+    ("clinical_actionability", "Clinical actionability"),
+    ("key_questions", "Key questions / experiments"),
     ("commercial_potential", "Commercial potential"),
 )
 _KEY_POINT_KEYS = frozenset(k for k, _ in KEY_POINT_GROUPS)
 
 
 def normalize_key_points(value: object) -> list | dict | None:
-    """Accept the legacy flat list (rows written under scout_hub <= 1.2.0) or
-    the three-group object (>= 1.3.0). Anything else is None: a malformed
-    narrative field never costs the verdict (A20); raw_verdict keeps it."""
+    """Accept the legacy flat list (rows written under scout_hub <= 1.2.0), the
+    three-group object (1.3.0) or the five-group object (1.4.0). Anything else
+    is None: a malformed narrative field never costs the verdict (A20);
+    raw_verdict keeps it.
+
+    A SUBSET of the known group keys is accepted, not exact set equality.
+    Equality meant one omitted group stored `key_points = NULL` and lost the
+    WHOLE field to `raw_verdict` — the strictest possible reaction to the
+    mildest possible defect, and a worse outcome than storing the partial
+    object, which both surfaces already render correctly because they iterate
+    `KEY_POINT_GROUPS` and `.get` each group rather than assuming all five are
+    present. An UNKNOWN key is still rejected outright: that is real shape
+    drift, not an omission, and `_persist_assessment`'s warning path plus
+    `test_skeleton_carries_the_narrative_fields` are what catch it. An empty
+    dict is rejected too — it carries nothing to render.
+    """
     if isinstance(value, list) and all(isinstance(x, str) for x in value):
         return value
-    if isinstance(value, dict) and set(value) == _KEY_POINT_KEYS and all(
+    if isinstance(value, dict) and value and set(value) <= _KEY_POINT_KEYS and all(
         isinstance(v, list) and all(isinstance(x, str) for x in v) for v in value.values()
     ):
         return value
@@ -540,6 +556,232 @@ def panel_state(assessment: OpportunityAssessment) -> str:
     return "unrecorded"
 
 
+# ---------------------------------------------------------------------------
+# Strengths / risks / not-established (request 3, decision D2)
+# ---------------------------------------------------------------------------
+
+#: Thresholds are FRACTIONS of the row's own `revision.scale_max`, never
+#: absolute scores. On the live 1-5 scale that is 4 and 2.
+STRENGTH_THRESHOLD_FRACTION = 0.8
+RISK_THRESHOLD_FRACTION = 0.4
+
+#: What a specialist signal counts as. Both sets name the historical labels
+#: (`clear`, `caution`) as well as the live ones (`adequate`, `blocking`,
+#: `gap`) because ~1,192 stored consults still carry the retired pair — the
+#: same read-wider-than-you-write asymmetry `_READABLE_SIGNALS` exists for in
+#: `src/agent/specialists.py`. Anything outside BOTH sets is unrecognised and
+#: lands in the third bucket rather than falling off the end of the branch.
+_STRENGTH_SIGNALS = frozenset({"adequate", "clear"})
+_RISK_SIGNALS = frozenset({"blocking", "gap", "caution"})
+
+_NOT_SCORED_DETAIL = "not scored — counted as zero in the weighted score"
+#: A verdict that carried NO dimension scores at all: `weighted_score` and
+#: `band` are NULL for it (see `_persist_assessment`), so nothing was
+#: "counted as zero" in a score that does not exist.
+_NO_SCORES_AT_ALL_DETAIL = "no dimension scores were recorded for this verdict"
+#: `read_state == "defaulted"`: the reply arrived complete but no signal
+#: could be parsed out of it, so the stored one is `specialists.py`'s
+#: substitute rather than anything a specialist said.
+_DEFAULTED_CONSULT_DETAIL = "no signal could be read from this reply"
+_TRUNCATED_CONSULT_DETAIL = "reply cut off — no signal"
+_UNRECOGNISED_SIGNAL_DETAIL = "signal not recognised — nothing can be said about this consult"
+_UNRECOGNISED_GATING_DETAIL = "unrecognised gating value"
+
+
+def _usable_score(raw: object) -> float | None:
+    """A score we can compare against a threshold, or None.
+
+    `bool` subclasses `int`, so `True` would otherwise arrive as 1.0 and be
+    reported as a real score of one.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def _format_score(value: float, scale_max: object) -> str:
+    def _plain(number: float) -> str:
+        return str(int(number)) if float(number).is_integer() else f"{number:g}"
+
+    ceiling = _usable_score(scale_max)
+    if ceiling is None:
+        return f"scored {_plain(value)}"
+    return f"scored {_plain(value)} of {_plain(ceiling)}"
+
+
+def derive_strengths_and_risks(
+    assessment: OpportunityAssessment,
+    *,
+    dimensions: list[dict[str, Any]] | None,
+    consults: list[dict[str, Any]] | None,
+    revision: Any,
+) -> dict[str, Any]:
+    """Three buckets, from STORED values only — never a new judgement.
+
+    Classification, exactly:
+
+    ==========================  ==========================================
+    input                       bucket
+    ==========================  ==========================================
+    dimension score             strength at `>= 0.8 * scale_max` (4 on a
+                                1-5 scale); risk at `<= 0.4 * scale_max`
+                                (2 on a 1-5 scale)
+    dimension score between     NOT LISTED AT ALL — a 3 of 5 is a real,
+                                neutral answer, not an unknown
+    dimension score is None     not established: "not scored — counted as
+                                zero in the weighted score"
+    `gating` value "met"        strength
+    `gating` value "not_met"    risk
+    `gating` "unconfirmed"      not established: "never asked"
+    any other gating value      not established: "unrecognised gating value"
+    `red_flags` entry           risk, carrying the flag's own full text
+    consult signal `adequate`   strength (and the historical `clear`)
+    or `blocking`/`gap`         risk (and the historical `caution`)
+    consult `reply_truncated`   not established, REGARDLESS of signal
+    consult signal NULL or
+    unrecognised                not established: "signal not recognised —
+                                nothing can be said about this consult"
+    `revision is None`          dimensions contribute NOTHING to any
+                                bucket, and `scale_known` is False
+    ==========================  ==========================================
+
+    Four things this function is built around, each a defect this repo has
+    already paid for once:
+
+    1. **The third bucket is not decoration.** `unconfirmed` means "never
+       asked", an unscored dimension is not a scored zero, and a truncated
+       consult's `verdict_signal` is `src/agent/specialists.py`'s PARSE
+       DEFAULT (`gap`) rather than anything a specialist said. Filing any of
+       the three as a strength or a risk manufactures a claim nobody made —
+       the same error `panel_state`'s five states and
+       `OpportunityAssessment.missing_domains`' three states exist to prevent.
+    2. **Thresholds come from the ROW's own revision**, via the `revision`
+       argument, never from a literal 4 and 2. A hardcoded threshold silently
+       relabels every row scored on another scale, which is precisely the
+       render-time re-derivation `panel_owed` was added to end.
+    3. **Nothing here is stored.** This is presentation of stored values; it
+       writes no column and must never be mistaken for a write-time finding.
+    4. **It cannot raise.** A malformed `gating` value, a non-string red flag,
+       a `scores` dict with a bool in it, a NULL `gating`, a consult dict
+       missing a key — each degrades into the third bucket or is skipped. A
+       brief card must never 500 a page.
+
+    Returns `{"strengths": [...], "risks": [...], "unestablished": [...],
+    "scale_known": bool}`, each entry being
+    `{"source": str, "label": str, "detail": str}` with `source` one of
+    `dimension` / `gating` / `red_flag` / `consult`.
+    """
+    strengths: list[dict[str, str]] = []
+    risks: list[dict[str, str]] = []
+    unestablished: list[dict[str, str]] = []
+    scale_known = revision is not None
+
+    def _add(bucket: list[dict[str, str]], source: str, label: object, detail: object) -> None:
+        bucket.append({
+            "source": source,
+            "label": str(label) if label else source.replace("_", " "),
+            "detail": str(detail),
+        })
+
+    # Dimensions. Skipped wholesale when the row's revision is unknown: with no
+    # scale there is no threshold, and guessing one is the re-derivation point 2
+    # rules out.
+    # "not scored, counted as zero in the weighted score" is only true when a
+    # weighted score EXISTS. `_persist_assessment` writes `scores or None`
+    # alongside a NULL `weighted_score`/`band` for a verdict that carried no
+    # dimension scores at all, so for that row the claim would be made six
+    # times about a number that was never computed. The detail page still
+    # renders all six of the revision's dimensions for such a row, which is
+    # why this has to be decided here rather than by the absence of rows.
+    any_scored = any(
+        isinstance(dim, dict) and _usable_score(dim.get("score")) is not None
+        for dim in dimensions or ()
+    )
+    not_scored_detail = (
+        _NOT_SCORED_DETAIL if any_scored else _NO_SCORES_AT_ALL_DETAIL
+    )
+    if scale_known:
+        scale_max = _usable_score(getattr(revision, "scale_max", None))
+        for dim in dimensions or ():
+            if not isinstance(dim, dict):
+                continue
+            label = dim.get("title") or dim.get("key")
+            score = _usable_score(dim.get("score"))
+            if score is None:
+                _add(unestablished, "dimension", label, not_scored_detail)
+                continue
+            if scale_max is None:
+                continue
+            detail = _format_score(score, scale_max)
+            if score >= STRENGTH_THRESHOLD_FRACTION * scale_max:
+                _add(strengths, "dimension", label, detail)
+            elif score <= RISK_THRESHOLD_FRACTION * scale_max:
+                _add(risks, "dimension", label, detail)
+            # else: a mid-scale score is a real, neutral answer. No bucket.
+
+    # Gating. The tri-state strings, plus a fourth branch for anything else —
+    # `gating` is JSONB with no CHECK constraint behind it.
+    gating = getattr(assessment, "gating", None)
+    if isinstance(gating, dict):
+        for key, value in gating.items():
+            label = str(key).replace("_", " ")
+            if value == "met":
+                _add(strengths, "gating", label, "met")
+            elif value == "not_met":
+                _add(risks, "gating", label, "not met")
+            elif value == "unconfirmed":
+                _add(unestablished, "gating", label, "never asked")
+            else:
+                _add(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL)
+
+    # Red flags, full text. A non-string entry is skipped rather than coerced:
+    # a rendered `None` or `{}` would read as a flag the hub never wrote.
+    red_flags = getattr(assessment, "red_flags", None)
+    if isinstance(red_flags, list):
+        for flag in red_flags:
+            if isinstance(flag, str) and flag.strip():
+                _add(risks, "red_flag", "Red flag", flag)
+
+    for consult in consults or ():
+        if not isinstance(consult, dict):
+            continue
+        label = consult.get("domain") or "consult"
+        if consult.get("reply_truncated"):
+            _add(unestablished, "consult", label, _TRUNCATED_CONSULT_DETAIL)
+            continue
+        # `read_state` (migration 0038) has THREE values, and two of them mean
+        # the stored `verdict_signal` is not something a specialist said:
+        # `truncated` (the reply was cut off) and `defaulted` (the reply
+        # arrived complete but `parse_opinion` could not read a signal out of
+        # it, so `_DEFAULT_SIGNAL` — `gap` — was substituted). The truncated
+        # case is caught above by `reply_truncated`; the DEFAULTED case has
+        # `truncated=False` and would otherwise land in `_RISK_SIGNALS` and
+        # render under a red glyph as a specialist finding nobody made, which
+        # is exactly what point 1 of this function's contract forbids and what
+        # `parse_opinion`'s own docstring calls "the laundering that branch
+        # exists to prevent". `read_state is None` is a pre-0038 row: the
+        # question was never recorded, so it is NOT treated as defaulted and
+        # stays on the signal path below, which is the only answer available
+        # for it.
+        if consult.get("read_state") == "defaulted":
+            _add(unestablished, "consult", label, _DEFAULTED_CONSULT_DETAIL)
+            continue
+        signal = consult.get("verdict_signal")
+        if isinstance(signal, str) and signal in _STRENGTH_SIGNALS:
+            _add(strengths, "consult", label, signal)
+        elif isinstance(signal, str) and signal in _RISK_SIGNALS:
+            _add(risks, "consult", label, signal)
+        else:
+            _add(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL)
+
+    return {
+        "strengths": strengths,
+        "risks": risks,
+        "unestablished": unestablished,
+        "scale_known": scale_known,
+    }
+
+
 async def build_assessment_detail(
     db: AsyncSession,
     assessment_id: uuid.UUID,
@@ -764,6 +1006,11 @@ async def build_assessment_detail(
             }
             for c in consults
         ],
+        # Request 3 / D2: the strengths-risks-not-established brief, DERIVED
+        # from the three things already resolved above and stored nowhere.
+        "verdict_signals": derive_strengths_and_risks(
+            assessment, dimensions=dimensions, consults=consults, revision=revision
+        ),
         "consult_count": len(consults),
         "retro_consult_count": retro_consult_count,
         "thread_id": thread_id,

@@ -31,3 +31,16 @@ def test_review_model_setting_default():
 
 def test_review_bot_prompt_exists():
     assert (ROOT / "prompts/review-bot.md").is_file()
+
+
+def test_the_two_role_manifests_the_bot_reads_exist():
+    """G1/finding PS3: `_prompt_file_set` now names both `role.toml` manifests
+    (where `post_types` and the prompt-set version live). A missing one is
+    recorded as a `sha256_12: None` gap rather than an error, so only this
+    check would notice a rename."""
+    from src.services import review_bot
+
+    files = review_bot._prompt_file_set()
+    for path in ("prompts/roles/pi_lab/role.toml", "prompts/roles/scout_hub/role.toml"):
+        assert path in files
+        assert (ROOT / path).is_file()

@@ -23,7 +23,7 @@ from src.models import (
     User,
 )
 from src.services import review_bot
-from src.services.assessment_reviews import submit_feedback
+from src.services.assessment_reviews import enqueue_analysis_if_absent, submit_feedback
 from tests import factories
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +140,59 @@ def test_recovery_is_not_rubric_specific():
     assert review_bot._parse_model_output(raw) == ("scout_hub", raw)
     raw2 = '{"target": "specialist:legal", "suggestion": "the model ran out of tok'
     assert review_bot._parse_model_output(raw2) == ("specialist:legal", raw2)
+
+
+# ---------------------------------------------------------------------------
+# _parse_additional_proposals (G2 / D6) — every failure is a DROP, never a raise
+# ---------------------------------------------------------------------------
+
+
+def test_a_duplicate_additional_target_is_dropped(caplog):
+    """One row per target: an entry restating the primary, or a second entry
+    restating an earlier one, is dropped rather than filed twice."""
+    parsed = {
+        "target": "scout_hub",
+        "additional_proposals": [
+            {"target": "scout_hub", "suggestion": "restates the primary", "rationale": "r"},
+            {"target": "pi_lab", "suggestion": "keep me", "rationale": "r"},
+            {"target": "pi_lab", "suggestion": "again", "rationale": "r"},
+        ],
+    }
+    with caplog.at_level("WARNING", logger="src.services.review_bot"):
+        kept = review_bot._parse_additional_proposals(parsed)
+    assert [t for t, _ in kept] == ["pi_lab"]
+    assert "keep me" in kept[0][1]
+    assert any("dropped 2 of 3 additional_proposals" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"target": "pi_lab", "suggestion": "   ", "rationale": ""},
+        {"target": "pi_lab", "suggestion": {"not": "a string"}},
+        {"target": "pi_lab"},
+    ],
+)
+def test_a_blank_additional_body_is_dropped(entry):
+    """The primary's blank-body fallback keeps `raw` so the row stays
+    reviewable; an ADDITIONAL entry has no such fallback — a second row whose
+    whole content is the same raw reply is noise, so it is dropped."""
+    parsed = {"target": "scout_hub", "additional_proposals": [entry]}
+    assert review_bot._parse_additional_proposals(parsed) == []
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        {"target": "scout_hub"},
+        {"target": "scout_hub", "additional_proposals": None},
+        {"target": "scout_hub", "additional_proposals": []},
+        {"target": "scout_hub", "additional_proposals": "pi_lab too"},
+        {"target": "scout_hub", "additional_proposals": [None, 3, "pi_lab"]},
+    ],
+)
+def test_additional_proposals_never_raises_on_a_malformed_value(parsed):
+    assert review_bot._parse_additional_proposals(parsed) == []
 
 
 # ---------------------------------------------------------------------------
@@ -297,17 +350,88 @@ async def test_deleting_the_only_review_mid_call_does_not_crash_the_job(
     assert any("stamped 0 of 1" in rec.getMessage() for rec in caplog.records)
 
 
+async def test_an_invalid_additional_target_is_dropped_and_warned_not_fatal(
+    db_session, monkeypatch, caplog
+):
+    """A bad `additional_proposals` entry must cost only itself: the primary
+    proposal is stored exactly as it would have been, and the job completes."""
+    raw = json.dumps({
+        "target": "scout_hub", "suggestion": "S1", "rationale": "R1",
+        "additional_proposals": [
+            {"target": "astrology", "suggestion": "S2", "rationale": "R2"},
+        ],
+    })
+    _install(monkeypatch, response=raw)
+    a, _ = await _seed(db_session)
+    db_session.add(AssessmentReview(
+        assessment_id=a.id, reviewer_name="r", score=2, comment="c", feedback_mode="learn",
+    ))
+    job = _job(a.id)
+    db_session.add(job)
+    await db_session.flush()
+
+    with caplog.at_level("WARNING", logger="src.services.review_bot"):
+        await review_bot.execute_review_analysis(job, db_session)
+
+    row = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
+    assert row.target == "scout_hub"
+    assert "S1" in row.suggestion and "S2" not in row.suggestion
+    assert row.raw_response == raw  # the dropped entry is still readable here
+    assert any(
+        "dropped 1 of 1 additional_proposals" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_additional_proposals_are_capped_at_two(db_session, monkeypatch, caplog):
+    """Three proposals total, no matter how long the array is: each entry is a
+    row off one button press."""
+    raw = json.dumps({
+        "target": "scout_hub", "suggestion": "S0", "rationale": "R0",
+        "additional_proposals": [
+            {"target": "pi_lab", "suggestion": "S1", "rationale": "R1"},
+            {"target": "rubric", "suggestion": "S2", "rationale": "R2"},
+            {"target": "specialist:legal", "suggestion": "S3", "rationale": "R3"},
+        ],
+    })
+    _install(monkeypatch, response=raw)
+    a, _ = await _seed(db_session)
+    db_session.add(AssessmentReview(
+        assessment_id=a.id, reviewer_name="r", score=2, comment="c", feedback_mode="learn",
+    ))
+    job = _job(a.id)
+    db_session.add(job)
+    await db_session.flush()
+
+    with caplog.at_level("WARNING", logger="src.services.review_bot"):
+        await review_bot.execute_review_analysis(job, db_session)
+
+    rows = (await db_session.execute(select(PromptChangeSuggestion))).scalars().all()
+    assert review_bot._MAX_ADDITIONAL_PROPOSALS == 2
+    assert {r.target for r in rows} == {"scout_hub", "pi_lab", "rubric"}
+    assert "specialist:legal" not in {r.target for r in rows}
+    assert any(
+        "dropped 1 of 3 additional_proposals" in r.getMessage() for r in caplog.records
+    )
+
+
 async def test_deleting_the_reviewer_deletes_their_pending_job_but_keeps_the_review(db_session):
     """Pins a KNOWN limitation, not a fix: jobs.user_id is ON DELETE CASCADE and
     the review job carries the reviewer's id (design D-5, for /admin/jobs
     visibility), so deleting a reviewer takes their pending job with it while
-    the review survives with a NULL author. The next 'learn' event on the
-    assessment re-enqueues, because the dedupe counts pending jobs only."""
+    the review survives with a NULL author. The next manual generate re-enqueues,
+    because the dedupe counts pending jobs only.
+
+    The enqueue is EXPLICIT here (2026-09-14, D7): `submit_feedback` no longer
+    enqueues anything — `POST /reviews/suggestions/generate` is the only
+    trigger — and the cascade behaviour this test pins is unrelated to who
+    enqueued the job."""
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     a, _ = await _seed(db_session)
     review = await submit_feedback(
         db_session, assessment=a, reviewer=reviewer, score=2, comment="c", feedback_mode="learn",
     )
+    await enqueue_analysis_if_absent(db_session, assessment_id=a.id, user_id=reviewer.id)
+    await db_session.flush()
     assert (await db_session.execute(select(Job))).scalars().all()
 
     await db_session.execute(delete(User).where(User.id == reviewer.id))

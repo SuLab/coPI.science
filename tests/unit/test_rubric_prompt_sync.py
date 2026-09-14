@@ -269,23 +269,71 @@ def test_pi_lab_prompt_never_carries_the_rubric(tmp_path, monkeypatch):
     assert "| 1 | Differentiation" not in prompt
 
 
-def test_skeleton_carries_the_three_narrative_fields():
+def test_skeleton_carries_the_narrative_fields():
     """The reviewer-facing narrative contract (design §3.2). These are NOT
     scored and are deliberately absent from the rubric document — the sidecar
-    skeleton is their only definition, so this is where drift is caught."""
+    skeleton is their only definition, so this is where drift is caught.
+
+    ``key_points`` is asserted as an ORDERED equality against the five groups
+    of the shared ``KEY_POINT_GROUPS`` contract: the read path renders the
+    groups in that order, so a key renamed or a group dropped from the prompt
+    silently empties a section of the detail page."""
     skeleton = _skeleton()
-    for key in ("headline", "key_points", "elevator_pitch"):
+    for key in ("headline", "key_points", "elevator_pitch", "score_rationale"):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
-        "significance": [], "innovation": [], "commercial_potential": []
+        "significance": [],
+        "innovation": [],
+        "clinical_actionability": [],
+        "key_questions": [],
+        "commercial_potential": [],
     }
+    assert list(skeleton["key_points"]) == [
+        "significance",
+        "innovation",
+        "clinical_actionability",
+        "key_questions",
+        "commercial_potential",
+    ]
     assert skeleton["headline"] == ""
     assert skeleton["elevator_pitch"] == ""
+    assert skeleton["score_rationale"] == ""
 
 
-def test_the_scout_hub_prompt_set_version_is_1_3_0_or_later():
+def test_the_scout_hub_prompt_set_version_is_1_4_0_or_later():
     manifest = tomllib.loads(Path("prompts/roles/scout_hub/role.toml").read_text())
-    assert tuple(int(x) for x in manifest["version"].split(".")) >= (1, 3, 0)
+    assert tuple(int(x) for x in manifest["version"].split(".")) >= (1, 4, 0)
+
+
+def test_phase4_bounds_the_headline_and_the_project_label():
+    """The two length bounds are stated as numbers in the prompt and mirrored
+    by ``_HEADLINE_SOFT_LIMIT`` / ``_PROJECT_SOFT_LIMIT`` on the write path, so
+    the prose and the drift alarms cannot part company."""
+    body = _norm(_phase4_text())
+    assert "at most 140 characters" in body, (
+        "phase4-thread-reply.md no longer bounds the headline at 140 characters"
+    )
+    assert "at most 70 characters" in body, (
+        "phase4-thread-reply.md no longer bounds company_or_project at 70 characters"
+    )
+
+
+def test_phase4_forbids_the_bare_approximation_tilde():
+    """Slack reads a PAIR of bare tildes as strikethrough, so a pitch with two
+    "~5 patients"-style approximations publishes everything between them struck
+    out. The hub-side counterpart of the renderer's own neutralisation."""
+    body = _norm(_phase4_text())
+    assert "bare `~`" in body
+    assert "strikethrough" in body
+
+
+def test_phase4_marks_the_score_rationale_staff_only():
+    """D3 kept score reasoning OUT of the elevator pitch, which IS published,
+    and gave it its own staff-only field. This assertion is the only thing
+    standing between that decision and a future edit that re-merges the two."""
+    body = _norm(_phase4_text())
+    assert "score_rationale" in body
+    assert "never posted to Slack" in body
 
 
 def test_phase4_binds_the_rationale_to_a_bolded_summary_sentence():

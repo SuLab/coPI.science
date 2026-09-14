@@ -15,6 +15,7 @@ need headroom under.
 import logging
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -28,10 +29,12 @@ from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSugg
 from src.services.assessment_reviews import (
     assign_reviewer,
     edit_feedback,
+    enqueue_pending_analyses,
     record_status_event,
     submit_feedback,
     unassign_reviewer,
 )
+from src.services.directory import ASSESSMENT_SORTS
 
 #: Mirrors PromptChangeSuggestion.status's docstring (src/models/review.py).
 #: Kept local rather than shared with src/routers/manager.py's copy — see
@@ -69,12 +72,85 @@ def _recorded_by(current_user: User) -> User | None:
     return None
 
 
+#: The two surface tokens that return the reader to the LIST page rather than
+#: the detail page (F1, 2026-09-14). The quick-score forms on both list pages
+#: post one of these; the detail-page forms keep posting "admin"/"manager".
+_LIST_SURFACES = frozenset({"admin-list", "manager-list"})
+
+
+def _list_filter_query(
+    run_id: str | None, sort: str | None, lab: str | None
+) -> str:
+    """The `?run_id=&sort=&lab=` the reader had on the list page, re-emitted.
+
+    Validated exactly the way ``directory.list_assessments`` validates the
+    same three, and anything that fails is DROPPED rather than 400ing: these
+    values are echoed straight into a ``Location`` header, and silently
+    dropping a junk one reproduces the list page's own "a stale bookmark
+    renders the queue, not an error" behaviour. ``sort`` must name a real
+    option, ``run_id`` must be ``"all"`` or parse as a UUID, and ``lab`` is
+    opaque (the page drops an unknown lab itself).
+
+    ``urlencode`` — never string concatenation — is what makes CR/LF header
+    injection and a smuggled ``&`` impossible here. Returns ``""``, not a bare
+    ``"?"``, when nothing survives.
+    """
+    params: list[tuple[str, str]] = []
+    if run_id == "all":
+        params.append(("run_id", "all"))
+    elif run_id:
+        try:
+            uuid.UUID(run_id)
+        except ValueError:
+            pass
+        else:
+            params.append(("run_id", run_id))
+    if sort in ASSESSMENT_SORTS:
+        params.append(("sort", sort))
+    if lab:
+        params.append(("lab", lab))
+    return f"?{urlencode(params)}" if params else ""
+
+
 def _assessments_redirect(
-    surface: str, current_user: User, assessment_id: uuid.UUID
+    surface: str,
+    current_user: User,
+    assessment_id: uuid.UUID,
+    *,
+    run_id: str | None = None,
+    sort: str | None = None,
+    lab: str | None = None,
 ) -> RedirectResponse:
     """Whitelist lives HERE, not at call sites; admin surface only for
     admins. NEVER build this from a bare "/admin" constant: test_reachability's
-    src_strings scan would mark the allowlisted GET /admin entry stale."""
+    src_strings scan would mark the allowlisted GET /admin entry stale.
+
+    Four surfaces. ``admin``/``manager`` land on the detail page, unchanged.
+    ``admin-list``/``manager-list`` (F1) land back on the LIST page the reader
+    posted from, with their filters re-emitted and the fragment
+    ``#a-<assessment_id>`` so the browser scrolls to the row they just scored.
+    An UNRECOGNISED surface keeps today's behaviour and falls through to
+    ``/manager/assessments/{id}``: a surface string is unvalidated form input,
+    and a bad one must land the reader somewhere real rather than 400.
+
+    ``run_id``/``sort``/``lab`` are only passed by ``submit_review_feedback``
+    and ``set_review_status``. The other FOUR call sites
+    (``edit``/``delete``/``assign``/``unassign``) pass nothing, which is a
+    documented consequence rather than an oversight: a ``*-list`` surface
+    posted to one of those four lands on the UNFILTERED list — the same
+    land-somewhere-real-rather-than-error posture as the surface fallback
+    above. Those four are detail-page-only forms today.
+    """
+    if surface in _LIST_SURFACES:
+        query = _list_filter_query(run_id, sort, lab)
+        fragment = f"#a-{assessment_id}"
+        if surface == "admin-list" and current_user.is_admin:
+            return RedirectResponse(
+                url=f"/admin/assessments{query}{fragment}", status_code=302
+            )
+        return RedirectResponse(
+            url=f"/manager/assessments{query}{fragment}", status_code=302
+        )
     if surface == "admin" and current_user.is_admin:
         return RedirectResponse(url=f"/admin/assessments/{assessment_id}", status_code=302)
     return RedirectResponse(url=f"/manager/assessments/{assessment_id}", status_code=302)
@@ -176,6 +252,20 @@ def _parse_dimension_scores(form: FormData) -> dict[str, int]:
     return scores
 
 
+def _form_str(form: FormData, field: str) -> str | None:
+    """One posted field as a plain string, or ``None``.
+
+    A crafted multipart POST can deliver an ``UploadFile`` where a string is
+    expected; a file part is not a filter value, so it reads as absent rather
+    than raising on ``.strip()`` later. Blank reads as absent too — the list
+    forms post ``value=""`` for an unset lab (contract C6).
+    """
+    raw = form.get(field)
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
+
+
 @router.post("/assessments/{assessment_id}/feedback")
 async def submit_review_feedback(
     assessment_id: uuid.UUID,
@@ -188,7 +278,10 @@ async def submit_review_feedback(
     current_user: User = _REVIEW,
 ):
     assessment = await _load_assessment(db, assessment_id)
-    dimension_scores = _parse_dimension_scores(await request.form())
+    # One `await request.form()` for both jobs: the dimension fields and the
+    # three list-page filters ride on the same POST (contract C6).
+    form = await request.form()
+    dimension_scores = _parse_dimension_scores(form)
     try:
         await submit_feedback(
             db,
@@ -208,7 +301,12 @@ async def submit_review_feedback(
         current_user.name, current_user.id, assessment_id, score, feedback_mode,
         len(dimension_scores),
     )
-    return _assessments_redirect(surface, current_user, assessment_id)
+    return _assessments_redirect(
+        surface, current_user, assessment_id,
+        run_id=_form_str(form, "run_id"),
+        sort=_form_str(form, "sort"),
+        lab=_form_str(form, "lab"),
+    )
 
 
 @router.post("/feedback/{feedback_id}/edit")
@@ -275,6 +373,12 @@ async def set_review_status(
     assessment_id: uuid.UUID,
     action: str = Form(...),
     surface: str = Form("manager"),
+    # Declared rather than read off the raw form (this handler does not parse
+    # one) so the signature documents what the list-page forms post: the three
+    # filters that a `*-list` surface needs to rebuild the reader's queue.
+    run_id: str | None = Form(None),
+    sort: str | None = Form(None),
+    lab: str | None = Form(None),
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
@@ -291,7 +395,9 @@ async def set_review_status(
         "Review status %s recorded by %s (%s) on assessment %s",
         action, current_user.name, current_user.id, assessment_id,
     )
-    return _assessments_redirect(surface, current_user, assessment_id)
+    return _assessments_redirect(
+        surface, current_user, assessment_id, run_id=run_id, sort=sort, lab=lab
+    )
 
 
 @router.post("/assessments/{assessment_id}/assign")
@@ -333,6 +439,60 @@ async def unassign_review(
         assessment_id, assignee_id, current_user.name, current_user.id,
     )
     return _assessments_redirect(surface, current_user, assessment_id)
+
+
+def _parse_optional_assessment_id(assessment_id: str) -> uuid.UUID | None:
+    """Blank means "every eligible assessment"; anything unparsable is a 400.
+
+    Same posture as ``_parse_assignee_id``: a malformed id is a request error,
+    not something to silently widen into a run-wide batch of Opus calls.
+    """
+    if not assessment_id.strip():
+        return None
+    try:
+        return uuid.UUID(assessment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Malformed assessment id") from exc
+
+
+@router.post("/suggestions/generate")
+async def generate_prompt_suggestions(
+    assessment_id: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Enqueue the review-bot analysis jobs BY HAND (F2, 2026-09-14).
+
+    Neither ``submit_feedback`` nor ``edit_feedback`` enqueues any more — a
+    suggestion is a 70-90k-token Opus call and is now spent only when a human
+    asks for one. ``_STAFF``, deliberately NOT ``_REVIEW``: a reviewer cannot
+    see ``/manager/prompt-suggestions`` (a suggestion can quote an unpublished
+    PI disclosure verbatim), so a reviewer must not be able to create one
+    either. Impersonation is refused for the same reason ``assign``/
+    ``unassign``/suggestion-status refuse it — this spends real money — even
+    though the review WRITES deliberately allow it.
+
+    Pressing the button twice in SEQUENCE is safe: ``enqueue_pending_analyses`` goes
+    through ``enqueue_analysis_if_absent``, so the second press enqueues
+    nothing and the redirect's ``generated=0&eligible=N`` says so out loud
+    rather than silently.
+    """
+    _refuse_impersonation(current_user)
+    scope = _parse_optional_assessment_id(assessment_id)
+    enqueued, eligible = await enqueue_pending_analyses(
+        db, requested_by=current_user, assessment_id=scope
+    )
+    await db.commit()
+    logger.info(
+        "Prompt-suggestion generation requested by %s (%s): enqueued=%d eligible=%d scope=%s",
+        current_user.name, current_user.id, enqueued, eligible, scope,
+    )
+    # The full literal path, never a bare-prefix constant — the same
+    # discipline `_assessments_redirect` documents.
+    return RedirectResponse(
+        url=f"/manager/prompt-suggestions?generated={enqueued}&eligible={eligible}",
+        status_code=302,
+    )
 
 
 async def _load_suggestion(

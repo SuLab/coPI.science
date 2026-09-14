@@ -1,6 +1,93 @@
 {% extends "base.html" %}
 {% block title %}Admin — Assessments — CoPI{% endblock %}
 
+{% block extra_head %}
+{# Same three scripts and the same style block as the two detail wrappers
+   (templates/admin/assessment_detail.html, templates/manager/assessment_detail.html),
+   copied verbatim — including the SRI integrity attributes — so the list page
+   can render the same sanitized markdown and reading scale as the detail page.
+   These two NEW list wrappers must stay IDENTICAL to each other; the detail
+   wrappers are a separate pair (Task B's area) and are not touched here. #}
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+        integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
+        crossorigin="anonymous"></script>
+<script src="/static/js/markdown.js"></script>
+<style>
+  .md-content ul { list-style: disc; margin: .5em 0; padding-left: 1.5em; }
+  .md-content ol { list-style: decimal; margin: .5em 0; padding-left: 1.5em; }
+  .md-content li { margin: .15em 0; }
+  .md-content p  { margin: .5em 0; }
+  .md-content p:first-child { margin-top: 0; }
+  .md-content p:last-child  { margin-bottom: 0; }
+  .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
+  .md-content strong { font-weight: 600; }
+  .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* Reading scale for the verdict's running prose. 17px/1.6 at a 68ch measure
+     is the readability target of the 2026-09-11 audit; keep the two wrappers'
+     style blocks IDENTICAL to each other. */
+  .assessment-prose {
+    max-width: 68ch;
+    font-size: 1.0625rem;
+    line-height: 1.6;
+    color: #1f2937;
+    text-wrap: pretty;
+  }
+  .assessment-prose p + p { margin-top: 1.25em; }
+  .assessment-prose li { margin: .35em 0; }
+  /* Inside the two-column brief the pitch column is already narrower than the
+     68ch measure, so the cap there would only shorten the lines twice. */
+  .assessment-brief-pitch .assessment-prose { max-width: none; }
+  .assessment-brief-keypoints .assessment-prose { max-width: none; }
+  /* Same reasoning, for the list page's card column. */
+  .assessment-card-pitch .assessment-prose { max-width: none; }
+  h2.assessment-headline { text-wrap: balance; }
+
+  /* Keyboard focus has to be visible on every interactive element, including
+     the <summary> toggles the page is now built around. */
+  a:focus-visible,
+  button:focus-visible,
+  summary:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible {
+    outline: 2px solid #4338ca;
+    outline-offset: 2px;
+  }
+
+  @media print {
+    .assessment-jump-nav, nav, footer, form, button { display: none !important; }
+    details:not([open]) > *:not(summary) { display: block !important; }
+    main { max-width: none; }
+    .assessment-prose { max-width: none; }
+  }
+</style>
+<script>
+  // CSS cannot open a <details>, and a collapsed section prints as its summary
+  // alone. Open every one for the print, then put back exactly what the reader
+  // had open.
+  (function () {
+    var wasOpen = null;
+    window.addEventListener('beforeprint', function () {
+      wasOpen = [];
+      document.querySelectorAll('details').forEach(function (d) {
+        wasOpen.push(d.open);
+        d.open = true;
+      });
+    });
+    window.addEventListener('afterprint', function () {
+      if (!wasOpen) return;
+      document.querySelectorAll('details').forEach(function (d, i) {
+        if (i < wasOpen.length) d.open = wasOpen[i];
+      });
+      wasOpen = null;
+    });
+  })();
+</script>
+{% endblock %}
+
 {% block content %}
 <div class="flex items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
@@ -10,8 +97,8 @@
        when the sort changes, and the sort when the run changes, without a
        single hidden input or a hand-assembled query string. #}
     <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end">
-        <label class="text-sm text-gray-500">Run:</label>
-        <select name="run_id" onchange="this.form.submit()"
+        <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
+        <select id="assessments-run-select" name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for run in runs %}
             <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
@@ -24,8 +111,8 @@
            from literals here: a sort this template offered but the service did
            not accept would silently render the default order with the wrong
            option showing as selected. #}
-        <label class="text-sm text-gray-500">Sort:</label>
-        <select name="sort" onchange="this.form.submit()"
+        <label for="assessments-sort-select" class="text-sm text-gray-500">Sort:</label>
+        <select id="assessments-sort-select" name="sort" onchange="this.form.submit()"
                 class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for value, label in sort_options %}
             <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
@@ -35,8 +122,8 @@
         {# The option text is the bare subject_agent_id, matching the table's
            own Lab column — "WangBot" here against "wang" in the column it
            filters would read as two different things. #}
-        <label class="text-sm text-gray-500">Lab:</label>
-        <select name="lab" onchange="this.form.submit()"
+        <label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label>
+        <select id="assessments-lab-select" name="lab" onchange="this.form.submit()"
                 class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="">All labs</option>
             {% for option in lab_options %}
@@ -101,5 +188,10 @@
    back to plain text when the subject_agent_id cannot be resolved to a live,
    linked user (stale slug, unlinked agent, or no subject at all). #}
 {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_ids.get(a.subject_agent_id) %}<a class="underline text-indigo-600 hover:text-indigo-800" href="/admin/users/{{ pi_user_ids[a.subject_agent_id] }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
+{# A bare TOKEN, never a path: test_manager_assessments_never_links_into_admin
+   asserts "/admin/" appears nowhere on the manager page, and
+   src/routers/reviews.py::_assessments_redirect assembles the literal path
+   from this discriminator rather than from anything rendered here. #}
+{% set list_surface = 'admin-list' %}
 {% include "admin/_assessments_body.html" %}
 {% endblock %}

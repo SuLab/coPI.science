@@ -812,7 +812,37 @@ purpose and reads the prompt files as plain data through the dependency-free
 setting distinct from the simulation's own model config. A suggestion is never
 auto-applied to any prompt file — it is stored as a `PromptChangeSuggestion`
 row and surfaced at `/manager/prompt-suggestions` for a human (admin or
-manager; a reviewer cannot see this page) to read and act on manually. The
+manager; a reviewer cannot see this page) to read and act on manually.
+
+**Nothing enqueues a review-bot job automatically as of 2026-09-14.**
+`submit_feedback` and `edit_feedback` no longer call
+`enqueue_analysis_if_absent`; `POST /reviews/suggestions/generate` — the
+"Generate suggestions from current reviews" button on
+`/manager/prompt-suggestions`, staff-only and refused under impersonation — is
+the ONLY trigger — it lives on the `/reviews` router (whose own explicit POST
+allowlist is now eight) and NOT on the manager router, whose write allowlist
+stays at the eight routes the Account Types section names. `feedback_mode ==
+"learn"` now means "eligible for the next
+manual generate", not "queued": the page states the eligible count
+(`count_pending_analysis_candidates`) and disables the button at zero, and
+because the dedupe counts PENDING jobs only, a second press is a visible no-op
+(`generated=0`) rather than a duplicate spend. One consequence to know: an edit
+made while a job is in flight still leaves its row unconsumed
+(`consumed_at_predicates` is untouched and is what guarantees that), but nothing
+re-queues it — it waits for the next press.
+
+**One job can now write MORE than one suggestion row.** The reply's contract
+gained an optional `additional_proposals` array (at most two entries, each with
+its own `target`, `suggestion` and `rationale`), so the same feedback can
+propose a hub-prompt change and the matching PI-prompt change together.
+`target` stays the JSON object's FIRST key, which is load-bearing:
+`_LEADING_TARGET_RE` recovers the declared target from an unparseable reply and
+did so for 3 of 12 live replies in the 2026-09-03 evaluation. Each proposal
+becomes its own row, all in one commit, all sharing one `feedback_snapshot` and
+one `raw_response`. The bot is also now told which prompt SET each file belongs
+to (`--- FILE: <path> [<role>] ... ---`) and is given both `role.toml`
+manifests; it is told plainly that the per-phase interview guidance is Python in
+`src/agent/thread_guidance.py` and has no quotable text. The
 bot's LLM calls are, by design, unlogged (no `llm_call_logs` row — that emit
 gate needs a callback only the simulation engine installs) and unthrottled (no
 rate limiter in front of it): the suggestion row records only `model`,
@@ -1285,6 +1315,44 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > `job_type_enum` values in place, exactly as `0039` does for
 > `review_feedback_analysis`.
 
+> **Deploy order for `0048_assessment_score_rationale` — migrate BEFORE the new
+> code serves, and rebuild the AGENT image in the same deploy.** `0048` is one
+> additive nullable Text column (`opportunity_assessments.score_rationale`,
+> sidecar item 10 of scout_hub prompt set 1.4.0 — the staff-only plain-language
+> account of why the dimension scores add up to the score they do), so *old
+> code against the new schema* is safe. The reverse breaks both ways. READ: the
+> new code **maps the column**, so every `select(OpportunityAssessment)` — both
+> assessment list pages, both detail pages — raises `UndefinedColumn`. WRITE:
+> `_persist_assessment` names it in the INSERT, and that write is best-effort,
+> so **every verdict of a running simulation is lost** to one ERROR line in a
+> log nobody is tailing while the Slack replies keep looking normal. Same shape
+> as the `0043` box above.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0048)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> **The agent rebuild is required, and the hazardous half of the pairing is
+> prompt-without-image.** `prompts/` is bind-mounted and `src/` is baked. This
+> deploy bumps the scout_hub prompt set to **1.4.0**, whose `key_points` is a
+> FIVE-group object (`significance`, `innovation`, `clinical_actionability`,
+> `key_questions`, `commercial_potential`) and which adds `score_rationale`.
+> Image-without-prompt is benign: `normalize_key_points` now accepts any SUBSET
+> of the five known group keys, so a 1.3.0 three-group sidecar still stores
+> (2026-09-14 — it used to demand exact set equality, which meant one omitted
+> group stored `key_points = NULL` and lost the whole field to `raw_verdict`).
+> Prompt-without-image writes NULL into `score_rationale` forever and hands the
+> five-group object to a parser that rejects it.
+>
+> NULL on every pre-`0048` row and deliberately never backfilled: those
+> verdicts were never asked for a score rationale, and a generated one would be
+> indistinguishable from one the hub wrote. Both assessment surfaces render
+> nothing when it is NULL.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —
@@ -1453,14 +1521,27 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
   headline line (PI/lab name, `company_or_project`, `recommendation`,
   band/score, a permalink or `(link unavailable)`, and — since 2026-09-09 — the
-  sidecar's `elevator_pitch` on a second line) to `#assessments-summary`
+  sidecar's `elevator_pitch` on a second line, clipped at a SENTENCE
+  boundary — see below) to `#assessments-summary`
   (`ASSESSMENTS_SUMMARY_CHANNEL`, `src/agent/channels.py`) — deliberately with **no**
   rationale, red flags, gating, or `raw_verdict` (design D12, widened once). The pitch is
   a SIDECAR field and may carry the PI's unpublished disclosures; publishing it rests on
   the operator's assertion (2026-09-09) that PIs cannot join the workspace, which no code
   enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:37`) still renders a join link
   on every PI's own `/agent` page. The pitch segment is omitted entirely when
-  `elevator_pitch` is NULL, which is every row written before migration `0043`. Band/score
+  `elevator_pitch` is NULL, which is every row written before migration `0043`.
+  **It is clipped at a SENTENCE boundary, not at an offset (2026-09-14).**
+  `PITCH_DISPLAY_CHARS` is still 600 and deliberately was NOT raised — raising it
+  would publish more sidecar prose to a channel whose content policy needed
+  sign-off — but all 8 pitches on record measured 1173-1406 characters, so the
+  old `value[:600]` cut every published headline mid-word (`...picked by univ`,
+  `...(as oppose`, `...built on a handfu`). `_clip_at_sentence`
+  (`src/services/assessment_headline.py`) now cuts after the last sentence
+  terminator leaving at least half the budget, falls back to the last space with
+  a `" ..."` marker, and returns a short pitch byte-identically unchanged.
+  **`score_rationale` (sidecar item 10, migration `0048`) is deliberately NOT
+  published here** — it reasons about the score, which is exactly the widening
+  D12 bounds; it is app-only, on both assessment surfaces. Band/score
   are omitted entirely when the verdict carried no dimension scores, for the same reason
   `_persist_assessment` leaves those columns NULL: an empty `scores` map is "we don't know",
   and `weighted_score({})` is a 0.00 that bands as a decline nobody made. That channel is

@@ -37,7 +37,7 @@ Return ONLY valid JSON with this exact schema:
    discrepancy in the output. The upstream filter is imperfect.
 
 4. **research_summary length.** Aim for 150-250 words. If the evidence is too
-   thin to write 150 words honestly, write fewer (down to ~80) rather than
+   thin to write 150 words honestly, write fewer (down to about 80) rather than
    padding with generalities. The validator allows down to 100, and a short
    honest summary is better than a long invented one.
 

@@ -9,6 +9,7 @@ other review write in this app.
 
 import hashlib
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ from src.models import (
     USER_ROLE_MANAGER,
     USER_ROLE_PI,
     USER_ROLE_REVIEWER,
+    AssessmentReview,
+    Job,
     OpportunityAssessment,
     PromptChangeSuggestion,
     SimulationRun,
@@ -281,3 +284,143 @@ async def test_suggestion_survives_assessment_deletion(client, db_session):
     assert r.status_code == 200
     assert "Doomed Assessment Co" in r.text
     assert "(assessment no longer available)" in r.text
+
+
+async def _seed_learn_review(db, assessment, *, reviewer_name="R", consumed=False):
+    review = AssessmentReview(
+        assessment_id=assessment.id,
+        reviewer_user_id=None,
+        reviewer_name=reviewer_name,
+        score=2,
+        comment="Needs work.",
+        feedback_mode="learn",
+        consumed_at=datetime.now(UTC) if consumed else None,
+    )
+    db.add(review)
+    await db.flush()
+    return review
+
+
+@pytest.mark.parametrize("role", [USER_ROLE_MANAGER, USER_ROLE_ADMIN])
+async def test_generate_button_renders_for_staff_with_eligible_count(
+    client, db_session, role
+):
+    user = await factories.make_user(db_session, user_role=role)
+    a = await _seed_assessment(db_session)
+    await _seed_learn_review(db_session, a)
+    await db_session.commit()
+
+    body = (
+        await client.get("/manager/prompt-suggestions", headers=auth_headers(user.id))
+    ).text
+
+    assert 'action="/reviews/suggestions/generate"' in body
+    assert 'method="post"' in body
+    assert "Generate suggestions from current reviews" in body
+    assert "1 assessment" in body
+    assert "no suggestion has consumed yet" in body
+    button_start = body.index("Generate suggestions from current reviews")
+    button_markup = body[max(0, button_start - 300) : button_start]
+    assert "disabled" not in button_markup
+
+
+async def test_generate_button_disabled_when_nothing_eligible(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    body = (
+        await client.get("/manager/prompt-suggestions", headers=auth_headers(mgr.id))
+    ).text
+
+    assert 'action="/reviews/suggestions/generate"' in body
+    assert "Nothing to analyse" in body
+    # The button itself carries the disabled attribute.
+    button_start = body.index("Generate suggestions from current reviews")
+    button_markup = body[max(0, button_start - 300) : button_start]
+    assert "disabled" in button_markup
+
+
+async def test_generate_button_absent_while_impersonating(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Two")
+
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+
+    body = (await client.get("/manager/prompt-suggestions", headers=headers)).text
+
+    assert "Generate suggestions from current reviews" not in body
+
+
+async def test_reviewer_still_403s_the_whole_page_with_the_button_present(
+    client, db_session
+):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+
+    r = await client.get(
+        "/manager/prompt-suggestions", headers=auth_headers(reviewer.id)
+    )
+
+    assert r.status_code == 403
+
+
+async def test_flash_renders_from_query_string(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    body = (
+        await client.get(
+            "/manager/prompt-suggestions?generated=2&eligible=3",
+            headers=auth_headers(mgr.id),
+        )
+    ).text
+
+    assert "Queued 2 of 3" in body
+
+
+async def test_generate_enqueues_exactly_the_eligible_assessments_and_second_press_is_noop(
+    client, db_session
+):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    eligible = await _seed_assessment(db_session)
+    await _seed_learn_review(db_session, eligible)
+    already_consumed = await _seed_assessment(db_session)
+    await _seed_learn_review(db_session, already_consumed, consumed=True)
+    await db_session.commit()
+
+    r = await client.post(
+        "/reviews/suggestions/generate",
+        headers=auth_headers(mgr.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/manager/prompt-suggestions?generated=1&eligible=1"
+
+    jobs = (
+        (
+            await db_session.execute(
+                select(Job).where(Job.type == "review_feedback_analysis")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(jobs) == 1
+    assert jobs[0].payload["assessment_id"] == str(eligible.id)
+
+    r2 = await client.post(
+        "/reviews/suggestions/generate",
+        headers=auth_headers(mgr.id),
+        follow_redirects=False,
+    )
+    assert r2.status_code == 302
+    assert r2.headers["location"] == "/manager/prompt-suggestions?generated=0&eligible=1"
+
+    jobs_after = (
+        (
+            await db_session.execute(
+                select(Job).where(Job.type == "review_feedback_analysis")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(jobs_after) == 1

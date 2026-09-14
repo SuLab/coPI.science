@@ -1478,13 +1478,24 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
     milestones, toggled by an onclick) was removed 2026-08-27, and the three
     DENSE fields it showed stay off this page.
 
-    NARROWED 2026-09-09 (design §4.1): the page is now a card list and each card
-    carries `key_points`. That is a deliberate, bounded reversal — `key_points`
-    is a purpose-built 3-5 bullet summary written for triage, not the dense
-    evidence this pin was written about. `rationale`, red-flag TEXT and
-    `derisking_milestones` remain detail-page content, and the flag COUNT
-    remains their only trace here. The blanket "assessment-detail" not-in check
-    also keeps the wrapper macros' class name honest.
+    NARROWED TWICE, both times deliberately and both times bounded:
+
+    * 2026-09-09 (design §4.1): the page became a card list and each card
+      carries `key_points` — a purpose-built 3-5 bullet summary written for
+      triage, not the dense evidence this pin was written about.
+    * 2026-09-14 (Task C of the assessment-UX plan, at operator request): a
+      card also carries `elevator_pitch` (line-clamped, never truncated
+      server-side), `score_rationale`, and its per-dimension rubric SCORES —
+      the last of which is a partial, knowing reversal of the 2026-08-27
+      removal of the score chips, now behind a per-card disclosure that is
+      CLOSED by default rather than on the card face.
+
+    What the pin still protects, unchanged: `rationale`, red-flag TEXT and
+    `derisking_milestones` are detail-page content and appear nowhere here,
+    with the flag COUNT their only trace. So are the removed machinery's own
+    strings — `assessment-detail` (which also keeps the wrapper macros' and
+    the new card classes' names honest), `Expand all`, `Collapse all`,
+    `Click for rationale`.
     """
     run = SimulationRun()
     db_session.add(run)
@@ -1498,6 +1509,8 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
         derisking_milestones=["MILESTONE-ONLY-ON-THE-DETAIL-PAGE"],
         scores={"differentiation": 4},
         key_points=["KEY-POINT-BELONGS-ON-THE-TRIAGE-PAGE"],
+        elevator_pitch="PITCH-BELONGS-ON-THE-TRIAGE-PAGE",
+        score_rationale="WHY-THIS-SCORE-BELONGS-ON-THE-TRIAGE-PAGE",
     )
     db_session.add(assessment)
     await db_session.flush()
@@ -1519,8 +1532,15 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
     assert "MILESTONE-ONLY-ON-THE-DETAIL-PAGE" not in html
     assert "1 flag" in html
 
-    # The summary field DOES render — that is the point of the card list.
+    # The summary fields DO render — that is the point of the card list.
     assert "KEY-POINT-BELONGS-ON-THE-TRIAGE-PAGE" in html
+    assert "PITCH-BELONGS-ON-THE-TRIAGE-PAGE" in html
+    assert "WHY-THIS-SCORE-BELONGS-ON-THE-TRIAGE-PAGE" in html
+    # And so do the per-dimension scores, behind the collapsed disclosure —
+    # the bounded 2026-09-14 reversal named in the docstring. Asserted by the
+    # disclosure's class rather than by a score value: a bare "4" would match
+    # half the page.
+    assert "assessment-card-scores" in html
 
 
 async def _two_runs_with_one_assessment_each(db_session):

@@ -56,7 +56,10 @@ async def test_container_is_migrated(engine):
         #      token for an install someone else began)
         # 0047 pi_grants / pi_industry_evidence / pi_industry_scores +
         #      enrich_grants/industry_evidence job types
-        assert v == "0047"
+        # 0048 opportunity_assessments.score_rationale (the hub's brief account
+        #      of why the dimension scores came out where they did; app-only,
+        #      never published to #assessments-summary)
+        assert v == "0048"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -18,6 +18,7 @@ import pytest
 from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_MANAGER,
+    USER_ROLE_REVIEWER,
     AssessmentReview,
     AssessmentReviewAssignment,
     AssessmentReviewEvent,
@@ -804,7 +805,16 @@ async def test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face(
     client, db_session, admin
 ):
     """N9. Dropping the panel badge in particular would be a real loss:
-    rendering a non-verified panel as unremarkable is a named failure mode."""
+    rendering a non-verified panel as unremarkable is a named failure mode.
+
+    UPDATED 2026-09-14 (Task C2, D4): the gating string is still ON THE PAGE
+    but no longer on the card FACE — it moved, verbatim, into each card's
+    collapsed "Rubric scores & gating" disclosure, at operator request. This
+    test is deliberately page-scoped and so still passes unchanged; the
+    sibling test below is what pins WHERE the string now lives, and the flag
+    count, panel badge and rubric stamp asserted here are all still face
+    content.
+    """
     run = await factories.make_simulation_run(db_session)
     db_session.add(OpportunityAssessment(
         simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
@@ -841,3 +851,403 @@ async def test_the_manager_surface_renders_the_same_cards(client, db_session):
     )).text
     assert "assessment-card" in html
     assert "MANAGER-HEADLINE-MARKER" in html
+
+
+# ---------------------------------------------------------------------------
+# Task C (2026-09-14): the card's two collapsed disclosures — "Rubric scores &
+# gating" (C2) and "Quick scoring" (C3) — and the two-column narrative (C1).
+# ---------------------------------------------------------------------------
+
+
+def _details_open_tag(html: str, klass: str) -> str:
+    """The literal ``<details ...>`` open tag carrying `klass`.
+
+    Found by walking BACK to the `<details` that owns the class attribute, not
+    by slicing a fixed number of characters before it: the preceding markup
+    contains its own ``>`` characters, so a fixed-width window would be cut
+    short and the "no `open` attribute" assertion would pass vacuously.
+    """
+    at = html.index(f'class="{klass} ')
+    start = html.rfind("<details", 0, at)
+    assert start != -1, f"{klass} is not on a <details> element"
+    return html[start : html.index(">", at) + 1]
+
+
+def _details_slice(html: str, klass: str) -> str:
+    """The inner markup of the FIRST ``<details class="<klass> ...">`` on the
+    page, bounded by its own ``</details>``.
+
+    Bounded on the element's own close tag rather than on a sentinel, for the
+    same reason ``_row_slice`` walks div depth: a sentinel assumes something
+    about what follows. Neither disclosure nests a second ``<details>``, so a
+    depth walk buys nothing here — but if one ever does, this helper must
+    grow one.
+    """
+    assert f'class="{klass} ' in html, f"no <details class={klass!r} ...> on the page"
+    start = html.index(f'class="{klass} ')
+    assert "<details" in html[:start], f"{klass} is not on a <details> element"
+    open_tag_end = html.index(">", start)
+    end = html.index("</details>", open_tag_end)
+    assert "<details" not in html[open_tag_end:end], (
+        f"{klass} now nests another <details>; this helper needs a depth walk"
+    )
+    return html[open_tag_end + 1 : end]
+
+
+async def _seed_narrative_row(db_session, *, project: str, **overrides):
+    """One row with every narrative field the card can render."""
+    run = overrides.pop("run", None) or await factories.make_simulation_run(db_session)
+    kwargs = dict(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project=project,
+        recommendation="conditional", weighted_score=3.05, band="conditional",
+    )
+    kwargs.update(overrides)
+    assessment = OpportunityAssessment(**kwargs)
+    db_session.add(assessment)
+    await db_session.flush()
+    return run, assessment
+
+
+async def test_quick_scoring_is_collapsed_and_labelled(client, db_session, admin):
+    """C3. Collapsed by DEFAULT: the card face is a triage surface, and a
+    permanently-expanded review form per card is what made the page
+    unreadable before the 2026-09-09 card list replaced the table."""
+    run, _ = await _seed_narrative_row(db_session, project="Quickscore Co")
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert "assessment-card-quickscore" in html
+    assert "Quick scoring" in html
+    assert " open" not in _details_open_tag(html, "assessment-card-quickscore"), (
+        "the quick-scoring disclosure must start closed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("base", "role", "surface"),
+    [
+        ("/admin", USER_ROLE_ADMIN, "admin-list"),
+        ("/manager", USER_ROLE_MANAGER, "manager-list"),
+    ],
+)
+async def test_quick_scoring_posts_to_literal_review_paths_on_both_surfaces(
+    client, db_session, base, role, surface
+):
+    """The action paths are LITERAL `/reviews/...` on both surfaces (the header
+    comment's recorded exception): that router is not split by surface, and the
+    `surface` hidden input — a bare token, contract C5/C6 — is what
+    `_assessments_redirect` uses to send the writer back to the list they were
+    reading. A path-shaped discriminator would put `/admin/` on the manager
+    page and fail test_manager_assessments_never_links_into_admin.
+    """
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"qs{base.strip('/')}@example.org"
+    )
+    run, assessment = await _seed_narrative_row(db_session, project="Paths Co")
+
+    html = (await client.get(
+        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+    )).text
+
+    assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
+    assert f'action="/reviews/assessments/{assessment.id}/status"' in html
+    assert 'method="post"' in html
+    # Contract C6: four hidden inputs, the same four on both forms.
+    quickscore = _details_slice(html, "assessment-card-quickscore")
+    assert quickscore.count(f'name="surface" value="{surface}"') == 2
+    assert quickscore.count('name="run_id"') == 2
+    assert quickscore.count('name="sort"') == 2
+    assert quickscore.count('name="lab"') == 2
+    # The status control is BUTTONS with lowercase values — never a select
+    # whose option TEXT is "Approved"/"Disapproved", which
+    # test_list_pages_show_reviewer_columns row-scopes against.
+    assert 'name="action" value="approved"' in quickscore
+    assert 'name="action" value="disapproved"' in quickscore
+    assert 'name="action" value="cleared"' in quickscore
+    assert "Approved" not in quickscore and "Disapproved" not in quickscore
+
+
+async def test_quick_scoring_offers_no_rubric_dimension_fields(
+    client, db_session, admin
+):
+    """Per-dimension scoring stays on the detail page. Posting no `dim_*` field
+    at all is the already-supported path (`_parse_dimension_scores` -> `{}` ->
+    SQL NULL), so this needs no route change — but a `dim_*` field appearing
+    here later would silently change what a quick score records."""
+    run, _ = await _seed_narrative_row(db_session, project="No Dims Co")
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert 'name="dim_' not in html
+
+
+async def test_quick_scoring_offers_no_edit_delete_or_assign_controls(
+    client, db_session, admin
+):
+    """Edit is excluded because `edit_feedback` REPLACES `dimension_scores`
+    from the posted form: a dimension-free edit posted from a card would wipe
+    scores a reviewer entered on the detail page. Delete is admin-only and
+    assign/unassign is staff-only, and neither belongs on a card a reviewer
+    also sees."""
+    run, _ = await _seed_narrative_row(db_session, project="No Edit Co")
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert "/reviews/feedback/" not in html
+    assert "/assign" not in html
+    assert "/unassign" not in html
+
+
+async def test_quick_scoring_select_ids_are_unique_and_labelled(
+    client, db_session, admin
+):
+    """The list-page twin of the detail page's labelling gate. PAGE-WIDE, which
+    is only possible because Task D gave the three filter selects an `id` and
+    their labels a `for` — before that the page violated the rule on
+    pre-existing markup. Two seeded rows, so a per-row id collision (an id
+    built from anything but `a.id`) fails here rather than in a screen
+    reader."""
+    run, _ = await _seed_narrative_row(db_session, project="Unique Ids One")
+    await _seed_narrative_row(db_session, project="Unique Ids Two", run=run)
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    select_ids = re.findall(r'<select[^>]*\bid="([^"]+)"', html)
+    assert len(select_ids) == len(set(select_ids)), (
+        f"duplicate select ids: {select_ids}"
+    )
+    assert len(re.findall(r"<select\b", html)) == len(select_ids), (
+        "every <select> on the page needs an id (Task D fixes the filter row)"
+    )
+    for sid in select_ids:
+        assert f'for="{sid}"' in html, f"no <label for={sid!r}>"
+
+
+async def test_quick_scoring_renders_for_a_reviewer_on_the_manager_surface(
+    client, db_session
+):
+    """A reviewer's whole surface is the manager list plus /reviews, so the
+    quick-scoring form has to be there — it is the only write they can reach
+    from the queue."""
+    reviewer = await factories.make_user(
+        db_session, user_role=USER_ROLE_REVIEWER, email="qs-reviewer@example.org"
+    )
+    run, assessment = await _seed_narrative_row(db_session, project="Reviewer Co")
+
+    html = (await client.get(
+        f"/manager/assessments?run_id={run.id}", headers=auth_headers(reviewer.id)
+    )).text
+
+    assert "assessment-card-quickscore" in html
+    assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
+    assert 'value="manager-list"' in html
+    assert "/admin/" not in html
+
+
+async def test_the_card_scores_disclosure_is_closed_by_default_and_holds_the_gating(
+    client, db_session, admin
+):
+    """C2/D4. The gating glyphs moved off the card face into this disclosure,
+    VERBATIM — same three glyphs, same titles, same `gating-row gating-*`
+    classes. The sibling of
+    test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face, which is
+    page-scoped and therefore cannot tell the two placements apart."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Scores Disclosure Co",
+        gating={"life_sciences_domain": "met", "credible_science": "unconfirmed"},
+        scores={"differentiation_unmet_need": 4},
+        rubric_version="3.4.0",
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert "assessment-card-scores" in html
+    assert " open" not in _details_open_tag(html, "assessment-card-scores"), (
+        "the scores disclosure must start closed"
+    )
+
+    scores = _details_slice(html, "assessment-card-scores")
+    assert "Rubric scores" in html
+    assert "life sciences domain" in scores
+    assert "credible science" in scores
+    assert "gating-row gating-met" in scores
+    assert "gating-row gating-unconfirmed" in scores
+    assert "&#9989;" in scores and "&#10067;" in scores
+    # The face keeps what the face kept (finding R3) — these are OUTSIDE it.
+    assert "panel not recorded" not in scores
+    assert "Reviewed by" not in scores
+
+
+async def test_the_card_scores_use_the_rows_own_revision(client, db_session, admin):
+    """Contract C4: the rows are built from the ROW'S OWN stamped revision, not
+    from today's document. A 1.0.0 row's `differentiation` is
+    "Commercialization potential / differentiation" at 15% weight; the live
+    3.4.0 document has no such key and names nothing that way. Re-deriving
+    against the live rubric is the failure this pins — the same class of bug
+    `panel_state` had before `panel_owed` became a stored column."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Own Revision Co",
+        scores={"differentiation": 4},
+        rubric_version="1.0.0",
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    scores = _details_slice(html, "assessment-card-scores")
+    assert "Commercialization potential / differentiation" in scores
+    assert "15%" in scores
+    assert "Differentiation &amp; unmet need" not in scores
+
+
+async def test_the_list_page_renders_the_pitch_and_key_points_side_by_side(
+    client, db_session, admin
+):
+    """C1: pitch LEFT, key points RIGHT, mirroring the detail page's brief so
+    the two surfaces cannot order the same two fields two ways."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Side By Side Co",
+        elevator_pitch="PITCH-MARKER: one tube of blood, two-week answer.",
+        key_points={"significance": ["POINTS-MARKER: decision-window fit"]},
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert "assessment-card-pitch" in html
+    assert "assessment-card-points" in html
+    assert html.index("assessment-card-pitch") < html.index("assessment-card-points")
+    assert "PITCH-MARKER" in html
+    assert "POINTS-MARKER" in html
+
+
+async def test_a_row_with_no_pitch_or_points_renders_neither_box(
+    client, db_session, admin
+):
+    """Every box is FULLY conditional. Every production row today has
+    `elevator_pitch IS NULL` and `key_points IS NULL`, so an unconditional
+    grid wrapper or tinted box fails on the entire current corpus, not on an
+    edge case. The mapping-of-empty-lists case is the list-page twin of
+    test_a_mapping_of_only_empty_lists_renders_no_key_points_column: it is a
+    storable shape (`normalize_key_points`) and must render no box, which is
+    why the gate is a CONTENT check and not `is mapping`."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Bare Card Co", elevator_pitch=None, key_points=None,
+    )
+    await _seed_narrative_row(
+        db_session, project="Empty Points Co", run=run,
+        elevator_pitch=None,
+        key_points={"significance": [], "innovation": []},
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+
+    assert "Bare Card Co" in html
+    assert "Empty Points Co" in html
+    # ROW-scoped, not page-wide: the wrapper's own stylesheet carries a
+    # `.assessment-card-pitch .assessment-prose { max-width: none; }` rule
+    # (templates/admin/assessments.html), so the class NAME is on every render
+    # whether or not any card emits the box. The claim being tested is about
+    # the card's markup, so it is asserted inside the card.
+    for marker in ("Bare Card Co", "Empty Points Co"):
+        card = _row_slice(html, marker)
+        assert "assessment-card-pitch" not in card, marker
+        assert "assessment-card-points" not in card, marker
+        assert "assessment-card-score-rationale" not in card, marker
+
+
+async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admin):
+    """Finding Q6. Everything Task C adds to a card — the pitch, the key-point
+    groups, the score rationale, six dimension bars and two disclosures with a
+    full review form in one of them — is per ROW, and the page renders up to
+    `assessments_limit` rows. A ceiling makes the next per-card addition
+    declare its cost instead of discovering it on a 500-row run.
+
+    MEASURED 2026-09-14 against the REAL served page (not a standalone render
+    of the body), with this exact fixture shape — 50 rows, ~560-char pitch,
+    five key-point groups x 2 bullets, ~310-char score rationale, six
+    dimension rows:
+
+    | what | bytes | per card |
+    |---|---|---|
+    | 50 rows, every narrative field populated | **728,695** | 14.2 KiB |
+    | 50 rows, no narrative fields at all (today's production shape) | 503,955 | 9.8 KiB |
+    | 500 rows (`ASSESSMENTS_LIMIT`, the "All Runs" worst case), populated | 7,130,306 | 13.9 KiB |
+    | 500 rows, no narrative fields | 4,882,416 | 9.5 KiB |
+
+    For scale: before this change a card was ~3.0 KiB, so the 500-row worst
+    case was ~1.5 MB. The first cut of this markup measured 8,669,804 bytes at
+    500 rows; whitespace control in the two disclosures (see the comment on the
+    dimension-row loop in templates/admin/_assessments_body.html) took it to
+    the 7,130,306 above with byte-identical rendered output. The DEFAULT view is
+    run-scoped and holds 6-20 rows, i.e. ~280 KB; the multi-megabyte figure is
+    reachable only via "All Runs".
+
+    CEILING is the populated 50-row measurement plus ~20%. If a change pushes
+    past it, raise it in the same commit to the newly MEASURED number and
+    record the measurement here — no speculative headroom.
+    """
+    CEILING = 875_000
+
+    run = await factories.make_simulation_run(db_session)
+    pitch = (
+        "A blood test that reports checkpoint-inhibitor response from one tube "
+        "of blood, inside the two-week decision window an oncologist has. "
+    ) * 4
+    why = "Scored on the retrospective cohort's strength and the IP position's weakness. " * 4
+    points = {
+        key: [f"{key} point one for triage", f"{key} point two for triage"]
+        for key in (
+            "significance", "innovation", "clinical_actionability",
+            "key_questions", "commercial_potential",
+        )
+    }
+    for i in range(50):
+        db_session.add(OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id="wang", channel_name="general",
+            company_or_project=f"Weight Co {i}",
+            headline=f"Headline {i}: a blood test for immunotherapy response",
+            recommendation="conditional", weighted_score=3.05, band="conditional",
+            confidence="High", prose_format="markdown",
+            elevator_pitch=pitch, score_rationale=why, key_points=points,
+            gating={
+                "life_sciences_domain": "met",
+                "credible_science": "unconfirmed",
+                "translational_potential": "met",
+            },
+            red_flags=["flag one", "flag two"],
+            scores={
+                "differentiation_unmet_need": 4, "scientific_credibility": 4,
+                "translational_path": 3, "fundable_experiment": 3,
+                "venture_potential": 2, "team_executability": 4,
+            },
+            rubric_version="3.4.0",
+        ))
+    await db_session.flush()
+
+    resp = await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    assert "Weight Co 0" in resp.text
+    assert len(resp.text) < CEILING, (
+        f"the 50-row admin list page is {len(resp.text)} bytes, over the "
+        f"{CEILING}-byte ceiling — re-measure and raise it deliberately, or "
+        "move something off the card"
+    )
