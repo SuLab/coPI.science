@@ -1,63 +1,59 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}Admin — Waitlist — CoPI{% endblock %}
 
 {% block content %}
-<div class="flex justify-between items-center mb-6">
+<div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <h1 class="text-2xl font-bold text-gray-900">Waitlist</h1>
-    <a href="/admin/waitlist/export" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-sm">
+    <a href="/admin/waitlist/export" data-testid="primary"
+       class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium sm:min-h-6 bg-indigo-600 text-white hover:bg-indigo-700 px-3 py-2 text-sm w-full sm:w-auto">
         Export CSV
     </a>
 </div>
 
-<div class="grid grid-cols-2 gap-4 mb-8">
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-indigo-600">{{ signups | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Total signups</div>
-    </div>
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">{{ signups | selectattr('contacted_at') | list | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Contacted</div>
-    </div>
-</div>
+{% call ui.stat_grid(2) %}
+{{ ui.stat(signups | length, 'Total signups', 'brand') }}
+{{ ui.stat(signups | selectattr('contacted_at') | list | length, 'Contacted', 'ok') }}
+{% endcall %}
 
 <div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
     {% if signups %}
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Institution</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Note</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Signed up</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contacted</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for s in signups %}
-            <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-medium">
-                    <a href="mailto:{{ s.email }}" class="text-indigo-600 hover:underline">{{ s.email }}</a>
-                </td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ s.name or '—' }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ s.institution or '—' }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600 max-w-xs">
-                    {% if s.note %}<span title="{{ s.note }}">{{ s.note[:80] }}{% if s.note | length > 80 %}…{% endif %}</span>{% else %}—{% endif %}
-                </td>
-                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ s.created_at.isoformat() }}" data-utc-fmt="short">{{ s.created_at.strftime('%b %d') }}</td>
-                <td class="px-4 py-3 text-xs">
-                    {% if s.contacted_at %}
-                    <span class="text-green-600">✓ {{ s.contacted_at.strftime('%b %d') }}</span>
-                    {% else %}
-                    <form method="POST" action="/admin/waitlist/{{ s.id }}/mark-contacted">
-                        <button type="submit" class="text-indigo-600 hover:underline">Mark contacted</button>
-                    </form>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% call ui.data_table(caption="Waitlist signups", id="waitlist-table") %}
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Institution</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Note</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Signed up</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contacted</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+        {% for s in signups %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm font-medium break-all">
+                <a href="mailto:{{ s.email }}" class="text-indigo-600 hover:underline">{{ s.email }}</a>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ s.name or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ s.institution or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600 max-w-xs">
+                {% if s.note %}<span title="{{ s.note }}">{{ s.note[:80] }}{% if s.note | length > 80 %}…{% endif %}</span>{% else %}—{% endif %}
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-500" data-utc="{{ s.created_at.isoformat() }}" data-utc-fmt="short">{{ s.created_at.strftime('%b %d') }}</td>
+            <td class="px-4 py-3 text-sm">
+                {% if s.contacted_at %}
+                <span class="text-green-600">✓ {{ s.contacted_at.strftime('%b %d') }}</span>
+                {% else %}
+                <form method="POST" action="/admin/waitlist/{{ s.id }}/mark-contacted" class="flex flex-wrap gap-2">
+                    {{ ui.button('Mark contacted', variant='ghost', size='sm', type='submit') }}
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    {% endcall %}
     {% else %}
     <p class="text-sm text-gray-500 px-6 py-8 text-center">No waitlist signups yet.</p>
     {% endif %}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}Admin — Discussions — CoPI{% endblock %}
 
 {% block extra_head %}
@@ -21,13 +22,13 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-6">
+<div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <h1 class="text-2xl font-bold text-gray-900">Discussions</h1>
     {% if runs %}
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-2">
+    <form method="GET" action="/admin/discussions" class="flex flex-wrap items-center gap-2">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
-                class="text-sm border-gray-300 rounded-md shadow-xs focus:ring-indigo-500 focus:border-indigo-500">
+                class="min-h-11 sm:min-h-6 text-sm border-gray-300 rounded-md shadow-xs focus:ring-indigo-500 focus:border-indigo-500">
             <option value="all" {% if selected_run_id == 'all' %}selected{% endif %}>All Runs</option>
             {% for run in runs %}
             <option value="{{ run.id }}" {% if run.id == selected_run_id %}selected{% endif %}>
@@ -45,19 +46,19 @@
 
 <!-- Summary cards -->
 {% set status_meta = {
-    'no_replies':  {'label': 'No Replies',   'color': 'gray',   'icon': '—'},
-    'active':      {'label': 'Active',       'color': 'blue',   'icon': '...'},
-    'proposal':    {'label': 'Proposal',     'color': 'green',  'icon': 'check'},
-    'no_proposal': {'label': 'No Proposal',  'color': 'amber',  'icon': 'x'},
-    'timeout':     {'label': 'Timeout',      'color': 'red',    'icon': 'clock'},
+    'no_replies':  {'label': 'No Replies',   'icon': '—',     'card': 'hover:border-gray-300',  'ring': 'ring-2 ring-gray-400',   'num': 'text-gray-600',   'pill': 'bg-gray-100 text-gray-700'},
+    'active':      {'label': 'Active',       'icon': '...',   'card': 'hover:border-blue-300',  'ring': 'ring-2 ring-blue-400',   'num': 'text-blue-600',   'pill': 'bg-blue-100 text-blue-700'},
+    'proposal':    {'label': 'Proposal',     'icon': 'check', 'card': 'hover:border-green-300', 'ring': 'ring-2 ring-green-400',  'num': 'text-green-600',  'pill': 'bg-green-100 text-green-700'},
+    'no_proposal': {'label': 'No Proposal',  'icon': 'x',     'card': 'hover:border-amber-300', 'ring': 'ring-2 ring-amber-400',  'num': 'text-amber-600',  'pill': 'bg-amber-100 text-amber-700'},
+    'timeout':     {'label': 'Timeout',      'icon': 'clock', 'card': 'hover:border-red-300',   'ring': 'ring-2 ring-red-400',    'num': 'text-red-600',    'pill': 'bg-red-100 text-red-700'},
 } %}
 <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
     {% for key, meta in status_meta.items() %}
     {% set n = counts.get(key, 0) %}
     <a href="/admin/discussions?run_id={{ selected_run_id }}{% if status_filter != key %}&status_filter={{ key }}{% endif %}"
-       class="bg-white rounded-xl border border-gray-200 p-4 text-center hover:border-{{ meta.color }}-300 transition
-              {% if status_filter == key %}ring-2 ring-{{ meta.color }}-400{% endif %}">
-        <div class="text-3xl font-bold text-{{ meta.color }}-600">{{ n }}</div>
+       class="bg-white rounded-xl border border-gray-200 p-4 text-center transition {{ meta.card }}
+              {% if status_filter == key %}{{ meta.ring }}{% endif %}">
+        <div class="text-3xl font-bold {{ meta.num }}">{{ n }}</div>
         <div class="text-sm text-gray-500 mt-1">{{ meta.label }}</div>
     </a>
     {% endfor %}
@@ -65,15 +66,15 @@
 
 <!-- Filters -->
 <div class="flex items-center gap-4 mb-4">
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-3">
+    <form method="GET" action="/admin/discussions" class="flex flex-wrap items-center gap-2">
         <input type="hidden" name="run_id" value="{{ selected_run_id }}">
-        <select name="channel_filter" class="text-sm border-gray-300 rounded-md shadow-xs">
+        <select name="channel_filter" class="min-h-11 sm:min-h-6 text-sm border-gray-300 rounded-md shadow-xs">
             <option value="">All Channels</option>
             {% for ch in channels %}
             <option value="{{ ch }}" {% if channel_filter == ch %}selected{% endif %}>#{{ ch }}</option>
             {% endfor %}
         </select>
-        <select name="status_filter" class="text-sm border-gray-300 rounded-md shadow-xs">
+        <select name="status_filter" class="min-h-11 sm:min-h-6 text-sm border-gray-300 rounded-md shadow-xs">
             <option value="">All Statuses</option>
             {% for key, meta in status_meta.items() %}
             <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ meta.label }}</option>
@@ -86,12 +87,12 @@
             <option value="{{ a }}" {% if a in agent_filter %}selected{% endif %}>{{ a | capitalize }}Bot</option>
             {% endfor %}
         </select>
-        <button type="submit"
-                class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
+        <button type="submit" data-testid="primary"
+                class="min-h-11 sm:min-h-6 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
         <button type="submit" name="export" value="true"
-                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export TXT</button>
+                class="min-h-11 sm:min-h-6 px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export TXT</button>
         <button type="submit" name="export" value="html"
-                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export HTML</button>
+                class="min-h-11 sm:min-h-6 px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export HTML</button>
         {% if channel_filter or status_filter or agent_filter %}
         <a href="/admin/discussions?run_id={{ selected_run_id }}" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
         {% endif %}
@@ -99,87 +100,85 @@
 </div>
 
 <!-- Threads table -->
-<div class="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted By</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replies</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replier</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date/Time</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for t in threads %}
-            {% set meta = status_meta.get(t.status, {'label': t.status, 'color': 'gray'}) %}
-            <tr class="hover:bg-gray-50 {% if t.decision %}cursor-pointer{% endif %}"
-                {% if t.decision %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
-                <td class="px-4 py-3">
-                    <span class="px-2 py-0.5 rounded-full text-xs bg-{{ meta.color }}-100 text-{{ meta.color }}-700">
-                        {{ meta.label }}
-                    </span>
-                </td>
-                <td class="px-4 py-3 text-sm">#{{ t.channel_name }}</td>
-                <td class="px-4 py-3 text-sm font-medium">{% if t.agent_id %}{{ t.agent_id | capitalize }}Bot{% else %}(unknown sender){% endif %}</td>
-                <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
-                <td class="px-4 py-3 text-sm">
-                    {% if t.decision %}
-                        {% if t.decision.agent_a == t.agent_id %}
-                            {{ t.decision.agent_b | capitalize }}Bot
-                        {% else %}
-                            {{ t.decision.agent_a | capitalize }}Bot
-                        {% endif %}
-                    {% elif t.replier %}
-                        {{ t.replier | capitalize }}Bot
-                    {% else %}
-                        —
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 text-sm text-gray-500">
-                    {% if t.decision %}
-                        {{ t.decision.outcome | replace('_', ' ') | capitalize }}
-                        <span class="text-xs text-gray-400"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
-                    {% else %}
-                        —
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 text-sm text-gray-500"><span data-utc="{{ t.created_at.isoformat() }}" data-utc-fmt="short">{{ t.created_at.strftime('%b %d %H:%M') }}</span></td>
-            </tr>
-            {% if t.decision and (t.decision.summary_text or t.reviews) %}
-            <tr id="detail-{{ loop.index }}" class="hidden">
-                <td colspan="7" class="px-6 py-4 bg-gray-50">
-                    {% if t.decision.summary_text %}
-                    <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | e }}"></div>
-                    {% endif %}
-                    {% if t.reviews %}
-                    <div class="border-t border-gray-200 pt-3 mt-3">
-                        <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">PI Reviews</h4>
-                        {% for rev in t.reviews %}
-                        <div class="flex items-start gap-3 mb-2 text-sm">
-                            <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">{{ rev.rating }}/4</span>
-                            <span class="font-medium text-gray-700">{{ rev.agent_id | capitalize }}Bot's PI</span>
-                            {% if rev.comment %}
-                            <span class="text-gray-500 italic">"{{ rev.comment }}"</span>
-                            {% endif %}
-                            <span class="text-xs text-gray-400">{{ rev.reviewed_at.strftime('%b %d %H:%M') }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endif %}
+{% call ui.data_table(caption="Discussion threads", id="discussions-table") %}
+<thead class="bg-gray-50">
+    <tr>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted By</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replies</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replier</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date/Time</th>
+    </tr>
+</thead>
+<tbody class="divide-y divide-gray-100">
+    {% for t in threads %}
+    {% set meta = status_meta.get(t.status, {'label': t.status, 'pill': 'bg-gray-100 text-gray-700'}) %}
+    <tr class="hover:bg-gray-50 {% if t.decision %}cursor-pointer{% endif %}"
+        {% if t.decision %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
+        <td class="px-4 py-3">
+            <span class="px-2 py-0.5 rounded-full text-xs {{ meta.pill }}">
+                {{ meta.label }}
+            </span>
+        </td>
+        <td class="px-4 py-3 text-sm">#{{ t.channel_name }}</td>
+        <td class="px-4 py-3 text-sm font-medium">{% if t.agent_id %}{{ t.agent_id | capitalize }}Bot{% else %}(unknown sender){% endif %}</td>
+        <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
+        <td class="px-4 py-3 text-sm">
+            {% if t.decision %}
+                {% if t.decision.agent_a == t.agent_id %}
+                    {{ t.decision.agent_b | capitalize }}Bot
+                {% else %}
+                    {{ t.decision.agent_a | capitalize }}Bot
+                {% endif %}
+            {% elif t.replier %}
+                {{ t.replier | capitalize }}Bot
             {% else %}
-            <tr>
-                <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No discussions found</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
+                —
+            {% endif %}
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-500">
+            {% if t.decision %}
+                {{ t.decision.outcome | replace('_', ' ') | capitalize }}
+                <span class="text-xs text-gray-400"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
+            {% else %}
+                —
+            {% endif %}
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-500"><span data-utc="{{ t.created_at.isoformat() }}" data-utc-fmt="short">{{ t.created_at.strftime('%b %d %H:%M') }}</span></td>
+    </tr>
+    {% if t.decision and (t.decision.summary_text or t.reviews) %}
+    <tr id="detail-{{ loop.index }}" class="hidden">
+        <td colspan="7" class="px-6 py-4 bg-gray-50">
+            {% if t.decision.summary_text %}
+            <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | e }}"></div>
+            {% endif %}
+            {% if t.reviews %}
+            <div class="border-t border-gray-200 pt-3 mt-3">
+                <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">PI Reviews</h4>
+                {% for rev in t.reviews %}
+                <div class="flex items-start gap-3 mb-2 text-sm">
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">{{ rev.rating }}/4</span>
+                    <span class="font-medium text-gray-700">{{ rev.agent_id | capitalize }}Bot's PI</span>
+                    {% if rev.comment %}
+                    <span class="text-gray-500 italic">"{{ rev.comment }}"</span>
+                    {% endif %}
+                    <span class="text-xs text-gray-400">{{ rev.reviewed_at.strftime('%b %d %H:%M') }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </td>
+    </tr>
+    {% endif %}
+    {% else %}
+    <tr>
+        <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No discussions found</td>
+    </tr>
+    {% endfor %}
+</tbody>
+{% endcall %}
 
 <div class="mt-4 text-sm text-gray-400">
     Showing {{ threads | length }} thread{{ 's' if threads | length != 1 }}

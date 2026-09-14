@@ -1,28 +1,17 @@
 {% extends "base.html" %}
+{% import "_components.html" as ui with context %}
 {% block title %}Admin — Agents — CoPI{% endblock %}
 
 {% block content %}
 <h1 class="text-2xl font-bold text-gray-900 mb-6">Agents</h1>
 
 <!-- Summary cards -->
-<div class="grid grid-cols-4 gap-4 mb-8">
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-amber-600">{{ pending | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Pending</div>
-    </div>
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">{{ active | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Active</div>
-    </div>
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-blue-500">{{ inactive | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Inactive (parked)</div>
-    </div>
-    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-gray-400">{{ suspended | length }}</div>
-        <div class="text-sm text-gray-500 mt-1">Suspended</div>
-    </div>
-</div>
+{% call ui.stat_grid(4) %}
+{{ ui.stat(pending | length, 'Pending', 'warn') }}
+{{ ui.stat(active | length, 'Active', 'ok') }}
+{{ ui.stat(inactive | length, 'Inactive (parked)', 'info') }}
+{{ ui.stat(suspended | length, 'Suspended', 'muted') }}
+{% endcall %}
 
 {% if pending %}
 <!-- Pending requests -->
@@ -30,29 +19,30 @@
     <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
         <h2 class="font-semibold text-amber-800">Pending Requests</h2>
     </div>
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for a in pending %}
-            <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-medium">{{ a.pi_name }}</td>
-                <td class="px-4 py-3 text-sm">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at.strftime('%b %d %H:%M') }}</td>
-                <td class="px-4 py-3">
-                    <a href="/admin/agents/{{ a.id }}"
-                       class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">Review</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% call ui.data_table(caption="Pending agent requests", id="agents-pending-table") %}
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+        {% for a in pending %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm font-medium">{{ a.pi_name }}</td>
+            <td class="px-4 py-3 text-sm">{{ a.bot_name }}</td>
+            <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at.strftime('%b %d %H:%M') }}</td>
+            <td class="px-4 py-3">
+                <a href="/admin/agents/{{ a.id }}"
+                   {% if loop.first %}data-testid="primary"{% endif %}
+                   class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium sm:min-h-6 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 px-2.5 py-1.5 text-xs">Review</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    {% endcall %}
 </div>
 {% endif %}
 
@@ -61,73 +51,73 @@
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Active Agents</h2>
     </div>
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Linked User</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Proposals</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for a in active %}
-            {% set total_proposals = proposal_counts.get(a.agent_id, 0) %}
-            {% set total_reviewed = review_counts.get(a.agent_id, 0) %}
-            {% set unreviewed = [total_proposals - total_reviewed, 0] | max %}
-            <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
-                <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm">
-                    {% if a.user_id and user_map.get(a.user_id | string) %}
-                        <a href="/admin/users/{{ a.user_id }}" class="text-indigo-600 hover:text-indigo-800">
-                            {{ user_map[a.user_id | string] }}
-                        </a>
-                    {% else %}
-                        <form method="POST" action="/admin/agents/{{ a.id }}/link" class="flex gap-1">
-                            <select name="user_id" class="text-xs border-gray-300 rounded-md py-1">
-                                <option value="">-- Link user --</option>
-                                {% for u in all_users %}
-                                <option value="{{ u.id }}">{{ u.name }}</option>
-                                {% endfor %}
-                            </select>
-                            <button type="submit" class="text-xs px-2 py-1 bg-gray-100 rounded-sm hover:bg-gray-200">Link</button>
-                        </form>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 text-sm">
-                    {% if a.slack_bot_token %}
-                        <span class="text-green-500 text-xs">DB token</span>
-                    {% elif a.agent_id in env_token_agents %}
-                        <span class="text-green-500 text-xs">.env token</span>
-                    {% else %}
-                        <span class="text-gray-400 text-xs">No tokens</span>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 text-sm">
-                    {% if unreviewed > 0 %}
-                        <span class="text-amber-600 font-medium">{{ unreviewed }} to review</span>
-                        <span class="text-gray-400">({{ total_proposals }} total)</span>
-                    {% elif total_proposals > 0 %}
-                        <span class="text-green-600">{{ total_proposals }} reviewed</span>
-                    {% else %}
-                        <span class="text-gray-400">0</span>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3">
-                    <a href="/admin/agents/{{ a.id }}"
-                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
-                </td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="6" class="px-4 py-8 text-center text-gray-400 text-sm">No active agents</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% call ui.data_table(caption="Active agents", id="agents-active-table") %}
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Linked User</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Proposals</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+        {% for a in active %}
+        {% set total_proposals = proposal_counts.get(a.agent_id, 0) %}
+        {% set total_reviewed = review_counts.get(a.agent_id, 0) %}
+        {% set unreviewed = [total_proposals - total_reviewed, 0] | max %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
+            <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
+            <td class="px-4 py-3 text-sm">
+                {% if a.user_id and user_map.get(a.user_id | string) %}
+                    <a href="/admin/users/{{ a.user_id }}" class="text-indigo-600 hover:text-indigo-800">
+                        {{ user_map[a.user_id | string] }}
+                    </a>
+                {% else %}
+                    <form method="POST" action="/admin/agents/{{ a.id }}/link" class="flex flex-wrap gap-2">
+                        <select name="user_id" class="min-h-11 sm:min-h-6 text-xs border-gray-300 rounded-md py-1">
+                            <option value="">-- Link user --</option>
+                            {% for u in all_users %}
+                            <option value="{{ u.id }}">{{ u.name }}</option>
+                            {% endfor %}
+                        </select>
+                        {{ ui.button('Link', variant='secondary', size='sm', type='submit') }}
+                    </form>
+                {% endif %}
+            </td>
+            <td class="px-4 py-3 text-sm">
+                {% if a.slack_bot_token %}
+                    <span class="text-green-500 text-xs">DB token</span>
+                {% elif a.agent_id in env_token_agents %}
+                    <span class="text-green-500 text-xs">.env token</span>
+                {% else %}
+                    <span class="text-gray-400 text-xs">No tokens</span>
+                {% endif %}
+            </td>
+            <td class="px-4 py-3 text-sm">
+                {% if unreviewed > 0 %}
+                    <span class="text-amber-600 font-medium">{{ unreviewed }} to review</span>
+                    <span class="text-gray-400">({{ total_proposals }} total)</span>
+                {% elif total_proposals > 0 %}
+                    <span class="text-green-600">{{ total_proposals }} reviewed</span>
+                {% else %}
+                    <span class="text-gray-400">0</span>
+                {% endif %}
+            </td>
+            <td class="px-4 py-3">
+                <a href="/admin/agents/{{ a.id }}"
+                   class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium sm:min-h-6 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 px-2.5 py-1.5 text-xs">Edit</a>
+            </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="6" class="px-4 py-8 text-center text-gray-400 text-sm">No active agents</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    {% endcall %}
 </div>
 
 {% if inactive %}
@@ -136,29 +126,29 @@
     <div class="px-6 py-4 border-b border-blue-100 bg-blue-50">
         <h2 class="font-semibold text-blue-800">Inactive (parked — excluded from simulation runs)</h2>
     </div>
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for a in inactive %}
-            <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
-                <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
-                <td class="px-4 py-3">
-                    <a href="/admin/agents/{{ a.id }}"
-                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% call ui.data_table(caption="Inactive agents", id="agents-inactive-table") %}
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+        {% for a in inactive %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
+            <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
+            <td class="px-4 py-3">
+                <a href="/admin/agents/{{ a.id }}"
+                   class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium sm:min-h-6 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 px-2.5 py-1.5 text-xs">Edit</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    {% endcall %}
 </div>
 {% endif %}
 
@@ -168,29 +158,29 @@
     <div class="px-6 py-4 border-b border-gray-200 bg-gray-50">
         <h2 class="font-semibold text-gray-700">Suspended (excluded from simulation runs)</h2>
     </div>
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
-            <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-            {% for a in suspended %}
-            <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
-                <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
-                <td class="px-4 py-3">
-                    <a href="/admin/agents/{{ a.id }}"
-                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% call ui.data_table(caption="Suspended agents", id="agents-suspended-table") %}
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+        {% for a in suspended %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
+            <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
+            <td class="px-4 py-3">
+                <a href="/admin/agents/{{ a.id }}"
+                   class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md font-medium sm:min-h-6 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 px-2.5 py-1.5 text-xs">Edit</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    {% endcall %}
 </div>
 {% endif %}
 {% endblock %}
