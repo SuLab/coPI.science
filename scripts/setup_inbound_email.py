@@ -3,8 +3,8 @@
 Check (and optionally provision) the AWS/DNS infrastructure for inbound email
 replies — the review+TOKEN@reply.copi.science flow.
 
-Background (investigation of 2026-08-11)
------------------------------------------
+Background
+----------
 The reply-by-email review flow shipped in code but its infrastructure was
 never provisioned on prod. Every layer was missing, so PI replies bounced and
 nothing was processed:

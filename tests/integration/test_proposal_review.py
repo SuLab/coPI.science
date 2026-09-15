@@ -1,4 +1,4 @@
-"""T11 — the proposal review loop, from a concluded thread up to (but not through)
+"""The proposal review loop, from a concluded thread up to (but not through)
 the email seam.
 
 Scope, stated once so the gap stays visible:
@@ -12,8 +12,7 @@ Scope, stated once so the gap stays visible:
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
   test that touches the notification path replaces `send_proposal_notification` with a
   recording double and says so in every assertion message, so a reader cannot mistake a
-  green run here for "proposal email is covered". It is not covered. See
-  `.notes/full-system-test-plan.md` § Global Constraints.
+  green run here for "proposal email is covered". It is not covered.
 
 Dependencies: the database is REAL (the rolled-back `db_session` from
 tests/conftest.py). The LLM, Slack and SES are all doubled — and the autouse
@@ -32,22 +31,26 @@ anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
 
 Both edges are one-way and mutually exclusive: the endpoints reject any second action
 by the same agent (`/review` with 400 "Already reviewed", `/reopen` with a silent
-redirect), and a uniqueness constraint backs it at the DB level. The two agents on a
-proposal transition independently. `rating=0` is not reachable through `/review` —
-the form validates 1..4 — so it is genuinely a reopen sentinel and not a rating.
+redirect), and a uniqueness constraint backs it at the DB level — except that the
+engine's implicit `rating=-1` marker is upgraded in place by the first explicit action.
+The two agents on a proposal transition independently. `rating=0` is not reachable
+through `/review` — the form validates 1..4 — so it is genuinely a reopen sentinel and
+not a rating.
 """
 
 import base64
 import html
 import json
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import boto3
 import pytest
 import slack_sdk
+from fastapi import HTTPException
 from itsdangerous import TimestampSigner
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
@@ -56,6 +59,7 @@ from src.agent.state import ThreadState
 from src.config import get_settings
 from src.models import (
     AgentChannel,
+    AgentDelegate,
     AgentMessage,
     AgentRegistry,
     EmailEngagementTracker,
@@ -64,6 +68,7 @@ from src.models import (
     ProposalReview,
     ThreadDecision,
 )
+from src.routers import agent_page
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests import factories
 from tests.fakes import FakeSlackClient
@@ -523,6 +528,59 @@ async def test_a_decided_review_cannot_be_re_decided(
     )).scalars().all()) == [2, 4]
 
 
+async def test_an_explicit_web_review_upgrades_the_engines_implicit_rating_marker(
+    client, db_session, lab, proposal,
+):
+    """The engine
+    persists an implicit ProposalReview(rating=-1, submitted_via="engine") the first
+    time a PI engages a proposal thread in Slack/DB. That row is NOT "already acted
+    on" — a SELECT guard that treats ANY existing row as terminal and returns 400
+    "Already reviewed" makes the review form re-shown to the PI a dead end.
+    The first explicit web review must upgrade that row in place instead.
+
+    Control for the same file: `test_a_decided_review_cannot_be_re_decided` above pins
+    that an existing REAL rating (!= -1) still produces today's 400 rejection.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id, old_reviewed_at = implicit.id, implicit.reviewed_at
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/review",
+        data={"rating": "3", "comment": "great"}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the implicit marker must be upgraded in place, not duplicated: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 3
+    assert review.comment == "great"
+    assert review.submitted_via == "web"
+    assert review.user_id == lab.pi_a_id
+    assert review.reviewed_by_user_id == lab.pi_a_id
+    assert review.delegate_user_id is None, "the PI acted in person"
+    assert review.reviewed_at > old_reviewed_at, (
+        "reviewed_at must be bumped to when the explicit action happened, not left at "
+        "the engine's implicit-marker timestamp"
+    )
+
+
 async def test_a_review_cannot_be_filed_against_someone_elses_proposal(
     client, db_session, lab, llm, proposal,
 ):
@@ -558,6 +616,99 @@ async def test_a_review_cannot_be_filed_against_someone_elses_proposal(
     assert good.status_code == 302, (
         "the participant control was refused too, so the 403 above proves nothing"
     )
+
+
+async def test_review_proposal_recovery_with_no_winning_row_returns_a_clean_response(
+    db_session, lab, llm, proposal,
+):
+    """review_proposal's ``except IntegrityError`` arm must not re-select the
+    presumed race winner with ``.scalar_one()`` -- correct when the IntegrityError
+    really was the review-uniqueness conflict, but ANY OTHER IntegrityError also
+    lands in this same except arm (e.g. an FK/NOT-NULL violation from a
+    concurrently deleted User), and ``.scalar_one()`` then finds no row and raises
+    ``NoResultFound`` -- a 500 out of the very handler that exists to avoid one. Use
+    ``.scalar_one_or_none()`` instead, matching ``reopen_proposal``'s sibling
+    recovery (agent_page.py:942-969), logging and continuing instead of crashing.
+
+    When ``winner is None``, the rollback threw the PI's insert away AND no other
+    row took its place, so *nothing was persisted* -- the arm must not answer a
+    redirect byte-identical to the success path while retiring the outstanding
+    ``EmailNotification``, or the PI sees the normal post-review page, loses their
+    rating and comment, and no reminder chases the proposal either. The arm must
+    instead raise ``HTTPException(409)``, matching ``post_agent_message``'s own
+    rollback-then-409 pattern (agent_page.py:1461-1466), and leave the notification
+    ``sent``.
+
+    What this test pins: no 500, no ``NoResultFound``, and no
+    partial ``ProposalReview`` row left behind.
+
+    Reproduced with a genuine, non-uniqueness IntegrityError, not a scripted fake:
+    a delegate reviews on "alpha"'s behalf while "alpha"'s PI (`lab.pi_a_id`) is
+    deleted out from under the request. ``agents.user_id -> users.id`` is
+    ``ON DELETE SET NULL``, so "alpha" survives with ``user_id=NULL`` -- a fresh
+    ``get_agent_with_access`` SELECT sees that NULL, so the delegate path (not PI
+    ownership) is what authorizes the request. ``review_proposal``'s happy-path INSERT
+    always writes ``user_id=agent.user_id`` ("Always the PI"), which is now NULL, and
+    ``proposal_reviews.user_id`` is NOT NULL -- so ``record_engagement``'s autoflush
+    raises a genuine ``IntegrityError`` that is NOT the review-uniqueness conflict.
+    """
+    delegate = await factories.make_user(db_session, name="Delegate Dee", email="dee@lab.test")
+    db_session.add(AgentDelegate(agent_registry_id=lab.reg_a_id, user_id=delegate.id))
+    # The outstanding reminder this branch must NOT retire. Hung off the DELEGATE, not
+    # the PI: email_notifications.user_id is ON DELETE CASCADE (models/
+    # email_notification.py:19-23), so a PI-owned row would vanish with the DELETE
+    # below and "still sent" would be unfalsifiable. mark_notification_responded is
+    # scoped to agent_registry_id + thread_decision_id, not to the responder (V4-4b),
+    # so this row is exactly what the arm used to flip.
+    notification = EmailNotification(
+        user_id=delegate.id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_a_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    db_session.add(notification)
+    # Release lab/proposal/delegate's setup as a savepoint boundary BEFORE the
+    # destructive delete, so review_proposal's own rollback() (triggered by the
+    # IntegrityError below) discards only the failed insert attempt, not the fixture.
+    await db_session.commit()
+    notification_id = notification.id
+    await db_session.execute(text("DELETE FROM users WHERE id = :u"), {"u": lab.pi_a_id})
+    await db_session.commit()
+
+    current_user = SimpleNamespace(id=delegate.id, name="Delegate Dee")
+    with pytest.raises(HTTPException) as raised:
+        await agent_page.review_proposal(
+            agent_id="alpha", thread_decision_id=proposal.id, request=SimpleNamespace(),
+            rating=3, comment="", db=db_session, current_user=current_user,
+        )
+
+    # Still N2's assertion, restated: HTTPException is a handled, coded response, so
+    # the arm is still not raising NoResultFound or any other 500 out of the handler.
+    assert raised.value.status_code == 409, (
+        "a non-uniqueness IntegrityError must answer a coded 4xx that tells the PI "
+        "nothing was saved, not a 302 indistinguishable from a successful review "
+        f"(got {raised.value.status_code})"
+    )
+    assert "retry" in str(raised.value.detail).lower(), (
+        f"the 409 must tell the PI what to do; detail was {raised.value.detail!r}"
+    )
+
+    db_session.expire_all()
+    reviews = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert reviews == [], "the failed insert must not have left a partial row behind"
+
+    # The half of R8 the response code cannot cover: nothing was persisted, so the
+    # reminder loop must keep chasing this proposal. The positive control that this is
+    # not simply "mark_notification_responded never runs" is
+    # test_reviewing_on_the_web_retires_the_outstanding_email_notification, which
+    # requires a SUCCESSFUL review to flip the same row to 'responded'.
+    after = await db_session.get(EmailNotification, notification_id)
+    assert after.status == "sent", (
+        "the outstanding reminder was retired for a review that was never persisted "
+        f"(status={after.status!r}) -- no e-mail will ever chase this proposal again"
+    )
+    assert after.responded_at is None and after.response_type is None
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +882,58 @@ async def test_reviewing_on_the_web_retires_the_outstanding_email_notification(
         assert tracker.consecutive_missed == 0
 
 
+async def test_a_delegates_review_also_retires_the_pis_own_notification(
+    client, db_session, lab, proposal,
+):
+    """V4-4b: mark_notification_responded is scoped to agent_registry_id, not the
+    responding user, so a delegate's review also retires the PI's own outstanding
+    reminder about the same agent's proposal. Without this the PI's row stayed 'sent'
+    forever, with no way to clear it themselves — a second /review hits 'Already
+    reviewed' before mark_notification_responded ever runs (agent_page.py's
+    existing-review check matches on thread_decision_id + agent_id, not on who is
+    asking).
+    """
+    delegate = await factories.make_user(
+        db_session, name="Deledda Delegate", email="delegate@lab.test"
+    )
+    db_session.add(AgentDelegate(agent_registry_id=lab.reg_a_id, user_id=delegate.id))
+
+    pi_notification = EmailNotification(
+        user_id=lab.pi_a_id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_a_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    other_agents_notification = EmailNotification(
+        user_id=lab.pi_b_id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_b_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    db_session.add_all([pi_notification, other_agents_notification])
+    await db_session.flush()
+    pi_notification_id = pi_notification.id
+    other_agents_notification_id = other_agents_notification.id
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/review",
+        data={"rating": "3", "comment": ""}, headers=_auth(delegate.id),
+    )
+    assert r.status_code == 302
+
+    db_session.expire_all()
+    notif = await db_session.get(EmailNotification, pi_notification_id)
+    assert notif.status == "responded", (
+        "the delegate's review did not retire the PI's own outstanding notification "
+        "for this proposal — the PI would be nagged forever, with no self-service way "
+        "to clear it"
+    )
+    other_notif = await db_session.get(EmailNotification, other_agents_notification_id)
+    assert other_notif.status == "sent", (
+        "reviewing alpha's copy of the proposal retired beta's own outstanding "
+        "notification too -- mark_notification_responded must stay scoped to "
+        "agent_registry_id, not cross-retire the other agent on the same proposal"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 5. Reopen -> private channel
 # ---------------------------------------------------------------------------
@@ -766,6 +969,13 @@ def slack_on(monkeypatch):
 
     def _client(agent_id, bot_token):
         c = FakeSlackClient(agent_id=agent_id, bot_token=bot_token)
+        # Offset each instance's ts counter. FakeSlackClient starts every instance's
+        # `_ts` at the same constant, which two real Slack calls minutes apart never
+        # would, so a test that drives a SECOND migration (the retry pin below) would
+        # otherwise trip uq_agent_messages_run_ts on the handover rows and report a
+        # constraint violation instead of the duplicate channel it is looking for.
+        # Same reason as test_email_inbound_reply_paths.py's `slack_migration_stub`.
+        c._ts += len(made) * 100_000
         made.append(c)
         return c
 
@@ -856,16 +1066,22 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
         "the PI's private guidance was echoed into the PUBLIC origin thread"
     )
 
-    # Observed behaviour, pinned because it is surprising rather than because it is
-    # right: the rating=0 sentinel puts the reopened proposal in the dashboard's
-    # "Reviewed Proposals" section labelled "Rating: 0/4" — on a scale the form only
-    # offers 1..4 on. The PI sees a rating they never gave, and the proposal is no
-    # longer rateable. Reported as a finding, not fixed here.
+    # The rating=0 reopen sentinel must not be rendered as a score: the form only
+    # offers 1..4, `agent_page.py:509` rejects a submitted 0 and `email_inbound.py:383`
+    # rejects it too, so a rating=0 row is always a sentinel, never a PI's answer. The
+    # dashboard must label it "Reopened with guidance" instead of telling the PI they
+    # scored a proposal zero out of four.
     page = (await client.get(
         "/agent/alpha/dashboard", headers=_auth(lab.pi_a_id))).text
-    assert "Rating: 0/4" in page, (
-        "reopen no longer renders the rating=0 sentinel as a rating — if this was "
-        "fixed deliberately, update this assertion; the finding is in the T11 report"
+    assert "Rating: 0/4" not in page, (
+        "the rating=0 reopen sentinel is being rendered as a score again"
+    )
+    # This IS a genuine reopen -- the route writes comment="[Reopened] {guidance}" -- so
+    # it carries the reopen label. The discriminator matters because a bulk-backfilled
+    # rating=0 row with no comment and no reviewer must NOT claim to be a reopen; it
+    # must read "No score recorded" instead.
+    assert "Reopened with guidance" in page, (
+        "the reopened proposal should be labelled as reopened, not scored"
     )
     assert f'action="/agent/alpha/proposals/{proposal.id}/review"' not in page, (
         "the proposal is still rateable after being reopened for refinement"
@@ -956,6 +1172,691 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
     ))) == 1, (
         "beta's reopen created nothing either, so the assertion above proves nothing"
+    )
+
+
+async def test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker(
+    client, db_session, lab, proposal, slack_off,
+):
+    """Same rule for reopen_proposal:
+    the `already_reviewed` guard must not treat the engine's implicit rating=-1
+    row as a completed reopen and silently redirect — that would skip the Slack
+    migration and drop the PI's guidance.
+
+    Control for the same file: `test_a_rated_proposal_cannot_then_be_reopened_by_the_
+    same_agent` above pins that an existing REAL rating (!= -1) still swallows the
+    reopen.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id, old_reviewed_at = implicit.id, implicit.reviewed_at
+
+    guidance = "Actually, let's narrow the scope first."
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": guidance}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel is not None, (
+        "the Slack migration never ran — the implicit marker was treated as an "
+        "already-completed reopen"
+    )
+
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the implicit marker must be upgraded in place, not duplicated: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 0
+    assert review.comment.startswith("[Reopened] "), review.comment
+    assert guidance in review.comment
+    assert review.submitted_via == "web"
+    assert review.reviewed_by_user_id == lab.pi_a_id
+    assert review.reviewed_at > old_reviewed_at, (
+        "reviewed_at must be bumped to when the explicit action happened, not left at "
+        "the engine's implicit-marker timestamp"
+    )
+
+
+async def test_reopen_leaves_a_concurrent_real_review_alone(
+    client, db_session, lab, proposal, monkeypatch,
+):
+    """The SECOND
+    `ProposalReview` SELECT in `reopen_proposal` happens AFTER
+    `migrate_public_thread_to_private` -- a multi-call Slack round-trip -- precisely
+    because a row can appear or change in that window. The branch must not simply
+    upgrade `if existing_row is not None`: a REAL review filed concurrently (the
+    PI rating on the still-rendered dashboard, a delegate, or an e-mail reply) while the
+    migration ran must not be overwritten with rating=0 / "[Reopened] ..." /
+    submitted_via="web" / a fresh reviewed_at.
+
+    Control: `test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker`
+    above pins that an untouched -1 marker IS still upgraded.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id = implicit.id
+
+    async def _migrate_then_race(
+        db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text,
+    ):
+        # While this (fake) Slack round-trip is "in flight", a real review is filed
+        # for the SAME (thread_decision, agent) -- the ruling's exact race window.
+        real_review = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision.id,
+                ProposalReview.agent_id == creator_agent_id,
+            )
+        )).scalar_one()
+        real_review.rating = 3
+        real_review.comment = "Rated for real while the migration ran."
+        real_review.submitted_via = "web"
+        await db.commit()
+        return SimpleNamespace(channel_name="fake-priv-channel-race")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private",
+        _migrate_then_race,
+    )
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Actually, let's narrow the scope first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the reopen must not insert a second row alongside the concurrent real "
+        f"review: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id
+    assert review.rating == 3, (
+        "a real review filed while the migration ran was overwritten by the reopen's "
+        "rating=0 marker — the ruling requires it be left alone"
+    )
+    assert review.comment == "Rated for real while the migration ran.", (
+        "the concurrent real review's comment was clobbered by '[Reopened] ...'"
+    )
+    assert review.submitted_via == "web"
+
+
+async def test_reopen_write_race_does_not_500_and_recovers_refined_in_channel(
+    client, db_session, lab, proposal, slack_off, monkeypatch,
+):
+    """reopen_proposal's write block
+    (`db.add(review)` through `commit()`) must have an `except IntegrityError` guard,
+    matching review_proposal's sibling guard. With no existing
+    review, the reopen takes the INSERT branch; migrate_public_thread_to_private has
+    already created the private Slack channel and (flush-only) set
+    `refined_in_channel` by this point. If a concurrent writer wins the race on
+    `uq_proposal_reviews_decision_agent`, code with no guard 500s, `get_db` rolls back,
+    and the channel that already exists for real is orphaned (refined_in_channel and
+    the AgentChannel rows are gone) -- and a PI retry then passes the `:695` `!= -1`
+    guard and migrates AGAIN, minting a SECOND channel.
+
+    Harness note (empirically confirmed, not just asserted): `db_session`
+    (tests/conftest.py) binds one nested SAVEPOINT inside a single outer transaction
+    that is only ever rolled back at teardown -- the `lab`/`proposal` fixture rows are
+    never truly COMMITted to the physical database, only savepoint-released within
+    that same open transaction. A genuinely separate connection therefore cannot see
+    them at all (verified directly: a row inserted and `db_session.commit()`'d, then
+    queried from a second `engine.connect()`, comes back with count 0) -- and a
+    RELEASE SAVEPOINT is not protected against a later ROLLBACK TO an earlier
+    SAVEPOINT on the SAME connection either, so no same-connection trick can make a
+    "concurrent" row survive `reopen_proposal`'s own `rollback()`. A true two-
+    transaction race where the winner survives is therefore only provable with a fake
+    session (see `test_concurrent_write_guards.py`'s
+    `test_reopen_proposal_upgrades_the_engines_implicit_marker_after_a_lost_race` and
+    `test_reopen_proposal_leaves_a_real_winner_alone_after_a_lost_race`); what THIS
+    test proves against a real Postgres constraint is the other half: the
+    guard actually catches the IntegrityError (no 500) and `refined_in_channel`
+    survives the recovery rather than being silently dropped.
+
+    Since the migration commits its own rows (391e545 for the Slack-off path, 34d3c15
+    for Slack-on), the retry at the end also exercises the guard: the losing
+    request leaves exactly the production wreckage -- a committed private channel, a
+    set `refined_in_channel`, and no review row -- and the second POST must not migrate
+    again. `test_a_retried_reopen_after_a_lost_race_does_not_mint_a_second_channel`
+    below covers the same ground on both fixtures and counts the Slack calls.
+
+    The race is reproduced by adding a second, competing `ProposalReview` for the SAME
+    (thread_decision, agent) from inside `record_engagement` -- the next `db.execute()`
+    after `db.add(review)`, so SQLAlchemy's autoflush (default True) is what actually
+    raises the real `IntegrityError` on `uq_proposal_reviews_decision_agent`.
+    """
+    from src.services import email_notifications
+
+    real_record_engagement = email_notifications.record_engagement
+    calls = {"n": 0}
+
+    async def _add_a_competing_review_and_flush(user_id, db):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Only the FIRST call (inside reopen_proposal's try, right after
+            # db.add(review)) stages the race. The except arm's own recovery calls
+            # record_engagement again to retire the notification (V4-4b) -- that call
+            # must behave normally, not queue a second competing insert.
+            db.add(ProposalReview(
+                thread_decision_id=proposal.id, agent_id="alpha", user_id=lab.pi_a_id,
+                rating=-1, comment=None, submitted_via="engine",
+            ))
+            await db.flush()
+        else:
+            await real_record_engagement(user_id, db)
+
+    monkeypatch.setattr(email_notifications, "record_engagement", _add_a_competing_review_and_flush)
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Actually, let's narrow the scope first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, f"expected a redirect, not a 500: {r.text[:400]}"
+
+    db_session.expire_all()
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel is not None, (
+        "the Slack channel already exists for real -- losing refined_in_channel here "
+        "orphans it"
+    )
+
+    # The two counts below sit on DIFFERENT durability boundaries, which is why one
+    # is 0 and the other is 1.
+    #
+    # The review rows -- `review`'s own insert and the competing one -- both live in
+    # this test's single shared savepoint, so `rollback()` really does undo both and
+    # the re-select finds no winner ("no winning row was found on re-select" in the
+    # captured log). That is the harness, not production: a real concurrent writer
+    # commits on its own connection and survives, which is what
+    # test_concurrent_write_guards.py's fake-session tests pin.
+    #
+    # The migration's rows are no longer the caller's to lose. `_migrate_offline`
+    # commits them at the same durability boundary the Slack-on
+    # path has drawn since 34d3c15, so the AgentChannel row and `refined_in_channel`
+    # outlive this rollback. That is what makes the retry below a test of the ROUTE's
+    # idempotency rather than of the savepoint: the retry meets exactly the production
+    # state -- no review row, a committed private channel, `refined_in_channel` set.
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert rows == [], (
+        "harness limitation, not a new assertion about correct behaviour: within one "
+        "shared savepoint neither insert can outlive the other's rollback"
+    )
+    channel_count_before_retry = await db_session.scalar(
+        select(func.count(AgentChannel.id)).where(AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE)
+    )
+    assert channel_count_before_retry == 1, (
+        "the migration commits its own AgentChannel row, so the lost review write must "
+        "not take it down -- if this is 0 the retry below tests nothing"
+    )
+    channel_id_before_retry = await db_session.scalar(
+        select(AgentChannel.channel_id).where(
+            AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+        )
+    )
+
+    r2 = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Retry after the race."}, headers=_auth(lab.pi_a_id),
+    )
+    assert r2.status_code == 302
+    db_session.expire_all()
+    channel_count_after_retry = await db_session.scalar(
+        select(func.count(AgentChannel.id)).where(AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE)
+    )
+    assert channel_count_after_retry == 1, (
+        "the retry re-ran migrate_public_thread_to_private and minted a SECOND private "
+        "channel on top of the one the lost attempt already created and committed. No "
+        "review row survives the race to stop it, so `refined_in_channel` -- which the "
+        "migration commits -- is the only durable record that the migration happened, "
+        "and reopen_proposal has to read it"
+    )
+    td_after = await _decision(db_session, proposal.thread_id)
+    assert td_after.refined_in_channel == channel_id_before_retry, (
+        "the retry repointed refined_in_channel at a new channel, orphaning the first "
+        "-- which already has the handover and the PI's guidance in it"
+    )
+
+
+@pytest.mark.parametrize("slack_fixture", ["slack_off", "slack_on"])
+async def test_a_retried_reopen_after_a_lost_race_does_not_mint_a_second_channel(
+    client, db_session, lab, proposal, monkeypatch, request, slack_fixture,
+):
+    """The web twin of
+    `test_email_inbound_reply_paths.py::test_a_retried_inbound_email_does_not_create_a_second_private_channel`.
+
+    `reopen_proposal` must not gate the migration on `enable_private_refinement and
+    origin_visibility == "public"` alone while reading `refined_in_channel` nowhere. The
+    review-row guard at the top of the route is not enough on its own, because the
+    review row is exactly what a lost race destroys:
+
+      1. `migrate_public_thread_to_private` commits the AgentChannel, its members, the
+         handover and `refined_in_channel` as soon as its side effects are real
+         (both the Slack-on and Slack-off paths).
+      2. The route's own `db.add(review)` then loses the race on
+         `uq_proposal_reviews_decision_agent` and the `except IntegrityError` arm rolls
+         it back.
+      3. The PI retries (the dashboard still shows the reopen form, or the Back
+         button). `already_reviewed` is None again, `origin_visibility` is still
+         'public' — the migration never flips it — so the route migrated a SECOND time:
+         two AgentChannel rows, a second real Slack channel, and `refined_in_channel`
+         repointed at it, orphaning the first channel that already holds the handover
+         and the PI's guidance. Both bots keep talking in the dead one.
+
+    Slack does not refuse the second create: `AgentSlackClient.create_private_channel`
+    (src/agent/slack_client.py:933-936) appends a fresh `%Y%m%d-%H%M%S` stamp to the
+    otherwise-deterministic `priv-{a}-{b}-{origin}` slug on every call, so the retry
+    asks for a name that has never existed. (`_migrate_offline` builds its `local:` id
+    the same way, at src/services/private_channels.py:344-346.)
+
+    Driven on BOTH fixtures on purpose. The Slack-off path is the one that only became
+    testable with 391e545 — before that its rows were flush-only, so the retry saw a
+    `refined_in_channel` pointing at rows that no longer existed and a guard reading it
+    would have produced *zero* channels. The `local:` / `G_` assertion on the channel id
+    below is what keeps the parametrisation honest: it fails if either case silently
+    ran the other path.
+    """
+    from src.services import email_notifications
+    from src.services import private_channels as pc
+
+    made = request.getfixturevalue(slack_fixture)  # `slack_on` returns the fakes
+    slack_on_path = slack_fixture == "slack_on"
+
+    # Count the migrations themselves rather than inferring them from row counts: on
+    # the Slack-off path there is no Slack call to count, and on both paths one call
+    # == one channel created. The route imports this name inside the function body, so
+    # patching the module attribute catches it.
+    migrations: list[str] = []
+    real_migrate = pc.migrate_public_thread_to_private
+
+    async def _counting_migrate(db, **kwargs):
+        migrations.append(kwargs["thread_decision"].thread_id)
+        return await real_migrate(db, **kwargs)
+
+    monkeypatch.setattr(pc, "migrate_public_thread_to_private", _counting_migrate)
+
+    # Same race harness as test_reopen_write_race_does_not_500_and_recovers_
+    # refined_in_channel above: a competing ProposalReview for the SAME
+    # (thread_decision, agent) is staged from inside the first record_engagement call,
+    # which is the next db.execute() after db.add(review), so autoflush raises the real
+    # IntegrityError on uq_proposal_reviews_decision_agent.
+    real_record_engagement = email_notifications.record_engagement
+    calls = {"n": 0}
+
+    async def _add_a_competing_review_and_flush(user_id, db):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db.add(ProposalReview(
+                thread_decision_id=proposal.id, agent_id="alpha", user_id=lab.pi_a_id,
+                rating=-1, comment=None, submitted_via="engine",
+            ))
+            await db.flush()
+        else:
+            await real_record_engagement(user_id, db)
+
+    monkeypatch.setattr(
+        email_notifications, "record_engagement", _add_a_competing_review_and_flush,
+    )
+
+    # --- Pass 1: the migration commits; the review write loses the race.
+    r1 = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Narrow the scope to the ternary complex first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r1.status_code == 302, f"expected a redirect, not a 500: {r1.text[:400]}"
+
+    db_session.expire_all()
+    first = (await db_session.execute(select(AgentChannel).where(
+        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+    ))).scalar_one()
+    first_channel_id = first.channel_id
+    assert migrations == [proposal.thread_id], (
+        f"the first reopen did not run the migration exactly once: {migrations}"
+    )
+    if slack_on_path:
+        assert first_channel_id.startswith("G_"), (
+            f"the `slack_on` case did not take the Slack path: {first_channel_id}"
+        )
+        assert sum(len(c.created_channels) for c in made) == 1
+    else:
+        assert first_channel_id.startswith("local:"), (
+            f"the `slack_off` case did not take the DB-only path: {first_channel_id}"
+        )
+
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel == first_channel_id
+
+    # Control on the harness: the race really did cost the review row. If one survived,
+    # the route's FIRST guard (`already_reviewed is not None and rating != -1`) would
+    # block the retry and this test would pass without the refined_in_channel guard.
+    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
+        ProposalReview.thread_decision_id == proposal.id
+    ))) == 0, (
+        "a review row survived the lost race, so the retry below is blocked by the "
+        "review-row guard and proves nothing about the migration guard"
+    )
+
+    # --- Pass 2: the PI retries the same action.
+    r2 = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Narrow the scope to the ternary complex first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r2.status_code == 302, f"the retry did not redirect: {r2.text[:400]}"
+
+    db_session.expire_all()
+    channels = (await db_session.execute(select(AgentChannel).where(
+        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+    ))).scalars().all()
+    assert len(channels) == 1, (
+        f"the retry minted a second private refinement channel: "
+        f"{[c.channel_id for c in channels]}"
+    )
+    assert migrations == [proposal.thread_id], (
+        f"the retry re-ran migrate_public_thread_to_private: {migrations}"
+    )
+    if slack_on_path:
+        assert sum(len(c.created_channels) for c in made) == 1, (
+            "the retry asked Slack for a second private channel: "
+            f"{[ch['name'] for c in made for ch in c.created_channels]}"
+        )
+
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel == first_channel_id, (
+        "refined_in_channel was repointed by the retry, orphaning the channel that "
+        "already holds the handover and the PI's guidance"
+    )
+
+    # The retry still has to do the rest of its job — skipping the migration must not
+    # turn the whole request into a no-op, or the proposal stays unreviewed forever.
+    review = (await db_session.execute(select(ProposalReview).where(
+        ProposalReview.thread_decision_id == proposal.id
+    ))).scalar_one()
+    assert review.rating == 0, (
+        "the retry skipped the migration but also failed to record the reopen marker"
+    )
+
+
+@pytest.fixture
+def legacy_db_only(monkeypatch):
+    """The legacy rollback lever with Slack off — reopen's DB-inbox branch.
+
+    Two independent switches, both pinned rather than relied on: the flag routes past
+    `migrate_public_thread_to_private`, and `slack_globally_enabled` (which auto-detects
+    from bot tokens, and the `lab` agents have none) routes past the Slack post. This is
+    the only reopen path whose PI text lives in a row THIS route has to commit, which is
+    what makes it the only one a rollback can destroy.
+    """
+    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
+
+    async def _off(db):
+        return False
+
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _off)
+
+
+async def _guidance_rows(db, marker: str) -> int:
+    return await db.scalar(
+        select(func.count(AgentMessage.id)).where(
+            AgentMessage.is_bot.is_(False), AgentMessage.content.contains(marker),
+        )
+    )
+
+
+def _stage_a_lost_review_race(monkeypatch, *, td_id, agent_id, user_id):
+    """Make the FIRST record_engagement call insert a competing ProposalReview.
+
+    That call is the next `db.execute()` after the route's own `db.add(review)`, so
+    SQLAlchemy's autoflush is what raises the real IntegrityError on
+    `uq_proposal_reviews_decision_agent` — the same seam
+    `test_reopen_write_race_does_not_500_and_recovers_refined_in_channel` uses. The
+    except arm calls record_engagement again to retire the notification; that call must
+    behave normally.
+    """
+    from src.services import email_notifications
+
+    real = email_notifications.record_engagement
+    calls = {"n": 0}
+
+    async def _race(uid, db):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db.add(ProposalReview(
+                thread_decision_id=td_id, agent_id=agent_id, user_id=user_id,
+                rating=-1, comment=None, submitted_via="engine",
+            ))
+            await db.flush()
+        else:
+            await real(uid, db)
+
+    monkeypatch.setattr(email_notifications, "record_engagement", _race)
+    return calls
+
+
+async def test_the_slack_off_reopen_writes_the_pis_guidance_to_the_db_inbox(
+    client, db_session, lab, proposal, legacy_db_only,
+):
+    """Control for the lost-race test below: one request, one inbox row.
+
+    Without this, "exactly one row after the race" could be satisfied by a route that
+    had started writing the guidance twice, or by one that never wrote it at all.
+    """
+    marker = _marker()
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": f"Tighten the aims. {marker}"},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+    db_session.expire_all()
+    assert await _guidance_rows(db_session, marker) == 1
+
+    row = (await db_session.execute(select(AgentMessage).where(
+        AgentMessage.content.contains(marker)
+    ))).scalar_one()
+    assert row.thread_ts == proposal.thread_id, (
+        "the guidance must land in the origin proposal thread, not the channel root"
+    )
+    assert row.sender_name == f"{lab.pi_a_name} (PI)"
+    assert row.is_bot is False, "the engine routes PI handling off is_bot=False"
+
+
+async def test_a_lost_reopen_race_keeps_the_pis_inbox_guidance(
+    client, db_session, lab, proposal, legacy_db_only, monkeypatch,
+):
+    """The recovery arm must re-create the guidance row the rollback ate.
+
+    `record_pi_message` does not commit, deliberately: the e-mail twin needs this row on
+    the same commit that retires the notification, so committing early would let a
+    retried S3 delivery mint a second one. That makes durability the
+    CALLER's job, and this caller was rolling back without doing it. With Slack off the
+    DB inbox is the whole conversation store — nothing was posted anywhere else — so
+    losing the row loses what the PI typed, silently: the request still answers 302 and
+    the dashboard still says the proposal was reopened.
+
+    Measured before the fix with Task 11's probe: "the PI's inbox guidance row was
+    discarded by the lost-race rollback and never re-created (found 0)".
+
+    Harness note, so the count is not over-read. `db_session` runs one shared savepoint,
+    so the competing insert cannot outlive the route's own rollback and the arm logs "no
+    winning row was found on re-select" — a state production only reaches when the
+    IntegrityError was NOT the uniqueness conflict (a concurrently deleted
+    ThreadDecision/User), and a retry after that 404s on the missing decision. In the
+    real winner-survives race the arm upgrades or keeps the winning row, so the retry
+    returns early at the `rating != -1` guard and never reaches this branch twice. What
+    this test pins is the arm itself: after it runs, the guidance is in the database.
+    """
+    marker = _marker()
+    _stage_a_lost_review_race(
+        monkeypatch, td_id=proposal.id, agent_id="alpha", user_id=lab.pi_a_id,
+    )
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": f"Nail down the geometry first. {marker}"},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, f"expected a redirect, not a 500: {r.text[:400]}"
+
+    db_session.expire_all()
+    n = await _guidance_rows(db_session, marker)
+    assert n == 1, (
+        "the PI's guidance is gone: record_pi_message added it to the session, the "
+        "lost-race rollback threw it away, and the recovery arm re-created only the "
+        f"review row (found {n} inbox rows). With Slack off this row is the only copy "
+        "of what the PI wrote"
+    )
+
+
+async def test_the_reopen_recovery_arm_survives_the_proposal_row_vanishing(
+    client, db_session, lab, proposal, legacy_db_only, monkeypatch,
+):
+    """The identical defect fixed in review_proposal's arm (:626-638).
+
+    Not every IntegrityError out of this write block is the review-uniqueness conflict.
+    If the ThreadDecision is deleted between this route's SELECT and its flush, the
+    ProposalReview insert violates the foreign key instead — and the arm's
+    `td_reload = (...).scalar_one()` then raised `NoResultFound` on the re-select, a 500
+    out of the very handler that exists to avoid one. Measured before the fix:
+    `sqlalchemy.exc.NoResultFound: No row was found when one was required` at
+    `agent_page.py:995`, escaping the route.
+
+    The deletion is committed from inside the route's own session (releasing the
+    savepoint) because a genuinely separate connection cannot see this test's uncommitted
+    fixture rows at all — see the harness note on
+    `test_reopen_write_race_does_not_500_and_recovers_refined_in_channel`. The FK
+    violation it produces is real, and so is the empty re-select.
+    """
+    from sqlalchemy import delete
+
+    from src.services import pi_inbox
+
+    real = pi_inbox.record_pi_message
+
+    async def _delete_the_decision_first(db, **kwargs):
+        await db.execute(
+            delete(ThreadDecision).where(ThreadDecision.id == proposal.id)
+        )
+        await db.commit()
+        return await real(db, **kwargs)
+
+    monkeypatch.setattr(pi_inbox, "record_pi_message", _delete_the_decision_first)
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Guidance against a proposal that is being deleted."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, (
+        f"the recovery arm 500'd on an IntegrityError that was not the uniqueness "
+        f"conflict: {r.text[:400]}"
+    )
+    assert r.headers["location"] == "/agent/alpha/dashboard"
+
+    # Control: the FK violation really happened — no review row was written for a
+    # decision that no longer exists.
+    db_session.expire_all()
+    assert (await db_session.scalar(select(func.count(ThreadDecision.id)).where(
+        ThreadDecision.id == proposal.id
+    ))) == 0
+    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
+        ProposalReview.thread_decision_id == proposal.id
+    ))) == 0
+
+
+async def test_refined_in_channel_survives_the_lost_race_without_the_arm_re_binding_it(
+    client, db_session, engine, lab, proposal, slack_off, monkeypatch,
+):
+    """verify-deploy finding 1a — the re-bind machinery is dead, and this is why.
+
+    Until 34d3c15/391e545 the recovery arm re-selected the ThreadDecision and re-bound
+    `refined_in_channel` from a value captured before the try, because
+    `migrate_public_thread_to_private` only FLUSHED it and the rollback undid the flush,
+    orphaning a Slack channel that existed for real. Both migration paths now commit it
+    themselves (`private_channels.py:415` and `:644`), so the rollback has nothing to
+    undo and the re-bind could only ever write back the value it had just read.
+
+    This is the unreachability proof the plan asks for rather than a red-then-green
+    test: it passed before the removal too. What it pins is the property the machinery
+    claimed to provide, and it is armed against the regression that would bring the
+    machinery back — if a migration path stopped committing, the first assertion goes to
+    None and the AgentChannel count to 0.
+
+    The second assertion is the direct measurement: a `before_cursor_execute` recorder
+    on the test engine shows no UPDATE of `thread_decisions` after the route's
+    `ROLLBACK TO SAVEPOINT`. That was already true with the re-bind in place — assigning
+    the identical value emits no SQL — which is exactly what "dead" means here.
+    """
+    from sqlalchemy import event
+
+    seen: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        seen.append(" ".join(statement.split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        _stage_a_lost_review_race(
+            monkeypatch, td_id=proposal.id, agent_id="alpha", user_id=lab.pi_a_id,
+        )
+        r = await client.post(
+            f"/agent/alpha/proposals/{proposal.id}/reopen",
+            data={"guidance": "Narrow the scope."}, headers=_auth(lab.pi_a_id),
+        )
+        assert r.status_code == 302, r.text[:400]
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _record)
+
+    db_session.expire_all()
+    channels = (await db_session.execute(select(AgentChannel).where(
+        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+    ))).scalars().all()
+    assert len(channels) == 1, (
+        "the migration's own commit is what keeps its rows through this rollback"
+    )
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel == channels[0].channel_id, (
+        "refined_in_channel must survive the recovery on the migration's commit, not "
+        "on a re-bind by the route"
+    )
+
+    rollbacks = [i for i, s in enumerate(seen) if "ROLLBACK TO SAVEPOINT" in s]
+    assert rollbacks, "the route never rolled back — the race did not fire"
+    after = [s for s in seen[rollbacks[-1]:] if s.startswith("UPDATE thread_decisions")]
+    assert after == [], (
+        f"the recovery arm wrote thread_decisions after the rollback: {after}"
     )
 
 

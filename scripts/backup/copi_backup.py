@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Nightly verified Postgres backups for the copi production stacks.
 
-Design: docs/specs/2026-08-18-postgres-backup-verification-design.md
-
 Runs on the HOST as root under systemd, not inside any container. Talks to the
 production databases only through ``docker exec``. Every dump is proved restorable
 before it is counted as a backup: it is restored into a throwaway, memory-capped,
@@ -43,19 +41,17 @@ DEFAULTS = {
     "VERIFY_MEM": "768m",
     "VERIFY_TIMEOUT_SEC": "1800",
     # Peak concurrent usage for ONE stack is roughly 2x the dump (container-side
-    # temp file plus the host .partial) PLUS the restored verify volume (~2.3 GB
-    # measured for copi-python), and prune runs last so a 6th copy can briefly
-    # coexist with 5 retained ones. Measured need ~= 3.74 GB against a 2.16 GB
-    # demand at the old factor of 3 — audit finding F3, 2026-08-18. Raised to 7.
-    # NOTE: scripts/backup/backup.env.example still documents 3; it is out of
-    # scope for this fix (not in the editable file list) and should be updated
-    # separately.
+    # temp file plus the host .partial) PLUS the restored verify volume, and
+    # prune runs last so a 6th copy can briefly coexist with 5 retained ones —
+    # a factor of 3 undercounts the real peak need.
+    # NOTE: scripts/backup/backup.env.example still documents 3; keep the two
+    # in sync when this changes.
     "FREE_SPACE_FACTOR": "7",
     "OFFSITE_CMD": "",
     "AWS_REGION": "us-east-2",
     "SES_SENDER_EMAIL": "",
     "MAIL_TO": "",
-    # A legitimate bulk deletion trips this on purpose (audit C1) — it should
+    # A legitimate bulk deletion trips this on purpose — it should
     # require a human to look, not silently rotate the last good copy away.
     "REGRESSION_TOLERANCE_PCT": "20",
 }
@@ -257,10 +253,10 @@ def select_for_deletion(
     return doomed
 
 
-# Ordinary tables only. Correct for both databases today: 30 relkind='r', zero
-# partitioned tables and zero materialised views (verified 2026-08-18). If a
-# partitioned table is ever added, a parent ('p') plus its leaf partitions ('r')
-# would need explicit handling — see spec §4.3 and §12.8.
+# Ordinary tables only (relkind='r'); neither production database currently has
+# partitioned tables or materialised views. If a partitioned table is ever
+# added, a parent ('p') plus its leaf partitions ('r') would need explicit
+# handling.
 COUNT_TABLES_SQL = """
 SELECT n.nspname || '.' || c.relname
 FROM pg_class c
@@ -300,7 +296,7 @@ def compare_counts(
 def detect_regression(prev: dict, cur: dict, tolerance_pct: int) -> str | None:
     """Compare this run's totals against the most recent PREVIOUS verified sidecar.
 
-    Pure and unit-testable on its own (audit C1 layer 2): ``prev``/``cur`` are
+    Pure and unit-testable on its own: ``prev``/``cur`` are
     sidecar documents (see ``sidecar_document``). Returns a human-readable reason
     naming both figures and the percentage if total row count OR ``dump_bytes`` has
     fallen by more than ``tolerance_pct``, else None.
@@ -388,7 +384,7 @@ class FakeRunner(Runner):
     Substring, not argv prefix. Every in-container call is
     ``docker exec <random-container-name> ...``, so a prefix cannot distinguish
     ``pg_isready`` from ``pg_restore`` — and that indistinguishability is exactly
-    what hid an infinite readiness loop during the plan audit.
+    what hid an infinite readiness loop.
     """
 
     def __init__(self, responses: dict[str, str] | None = None) -> None:
@@ -471,9 +467,9 @@ def terminate_sql(sql: str) -> str:
 
     Load-bearing, not cosmetic. psql buffers an unterminated statement and executes
     the following ``\\echo`` backslash command IMMEDIATELY, so the sentinel arrives
-    before the rows do and the reader sees an empty result. Verified against the live
-    server 2026-08-18: the same multi-line query returns 30 rows with a trailing
-    semicolon and 0 rows without one, printing the sentinel first.
+    before the rows do and the reader sees an empty result: the same query returns
+    its real rows with a trailing semicolon and zero rows without one, with the
+    sentinel printed first either way.
 
     With COUNT_TABLES_SQL unterminated, the source snapshot counts come back ``{}``
     while the restored counts are real, so every dump fails verification with one
@@ -753,9 +749,9 @@ def verify_dump(
     try:
         # TOC check on the copied archive: proves the docker cp did not truncate.
         # Run in a throwaway container of the SAME image, not on the host — the
-        # host has no postgres client tools installed (verified 2026-08-18), and
-        # installing them would introduce a third pg_restore version alongside the
-        # source server and the verify container.
+        # host has no postgres client tools installed, and installing them would
+        # introduce a third pg_restore version alongside the source server and
+        # the verify container.
         runner.run([
             "docker", "run", "--rm", "--network", "none",
             "-v", f"{dump_path}:/d.bin:ro", cfg.verify_image,
@@ -769,7 +765,7 @@ def verify_dump(
         )
         deadline = time.monotonic() + cfg.verify_timeout_sec
         while True:
-            # -h 127.0.0.1 is load-bearing (audit I3): postgres:15's entrypoint runs a
+            # -h 127.0.0.1 is load-bearing: postgres:15's entrypoint runs a
             # temporary bootstrap server on the UNIX SOCKET ONLY
             # (listen_addresses='') before restarting the real one. pg_isready with
             # no host checks that socket and can report ready during that window
@@ -786,8 +782,7 @@ def verify_dump(
             # Bail the moment the container is gone. Without this, a container
             # OOM-killed at startup spins here for the full VERIFY_TIMEOUT_SEC
             # (30 min), delaying the alert and holding the flock the whole time.
-            # Found by running this plan's own tests during the audit: two of them
-            # hung rather than failed.
+            # Two of this module's own tests hung rather than failed without this check.
             alive = runner.run(
                 ["docker", "inspect", "-f", "{{.State.Running}}", name], check=False
             )
@@ -835,7 +830,7 @@ def verify_dump(
                 f"{stack.name}: snapshot reported ZERO tables — the count step failed. "
                 "Refusing to call this dump verified."
             )
-        # Absolute floor, distinct from the empty-dict case above (audit C1): a
+        # Absolute floor, distinct from the empty-dict case above: a
         # mass-TRUNCATEd production database still reports N tables, each with a
         # real (zero) count, so `expected_counts` is truthy and the guard above
         # never fires. Both production databases hold tens of thousands of rows;
@@ -854,7 +849,7 @@ def verify_dump(
             problems = [
                 f"{stack.name}: verify container was OOM-killed at VERIFY_MEM="
                 f"{cfg.verify_mem}. This is a harness failure, not a bad dump — "
-                "raise VERIFY_MEM (spec §10 test 16) and re-verify."
+                "raise VERIFY_MEM and re-verify."
             ]
         else:
             # Every BackupError raised inside this function already embeds stack.name;
@@ -924,7 +919,7 @@ def build_status(
     """Build the status.json document.
 
     ``last_success_utc`` is what lets a reader distinguish "ran and failed" from
-    "did not run" (spec §7.2). On a failed run it is carried forward from
+    "did not run". On a failed run it is carried forward from
     ``previous`` (yesterday's status.json, if any) rather than dropped; on a
     successful run it is stamped to ``now``.
     """
@@ -958,14 +953,14 @@ def render_failure_mail(
 ) -> tuple[str, str]:
     """Render the failure mail.
 
-    ``offsite_failed`` lists stacks whose OFFSITE_CMD hook exited non-zero. Spec §9
-    requires this to be mailed even when every stack otherwise verified — it is
+    ``offsite_failed`` lists stacks whose OFFSITE_CMD hook exited non-zero. This must
+    be mailed even when every stack otherwise verified — it is
     NOT folded into StackResult.ok (which means "a verified backup exists" and
     must stay true), so it is threaded through as a separate argument instead.
 
     ``regressed`` maps stack name -> reason for stacks whose row count or dump size
     fell more than REGRESSION_TOLERANCE_PCT versus the previous verified sidecar
-    (audit C1 layer 2). Kept out of StackResult.ok for the same reason as
+    Kept out of StackResult.ok for the same reason as
     ``offsite_failed``: the backup genuinely verified against the snapshot it was
     taken from, so "verified" must stay true even though the run is reported FAILED.
     """
@@ -1014,7 +1009,7 @@ def render_failure_mail(
 
 
 # A normal nightly gap is 24h; 26h leaves slack for the run's own duration and
-# scheduling jitter without masking real multi-day silence (audit C2). Six
+# scheduling jitter without masking real multi-day silence. Six
 # consecutive nights of total failure otherwise pass behind a green weekly mail:
 # render_heartbeat_mail used to warn only when `history` was EMPTY, but six-day-old
 # sidecars are non-empty and render as a clean "verified" summary.
@@ -1087,7 +1082,7 @@ def enough_free_space(free_bytes: int, last_dump_bytes: int, factor: int) -> boo
     """True iff ``free_bytes`` covers ``factor`` times the expected backup demand.
 
     A ``last_dump_bytes`` of zero must never read as "no constraint": that is
-    exactly the no-verified-dump-yet gap (audit F3) that let this guard pass on a
+    exactly the no-verified-dump-yet gap that let this guard pass on a
     full disk, because ``free_bytes >= factor * 0`` is trivially true for any
     ``free_bytes``, including 0. Zero demand means the caller could not measure
     what it needs (no dump on disk AND the live-DB-size fallback failed) — a guard
@@ -1132,7 +1127,7 @@ def sweep(runner: Runner, cfg: Config, now: datetime) -> None:
 def prune(cfg: Config, dry_run: bool, exclude_stacks: set[str] | None = None) -> list[Path]:
     """Apply retention. Returns the paths deleted (or that would be).
 
-    ``exclude_stacks`` skips retention entirely for named stacks (audit C1 layer 2):
+    ``exclude_stacks`` skips retention entirely for named stacks:
     when this run detected a row-count/size regression for a stack, its older
     copies are the only remaining evidence and must survive this run's prune pass
     even though the regressed dump itself verified correctly.
@@ -1183,7 +1178,7 @@ def _live_db_bytes(runner: Runner, cfg: Config) -> int:
     """Sum of live database sizes across every configured stack.
 
     Used only as a fallback by the free-space guard when no verified dump exists
-    yet (audit F3): on a brand-new host ``_last_dump_bytes`` is legitimately 0, and
+    yet: on a brand-new host ``_last_dump_bytes`` is legitimately 0, and
     the guard must size itself against the real database rather than pass
     unconditionally. If this also fails to produce a number, the caller must
     treat it as a hard preflight failure — see ``enough_free_space``.
@@ -1208,8 +1203,8 @@ def _run_ok(
     Kept separate from StackResult.ok (which means "a verified backup exists" and
     must stay true even when its offsite copy failed to upload, or when a dump that
     verified correctly nonetheless regressed against its predecessor) so cmd_run has
-    one place that decides the exit code and whether to mail — see audit F7 (offsite)
-    and audit C1 (regression).
+    one place that decides the exit code and whether to mail, whether the offsite
+    upload failed, or whether a stack regressed.
     """
     return bool(status["ok"]) and not offsite_failed and not (regressed or {})
 
@@ -1238,8 +1233,8 @@ def _write_status(
 def _mail_failure(cfg: Config, subject: str, body: str) -> None:
     """Send a failure mail and log loudly if SES did not actually accept it.
 
-    A failed run with an undeliverable mail must still leave a trace — see audit
-    F1. The full body (which embeds every problem collected so far) is logged at
+    A failed run with an undeliverable mail must still leave a trace. The full
+    body (which embeds every problem collected so far) is logged at
     ERROR unconditionally, not only when the send itself fails, so the journal
     always has the complete picture even if mail silently succeeds but nobody
     reads their inbox that day.
@@ -1253,7 +1248,7 @@ def _detect_regressions(
     cfg: Config, results: list[StackResult], now: datetime
 ) -> dict[str, str]:
     """Compare each successfully verified stack's totals against its most recent
-    PREVIOUS sidecar (audit C1 layer 2). Evaluated BEFORE pruning.
+    PREVIOUS sidecar. Evaluated BEFORE pruning.
 
     Only stacks that produced a verified dump this run are eligible: a stack that
     already failed dump/verify is reported through the ordinary failure path, and
@@ -1294,7 +1289,7 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
     if demand == 0:
         # No verified dump on disk yet (first run, or verification has been
         # failing) — fall back to the live DB size rather than let a 0 demand
-        # pass the guard unconditionally (audit F3).
+        # pass the guard unconditionally.
         try:
             demand = _live_db_bytes(runner, cfg)
             logger.info("no dump on disk yet; sized the guard against the live DB: %d bytes", demand)
@@ -1334,10 +1329,10 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
                 final = dump.path.with_name(dump.path.name + ".unverified")
                 dump.path.replace(final)
 
-            # The sidecar must exist BEFORE OFFSITE_CMD runs. Spec §6 invokes the
-            # hook as `$OFFSITE_CMD <dump> <sidecar>`, and a hook handed a path that
-            # does not exist yet cannot upload it. Written once with offsite=False,
-            # then rewritten with the real result if the hook actually ran.
+            # The sidecar must exist BEFORE OFFSITE_CMD runs: the hook is invoked as
+            # `$OFFSITE_CMD <dump> <sidecar>`, and a hook handed a path that does not
+            # exist yet cannot upload it. Written once with offsite=False, then
+            # rewritten with the real result if the hook actually ran.
             sidecar = final.with_name(final.name + ".json")
             result = StackResult(stack.name, dump, verify, False, None)
             sidecar.write_text(json.dumps(sidecar_document(result, now), indent=2))
@@ -1358,7 +1353,7 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
             result = StackResult(stack.name, None, None, False, str(exc))
         results.append(result)
 
-    # Evaluated BEFORE pruning (audit C1 layer 2): a legitimate bulk deletion trips
+    # Evaluated BEFORE pruning: a legitimate bulk deletion trips
     # this on purpose — the dump is kept (it verified correctly against its own
     # snapshot) but the run is reported FAILED and this stack is excluded from the
     # prune pass below, since its older copies are the only remaining evidence.
@@ -1368,7 +1363,7 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
     overall_ok = _run_ok(status, offsite_failed, regressed)
     logger.info("run complete: overall=%s", "OK" if overall_ok else "FAILED")
 
-    # Mail BEFORE prune (audit F2): an exception from prune must never suppress the
+    # Mail BEFORE prune: an exception from prune must never suppress the
     # failure mail for an already-failing run.
     if not overall_ok:
         subject, body = render_failure_mail(
@@ -1391,7 +1386,7 @@ def cmd_run(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int
     """Entry point for `copi-backup run`.
 
     Wraps _cmd_run_inner so that a truly unexpected exception can never leave
-    status.json and mail silent — audit F4 required a status.json write (and a
+    status.json and mail silent: this requires a status.json write (and a
     best-effort mail) on EVERY exit path, including one nobody anticipated.
     """
     try:
@@ -1457,7 +1452,7 @@ def _write_signal_status(cfg: Config, signum: int) -> None:
 
 def _install_signal_handlers(cfg: Config) -> None:
     """Install SIGTERM/SIGINT handlers so a kill mid-run cannot leave status.json
-    reporting yesterday's success (audit C2).
+    reporting yesterday's success.
 
     ``TimeoutStartSec=3600`` sends SIGTERM to a run that overruns; the default
     disposition tears the interpreter down immediately, so cmd_run's own
@@ -1509,7 +1504,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Configured here, not at module import time: systemd captures a unit's stdout
     # into the journal, so writing there is what makes a failed run visible at all
-    # (audit F1) — but this must not reconfigure logging for anything that merely
+    # but this must not reconfigure logging for anything that merely
     # imports this module (e.g. the unit tests, which load it via importlib).
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
 

@@ -818,6 +818,55 @@ def test_backfill_with_no_profile_directories_is_a_clean_no_op(db, runner, monke
     assert db(lambda s: _revisions_for(s, agent_uuid)) == []
 
 
+def test_backfill_honors_a_relocated_profiles_dir(db, runner, tmp_path, monkeypatch):
+    """`backfill-profile-revisions` must resolve paths through `Settings.profiles_dir`
+    (env COPI_PROFILES_DIR), not a hardcoded "profiles/{public,private,memory}" literal.
+    Points `profiles_dir` at a directory OTHER than "<cwd>/profiles" and confirms the
+    command finds files there, not at the CWD-relative default (the CWD here has no
+    "profiles/" dir at all, so a command that still reads the hardcoded literal would
+    find nothing and report 0)."""
+    from src import config
+
+    agent_id = f"{AGENT_PREFIX}relocated"
+
+    async def _seed(session):
+        agent = await factories.make_agent(session, agent_id=agent_id, bot_name="ClitestRelocatedBot")
+        return agent.id
+
+    agent_uuid = db(_seed)
+
+    custom_root = tmp_path / "not-named-profiles"
+    for subdir, content in (
+        ("public", "# Relocated public\n"),
+        ("private", "# Relocated private\n"),
+        ("memory", "# Relocated memory\n"),
+    ):
+        d = custom_root / subdir
+        d.mkdir(parents=True)
+        (d / f"{agent_id}.md").write_text(content, encoding="utf-8")
+
+    cwd_without_profiles = tmp_path / "cwd"
+    cwd_without_profiles.mkdir()
+    monkeypatch.chdir(cwd_without_profiles)
+
+    # Layer profiles_dir onto whatever cli_points_at_test_db already patched (must keep
+    # its database_url override, or this test would write to the wrong database).
+    patched = config.get_settings().model_copy(update={"profiles_dir": str(custom_root)})
+    monkeypatch.setattr(config, "get_settings", lambda: patched)
+
+    result = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
+    assert "Created 3 profile revisions." in result.output
+
+    revisions = db(lambda s: _revisions_for(s, agent_uuid))
+    assert len(revisions) == 3
+    by_type = {r.profile_type: r.content for r in revisions}
+    assert by_type == {
+        "public": "# Relocated public\n",
+        "private": "# Relocated private\n",
+        "memory": "# Relocated memory\n",
+    }
+
+
 # ===========================================================================
 # Harness self-check
 # ===========================================================================

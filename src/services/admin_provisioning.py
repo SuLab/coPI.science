@@ -9,6 +9,7 @@ Wraps the shared ``slack_provisioning`` helpers with web-flow concerns:
 - writing the resulting bot token onto the ``AgentRegistry`` row.
 """
 
+import asyncio
 import logging
 import secrets
 import time
@@ -19,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import get_settings
 from src.models import AgentRegistry, AppSetting, SlackAppProvision
 from src.services.slack_provisioning import (
-    create_app,
-    exchange_code,
-    lookup_team_id,
+    create_app_async,
+    exchange_code_async,
+    lookup_team_id_async,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ _TOKEN_EXP_MARGIN = 120
 
 # Slack API error slugs that indicate the config token itself is bad (as
 # opposed to a manifest/validation error) — the only case worth rotating and
-# retrying create_app for (SEC-10).
+# retrying create_app for.
 _AUTH_ERRORS = (
     "not_authed",
     "invalid_auth",
@@ -48,6 +49,27 @@ _AUTH_ERRORS = (
 
 class ProvisioningError(RuntimeError):
     """Raised for any provisioning failure surfaced to the admin UI."""
+
+
+async def _rotate_and_persist(db: AsyncSession, refresh: str) -> str:
+    """Rotate the config token and persist the new triple in one unit.
+
+    Split out of ``_config_token`` so the caller can wrap this in
+    ``asyncio.shield``: Slack's refresh token is single-use and is
+    consumed the moment the worker thread's ``httpx.post`` completes, so if the
+    awaiting task is cancelled after that but before these three KV rows land,
+    both the old and the new refresh token become unusable and all Slack
+    provisioning is bricked until an operator mints a fresh pair by hand.
+    """
+    from src.services.slack_provisioning import rotate_config_token_async
+    new_token, new_refresh, exp = await rotate_config_token_async(refresh)
+    # Persist the whole new triple atomically: the refresh we just consumed
+    # is now dead, so the new pair must land together.
+    await _kv_set(db, _KEY_TOKEN, new_token)
+    await _kv_set(db, _KEY_REFRESH, new_refresh)
+    await _kv_set(db, _KEY_TOKEN_EXP, str(exp))
+    await db.commit()
+    return new_token
 
 
 async def _kv_get(db: AsyncSession, key: str) -> str | None:
@@ -74,7 +96,7 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     new pair. To keep those single-use rotations rare, we cache the access token
     with its expiry and reuse it until it is about to expire (or ``force_rotate``
     is set after an auth failure). Only then do we rotate and persist the new
-    ``(token, refresh, exp)`` triple atomically before returning (SEC-10).
+    ``(token, refresh, exp)`` triple atomically before returning.
 
     Seeds from ``Settings`` (``.env``) on first use; thereafter the KV rows are
     authoritative.
@@ -94,18 +116,18 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     refresh = await _kv_get(db, _KEY_REFRESH) or settings.slack_config_refresh_token
 
     if refresh:
+        # C2: release the pooled connection before the Slack round trip. The
+        # SELECTs above are the only DB work so far, and rotate_config_token_async
+        # can now retry/backoff off the event loop -- but only if it isn't also
+        # holding a checked-out connection for the duration.
+        await db.commit()
         try:
-            from src.services.slack_provisioning import rotate_config_token
-            new_token, new_refresh, exp = rotate_config_token(refresh)
+            # asyncio.shield: a cancellation of THIS awaiting task (e.g. uvicorn's
+            # graceful shutdown mid-deploy) must not stop the rotate-and-persist
+            # unit once Slack's single-use refresh token has been spent.
+            return await asyncio.shield(_rotate_and_persist(db, refresh))
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
-        # Persist the whole new triple atomically: the refresh we just consumed
-        # is now dead, so the new pair must land together.
-        await _kv_set(db, _KEY_TOKEN, new_token)
-        await _kv_set(db, _KEY_REFRESH, new_refresh)
-        await _kv_set(db, _KEY_TOKEN_EXP, str(exp))
-        await db.commit()
-        return new_token
 
     # No refresh token at all — fall back to a statically-configured access token.
     token = await _kv_get(db, _KEY_TOKEN) or settings.slack_config_token
@@ -129,8 +151,8 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     """
     redirect_uri = _redirect_uri()
 
-    def _create(token: str) -> dict:
-        return create_app(
+    async def _create(token: str) -> dict:
+        return await create_app_async(
             config_token=token,
             agent_id=agent.agent_id,
             bot_name=agent.bot_name,
@@ -141,16 +163,22 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     # Use the cached access token; only rotate (consuming a single-use refresh)
     # if create_app fails specifically because the token is bad. This keeps
     # rotations rare and means a rotation is never "spent" on a manifest error
-    # (SEC-10).
+    #
     config_token = await _config_token(db)
+    # C2: release the pooled connection before the blocking Slack round trip.
+    # _config_token either just ran read-only SELECTs (cached-token path) or
+    # already committed its own writes (rotate path); either way this commit
+    # is safe and returns the connection to the pool for create_app's duration.
+    await db.commit()
     try:
-        app = _create(config_token)
+        app = await _create(config_token)
     except Exception as exc:
         if any(slug in str(exc) for slug in _AUTH_ERRORS):
             logger.info("Config token rejected (%s) — rotating and retrying", exc)
             config_token = await _config_token(db, force_rotate=True)
+            await db.commit()
             try:
-                app = _create(config_token)
+                app = await _create(config_token)
             except Exception as exc2:
                 raise ProvisioningError(f"Could not create the Slack app: {exc2}")
         else:
@@ -158,7 +186,7 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
 
     # Idempotency: a prior "Provision" click for this agent may have left a
     # pending bridge row (holding a client_secret + reusable state). Drop any
-    # such rows so there is at most one live provisioning per agent (SEC-10).
+    # such rows so there is at most one live provisioning per agent.
     await db.execute(
         delete(SlackAppProvision).where(
             SlackAppProvision.agent_registry_id == agent.id
@@ -181,7 +209,8 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     extra = {"state": state, "redirect_uri": redirect_uri}
     team_token = await get_any_bot_token(db)
     if team_token:
-        team_id = lookup_team_id(team_token)
+        await db.commit()
+        team_id = await lookup_team_id_async(team_token)
         if team_id:
             extra["team"] = team_id
     return app["oauth_url"] + "&" + urlencode(extra)
@@ -208,8 +237,10 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
         await db.commit()
         raise ProvisioningError("Agent no longer exists.")
 
+    # C2: release the pooled connection before the blocking Slack round trip.
+    await db.commit()
     try:
-        token = exchange_code(
+        token = await exchange_code_async(
             prov.client_id, prov.client_secret, code, _redirect_uri()
         )
     except Exception as exc:
@@ -217,7 +248,7 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
         # reusable OAuth state (no TTL), so leaving it behind is a standing
         # secret + replay surface. Log details server-side only; surface a
         # generic message so no token/secret fragment reaches the redirect URL
-        # or access logs. See SEC-9.
+        # or access logs.
         logger.error(
             "Token exchange failed for agent %s (provision %s): %s",
             prov.agent_registry_id, prov.id, exc,

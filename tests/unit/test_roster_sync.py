@@ -95,14 +95,48 @@ def _factory_for(rows):
     return lambda: _FakeDB(rows)
 
 
+class _FakeDBGrantbotTokenRaises:
+    """Serves the roster query and the publication join normally, but the
+    grantbot uid-reprobe's single-column token query (get_agent_bot_token)
+    raises — used to prove that failure is isolated to its own try/except
+    and cannot abort the add/remove diff sharing the same DB session.
+
+    Discriminated by column count (real SQLAlchemy Select objects), not call
+    order, since production issues all three queries on one open session:
+    the 5-column roster select, the 2-column publication join, and the
+    1-column grantbot token select.
+    """
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, stmt):
+        n = len(stmt.selected_columns)
+        if n == 1:
+            raise RuntimeError("grantbot token query failed")
+        return _FakeResult(self._rows if n > 2 else [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _FakeSlackClient:
-    """Stand-in for AgentSlackClient — connect() always succeeds."""
-    def __init__(self, agent_id, bot_token):
+    """Stand-in for AgentSlackClient.
+
+    bot_user_id is derived from the token so a rotation (a new token) yields a
+    distinct uid, the way a re-provisioned Slack app would — needed to tell
+    apart the uid map before/after a rebuild.
+    """
+    def __init__(self, agent_id, bot_token, connect_result=True):
         self.agent_id = agent_id
         self.bot_token = bot_token
+        self.bot_user_id = f"U_{bot_token}"
+        self._connect_result = connect_result
 
     def connect(self):
-        return True
+        return self._connect_result
 
 
 def _make_engine(active_rows, existing_agents=()):
@@ -132,6 +166,15 @@ class TestSyncRosterFromDb:
         assert "wiseman" in engine.slack_clients
         assert engine._bot_name_to_id["wisemanbot"] == "wiseman"
 
+    async def test_a_newly_added_agent_gets_its_state_rebuilt(self, monkeypatch):
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
+        engine._rebuild_one_agent_state = AsyncMock()
+
+        await engine._sync_roster_from_db()
+
+        engine._rebuild_one_agent_state.assert_awaited_once_with("wiseman")
+
     async def test_removes_inactivated_agent(self, monkeypatch):
         _patch_client(monkeypatch)
         engine = _make_engine([_row("su")], existing_agents=["su", "wiseman"])
@@ -153,10 +196,10 @@ class TestSyncRosterFromDb:
     async def test_surviving_agent_that_gains_a_token_gets_a_client(self, monkeypatch):
         """Regression: a roster agent provisioned AFTER startup stayed Slack-less.
 
-        Measured 2026-08-06 on the blackbird deployment: 48 bots were installed
-        while the engine ran, their tokens landed in AgentRegistry, and not one
-        of them ever connected — ``Connected as`` stayed at the 7 that had tokens
-        at process start. Cause: ``main.py`` puts EVERY active agent into
+        Observed on a real deployment: bots provisioned while the engine ran
+        had their tokens land in AgentRegistry, but not one of them ever
+        connected — ``Connected as`` stayed at the count that had tokens at
+        process start. Cause: ``main.py`` puts EVERY active agent into
         ``self.agents`` regardless of token, so a later-provisioned agent is in
         neither ``to_add`` nor ``to_remove``, the sync early-returns, and clients
         are only ever built in the ``to_add`` loop. The docstring's promise that
@@ -200,6 +243,218 @@ class TestSyncRosterFromDb:
 
         assert engine.slack_clients["su"] is before
 
+    async def test_surviving_agent_bot_name_and_pi_name_edits_go_live(self, monkeypatch):
+        """DOC-B residual: renaming a live agent's bot_name/pi_name in AgentRegistry
+        must be picked up without a restart. Before the fix, the surviving-agent
+        loop diffed `role` only; bot_name/pi_name were read only in the `to_add`
+        branch, so a DB rename was invisible until the process restarted.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        renamed.pi_name = "New Name"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        agent = engine.agents["su"]
+        assert agent.bot_name == "NewSuBot"
+        assert agent.pi_name == "New Name"
+        assert engine._bot_name_to_id.get("newsubot") == "su"
+        assert "subot" not in engine._bot_name_to_id
+
+    async def test_rename_away_from_service_bot_name_reseeds_the_seed(self, monkeypatch):
+        """#26 DOC-B follow-up: a roster PI's bot_name legitimately overrides the
+        SERVICE_AGENT_IDS seed for "grantbot" while it owns that name (see
+        __init__'s comment — the roster answer must win). But the old
+        incremental rename logic just popped the owned key on a rename away
+        from it, permanently deleting the shared seed entry instead of
+        restoring it — leaving GrantBot's own posts unattributable
+        thereafter. A full _rebuild_bot_name_map() re-applies the
+        SERVICE_AGENT_IDS setdefault every time, so the seed survives.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su")], existing_agents=["su"])
+        # Simulate a prior tick where this roster agent already claimed the
+        # "grantbot" name (no seed entry survives that claim — see __init__).
+        engine.agents["su"].bot_name = "GrantBot"
+        engine._bot_name_to_id = {"grantbot": "su"}
+
+        await engine._sync_roster_from_db()
+
+        assert engine.agents["su"].bot_name == "SuBot"
+        assert engine._bot_name_to_id.get("grantbot") == "grantbot", (
+            "renaming a roster agent AWAY from a service-bot name must "
+            "reseed the SERVICE_AGENT_IDS entry, not leave it missing"
+        )
+        # A full rebuild must not lose the renamed agent's OWN new mapping...
+        assert engine._bot_name_to_id.get("subot") == "su"
+        # ...and the flush (bot_name_changed -> set_bot_name_map) must carry
+        # the reseeded "grantbot" entry into message_log's copy too, not just
+        # the engine's own _bot_name_to_id.
+        assert engine.message_log._bot_name_to_id.get("grantbot") == "grantbot"
+
+    async def test_removal_of_agent_holding_service_bot_name_reseeds_the_seed(self, monkeypatch):
+        """Mirrors test_rename_away_from_service_bot_name_reseeds_the_seed
+        above, for the REMOVAL path: afba7e8's removal loop searched-and-
+        popped the removed agent's OWN _bot_name_to_id key (`next(n for n, a
+        in ... if a == aid)`), which permanently deleted the SERVICE_AGENT_IDS
+        "grantbot" seed whenever the removed agent happened to be the one
+        holding that name — GrantBot's own :moneybag: posts become
+        unattributable for the rest of the run after that. ca72c8f's
+        _rebuild_bot_name_map() (now also used by the removal branch) reseeds
+        it instead, and both the engine's own map and message_log's flushed
+        copy must reflect it.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su")], existing_agents=["su", "grant"])
+        engine.agents["grant"].bot_name = "GrantBot"
+        engine._rebuild_bot_name_map()
+
+        await engine._sync_roster_from_db()
+
+        assert "grant" not in engine.agents  # removed (not in the DB rows)
+        assert engine._bot_name_to_id.get("grantbot") == "grantbot", (
+            "removing a roster agent that held a service-bot name must "
+            "reseed the SERVICE_AGENT_IDS entry, not leave it missing"
+        )
+        assert engine.message_log._bot_name_to_id.get("grantbot") == "grantbot"
+
+    async def test_existing_client_is_rebuilt_when_its_token_rotates(self, monkeypatch):
+        """The old `continue` on 'aid in self.slack_clients'
+        skipped a TOKEN ROTATION on an already-connected agent entirely — the
+        agent kept posting with the stale (about-to-be-revoked) token until a
+        restart. Rebuild the client when the desired token no longer matches
+        the connected client's token.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        after = engine.slack_clients["su"]
+        assert after is not before
+        assert after.bot_token == "xoxb-rotated"
+
+    async def test_message_log_name_map_flushed_after_rename(self, monkeypatch):
+        """The engine's own _bot_name_to_id already
+        picked up a rename (test_surviving_agent_bot_name_and_pi_name_edits_go_live
+        above), but message_log holds a COPY taken by set_bot_name_map — the
+        early-return path must flush that copy too, or the poller (which reads
+        message_log's map) keeps resolving the OLD name.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        assert engine.message_log._bot_name_to_id.get("newsubot") == "su"
+        assert "subot" not in engine.message_log._bot_name_to_id
+
+    async def test_name_map_self_heals_on_the_next_tick_after_a_later_step_raises(
+        self, monkeypatch,
+    ):
+        """Unlike set_bot_uid_map (already unconditional in this same
+        no-add/no-remove fast path), the name-map flush only ran `if
+        bot_name_changed`. bot_name_changed is only True on the SAME tick as
+        the rename, so if a LATER step in that tick (_recompute_allowed_sender_ids)
+        raises before the flush, the flush is skipped — and a conditional flush
+        can never retry on a later tick, because by then the rename is already
+        applied and bot_name_changed is False again. Two ticks: the first
+        applies the rename to the Agent object (that part runs before the
+        raise) but raises before reaching the flush; the second is healthy
+        and must flush regardless of bot_name_changed.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        calls = {"n": 0}
+
+        async def _flaky_recompute():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated failure after the rename diff")
+
+        engine._recompute_allowed_sender_ids = _flaky_recompute
+
+        await engine._sync_roster_from_db()  # tick 1: renames, then raises
+
+        assert engine.agents["su"].bot_name == "NewSuBot", "the rename itself must still land"
+        assert engine._bot_name_to_id.get("newsubot") == "su", (
+            "sanity: the engine's own map already picked up the rename"
+        )
+        assert engine.message_log._bot_name_to_id.get("newsubot") != "su", (
+            "sanity: the flush really was skipped on the failing tick"
+        )
+
+        engine._last_roster_poll = 0.0  # bypass the 30s throttle for tick 2
+        await engine._sync_roster_from_db()  # tick 2: healthy, no further rename
+
+        assert engine.message_log._bot_name_to_id.get("newsubot") == "su", (
+            "a rename lost to an earlier exception never self-healed on the next healthy tick"
+        )
+
+    async def test_message_log_uid_map_flushed_after_token_rotation(self, monkeypatch):
+        """A rotated client gets a NEW bot_user_id (re-provisioned Slack app).
+        message_log._bot_uid_to_agent is a copy taken by set_bot_uid_map — the
+        early-return path (no add/remove) must flush it too, or <@Unew>
+        mentions of the rotated bot never resolve until a restart.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        after = engine.slack_clients["su"]
+        assert engine.message_log._bot_uid_to_agent.get(after.bot_user_id) == "su"
+
+    async def test_rotation_with_failed_connect_keeps_old_client(self, monkeypatch):
+        """connect() failing on the rebuild attempt must not discard the still-
+        working client — the engine keeps posting on the old (soon-to-expire)
+        token and retries the rebuild on a later tick."""
+        def _factory(agent_id, bot_token):
+            return _FakeSlackClient(agent_id, bot_token, connect_result=False)
+        monkeypatch.setattr("src.agent.slack_client.AgentSlackClient", _factory)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["su"] is before
+
+    async def test_rotation_does_not_touch_other_agents_client(self, monkeypatch):
+        _patch_client(monkeypatch)
+        engine = _make_engine(
+            [_row("su", token="xoxb-rotated"), _row("wiseman")],
+            existing_agents=["su", "wiseman"],
+        )
+        before = engine.slack_clients["wiseman"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["wiseman"] is before
+
+    async def test_db_token_cleared_does_not_fall_back_to_env(self, monkeypatch):
+        """DB is authoritative: clearing an agent's DB token must not downgrade
+        an already-connected agent to a (possibly stale) .env token, and must
+        not retry a reconnect every tick against a dead env token."""
+        _patch_client(monkeypatch)
+        monkeypatch.setattr(
+            slack_tokens, "get_settings",
+            lambda: types.SimpleNamespace(get_slack_tokens=lambda: {"su": "xoxb-env-old"}),
+        )
+        engine = _make_engine([_row("su", token=None)], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["su"] is before
+
     async def test_throttle_skips_within_interval(self, monkeypatch):
         _patch_client(monkeypatch)
         import time
@@ -224,8 +479,7 @@ class TestSyncRosterFromDb:
         Before the fix, _load_publication_records shared the roster query's
         try/except, so any exception from it (AgentRegistry/Publication join
         failing) was caught by the OUTER handler and silently no-op'd the whole
-        tick — new agents never got added, removals never propagated. See
-        issue #29 review.
+        tick — new agents never got added, removals never propagated.
         """
         _patch_client(monkeypatch)
         engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
@@ -240,6 +494,89 @@ class TestSyncRosterFromDb:
         assert "wiseman" in engine.slack_clients
         # Stale grounding data is preserved rather than cleared or replaced.
         assert engine._agent_publications == stale
+
+    async def test_grantbot_token_lookup_failure_does_not_abort_roster_sync(self, monkeypatch):
+        """The grantbot uid-reprobe token read shares the roster query's DB
+        session but must have its own try/except, same rationale as the
+        publication-record load just above it: before the fix it shared the
+        outer try/except, so a failure there silently no-op'd the whole
+        tick — a newly active agent was never added.
+        """
+        _patch_client(monkeypatch)
+        rows = [_row("su"), _row("wiseman")]
+        engine = _make_engine(rows, existing_agents=["su"])
+        engine.session_factory = lambda: _FakeDBGrantbotTokenRaises(rows)
+
+        await engine._sync_roster_from_db()
+
+        # Roster sync still completed its add/remove work despite the failure.
+        assert set(engine.agents) == {"su", "wiseman"}
+        assert "wiseman" in engine.slack_clients
+
+
+class TestRosterSyncDoesNotBlockTheLoop:
+    """AgentSlackClient.connect() is a blocking Slack
+    Web API call that can sit in a retry/backoff loop for up to
+    RATE_LIMIT_WAIT_BUDGET_SECONDS (180s) under a sustained throttle. Calling
+    it directly (not through run_slack_call) inside _sync_roster_from_db
+    blocks the whole process's single event loop for that long, starving
+    every other coroutine on it -- including the SIGTERM-driven shutdown
+    logic in main.py, which never gets scheduled until the blocking call
+    happens to return.
+    """
+
+    async def test_a_slow_connect_does_not_block_other_coroutines(self, monkeypatch):
+        import asyncio
+        import time as time_mod
+
+        _patch_client(monkeypatch)
+
+        SLEEP_SECONDS = 0.5
+        connect_window: dict[str, float] = {}
+
+        class _SlowConnectClient(_FakeSlackClient):
+            def connect(self):
+                connect_window["start"] = time_mod.monotonic()
+                time_mod.sleep(SLEEP_SECONDS)
+                connect_window["end"] = time_mod.monotonic()
+                return self._connect_result
+
+        monkeypatch.setattr("src.agent.slack_client.AgentSlackClient", _SlowConnectClient)
+
+        engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
+
+        ticks: list[float] = []
+        stop = asyncio.Event()
+
+        async def ticker():
+            while not stop.is_set():
+                ticks.append(time_mod.monotonic())
+                await asyncio.sleep(0.02)
+
+        sync_task = asyncio.ensure_future(engine._sync_roster_from_db())
+        tick_task = asyncio.ensure_future(ticker())
+        await asyncio.wait_for(sync_task, timeout=3.0)
+        stop.set()
+        await asyncio.wait_for(tick_task, timeout=1.0)
+
+        assert "start" in connect_window and "end" in connect_window
+        # The regression: a direct (non-run_slack_call) client.connect() call
+        # runs synchronously on the loop for the whole SLEEP_SECONDS, so the
+        # ticker cannot record ANY tick between connect_window's start/end.
+        # Fixed (run_slack_call), connect() runs on a worker thread and the
+        # loop keeps servicing the ticker every ~0.02s throughout that
+        # window.
+        ticks_during_connect = [
+            t for t in ticks if connect_window["start"] < t < connect_window["end"]
+        ]
+        assert len(ticks_during_connect) >= 3, (
+            "the event loop must keep servicing other coroutines while a "
+            f"roster-sync connect() is in flight, got only "
+            f"{len(ticks_during_connect)} tick(s) during the "
+            f"{SLEEP_SECONDS}s blocking connect() call — the loop was "
+            "blocked for that call"
+        )
+        assert "wiseman" in engine.agents
 
 
 # ---------------------------------------------------------------

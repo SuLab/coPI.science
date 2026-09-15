@@ -20,6 +20,7 @@ the source level.
 import logging
 import re
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,7 +28,76 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from src.agent.retry_after import parse_retry_after
+
 logger = logging.getLogger(__name__)
+
+# Process-wide shutdown signal.
+#
+# One threading.Event, shared by every caller regardless of which thread or
+# pool it runs on. It is STICKY for the lifetime of the process: nothing in
+# src/ ever clears it once set, because a process that received SIGTERM or
+# ran its lifespan/worker shutdown is exiting anyway -- there is no "shut
+# down without exiting" case to accommodate in production. _get_executor()
+# creating a fresh pool after a shutdown does NOT touch this event; a call
+# queued on that fresh pool aborts immediately via _sleep_interruptibly, same
+# as any other post-shutdown caller. Tests that share one interpreter across
+# multiple independent lifespans/pools clear it themselves in a fixture.
+SHUTDOWN_REQUESTED = threading.Event()
+
+# Backward-compatible alias -- existing call sites/tests may still refer to
+# this name.
+SHUTTING_DOWN = SHUTDOWN_REQUESTED
+
+
+def signal_shutdown() -> None:
+    """Set the process-wide shutdown event.
+
+    Called by ``shutdown_slack_executor()`` (FastAPI lifespan / worker
+    shutdown) and directly by the agent-run process's own SIGTERM/SIGINT
+    handler (``src/agent/main.py``), which never goes through the pool at
+    all. Idempotent; safe to call more than once. Nothing in ``src/`` ever
+    clears this once set -- it is sticky for the rest of the process's life.
+    """
+    SHUTDOWN_REQUESTED.set()
+
+
+class SlackShuttingDown(SlackApiError):
+    """Raised by ``_sleep_interruptibly`` to abort a retry sleep on shutdown.
+
+    Every ``except SlackApiError as exc:`` handler in this module reads
+    ``exc.response.get("error")`` unconditionally (``AgentSlackClient._api``'s
+    contract is that a real ``slack_sdk`` exception always carries a response
+    dict) — plain ``SlackApiError("shutting down", response=None)`` broke that
+    contract and turned a clean shutdown into an ``AttributeError`` at every
+    one of those call sites instead of the handled-failure path they already
+    have. ``response`` here is a real dict, keyed exactly like a Slack error
+    response, with an ``"error"`` value (``"shutting_down"``) that cannot
+    collide with any Slack-issued error string, so it always falls through to
+    each handler's generic "unrecognized error" branch (log-and-return-None/
+    empty, same as any other unrecognized ``SlackApiError``) rather than
+    matching a specific branch like ``"ratelimited"`` or ``"channel_not_found"``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("shutting down", response={"error": "shutting_down"})
+
+
+def _sleep_interruptibly(seconds: float) -> None:
+    """Sleep for ``seconds``, in <=1s slices, aborting early on shutdown.
+
+    Raises ``SlackShuttingDown`` the moment ``SHUTDOWN_REQUESTED`` is set,
+    rather than finishing out the sleep, so a thread mid-backoff (whether on
+    a ``slack_executor`` worker or the caller's own thread) does not hold up
+    interpreter exit for however much of the Retry-After it has left.
+    """
+    remaining = seconds
+    while remaining > 0:
+        if SHUTDOWN_REQUESTED.is_set():
+            raise SlackShuttingDown()
+        slice_s = min(1.0, remaining)
+        time.sleep(slice_s)
+        remaining -= slice_s
 
 
 class BotNotInvitedToPrivateChannel(Exception):
@@ -35,8 +105,8 @@ class BotNotInvitedToPrivateChannel(Exception):
 
     This should only fire in response to a genuine invite-path bug — any private
     channel a bot is asked to act on should have been one the bot was invited to
-    at channel-creation time. See specs/agent-system.md §"Auto-join retry must
-    gate on visibility".
+    at channel-creation time. See specs/agent-system.md for the auto-join
+    invite-gating rule.
     """
 
     def __init__(self, agent_id: str, channel_id: str, slack_error: str | None = None):
@@ -116,7 +186,24 @@ def markdown_to_mrkdwn(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-MAX_RETRIES = 3
+# Hard ceiling on retry *attempts*, independent of the wait budget below — what
+# stops a Retry-After of 1s (or less) from spinning through hundreds of quick
+# retries while staying "within budget". At MAX_RETRY_AFTER's 30s cap, 8
+# attempts is well clear of RATE_LIMIT_WAIT_BUDGET_SECONDS on its own (8 * 30 =
+# 240 > 180), so in practice the budget is what ends a sustained 30s-header
+# throttle; the attempt ceiling is what ends a sustained short-header one.
+MAX_RETRIES = 8
+MAX_RETRY_AFTER = 30.0
+
+# Total time `_call_with_retry` will spend sleeping on a single call before
+# giving up, regardless of how many attempts that took. A legitimate
+# `Retry-After: 60` capped per-sleep at 30s and too low a MAX_RETRIES could
+# exhaust the budget after a couple of 30s sleeps -- well short of the real
+# 60s waits Slack actually asked for -- leaving the caller to write a
+# DB-only row the PIs never saw on Slack. Sized so a sustained 30s-per-attempt
+# throttle gets six full attempts
+# (180 / 30 = 6) before giving up.
+RATE_LIMIT_WAIT_BUDGET_SECONDS = 180.0
 
 # How many times to attempt private-channel creation. Attempt 0 uses a plain
 # timestamp suffix; later attempts add random entropy to survive the (extremely
@@ -131,6 +218,16 @@ SLACK_PAGE_LIMIT = 200
 # what guarantees termination if Slack cycles through several cursors instead of
 # repeating one. 200 pages x 200 items is far past anything this system holds.
 MAX_PAGES = 200
+
+# Listing-level wall-clock deadline for `_paginate`. `RATE_LIMIT_WAIT_BUDGET_SECONDS`
+# bounds one Slack call, but `_paginate` can issue up to MAX_PAGES of them — a
+# throttled listing that let every page use the full per-call budget could block
+# the synchronous engine loop for 200 * 180s. This is the ceiling on the *whole*
+# listing instead: each page's retry gets whatever remains of it, so total time
+# blocked on one listing cannot exceed this regardless of page count. Sized well
+# above a single call's budget (180s) so an ordinary listing that hits one bad
+# page still gets a full retry budget for it.
+PAGINATION_WAIT_BUDGET_SECONDS = 600.0
 
 # chat.postMessage splits a longer `text` into several messages *and returns only
 # the last chunk's ts*. Measured against the live workspace: 4000 and 4001
@@ -291,7 +388,7 @@ class AgentSlackClient:
     # The chokepoint
     # ------------------------------------------------------------------
 
-    def _api(self, method: str, **kwargs) -> Any:
+    def _api(self, method: str, *, _wait_budget: float | None = None, **kwargs) -> Any:
         """Call one Slack Web API endpoint. **Every** call in this class comes here.
 
         Takes the slack_sdk method *name* rather than a bound callable, which is
@@ -300,19 +397,44 @@ class AgentSlackClient:
         source-level test in ``tests/unit/test_slack_client_contract.py`` fails if
         a second one appears. A new endpoint therefore inherits the retry/backoff
         path by construction instead of by the author remembering.
+
+        ``_wait_budget`` is a private seam for ``_paginate``, which needs to cap a
+        single page's retry budget to whatever remains of the *listing's* budget
+        rather than the full per-call default. It is keyword-only on this method
+        (and on ``_call_with_retry``) precisely so it is consumed here and never
+        forwarded into ``kwargs`` — it can never reach the slack_sdk method.
         """
         if self._client is None:
             raise SlackNotConnected(
                 f"[{self.agent_id}] {method} called with no authenticated client"
             )
-        return self._call_with_retry(getattr(self._client, method), **kwargs)
+        return self._call_with_retry(getattr(self._client, method), _wait_budget=_wait_budget, **kwargs)
 
-    def _call_with_retry(self, method, **kwargs) -> Any:
+    def _call_with_retry(self, method, *, _wait_budget: float | None = None, **kwargs) -> Any:
         """Call a Slack API method with retry on rate limiting.
 
         The retry primitive behind ``_api``. Kept as a separate public-ish seam
         because test teardown reaches for endpoints the client has no wrapper for
         (``conversations_archive``) and must still get the backoff.
+
+        Checks ``SHUTDOWN_REQUESTED`` before attempt 0, not just inside the
+        retry-sleep branch below, so a call that is still queued (or simply
+        hasn't started) when shutdown is signalled aborts with zero network
+        round trips instead of always paying for one full HTTP attempt
+        regardless. Exit bound once attempt 0 has actually started: one
+        in-flight HTTP call plus <=1s (the retry sleep's slice size) — see
+        ``shutdown_slack_executor``'s docstring in
+        ``src/services/slack_executor.py``.
+
+        Bounded by two independent limits rather than a fixed attempt count:
+        a cumulative wait budget (``RATE_LIMIT_WAIT_BUDGET_SECONDS`` by
+        default, or ``_wait_budget`` when a caller supplies one), so a legitimate
+        ``Retry-After: 60`` gets several real waits rather than being exhausted by
+        attempt count alone, and a hard attempt ceiling (``MAX_RETRIES``), so a
+        short or zero Retry-After cannot spin through hundreds of near-instant
+        retries while staying "within budget". Giving up is decided *before*
+        sleeping — a wait that would push the cumulative total over budget is not
+        taken at all, so the total time actually slept never exceeds the budget.
 
         ``last_exc`` exists because Python unbinds an ``except ... as exc`` name at the
         end of the except block. Referring to ``exc`` after the loop raised
@@ -321,23 +443,48 @@ class AgentSlackClient:
         handler entirely and crashed the turn. That happens precisely when Slack is
         throttling us, i.e. when the system is busiest.
         """
+        # Checked BEFORE attempt 0, not just inside the retry-sleep branch
+        # below, so queued-but-unstarted work aborts without issuing a
+        # network round trip at all once shutdown has already been signalled
+        # -- rather than always paying for one full HTTP call regardless.
+        if SHUTDOWN_REQUESTED.is_set():
+            raise SlackShuttingDown()
+        wait_budget = RATE_LIMIT_WAIT_BUDGET_SECONDS if _wait_budget is None else _wait_budget
         last_exc: SlackApiError | None = None
+        total_slept = 0.0
+        attempts_made = 0
         for attempt in range(MAX_RETRIES):
+            attempts_made = attempt + 1
             try:
                 return method(**kwargs)
             except SlackApiError as exc:
-                if exc.response.get("error") == "ratelimited":
-                    last_exc = exc
-                    retry_after = int(exc.response.headers.get("Retry-After", 5))
-                    logger.warning(
-                        "[%s] Rate limited, retrying in %ds (attempt %d/%d)",
-                        self.agent_id, retry_after, attempt + 1, MAX_RETRIES,
-                    )
-                    time.sleep(retry_after)
-                else:
+                if exc.response.get("error") != "ratelimited":
                     raise
+                last_exc = exc
+                retry_after = parse_retry_after(
+                    exc.response.headers.get("Retry-After"),
+                    default=5.0,
+                    cap=MAX_RETRY_AFTER,
+                )
+                if total_slept + retry_after > wait_budget:
+                    logger.warning(
+                        "[%s] Rate limit wait budget exhausted after %.1fs/%.1fs "
+                        "(attempt %d/%d) — giving up rather than sleeping %.1fs more",
+                        self.agent_id, total_slept, wait_budget,
+                        attempts_made, MAX_RETRIES, retry_after,
+                    )
+                    break
+                logger.warning(
+                    "[%s] Rate limited, retrying in %.1fs (attempt %d/%d, "
+                    "%.1fs/%.1fs of wait budget used)",
+                    self.agent_id, retry_after, attempts_made, MAX_RETRIES,
+                    total_slept, wait_budget,
+                )
+                _sleep_interruptibly(retry_after)
+                total_slept += retry_after
         raise SlackApiError(
-            "Rate limit retries exhausted",
+            f"Rate limit retries exhausted after {attempts_made} attempt(s), "
+            f"waited {total_slept:.1f}s (budget {wait_budget:.0f}s)",
             response=last_exc.response if last_exc else None,
         )
 
@@ -366,17 +513,37 @@ class AgentSlackClient:
 
         An empty page carrying a cursor is followed, not treated as the end —
         Slack does return those.
+
+        Owns a listing-level wall-clock deadline (``PAGINATION_WAIT_BUDGET_SECONDS``)
+        independent of any single page's retry budget: each page's ``_api`` call is
+        given only what remains of the deadline, so a sustained throttle that keeps
+        producing fresh cursors is cut off by the listing budget long before
+        ``MAX_PAGES`` * ``RATE_LIMIT_WAIT_BUDGET_SECONDS`` of blocking is reached. A
+        page whose remaining budget is exhausted before it even starts is asked for
+        no wait at all — it either succeeds immediately or fails immediately — which
+        surfaces as the same "a page after the first failed" path below.
+
+        Each page's budget is additionally capped at ``RATE_LIMIT_WAIT_BUDGET_SECONDS``:
+        ``PAGINATION_WAIT_BUDGET_SECONDS``
+        (600s) is larger than the per-call default (180s) precisely so a listing gets
+        more total patience across many pages than one call would — but page 0 starts
+        with the *entire* remaining listing budget, so without this cap a single early
+        page could be handed the full 600s instead of the 180s any other caller gets
+        for one call.
         """
         items: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
         cursor = ""
+        listing_started = time.monotonic()
         for page in range(MAX_PAGES):
             call = dict(kwargs)
             call["limit"] = limit
             if cursor:
                 call["cursor"] = cursor
+            remaining = PAGINATION_WAIT_BUDGET_SECONDS - (time.monotonic() - listing_started)
+            page_budget = min(RATE_LIMIT_WAIT_BUDGET_SECONDS, max(remaining, 0.0))
             try:
-                result = self._api(method, **call)
+                result = self._api(method, _wait_budget=page_budget, **call)
             except SlackApiError as exc:
                 if page == 0:
                     raise
@@ -658,8 +825,12 @@ class AgentSlackClient:
             return user_id or "unknown"
         try:
             info = self._api("users_info", user=user_id)
-            user = info.get("user", {})
-            return user.get("display_name") or user.get("real_name") or user_id
+            user = info.get("user") or {}
+            return (
+                (user.get("profile") or {}).get("display_name")
+                or user.get("real_name")
+                or user_id
+            )
         except SlackApiError:
             return user_id
 
@@ -669,7 +840,7 @@ class AgentSlackClient:
             return False
         try:
             info = self._api("users_info", user=user_id)
-            user = info.get("user", {})
+            user = info.get("user") or {}
             return user.get("is_bot", False)
         except SlackApiError:
             return False

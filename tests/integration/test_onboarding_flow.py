@@ -15,7 +15,7 @@ than quietly make a network call), SES is a recorder, and the two export
 directories are redirected into ``tmp_path`` so the suite never writes into
 ``profiles/``.
 
-Discipline (see ``.notes/full-system-test-plan.md``): every absence assertion
+Discipline: every absence assertion
 carries a positive control in the same test. "The victim's row did not change"
 is worthless next to a route that changes nothing for anybody, so each negative
 is paired with the same request producing the effect it is supposed to produce.
@@ -31,9 +31,12 @@ from types import SimpleNamespace
 import pytest
 from itsdangerous import TimestampSigner, URLSafeTimedSerializer
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from src.config import get_settings
 from src.models import (
+    AgentDelegate,
+    AgentRegistry,
     EmailEngagementTracker,
     EmailNotificationPreference,
     Job,
@@ -87,10 +90,9 @@ def export_dirs(tmp_path, monkeypatch):
     pub, priv = tmp_path / "public", tmp_path / "private"
     monkeypatch.setattr(profile_export, "PROFILES_DIR", pub)
     monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", priv)
-    # onboarding.py bound PRIVATE_PROFILES_DIR into its own namespace at import
-    # time (the on-disk fallback in the private-profile editor), so patching the
-    # service module alone would leave that read pointed at the repo.
-    monkeypatch.setattr(onboarding_router, "PRIVATE_PROFILES_DIR", priv)
+    # onboarding.py's on-disk fallback calls profile_export._private_profiles_dir()
+    # at request time instead of reading a module-level constant bound at
+    # import time, so patching the service module's constant is sufficient here.
     return SimpleNamespace(public=pub, private=priv)
 
 
@@ -176,6 +178,7 @@ async def _prof(db, uid):
                 ResearcherProfile.private_profile_md,
                 ResearcherProfile.private_profile_seed,
                 ResearcherProfile.profile_version,
+                ResearcherProfile.synthesis_validated,
             ).where(ResearcherProfile.user_id == uid)
         )
     ).mappings().first()
@@ -874,6 +877,175 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
     assert prof["profile_version"] == 4
 
 
+async def test_profile_save_partial_post_does_not_blank_omitted_fields(client, db_session):
+    u = await factories.make_user(
+        db_session, name="Keep", email="keep@example.org",
+        institution="Old Institute", department="Old Dept",
+    )
+    await factories.make_profile(
+        db_session, user=u,
+        research_summary="old summary", techniques=["old-t"],
+        experimental_models=["old-m"], disease_areas=["old-d"],
+        key_targets=["old-k"], keywords=["old-kw"],
+    )
+    await db_session.flush()
+
+    # A crafted/partial POST — templates never send one, but the route must not
+    # assume that. Omits institution, research_summary and techniques.
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={"name": "Keep", "email": "keep@example.org", "department": "New Dept"},
+    )
+    assert r.status_code == 302
+
+    user = await _user_row(db_session, u.id)
+    assert user["institution"] == "Old Institute"  # omitted -> untouched
+    assert user["department"] == "New Dept"        # present -> updated
+
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == "old summary"
+    assert prof["techniques"] == ["old-t"]
+    assert prof["experimental_models"] == ["old-m"]
+    assert prof["disease_areas"] == ["old-d"]
+    assert prof["key_targets"] == ["old-k"]
+    assert prof["keywords"] == ["old-kw"]
+
+
+async def test_profile_save_partial_post_does_not_blank_email(client, db_session):
+    """Fix round 1: `email` used the same Form("") pattern as the other
+    fields but was still assigned unconditionally, so a POST that omits it
+    silently NULLed User.email (nullable+unique, so nothing would raise)."""
+    u = await factories.make_user(db_session, name="Keep", email="keep@example.org")
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={"name": "Keep", "department": "New Dept"},
+    )
+    assert r.status_code == 302
+
+    user = await _user_row(db_session, u.id)
+    assert user["email"] == "keep@example.org"  # omitted -> untouched
+    assert user["department"] == "New Dept"      # present -> updated
+
+
+async def test_profile_save_still_clears_email_the_user_emptied(client, db_session):
+    """Control for the fix above: an explicit empty email (the field IS
+    present in the POST) is a deliberate clear and must still be written —
+    this is today's behaviour and must not regress."""
+    u = await factories.make_user(db_session, name="Clr", email="clr@example.org")
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save", headers=_auth(u.id),
+        data={"name": "Clr", "email": ""},
+    )
+    assert r.status_code == 302
+    assert (await _user_row(db_session, u.id))["email"] is None
+
+
+async def test_onboarding_save_profile_partial_post_does_not_blank_omitted_fields(
+    client, db_session
+):
+    u = await factories.make_user(db_session, email="ob@example.org")
+    await factories.make_profile(
+        db_session, user=u, research_summary="old summary", techniques=["old-t"],
+    )
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile",
+        headers=_auth(u.id),
+        data={"email": "ob@example.org", "keywords": "new-kw"},
+    )
+    assert r.status_code == 302
+
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == "old summary"
+    assert prof["techniques"] == ["old-t"]
+    assert prof["keywords"] == ["new-kw"]
+
+
+async def test_profile_save_still_clears_a_field_the_user_emptied(client, db_session):
+    """The other half of V6-form1..4: an EMPTY value is a deliberate clear and must
+    still be written. FastAPI maps "" to the parameter default, so a value-based
+    guard (`Form(None)` + `is not None`) would silently ignore it."""
+    u = await factories.make_user(db_session, name="Clr", email="clr@example.org",
+                                  institution="Old Institute")
+    await factories.make_profile(db_session, user=u, research_summary="old", techniques=["t"])
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save", headers=_auth(u.id),
+        data={"name": "Clr", "email": "clr@example.org", "institution": "",
+              "research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+    assert (await _user_row(db_session, u.id))["institution"] is None
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == ""
+    assert prof["techniques"] == []
+
+
+async def test_onboarding_save_profile_still_clears_a_field_the_user_emptied(client, db_session):
+    u = await factories.make_user(db_session, email="ob-clr@example.org")
+    await factories.make_profile(db_session, user=u, research_summary="old", techniques=["t"])
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile", headers=_auth(u.id),
+        data={"email": "ob-clr@example.org", "research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == ""
+    assert prof["techniques"] == []
+
+
+async def test_profile_save_resets_a_previously_failed_synthesis_validated_flag(
+    client, db_session
+):
+    """V6-22a: without this, a PI's hand-edit of a profile the pipeline had marked
+    synthesis_validated=False stays False forever, so the NEXT pipeline run's
+    stored_is_worth_keeping gate (profile_pipeline.py:389, `is not False`) treats
+    the PI's own edit as not worth protecting."""
+    u = await factories.make_user(db_session, name="Keep", email="keep@example.org")
+    await factories.make_profile(db_session, user=u, synthesis_validated=False)
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={
+            "name": "Keep", "email": "keep@example.org",
+            "research_summary": "hand-edited summary", "techniques": "t1",
+        },
+    )
+    assert r.status_code == 302
+    assert (await _prof(db_session, u.id))["synthesis_validated"] is None
+
+
+async def test_onboarding_save_profile_resets_a_previously_failed_synthesis_validated_flag(
+    client, db_session
+):
+    """Mirrors test_profile_save_resets_a_previously_failed_synthesis_validated_flag
+    for /onboarding/save-profile — same stored_is_worth_keeping gate
+    (profile_pipeline.py:389, `is not False`)."""
+    u = await factories.make_user(db_session, email="ob-reset@example.org")
+    await factories.make_profile(db_session, user=u, synthesis_validated=False)
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile",
+        headers=_auth(u.id),
+        data={"email": "ob-reset@example.org", "research_summary": "hand-edited"},
+    )
+    assert r.status_code == 302
+    assert (await _prof(db_session, u.id))["synthesis_validated"] is None
+
+
 async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(
     client, db_session
 ):
@@ -952,6 +1124,170 @@ async def test_delete_account_needs_the_confirmation_word(client, db_session):
             select(func.count()).select_from(Publication).where(Publication.user_id == u.id)
         )
     ).scalar_one() == 0
+
+
+async def test_delete_account_returns_409_on_integrity_error(client, db_session, monkeypatch):
+    u = await factories.make_user(db_session)
+    uid = u.id
+    h = _auth(uid)
+    # factories.make_user only flushes, it never commits — this session's savepoint
+    # scope otherwise still covers u's own INSERT. Commit it for real here so the
+    # ROLLBACK TO SAVEPOINT the route issues below (a real db.rollback(), only its
+    # commit() is mocked) can't unwind past the fixture setup and take u's row with
+    # it; that would make the assertion below pass for the wrong reason (u never
+    # existed at all by that point) regardless of what the route does.
+    await db_session.commit()
+
+    async def _boom(*a, **kw):
+        raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
+
+    monkeypatch.setattr(db_session, "commit", _boom)
+
+    r = await client.post("/profile/delete-account", headers=h, data={"confirm": "delete"})
+    assert r.status_code == 409
+
+    # The route rolls back on IntegrityError before returning 409 — a mutant that
+    # dropped the rollback (or the whole except block) could still return 409 from a
+    # stale response while the delete had actually gone through. Confirm the row
+    # genuinely survives the failed commit.
+    assert await _user_row(db_session, uid) is not None, (
+        "user row was deleted despite the simulated commit failure"
+    )
+
+
+# --- the delete must not orphan a live agent -------------
+#
+# "Owns an active agent" means: an ``agents`` row whose ``user_id`` is the
+# caller (the column is UNIQUE, so at most one) AND whose ``status`` is live or
+# one unconditional admin click from live:
+#
+#   active   — on the simulation roster (src/agent/main.py:110,
+#              src/agent/simulation.py:4221) and posting to Slack under the
+#              PI's name. Deleting the owner leaves status='active' with
+#              user_id NULL: a bot nobody owns.
+#   pending  — admin_update_agent (src/routers/admin.py:952-956) promotes a
+#              pending row straight to 'active' and never re-reads user_id, so
+#              an orphaned pending row becomes an orphaned *live* agent with no
+#              further owner-consented step in between.
+#
+# Parked rows do NOT block. 'inactive' is precisely the remedy the refusal page
+# tells the user to take, so blocking on it would make the remedy unreachable
+# and turn the refusal into a permanent one; 'suspended' is the same off-roster
+# state, reached by an admin rejection (admin.py admin_reject_agent).
+# A *delegation* (agent_delegates) is not ownership and never blocks — see
+# test_a_delegate_of_someone_elses_active_agent_can_still_delete below.
+
+
+async def _agent_row(db, agent_pk):
+    """(row exists?, user_id) — a bare scalar cannot tell a deleted agent row
+    apart from one whose user_id was nulled, which is the whole question here."""
+    exists = await db.scalar(
+        select(func.count()).select_from(AgentRegistry).where(AgentRegistry.id == agent_pk)
+    )
+    owner = await db.scalar(
+        select(AgentRegistry.user_id).where(AgentRegistry.id == agent_pk)
+    )
+    return bool(exists), owner
+
+
+@pytest.mark.parametrize(
+    "agent_status,refused",
+    [("active", True), ("pending", True), ("inactive", False), ("suspended", False)],
+    ids=["active", "pending", "inactive", "suspended"],
+)
+async def test_delete_account_is_refused_only_while_the_owned_agent_could_go_live(
+    client, db_session, agent_status, refused
+):
+    u = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=u, status=agent_status)
+    agent_pk, uid = agent.id, u.id
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"}
+    )
+
+    exists, owner = await _agent_row(db_session, agent_pk)
+    if refused:
+        assert r.status_code == 409, (
+            f"status={agent_status!r}: the delete was not refused ({r.status_code})"
+        )
+        assert await _user_row(db_session, uid) is not None, (
+            f"status={agent_status!r}: the account was deleted anyway"
+        )
+        assert (exists, owner) == (True, uid), (
+            f"status={agent_status!r}: agent orphaned (exists={exists}, user_id={owner})"
+        )
+    else:
+        # Control for the branch above: with a parked agent the very same
+        # request must still delete the account, so the 409s are about the
+        # agent's status and not about a route that refuses everybody.
+        assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1", (
+            f"status={agent_status!r}: a parked agent blocked self-service deletion"
+        )
+        assert await _user_row(db_session, uid) is None
+        assert (exists, owner) == (True, None), (
+            f"status={agent_status!r}: expected the parked agent row to survive "
+            f"with user_id NULL (exists={exists}, user_id={owner})"
+        )
+
+
+async def test_the_delete_confirm_page_explains_the_refusal_instead_of_offering_the_form(
+    client, db_session
+):
+    owner = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=owner, status="active", bot_name="GuardBot")
+    plain = await factories.make_user(db_session)
+    await db_session.flush()
+
+    blocked = await client.get("/profile/delete-account", headers=_auth(owner.id))
+    assert blocked.status_code == 200
+    assert "GuardBot" in blocked.text, "the page does not name the agent that blocks the delete"
+    assert "deactivate" in blocked.text.lower(), "the page does not state the remedy"
+    assert 'action="/profile/delete-account"' not in blocked.text, (
+        "the confirm form is still offered to a user whose POST would be refused"
+    )
+
+    # CONTROL — a user who owns no agent still gets the form, so the absence
+    # above is the guard and not a template that renders nothing for anybody.
+    ok = await client.get("/profile/delete-account", headers=_auth(plain.id))
+    assert ok.status_code == 200
+    assert 'action="/profile/delete-account"' in ok.text
+
+
+async def test_a_delegate_of_someone_elses_active_agent_can_still_delete(client, db_session):
+    """A delegation is not ownership.
+
+    Measured on the production copy (copi_verify @ 0028): William Dion is a
+    delegate of the active ``wiseman`` agent and owns none. Deleting him removes
+    one agent_delegates row (ondelete=CASCADE) and leaves wiseman.user_id intact.
+    """
+    owner = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=owner, status="active")
+    agent_pk, owner_id = agent.id, owner.id
+    delegate = await factories.make_user(db_session)
+    db_session.add(AgentDelegate(agent_registry_id=agent_pk, user_id=delegate.id))
+    await db_session.flush()
+    delegate_id = delegate.id
+
+    r = await client.post(
+        "/profile/delete-account", headers=_auth(delegate_id), data={"confirm": "delete"}
+    )
+    assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1"
+    assert await _user_row(db_session, delegate_id) is None
+    assert await _agent_row(db_session, agent_pk) == (True, owner_id), (
+        "deleting a delegate disturbed the agent's owner"
+    )
+    assert await db_session.scalar(
+        select(func.count()).select_from(AgentDelegate).where(AgentDelegate.user_id == delegate_id)
+    ) == 0
+
+    # CONTROL — the owner of that same agent is still refused, so the pass
+    # above is about delegation and not about a guard that never fires.
+    refused = await client.post(
+        "/profile/delete-account", headers=_auth(owner_id), data={"confirm": "delete"}
+    )
+    assert refused.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -1050,6 +1386,51 @@ async def test_the_private_export_skips_an_empty_private_profile(db_session, exp
     assert profile_export.export_private_profile(user, prof, "emptypi") is not None
     assert (export_dirs.private / "emptypi.md").read_text(encoding="utf-8").startswith(
         "now there is content"
+    )
+
+
+async def test_the_private_export_deletes_the_file_once_content_is_cleared(
+    db_session, export_dirs
+):
+    """Clear-after-write: clearing a private profile must not
+    null the DB columns while leaving a previously
+    exported profiles/private/{agent_id}.md on disk, which src/agent/agent.py's
+    private_profile property keeps reading — it only falls back to "No private
+    instructions yet." when the file is ABSENT. Removing the file (not just
+    skipping the write) is what makes that fallback correct.
+
+    `remove_if_empty=True` is required here: the default is False
+    so that a run_profile_pipeline call — which has no genuine "cleared"
+    case — can never delete a disk-only private profile it did not itself
+    create. Only a real clear path (onboarding.py's save_private_profile)
+    opts in.
+    """
+    user = await factories.make_user(db_session)
+    prof = await factories.make_profile(
+        db_session, user=user, private_profile_md="secret behavioural instructions"
+    )
+
+    path = profile_export.export_private_profile(user, prof, "clearpi")
+    assert path == export_dirs.private / "clearpi.md"
+    assert "secret behavioural instructions" in path.read_text(encoding="utf-8")
+
+    # Clear both columns, as the onboarding/agent-page blank-save paths do.
+    prof.private_profile_md = None
+    prof.private_profile_seed = None
+    assert (
+        profile_export.export_private_profile(user, prof, "clearpi", remove_if_empty=True)
+        is None
+    )
+    assert not path.exists(), (
+        "clearing a private profile must delete the exported file, not merely "
+        "skip re-writing it"
+    )
+
+    # Tolerate absence: clearing an already-cleared (file-less) profile must
+    # not raise.
+    assert (
+        profile_export.export_private_profile(user, prof, "clearpi", remove_if_empty=True)
+        is None
     )
 
 
@@ -1201,6 +1582,9 @@ async def test_saving_the_private_profile_writes_the_private_file_and_a_private_
         await db_session.execute(select(func.count()).select_from(ProfileRevision))
     ).scalar_one() == 1
     assert await _flag(db_session, other.id) is True
+    other_prof = await _prof(db_session, other.id)
+    assert other_prof["private_profile_md"] is None
+    assert other_prof["private_profile_seed"] is None
 
 
 # ---------------------------------------------------------------------------

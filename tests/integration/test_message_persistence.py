@@ -179,6 +179,7 @@ async def test_concurrent_writers_both_persist_at_the_same_instant(db_session, m
     pi_msg = await record_pi_message(
         db_session, run_id=run.id, channel_name="general",
         content="PI: please pivot to aging biology", sender_name="Dr Human (PI)",
+        sender_user_id=None,
     )
     await db_session.flush()
 
@@ -301,14 +302,19 @@ async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
 
 
 async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
-    # Seeding the seen-set (not just the cursor) means the first poll's lookback
-    # re-scan doesn't replay recent history through handle_dm after a restart.
+    """Replay protection across a restart must rely on the durable
+    ``handled_at`` marker, not the in-memory seen-set. A DM that was already
+    handled (or backfilled by migration 0030) is not re-run after a restart; the
+    seed no longer populates ``_pi_dm_seen`` from the DB."""
+    from datetime import UTC, datetime
+
     run = await factories.make_simulation_run(db_session)
     ts = "1700000150.000000"
     db_session.add(PiDmMessage(
         simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
         direction="inbound", content="old directive",
         sender_name="PI", ts=ts, posted_at=float(ts),
+        handled_at=datetime.now(UTC),
     ))
     await db_session.flush()
 
@@ -318,9 +324,82 @@ async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
     engine._pi_handler = handler
 
     await engine._seed_pi_dm_cursor()
-    assert ts in engine._pi_dm_seen
+    assert engine._pi_dm_seen == {}
     await engine._poll_pi_dms_from_db()
     assert handler.calls == []
+
+
+async def test_dm_for_an_unknown_agent_is_marked_handled_not_retried_forever(db_session):
+    """A DM for an agent_id that does not exist in AgentRegistry
+    at all (never provisioned, or the row itself was deleted) must not
+    `continue` before _mark_pi_dm_handled, leaving handled_at NULL — that
+    would match the durable-marker recovery clause forever, re-fetching this
+    row on every poll with no way it will ever be processed."""
+    run = await factories.make_simulation_run(db_session)
+    engine = _engine_for(db_session, run.id, agents=[Agent("su", "SuBot", "Andrew Su")])
+    handler = _RecordingPiHandler()
+    engine._pi_handler = handler
+
+    ts = "1700000200.000000"
+    dm = PiDmMessage(
+        simulation_run_id=run.id, agent_id="ghost", pi_user_id="local:x",
+        direction="inbound", content="hello?", sender_name="PI",
+        ts=ts, posted_at=float(ts),
+    )
+    db_session.add(dm)
+    await db_session.flush()
+    await db_session.refresh(dm)
+
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == []
+    await db_session.refresh(dm)
+    assert dm.handled_at is not None, (
+        "a DM for an agent not on the roster must be marked handled, or it is "
+        "re-fetched by the durable-marker recovery clause on every poll forever"
+    )
+
+
+async def test_dm_for_a_registered_but_not_yet_rostered_agent_is_left_unhandled(
+    db_session,
+):
+    """`self.agents` shrinks on
+    deactivation and is only partially populated before the first roster
+    sync, so "not in self.agents" alone must not be treated as "will never
+    be processed" — stamping handled_at on a
+    DM for an agent that legitimately exists (and may be added to the live
+    roster on the very next sync), permanently discarding it. Only an
+    agent_id with NO AgentRegistry row at all may be stamped immediately."""
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="notyetlive", status="pending")
+    engine = _engine_for(db_session, run.id, agents=[Agent("su", "SuBot", "Andrew Su")])
+    handler = _RecordingPiHandler()
+    engine._pi_handler = handler
+
+    ts = "1700000201.000000"
+    dm = PiDmMessage(
+        simulation_run_id=run.id, agent_id="notyetlive", pi_user_id="local:x",
+        direction="inbound", content="hello?", sender_name="PI",
+        ts=ts, posted_at=float(ts),
+    )
+    db_session.add(dm)
+    await db_session.flush()
+    await db_session.refresh(dm)
+
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == []
+    await db_session.refresh(dm)
+    assert dm.handled_at is None, (
+        "a DM for an agent that exists in AgentRegistry but is not yet on the "
+        "live roster must be left unhandled for a later tick, not discarded"
+    )
+
+    # Once the roster catches up (e.g. the next _sync_roster_from_db), the
+    # row is processed normally on the very next poll.
+    engine.agents["notyetlive"] = Agent("notyetlive", "NotYetLiveBot", "PI")
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == [("notyetlive", "local:x", "hello?")]
+    await db_session.refresh(dm)
+    assert dm.handled_at is not None
 
 
 # ---------------------------------------------------------------
@@ -788,8 +867,8 @@ async def test_flush_chunks_a_batch_that_exceeds_the_bind_parameter_ceiling(db_s
     # deliberately re-queues a failed batch in full rather than dropping it, so an
     # oversized batch fails identically on every retry and the buffer never
     # drains — every message stays in volatile memory while the DB is supposed to
-    # be the durable store. Observed in production on 2026-08-14 with 6,988
-    # buffered rows (~112k parameters), failing once per turn.
+    # be the durable store. Observed in production with thousands of
+    # buffered rows (tens of thousands of parameters), failing once per turn.
     run = await factories.make_simulation_run(db_session)
     engine = _engine_for(db_session, run.id)
 
@@ -812,3 +891,90 @@ async def test_flush_chunks_a_batch_that_exceeds_the_bind_parameter_ceiling(db_s
     # Every row landed, and the buffer drained instead of being re-queued.
     assert await _count_messages(db_session, run.id) == n
     assert engine._pending_persist == []
+
+
+# ---------------------------------------------------------------
+# K-1 — a transient DB failure in _agent_ids_owned_by_user must not get the
+# row stamped HANDLED; it must retry (and apply side effects) next tick.
+# ---------------------------------------------------------------
+
+class _FlakyOwnershipFactory:
+    """Wraps the real (savepoint-rolled-back) test session so exactly the
+    AgentRegistry ownership SELECT fails once — everything else (the poll's
+    own row query, the INGESTED/HANDLED marker writes) behaves normally.
+    Exercises the real ``_agent_ids_owned_by_user`` DB-error path rather than
+    stubbing the method itself.
+    """
+
+    def __init__(self, session):
+        self._s = session
+        self.armed = True
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt, *a, **kw):
+        if self.armed and "agent_registry" in str(stmt).lower():
+            self.armed = False
+            raise RuntimeError("transient DB error")
+        return await self._s.execute(stmt, *a, **kw)
+
+    async def commit(self):
+        return await self._s.commit()
+
+    async def refresh(self, *a, **kw):
+        return await self._s.refresh(*a, **kw)
+
+
+async def test_a_transient_ownership_lookup_failure_retries_instead_of_discarding(
+    db_session,
+):
+    from src.agent.agent import Agent
+    from src.agent.state import ThreadState
+
+    run = await factories.make_simulation_run(db_session)
+    user = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=user, agent_id="su")
+
+    su = Agent("su", "SuBot", "Andrew Su")
+    su.state.active_threads["100.0"] = ThreadState(
+        thread_id="100.0", channel="general", other_agent_id=None,
+    )
+    engine = _engine_for(db_session, run.id, agents=[su])
+    engine.session_factory = _FlakyOwnershipFactory(db_session)
+    engine.message_log.append(LogEntry(
+        ts="100.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+        content="root post", posted_at=100.0, is_bot=True,
+    ))
+
+    row = await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="local:general", channel_name="general",
+        message_ts="150.000001", thread_ts="100.0", posted_at=150.000001,
+        content="please revisit the panel", sender_name="Andrew Su (PI)",
+        sender_user_id=user.id,
+    )
+    await db_session.refresh(row)
+    engine._pi_inbox_cursor = row.created_at + timedelta(seconds=5)
+
+    # Tick 1: the ownership lookup's SELECT raises, so the handler must raise
+    # (not silently resolve to the empty set) and the row must stay
+    # 'ingested' (retried), not get stamped 'handled' — and the ownership-
+    # gated side effect (pi_context) must NOT have been applied yet.
+    await engine._poll_inbound_from_db()
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "ingested"
+    assert su.state.active_threads["100.0"].pi_context is None
+
+    # Tick 2: the lookup succeeds, so the row is fully handled and the side
+    # effect lands.
+    await engine._poll_inbound_from_db()
+    await db_session.refresh(row)
+    assert row.pi_inbound_state == "handled"
+    assert su.state.active_threads["100.0"].pi_context == "please revisit the panel"

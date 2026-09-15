@@ -17,11 +17,12 @@ def _run(coro):
 
 async def _get_db():
     """Get an async database session."""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.config import get_settings
+    from src.database import make_engine
     settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+    engine = make_engine(settings.database_url)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, factory
 
@@ -237,6 +238,7 @@ def backfill_profile_revisions():
 
         from sqlalchemy import select
 
+        from src.config import get_settings
         from src.models import AgentRegistry
         from src.services.profile_versioning import create_revision, latest_revision
 
@@ -246,11 +248,14 @@ def backfill_profile_revisions():
             result = await db.execute(select(AgentRegistry))
             agents = {a.agent_id: a for a in result.scalars().all()}
 
+            # Derived from the setting (env COPI_PROFILES_DIR, default "profiles") rather
+            # than a hardcoded literal, matching every other profile path builder.
+            profiles_root = Path(get_settings().profiles_dir)
             count = 0
             for profile_type, subdir in [
-                ("public", "profiles/public"),
-                ("private", "profiles/private"),
-                ("memory", "profiles/memory"),
+                ("public", profiles_root / "public"),
+                ("private", profiles_root / "private"),
+                ("memory", profiles_root / "memory"),
             ]:
                 dirpath = Path(subdir)
                 if not dirpath.exists():

@@ -1,7 +1,7 @@
 """Migration service: public thread → collab_private channel.
 
-Implements the v1 Migration Rule from specs/privacy-and-channel-visibility.md
-§"When Channels Become Private". Called by the PI Reopens a Proposal flow
+Implements the v1 Migration Rule from specs/privacy-and-channel-visibility.md's
+"When Channels Become Private" section. Called by the PI Reopens a Proposal flow
 (``POST /agent/{agent_id}/proposals/{thread_decision_id}/reopen``) to move a
 thread from its public origin into a new collab_private channel before any PI
 guidance text is posted.
@@ -24,6 +24,19 @@ The service orchestrates:
 Slack-side side-effects are performed before DB writes so a Slack failure
 aborts cleanly without leaving a stale AgentChannel row. If DB writes fail
 after Slack succeeds, we log — the orphan Slack channel can be archived manually.
+
+Every ``AgentSlackClient`` call this module makes is
+synchronous and can block for as long as
+``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s) under a sustained
+throttle. This module is called from async code — the web reopen route and
+the e-mail inbound worker — so calling straight in would freeze the single
+ASGI worker (or the worker process) for that whole retry loop, not just the
+one request. Every such call therefore runs via ``run_slack_call``, which
+moves it to a thread pool dedicated to Slack I/O rather than the process-wide
+default ``asyncio.to_thread`` pool everything else shares. The
+engine's own ``_post_message`` (``src/agent/simulation.py``) is intentionally
+NOT threaded — the main-loop is synchronous by design and already isolated
+in its own process.
 """
 
 from __future__ import annotations
@@ -51,12 +64,33 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.slack_executor import run_slack_call
 
 logger = logging.getLogger(__name__)
 
 # Neutral marker closing the origin public thread. Deliberately carries none of
-# the PI's guidance text — that stays inside the private channel (§G6).
+# the PI's guidance text — that stays inside the private channel.
 _CLOSE_MARKER_TEXT = "⏸️ continuing this discussion off-channel."
+
+
+@dataclass
+class MigrationProgress:
+    """Caller-owned record of whether the migration has yet done anything a retry
+    would duplicate.
+
+    A caller that must decide "retry or give up" cannot answer it from the exception:
+    the same ``RuntimeError`` can come from ``auth.test`` being throttled (nothing has
+    happened; retry) or from the invite that follows ``conversations.create`` (a real
+    private channel now exists; a retry mints a second, orphaned one). Only this
+    function knows how far it got, so it says so here.
+
+    ``safe_to_retry`` starts **False** deliberately. The default is what a caller sees
+    when the migration never ran, never reached its first statement, or was replaced by
+    a double — i.e. when we know nothing — and the safe reading of "we don't know" is
+    that a retry might duplicate a real Slack channel.
+    """
+
+    safe_to_retry: bool = False
 
 
 @dataclass
@@ -94,7 +128,7 @@ def _build_slug(agent_a: str, agent_b: str, origin_channel_name: str) -> str:
 #
 # Kept below slack_client.SLACK_MAX_TEXT_CHARS deliberately: _add_handover_message
 # writes ONE DB row per call, so a post that Slack splits would desynchronise the
-# mirror (8515f65, defect 2). Pinned by
+# mirror. Pinned by
 # tests/unit/test_slack_client_contract.py::test_handover_post_budget_stays_under_the_slack_split_threshold.
 _MAX_POST_CHARS = 3500
 
@@ -395,6 +429,25 @@ async def _migrate_offline(
     )
 
     thread_decision.refined_in_channel = new_channel_id
+
+    # Commit here, not at the caller's convenience — the same durability boundary the
+    # Slack-on path draws at the end of migrate_public_thread_to_private, placed for the
+    # mirror-image reason. Nothing above this line is irreversible on Slack, because
+    # there is no Slack; instead these rows ARE the channel. With Slack off the DB is
+    # the whole conversation store, so the handover (which carries the PI's guidance
+    # verbatim) and the AgentChannel the engine discovers private channels from
+    # (src/agent/simulation.py:2113-2126) exist nowhere else. Leaving them merely
+    # flushed made them hostage to whatever the caller did next, and a caller that
+    # rolled back (the web reopen route losing a race on
+    # uq_proposal_reviews_decision_agent, the e-mail handler's terminal-failure path)
+    # discarded all of them while its recovery arm re-bound refined_in_channel to this
+    # `local:` id — leaving a pointer to rows that no longer existed, which the reopen
+    # route's `rating != -1` guard then stopped any retry from repairing. Committing as
+    # soon as the migration's own work is complete keeps the pointer and its target in
+    # step; a caller's later failure then costs only that caller's own rows (e.g. the
+    # review row), which is recoverable.
+    await db.commit()
+
     logger.info("Slack-off migration: created private channel %s (DB-only)", new_channel_name)
     return MigrationResult(
         channel_id=new_channel_id,
@@ -411,6 +464,7 @@ async def migrate_public_thread_to_private(
     creator_agent_id: str,  # triggering PI's agent — becomes channel creator
     creator_pi_user: User,
     guidance_text: str,
+    progress: MigrationProgress | None = None,
 ) -> MigrationResult:
     """Create a collab_private channel for this thread and close the public origin.
 
@@ -418,9 +472,20 @@ async def migrate_public_thread_to_private(
     other PI's DM fails) are logged but do not abort the migration — the
     private channel is the primary artifact.
 
+    Pass a ``MigrationProgress`` as ``progress`` to learn, when this raises, whether
+    anything irreversible had happened yet; see that class and the
+    "point of no return" comment below. Omitting it is not an error — a caller with
+    no retry to make (the web reopen route answers a human who can simply click
+    again) does not need the distinction.
+
     Does NOT write the ProposalReview row — the caller (reopen endpoint) owns
     that decision and persists it after this function returns.
     """
+    # Nothing has happened yet, on Slack or in the DB, so a failure from here on is
+    # clean to retry until this is cleared again at the point of no return below.
+    if progress is not None:
+        progress.safe_to_retry = True
+
     # Identify the other agent in the thread
     a = thread_decision.agent_a
     b = thread_decision.agent_b
@@ -434,6 +499,13 @@ async def migrate_public_thread_to_private(
 
     # Slack-off: DB-only migration (no channel/invite/post/DM). The handover is
     # written straight to agent_messages for the sim to ingest.
+    #
+    # `progress.safe_to_retry` deliberately stays True across this whole branch: it
+    # makes no Slack call, so its only durable effect is its own commit, and both
+    # outcomes of that commit are retry-safe. If it did not land, nothing exists. If it
+    # landed and only the acknowledgement was lost, it wrote
+    # `thread_decisions.refined_in_channel`, which is exactly what a retrying caller
+    # reads to skip the migration (email_inbound.py's second idempotency guard).
     if not await _slack_enabled_for_migration(db, creator_agent_id, other_agent_id):
         return await _migrate_offline(
             db,
@@ -452,18 +524,31 @@ async def migrate_public_thread_to_private(
     simulation_run_id = await _latest_simulation_run_id(db)
 
     # --- Slack side-effects ------------------------------------------------
+    # run_slack_call everywhere below: _make_client calls
+    # AgentSlackClient.connect(), a blocking Slack API call.
     creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
     other_token = await _get_or_fail_bot_token(db, other_agent_id)
-    creator_client = _make_client(creator_agent_id, creator_token)
-    other_client = _make_client(other_agent_id, other_token)
+    creator_client = await run_slack_call(_make_client, creator_agent_id, creator_token)
+    other_client = await run_slack_call(_make_client, other_agent_id, other_token)
 
     other_bot_user_id = other_client.bot_user_id
     if not other_bot_user_id:
         raise RuntimeError(f"Could not resolve bot user ID for '{other_agent_id}'")
 
     slug = _build_slug(a, b, origin_channel_name)
-    new_channel = creator_client.create_private_channel(slug)
+    # Point of no return. Cleared BEFORE the call, not after it: an
+    # exception escaping create_private_channel (a connection reset, a read timeout —
+    # a SlackApiError is caught in there and returns None instead) leaves it unknown
+    # whether Slack acted on the request, and the slug carries a second-resolution
+    # timestamp, so a retry would ask for a *differently named* channel rather than
+    # colliding on name_taken. Unknown must read as "irreversible".
+    if progress is not None:
+        progress.safe_to_retry = False
+    new_channel = await run_slack_call(creator_client.create_private_channel, slug)
     if not new_channel:
+        # Slack answered and refused: no channel exists, so this one is clean again.
+        if progress is not None:
+            progress.safe_to_retry = True
         raise RuntimeError(f"Slack refused to create private channel '{slug}'")
     new_channel_id = new_channel["id"]
     new_channel_name = new_channel["name"]
@@ -477,7 +562,7 @@ async def migrate_public_thread_to_private(
     )).scalar_one_or_none()
     if creator_pi_slack_id:
         invitees.append(creator_pi_slack_id)
-    if not creator_client.invite_to_channel(new_channel_id, invitees):
+    if not await run_slack_call(creator_client.invite_to_channel, new_channel_id, invitees):
         logger.warning(
             "Some invites to %s failed — channel exists but membership may be incomplete",
             new_channel_id,
@@ -486,7 +571,9 @@ async def migrate_public_thread_to_private(
     # Resolve origin channel ID: we need it to close the origin thread.
     # creator_client caches channel IDs from any earlier lookups, but the
     # web app is short-lived, so just look it up fresh.
-    origin_channel_id = creator_client._resolve_channel_id(origin_channel_name)
+    origin_channel_id = await run_slack_call(
+        creator_client._resolve_channel_id, origin_channel_name,
+    )
 
     # Post the handover as 2+ top-level messages so each stays within
     # Slack's per-message length limit and no content gets orphaned in a
@@ -503,7 +590,7 @@ async def migrate_public_thread_to_private(
     # store — a handover that existed only on Slack would be invisible to a
     # Slack-off restart and to the web conversation view.
     handover_results: list[tuple[str, dict | None]] = [
-        (post, creator_client.post_message(new_channel_id, post))
+        (post, await run_slack_call(creator_client.post_message, new_channel_id, post))
         for post in handover_posts
     ]
 
@@ -523,7 +610,8 @@ async def migrate_public_thread_to_private(
         )
     else:
         try:
-            close_result = creator_client.post_message(
+            close_result = await run_slack_call(
+                creator_client.post_message,
                 origin_channel_id, _CLOSE_MARKER_TEXT, thread_ts=slack_parent,
             )
         except ThreadNotFound:
@@ -544,14 +632,16 @@ async def migrate_public_thread_to_private(
         try:
             # Also invite them to the channel first (so when they click the
             # link they can see the history). Tolerant of already_in_channel.
-            other_client.invite_to_channel(new_channel_id, [other_reg.slack_user_id])
+            await run_slack_call(
+                other_client.invite_to_channel, new_channel_id, [other_reg.slack_user_id],
+            )
             dm_text = _build_other_pi_dm(
                 other_pi_name=other_pi.name,
                 creator_pi_name=creator_pi_user.name,
                 origin_channel_name=origin_channel_name,
                 new_channel_name=new_channel_name,
             )
-            other_client.send_dm(other_reg.slack_user_id, dm_text)
+            await run_slack_call(other_client.send_dm, other_reg.slack_user_id, dm_text)
             invited_other_pi = True
         except Exception as exc:
             logger.warning(
@@ -608,6 +698,21 @@ async def migrate_public_thread_to_private(
 
     # Record the refinement destination on the thread_decision
     thread_decision.refined_in_channel = new_channel_id
+
+    # Commit here, not at the caller's convenience. Everything above this line is
+    # irreversible: the Slack channel exists, both bots are in it, the handover is
+    # posted, and the other PI has been DM'd. Leaving these rows merely flushed made
+    # them hostage to whatever the caller did next — and a caller that rolled back
+    # (the web reopen route losing a race on uq_proposal_reviews_decision_agent, the
+    # e-mail handler's terminal-failure path) discarded the AgentChannel row while the
+    # Slack channel stayed. The engine discovers private channels ONLY from
+    # AgentChannel (src/agent/simulation.py:2113-2126), so the result was a real Slack
+    # channel that no bot would ever read, with thread_decisions.refined_in_channel
+    # pointing at it so no retry could repair it. Committing the DB record as soon as
+    # the external side effect is real keeps the two in step; a caller's later failure
+    # then costs only that caller's own rows (e.g. the review row), which is
+    # recoverable.
+    await db.commit()
 
     return MigrationResult(
         channel_id=new_channel_id,

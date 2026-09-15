@@ -25,6 +25,25 @@ from testcontainers.postgres import PostgresContainer
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _clear_slack_shutdown_requested():
+    """Clear `slack_client.SHUTDOWN_REQUESTED` before AND after every test.
+
+    It is process-wide and sticky by design (see its definition in
+    src/agent/slack_client.py) -- nothing in src/ ever clears it once set,
+    because a real process that set it is exiting anyway. Several test files
+    set it deliberately to exercise shutdown behaviour; without a shared
+    reset, one file's leftover state would poison every later test in the
+    same pytest process with "shutdown already requested". This autouse
+    fixture removes that ordering dependency.
+    """
+    from src.agent.slack_client import SHUTDOWN_REQUESTED
+
+    SHUTDOWN_REQUESTED.clear()
+    yield
+    SHUTDOWN_REQUESTED.clear()
+
+
 @pytest.fixture(scope="session")
 def _pg_container():
     # Allow pointing the suite at an already-running Postgres via TEST_DATABASE_URL
@@ -120,6 +139,17 @@ async def client(db_session, engine, monkeypatch):
     badge_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr("src.main.get_session_factory", lambda: badge_factory)
 
+    # Same reasoning, second app-level global: /api/health does not use the injected
+    # get_db either. It owns a dedicated engine (src/main.py::get_health_engine) so the
+    # probe can carry asyncpg connect/command timeouts -- `asyncio.wait_for` cannot
+    # interrupt a socket read a SQLAlchemy greenlet is parked on, measured at 142 s
+    # against a frozen Postgres -- and that engine is built from settings.database_url,
+    # which is unreachable in tests. Left unpatched it made every /api/health request
+    # answer 503: tests/integration/test_health_route.py::test_health_ok failed exactly
+    # that way, and tests/unit/test_agent_badge_middleware.py had to patch it
+    # separately. Repoint it here so no future test has to know it exists.
+    monkeypatch.setattr("src.main.get_health_engine", lambda: engine)
+
     app = create_app()
 
     async def _override_get_db():
@@ -138,7 +168,7 @@ def _text():
 
 
 # ---------------------------------------------------------------------------
-# Live Slack tier — see .notes/slack-integration-test-plan.md
+# Live Slack tier
 # ---------------------------------------------------------------------------
 
 _LIVE_SLACK_ENV = ("SLACK_TEST_WORKSPACE", "SLACK_TEST_PI_USER_ID",

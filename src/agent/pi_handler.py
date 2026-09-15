@@ -137,52 +137,117 @@ class PIHandler:
 
             if profile_match:
                 new_profile = profile_match.group(1).strip()
-                agent.update_private_profile(new_profile)
 
-                # Persist to DB and record revision
+                # DB first, disk second. The DB is the
+                # primary store; a disk write failure must never be reported to
+                # the PI as success, and it must never be allowed to overwrite a
+                # good DB row with stale content (that was the original defect —
+                # see Agent.update_private_profile / persist_private_profile_to_db).
+                # `db_ok` stays True when no session_factory is configured at
+                # all (e.g. in tests) — that is a deployment choice, not a
+                # failed write, so it must not trigger the "couldn't be saved"
+                # acknowledgement below.
+                # `db_ok` is the one flag the ack and the disk write key on, and
+                # once persist_private_profile_to_db returns True the profile
+                # row is durably committed — nothing after that point may flip
+                # `db_ok` back to False.
+                # The revision bookkeeping (two more SELECTs, create_revision,
+                # a second commit) that used to share this method's outer
+                # try/except could do exactly that: an exception there, AFTER
+                # the profile row was already saved, reported the whole write
+                # as failed — DB held the new content, disk and the in-memory
+                # cache stayed on the old content (skipped per the `if db_ok:`
+                # guard below), and the PI was told to retry. A committed
+                # profile row is final regardless of what happens to its
+                # revision record, so bookkeeping failures are caught and
+                # logged in their own try/except that cannot touch `db_ok`.
+                db_ok = True
                 if self.session_factory:
+                    # `committed` is set the instant persist_private_profile_to_db
+                    # returns True and is never assigned again, so neither the
+                    # revision block nor the session's own __aexit__ (a dropped
+                    # connection on close/rollback) can flip it.
+                    committed = False
                     try:
                         async with self.session_factory() as db:
-                            await agent.persist_private_profile_to_db(db)
-
-                            # Record profile revision
-                            from sqlalchemy import select
-                            from src.models import AgentRegistry, User
-                            from src.services.profile_versioning import create_revision
-                            agent_reg = (await db.execute(
-                                select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-                            )).scalar_one_or_none()
-                            pi_user = (await db.execute(
-                                select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
-                                .where(AgentRegistry.slack_user_id == pi_slack_id)
-                            )).scalar_one_or_none()
-                            if agent_reg:
-                                summary = instruction[:200] if instruction else None
-                                await create_revision(
-                                    db,
-                                    agent_registry_id=agent_reg.id,
-                                    profile_type="private",
-                                    content=new_profile,
-                                    changed_by_user_id=pi_user.id if pi_user else None,
-                                    mechanism="slack_dm",
-                                    change_summary=f"PI instruction: {summary}" if summary else None,
-                                )
-                                await db.commit()
+                            committed = await agent.persist_private_profile_to_db(db, new_profile)
+                            if committed:
+                                try:
+                                    # Record profile revision — best-effort:
+                                    # its failure must not undo the commit above.
+                                    from sqlalchemy import select
+                                    from src.models import AgentRegistry, User
+                                    from src.services.profile_versioning import create_revision
+                                    agent_reg = (await db.execute(
+                                        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+                                    )).scalar_one_or_none()
+                                    pi_user = (await db.execute(
+                                        select(User).join(AgentRegistry, AgentRegistry.user_id == User.id)
+                                        .where(AgentRegistry.slack_user_id == pi_slack_id)
+                                    )).scalar_one_or_none()
+                                    if agent_reg:
+                                        summary = instruction[:200] if instruction else None
+                                        await create_revision(
+                                            db,
+                                            agent_registry_id=agent_reg.id,
+                                            profile_type="private",
+                                            content=new_profile,
+                                            changed_by_user_id=pi_user.id if pi_user else None,
+                                            mechanism="slack_dm",
+                                            change_summary=f"PI instruction: {summary}" if summary else None,
+                                        )
+                                        await db.commit()
+                                except Exception as revision_exc:
+                                    logger.error(
+                                        "[%s] Profile revision bookkeeping failed "
+                                        "after a committed profile row: %s",
+                                        agent_id, revision_exc,
+                                    )
                     except Exception as db_exc:
-                        logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
+                        if committed:
+                            logger.error(
+                                "[%s] Session teardown failed after a committed profile row: %s",
+                                agent_id, db_exc,
+                            )
+                        else:
+                            logger.error("[%s] DB persist failed: %s", agent_id, db_exc)
+                    db_ok = committed
+
+                # Disk is best-effort, and only attempted once the DB persist
+                # actually succeeded: when db_ok is False, nothing was durably saved
+                # anywhere, the PI is told to retry, and the agent must not
+                # start behaving on an instruction it just reported as
+                # unsaved — update_private_profile always sets the in-memory
+                # cache to its argument (see its docstring), so calling it
+                # here on a DB failure would make the ack and the agent's
+                # actual behaviour disagree.
+                if db_ok:
+                    if not agent.update_private_profile(new_profile):
+                        logger.warning(
+                            "[%s] Private profile disk write failed after a "
+                            "successful DB persist; the in-memory cache still "
+                            "reflects the new instruction",
+                            agent_id,
+                        )
 
                 changes = changes_match.group(1).strip() if changes_match else "Profile updated."
 
-                confirmation = (
-                    f"I've updated my private profile to reflect your instruction. "
-                    f"Here's what changed: {changes}\n\n"
-                    f"Here's my full updated profile:\n\n"
-                    f"```\n{new_profile}\n```\n\n"
-                    f"Reply with further instructions to refine, or edit directly "
-                    f"at copi.science/agent/profile/edit."
-                )
-                await self._send_dm(agent_id, pi_slack_id, confirmation)
-                logger.info("[%s] Private profile rewritten per PI instruction", agent_id)
+                if db_ok:
+                    confirmation = (
+                        f"I've updated my private profile to reflect your instruction. "
+                        f"Here's what changed: {changes}\n\n"
+                        f"Here's my full updated profile:\n\n"
+                        f"```\n{new_profile}\n```\n\n"
+                        f"Reply with further instructions to refine, or edit directly "
+                        f"at copi.science/agent/profile/edit."
+                    )
+                    await self._send_dm(agent_id, pi_slack_id, confirmation)
+                    logger.info("[%s] Private profile rewritten per PI instruction", agent_id)
+                else:
+                    await self._send_dm(agent_id, pi_slack_id,
+                        "I received your instruction, but I wasn't able to save it. "
+                        "Please try again in a moment, or edit your profile directly "
+                        "at copi.science/agent/profile/edit.")
             else:
                 logger.warning("[%s] Profile rewrite response missing <profile> tags", agent_id)
                 await self._send_dm(agent_id, pi_slack_id,
@@ -400,7 +465,17 @@ class PIHandler:
         client = self.slack_clients.get(agent_id)
         slack_ts = None
         if client and client.is_connected:
-            result = client.send_dm(pi_slack_id, text)
+            # slack_sdk re-raises non-HTTP transport failures unchanged
+            # (_call_with_retry only catches SlackApiError) — this is the
+            # real unguarded raise on the _poll_inbound_from_db ->
+            # handle_channel_tag -> _send_dm chain. The DB record
+            # below still gets written on failure, so the DM survives as a
+            # DB-only row exactly like the Slack-off path.
+            try:
+                result = client.send_dm(pi_slack_id, text)
+            except Exception as exc:
+                logger.error("[%s] Failed to send PI DM via Slack: %s", agent_id, exc)
+                result = None
             if isinstance(result, dict):
                 slack_ts = result.get("ts")
         else:

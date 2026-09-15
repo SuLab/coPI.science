@@ -54,9 +54,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
-from src.services.llm import _extract_json, get_anthropic_client
+from src.services.llm import extract_json, get_anthropic_client
 from src.services.orcid import fetch_orcid_profile, fetch_orcid_works
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import bump_profile_version
 from src.services.pubmed import convert_dois_to_pmids, fetch_pubmed_records, normalize_doi
 
 PRIVATE_DIR = Path("profiles/private")
@@ -163,6 +164,29 @@ def _slugify_agent_id(name: str) -> str:
     return "".join(c for c in last if c.isalpha()) or "lab"
 
 
+def _bot_name_for(agent_id: str, name: str) -> str:
+    """Digit-aware bot name, byte-identical to scripts/backfill_agents._bot_name_for.
+
+    Deliberately duplicated rather than imported: `scripts/` is not an importable
+    package (no `__init__.py`), and this file's documented invocation is
+    `python scripts/generate_sparsedata_user.py`, which puts `scripts/` — not the
+    repo root — on `sys.path`. A cross-script import therefore raises
+    ModuleNotFoundError for the operator while still passing under pytest.
+    `tests/unit/test_generate_sparsedata_user.py` pins the two copies to agree.
+
+    The previous inline version used `agent_id[0]` literally, so a
+    third same-initial namesake ("pwu2") produced "PWuBot" — a duplicate of the
+    second Wu's bot name, with no unique constraint on `agents.bot_name` to catch it.
+    """
+    last = name.strip().split()[-1]
+    last_alpha = "".join(c for c in last if c.isalpha())
+    stem = "".join(c for c in agent_id if not c.isdigit())
+    suffix = agent_id[len(stem):]
+    if stem.lower() == last_alpha.lower():
+        return f"{last_alpha.capitalize()}{suffix}Bot"
+    return f"{agent_id[0].upper()}{last_alpha.capitalize()}{suffix}Bot"
+
+
 async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     base = _slugify_agent_id(name)
     candidate = base
@@ -170,13 +194,15 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     if coll.scalar_one_or_none() is None:
         return candidate
     initial = name.strip()[0].lower() if name.strip() else "x"
-    candidate = f"{initial}{base}"
-    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == candidate))
+    prefixed = f"{initial}{base}"
+    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == prefixed))
     if coll.scalar_one_or_none() is None:
-        return candidate
-    # Last resort: numeric suffix
+        return prefixed
+    # Last resort: numeric suffix appended to the PREFIXED candidate — restarting
+    # from the bare stem would diverge from agent_page.derive_agent_identity on
+    # a third same-initial collision.
     for i in range(2, 20):
-        candidate = f"{base}{i}"
+        candidate = f"{prefixed}{i}"
         coll = await db.execute(
             select(AgentRegistry).where(AgentRegistry.agent_id == candidate)
         )
@@ -336,9 +362,8 @@ async def _disambiguate(
       2. that author's first initial matches the input name's first initial
       3. that author's affiliation matches one of the input affiliations
 
-    The first-initial requirement (added 2026-06-03) is critical for common
-    surnames like Chen/Liu where surname + affiliation alone matched many
-    distinct researchers.
+    The first-initial requirement is critical for common surnames like Chen/Liu
+    where surname + affiliation alone matched many distinct researchers.
     """
     if not pmids:
         return [], 0
@@ -497,7 +522,7 @@ def _synthesize(context_text: str, name: str) -> dict[str, Any]:
     )
     response_text = message.content[0].text
     try:
-        return _extract_json(response_text)
+        return extract_json(response_text)
     except ValueError:
         logger.error("Sparse synthesis JSON parse failed for %s; raw:\n%s", name, response_text)
         raise
@@ -599,9 +624,9 @@ async def _persist(
     profile.disease_areas = synthesized.get("disease_areas", [])
     profile.key_targets = synthesized.get("key_targets", [])
     profile.keywords = synthesized.get("keywords", [])
-    profile.profile_version = (profile.profile_version or 0) + 1
     profile.profile_generated_at = datetime.now(timezone.utc)
     await db.flush()
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     # AgentRegistry (upsert)
     agent_result = await db.execute(
@@ -610,12 +635,11 @@ async def _persist(
     agent = agent_result.scalar_one_or_none()
     if agent is None:
         agent_id = await _resolve_agent_id(row.name, db)
-        last_name = row.name.strip().split()[-1]
-        last_alpha = "".join(c for c in last_name if c.isalpha())
-        if agent_id == _slugify_agent_id(row.name):
-            bot_name = f"{last_alpha.capitalize()}Bot"
-        else:
-            bot_name = f"{agent_id[0].upper()}{last_alpha.capitalize()}Bot"
+        # Digit-aware bot-name derivation: mirroring agent_id[0] literally would
+        # make a third same-initial namesake ('pwu2') collide with the second
+        # Wu's 'PWuBot'. Reuse backfill_agents._bot_name_for, which already
+        # strips the numeric suffix before deriving the initial.
+        bot_name = _bot_name_for(agent_id, row.name)
         agent = AgentRegistry(
             agent_id=agent_id,
             user_id=user.id,

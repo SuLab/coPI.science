@@ -17,6 +17,12 @@ docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postg
   app python -m pytest tests/ -v
 ```
 
+**Note (2026-09, #27 I3):** the command above works against the **dev** compose file, whose
+`.:/app` bind mount supplies `tests/`. `tests/` is excluded from the built image by
+`.dockerignore`, so the same command against a prod-built container reports
+"file or directory not found: tests/". Run the suite on the host (`./scripts/ci.sh`) or with the
+dev compose file.
+
 The named database must already exist — the suite migrates it, it does not create
 it. Add a fresh scratch DB with
 `docker compose exec -T postgres createdb -U copi copi_xN`, and give concurrent
@@ -72,9 +78,11 @@ docker compose $C --profile agent run -d --name agent-run agent python -m src.ag
 
 On resume the sim fetches Slack history for each bot in roster order before reaching
 turn 1. Slack throttles this hard — expect ~10 minutes of
-`[<first-agent>] Rate limited, retrying in 10s (attempt 1/3)` before the first
-`=== Turn 1 ===`. Repeated `attempt 1/3` (never `2/3`) means each call 429s once then
-succeeds on retry — that is forward progress, not a hang.
+`[<first-agent>] Rate limited, retrying in 10s (attempt 1/8, 10.0s/180.0s of wait
+budget used)` before the first `=== Turn 1: <agent> ===`. Repeated `attempt 1/8`
+(never `2/8`) means each call 429s once then succeeds on retry — that is forward
+progress, not a hang (RC-3 on this branch raised the ceiling from 3 attempts to 8 and
+added the 180s cumulative wait-budget figure logged alongside it).
 
 **Before restarting**, always save logs and rebuild containers:
 
@@ -88,12 +96,36 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 # 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
 #    skips the shutdown flush and permanently loses the in-flight turn's
 #    messages (the DB, not Slack, is the durable store). `docker stop` sends
-#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
+#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish. One
+#    SIGTERM stops after the current turn and aborts Slack retry sleeps 20 s
+#    later; a SECOND signal aborts Slack immediately (the DB flush still
+#    runs); a THIRD terminates the process at once and can lose the flush --
+#    never send a third unless the process is wedged.
 docker stop -t 30 agent-run
 docker rm agent-run
 
-# 3. Rebuild app + worker (picks up code changes)
-docker compose $C up -d --build app worker
+# 3. Redeploy app + worker + grantbot against the migrated schema — via
+#    scripts/redeploy.sh, NOT a bare `up -d --build`. `depends_on: migrate: condition:
+#    service_completed_successfully` only orders container CREATION: on an
+#    already-running stack, an existing exited `migrate` container from the last
+#    deploy can satisfy that condition without being re-run against the freshly
+#    built image, so old code can keep serving requests against a schema the new
+#    migration hasn't applied yet (audit 2026-09-08 RC-6, #27 I2; audit 2026-09-10
+#    R-4 added grantbot, which has the identical depends_on shape and was
+#    otherwise left running the old image). redeploy.sh builds
+#    migrate+app+worker+grantbot, STOPS app/worker/grantbot first, runs migrate
+#    and checks its exit code, only then starts the new app/worker/grantbot, then
+#    reloads nginx (the recreated app container gets a new IP — see the
+#    nginx-stale-upstream-ip memory note). `agent` is NOT part of this — it is a
+#    one-off with its own restart runbook above. It refuses to run unless both prod compose files are visible
+#    (via $COMPOSE_FILE or -f) and never passes an orphan-removal flag. The image
+#    runs as UID 10001, so profiles/ and data/ on the host must already be owned
+#    by 10001:10001 (never prompts/ — see docs/production-migration.md §10.8 and
+#    Part R.5 of docs/plans/2026-09-02-close-issues-20-27.md) or the services
+#    that mount them fail to write into their bind mounts — profiles/ and
+#    prompts/ are mounted on app/worker (and agent/grantbot); data/ is mounted
+#    only on agent/grantbot, not app/worker.
+./scripts/redeploy.sh $C
 
 # 4. Rebuild the agent image too — prod bakes code into the image, so skipping
 #    this silently runs whatever source was current at the last build.
@@ -114,6 +146,18 @@ the whole repo at `/app`, which is why this used to be a restart-only step.)
 they can decide whether to restart.** Roster changes — activating/inactivating agents or
 setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're
 picked up live by `_sync_roster_from_db`.
+
+**One-time Slack-ts repair (legacy rows).** A workspace that predates the DB-primary
+conversation model may have `agent_messages` rows with `slack_ts IS NULL`. Replies to
+threads rooted on those rows are silently kept off Slack — `_slack_parent_ts`
+(`src/agent/simulation.py`) returns `None` for a legacy root and callers skip the
+mirror rather than guess a timestamp Slack never issued. Run
+`docker compose exec -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py --apply` once, before your
+next restart, to ask Slack which timestamps actually exist and repair them (safe to
+re-run; read-only against Slack otherwise). `docs/production-migration.md` §8 Step 8
+walks through this as an ordered step after the migration and before the app-code
+deploy for a *fresh* migration; if your workspace is already at head and has never run
+it, run it manually — nothing else will prompt you to.
 
 ## Adding New PIs
 
@@ -139,7 +183,7 @@ Each agent needs an `AgentRegistry` row with a unique `agent_id` (lowercase last
 and `bot_name` (`{LastName}Bot`), created `status='pending'`. Self-service signups
 (`src/routers/agent_page.py`) and the backfill scripts both create these automatically.
 
-**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). The web UI applies this logic automatically.
+**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). If that prefixed id is *also* taken (a third same-initial namesake), append a numeric suffix to the prefixed candidate (e.g. `pwu2` / `PWu2Bot`). The web UI applies this logic automatically.
 
 ### 3. Provision the Slack bot + activate (admin UI)
 

@@ -1,4 +1,4 @@
-"""Tests for the LLM prompt-injection delimiter helper (SEC-14)."""
+"""Tests for the LLM prompt-injection delimiter helper."""
 
 from src.agent.prompt_safety import delimit
 

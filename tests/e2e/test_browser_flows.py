@@ -1,11 +1,11 @@
-"""Task 12 — browser flows, as repeatable scripts.
+"""Browser flows, as repeatable scripts.
 
 Two layers, because the two things worth recording are different:
 
 1. **``FLOWS``** — a machine-readable transcript of every flow: what to open,
    what to click, and what must be visible. This is the part a human (or an
-   MCP-driven browser agent) replays. Playwright-over-MCP is interactive, so the
-   plan (.notes/full-system-test-plan.md, Task 12) asks for scripts rather than
+   MCP-driven browser agent) replays. Playwright-over-MCP is interactive, so
+   scripts are used rather than
    pytest tests; ``FLOWS`` is that script, and ``test_every_flow_is_well_formed``
    keeps it honest.
 

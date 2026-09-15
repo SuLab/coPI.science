@@ -2,17 +2,15 @@
 
 Revision ID: 0022
 Revises: 0021
-Create Date: 2026-07-30 00:00:00.000000
 
 Renumbered from 0019 at merge time. The cohort branch was cut before main's
 db-primary work, so its original "0019" collided with 0019_agent_message_content:
 two revisions sharing an id resolve to whichever file sorts last, which silently
 skips the other while stamping the DB as fully migrated. Revision ids are assigned
-at merge, never at branch. See .notes/cohort-system-v2.md §4.2 / §14 and the
-alembic guard in scripts/ci.sh.
+at merge, never at branch; see the alembic guard in scripts/ci.sh.
 
 Downgrades are idempotent (if_exists) so a rollback cannot wedge on an object that
-a partially-applied upgrade never created. See v2 §14.4.
+a partially-applied upgrade never created.
 """
 
 from typing import Sequence, Union
@@ -30,7 +28,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # A cohort is a named group of agents permitted to act on each other's
-    # activity during simulation. See .notes/cohort-system-v2.md.
+    # activity during simulation.
     op.create_table(
         "cohorts",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -91,7 +89,7 @@ def upgrade() -> None:
     # and NO FK on cohort_id. `topology` snapshots the full cohort->members map
     # plus the active gate settings at run start and on every change, so a
     # completed simulation run stays attributable to the configuration that
-    # produced it (v2 §13.1).
+    # produced it.
     op.create_table(
         "cohort_audit_events",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),

@@ -2,9 +2,9 @@
 
 Idempotence is the property that matters: this script will be run more than once
 against production, and the second run must be a no-op rather than a duplicate-key
-crash or a silent double-insert. The audit assertions exist because blackbird's 62
-cohorts were seeded by direct SQL and have no `created`/`agent_added` rows at all —
-that is the failure this task is written to avoid.
+crash or a silent double-insert. These assertions exist because cohorts seeded by
+direct SQL can end up with no `created`/`agent_added` rows at all — that is the
+failure this test is written to avoid.
 """
 
 import pytest

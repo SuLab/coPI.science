@@ -537,7 +537,7 @@ def _verify_fake(counts_out="public.users|3\n", tables_out="public.users\n", **k
     # are chosen from text that appears in exactly one of the two generated SQL
     # strings, so a test overriding only one of tables_out/counts_out actually
     # exercises the listing -> build-query -> count flow instead of coincidentally
-    # passing because both calls return the same canned string (audit F8).
+    # passing because both calls return the same canned string.
     fake = cb.FakeRunner({
         "pg_isready": "",
         "State.Running": "true",
@@ -771,7 +771,7 @@ def test_build_status_stamps_last_success_utc_to_now_on_a_successful_run():
 
 def test_build_status_carries_last_success_utc_forward_on_a_failed_run():
     # This is what lets a reader distinguish "ran and failed" from "did not run"
-    # (spec §7.2) — a failed run must not clobber the last known-good timestamp.
+    # — a failed run must not clobber the last known-good timestamp.
     now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
     previous = {"last_success_utc": "2026-08-18T08:00:00Z"}
     status = cb.build_status([_bad_result()], now, previous=previous)
@@ -829,9 +829,9 @@ def test_failure_mail_is_one_message_for_multiple_failures():
 
 
 def test_failure_mail_reports_offsite_failures_even_when_every_stack_verified():
-    # Spec §9: OFFSITE_CMD non-zero must be mailed even though StackResult.ok stays
+    # OFFSITE_CMD non-zero must be mailed even though StackResult.ok stays
     # True (a verified local backup still exists) — the mail is the only place this
-    # surfaces, since it is deliberately kept out of StackResult.ok (audit F7).
+    # surfaces, since it is deliberately kept out of StackResult.ok.
     now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
     subject, body = cb.render_failure_mail(
         [_ok_result()], now, offsite_failed=["copi-python"]
@@ -968,7 +968,7 @@ def test_enough_free_space_requires_factor_multiple():
 
 def test_enough_free_space_refuses_when_demand_is_unmeasured():
     # last_dump_bytes=0 must NOT read as "no constraint" — that is exactly the
-    # no-verified-dump-yet gap (audit F3) that let this guard pass on a full disk,
+    # no-verified-dump-yet gap that let this guard pass on a full disk,
     # since free_bytes >= factor * 0 is trivially true for any free_bytes. cmd_run
     # now falls back to the live DB size before ever calling this with a real 0;
     # if that fallback itself fails, the guard must refuse, not silently pass.
@@ -976,9 +976,8 @@ def test_enough_free_space_refuses_when_demand_is_unmeasured():
 
 
 def test_enough_free_space_is_false_when_free_and_demand_are_both_zero():
-    # The exact case named by the audit: a full disk with an unmeasured demand.
-    # 0 >= factor * 0 is mathematically True, which is precisely the no-op this
-    # guard must not be.
+    # A full disk with an unmeasured demand: 0 >= factor * 0 is mathematically
+    # True, which is precisely the no-op this guard must not be.
     assert cb.enough_free_space(free_bytes=0, last_dump_bytes=0, factor=3) is False
 
 

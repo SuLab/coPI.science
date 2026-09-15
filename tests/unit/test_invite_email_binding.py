@@ -1,4 +1,4 @@
-"""SEC-6: delegate invite acceptance must be bound to the invited email."""
+"""Delegate invite acceptance must be bound to the invited email."""
 
 import uuid
 from datetime import UTC, datetime, timedelta

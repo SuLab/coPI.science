@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from src.agent.foa_pattern import FOA_NUMBER_RE as _FOA_NUMBER_RE
+from src.agent.foa_pattern import extract_foa_number
+from src.agent.mentions import BOT_TAG_RE
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
-
 
 # ---------------------------------------------------------------------------
 # Announcement-only detector (atomic spin-off rule)
@@ -19,10 +21,20 @@ from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
 # Intent + future-post phrases that indicate the agent is merely announcing
 # a forthcoming spin-off post instead of creating it.
+#
+# The apostrophe class in the two contraction phrases covers every code point
+# this text can carry it in: U+0027 apostrophe, U+2019 right
+# single quotation mark (Slack's smart-quote autocorrect and most LLM output),
+# U+02BC modifier letter apostrophe, U+2018 left single quotation mark (an LLM
+# that opens a quote and never closes it), U+00B4 acute accent (a common
+# keyboard-layout substitution) and U+FF07 fullwidth apostrophe (CJK input
+# methods). The classes in the two phrases must stay identical — every code
+# point is pinned against both in tests/unit/test_funding_rules.py's
+# TestApostropheClass, which fails if one class drifts from the other.
 _ANNOUNCEMENT_PHRASES = [
-    r"\bi['']?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
+    r"\bi['’ʼ‘´＇]?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
     r"\bi will (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
-    r"\bi'?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
+    r"\bi['’ʼ‘´＇]?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
     r"\bgoing up now\b",
     r"\bposting (it |the )?(now|shortly|next)\b",
     r"\blook (out )?for (my|the|it)\b",
@@ -92,7 +104,14 @@ _ACK_PHRASES = [
 ]
 _ACK_RE = re.compile("|".join(_ACK_PHRASES), re.IGNORECASE)
 
-_FOA_NUMBER_RE = re.compile(r"\b(PA[RS]?-\d{2}-\d{3,4}|RFA-[A-Z]{2,3}-\d{2}-\d{3,4})\b")
+# A message this long is presumed substantive even if it opens with an ack
+# phrase — see is_acknowledgment_only_funding_reply.
+# 10, not a rounder-looking 12: a real ack-phrase message ("Agreed, we can
+# send the plasmids and the mice next week.") is 11 words, and a threshold
+# that does not flip that sentence does not close this gap. Verified safe
+# against every TestAcknowledgmentOnly.test_positive_cases fixture — the
+# longest ("Sounds good — see you there.") is 6 words.
+_ACK_SUBSTANTIVE_WORD_COUNT = 10
 
 
 def _strip_for_ack_check(text: str) -> str:
@@ -127,6 +146,13 @@ def is_acknowledgment_only_funding_reply(text: str) -> bool:
     # A question is substantive engagement, not an ack.
     if "?" in stripped:
         return False
+    # A reply this long is doing more than acknowledging, even one that opens
+    # with an ack phrase and never touches the (necessarily incomplete) marker
+    # vocabulary above: without this, "Agreed, we can send the plasmids
+    # and the mice next week." would be rejected as ack-only for lacking a listed
+    # noun.
+    if len(stripped.split()) >= _ACK_SUBSTANTIVE_WORD_COUNT:
+        return False
     cleaned = _strip_for_ack_check(stripped)
     if not cleaned:
         # Only emoji / @mention — treat as ack-only.
@@ -149,9 +175,6 @@ class FundingThreadSummary:
 
     def is_empty(self) -> bool:
         return not (self.alignments or self.pairings_proposed or self.spinoffs)
-
-
-_TAG_RE = re.compile(r"@(\w+[Bb]ot)\b")
 
 
 def _first_meaningful_line(content: str, limit: int = 160) -> str:
@@ -186,10 +209,10 @@ def summarize_funding_thread(
     root = history[0]
     replies = history[1:]
 
-    foa_number = None
-    m = _FOA_NUMBER_RE.search(root.content)
-    if m:
-        foa_number = m.group(0)
+    # Canonical (upper-case) form — see extract_foa_number. The scan below
+    # compares against upper-cased bodies, so the two spellings of one FOA
+    # number cannot hide a spin-off from each other.
+    foa_number = extract_foa_number(root.content)
 
     alignments: list[tuple[str, str]] = []
     pairings: list[tuple[str, str]] = []
@@ -197,7 +220,7 @@ def summarize_funding_thread(
 
     for entry in replies:
         alignments.append((entry.sender_name, _first_meaningful_line(entry.content)))
-        for tag_match in _TAG_RE.finditer(entry.content):
+        for tag_match in BOT_TAG_RE.finditer(entry.content):
             bot_name = tag_match.group(1)
             key = (entry.sender_name, bot_name.lower())
             if key in seen_pairings:
@@ -215,7 +238,12 @@ def summarize_funding_thread(
                 continue
             if not is_funding_post(entry.content):
                 continue
-            if foa_number not in entry.content:
+            # Case-insensitive: the number was extracted with an IGNORECASE
+            # pattern, so a case-sensitive compare here silently dropped
+            # spin-offs whose casing differs from the root's — NIH's own
+            # permalink lower-cases the number — and an agent that cannot see
+            # the existing spin-off would post a duplicate.
+            if foa_number not in entry.content.upper():
                 continue
             spinoffs.append((entry.ts, _first_meaningful_line(entry.content)))
 

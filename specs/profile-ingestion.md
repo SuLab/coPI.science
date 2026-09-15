@@ -183,7 +183,10 @@ If validation fails: re-run synthesis once with stricter prompt. If it fails aga
    c. Store new Publication entities
    d. Run LLM synthesis with updated publication set → candidate profile
    e. Compare candidate arrays against current arrays (techniques, experimental_models, disease_areas, key_targets, keywords, grant_titles)
-   f. If any array differs: store as `pending_profile`, notify user
+   f. NOT IMPLEMENTED: this was designed to store a candidate as `pending_profile` for
+      side-by-side review, but no code ever wrote that column (issue #22 V6-pend). Today
+      a differing candidate is written straight to the live profile fields by whatever
+      pipeline run produced it, gated only by `_validate_profile` (see PR V1/V6 fixes).
    g. If no arrays differ: no action needed (new publication stored but profile unchanged)
 4. Refresh frequency is configurable (default: monthly). No regeneration if nothing changed.
 

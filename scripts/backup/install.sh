@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Install the verified-backup system onto this host. Idempotent: safe to re-run
-# after a code change. Does NOT enable the timers — see the go-live checklist in
-# docs/specs/2026-08-18-postgres-backup-verification-design.md §10. Enabling before
-# the failure-injection harness has passed ships an unproven backup system.
+# after a code change. Does NOT enable the timers — run scripts/backup/failure_injection.sh
+# first. Enabling before the failure-injection harness has passed ships an
+# unproven backup system.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

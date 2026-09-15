@@ -3,12 +3,15 @@
 import asyncio
 import logging
 import re
+import time
+import weakref
 import xml.etree.ElementTree as ET
 from typing import Any
 
 import httpx
 
 from src.config import get_settings
+from src.services.http_retry import get_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +72,132 @@ def reconcile_pub_doi(
         return assigned, "ok"
     return auth, "corrected"
 
-# Rate limiting: with API key 10/s, without 3/s
-_request_semaphore = asyncio.Semaphore(8)  # Conservative limit
+# Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
+# traffic at 10 req/s. TWO SEPARATE MECHANISMS enforce that:
+#   * the semaphore below bounds CONCURRENCY — how many NCBI requests may be in
+#     flight at once. It does NOT bound the aggregate rate: N slots each sleeping
+#     `interval` seconds would allow up to N/interval requests per second, well
+#     past the ceiling.
+#   * `_pace_ncbi` below bounds RATE — a monotonic-clock gate that spaces request
+#     STARTS at least `interval` apart, process-wide, no matter how many callers
+#     are in flight or which event loop they run on.
+# The slot is taken per ATTEMPT (via get_with_retry's `attempt_context`), not
+# once around the whole retry loop, so a caller backing off after a 429 no longer
+# occupies a slot while it is issuing no request at all. That
+# cannot raise the in-flight count above the slot count: a retry has to
+# re-acquire before it may send anything.
+#
+# The semaphores are per EVENT LOOP, not per process. Like
+# `asyncio.Lock`, an `asyncio.Semaphore` binds to a loop not at construction but
+# at its first *contended* acquire — `Semaphore.acquire` only reaches
+# `self._get_loop()` on the branch where it has to wait. A module-level singleton
+# therefore survives any number of `asyncio.run()` calls right up until the day
+# one of them contends it, and then raises "bound to a different event loop" in
+# every later loop. Keying on the running loop removes the hazard instead of
+# documenting it. The keys are weak, so a finished loop's entry goes away with
+# the loop.
+_NCBI_SEMAPHORE_SIZES = {True: 8, False: 2}
+_ncbi_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[bool, asyncio.Semaphore]
+] = weakref.WeakKeyDictionary()
+
+
+def _ncbi_semaphore(has_key: bool) -> asyncio.Semaphore:
+    """Return the RUNNING loop's NCBI concurrency semaphore for `has_key`.
+
+    Created on first use per (loop, has_key) pair — see the comment above for why
+    a single process-wide Semaphore is a latent cross-loop failure.
+    """
+    loop = asyncio.get_running_loop()
+    per_loop = _ncbi_semaphores.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _ncbi_semaphores[loop] = per_loop
+    sem = per_loop.get(has_key)
+    if sem is None:
+        sem = asyncio.Semaphore(_NCBI_SEMAPHORE_SIZES[has_key])
+        per_loop[has_key] = sem
+    return sem
+
+
+# Seconds between request STARTS, i.e. the inverse of the aggregate rate ceiling
+# `_pace_ncbi` enforces. NCBI's policy is 10 req/s keyed, 3 req/s keyless. The
+# gate only bounds the start SCHEDULE, not the departures: if the event loop
+# itself stalls (e.g. building a fresh httpx.AsyncClient per call, ~32ms of
+# blocking SSL work), every reservation that came due during the stall departs
+# in the same tick, bursting past the ceiling. And `1/interval` is only an
+# asymptotic average — the worst case NCBI actually meters in a 1s window is
+# `floor(1/interval) + 1` starts, since N starts spaced `interval` apart span
+# less than N*interval seconds. Both properties are pinned by tests
+# (`test_the_keyed_burst_bound_is_one_under_the_policy_ceiling` and
+# `test_a_concurrent_burst_never_exceeds_the_ncbi_arrival_ceiling`).
+
+# Built ONCE at import and shared across calls: building a fresh
+# `httpx.AsyncClient` (and its SSL context) per call blocks the event loop long
+# enough to defeat `_pace_ncbi` above, since `asyncio.gather` builds every
+# client before any of them yields at their first real await. Uses
+# `httpx.create_ssl_context()` rather than a hand-rolled context so it cannot
+# drift from httpx's own TLS defaults. An `ssl.SSLContext` is not an asyncio
+# object, so unlike a shared `AsyncClient` it can be built once at import
+# without binding to an event loop (the loop-affinity bug the semaphore above
+# works around).
+_NCBI_SSL_CONTEXT = httpx.create_ssl_context()
+
+# Keyed: 0.112s, chosen so the worst-case burst (`floor(1/interval) + 1`) stays
+# one request under the keyed ceiling of 10/s rather than landing exactly on it
+# with no jitter margin. Keyless stays at 0.34s (worst-case burst 3, its own
+# ceiling) — a fallback path production doesn't use, so it is held at its
+# ceiling rather than under it.
+_NCBI_PACING_SECONDS = {True: 0.112, False: 0.34}
+
+# Total retry budget for ONE logical `_ncbi_get`, in seconds (over-impl R3: the
+# retry loop shipped with four attempts and no total ceiling). 120 s = 2x the 60 s
+# client timeout below, so a fully hung NCBI spends two attempts (t=0 and t=60.5,
+# with the 0.5 s backoff) instead of four, and a `Retry-After: 60` storm two
+# instead of four. `get_with_retry` never cancels an attempt already in flight, so
+# the honest worst case for one logical call is deadline + one client timeout =
+# 180 s, down from 420 s — see `_out_of_budget` in http_retry.py. This bounds each
+# CALL, not the pipeline: `convert_dois_to_pmids` still issues one call per
+# unresolved DOI, so the aggregate is 180 s x DOI count in the worst case.
+_NCBI_RETRY_DEADLINE_SECONDS = 120.0
+
+# Overridable by tests (see test_pubmed_contract.py) — the retry loop's own
+# exponential backoff, not the pacing gate above.
+_RETRY_BACKOFF = 0.5
+
+# Shared clock state for `_pace_ncbi`: a monotonic-clock reservation cursor, not a
+# lock. An `asyncio.Lock` does not bind to a loop at construction — lazy
+# construction was never the fix — it binds at its first *contended* acquire,
+# inside `await lock.acquire()`. A module-level singleton lock acquired from more
+# than one event loop over the process's life (a fresh loop per `asyncio.run()`
+# call, or per test with function-scoped event loops) eventually gets acquired
+# from a second loop and raises. The cursor below needs no lock: every caller
+# does one read-modify-write of `_ncbi_next_start` with no `await` between the
+# read and the write, which is atomic on a single-threaded event loop — nothing
+# else can run between two non-`await` statements — so concurrent callers can't
+# race it, and the cursor itself is never bound to any loop at all — which is why
+# it stays a single process-wide value while the semaphores above have to be
+# rebuilt per loop, and why the RATE ceiling still holds
+# process-wide even though the CONCURRENCY bound is now per loop.
+_ncbi_next_start = 0.0
+
+
+async def _pace_ncbi(interval: float) -> None:
+    """Space NCBI request starts at least `interval` seconds apart, process-wide.
+
+    Enforces the E-utilities ceiling (3 req/s anonymous, 10 req/s with an api_key)
+    regardless of how many callers are in flight — the semaphore alone does not:
+    N slots each sleeping `interval` allow N/interval requests per second. Reserves
+    the next start slot on `_ncbi_next_start` with a single atomic
+    read-modify-write (no lock, nothing loop-bound — see the module-level comment
+    above), then sleeps out whatever wait that reservation implies.
+    """
+    global _ncbi_next_start
+    now = time.monotonic()
+    start = max(now, _ncbi_next_start)
+    _ncbi_next_start = start + interval
+    if start > now:
+        await asyncio.sleep(start - now)
 
 
 # NCBI's E-utilities usage policy requires every request to identify the caller with
@@ -82,18 +209,42 @@ _NCBI_TOOL = "copi-science"
 
 
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
-    """Make a rate-limited, identified GET request to NCBI."""
+    """Make a rate-limited, identified, retried GET request to NCBI.
+
+    Retries a transient failure through the shared ``get_with_retry`` helper. Pacing
+    happens via ``_pace_ncbi``, passed in as ``get_with_retry``'s ``before_request`` hook
+    rather than called once here directly — the hook fires at the top of EVERY loop
+    iteration, including the first, so every attempt (not just the initial request) reserves a
+    pacing slot. This replaces, rather than supplements, the old single pre-call
+    ``await _pace_ncbi(...)``: keeping both would reserve twice for the first attempt. A retry's own
+    exponential backoff no longer has to out-run the pacing interval on its own — the gate now
+    applies uniformly, so a burst of 429s can't re-fire faster than NCBI's ceiling the way it could
+    when only the first attempt was paced (measured: 16-25 req/s against a 10 req/s ceiling under
+    concurrency).
+
+    The concurrency slot is likewise passed in as ``attempt_context`` rather than wrapped around
+    the whole call, so it is held for one attempt and released across the backoff,
+    and it is resolved per attempt through ``_ncbi_semaphore`` so it belongs to the loop actually
+    running. ``deadline`` caps the total retry budget.
+    """
     settings = get_settings()
-    if settings.ncbi_api_key:
+    has_key = bool(settings.ncbi_api_key)
+    if has_key:
         params["api_key"] = settings.ncbi_api_key
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
-    async with _request_semaphore:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            await asyncio.sleep(0.12)  # ~8 req/s
-            return resp
+    async with httpx.AsyncClient(
+        timeout=60, follow_redirects=True, verify=_NCBI_SSL_CONTEXT
+    ) as client:
+        return await get_with_retry(
+            client,
+            url,
+            params=params,
+            backoff=_RETRY_BACKOFF,
+            before_request=lambda: _pace_ncbi(_NCBI_PACING_SECONDS[has_key]),
+            attempt_context=lambda: _ncbi_semaphore(has_key),
+            deadline=_NCBI_RETRY_DEADLINE_SECONDS,
+        )
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
@@ -203,15 +354,17 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
                     record["doi"] = eloc.text
                     break
 
-        # Title
+        # Title. itertext() (not .text) so inline markup (<i>, <sub>, <sup> — gene
+        # symbols, chemical formulas, italicized species names) doesn't truncate
+        # the title at the first child element.
         title_el = article.find(".//ArticleTitle")
-        record["title"] = (title_el.text or "") if title_el is not None else ""
+        record["title"] = "".join(title_el.itertext()) if title_el is not None else ""
 
-        # Abstract
+        # Abstract — same markup-truncation defect as the title.
         abstract_parts = []
         for abstract_el in article.findall(".//AbstractText"):
             label = abstract_el.get("Label")
-            text = abstract_el.text or ""
+            text = "".join(abstract_el.itertext())
             if label:
                 abstract_parts.append(f"{label}: {text}")
             else:
@@ -239,9 +392,9 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         record["pub_types"] = pub_types
 
         # Authors — count for position heuristics, names for tool output.
-        # Names let an agent CHECK authorship before claiming it (issue #29:
-        # the origin exchange retrieved this very paper and the tool answer
-        # had no author list to falsify the false co-authorship claim).
+        # Names let an agent CHECK authorship before claiming it: without an
+        # author list in the tool answer, an agent has no way to falsify a
+        # false co-authorship claim about a paper it just retrieved.
         authors = article.findall(".//Author")
         record["author_count"] = len(authors)
         names: list[str] = []
@@ -448,7 +601,7 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         "authors": rec.get("authors", []),
         # The paper's own DOI (article-scoped, see _parse_pubmed_xml). Cited
         # by the retrieve tools so an agent sharing its own paper can satisfy
-        # the emit gate's DOI requirement (issue #29).
+        # the emit gate's DOI requirement.
         "doi": rec.get("doi", ""),
     }
 

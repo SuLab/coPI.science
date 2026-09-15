@@ -1,7 +1,7 @@
 """Live integration tests for the agent page — all 19 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
-flows. Task T8 of .notes/full-system-test-plan.md.
+flows.
 
 Nothing external is real: Slack (`slack_sdk.WebClient` and the copy bound inside
 `src.agent.slack_client`), SES (`send_delegate_invitation`) and the whole httpx
@@ -24,11 +24,13 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import unquote
 
 import pytest
+from fastapi import HTTPException
 from itsdangerous import TimestampSigner
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.config import get_settings
 from src.models import (
@@ -44,6 +46,7 @@ from src.models import (
     ProposalReview,
     ResearcherProfile,
 )
+from src.routers.agent_page import derive_agent_identity
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -312,7 +315,7 @@ async def _agent_of(db, user) -> AgentRegistry | None:
 
 
 async def test_signup_creates_a_pending_agent_row(client, db_session):
-    """The documented self-service path (CLAUDE.md §Adding New PIs)."""
+    """The documented self-service signup path creates a pending agent row."""
     user, r = await _signup(client, db_session, "Ada Zephyr", "ada@example.org")
     assert r.status_code == 302 and r.headers["location"] == "/agent"
 
@@ -353,6 +356,91 @@ async def test_signup_collision_also_disambiguates_the_bot_name(client, db_sessi
     await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
     second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
     assert (await _agent_of(db_session, second)).bot_name == "PWuBot"
+
+
+async def test_signup_third_same_initial_collision_gets_a_numeric_suffix(
+    client, db_session
+):
+    """A third same-initial namesake collides on the initial-prefixed id too
+    ('pwu' is already taken by the second Wu). The fallback must append the
+    numeric suffix to THAT prefixed candidate ('pwu2'), not restart from the
+    bare stem ('wu2'), or the id collides and signup fails.
+    """
+    first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
+    second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
+    third, r3 = await _signup(client, db_session, "Pei Wu", "pei@example.org")
+
+    assert r3.status_code == 302, r3.text
+    assert (await _agent_of(db_session, first)).agent_id == "wu"
+    assert (await _agent_of(db_session, second)).agent_id == "pwu"
+    third_agent = await _agent_of(db_session, third)
+    assert third_agent.agent_id == "pwu2"
+    assert third_agent.bot_name == "PWu2Bot"
+
+
+async def test_signup_fourth_same_initial_collision_extends_the_numeric_suffix(
+    client, db_session
+):
+    """A fourth same-initial namesake collides on 'pwu2' too; the suffix must
+    keep extending to 'pwu3', not restart or repeat."""
+    first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
+    second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
+    third, _ = await _signup(client, db_session, "Pei Wu", "pei@example.org")
+    fourth, r4 = await _signup(client, db_session, "Ping Wu", "ping@example.org")
+
+    assert r4.status_code == 302, r4.text
+    assert (await _agent_of(db_session, first)).agent_id == "wu"
+    assert (await _agent_of(db_session, second)).agent_id == "pwu"
+    assert (await _agent_of(db_session, third)).agent_id == "pwu2"
+    fourth_agent = await _agent_of(db_session, fourth)
+    assert fourth_agent.agent_id == "pwu3"
+    assert fourth_agent.bot_name == "PWu3Bot"
+
+
+async def test_derive_agent_identity_raises_409_when_the_numeric_range_is_exhausted(
+    db_session,
+):
+    """derive_agent_identity's last-resort loop is range(2, 20); once every
+    candidate from 'wu' through 'pwu19' is taken it must raise a clean 409,
+    not fall through and return a colliding id."""
+    await factories.make_agent(db_session, agent_id="wu", bot_name="WuBot", pi_name="Wu")
+    await factories.make_agent(db_session, agent_id="pwu", bot_name="PWuBot", pi_name="Wu")
+    for i in range(2, 20):
+        await factories.make_agent(
+            db_session, agent_id=f"pwu{i}", bot_name=f"PWu{i}Bot", pi_name="Wu"
+        )
+    await db_session.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await derive_agent_identity(db_session, "Ping Wu")
+    assert exc_info.value.status_code == 409
+
+
+async def test_signup_returns_409_on_a_lost_identity_race(client, db_session, monkeypatch):
+    """Two concurrent signups can both pass derive_agent_identity's SELECT
+    before either commits (TOCTOU on the agent_id unique constraint). Force
+    the race by making derive_agent_identity return an id that's already
+    taken, and assert the handler converts the resulting IntegrityError into
+    a 409, not a raw 500."""
+    monkeypatch.setattr(
+        "src.routers.agent_page.derive_agent_identity",
+        AsyncMock(return_value=("racer", "RacerBot")),
+    )
+    other_user = await factories.make_user(
+        db_session, name="Already There", email="already@example.org"
+    )
+    await factories.make_agent(
+        db_session, user=other_user, agent_id="racer", bot_name="RacerBot",
+        pi_name="Already There", status="pending",
+    )
+
+    user = await factories.make_user(db_session, name="Race Newcomer", email="race@example.org")
+    await factories.make_profile(db_session, user=user)
+    await db_session.flush()
+
+    r = await client.post("/agent/request", headers=_auth(user.id))
+    assert r.status_code == 409
+    assert (await _agent_of(db_session, user)) is None
 
 
 async def test_signup_needs_a_completed_profile(client, db_session):
@@ -478,13 +566,36 @@ async def test_reopen_records_a_rating_zero_review_carrying_the_guidance(
     assert review.submitted_via == "web"
 
 
-async def test_reopen_rejects_empty_guidance(client, db_session, world, slack):
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"guidance": "   "}, id="whitespace"),
+        pytest.param({"guidance": ""}, id="empty-box"),
+        pytest.param({}, id="field-omitted"),
+    ],
+)
+async def test_reopen_rejects_empty_guidance(client, db_session, world, slack, body):
+    """The handler's own coded 400 must be the answer for an EMPTY guidance box too,
+    not just a whitespace-only one.
+
+    `guidance` must be declared `Form("")` rather than `Form(...)`: an empty
+    `guidance=` field is otherwise reported by Starlette's form parser as a MISSING
+    field, so FastAPI answers a raw
+    `{"detail":[{"type":"missing","loc":["body","guidance"],"msg":"Field required",...}]}`
+    422 (which the reopen form has no rendering for) instead of reaching the handler's
+    `Guidance text is required` branch. Only the whitespace case (a box with a space
+    in it) reaches that branch under `Form(...)`.
+    """
     r = await client.post(
         f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/reopen",
-        data={"guidance": "   "},
+        data=body,
         headers=_auth(world.pi.id),
     )
-    assert r.status_code == 400
+    assert r.status_code == 400, (
+        f"empty guidance answered {r.status_code}, not the handler's coded 400: "
+        f"{r.text[:200]}"
+    )
+    assert r.json()["detail"] == "Guidance text is required"
     assert await _private_channels(db_session) == []
     assert slack.calls == []
 
@@ -746,8 +857,7 @@ async def test_a_delegate_can_review_a_proposal_and_a_stranger_cannot(
     assert allowed.status_code == 302
     review = (await _reviews(db_session, OWNER_AGENT))[0]
     assert review.rating == 4
-    # Attribution: the review belongs to the PI, the delegate is recorded
-    # alongside (specs/web-delegates.md §Changes to ProposalReview).
+    # Attribution: the review belongs to the PI, the delegate is recorded alongside.
     assert review.user_id == world.pi.id
     assert review.delegate_user_id == delegated.user.id
     assert review.reviewed_by_user_id == delegated.user.id
@@ -835,6 +945,27 @@ async def test_a_delegate_can_link_their_slack_account(client, db_session, world
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
 
 
+async def test_connecting_slack_twice_is_idempotent(client, db_session, world, delegated, slack):
+    """POST /delegates/connect-slack twice with the same stubbed Slack id must not append
+    a second entry — exercises append_delegate_slack_id_stmt's NOT ... ANY() guard at the
+    route level, not just via the compiled SQL directly."""
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    await db_session.flush()
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    for _ in range(2):
+        r = await client.post(
+            f"/agent/{OWNER_AGENT}/delegates/connect-slack",
+            headers=_auth(delegated.user.id),
+        )
+        assert r.status_code == 302 and "slack_error" not in r.headers["location"]
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == ["U-DELEGATE"]
+
+
 async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
     client, db_session, world, slack
 ):
@@ -851,6 +982,99 @@ async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
         select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
     )).scalar_one()
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
+
+
+async def test_accepting_an_invitation_with_no_bot_token_skips_the_sync_and_logs(
+    client, db_session, world, slack, caplog,
+):
+    """V10b: a delegate invite must still succeed with no bot token configured. The old code
+    silently skipped the whole Slack-sync block (`if bot_token:` with no `else`), which hid an
+    unconfigured agent token indefinitely. `world.agent.slack_bot_token` is None by default and
+    "tstowner" has no `.env` fallback slug, so this is the fixture's default path — no stub
+    needed, and the `slack` recorder (autouse) fails the test if invite.py reaches for a client
+    anyway.
+    """
+    delegate = await factories.make_user(db_session, name="Dee Legate", email="dee@example.org")
+    await _invite(client, world, "dee@example.org")
+    token = await _token_for(db_session, world.agent, "dee@example.org")
+
+    with caplog.at_level("INFO"):
+        r = await client.post(f"/invite/{token}/accept", headers=_auth(delegate.id))
+    assert r.status_code == 302
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids is None
+    assert slack.calls == [], f"invite.py reached Slack with no usable token: {slack.calls}"
+    assert any(
+        "no slack bot token" in r.getMessage().lower() and OWNER_AGENT in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+async def test_removing_a_delegate_also_removes_their_slack_id(
+    client, db_session, world, delegated, slack
+):
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    world.agent.delegate_slack_ids = ["U-OTHER", "U-DELEGATE"]
+    await db_session.flush()
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/{delegated.row.id}/remove",
+        headers=_auth(world.pi.id),
+    )
+    assert r.status_code == 302
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == ["U-OTHER"]
+
+
+async def test_removing_a_delegate_removes_authority_even_if_the_in_memory_gate_is_stale(
+    client, db_session, world, delegated, slack
+):
+    """Removing a delegate must revoke Slack-command authority even when this session's
+    in-memory `agent.delegate_slack_ids` is stale relative to the DB row — a gate that
+    reads `if delegate_email and agent.delegate_slack_ids:` would skip the Slack lookup
+    and the array_remove entirely when the in-memory attribute reads empty/None despite
+    the DB row already holding the id (src/agent/simulation.py ~4011-4021), leaving a
+    removed delegate's Slack id in the array with agent-command authority.
+
+    Simulated here with a raw UPDATE that bypasses the ORM session (so the already-loaded
+    `world.agent` instance is never touched/expired) — leaving the in-memory attribute at its
+    original None while the DB row is seeded with the delegate's Slack id out from under it.
+    """
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    await db_session.flush()
+    assert world.agent.delegate_slack_ids is None  # baseline the stale in-memory value
+
+    await db_session.execute(
+        text("UPDATE agents SET delegate_slack_ids = ARRAY[:sid] WHERE id = :id"),
+        {"sid": "U-DELEGATE", "id": world.agent.id},
+    )
+    assert world.agent.delegate_slack_ids is None  # still stale after the out-of-band write
+
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/{delegated.row.id}/remove",
+        headers=_auth(world.pi.id),
+    )
+    assert r.status_code == 302
+
+    # populate_existing=True: without it this select would just return the SAME
+    # already-loaded, never-expired identity-mapped object with its stale cached
+    # value — which would make this assertion measure the ORM cache instead of the
+    # actual on-disk row the bug (and the fix) are about.
+    agent = (await db_session.execute(
+        select(AgentRegistry)
+        .where(AgentRegistry.agent_id == OWNER_AGENT)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == []
 
 
 # ===========================================================================
@@ -901,6 +1125,92 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     assert "A shared assay platform" in page2.text
 
 
+async def test_dashboard_still_shows_review_form_for_implicit_minus_one_review(
+    client, db_session, world
+):
+    """The engine's implicit
+    `rating=-1` marker (written when a PI merely engages a proposal thread,
+    without giving an explicit verdict) must not move the proposal into the
+    "reviewed" bucket — the PI would then never see the review form again.
+    """
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=-1,
+        )
+    )
+    await db_session.flush()
+
+    page = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
+    assert page.status_code == 200
+    # The unreviewed-bucket banner and the review form's POST target for this
+    # exact proposal must both still be present.
+    assert "paused from initiating new posts" in page.text
+    assert f'/agent/{OWNER_AGENT}/proposals/{world.td.id}/review' in page.text
+
+
+async def test_a_legacy_rating_zero_marker_is_not_labelled_as_a_score_or_a_reopen(
+    client, db_session, world
+):
+    """rating=0 is a MARKER with two populations.
+
+    Measured on the production copy: of 233 rating=0 rows only **6** carry a
+    '[Reopened]' comment; the other **227** are a 2026-04-30/05-01 bulk backfill with no
+    comment and no `reviewed_by_user_id`. Task 16 rendered every one of them "Reopened
+    with guidance", asserting an event that never happened for 227 rows; before that they
+    rendered as "Rating: 0/4", asserting a score the PI never gave (89 times on one PI's
+    own dashboard).
+
+    A marker stays HANDLED -- the PI engaged and the proposal is deliberately not
+    rateable again (pinned in test_proposal_review.py) -- so this test is about the LABEL
+    only: say what is known and nothing more.
+    """
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=0,
+            comment=None,          # the 227-row backfill shape
+        )
+    )
+    await db_session.flush()
+
+    page = (await client.get(f"/agent/{OWNER_AGENT}/dashboard",
+                             headers=_auth(world.pi.id))).text
+    assert "Rating: 0/4" not in page, "a marker was rendered as a score the PI never gave"
+    assert "Reopened with guidance" not in page, (
+        "a backfill row with no comment and no reviewer was labelled as a reopen"
+    )
+    assert "No score recorded" in page, "the marker should be described, not mislabelled"
+
+
+async def test_a_genuine_reopen_marker_is_labelled_as_a_reopen(
+    client, db_session, world
+):
+    """The 6-row twin of the test above: a real reopen DOES carry the label, so the
+    discriminator is not just suppressing every label."""
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=world.td.id,
+            agent_id=OWNER_AGENT,
+            user_id=world.pi.id,
+            rating=0,
+            comment="[Reopened] please broaden the target list",
+            reviewed_by_user_id=world.pi.id,
+        )
+    )
+    await db_session.flush()
+
+    page = (await client.get(f"/agent/{OWNER_AGENT}/dashboard",
+                             headers=_auth(world.pi.id))).text
+    assert "Reopened with guidance" in page
+    assert "Rating: 0/4" not in page
+    assert "No score recorded" not in page
+
+
 async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     client, db_session, world
 ):
@@ -921,6 +1231,12 @@ async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
     assert msg.sender_name == "Pat Owner (PI)"
     assert msg.content == "@OwnerBot Let's aim at the assay."  # tag_bot prepends
     assert msg.visibility == "public"
+    # The ownership carrier _agent_ids_owned_by_user resolves against — must be
+    # the acting PI's own id, not NULL.
+    assert msg.sender_user_id == world.pi.id
+    # Stamped 'pending' at insert time so a down agent-run's cursor jump can
+    # never make this row permanently invisible to the poller.
+    assert msg.pi_inbound_state == "pending"
 
     # …and it is visible on the read view (control that the write is reachable).
     page = await client.get(f"/agent/{OWNER_AGENT}/conversations",
@@ -988,6 +1304,79 @@ async def test_a_pi_cannot_post_into_another_pairs_private_channel(
     assert third_user is not None
 
 
+async def test_pi_cannot_reply_into_a_thread_their_agent_never_joined(client, db_session, world):
+    """A free-form thread_ts must belong to a thread the posting PI's own agent
+    participates in; otherwise the engine would clear another lab's
+    proposal-review block on the PI's behalf."""
+    root = await factories.make_agent_message(
+        db_session, run=world.run, agent_id="alpha", channel_name="general",
+        message_ts="1700000000.000100", thread_ts=None, phase="new_post", content="root",
+    )
+    await factories.make_agent_message(
+        db_session, run=world.run, agent_id="beta", channel_name="general",
+        message_ts="1700000000.000200", thread_ts=root.message_ts, phase="thread_reply", content="r",
+    )
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "looks good", "thread_ts": "1700000000.000100"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 403
+    assert "thread" in resp.json()["detail"].lower()
+    written = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == "1700000000.000100",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalars().all()
+    assert written == [], (
+        "a PI whose agent never joined this thread wrote into it: "
+        f"{[m.content for m in written]}"
+    )
+
+
+async def test_pi_cannot_reply_into_an_unknown_thread(client, db_session, world):
+    """The fail-closed branch: a thread_ts naming no root at all is refused, not
+    just one the PI's agent didn't join."""
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "looks good", "thread_ts": "9999999999.999999"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 403
+    assert "thread" in resp.json()["detail"].lower()
+    written = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == "9999999999.999999",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalars().all()
+    assert written == [], (
+        "a PI addressed a nonexistent thread and it was written anyway: "
+        f"{[m.content for m in written]}"
+    )
+
+
+async def test_pi_can_reply_into_their_own_agents_thread(client, db_session, world):
+    await factories.make_agent_message(
+        db_session, run=world.run, agent_id=world.agent.agent_id, channel_name="general",
+        message_ts="1700000000.000300", thread_ts=None, phase="new_post", content="root",
+    )
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "thanks", "thread_ts": "1700000000.000300"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 302
+    saved = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.channel_name == "general",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalar_one()
+    assert saved.thread_ts == "1700000000.000300"
+
+
 async def test_sending_a_dm_records_an_inbound_pi_dm(client, db_session, world):
     r = await client.post(
         f"/agent/{OWNER_AGENT}/dm",
@@ -1025,6 +1414,29 @@ async def test_saving_the_private_profile_persists_to_db_disk_and_a_revision(
     assert revisions[0].mechanism == "web"
 
 
+async def test_first_private_profile_save_creates_the_missing_profile_row(
+    client, db_session
+):
+    """Before this fix, `if profile:` made a first-ever private save (no
+    ResearcherProfile row yet) a silent, permanent disk-only write."""
+    pi, _agent = await _agent_for(
+        db_session, name="No Profile", email="noprof@example.org",
+        agent_id="tstnoprof", bot_name="NoProfBot",
+    )
+    await db_session.flush()
+
+    r = await client.post(
+        "/agent/tstnoprof/profile/save",
+        headers=_auth(pi.id),
+        data={"content": "first ever private instructions"},
+    )
+    assert r.status_code == 302
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md == "first ever private instructions"
+
+
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
     client, db_session, world, delegated
 ):
@@ -1055,6 +1467,80 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
         select(ResearcherProfile).where(ResearcherProfile.user_id == delegated.user.id)
     )).scalar_one()
     assert delegate_profile.research_summary == "Delegate's own"
+
+
+async def test_save_public_profile_partial_post_does_not_blank_omitted_fields(
+    client, db_session, world
+):
+    """The `world` fixture already gives `world.pi` a ResearcherProfile
+    (`factories.make_profile(db_session, user=pi)` in the fixture itself) — and
+    `researcher_profiles.user_id` is UNIQUE, so a second `factories.make_profile(...,
+    user=world.pi, ...)` here would raise IntegrityError at flush. Mutate the row
+    the fixture already created instead."""
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old summary"
+    profile.techniques = ["old-t"]
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"keywords": "new-kw"},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.research_summary == "old summary"
+    assert profile.techniques == ["old-t"]
+    assert profile.keywords == ["new-kw"]
+
+
+async def test_save_public_profile_still_clears_a_field_the_user_emptied(client, db_session, world):
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old"
+    profile.techniques = ["t"]
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.research_summary == ""
+    assert profile.techniques == []
+
+
+async def test_save_public_profile_resets_synthesis_validated(client, db_session, world):
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old summary"
+    profile.techniques = ["old-t"]
+    profile.synthesis_validated = False
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"research_summary": "hand-edited", "techniques": "t1"},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.synthesis_validated is None
 
 
 async def test_connect_slack_stores_the_pis_slack_user_id(client, db_session, world, slack):
@@ -1259,7 +1745,7 @@ async def test_delegate_write_access_matches_the_spec(
     client, world, delegated, ep, slack, thread_root
 ):
     """Delegates get everything except delegate management and Slack linking of
-    the PI's own account (specs/web-delegates.md §Write access differentiation).
+    the PI's own account.
 
     Both halves are in this one parametrisation: the owner-only endpoints must
     reject, and every other endpoint must accept.

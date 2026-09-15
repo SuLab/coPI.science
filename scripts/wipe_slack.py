@@ -2,7 +2,7 @@
 
 This is a destructive mass-delete: it removes every bot message across every
 public channel of whatever workspace the tokens authenticate to. To make it
-hard to run against the wrong workspace by accident (SEC-11), it:
+hard to run against the wrong workspace by accident, it:
 
   * requires a ``--workspace`` assertion that must match the workspace the
     tokens actually authenticate to (team id, team domain, or workspace name),
@@ -83,7 +83,7 @@ def _assert_workspace(client: WebClient, expected: str) -> dict:
 
     ``expected`` may be the team id (T…), the team domain, or the workspace
     name. Aborts the process on any mismatch so a stale/misconfigured token
-    can't silently wipe the wrong workspace (SEC-11).
+    can't silently wipe the wrong workspace.
     """
     try:
         info = client.auth_test()

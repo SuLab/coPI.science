@@ -7,18 +7,21 @@ hitting the Grants.gov API every time.
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
+from src.agent.foa_pattern import FOA_NUMBER_RE
+from src.agent.foa_pattern import extract_foa_number as extract_foa_number
+
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path("data/foa_cache")
+# Kept as a module attribute for backward compatibility:
+# foa_cache.FOA_PATTERN used to be this module's own compiled pattern; it is
+# now just the shared one, same object, so identity checks against
+# foa_pattern.FOA_NUMBER_RE still hold.
+FOA_PATTERN = FOA_NUMBER_RE
 
-# Matches standard FOA formats: RFA-AI-27-019, PAR-24-293, DE-FOA-0003456, etc.
-FOA_PATTERN = re.compile(
-    r"\b((?:RFA|PAR|PA|NOT|OTA|RFI|DE-FOA)-[A-Z]{2,4}-\d{2,4}-\d{2,5})\b"
-)
+CACHE_DIR = Path("data/foa_cache")
 
 
 def cache_foa(foa_number: str, opportunity: dict[str, Any]) -> None:
@@ -76,12 +79,6 @@ def format_foa_for_prompt(foa_number: str) -> str | None:
     if result.get("additional_info_url"):
         parts.append(f"\nMore info: {result['additional_info_url']}")
     return "\n".join(parts)
-
-
-def extract_foa_number(content: str) -> str | None:
-    """Extract an FOA number from post content, or None if not found."""
-    m = FOA_PATTERN.search(content)
-    return m.group(1) if m else None
 
 
 async def backfill_cache(posted_numbers: list[str]) -> int:

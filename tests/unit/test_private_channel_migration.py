@@ -2,17 +2,34 @@
 
 Covers the pure parts of src/services/private_channels.py and the new
 slack_client helpers. Full end-to-end orchestration is exercised via the
-mock-mode AgentSlackClient (no real Slack, no DB writes).
+mock-mode AgentSlackClient (no real Slack).
+
+Most of the file is pure and DB-free; the transaction-boundary tests at the end
+(``TestOfflineMigrationDurability``) need a real Postgres and carry the
+``integration`` marker.
 """
 
+import threading
+
 import pytest
+from sqlalchemy import func, select
 
 from src.agent.slack_client import AgentSlackClient
+from src.models import (
+    VISIBILITY_COLLAB_PRIVATE,
+    AgentChannel,
+    AgentMessage,
+    PrivateChannelMember,
+    ThreadDecision,
+)
 from src.services.private_channels import (
     _build_handover_messages,
     _build_other_pi_dm,
     _build_slug,
+    migrate_public_thread_to_private,
 )
+from tests import factories
+from tests.fakes import FakeSlackClient
 
 
 def _join_handover(
@@ -315,3 +332,271 @@ class TestImports:
         settings = get_settings()
         assert hasattr(settings, "enable_private_refinement")
         assert isinstance(settings.enable_private_refinement, bool)
+
+
+# ---------------------------------------------------------------------------
+# Transaction boundary — the Slack-off migration owns its own commit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestOfflineMigrationDurability:
+    """`_migrate_offline`'s rows must outlive a rollback by the caller.
+
+    The Slack-on path has committed its own rows since `34d3c15`; the Slack-off
+    path only flushed them, so it kept the whole of N1: `reopen_proposal`'s
+    `except IntegrityError: await db.rollback()` discarded the AgentChannel, its
+    three members and the handover messages, while its recovery arm re-bound
+    `refined_in_channel` to the `local:` id of a channel whose rows no longer
+    existed — a dangling pointer no retry could repair.
+    """
+
+    async def _seed(self, db):
+        run = await factories.make_simulation_run(db)
+        pi = await factories.make_user(db, name="Andrew Su")
+        await factories.make_agent(
+            db, user=pi, agent_id="alpha", bot_name="AlphaBot", pi_name="Andrew Su",
+        )
+        other_pi = await factories.make_user(db, name="Luke Wiseman")
+        await factories.make_agent(
+            db, user=other_pi, agent_id="beta", bot_name="BetaBot", pi_name="Luke Wiseman",
+        )
+        td = await factories.make_thread_decision(
+            db, run=run, agent_a="alpha", agent_b="beta",
+            channel="drug-repurposing", origin_visibility="public",
+            summary_text="Joint repurposing screen of the HRI activator series.",
+        )
+        return run, pi, td
+
+    @pytest.fixture
+    def slack_off(self, monkeypatch):
+        """Force the DB-only migration path (mirrors test_proposal_review.py's fixture)."""
+        async def _off(*args, **kwargs):
+            return False
+
+        monkeypatch.setattr(
+            "src.services.private_channels._slack_enabled_for_migration", _off,
+        )
+
+    async def test_offline_migration_rows_survive_the_callers_rollback(
+        self, db_session, slack_off,
+    ):
+        run, pi, td = await self._seed(db_session)
+        # Read every PK out of the ORM now: expire_all() below detaches these
+        # instances from a usable connection, and a lazy re-load of `run.id` from a
+        # plain assertion raises MissingGreenlet rather than reporting the count.
+        run_id, td_id = run.id, td.id
+
+        result = await migrate_public_thread_to_private(
+            db_session,
+            thread_decision=td,
+            creator_agent_id="alpha",
+            creator_pi_user=pi,
+            guidance_text="Nail down the ternary-complex geometry first.",
+        )
+        assert result.channel_id.startswith("local:")
+
+        # Control: every row exists BEFORE the rollback, so "absent afterwards"
+        # cannot be an artefact of a seed that never ran.
+        assert await self._channels(db_session, run_id) == 1
+        assert await self._members(db_session, result.agent_channel_id) == 3
+        assert await self._messages(db_session, result.channel_id) >= 1
+
+        # Second control, in the other direction: a row the CALLER adds after the
+        # migration returns is still the caller's to lose. If this survived too, the
+        # harness would not be rolling anything back and the assertions below would
+        # be vacuous.
+        db_session.add(AgentMessage(
+            simulation_run_id=run_id, agent_id="alpha",
+            channel_id=result.channel_id, channel_name=result.channel_name,
+            message_ts="9999999999.000001", message_length=7, phase="new_post",
+            visibility=VISIBILITY_COLLAB_PRIVATE, content="caller", sender_name="alphaBot",
+            is_bot=True, posted_at=9999999999.000001,
+        ))
+        await db_session.flush()
+
+        # What reopen_proposal's `except IntegrityError` arm does.
+        await db_session.rollback()
+        db_session.expire_all()
+
+        assert await self._channels(db_session, run_id) == 1, (
+            "the Slack-off migration's AgentChannel row was rolled back with the "
+            "caller's losing write — the engine discovers private channels only from "
+            "agent_channels, so the refinement channel would exist for nobody"
+        )
+        assert await self._members(db_session, result.agent_channel_id) == 3, (
+            "both bots and the triggering PI lost their membership rows"
+        )
+        assert await self._messages(db_session, result.channel_id) >= 1, (
+            "the handover — which carries the PI's guidance verbatim — was discarded"
+        )
+        reloaded = (await db_session.execute(
+            select(ThreadDecision).where(ThreadDecision.id == td_id)
+        )).scalar_one()
+        assert reloaded.refined_in_channel == result.channel_id, (
+            "refined_in_channel must point at a channel whose rows still exist"
+        )
+        assert await db_session.scalar(
+            select(func.count(AgentMessage.id)).where(
+                AgentMessage.message_ts == "9999999999.000001"
+            )
+        ) == 0, (
+            "the caller's own post-migration row survived, so this test proves "
+            "nothing about the migration's commit"
+        )
+
+    @staticmethod
+    async def _channels(db, run_id) -> int:
+        return await db.scalar(
+            select(func.count(AgentChannel.id)).where(
+                AgentChannel.simulation_run_id == run_id,
+                AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE,
+            )
+        )
+
+    @staticmethod
+    async def _members(db, agent_channel_id) -> int:
+        return await db.scalar(
+            select(func.count(PrivateChannelMember.id)).where(
+                PrivateChannelMember.agent_channel_id == agent_channel_id
+            )
+        )
+
+    @staticmethod
+    async def _messages(db, channel_id) -> int:
+        return await db.scalar(
+            select(func.count(AgentMessage.id)).where(
+                AgentMessage.channel_id == channel_id
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Every Slack call runs off the event loop
+# ---------------------------------------------------------------------------
+
+
+class _ThreadRecordingSlackClient(FakeSlackClient):
+    """Records which OS thread each Slack-calling method actually ran on.
+
+    A synchronous ``AgentSlackClient`` call can block for up to
+    ``slack_client.RATE_LIMIT_WAIT_BUDGET_SECONDS`` (180s) under a
+    sustained 429. Called straight from async code, that freezes the single
+    ASGI worker or the worker process for the whole retry loop. This fake
+    proves the fix: every method the migration calls records
+    ``threading.get_ident()`` before delegating to the real (mock-mode)
+    behaviour, so a test can assert none of them ran on the event loop's own
+    thread.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.threads_seen: set[int] = set()
+
+    def _record(self) -> None:
+        self.threads_seen.add(threading.get_ident())
+
+    def create_private_channel(self, name):
+        self._record()
+        return super().create_private_channel(name)
+
+    def invite_to_channel(self, channel_id, user_ids):
+        self._record()
+        return super().invite_to_channel(channel_id, user_ids)
+
+    def post_message(self, channel, text, thread_ts=None):
+        self._record()
+        return super().post_message(channel, text, thread_ts)
+
+    def send_dm(self, user_id, text):
+        self._record()
+        return super().send_dm(user_id, text)
+
+    def _resolve_channel_id(self, channel):
+        self._record()
+        return super()._resolve_channel_id(channel)
+
+
+@pytest.mark.integration
+class TestSlackCallsRunOffTheEventLoop:
+    """src/services/private_channels.py calls straight into
+    AgentSlackClient's synchronous, blocking methods from async code (the web
+    reopen route, the e-mail inbound worker). Every one of those calls must go
+    through ``asyncio.to_thread`` so a Slack throttle cannot freeze the
+    process.
+    """
+
+    async def _seed(self, db):
+        run = await factories.make_simulation_run(db)
+        pi = await factories.make_user(db, name="Andrew Su")
+        await factories.make_agent(
+            db, user=pi, agent_id="alpha", bot_name="AlphaBot", pi_name="Andrew Su",
+            slack_user_id="U_ALPHA_PI",
+        )
+        other_pi = await factories.make_user(db, name="Luke Wiseman")
+        await factories.make_agent(
+            db, user=other_pi, agent_id="beta", bot_name="BetaBot", pi_name="Luke Wiseman",
+            slack_user_id="U_BETA_PI",
+        )
+        td = await factories.make_thread_decision(
+            db, run=run, agent_a="alpha", agent_b="beta",
+            channel="drug-repurposing", origin_visibility="public",
+            summary_text="Joint repurposing screen of the HRI activator series.",
+        )
+        return run, pi, td
+
+    async def test_migration_slack_calls_execute_off_the_event_loop_thread(
+        self, db_session, monkeypatch,
+    ):
+        run, pi, td = await self._seed(db_session)
+        loop_thread = threading.get_ident()
+
+        made: list[_ThreadRecordingSlackClient] = []
+        make_client_threads: list[int] = []
+
+        async def _on(*a, **k):
+            return True
+
+        async def _token(db, agent_id):
+            return f"xoxb-fake-{agent_id}"
+
+        def _client(agent_id, bot_token):
+            make_client_threads.append(threading.get_ident())
+            c = _ThreadRecordingSlackClient(agent_id=agent_id, bot_token=bot_token)
+            made.append(c)
+            return c
+
+        monkeypatch.setattr(
+            "src.services.private_channels._slack_enabled_for_migration", _on)
+        monkeypatch.setattr(
+            "src.services.private_channels._get_or_fail_bot_token", _token)
+        monkeypatch.setattr("src.services.private_channels._make_client", _client)
+
+        result = await migrate_public_thread_to_private(
+            db_session,
+            thread_decision=td,
+            creator_agent_id="alpha",
+            creator_pi_user=pi,
+            guidance_text="Nail down the ternary-complex geometry first.",
+        )
+
+        # Sanity: this exercised the Slack-on path (a real channel-shaped id),
+        # not the DB-only fallback — otherwise the assertions below would be
+        # vacuously true because no Slack call was ever made.
+        assert result.channel_id.startswith("G_")
+        assert len(made) == 2, "expected one client each for the creator and other bot"
+
+        assert make_client_threads, "_make_client was never called"
+        assert loop_thread not in make_client_threads, (
+            "_make_client (which calls AgentSlackClient.connect()) ran on the "
+            "event loop's own thread"
+        )
+        for client in made:
+            assert client.threads_seen, (
+                f"no Slack calls were recorded on the {client.agent_id} client"
+            )
+            assert loop_thread not in client.threads_seen, (
+                f"a Slack call on the {client.agent_id} client ran on the event "
+                "loop's own thread — a sustained throttle would freeze the "
+                "whole process for up to RATE_LIMIT_WAIT_BUDGET_SECONDS"
+            )

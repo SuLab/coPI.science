@@ -26,6 +26,16 @@ def _entry(ts, agent_id, name, content, thread_ts=None, channel="funding-opportu
     )
 
 
+def test_foa_cache_and_funding_rules_share_the_same_compiled_pattern():
+    """Regression guard: both call sites must be backed by the one shared
+    pattern, not independently-maintained copies that can re-diverge."""
+    from src.agent import foa_cache, funding_rules
+    from src.agent.foa_pattern import FOA_NUMBER_RE
+
+    assert foa_cache.FOA_PATTERN is FOA_NUMBER_RE
+    assert funding_rules._FOA_NUMBER_RE is FOA_NUMBER_RE
+
+
 # ---------------------------------------------------------------
 # Announcement-only detector
 # ---------------------------------------------------------------
@@ -39,6 +49,8 @@ class TestAnnouncementOnly:
         "Thread wrapped. Moving to the dedicated thread.",
         "Posting it now — look for my post shortly.",
         "Confirmed — I'll post a new :moneybag: thread tagging you.",
+        # Apostrophe spellings are covered exhaustively, one row per code
+        # point, in TestApostropheClass below.
     ])
     def test_positive_cases(self, text):
         assert is_announcement_only_funding_reply(text) is True
@@ -60,6 +72,11 @@ class TestAnnouncementOnly:
     def test_negative_cases(self, text):
         assert is_announcement_only_funding_reply(text) is False
 
+    def test_no_apostrophe_at_all_still_matches(self):
+        # The class is optional, so the unpunctuated spelling matches too. Pinned
+        # so widening the class cannot accidentally make the apostrophe required.
+        assert is_announcement_only_funding_reply("Ill spin up a dedicated thread.") is True
+
     def test_mixed_announcement_with_substance_allowed(self):
         # Has announcement phrase but also substantive content → allowed.
         text = (
@@ -68,6 +85,45 @@ class TestAnnouncementOnly:
             "validation."
         )
         assert is_announcement_only_funding_reply(text) is False
+
+
+# ---------------------------------------------------------------
+# Apostrophe class — one row per code point
+# ---------------------------------------------------------------
+
+# The announcement detector classifies PI-authored and LLM-authored text, where
+# the contraction apostrophe arrives as any of these. U+0027/U+2019/U+02BC were
+# already handled; U+2018, U+00B4 and U+FF07 are a deliberate widening past
+# the curly U+2019 alone.
+APOSTROPHE_CODE_POINTS = [
+    ("U+0027-apostrophe", "'"),
+    ("U+2019-right-single-quote", "’"),
+    ("U+02BC-modifier-letter", "ʼ"),
+    ("U+2018-left-single-quote", "‘"),
+    ("U+00B4-acute-accent", "´"),
+    ("U+FF07-fullwidth", "＇"),
+]
+
+
+class TestApostropheClass:
+    """An announcement-only reply must be classified the same whichever apostrophe the
+    author (or the model, or Slack's smart-quote autocorrect) used. A partial class is the same
+    defect: a U+2019-only class would still let four spellings through
+    the atomic-spin-off rule."""
+
+    @pytest.mark.parametrize(
+        "template",
+        ["I{apos}ll spin up a dedicated thread.", "I{apos}m going to start a new thread."],
+        ids=["ill-contraction", "im-contraction"],
+    )
+    @pytest.mark.parametrize(
+        "apos",
+        [c for _, c in APOSTROPHE_CODE_POINTS],
+        ids=[name for name, _ in APOSTROPHE_CODE_POINTS],
+    )
+    def test_every_apostrophe_spelling_is_classified(self, apos, template):
+        text = template.format(apos=apos)
+        assert is_announcement_only_funding_reply(text) is True, repr(text)
 
 
 # ---------------------------------------------------------------
@@ -97,6 +153,33 @@ class TestAcknowledgmentOnly:
         "Our specific aim would be autophagy activator AA-20 tested in APPswe mice.",
     ])
     def test_negative_cases(self, text):
+        assert is_acknowledgment_only_funding_reply(text) is False
+
+    @pytest.mark.parametrize("text", [
+        # A literal reproduction of the reported case — 11 words, so a
+        # 12-word threshold does not fix this at all; 10 does.
+        "Agreed, we can send the plasmids and the mice next week.",
+        # the general failure mode: vocabulary the fixed marker list misses,
+        # demonstrated with a materially longer, equally vocabulary-avoiding sentence.
+        "Agreed, we can package up the mice and the plasmids and ship them "
+        "to your team early next week.",
+    ])
+    def test_a_substantive_reply_starting_with_an_ack_word_is_not_rejected(self, text):
+        # Opens with "Agreed" (an ack phrase) and contains none of
+        # _SUBSTANTIVE_MARKERS_RE's fixed vocabulary, but is unambiguously a
+        # real logistics commitment, not a bare acknowledgment.
+        assert is_acknowledgment_only_funding_reply(text) is False
+
+    def test_long_pure_pleasantry_is_an_accepted_false_negative(self):
+        # Accepted cost of the >= 10-word threshold: a
+        # pleasantry with no substantive content still clears the word-count
+        # cutoff meant to rescue substantive replies, so it is (wrongly)
+        # treated as not-ack-only. Pinning this rather than "fixing" it keeps
+        # the fix from re-introducing the original bug (rejecting the
+        # 11-word "Agreed, we can send the plasmids and the mice next
+        # week." reply) — see the word-count threshold's own comment.
+        text = "Thanks so much for the tag, really looking forward to working together."
+        assert len(text.split()) >= 10
         assert is_acknowledgment_only_funding_reply(text) is False
 
 
@@ -161,6 +244,36 @@ class TestSummarizer:
         assert len(summary.spinoffs) == 1
         assert summary.spinoffs[0][0] == "200"
 
+    @pytest.mark.parametrize("root_spelling,spinoff_spelling", [
+        ("PAR-25-297", "par-25-297"),
+        ("par-25-297", "PAR-25-297"),
+        ("PAR-25-297", "Par-25-297"),
+        ("PAR-25-297", "PAR-25-297"),  # control: matching casing already worked
+    ])
+    def test_spinoff_detection_is_case_insensitive(self, root_spelling, spinoff_spelling):
+        """If the root's number is extracted case-insensitively but then
+        compared case-*sensitively* against every candidate spin-off body, a spin-off that
+        spelled the number any other way is invisible to the summary — and an agent that cannot
+        see the existing spin-off posts a duplicate. NIH's own permalink lower-cases the number,
+        so the mismatched spelling occurs naturally."""
+        ml = MessageLog()
+        ml.set_bot_name_map({"wisemanbot": "wiseman"})
+        ml.append(_entry(
+            "100", None, "GrantBot",
+            f":moneybag: *Funding Opportunity*\n{root_spelling} Alzheimer's Drug-Development Program",
+        ))
+        ml.append(_entry(
+            "101", "wiseman", "WisemanBot",
+            f":moneybag: {root_spelling} — our ISR/HRI activators align with the FOA.",
+            thread_ts="100",
+        ))
+        ml.append(_entry(
+            "200", "wiseman", "WisemanBot",
+            f":moneybag: {spinoff_spelling} — Wiseman/Petrascheck joint aims draft.",
+        ))
+        summary = summarize_funding_thread(ml, "100")
+        assert [ts for ts, _ in summary.spinoffs] == ["200"]
+
     def test_empty_thread(self):
         ml = MessageLog()
         summary = summarize_funding_thread(ml, "nonexistent")
@@ -177,6 +290,28 @@ class TestSummarizer:
     def test_format_empty(self):
         empty = FundingThreadSummary([], [], [])
         assert "no prior activity" in format_funding_thread_summary(empty).lower()
+
+
+class TestTagRegexCaseInsensitivity:
+    """@-mentions of a bot tag must resolve regardless of case — Slack's own autocomplete
+    and manual typing both routinely produce @GRANTBOT, @SuBOT, etc."""
+
+    @pytest.mark.parametrize("mention,name", [
+        ("@grantbot", "grantbot"),
+        ("@GRANTBOT", "GRANTBOT"),
+        ("@SuBot", "SuBot"),
+        ("@SuBOT", "SuBOT"),
+    ])
+    def test_pairing_detection_is_case_insensitive(self, mention, name):
+        ml = MessageLog()
+        ml.set_bot_name_map({"wisemanbot": "wiseman"})
+        ml.append(_entry("100", None, "GrantBot", ":moneybag: PAR-25-297 opportunity"))
+        ml.append(_entry(
+            "101", "wiseman", "WisemanBot",
+            f"Aligning on this. {mention} take a look.", thread_ts="100",
+        ))
+        summary = summarize_funding_thread(ml, "100")
+        assert summary.pairings_proposed == [("WisemanBot", name)], summary.pairings_proposed
 
 
 class TestYourPriorMessages:

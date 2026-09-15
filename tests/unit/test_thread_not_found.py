@@ -14,6 +14,7 @@ import pytest
 from slack_sdk.errors import SlackApiError
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
@@ -133,6 +134,15 @@ class TestEvictDeadThread:
 
     def test_evicts_from_all_agents(self, engine_with_agents):
         engine, dead_ts, a, b = engine_with_agents
+        # slack_ts=dead_ts: this thread WAS born on Slack (a legitimately
+        # dead thread — the parent was deleted), unlike the DB-only-root
+        # case covered by test_refuses_to_evict_a_db_only_thread below.
+        # Eviction must still proceed for this one.
+        engine.message_log.append(LogEntry(
+            ts=dead_ts, channel="single-cell-omics", sender_agent_id="other",
+            sender_name="OtherBot", content="dead root", posted_at=0.0, is_bot=True,
+            slack_ts=dead_ts,
+        ))
         engine._evict_dead_thread(dead_ts)
 
         for ag in (a, b):
@@ -141,7 +151,13 @@ class TestEvictDeadThread:
             assert not any(p.thread_id == dead_ts for p in ag.state.pending_proposals)
 
         assert f"proposal_thread:{dead_ts}" not in engine._poll_cursors
-        assert dead_ts not in engine._closed_thread_ids
+        # INVERTED: eviction must not un-close a thread the outcome machinery
+        # (or, as here, the test fixture) already marked closed. The old
+        # assertion (`dead_ts not in engine._closed_thread_ids`) pinned the
+        # `.discard()` call this task removes.
+        assert dead_ts in engine._closed_thread_ids
+        # NEW: the dead root's own log entry is purged too, not just agent state.
+        assert engine.message_log.get_entry(dead_ts) is None
 
     def test_unknown_thread_id_is_noop(self, engine_with_agents):
         engine, _, a, b = engine_with_agents
@@ -151,3 +167,45 @@ class TestEvictDeadThread:
             assert len(ag.state.active_threads) == 1
             assert len(ag.state.interesting_posts) == 1
             assert len(ag.state.pending_proposals) == 1
+
+    def test_evicting_a_never_closed_thread_still_closes_and_tombstones_it(self):
+        # Unlike engine_with_agents' fixture (which pre-closes dead_ts before
+        # eviction runs), this thread was never in _closed_thread_ids — the
+        # .add() must still land, and the new tombstone (_dead_thread_ids)
+        # must be set regardless of prior closed-state.
+        dead_ts = "1776900000.000200"
+        agent = Agent(agent_id="su", pi_name="Su", bot_name="SuBot")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        assert dead_ts not in engine._closed_thread_ids
+        assert dead_ts not in engine._dead_thread_ids
+
+        engine._evict_dead_thread(dead_ts)
+
+        assert dead_ts in engine._closed_thread_ids
+        assert dead_ts in engine._dead_thread_ids
+
+    def test_refuses_to_evict_a_db_only_thread(self):
+        # A thread rooted while Slack was off (slack_ts is None) has
+        # never been seen by Slack, so a ThreadNotFound for it is a
+        # mistranslation upstream, not evidence the thread is dead. Evicting
+        # it purges the working log and permanently black-holes future PI
+        # messages in it (see the poller test below). _evict_dead_thread must
+        # refuse and leave every container untouched.
+        dead_ts = "1776900000.000300"
+        agent = Agent(agent_id="su", pi_name="Su", bot_name="SuBot")
+        agent.state.active_threads[dead_ts] = ThreadState(
+            thread_id=dead_ts, channel="single-cell-omics", other_agent_id="other",
+        )
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts=dead_ts, channel="single-cell-omics", sender_agent_id="su",
+            sender_name="SuBot", content="db-only root", posted_at=0.0,
+            is_bot=True, slack_ts=None,
+        ))
+
+        engine._evict_dead_thread(dead_ts)
+
+        assert dead_ts in agent.state.active_threads
+        assert engine.message_log.get_entry(dead_ts) is not None
+        assert dead_ts not in engine._closed_thread_ids
+        assert dead_ts not in engine._dead_thread_ids

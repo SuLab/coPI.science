@@ -8,6 +8,13 @@ where the resulting ``xoxb-`` token is stored.
 
 Functions here are transport-only (httpx) and raise ``RuntimeError`` on Slack
 API errors; callers handle presentation/logging.
+
+The core is synchronous, matching ``slack_web.py``'s split (``AgentSlackClient``
+uses ``slack_sdk``; this module uses raw ``httpx`` for the manifest/OAuth API,
+which ``slack_sdk`` doesn't cover). **Async callers (the admin routes, via
+``admin_provisioning.py``) MUST use the ``_async`` wrappers at the bottom of
+this module, not the sync functions** — ``create_app``'s retry loop alone can
+block for minutes on a rate-limited response.
 """
 
 import logging
@@ -15,9 +22,19 @@ import time
 
 import httpx
 
+from src.agent.retry_after import parse_retry_after
+from src.services.slack_executor import run_slack_call
+
 logger = logging.getLogger(__name__)
 
 SLACK_API = "https://slack.com/api"
+
+# Cap on how long a single apps.manifest.create rate-limit wait may run, even
+# though it now happens on a worker thread (asyncio.to_thread) rather than the
+# event loop — an unbounded Slack-supplied Retry-After (observed as high as
+# 4500s) would otherwise still tie up that thread and the admin's request
+# for an unreasonable time. Mirrors slack_web._MAX_RETRY_AFTER.
+_MAX_MANIFEST_RETRY_AFTER = 30.0
 
 # All scopes the bots actually use — derived from AgentSlackClient + routers/podcast.
 BOT_SCOPES = [
@@ -61,7 +78,7 @@ def rotate_config_token(refresh_token: str) -> tuple[str, str, int]:
     access token's expiry (unix seconds; 0 if Slack omits it). Slack rotates the
     refresh token too and it is single-use, so the caller MUST persist the new
     pair atomically. ``exp`` lets callers cache the access token and avoid
-    rotating on every use (see admin_provisioning; SEC-10).
+    rotating on every use (see admin_provisioning).
     """
     resp = httpx.post(
         f"{SLACK_API}/tooling.tokens.rotate",
@@ -82,6 +99,7 @@ def create_app(
     redirect_uri: str,
     max_rate_limit_retries: int = 5,
     scopes: list[str] | None = None,
+    retry_after_cap: float = _MAX_MANIFEST_RETRY_AFTER,
 ) -> dict:
     """Create one Slack app via the Manifest API.
 
@@ -140,13 +158,24 @@ def create_app(
                 "client_secret": creds["client_secret"],
                 "oauth_url": data["oauth_authorize_url"],
             }
-        if data.get("error") == "ratelimited":
-            wait = int(data.get("retry_after", 0) or resp.headers.get("Retry-After", 60))
-            logger.warning("apps.manifest.create rate limited — waiting %ds before retry", wait)
-            time.sleep(wait)
-        else:
+        if data.get("error") != "ratelimited":
             detail = data.get("errors") or data.get("error", "unknown")
             raise RuntimeError(f"apps.manifest.create failed: {detail}")
+        # C2: don't sleep on the last attempt -- the old code slept once more,
+        # uselessly, right before giving up and raising below.
+        if attempt == max_rate_limit_retries - 1:
+            break
+        raw_retry_after = data.get("retry_after") or resp.headers.get("Retry-After")
+        wait = parse_retry_after(
+            str(raw_retry_after) if raw_retry_after is not None else None,
+            default=60.0,
+            cap=retry_after_cap,
+        )
+        logger.warning(
+            "apps.manifest.create rate limited — waiting %.0fs before retry (capped at %.0fs)",
+            wait, retry_after_cap,
+        )
+        time.sleep(wait)
     raise RuntimeError(
         f"apps.manifest.create: still rate-limited after {max_rate_limit_retries} retries"
     )
@@ -175,6 +204,56 @@ def exchange_code(
     token = data.get("access_token", "")
     if not token.startswith("xoxb-"):
         # Do NOT echo any part of the token — this message can surface in logs
-        # and a user-facing ?slack_error= redirect. See SEC-9.
+        # and a user-facing ?slack_error= redirect.
         raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token
+
+
+# ---------------------------------------------------------------------------
+# Every function above is synchronous httpx, and create_app's
+# retry loop alone can now sleep up to (max_rate_limit_retries - 1) * 30s (capped,
+# see _MAX_MANIFEST_RETRY_AFTER) between rate-limited attempts. Called directly
+# from an `async def` route (admin_provisioning.py), that blocks the whole
+# event loop -- the single uvicorn worker has nothing else to run -- so every
+# other request the process is serving freezes for as long as Slack keeps
+# rate-limiting. run_slack_call moves the whole call (including its internal
+# time.sleep) to the dedicated Slack I/O executor; mirrors slack_web.py:267-300.
+# ---------------------------------------------------------------------------
+
+
+async def lookup_team_id_async(bot_token: str) -> str | None:
+    """``lookup_team_id`` off the event loop."""
+    return await run_slack_call(lookup_team_id, bot_token)
+
+
+async def rotate_config_token_async(refresh_token: str) -> tuple[str, str, int]:
+    """``rotate_config_token`` off the event loop."""
+    return await run_slack_call(rotate_config_token, refresh_token)
+
+
+async def create_app_async(
+    config_token: str,
+    agent_id: str,
+    bot_name: str,
+    pi_name: str,
+    redirect_uri: str,
+    max_rate_limit_retries: int = 5,
+    scopes: list[str] | None = None,
+) -> dict:
+    """``create_app`` off the event loop, including its internal retry sleeps."""
+    return await run_slack_call(
+        create_app, config_token, agent_id, bot_name, pi_name, redirect_uri,
+        max_rate_limit_retries=max_rate_limit_retries, scopes=scopes,
+    )
+
+
+async def exchange_code_async(
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+) -> str:
+    """``exchange_code`` off the event loop."""
+    return await run_slack_call(
+        exchange_code, client_id, client_secret, code, redirect_uri
+    )

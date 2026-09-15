@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 #
-# Guided production migration to alembic head 0023 (branch cohort-db-conversations).
-# Supported starting points: 0018 (main before PR19), 0019, 0020 and 0021.
-# 0021 is origin/main's own alembic head, so that is where a deployment tracking main is.
+# Guided production migration to the alembic tree's single head (branch cohort-db-conversations).
+#
+# THE TARGET IS DERIVED, NOT PINNED. With no --target this script reads
+# alembic/versions/*.py, subtracts every down_revision from every revision, and migrates
+# to the one id left over — and refuses to run if that is not exactly one id. There used
+# to be a `TARGET="00NN"` constant here; it went stale twice (0023->0024, then 0028 while
+# the tree's head was already 0029) and a bare --apply then migrated to the OLD head,
+# stamped it, verified it and reported success, leaving the application to start against
+# a schema it no longer matched. preflight only WARNs on a target that is not the head,
+# and --apply does not stop on a preflight warning, so nothing caught it. Pass --target to
+# migrate somewhere else deliberately; the banner says which of the two happened.
+#
+# Supported starting points: every revision in the chain from 0018 (main before PR19) up to
+# the revision below the head — see SUPPORTED_START_REVISIONS in scripts/migrate/preflight.py,
+# which derives the same range. 0021 is origin/main's own alembic head, so that is where a
+# deployment tracking main is; 0024 is where org1 sits after the 08-14 deploy.
 #
 # READ docs/production-migration.md BEFORE RUNNING THIS. This script is the
 # executable half of that runbook; the runbook explains *why* each step is where
@@ -17,7 +30,23 @@
 #   ./scripts/migrate/run_migration.sh                      # rehearse, write nothing
 #   ./scripts/migrate/run_migration.sh --apply              # back up, migrate, verify
 #   ./scripts/migrate/run_migration.sh --apply \
-#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested 2026-08-04"
+#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested"
+#   ./scripts/migrate/run_migration.sh --via-run --apply \
+#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested"
+#
+# --via-run runs every in-container step (Step 1's import checks, preflight, alembic,
+# postflight) as a one-off `docker compose run --rm` container built from the CURRENT
+# image, instead of `docker compose exec` against an already-running one. Use it when
+# `app` is stopped for the migration window: the image, not a running container, is what
+# carries the new source, so `exec` has nothing to target. It also skips Step 1's "service
+# must be running" check, and passes the preflight snapshot to postflight through a bind
+# mount — each `--rm` container is ephemeral, so without the mount postflight would not
+# see the file the (separate) preflight container wrote. If Step 3 takes a real dump
+# (--apply without --backup-verified-elsewhere), that dump's path is translated onto the
+# same bind mount before it is handed to preflight, for the same reason — this only works
+# when --backup-dir and the snapshot's directory (MIGRATE_SNAPSHOT, or --backup-dir by
+# default) are the same directory; if you have pointed them at two different places,
+# --via-run --apply refuses to guess and asks for --backup-verified-elsewhere instead.
 #
 # --backup-verified-elsewhere is the ONLY way to skip taking a dump, and it makes
 # you write down what you are asserting instead. There is deliberately no bare
@@ -53,7 +82,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 APPLY=0
-TARGET="0024"
+VIA_RUN=0
+TARGET=""            # empty = derive the alembic head below; --target overrides
+TARGET_SOURCE=""
 DSN="${DATABASE_URL:-}"
 BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
 SVC="${MIGRATE_SERVICE:-app}"
@@ -67,7 +98,8 @@ die_usage() { echo "ERROR: $*" >&2; echo "See docs/production-migration.md" >&2;
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
-    --target) TARGET="${2:?--target needs a revision}"; shift 2 ;;
+    --via-run) VIA_RUN=1; shift ;;
+    --target) TARGET="${2:?--target needs a revision}"; TARGET_SOURCE="--target"; shift 2 ;;
     --database-url) DSN="${2:?--database-url needs a DSN}"; shift 2 ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift 2 ;;
     --backup-verified-elsewhere)
@@ -87,11 +119,79 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --------------------------------------------------------------------------
+# Resolve the target: the alembic tree's single head, unless --target said otherwise.
+#
+# ids - parents, the same derivation preflight's check_alembic_scripts does inside the
+# container. Two independent implementations on purpose: if the host checkout and the
+# image disagree about the tree, preflight's own head check turns that into a visible
+# WARN instead of a silent migration to the wrong revision.
+# --------------------------------------------------------------------------
+alembic_heads() {
+  awk '
+    /^revision[: ]/      { if (match($0, /"[^"]+"/)) ids[substr($0, RSTART + 1, RLENGTH - 2)] = 1 }
+    /^down_revision[: ]/ { if (match($0, /"[^"]+"/)) par[substr($0, RSTART + 1, RLENGTH - 2)] = 1 }
+    END { for (i in ids) if (!(i in par)) print i }
+  ' "$REPO_ROOT"/alembic/versions/*.py | sort
+}
+
+if [ -z "$TARGET" ]; then
+  HEADS="$(alembic_heads)"
+  N_HEADS=0
+  [ -n "$HEADS" ] && N_HEADS="$(printf '%s\n' "$HEADS" | wc -l | tr -d ' ')"
+  if [ "$N_HEADS" -ne 1 ]; then
+    echo "BLOCKED: alembic/versions/ does not have exactly one head (found: ${HEADS:-none})." >&2
+    echo "  Refusing to guess which revision production should end up at." >&2
+    echo "    python -m alembic heads" >&2
+    echo "  Renumber the newer migration onto the current head, or pass --target." >&2
+    exit "$EX_BLOCKED"
+  fi
+  TARGET="$HEADS"
+  TARGET_SOURCE="derived from alembic/versions/"
+fi
+
+# --------------------------------------------------------------------------
+# Resolve the preflight/postflight snapshot path up front (not inside Step 4,
+# where it used to live): `compose_py`, defined next, is called as early as
+# Step 1, and under --via-run it needs the snapshot's host directory for the
+# bind mount before Step 1 runs.
+#
+# --via-run's snapshot is written INSIDE the one-off container by UID 10001 (the
+# image's runtime user, since the prod compose sets no `user:` override on `migrate`
+# or one-off `run`s). On the prod host $BACKUP_DIR (default `backups/`) is owned by
+# the operator, not 10001, so writing the default path there fails closed with
+# EACCES — data/ is already chowned to 10001:10001 for the profiles/data bind
+# mounts, so default the snapshot there instead under --via-run.
+# An explicit MIGRATE_SNAPSHOT always wins, in either mode; the non---via-run default
+# (an `exec` into an already-running, non-10001-restricted container) is unchanged.
+if [[ "$VIA_RUN" == "1" ]]; then
+  SNAP="${MIGRATE_SNAPSHOT:-$REPO_ROOT/data/preflight_snapshot.json}"
+else
+  SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
+fi
+mkdir -p "$(dirname "$SNAP")"
+SNAP_HOST_DIR="$(cd "$(dirname "$SNAP")" && pwd)"
+# Under --via-run each step is a --rm container: the snapshot must be addressed through the
+# bind mount, not through the ephemeral image path.
+SNAP_IN_CONTAINER="$SNAP"
+[[ "$VIA_RUN" == "1" ]] && SNAP_IN_CONTAINER="/migrate-state/$(basename "$SNAP")"
+
+compose_py() {   # replaces the inline `docker compose exec ...` in Step 1, run_py(), Step 5 and Step 6
+  if [[ "$VIA_RUN" == "1" ]]; then
+    docker compose run --rm --no-deps -T \
+      -v "$SNAP_HOST_DIR:/migrate-state" \
+      -e MIGRATE_STATE_DIR=/migrate-state \
+      -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$@"
+  else
+    docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$@"
+  fi
+}
+
 MODE="REHEARSAL (nothing will be written)"
 [ "$APPLY" -eq 1 ] && MODE="APPLY (this will back up and migrate)"
 
 echo "=============================================================="
-echo " coPI production migration -> $TARGET"
+echo " coPI production migration -> $TARGET ($TARGET_SOURCE)"
 echo " mode: $MODE"
 echo "=============================================================="
 
@@ -106,13 +206,15 @@ echo "=============================================================="
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 1: the container is running current code ---"
-if ! docker compose ps --status running --services 2>/dev/null | grep -qx "$SVC"; then
+if [[ "$VIA_RUN" == "1" ]]; then
+  echo "    via-run: using a one-off container from the current image"
+elif ! docker compose ps --status running --services 2>/dev/null | grep -qx "$SVC"; then
   echo "BLOCKED: compose service '$SVC' is not running." >&2
   echo "  docker compose up -d --build $SVC" >&2
   exit "$EX_OPERATIONAL"
 fi
-SRC_PATH="$(docker compose exec -T -e PYTHONPATH=/app "$SVC" \
-  python -c 'import src; print(src.__file__)' 2>/dev/null | tr -d '\r')"
+SRC_PATH="$(compose_py "$SVC" \
+  python -c 'import src; print(src.__file__)' 2>/dev/null | tail -n 1 | tr -d '\r')"
 case "$SRC_PATH" in
   /app/src/__init__.py) echo "    PASS  import src -> $SRC_PATH" ;;
   *) echo "BLOCKED: with PYTHONPATH=/app, 'import src' resolved to '${SRC_PATH:-<nothing>}'," >&2
@@ -120,7 +222,7 @@ case "$SRC_PATH" in
      echo "  docker compose up -d --build $SVC" >&2
      exit "$EX_BLOCKED" ;;
 esac
-if ! docker compose exec -T -e PYTHONPATH=/app "$SVC" \
+if ! compose_py "$SVC" \
      python -c 'from src.models import Cohort' >/dev/null 2>&1; then
   echo "BLOCKED: /app/src has no Cohort model — the mounted source predates 0022." >&2
   exit "$EX_BLOCKED"
@@ -149,7 +251,7 @@ fi
 echo "    target: $(printf '%s' "$DSN" | sed -E 's#(//[^:]+):[^@]*@#\1:***@#')"
 
 run_py() {  # run a repo python script inside the container with current code
-  docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$SVC" python "$@"
+  compose_py "$SVC" python "$@"
 }
 
 # --------------------------------------------------------------------------
@@ -179,7 +281,7 @@ else
   # Caught by rehearsing this script end to end — it would have blocked every real
   # migration at the backup step.
   CTMP="/tmp/copi_migrate_$$.dump"
-  if ! docker compose exec -T "$PG_SVC" pg_dump -U copi -Fc -f "$CTMP" "$DBNAME"; then
+  if ! docker compose exec -T "$PG_SVC" pg_dump -U "${POSTGRES_USER:-copi}" -Fc -f "$CTMP" "$DBNAME"; then
     echo "BLOCKED: pg_dump failed. Not migrating without a backup." >&2
     docker compose exec -T "$PG_SVC" rm -f "$CTMP" >/dev/null 2>&1 || true
     exit "$EX_OPERATIONAL"
@@ -200,7 +302,30 @@ else
     exit "$EX_OPERATIONAL"
   fi
   echo "    PASS  ${SZ} bytes on the host, ${TOC_N} restorable objects in the TOC"
-  EXTRA_PREFLIGHT+=(--backup-path "$BACKUP_FILE")
+  BACKUP_PATH_ARG="$BACKUP_FILE"
+  if [[ "$VIA_RUN" == "1" ]]; then
+    # $BACKUP_FILE is a HOST path. Each --via-run step is a fresh --rm container
+    # with only $SNAP_HOST_DIR bind-mounted at /migrate-state — prod bakes the
+    # repo into the image, so there is no repo bind mount for the dump to ride
+    # in on otherwise. When $BACKUP_DIR is the same directory the snapshot lives
+    # in (true by default: both default to $BACKUP_DIR), the dump already landed
+    # inside that mount and can be addressed as /migrate-state/<basename>. If
+    # --backup-dir or MIGRATE_SNAPSHOT point the two at different directories,
+    # no mount reaches the dump — refuse to guess (preflight's find_backup()
+    # would otherwise silently return None and BLOCK right after a good dump).
+    BACKUP_HOST_DIR="$(cd "$BACKUP_DIR" && pwd)"
+    if [[ "$BACKUP_HOST_DIR" == "$SNAP_HOST_DIR" ]]; then
+      BACKUP_PATH_ARG="/migrate-state/$(basename "$BACKUP_FILE")"
+    else
+      echo "BLOCKED: --via-run cannot hand the dump at $BACKUP_FILE into the" >&2
+      echo "  preflight container: --backup-dir ($BACKUP_DIR) and the snapshot's" >&2
+      echo "  directory ($SNAP_HOST_DIR, from MIGRATE_SNAPSHOT) differ, so only one" >&2
+      echo "  of the two is bind-mounted at /migrate-state. Re-run with the two" >&2
+      echo "  directories matching, or with --backup-verified-elsewhere \"$BACKUP_FILE\"." >&2
+      exit "$EX_OPERATIONAL"
+    fi
+  fi
+  EXTRA_PREFLIGHT+=(--backup-path "$BACKUP_PATH_ARG")
 fi
 
 # --------------------------------------------------------------------------
@@ -208,10 +333,8 @@ fi
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 4: preflight ---"
-SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
-mkdir -p "$(dirname "$SNAP")"
 set +e
-run_py scripts/migrate/preflight.py --target "$TARGET" --snapshot "$SNAP" \
+run_py scripts/migrate/preflight.py --target "$TARGET" --snapshot "$SNAP_IN_CONTAINER" \
   "${EXTRA_PREFLIGHT[@]}"
 PF=$?
 set -e
@@ -251,8 +374,7 @@ fi
 echo
 echo "--- Step 5: alembic upgrade $TARGET (lock_timeout ${LOCK_TIMEOUT_MS}ms) ---"
 set +e
-docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" \
-  -e ALEMBIC_LOCK_TIMEOUT_MS="$LOCK_TIMEOUT_MS" "$SVC" \
+compose_py -e ALEMBIC_LOCK_TIMEOUT_MS="$LOCK_TIMEOUT_MS" "$SVC" \
   python -m alembic upgrade "$TARGET"
 MIG=$?
 set -e
@@ -284,7 +406,7 @@ async def m():
         r = await c.execute(sa.text('select version_num from alembic_version'))
         print((r.scalar() or 'NONE'))
     await e.dispose()
-asyncio.run(m())" 2>/dev/null | tr -d '\r')"
+asyncio.run(m())" 2>/dev/null | tail -n 1 | tr -d '\r')"
 if [ "$STAMP" != "$TARGET" ]; then
   echo "BLOCKED: alembic reported success but alembic_version is '${STAMP:-MISSING}', not $TARGET." >&2
   echo "  Treat this as a silent rollback. Do NOT deploy code. Investigate env.py." >&2
@@ -298,7 +420,7 @@ echo "    PASS  alembic_version = $STAMP (read back from the database)"
 echo
 echo "--- Step 7: postflight ---"
 set +e
-run_py scripts/migrate/postflight.py --target "$TARGET" --snapshot "$SNAP"
+run_py scripts/migrate/postflight.py --target "$TARGET" --snapshot "$SNAP_IN_CONTAINER"
 POST=$?
 set -e
 if [ "$POST" -ne 0 ]; then
@@ -321,6 +443,8 @@ echo "          python scripts/backfill_slack_ts.py            # report first"
 echo "        docker compose exec -T -e PYTHONPATH=/app $SVC \\"
 echo "          python scripts/backfill_slack_ts.py --apply"
 echo "      Read its output. Exit 2 means rows were UNVERIFIED, not absent."
-echo "   9. Deploy the application code, then restart app + worker."
+echo "   9. Deploy the application code, then start (or restart) app + worker."
+echo "      If you migrated with --via-run, this is also when app comes back up —"
+echo "      step 8's 'docker compose exec' needs a running container."
 echo "  10. Start agent-run last."
 echo "=============================================================="

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Failure-injection harness for the verified-backup system (spec §10, tests 2-16).
-# Host-only: needs the Docker socket and the real postgres containers. NOT run by
-# scripts/ci.sh.
+# Failure-injection harness for the verified-backup system. Host-only: needs the
+# Docker socket and the real postgres containers. NOT run by scripts/ci.sh.
 #
 # Happy path proves nothing. Every check here deliberately breaks something and
 # asserts the system notices.
@@ -31,8 +30,8 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 newest() { ls -t "$DIR"/*.dump 2>/dev/null | head -1; }
 
 # The host has no postgres client tools; read the TOC with the same image the
-# backup system uses. Exit 0 = readable. Verified 2026-08-18: good dump -> 0,
-# truncated -> 1, garbage -> 1.
+# backup system uses. Exit 0 = readable: a good dump exits 0, a truncated or
+# garbage one exits 1.
 toc_ok() {
   docker run --rm --network none -v "$1":/d.bin:ro postgres:15 \
     pg_restore -l /d.bin >/dev/null 2>&1
@@ -155,7 +154,7 @@ for d in 01 02 03 04 05; do
 done
 CNT_BEFORE=$(find "$TMPD/$STACK" -type f | wc -l)
 # A real temp file, NOT <(process substitution): sudo closes inherited fds, so
-# /dev/fd/63 does not exist in the child. Verified during the plan audit.
+# /dev/fd/63 does not exist in the child.
 TMPCFG=$(mktemp)
 sed "s|^BACKUP_ROOT=.*|BACKUP_ROOT=$TMPD|" "$CFG" > "$TMPCFG"
 /usr/local/bin/copi-backup prune --config "$TMPCFG" >/dev/null 2>&1
@@ -183,8 +182,8 @@ done
 [ "$MISSING" -eq 0 ] && ok "all production volumes intact"
 
 echo "== test 13: OOM in verify container is detected =="
-# Measured on this host (2026-08-18): 32m triggers genuine OOM with OOMKilled=true.
-# Lower caps (48m, 64m) do not OOM-kill. This test verifies the OOM-discrimination
+# 32m reliably triggers a genuine OOM with OOMKilled=true on this host; higher
+# caps (48m, 64m) do not OOM-kill. This test verifies the OOM-discrimination
 # branch in verify_dump correctly identifies containers killed by memory exhaustion.
 VOLNAME="copi-verify-oom-test"
 docker volume create --label copi.backup.ephemeral=true "$VOLNAME" >/dev/null 2>&1

@@ -26,8 +26,7 @@ keeping the id ts-shaped, float-parseable and strictly ordered. The cost is
 resolution (a writer can mint one id per slot), which is orders of magnitude
 above the real posting rate.
 
-See specs/local-db-conversations.md, the PR #19 review (M1 / mint precision) and
-.notes/db-conversations-residual-2026-07-24.md (R1).
+See specs/local-db-conversations.md for the full mint-precision rationale.
 """
 
 from __future__ import annotations
@@ -48,6 +47,8 @@ WRITER_ENGINE = 0        # SimulationEngine._ts_minter (agent_messages)
 WRITER_WEB = 1           # web app process (PI messages + DMs)
 WRITER_GRANTBOT = 2      # grantbot process (funding posts)
 WRITER_ENGINE_AUX = 3    # module default inside the engine process (PI DMs)
+WRITER_WORKER = 4        # worker process (PI messages/DMs from inbound-email replies, when
+                         # ENABLE_INBOUND_EMAIL is on) — see src/worker/main.py:main()
 
 
 def _fmt(us: int) -> str:

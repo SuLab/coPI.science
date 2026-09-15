@@ -8,15 +8,15 @@ where the DB-primary conversation interface and the cohort gate actually meet:
 - `_poll_inbound_from_db` ingesting real agent_messages rows written by "another
   process", then a gated read filtering them per agent
 - `_rebuild_state_from_db` + `_rebuild_agent_state` reconstructing threads on a
-  *resumed* run and the first recompute grandfathering them (v2 §8)
+  *resumed* run and the first recompute grandfathering them
 - `_record_topology_snapshot` actually writing a row — it is wrapped in try/except,
   so a broken write would otherwise only log a warning
 - `_sync_roster_from_db` adding/removing agents mid-run under an active gate
-- the full topology matrix (v2 §5.2) evaluated through the engine, not the helper
+- the full topology matrix evaluated through the engine, not the helper
 
 Slack is off (NullTransport) throughout: that is the configuration where the DB is
 the sole conversation store, so the gate's correctness rests entirely on read-side
-filtering with no second path to incidentally catch a miss (v2 §9.1).
+filtering with no second path to incidentally catch a miss.
 """
 
 import uuid
@@ -361,7 +361,7 @@ async def test_db_ingestion_is_complete_and_reads_are_per_agent(live, monkeypatc
 
     await eng._poll_inbound_from_db()
 
-    # Shared log is complete — ingestion is never gated (v2 §6.2).
+    # Shared log is complete — ingestion is never gated.
     assert len(eng.message_log) == 3, "ingestion must not drop anything"
 
     su = eng.agents["su"]
@@ -430,7 +430,7 @@ async def test_private_channel_message_from_a_non_mate_is_visible(live, monkeypa
 
 
 async def test_resumed_run_rebuild_then_first_recompute_grandfathers(live, monkeypatch):
-    """The §8 path that only exists on a restart, exercised for real.
+    """The grandfathering path that only exists on a restart, exercised for real.
 
     Messages from a previous process are in the DB. The rebuild reconstructs the
     thread cohort-blind; the first recompute must mark it grandfathered.
@@ -714,7 +714,7 @@ async def test_outbound_post_strips_a_cross_cohort_mention_for_real(live, monkey
 
 
 async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch):
-    """§8's central promise, driven end to end rather than asserted structurally.
+    """The grandfathering promise, driven end to end rather than asserted structurally.
 
     A thread whose partner has left the cohort must still be answered — abandoning
     it mid-flight wastes every call already spent — while losing reactive priority.
@@ -852,15 +852,16 @@ async def test_empty_topology_fails_open_not_closed(live, monkeypatch):
 async def test_post_message_stamps_private_channel_visibility(live, monkeypatch):
     """A message posted into a collab_private channel must persist as collab_private.
 
-    Regression for a defect that made the §7 exemption dead code. `_post_message`
-    omitted `visibility` when constructing the LogEntry, so every agent-authored
-    message defaulted to "public" — even in a PI-created refinement channel. The gate's
-    private-channel exemption reads that field, so it never fired: two agents in
-    different cohorts could not converse in the channel the PI made for them.
+    `_post_message` must not omit `visibility` when constructing the LogEntry: if
+    every agent-authored message defaulted to "public" — even in a PI-created
+    refinement channel — the gate's private-channel exemption, which reads that
+    field, would never fire, and two agents in different cohorts could not
+    converse in the channel the PI made for them.
 
-    The existing §7 test could not catch this because it writes the AgentMessage row
-    directly with the visibility already set, exercising only the read path. This one
-    goes through `_post_message` and reads back what actually landed.
+    The private-channel exemption test elsewhere in this file cannot catch this
+    because it writes the AgentMessage row directly with the visibility already
+    set, exercising only the read path. This one goes through `_post_message`
+    and reads back what actually landed.
     """
     factory, run_id = live
     await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
@@ -885,7 +886,8 @@ async def test_post_message_stamps_private_channel_visibility(live, monkeypatch)
         }
     assert rows[priv] == VISIBILITY_COLLAB_PRIVATE, (
         "a message posted into a collab_private channel persisted as "
-        f"{rows[priv]!r} — the §7 exemption keys on this field and would never fire"
+        f"{rows[priv]!r} — the private-channel exemption keys on this field and "
+        "would never fire"
     )
     assert rows["general"] == VISIBILITY_PUBLIC
 
@@ -900,7 +902,7 @@ async def test_post_message_stamps_private_channel_visibility(live, monkeypatch)
 
 
 # ===========================================================================
-# Scale + roster churn (v2 §14.6)
+# Scale + roster churn
 # ===========================================================================
 
 
@@ -1005,7 +1007,7 @@ async def test_activating_an_agent_mid_run_gives_it_a_gate(live20, monkeypatch):
 
 
 # ===========================================================================
-# §6.3 — forward-only cursor semantics
+# Forward-only cursor semantics
 # ===========================================================================
 
 
@@ -1013,8 +1015,8 @@ async def test_filtering_is_forward_only(live, monkeypatch):
     """A message the gate suppressed stays suppressed after the sender becomes a
     cohort-mate, because the reading agent's cursor has already moved past it.
 
-    This is documented in §6.3 as the reason a membership change never replays
-    backlog, and nothing tested it. The control is the third leg: a message posted
+    This is the reason a membership change never replays
+    backlog. The control is the third leg: a message posted
     AFTER the change must be visible — otherwise a gate that simply never reopened
     would satisfy the "no replay" assertion and the test would prove nothing.
     """
@@ -1104,14 +1106,15 @@ async def test_a_rewound_cursor_does_replay_and_the_gate_still_applies(live, mon
 
 
 # ===========================================================================
-# §7 — the private-channel exemption, through the writers
+# The private-channel exemption, through the writers
 # ===========================================================================
 
 
 async def test_private_exemption_holds_for_every_write_path(live, monkeypatch):
-    """§7 driven through the write paths rather than by constructing the row.
+    """The private-channel exemption driven through the write paths rather than by
+    constructing the row.
 
-    Rule B: the earlier §7 test wrote the AgentMessage row with `visibility` already
+    The private-channel test elsewhere in this file writes the AgentMessage row with `visibility` already
     set, exercising only the read side — which is exactly how it missed that
     `_post_message` never stamped the field at all. Every message here reaches the log
     through a real writer.
@@ -1162,7 +1165,7 @@ async def test_private_exemption_holds_for_every_write_path(live, monkeypatch):
     await eng._flush_persisted()
     assert eng.message_log.has_new_reply_from_other(
         root_ts, "su", since=0.0, allowed_sender_ids=su.allowed_sender_ids,
-    ) is True, "a private-channel reply from a non-mate must still register (§7)"
+    ) is True, "a private-channel reply from a non-mate must still register"
 
     # Control: the SAME sender doing the SAME two things in a PUBLIC channel is
     # filtered, so the exemption is scoped to the channel class and the gate is
@@ -1194,7 +1197,7 @@ async def test_private_exemption_holds_for_every_write_path(live, monkeypatch):
 
 
 async def test_every_outbound_channel_class_is_stamped(live, monkeypatch):
-    """Regression guard for the defect that made §7 dead code.
+    """Regression guard for a missing-visibility-stamp defect.
 
     `_post_message` must stamp `visibility` for every channel class it can post into,
     including one it has never seen — which must default to public rather than NULL.
@@ -1233,12 +1236,12 @@ async def test_every_outbound_channel_class_is_stamped(live, monkeypatch):
 
 
 # ===========================================================================
-# §8 grandfathering + §13.1 provenance, through the real startup path
+# Grandfathering + provenance, through the real startup path
 # ===========================================================================
 
 
 async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypatch):
-    """§8's two halves in one test, so neither can pass on its own.
+    """Grandfathering's two halves in one test, so neither can pass on its own.
 
     "Loses reactive priority" is an absence: _owes_reply going False would also be
     satisfied by a thread that had simply gone quiet. So the same thread is asserted to
@@ -1294,7 +1297,7 @@ async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypat
 
 
 async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch):
-    """§13.1 and the §8 pre-loop recompute through `start()` itself.
+    """The topology-snapshot write and the pre-loop gate recompute through `start()` itself.
 
     Every other test in this module calls `_recompute_allowed_sender_ids()` directly,
     so the ordering inside `start()` — gate computed and snapshot written BEFORE the
@@ -1374,7 +1377,7 @@ async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypa
 
 
 # ===========================================================================
-# §9 outbound tag hygiene, §10.3 the fairness valve
+# Outbound tag hygiene, the fairness valve
 # ===========================================================================
 
 
@@ -1402,7 +1405,8 @@ STRIP_CASES = [
 @pytest.mark.parametrize("text,expected", STRIP_CASES,
                          ids=[c[0][:26] for c in STRIP_CASES])
 async def test_strip_cases(live, monkeypatch, text, expected):
-    """Every §9 behaviour as a row, so a failure names the surrounding, not the regex."""
+    """Every outbound tag-stripping behaviour as a row, so a failure names the
+    surrounding, not the regex."""
     factory, run_id = live
     await _topology(factory, {"alpha": ["su", "wiseman"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
@@ -1460,7 +1464,7 @@ async def test_strip_indentation_is_preserved(live, monkeypatch):
 
 
 async def test_valve_holds_over_sustained_load(live20, monkeypatch):
-    """§10.3 at pilot scale over 200 selections.
+    """The fairness valve at pilot scale over 200 selections.
 
     A fake clock is essential: with wall time every pick lands in the same instant, the
     staleness weight clamps to 1.0 for everyone, and the proactive tier becomes uniform
@@ -1486,8 +1490,9 @@ async def test_valve_holds_over_sustained_load(live20, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(sim, "time", types.SimpleNamespace(time=lambda: clock[0]))
 
-    # Two agents locked in a perpetual exchange — the starvation scenario §10.3 exists
-    # for. The other 18 have nothing owed and can only be reached proactively.
+    # Two agents locked in a perpetual exchange — the starvation scenario the
+    # fairness valve exists for. The other 18 have nothing owed and can only be
+    # reached proactively.
     for a, b in (("su", "wiseman"), ("wiseman", "su")):
         eng.agents[a].state.active_threads[f"t-{a}"] = ThreadState(
             thread_id=f"t-{a}", channel="general", other_agent_id=b,

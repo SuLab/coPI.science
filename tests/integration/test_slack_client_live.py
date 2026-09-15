@@ -323,7 +323,7 @@ def test_an_over_limit_post_reports_every_message_it_created(
     # No content was lost or duplicated across the split.
     assert re.sub(r"\s+", "", "".join(live)) == re.sub(r"\s+", "", body)
     # A split root stays ONE top-level post: the continuations hang off the first
-    # message, so nobody else's Phase 2 scan sees several roots for one post.
+    # message, so nobody else's phase 2 scan sees several roots for one post.
     assert posted[0]["thread_ts"] is None
     assert all(p["thread_ts"] == posted[0]["ts"] for p in posted[1:]), (
         f"continuation chunks are not threaded on the first: {[p['thread_ts'] for p in posted]}"

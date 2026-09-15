@@ -14,8 +14,7 @@ lab, while the cohort gate forbade every such tag. Measured over one run, 259
 an agent the poster could not reach. Role alone is the wrong axis — ``pi_lab`` in
 a mesh deployment *should* make cross-lab posts; the same role in a star must not.
 So a post type declares the counterparty roles it addresses, and availability is
-computed against the agent's live gate. See
-docs/specs/2026-08-06-role-topology-post-type-gating-design.md.
+computed against the agent's live gate.
 """
 
 from __future__ import annotations
@@ -103,7 +102,7 @@ FUNDING_POST_TYPES: frozenset[str] = frozenset({"funding_collab"})
 
 # Retired names a running deployment may still emit. ``idea`` sat in the old
 # phase-5 enum alongside ``idea_crosslab`` with no documented difference and no
-# code distinguishing them (design §2), so collapsing them is right — but a mesh
+# code distinguishing them, so collapsing them is right — but a mesh
 # deployment whose bind-mounted prompts lag the baked-in code would otherwise
 # have every ``idea`` post rejected by layer 1 and silently publish nothing.
 # That is a regression in a deployment this change is not supposed to touch.
@@ -246,7 +245,7 @@ def available_for(
 
     ``funding_only`` narrows the result to ``FUNDING_POST_TYPES``; the result may
     legitimately be empty in that mode, which must NOT be treated as "skip the
-    turn" — a funding *reply* is still valid. See spec §5.
+    turn" — a funding *reply* is still valid.
     """
     out = [
         s for s in declared

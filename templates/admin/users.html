@@ -29,7 +29,6 @@
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
             <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
             <option value="complete" {% if status_filter == 'complete' %}selected{% endif %}>Complete</option>
-            <option value="pending_update" {% if status_filter == 'pending_update' %}selected{% endif %}>Pending Update</option>
         </select>
     </div>
     <div>
@@ -104,8 +103,7 @@
                     {% set status_colors = {
                         'no_profile': 'bg-gray-100 text-gray-600',
                         'generating': 'bg-blue-100 text-blue-700',
-                        'complete': 'bg-green-100 text-green-700',
-                        'pending_update': 'bg-amber-100 text-amber-700'
+                        'complete': 'bg-green-100 text-green-700'
                     } %}
                     <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
                         {{ status_colors.get(item.profile_status, 'bg-gray-100 text-gray-600') }}">

@@ -35,7 +35,8 @@ async def _cohort(db, name, *agent_ids):
 async def test_gate_clause_matches_entry_allowed(
     db_session, name, kwargs, gate, expected
 ):
-    """Every row of the engine's §5.1 table, decided by SQL instead of Python."""
+    """Every row of the engine's allowed-entry decision table, decided by SQL
+    instead of Python."""
     run = await factories.make_simulation_run(db_session)
     row_kwargs = dict(agent_id="x", is_bot=True, visibility="public")
     row_kwargs.update(
@@ -160,7 +161,7 @@ async def test_preflight_refusal_fails_open_loudly(db_session, monkeypatch, capl
 
 async def test_no_warning_when_gate_is_simply_off(db_session, monkeypatch, caplog):
     """Control for the test above: isolation disabled is the ordinary, silent
-    gate-off path (§5.1's first row) — it must not trip the preflight-refusal
+    gate-off path — it must not trip the preflight-refusal
     warning, or every request would log at WARNING and the signal would be
     worthless."""
     from src.config import get_settings
@@ -429,7 +430,7 @@ async def test_reply_count_excludes_out_of_cohort_replies(
 async def test_a_reply_from_a_different_channel_sharing_a_thread_ts_is_excluded(
     client, db_session, monkeypatch
 ):
-    """Latent-bug regression (audit finding F4). `thread_ts` alone is not proof a
+    """Latent-bug regression. `thread_ts` alone is not proof a
     row belongs to a given root's conversation — only `uq_agent_messages_run_ts`
     (message_ts unique per run) is guaranteed, and nothing enforces that a row's
     `thread_ts` names a root in ITS OWN channel. Construct exactly the scenario
@@ -595,7 +596,7 @@ async def _threaded_world(db_session, monkeypatch):
     (OUT-OF-COHORT-REPLY, NOT in spoke1's gate — spoke1 and spoke2 are each
     paired with `hub` but not with each other). That pairing is deliberate:
     it is the only way to prove replies are gated at all, rather than merely
-    admitted through the root owner's own-post carve-out. Spoke2 additionally
+    admitted through the root owner's own-post exemption. Spoke2 additionally
     has its own root (9.0003, FOREIGN-ROOT) with no reply, used by the
     out-of-cohort-root/IDOR tests below.
     """
@@ -755,11 +756,11 @@ async def test_a_stranger_cannot_expand_someone_elses_thread(
 async def test_expanding_an_uncohorted_own_thread_is_200_not_404(
     client, db_session, monkeypatch
 ):
-    """CONTROLLER AMENDMENT case: a PI whose agent is active but uncohorted
+    """A PI whose agent is active but uncohorted
     (gate == empty set under policy="isolated") must still be able to expand
     their OWN thread. A bare `gate_clause(gate)` would resolve `root is None`
     here and 404 the PI's own thread — the leaking-inverse of the feed's own
-    carve-out, which already renders this root and counts this reply in the
+    exemption, which already renders this root and counts this reply in the
     badge. `own_or_gated(gate, aid)` must admit both the root and the reply.
     """
     from src.config import get_settings

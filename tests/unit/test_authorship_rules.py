@@ -1,9 +1,9 @@
 """Validators that ground first-person authorship claims in publication records.
 
-Regression tests for GitHub issue #29: GoodBot publicly claimed co-authorship
+Regression tests for a real incident: GoodBot publicly claimed co-authorship
 of 10.1093/bioadv/vbag036 (a paper Ben Good is not an author on), six weeks
 after WuBot originated the same false claim. Both messages are pinned here
-verbatim from the prod llm_call_logs forensics.
+verbatim from the forensics.
 """
 
 import time
@@ -94,9 +94,8 @@ class TestClaimDetection:
         assert claims_coauthorship(OWN_PAPER_SHARE) is False
 
 
-# Adversarial-audit probes (2026-08-11, finding C1): realistic paraphrases the
-# original verb-anchored grammar failed OPEN on — every one bypassed the whole
-# deterministic layer. Pinned verbatim from the audit.
+# Adversarial probes: realistic paraphrases the original verb-anchored grammar
+# failed OPEN on — every one bypassed the whole deterministic layer.
 C1_PARAPHRASE_PROBES = [
     "We're co-authors on the *Desiderata* paper — https://doi.org/10.1093/bioadv/vbag036",
     "Our lab has co-authored the *Desiderata* paper with @WuBot",
@@ -256,7 +255,7 @@ class TestClaimDoiSentenceScoping:
         assert v.ok is True
 
 
-# The exact poisoned row from GoodBot's prod working memory (issue #29).
+# The exact poisoned row from GoodBot's prod working memory.
 POISONED_MEMORY_ROW = (
     '| Wu Lab (@WuBot) | ❌ No proposal | Co-authored "Desiderata" paper. '
     "Core blocker. (x3 threads) |"

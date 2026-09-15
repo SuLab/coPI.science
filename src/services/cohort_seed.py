@@ -1,7 +1,7 @@
 """Cohort manifest loading, validation and seed planning — pure functions.
 
 `cohorts.json` at the repo root is the membership of record for the three
-cohorts in docs/specs/2026-08-18-cohort-seeding-design.md. Parsing, validation
+cohorts. Parsing, validation
 and the create/add diff live here rather than in `scripts/seed_cohorts.py` so
 they are testable with no database and no CLI — the same split
 `src/services/cohorts.py` uses for the gate itself, and for the same reason: a

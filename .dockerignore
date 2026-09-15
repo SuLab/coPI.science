@@ -3,6 +3,7 @@
 certbot
 logs
 data
+profiles
 *.log
 __pycache__
 **/__pycache__
@@ -15,3 +16,41 @@ venv
 # Secrets — never in an image layer (compose injects these at runtime via env_file)
 .env
 .env.*
+
+# Bloat + secrets that COPY . . would otherwise bake into every image layer.
+# backups/ is the sharp one: it holds full production pg_dumps AND a
+# plaintext prod .env (SLACK_BOT_TOKEN_* per agent, POSTGRES_PASSWORD,
+# SLACK_CONFIG_TOKEN/_REFRESH_TOKEN) that the .env/.env.* patterns above do
+# not catch — it has no leading dot and sits two directories down.
+backups
+.venv-test
+.venv*
+tests
+.notes
+mutants
+build
+.hypothesis
+.ruff_cache
+.coverage
+.mutmut-cache
+# Created by ci.sh's mypy stage — large relative to the built image's /app
+# tree, and not something any runtime process reads.
+.mypy_cache
+# A stray uv.lock (a `uv` command run without --no-project writes one) is a second,
+# competing lockfile; requirements.lock is the only one the image installs.
+uv.lock
+.playwright-mcp
+copi.egg-info
+.superpowers
+**/.env*
+docs/specs
+# The one-off implementation plans and their evidence subtrees — a large
+# fraction of /app's tree for text no process reads. Nothing under src/,
+# scripts/, templates/ or alembic/ opens a path below docs/; every reference
+# is a comment or a docstring (`grep -rn 'docs/' src/ scripts/ templates/
+# alembic/`), which is the same reasoning that already excludes docs/specs
+# above. docs/ itself is deliberately NOT excluded: docs/production-migration.md
+# and docs/inbound-email.md are operator runbooks worth having next to the
+# code in a shell inside the container.
+docs/plans
+docs/superpowers

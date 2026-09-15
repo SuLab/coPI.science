@@ -71,26 +71,14 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0024"
-#: 0023 is supported because it is where a deployment that already took the cohort
-#: migration sits. org1 is at 0018 (see docs/production-migration.md); do not read
-#: this tuple as a statement about any one deployment's current stamp.
-#:
-#: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
-#: deployment that tracks main is therefore stamped 0021, and the first version of this
-#: list — ("0018", "0019") — hard-BLOCKED exactly that state. The framing that produced
-#: it ("migrate from 0018 or 0019") described where production was at the time, not where
-#: main is.
-#:
-#: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
-#: already exists, so duplicates cannot be present and there is no 0019 index build to
-#: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
-#: small researcher_profiles).
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023")
+DEFAULT_TARGET = "0030"
 
-#: Start revisions at which migration 0019 has already run, so the expensive
-#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
-POST_0019_STARTS = ("0020", "0021")
+#: The oldest stamp this tooling will migrate from. Below it the chain has never been
+#: rehearsed end to end and the runbook does not describe it; 0018 is `main` before PR19
+#: and the oldest stamp any live deployment carries.
+OLDEST_SUPPORTED_START = "0018"
+
+#: SUPPORTED_START_REVISIONS and POST_0019_STARTS are derived from REVISION_ORDER, below.
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
 SNAPSHOT_SCHEMA = "public"
@@ -100,8 +88,8 @@ SNAPSHOT_SCHEMA = "public"
 # ---------------------------------------------------------------------------
 # Method: build a fixture at 0018, bulk-load N synthetic agent_messages rows, then
 # run the 15-statement 0019+0021 DDL block for agent_messages inside ONE transaction
-# in psql with \timing on, and sum the statement times. postgres:15, the compose
-# postgres container, on this developer's machine, 2026-08-04:
+# in psql with \timing on, and sum the statement times. Measured against
+# postgres:15, the compose postgres container:
 #
 #     rows        DDL block total   post-migration total relation size
 #     10,011          112.0 ms       3,608 kB   (from 2,016 kB, +79%)
@@ -201,9 +189,140 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
     # 0024_add_agent_role
     PlannedObject("0024", "column", "role", "agents"),
+    # 0025_publications_unique_user_pmid
+    PlannedObject("0025", "constraint", "uq_publications_user_pmid", "publications"),
+    # 0026_pcm_user_cascade recreates an existing FK under its original name — not a
+    # new object, so it gets no PlannedObject entry (see the migration's docstring).
+    # 0027_fk_and_badge_indexes
+    PlannedObject("0027", "index", "ix_access_allowlist_added_by_user_id", "access_allowlist"),
+    PlannedObject("0027", "index", "ix_agent_delegates_user_id", "agent_delegates"),
+    PlannedObject("0027", "index", "ix_agent_delegates_invitation_id", "agent_delegates"),
+    PlannedObject("0027", "index", "ix_agents_approved_by", "agents"),
+    PlannedObject("0027", "index", "ix_cohort_audit_events_actor_id", "cohort_audit_events"),
+    PlannedObject("0027", "index", "ix_cohort_memberships_added_by", "cohort_memberships"),
+    PlannedObject("0027", "index", "ix_cohorts_created_by", "cohorts"),
+    PlannedObject(
+        "0027", "index", "ix_delegate_invitations_invited_by_user_id", "delegate_invitations"
+    ),
+    PlannedObject(
+        "0027", "index", "ix_delegate_invitations_accepted_by_user_id", "delegate_invitations"
+    ),
+    PlannedObject("0027", "index", "ix_email_notifications_thread_decision_id", "email_notifications"),
+    PlannedObject("0027", "index", "ix_email_notifications_agent_registry_id", "email_notifications"),
+    PlannedObject("0027", "index", "ix_private_channel_members_user_id", "private_channel_members"),
+    PlannedObject(
+        "0027", "index", "ix_private_channel_members_added_by_user_id", "private_channel_members"
+    ),
+    PlannedObject("0027", "index", "ix_profile_revisions_changed_by_user_id", "profile_revisions"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_delegate_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_reviewed_by_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_slack_app_provisions_agent_registry_id", "slack_app_provisions"),
+    PlannedObject("0027", "index", "ix_thread_decisions_agent_a_outcome", "thread_decisions"),
+    PlannedObject("0027", "index", "ix_thread_decisions_agent_b_outcome", "thread_decisions"),
+    # 0028_thread_reopen_state
+    PlannedObject("0028", "column", "reopened_at", "thread_decisions"),
+    # 0029_pi_engagement_and_inbound_state
+    PlannedObject("0029", "column", "pi_engaged_at", "thread_decisions"),
+    PlannedObject("0029", "column", "pi_inbound_state", "agent_messages"),
+    # 0030_pi_ownership_and_dm_handled
+    PlannedObject("0030", "column", "sender_user_id", "agent_messages"),
+    # 0030 also creates this named FK constraint (_SENDER_USER_ID_FK in the
+    # migration).
+    PlannedObject("0030", "constraint", "agent_messages_sender_user_id_fkey", "agent_messages"),
+    PlannedObject("0030", "index", "ix_agent_messages_sender_user_id", "agent_messages"),
+    PlannedObject("0030", "column", "handled_at", "pi_dm_messages"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024")
+#: Every revision in the chain, in order. A revision missing from here is invisible
+#: to pending_revisions()/planned_objects_between(): check_name_collisions would
+#: report green while checking nothing, and revision_status would BLOCK an upgrade
+#: whose target it cannot find in the list.
+REVISION_ORDER = (
+    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
+    "0028", "0029", "0030",
+)
+
+#: Every revision an upgrade may legitimately START from: the whole chain from
+#: OLDEST_SUPPORTED_START up to the revision below the head.
+#:
+#: DERIVED, not hand-maintained, and that is the point. The hand-maintained version was
+#: assembled by naming deployments — ("0018", "0019"), then +0020/0021 for main's head,
+#: then +0023, then +0024 — and it was one release late every single time, because the
+#: revision a deploy leaves production at only becomes a *starting* point on the NEXT
+#: deploy. It stopped at 0024 while the head was 0029, which would have BLOCKed the
+#: migration after this one off the stamp this one writes.
+#:
+#: The earlier exclusion of 0022 ("no deployment reaches it") was a statement about
+#: deployments, not a hazard finding about 0022, and it was equally true of 0025-0028 —
+#: so it could not survive accepting those. What actually justifies the range: the chain
+#: is linear and alembic runs it in ONE transaction, `scripts/ci.sh` migrates all of it
+#: on every run, and starting later applies a strict suffix of that same chain. Data-state
+#: hazards that really are revision-specific (the ambiguous 0019 stamp, duplicate
+#: (simulation_run_id, message_ts), duplicate (user_id, pmid)) have their own checks; a
+#: stamp that no migration file defines is BLOCKed by check_alembic_scripts.
+SUPPORTED_START_REVISIONS = tuple(
+    r for r in REVISION_ORDER if r >= OLDEST_SUPPORTED_START and r != DEFAULT_TARGET
+)
+
+#: Start revisions at which migration 0019 has already run, so the expensive
+#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
+POST_0019_STARTS = tuple(REVISION_ORDER[REVISION_ORDER.index("0019") + 1 :])
+
+#: What each revision costs an operator who has not applied it yet, one clause each.
+#: check_sizing filters this by pending_revisions() so the sentence it prints describes
+#: the chain that will ACTUALLY run — a fixed list written when 0024 was the only
+#: post-0019 start told an operator at 0026 to expect 0025's index build and 0026's FK
+#: swap, both already behind them.
+REVISION_COST_NOTES: dict[str, str] = {
+    "0019": "0019's ACCESS EXCLUSIVE index build on agent_messages",
+    "0020": "0020 creates pi_dm_messages (empty)",
+    "0021": "0021 adds two indexes on agent_messages",
+    "0022": "0022 creates three empty cohort tables",
+    "0023": "0023 adds three columns to the small researcher_profiles",
+    "0024": "0024 adds one column to agents",
+    "0025": "0025 ADD CONSTRAINT UNIQUE on publications ({publications_rows:,} rows, "
+            "ACCESS EXCLUSIVE for the whole index build)",
+    "0026": "0026 drop/recreate of one FK (ACCESS EXCLUSIVE on private_channel_members, "
+            "SHARE ROW EXCLUSIVE on users)",
+    "0027": "0027's 20 non-concurrent CREATE INDEXes (SHARE on 13 tables)",
+    "0028": "0028 one nullable ADD COLUMN",
+    "0029": "0029 two more nullable ADD COLUMNs (catalogue-only, no rewrite)",
+    "0030": "0030 two more nullable ADD COLUMNs plus one small backfill UPDATE "
+            "on pi_dm_messages (catalogue-only column adds, no table rewrite)",
+}
+
+
+def remaining_chain_notes(current: str | None, target: str, publications_rows: int = 0) -> str:
+    """One clause per revision that an upgrade from ``current`` to ``target`` will run.
+
+    Only the pending ones: naming a revision the operator has already applied is how a
+    sizing note turns into a wrong instruction.
+    """
+    pending = pending_revisions(current, target)
+    return "; ".join(
+        REVISION_COST_NOTES[r].format(publications_rows=publications_rows)
+        for r in REVISION_ORDER
+        if r in pending and r in REVISION_COST_NOTES
+    )
+
+def pending_revisions(current: str | None, target: str) -> frozenset[str]:
+    """The revisions an upgrade from ``current`` to ``target`` will actually run.
+
+    Same slice ``planned_objects_pending`` uses, exposed on its own so callers can ask
+    "will 0025 run?" without going through PLANNED_OBJECTS.
+    """
+    try:
+        lo = REVISION_ORDER.index(current)
+    except ValueError:
+        lo = 0
+    try:
+        hi = REVISION_ORDER.index(target)
+    except ValueError:
+        hi = len(REVISION_ORDER) - 1
+    return frozenset(REVISION_ORDER[lo + 1 : hi + 1])
+
+
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
@@ -465,6 +584,17 @@ def legacy_inventory_status(recoverable: int, unrecoverable: int) -> tuple[str, 
     return WARN, "; ".join(parts) + "."
 
 
+def publication_duplicate_status(group_count: int, row_count: int) -> tuple[str, str]:
+    """(user_id, pmid) groups 0025's dedup will merge into one row each and delete."""
+    if group_count == 0:
+        return PASS, "no duplicate (user_id, pmid) pairs; 0025 has nothing to merge or delete."
+    return WARN, (
+        f"{group_count:,} duplicate (user_id, pmid) pair(s) covering {row_count:,} row(s) "
+        "total. 0025 will COALESCE-merge each group into its earliest-created row and "
+        "irreversibly delete the rest before adding uq_publications_user_pmid."
+    )
+
+
 #: An `active` session holding a transaction younger than this will release its locks on
 #: its own before it matters; older than this and it is indistinguishable from a stuck
 #: one. Idle-in-transaction is BLOCKed at any age, because nothing will end it.
@@ -618,12 +748,24 @@ def compare_row_counts(
     after: dict[str, int],
     allow_growth: bool = False,
     expected_new: tuple[str, ...] | frozenset[str] = (),
+    expected_deletions: dict[str, int] | None = None,
 ) -> tuple[bool, list[str]]:
     """Compare a preflight snapshot against a postflight count. Shared by both scripts.
 
-    Shrinkage is always a failure. Growth is a failure unless ``allow_growth``, because
-    the migration itself inserts no rows: if a count went up, a writer was live during
-    the migration and the lock-window analysis was wrong.
+    Growth is a failure unless ``allow_growth``, because the migration itself inserts no
+    rows: if a count went up, a writer was live during the migration and the lock-window
+    analysis was wrong.
+
+    Shrinkage is a failure UNLESS the table appears in ``expected_deletions`` with a count
+    that matches the delta exactly. Migration 0025 deletes duplicate ``(user_id, pmid)``
+    publications on purpose — 223 of them on the production database this was measured
+    against — and preflight records the number it counted, so the comparison can tell
+    "0025 removed exactly the duplicates preflight saw" from "rows went missing". An
+    inexact match fails in BOTH directions: deleting more than predicted means something
+    else deleted rows too, and deleting fewer means 0025 did not do what preflight
+    measured (in which case the unique constraint it then adds could not have been
+    created). A snapshot written before this key existed has no expectations and keeps
+    the original, strictly-no-shrinkage behaviour.
 
     ``expected_new`` names the tables the chain CREATES (0020's pi_dm_messages, 0022's
     three cohort tables). Those are absent from the preflight snapshot by construction,
@@ -632,6 +774,7 @@ def compare_row_counts(
     """
     problems: list[str] = []
     expected_new = frozenset(expected_new)
+    expected_deletions = dict(expected_deletions or {})
     for table in sorted(set(before) | set(after)):
         b = before.get(table)
         a = after.get(table)
@@ -644,7 +787,19 @@ def compare_row_counts(
             problems.append(f"{table}: existed before with {b:,} rows, now MISSING")
             continue
         if a < b:
-            problems.append(f"{table}: {b:,} rows before, {a:,} after — {b - a:,} rows LOST")
+            lost = b - a
+            expected = expected_deletions.get(table, 0)
+            if expected and lost == expected:
+                continue                      # exactly the rows preflight predicted
+            if expected:
+                problems.append(
+                    f"{table}: {b:,} rows before, {a:,} after — {lost:,} rows gone, but "
+                    f"preflight predicted exactly {expected:,}"
+                )
+            else:
+                problems.append(
+                    f"{table}: {b:,} rows before, {a:,} after — {lost:,} rows LOST"
+                )
         elif a > b and not allow_growth:
             problems.append(
                 f"{table}: {b:,} rows before, {a:,} after — grew by {a - b:,}; the "
@@ -1108,7 +1263,7 @@ async def run_preflight(args) -> Report:
         # --- 9. sizing / expected lock window ------------------------------------
         rows = 0
         try:
-            sizing = await check_sizing(conn, rev)
+            sizing = await check_sizing(conn, rev, args.target)
             report.add(*sizing)
             rows = sizing[4].get("agent_messages_rows", 0)
         except Exception as exc:  # noqa: BLE001
@@ -1132,12 +1287,18 @@ async def run_preflight(args) -> Report:
             lambda: check_legacy_inventory(conn, rev),
         )
 
-        # --- 12. backup ----------------------------------------------------------
+        # --- 12. publication (user_id, pmid) duplicates 0025 will merge/delete ---
+        await report.add_guarded(
+            "Publication (user_id, pmid) duplicates 0025 will merge and delete",
+            lambda: check_publication_duplicates(conn),
+        )
+
+        # --- 13. backup ----------------------------------------------------------
         await report.add_guarded(
             "Recent, non-trivial backup exists", lambda: check_backup(args, rows)
         )
 
-        # --- 13. row-count snapshot for postflight -------------------------------
+        # --- 14. row-count snapshot for postflight -------------------------------
         report.extra["lock_timeout_ms"], report.extra["lock_timeout_source"] = (
             resolve_lock_timeout_ms(dict(os.environ), read_env_py())
         )
@@ -1145,7 +1306,30 @@ async def run_preflight(args) -> Report:
         async def _snapshot_check():
             counts = await snapshot_row_counts(conn)
             report.extra["row_counts"] = counts
-            status_, detail_, rem_ = write_snapshot(args, report, counts, rev)
+            # 0025 deletes duplicate publications on purpose. Record WHICH rows, so
+            # postflight can distinguish that from row loss instead of failing the
+            # verification of a correct migration (measured: 223 rows on production) —
+            # and so a concurrent deleter inside a duplicate group cannot hide behind a
+            # net count that still adds up. Only record it when 0025 is actually in the
+            # pending set: an expectation recorded for a chain that will not run 0025
+            # would license arbitrary deletions.
+            doomed: list[str] = []
+            keepers: list[str] = []
+            if "0025" in pending_revisions(rev, args.target):
+                doomed, keepers = await publication_duplicate_plan(conn)
+            expected_deletions = {"publications": len(doomed)} if doomed else {}
+            expected_deleted_ids = {"publications": doomed} if doomed else {}
+            expected_kept_ids = {"publications": keepers} if doomed else {}
+            report.extra["expected_deletions"] = expected_deletions
+            status_, detail_, rem_ = write_snapshot(
+                args,
+                report,
+                counts,
+                rev,
+                expected_deletions=expected_deletions,
+                expected_deleted_ids=expected_deleted_ids,
+                expected_kept_ids=expected_kept_ids,
+            )
             return (
                 "Row-count snapshot written for postflight",
                 status_,
@@ -1609,14 +1793,17 @@ def check_migration_harness():
     )
 
 
-async def check_sizing(conn, rev: str | None = None):
+async def check_sizing(conn, rev: str | None = None, target: str = DEFAULT_TARGET):
     """agent_messages row count, size, and the estimated lock window.
 
     The estimate is a function of the 0019 index build, so it only applies when 0019 is
-    still pending. Starting from 0020/0021 that cost is already paid and the remaining
-    chain (0022's three empty tables, 0023's three columns on a small table) does not
-    scale with agent_messages at all — quoting the row-scaled number there would tell an
-    operator to book an outage they do not need.
+    still pending. Starting anywhere after 0019 that cost is already paid, but the
+    remaining chain is not a no-op — so this branch names the revisions that are
+    genuinely still pending (``remaining_chain_notes``) and, while 0025 is one of them,
+    sizes ``publications`` instead of quoting the already-paid 0019 cost. Past 0025 there
+    is no calibrated model left to quote: both row-scaled models here cover index builds
+    that have already run, and inventing a number for what remains would be worse than
+    saying so.
     """
     title = "Sizing and expected lock window"
     if not await table_exists(conn, "agent_messages"):
@@ -1624,22 +1811,29 @@ async def check_sizing(conn, rev: str | None = None):
     rows = int(await fetch_one_value(conn, "SELECT count(*) FROM agent_messages"))
     if rev in POST_0019_STARTS:
         heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
+        pubs = (
+            int(await fetch_one_value(conn, "SELECT count(*) FROM publications"))
+            if await table_exists(conn, "publications")
+            else 0
+        )
+        if "0025" in pending_revisions(rev, target):
+            status, tail = sizing_status(pubs, estimate_lock_window_ms(pubs)[1])
+        else:
+            status, tail = (
+                PASS,
+                "No calibrated estimate for what remains: the two row-scaled models here "
+                "cover 0019's agent_messages index build and 0025's publications index "
+                f"build, both already applied at {rev}.",
+            )
         return (
             title,
-            PASS,
-            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — but 0019 has "
-            f"already run at {rev}, so its ACCESS EXCLUSIVE index build is behind you. "
-            f"What remains is 0022 (three empty tables) and 0023 (three columns on "
-            f"researcher_profiles); neither scales with agent_messages. Measured at ~2s "
-            f"at every size tested.",
-            [],
-            {
-                "agent_messages_rows": rows,
-                "agent_messages_heap_bytes": heap,
-                "estimated_lock_window_ms_low": 0,
-                "estimated_lock_window_ms_high": 2000,
-                "index_build_already_done": True,
-            },
+            status,
+            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — 0019 is behind you at {rev}. "
+            f"What remains for {rev}->{target}: "
+            f"{remaining_chain_notes(rev, target, pubs)}. The chain is ONE transaction, so "
+            f"every lock is held until the last statement commits. {tail}",
+            ["Stop app, worker, grantbot and agent-run before --apply (runbook R.4)."],
+            {"agent_messages_rows": rows, "publications_rows": pubs},
         )
     heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
     total = int(await fetch_one_value(conn, "SELECT pg_total_relation_size('agent_messages')"))
@@ -1757,6 +1951,90 @@ async def check_legacy_inventory(conn, rev: str | None):
     return (title, status, detail, rem, data)
 
 
+async def publication_duplicate_plan(conn) -> tuple[list[str], list[str]]:
+    """WHICH publication rows 0025 will delete, and which it will keep.
+
+    Returns ``(doomed_ids, keeper_ids)``, both as strings, mirroring 0025's own
+    selection exactly: per ``(user_id, pmid)`` group with ``pmid IS NOT NULL``, order
+    by ``created_at ASC, id ASC`` and keep the first — see
+    ``alembic/versions/0025_publications_unique_user_pmid.py``. Empty lists when the
+    table is absent or already clean (including after 0025 has run, since its unique
+    constraint makes duplicates impossible from then on).
+
+    Naming the rows rather than counting them is what makes the postflight check sound.
+    A count cannot detect a concurrent deleter operating INSIDE a duplicate group,
+    because every row such a process removes reduces 0025's own delete count by exactly
+    one and the net shrinkage still lands on the prediction — demonstrated on a real
+    database: 5 group KEEPERS deleted mid-window, 0025 then deleted 218, total 223, and
+    a count-based check reported "exactly the duplicates 0025 was measured to delete"
+    while five rows of real data were gone. Identity closes that whole class.
+    """
+    if not await table_exists(conn, "publications"):
+        return ([], [])
+    rows = await fetch_all(
+        conn,
+        """
+        SELECT id, user_id, pmid,
+               row_number() OVER (
+                   PARTITION BY user_id, pmid ORDER BY created_at ASC, id ASC
+               ) AS rn
+          FROM publications
+         WHERE pmid IS NOT NULL
+           AND (user_id, pmid) IN (
+                 SELECT user_id, pmid FROM publications
+                  WHERE pmid IS NOT NULL
+                  GROUP BY user_id, pmid
+                 HAVING count(*) > 1
+               )
+         ORDER BY user_id, pmid, rn
+        """,
+    )
+    doomed = [str(r["id"]) for r in rows if int(r["rn"]) > 1]
+    keepers = [str(r["id"]) for r in rows if int(r["rn"]) == 1]
+    return (doomed, keepers)
+
+
+async def check_publication_duplicates(conn):
+    """(user_id, pmid) duplicates 0025's dedup will merge into one row and delete.
+
+    check 11 (legacy-row inventory, above) does NOT surface this count: that check
+    is exclusively about agent_messages.content, and check_sizing reports only a
+    bare ``count(*)`` on publications for lock-window sizing, not which rows are
+    duplicates. This is the actual pre-flight visibility for 0025's irreversible
+    DELETE.
+    """
+    title = "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    if not await table_exists(conn, "publications"):
+        return (title, PASS, "publications does not exist.", [], {})
+    rows = await fetch_all(
+        conn,
+        "SELECT user_id, pmid, count(*) AS n FROM publications "
+        "WHERE pmid IS NOT NULL GROUP BY user_id, pmid HAVING count(*) > 1 "
+        "ORDER BY user_id, pmid",
+    )
+    group_count = len(rows)
+    row_count = sum(int(r["n"]) for r in rows)
+    status, note = publication_duplicate_status(group_count, row_count)
+    data = {"duplicate_groups": group_count, "duplicate_rows": row_count}
+    if group_count == 0:
+        return (title, status, note, [], data)
+    shown = [f"({r['user_id']}, {r['pmid']})" for r in rows[:20]]
+    pairs = ", ".join(shown)
+    if group_count > len(shown):
+        pairs += f", … +{group_count - len(shown)} more"
+    detail = f"{note} Affected (user_id, pmid) pairs: {pairs}."
+    rem = [
+        "Dump the rows 0025 will merge/delete before --apply — downgrade() cannot "
+        "restore them, so this is the only out-of-band trace of what a given run "
+        "changed:",
+        "  \\copy (SELECT * FROM publications WHERE pmid IS NOT NULL AND "
+        "(user_id, pmid) IN (SELECT user_id, pmid FROM publications WHERE pmid IS "
+        "NOT NULL GROUP BY user_id, pmid HAVING count(*) > 1) ORDER BY user_id, "
+        "pmid, created_at) TO 'dup_publications.csv' WITH CSV HEADER;",
+    ]
+    return (title, status, detail, rem, data)
+
+
 def check_backup(args, live_rows: int):
     """A recent, data-bearing dump must exist: rollback past 0019 is destructive."""
     title = "Recent, non-trivial backup exists"
@@ -1782,8 +2060,24 @@ def check_backup(args, live_rows: int):
     )
 
 
-def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None):
-    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive."""
+def write_snapshot(
+    args,
+    report: Report,
+    counts: dict[str, int],
+    rev: str | None,
+    expected_deletions: dict[str, int] | None = None,
+    expected_deleted_ids: dict[str, list[str]] | None = None,
+    expected_kept_ids: dict[str, list[str]] | None = None,
+):
+    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive.
+
+    ``expected_deletions`` counts, and ``expected_deleted_ids`` / ``expected_kept_ids``
+    NAME, the rows a revision in the pending chain removes on purpose (0025's duplicate
+    publications). Without them postflight reads that deletion as row loss and fails the
+    verification of a migration that did exactly what it should; without the ids in
+    particular, a concurrent deleter inside a duplicate group is invisible (see
+    ``publication_duplicate_plan``).
+    """
     payload = {
         "kind": "preflight-snapshot",
         "generated_at": time.time(),
@@ -1791,6 +2085,9 @@ def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None
         "current_revision": rev,
         "target": args.target,
         "row_counts": counts,
+        "expected_deletions": dict(expected_deletions or {}),
+        "expected_deleted_ids": {k: list(v) for k, v in (expected_deleted_ids or {}).items()},
+        "expected_kept_ids": {k: list(v) for k, v in (expected_kept_ids or {}).items()},
     }
     detail = (
         f"{len(counts)} tables, {sum(counts.values()):,} rows total (exact counts, not "

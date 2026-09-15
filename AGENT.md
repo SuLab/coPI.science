@@ -4,9 +4,9 @@
 
 Python implementation of the CoPI researcher collaboration platform combined with the LabAgent multi-agent Slack system. ORCID OAuth, profile generation pipeline, profile editing UI, admin dashboard, and Slack-based AI agent simulation.
 
-**GitHub:** https://github.com/andrewsu/coPI-python-opus
+**GitHub:** https://github.com/SuLab/coPI.science
 **Target domain:** copi.science
-**Pilot:** 10 labs at Scripps Research
+**Pilot:** Scripps Research labs — the live roster and count are at **/admin/agents** (see CLAUDE.md "Adding New PIs"); the number changes as PIs are provisioned.
 
 ## What's In Scope
 
@@ -14,14 +14,21 @@ Python implementation of the CoPI researcher collaboration platform combined wit
 - Profile ingestion pipeline (ORCID → PubMed → PMC → Claude Opus synthesis)
 - Profile review/editing web UI (FastAPI + Jinja2)
 - Admin dashboard (users, profiles, jobs, agent activity)
-- Slack agent system (8 bots, simulation engine)
+- Slack agent system (bot count tracked live at /admin/agents; simulation engine)
 
 ## What's Out of Scope
 
 - Matching engine (pairwise proposal generation)
 - Swipe interface
-- Notifications (email)
-- Daily digest
+
+## What Email Actually Does (in scope, built)
+
+`src/services/email.py`, `email_inbound.py`, `email_notifications.py` —
+proposal-review emails, reply intake, unsubscribe/settings, and a periodic
+status-overview digest (`check_and_send_status_overviews`, called from the worker's
+~300 s poll loop in `src/worker/main.py`; each PI's own cadence comes from
+`email_notification_preferences.frequency`, which defaults to weekly —
+`daily` is one option on that ladder, not the schedule).
 
 ## Key Specs
 
@@ -73,8 +80,8 @@ templates/                  # Jinja2 HTML templates
 Decisions made autonomously during implementation are recorded here for human review.
 
 ### 2026-03-20: Admin impersonation endpoint location
-**Decision:** Admin impersonation routes placed at `/api/admin/impersonate` (POST) and `/api/admin/impersonate/stop` (POST) rather than inside the `/admin` router prefix.
-**Reason:** The impersonate stop button posts from any page (including non-admin pages when impersonating), so a clean `/api/admin/` prefix was clearer. Both routes still require is_admin verification.
+**Decision:** Admin impersonation routes are `POST /admin/impersonate` and `POST /admin/impersonate/stop` (`src/routers/admin.py`, mounted under the `/admin` prefix in `src/main.py`). *(Corrected 2026-09: this entry originally described an `/api/`-prefixed design that was never what shipped — see issue #26 DOC-3.)*
+**Reason:** The impersonate-stop button posts from any page (including non-admin pages when impersonating). Both routes still require is_admin verification.
 
 ### 2026-03-20: Login page GET /login serves both redirect and HTML
 **Decision:** `/login` GET route redirects directly to ORCID OAuth if not already logged in. The login.html page has its sign-in button also pointing to `/login` (which re-triggers the redirect).
@@ -102,7 +109,7 @@ Decisions made autonomously during implementation are recorded here for human re
 **Reason:** Avoids Node.js build step in a Python project. Acceptable for pilot; switch to compiled Tailwind for production if performance matters.
 
 ### 2026-03-20: Profile markdown export
-**Decision:** When a ResearcherProfile is saved/updated in the DB, automatically export it to `profiles/public/{lab}.md` if the user is one of the 8 pilot labs (matched by ORCID).
+**Decision:** When a ResearcherProfile is saved/updated in the DB, automatically export it to `profiles/public/{lab}.md` (matched by ORCID). Written when there were 8 pilot labs; the roster is now whatever `AgentRegistry` holds — see `/admin/agents` for the live count, and `orcids.txt` (48 entries) for the seeding list. Do not treat any number in this file as the current roster size.
 **Reason:** Keeps the DB (source of truth) and filesystem (agent input) in sync without a separate sync step.
 
 ## Implementation Status
@@ -115,10 +122,14 @@ Decisions made autonomously during implementation are recorded here for human re
 - [x] Admin dashboard
 - [x] Worker process
 - [x] Agent system (Slack bots, simulation engine)
-- [x] Agent profiles (8 pilot labs, auto-generated structure)
+- [x] Agent profiles (auto-generated structure; current roster at /admin/agents)
 - [x] Prompt files
 
 ## Pilot Lab ORCIDs
+
+**Historical snapshot — the original pilot cohort, not the current roster.** The live roster is
+`AgentRegistry` (see `/admin/agents`); the seeding list is `orcids.txt`, which now holds 48 ORCIDs.
+This table is kept because the decisions above refer to it.
 
 | PI | ORCID |
 |---|---|

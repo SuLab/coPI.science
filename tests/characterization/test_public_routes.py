@@ -1,6 +1,6 @@
 """Characterization pins for the public (no-login) route surface in src/routers/public.py.
 
-These capture CURRENT behavior — including security-hardened validation (SEC-7/16/17) —
+These capture CURRENT behavior — including security-hardened validation —
 not desired behavior. If the app changes intentionally, update the pins.
 """
 
@@ -118,7 +118,7 @@ async def test_graph_routes_render_200_with_csp(client, path):
 # --- proposal vote (POST /api/proposal-vote) --------------------------------
 
 async def test_proposal_vote_missing_token_422(client):
-    # SEC-7: a browser token is required (NULL tokens can't dedup -> unbounded rows).
+    # A browser token is required (NULL tokens can't dedup -> unbounded rows).
     body = {"decision_id": str(uuid.uuid4()), "vote": "up"}
     r = await client.post("/api/proposal-vote", json=body)
     assert r.status_code == 422

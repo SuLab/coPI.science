@@ -80,7 +80,7 @@
                 <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="short">{{ c.created_at.strftime('%b %d') }}</td>
                 <td class="px-4 py-3 text-sm">
                     {% if c.memberships %}
-                    {# Server refuses this too (v2 §12) — deleting a populated cohort
+                    {# Server refuses this too — deleting a populated cohort
                        would cascade memberships away and silently reshape a running
                        simulation's topology. #}
                     <span class="text-gray-400 cursor-not-allowed"

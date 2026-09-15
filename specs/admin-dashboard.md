@@ -20,7 +20,8 @@ Default landing page. Table of all users.
 - Name (with department as subtext)
 - Institution
 - ORCID (linked to orcid.org)
-- Profile status: `no_profile` | `generating` | `complete` | `pending_update`
+- Profile status: `no_profile` | `generating` | `complete`
+  (`pending_update` was removed: `pending_profile` has no writer — issue #22 V6-pend)
 - Agent status: `not_requested` | `awaiting_token` | `active` | `suspended`
 - Publication count
 - Profile version

@@ -9,30 +9,57 @@ description = "CoPI/LabAgent — Research collaboration platform with Slack-base
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
-    "jinja2>=3.1.4",
-    "python-multipart>=0.0.9",
-    "authlib>=1.3.0",
-    "httpx>=0.27.0",
-    "sqlalchemy[asyncio]>=2.0.30",
-    "asyncpg>=0.29.0",
-    "alembic>=1.13.0",
-    "anthropic>=0.26.0",
-    "slack-sdk>=3.27.0",
+    "fastapi>=0.111.0,<1.0.0",
+    # Floors raised past known advisories (#27 I4's "raise floors past known CVEs").
+    # Checked against OSV 2026-09-04: jinja2 <3.1.6 carries 6 advisories,
+    # python-multipart <0.0.31 carries 16, authlib <1.7.1 carries 22. The lock already
+    # resolves above all three (3.1.6 / 0.0.32 / 1.8.0), so raising the floors changes
+    # nothing today — the point is that a future resolve cannot walk back into them.
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.31,<1.0.0",
+    "authlib>=1.7.1,<2.0.0",
+    # Caps on the PRE-1.0 packages (#27 I4's second Fix clause). A 0.x minor bump is a
+    # breaking change by convention, and these five sit on request-handling and database
+    # paths where a silent upgrade is how a deploy breaks: uvicorn serves, httpx is every
+    # outbound call, asyncpg is the driver, python-multipart parses every form, typer is
+    # the CLI entry point. Deliberately NOT capping the already-1.0+ libraries
+    # (alembic, boto3, pydantic-settings, itsdangerous, rich): they are not what the Fix
+    # line names, and a cap there only churns the lock — a <15 cap on rich, tried and
+    # reverted, downgraded a working 15.0.0 to 14.3.4 for nothing.
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "asyncpg>=0.29.0,<1.0.0",
+    "sqlalchemy[asyncio]>=2.0.30,<3.0.0",
+    # >=1.16: migrations' downgrade() use if_exists= (op.drop_index,
+    # op.drop_constraint, op.drop_column), which 1.13-1.15 don't support.
+    "alembic>=1.16.0",
+    "anthropic>=0.26.0,<1.0.0",
+    "slack-sdk>=3.27.0,<4.0.0",
     "pydantic-settings>=2.2.0",
     "itsdangerous>=2.2.0",
     "boto3>=1.34.0",
-    "typer>=0.12.0",
+    "typer>=0.12.0,<1.0.0",
     "rich>=13.7.0",
-    "plotly>=5.20.0",
 ]
 
 [project.optional-dependencies]
+scripts = [
+    # Sole importer: scripts/build_cabo_sankey.py (#27 I4). Not needed by
+    # app/worker/agent/grantbot — moved out of the runtime install so it
+    # stops shipping in all four images for a script nobody runs from
+    # inside a container in the normal path.
+    "plotly>=5.20.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
+    # Capped, not just floored (#27 I7): unpinned, this resolved to 2.3.1 here and
+    # any later mypy release that adds a check would turn every push red against
+    # ci.sh's MYPY_MAX ceiling for reasons unrelated to the change. A dev-only
+    # extra, so this cannot make requirements.lock stale (verified: mypy does not
+    # appear in requirements.lock's 1316 lines; it is a runtime-only lockfile).
+    "mypy>=2.3,<2.4",
     "testcontainers[postgres]>=4.0.0",
     "respx>=0.21.0",
     "syrupy>=4.6.0",
@@ -67,6 +94,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
