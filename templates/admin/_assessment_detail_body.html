@@ -53,20 +53,24 @@
 <nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#signals">Strengths &amp; risks</a>
+    {% if a.recommended_next_experiment %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#ask">Ask</a>{% endif %}
     {% if a.rationale %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#rationale">Rationale</a>{% endif %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#panel">Panel</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#gating">Gating</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#scores">Scores</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#review">Review</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline">Timeline</a>
     {# Real buttons, not links: they act on the page rather than navigating, and
        a <button> is keyboard-operable and focusable without any extra wiring.
        The script at the bottom of this include is what they drive. #}
-    <button type="button" data-details-toggle="open" class="ml-auto text-sm text-indigo-700 underline-offset-2 hover:underline">Expand all</button>
-    <button type="button" data-details-toggle="close" class="text-sm text-indigo-700 underline-offset-2 hover:underline">Collapse all</button>
+    {# Styled as small outline BUTTONS, not like the anchors beside them
+       (2026-09-15 audit M2): navigation and action must not look alike. #}
+    <button type="button" data-details-toggle="open" class="ml-auto rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Expand all</button>
+    <button type="button" data-details-toggle="close" class="rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Collapse all</button>
 </nav>
 
-<div id="brief" class="assessment-brief scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-    <h2 class="assessment-headline text-2xl font-semibold text-gray-900">
+<div id="brief" class="assessment-brief scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <p class="assessment-headline text-2xl font-semibold text-gray-900">
         {{ a.headline or a.company_or_project or "—" }}
         {% if a.confidence %}
             {# Brackets stripped before re-wrapping, the same way the
@@ -77,7 +81,7 @@
                <h2> right under this one. #}
             <span class="text-sm font-normal text-gray-600">[{{ a.confidence.strip("[]") }}]</span>
         {% endif %}
-    </h2>
+    </p>
     {% if a.headline and a.company_or_project %}
     <div class="assessment-brief-label text-sm text-gray-600 mt-1">{{ a.company_or_project }}</div>
     {% endif %}
@@ -106,6 +110,30 @@
             <p class="assessment-brief-pitch-body whitespace-pre-line">{{ a.elevator_pitch }}</p>
             {% endif %}
             </div>
+            {% if has_points %}
+            {# Sidecar item 10 (scout_hub >= 1.4.0): the hub's own one-paragraph
+               account of WHY the weighted score came out where it did. Boxed rather
+               than folded into the pitch, because the pitch is published to
+               #assessments-summary and this is app-only (plan decision D3). NULL on
+               every row written before 0048 and deliberately never backfilled, so
+               the whole block is conditional rather than showing an empty state. #}
+            {% if a.score_rationale %}
+            <div id="score-rationale" class="assessment-brief-score-rationale scroll-mt-16 max-md:scroll-mt-28 mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <div class="text-sm font-semibold text-amber-900">Why this score</div>
+                {# Same write-time `prose_format` stamp and the same safe fallback as
+                   the pitch above and Rationale below: a NULL stamp means legacy
+                   plain text, which may carry a literal `*` in a scientific
+                   identifier that a markdown pass would corrupt. #}
+                <div class="assessment-prose max-w-none mt-1">
+                {% if a.prose_format == 'markdown' %}
+                <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+                {% else %}
+                <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+                {% endif %}
+                </div>
+            </div>
+            {% endif %}
+            {% endif %}
         </div>
         {% endif %}
         {% if has_points and a.key_points is mapping %}
@@ -132,6 +160,10 @@
         {% endif %}
     </div>
     {% endif %}
+    {# "Why this score" renders inside the pitch column when the brief is
+       two-column (audit M8: the pitch column ended ~580px above the key
+       points, leaving 40% of the card blank); full-width below otherwise. #}
+    {% if not (a.elevator_pitch and has_points) %}
     {# Sidecar item 10 (scout_hub >= 1.4.0): the hub's own one-paragraph
        account of WHY the weighted score came out where it did. Boxed rather
        than folded into the pitch, because the pitch is published to
@@ -139,7 +171,7 @@
        every row written before 0048 and deliberately never backfilled, so
        the whole block is conditional rather than showing an empty state. #}
     {% if a.score_rationale %}
-    <div id="score-rationale" class="assessment-brief-score-rationale mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+    <div id="score-rationale" class="assessment-brief-score-rationale scroll-mt-16 max-md:scroll-mt-28 mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
         <div class="text-sm font-semibold text-amber-900">Why this score</div>
         {# Same write-time `prose_format` stamp and the same safe fallback as
            the pitch above and Rationale below: a NULL stamp means legacy
@@ -153,6 +185,7 @@
         {% endif %}
         </div>
     </div>
+    {% endif %}
     {% endif %}
 </div>
 
@@ -189,18 +222,21 @@
    collapsible — a gate's rubric description is a tooltip and a dimension's
    weight is inline, so trivial rows never grow a disclosure control. #}
 {% macro signal_row(item, kind) %}
-{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-600', 'Risk'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
+{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-700', 'Risk'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
 {% set collapsible = item.body and item.source in ('consult', 'red_flag') %}
 <li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0"
     {% if item.source == 'gating' and item.body %}title="{{ item.body | join(' ') }}"{% endif %}>
     {% if collapsible %}
     <details class="signal-collapsible group">
-        <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-baseline gap-x-2 min-w-0">
+        {# Wraps on narrow screens (audit M1) and clamps the preview to two
+           lines instead of one truncated line (audit M3), so the qualifying
+           clause of a risk's first sentence survives. #}
+        <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
             <span class="{{ glyph[1] }} shrink-0" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
-            <span class="shrink-0"><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}</span>
-            {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-            {% if item.preview %}<span class="signal-preview flex-1 min-w-0 truncate text-sm text-gray-600 group-open:hidden">{{ item.preview }}</span>{% endif %}
-            <span class="shrink-0 ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
+            <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}</span>
+            {% if item.note %}<span class="signal-note whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+            <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
+            {% if item.preview %}<span class="signal-preview basis-full ml-6 line-clamp-2 text-sm text-gray-600 group-open:hidden">{{ item.preview }}</span>{% endif %}
         </summary>
         <div class="mt-1 ml-6">
             {% if item.source == 'consult' %}
@@ -208,10 +244,17 @@
             {% endif %}
             <ul class="signal-body mt-1 space-y-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
                 {% for line in item.body %}
+                {% if item.source == 'consult' and loop.last and loop.index > 1 and line.startswith('and ') and line.endswith(' more') %}
+                {# `_capped_body`'s tail. The remaining quotes exist only on the
+                   timeline's consult cards, so the tail is a link that opens
+                   the timeline (audit M3) rather than a dead sentence. #}
+                <li class="list-none -ml-5"><a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline" data-open-details="timeline">{{ line }} &mdash; read them on the interview timeline</a></li>
+                {% else %}
                 <li>{{ line }}</li>
+                {% endif %}
                 {% endfor %}
             </ul>
-            {% if item.note %}<div class="text-sm text-gray-600 mt-1">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
+            {% if item.note %}<div class="text-sm text-gray-600 mt-1">Earlier consults in this domain are listed in full on the <a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline" data-open-details="timeline">interview timeline</a>.</div>{% endif %}
         </div>
     </details>
     {% else %}
@@ -224,12 +267,12 @@
     {% endif %}
 </li>
 {% endmacro %}
-<div id="signals" class="assessment-signals scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-base font-semibold text-gray-900 mb-1">Strengths and risks</h3>
+<div id="signals" class="assessment-signals scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-1">Strengths and risks</h2>
     {% if vs.get('mid_scale_count') %}
     {% set mid_n = vs.mid_scale_count %}
     {% set scored_n = vs.get('scored_dimension_count') or mid_n %}
-    <p class="signals-midscale text-sm text-gray-600 mb-3">
+    <p class="signals-midscale text-base leading-relaxed text-gray-600 mb-3 max-w-[68ch]">
         {% if mid_n == scored_n and mid_n == 1 %}
         The one scored dimension sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists it.
         {% elif mid_n == scored_n %}
@@ -311,10 +354,10 @@
         </section>
     </div>
     {# Legend + provenance, always visible (never behind a disclosure). #}
-    <p class="signals-legend text-sm text-gray-600 mt-3">
+    <p class="signals-legend text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">
         &#10003; strength &middot; &#10007; risk &middot; ? not established &middot; "show" opens a row's quoted text &middot; &#9432; hover for the gate's definition
     </p>
-    <p class="signals-provenance text-sm text-gray-600 mt-1 max-w-[80ch]">
+    <p class="signals-provenance text-base leading-relaxed text-gray-600 mt-1 max-w-[68ch]">
         Derived from this verdict's stored dimension scores, gating states, red
         flags and specialist signals; thresholds come from the rubric revision that scored this row.
         {% if not vs.get('scale_known') %}
@@ -338,14 +381,27 @@
    written before 0037, which is why the whole block is conditional rather
    than showing "none". #}
 {% if a.recommended_next_experiment %}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-base font-semibold text-gray-900 mb-2">The ask</h3>
+{# The ask (audit H1): anchored, in the jump nav, and — when the hub wrote it
+   under the >=1.4.0 markdown contract whose first paragraph is the bolded
+   one-sentence ask — the plan behind that sentence is a disclosure. Older
+   rows have no such guaranteed first line and render in full. #}
+{% set ask_text = a.recommended_next_experiment %}
+{% set ask_parts = ask_text.strip().split('\n\n', 1) %}
+{% set ask_split = a.prose_format == 'markdown' and ask_parts|length == 2 and ask_parts[0].startswith('**') %}
+<div id="ask" class="scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">The ask</h2>
     {# Same write-time stamp and same safe fallback as Rationale below. #}
     <div class="assessment-prose">
-    {% if a.prose_format == 'markdown' %}
-    <div class="assessment-next-experiment md-content" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
+    {% if ask_split %}
+    <div class="assessment-next-experiment md-content" data-markdown="{{ ask_parts[0] | e }}"></div>
+    <details class="assessment-ask-plan mt-3">
+        <summary class="cursor-pointer text-base text-indigo-700 underline-offset-2 hover:underline">Show the full plan</summary>
+        <div class="md-content mt-2" data-markdown="{{ ask_parts[1] | e }}"></div>
+    </details>
+    {% elif a.prose_format == 'markdown' %}
+    <div class="assessment-next-experiment md-content" data-markdown="{{ ask_text | e }}"></div>
     {% else %}
-    <p class="assessment-next-experiment whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
+    <p class="assessment-next-experiment whitespace-pre-line">{{ ask_text }}</p>
     {% endif %}
     </div>
 </div>
@@ -445,6 +501,10 @@
             </div>
         </div>
         <div class="text-right">
+            {# Two different columns that often read the same word (audit M4):
+               the hub's own `recommendation` and the computed `band`. Each is
+               labelled so a reader can tell which is which. #}
+            <div class="text-sm text-gray-600 mb-0.5">Hub recommendation</div>
             {% if a.recommendation %}
                 {% set rec_chip = {
                     'advance': 'bg-green-100 text-green-700',
@@ -456,7 +516,8 @@
             {% else %}
                 <span class="text-sm text-gray-600">no recommendation</span>
             {% endif %}
-            <div class="mt-2">
+            <div class="text-sm text-gray-600 mt-2">Score and band</div>
+            <div class="mt-0.5">
                 <span class="text-2xl font-bold
                     {% if a.band == 'advance' %}text-green-700
                     {% elif a.band == 'conditional' %}text-amber-700
@@ -533,7 +594,7 @@
    error in a different place. Pinned by
    test_the_panel_banner_is_never_inside_a_collapsed_details and
    test_a_non_empty_red_flag_list_is_never_collapsed. #}
-<div id="panel" class="scroll-mt-16 mb-6 rounded-xl border p-4 text-base leading-relaxed
+<div id="panel" class="scroll-mt-16 max-md:scroll-mt-28 mb-6 rounded-xl border p-4 text-base leading-relaxed
     {% if panel_state == 'gap' %}border-orange-300 bg-orange-50 text-orange-900
     {% elif panel_state == 'unverified' %}border-gray-300 bg-gray-50 text-gray-700
     {% elif panel_state == 'not_owed' %}border-slate-300 bg-slate-50 text-slate-700
@@ -578,23 +639,21 @@
     {% endif %}
     </div>
     {% if panel_summary %}
+        {# One chip per DOMAIN (audit M6), worst signal colouring the chip and
+           the tally in chronological order; a domain with cut-off replies gets
+           its own neutral chip so a parse default never joins an opinion tally. #}
         <div class="mt-2 flex flex-wrap gap-2">
-            {% for entry in panel_summary %}
-            {% if entry.reply_truncated %}
-            {# The specialist's reply stopped before it finished, so
-               `verdict_signal` is src/agent/specialists.py's parse default
-               (`gap`) and NOT something anyone said. Printing it here would
-               make a cut-off consult read as an opinion in the one row of chips
-               that answers "was this verdict's panel real". Same neutral chip
-               the tool-chip macro above uses for a consult that returned
-               nothing — a non-answer is styled like a non-answer. #}
-            <span class="panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600"
-                  title="This specialist's reply was cut off before it finished, so it has no signal — the stored one is a parse default. It does not count toward the specialist floor.">
-                {{ entry.domain }} &middot; reply cut off
+            {% for dom in panel_domains %}
+            {% if dom.signals %}
+            <span class="panel-domain px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(dom.worst, 'bg-gray-100 text-gray-600') }}"
+                  title="{{ dom.domain }}: {{ dom.total }} consult{{ '' if dom.total == 1 else 's' }}">
+                {{ dom.domain }}{% for sig, n in dom.signals %} &middot; {{ sig }}{% if n > 1 %} &times;{{ n }}{% endif %}{% endfor %}
             </span>
-            {% else %}
-            <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(entry.verdict_signal, 'bg-gray-100 text-gray-600') }}">
-                {{ entry.domain }} &middot; {{ entry.verdict_signal }}
+            {% endif %}
+            {% if dom.cut_off %}
+            <span class="panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600"
+                  title="{{ dom.cut_off }} of this specialist's replies were cut off before they finished, so they have no signal — the stored one is a parse default. They do not count toward the specialist floor.">
+                {{ dom.domain }} &middot; reply cut off{% if dom.cut_off > 1 %} &times;{{ dom.cut_off }}{% endif %}
             </span>
             {% endif %}
             {% endfor %}
@@ -606,12 +665,13 @@
    Gating is dense evidence and moves behind a disclosure; Red flags is a
    WARNING (see the N8 comment above the panel banner) and stays a plain,
    always-expanded card. #}
-<details id="gating" class="scroll-mt-16 mb-6">
-<summary class="cursor-pointer text-lg font-semibold text-gray-900">Gating criteria</summary>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
+<details id="gating" class="scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200">
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Gating criteria</h2></summary>
+<div class="px-5 pb-5">
     {% if a.gating %}
         {% for key, gate_state in a.gating.items() %}
-        <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-base py-0.5">
+        {% set gate_meta = gating_descriptions.get(key) if gating_descriptions else none %}
+        <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-base py-1">
             {# Each glyph carries BOTH an aria-label and its original title: the
                title is a hover affordance a touch user never gets, and the
                legend below is the visible answer for everyone. #}
@@ -625,12 +685,18 @@
                 <span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}" aria-label="Unrecognized gating value">&bull;</span>
             {% endif %}
             {{ key.replace("_", " ") }}
+            {% if gate_meta %}
+            {# The gate's definition, visible in the card rather than only in a
+               hover title (audit L1). Live-rubric rows only (same provenance
+               guard as the strengths/risks card). #}
+            <div class="gating-description ml-6 text-base leading-relaxed text-gray-600 max-w-[68ch]">{{ gate_meta.description }}</div>
+            {% endif %}
         </div>
         {% endfor %}
         <p class="gating-legend text-sm text-gray-600 mt-2">
             &#9989; met &middot; &#10060; not met &middot; &#10067; unconfirmed &mdash; the PI was not asked
         </p>
-        <p class="text-sm text-gray-600 mt-2 max-w-[68ch]">
+        <p class="text-base leading-relaxed text-gray-600 mt-2 max-w-[68ch]">
             "not met" (asked and failed) and "unconfirmed" (never asked) are
             different answers; only the first can license discounting an idea.
         </p>
@@ -641,10 +707,10 @@
 </details>
 
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-base font-semibold text-gray-900 mb-3">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">
         Red flags
         {% if a.red_flags %}<span class="text-amber-700">({{ a.red_flags | length }})</span>{% endif %}
-    </h3>
+    </h2>
     {% if a.red_flags %}
         <ul class="assessment-red-flags list-disc list-inside text-base leading-relaxed text-gray-700 space-y-1 max-w-[68ch]">
             {% for flag in a.red_flags %}<li>{{ flag }}</li>{% endfor %}
@@ -655,9 +721,9 @@
 </div>
 
 {% if a.rationale %}
-<details id="rationale" class="scroll-mt-16 mb-6" open>
-<summary class="cursor-pointer text-lg font-semibold text-gray-900">Full rationale ({{ a.rationale.split('\n\n') | length }} paragraph{{ '' if a.rationale.split('\n\n') | length == 1 else 's' }})</summary>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
+<details id="rationale" class="scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200" open>
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Full rationale ({{ a.rationale.split('\n\n') | length }} paragraph{{ '' if a.rationale.split('\n\n') | length == 1 else 's' }})</h2></summary>
+<div class="px-5 pb-5">
     {# `prose_format` is the write-time stamp (0040), replayed here rather than
        re-derived: 'markdown' means the hub wrote this under the markdown-
        prompt contract (Part A4) and it is safe to render through the
@@ -694,13 +760,13 @@
    fact. An unscored dimension shows an empty track and "not scored", never a
    zero-length bar that reads as a scored zero — it counts as ZERO in the
    weighted score, which is a different statement from "scored 0". #}
-<details id="scores" class="scroll-mt-16 mb-6" open>
-<summary class="cursor-pointer text-lg font-semibold text-gray-900">Dimension scores</summary>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
+<details id="scores" class="scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200" open>
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Dimension scores</h2></summary>
+<div class="px-5 pb-5">
     <div class="space-y-1.5">
         {% for d in dimensions %}
-        <div class="score-{{ d.key }} flex items-center gap-3 text-sm">
-            <span class="w-56 shrink-0 {% if d.score is none %}text-gray-600{% else %}text-gray-700{% endif %}">
+        <div class="score-{{ d.key }} flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 text-sm">
+            <span class="w-full sm:w-56 sm:shrink-0 {% if d.score is none %}text-gray-600{% else %}text-gray-700{% endif %}">
                 {{ d.title }}
             </span>
             <span class="w-10 shrink-0 text-right font-semibold {% if d.score is none %}text-gray-600{% else %}text-gray-800{% endif %}">
@@ -717,7 +783,7 @@
         </div>
         {% endfor %}
     </div>
-    <p class="text-sm text-gray-600 mt-3">
+    <p class="text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">
         {% if scale_max %}Bars are the score on the {{ revision.scale_min }}&ndash;{{ scale_max }} scale.{% else %}This row's revision is not in the registry, so its scale is unknown and no bars are drawn.{% endif %}
         The weighted score above was computed at write time from these dimension
         values and the weights of the revision that scored them
@@ -797,9 +863,9 @@
 
 {% set effective_user = impersonation_banner or current_user %}
 {% set can_write = true %}
-<div id="review" class="scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+<div id="review" class="scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Human review</h2>
-    <p class="review-rubric-instructions text-sm text-gray-600 mb-3 max-w-[68ch]">
+    <p class="review-rubric-instructions text-base leading-relaxed text-gray-600 mb-3 max-w-[68ch]">
         Scores here rate the proposal's own scientific and strategic quality, not
         how well the bot performed. Review it against Blackbird's rubric
         (<span class="font-mono">{{ review_rubric.version }}</span>): read the
@@ -1055,10 +1121,10 @@
 {# ---------------------------------------------------------------------------
    Interview timeline
    --------------------------------------------------------------------------- #}
-<details id="timeline" class="scroll-mt-16 mb-6">
-<summary class="cursor-pointer text-lg font-semibold text-gray-900">Interview timeline</summary>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 border-t-0 rounded-t-none p-5">
-    <p class="text-sm text-gray-600 mb-4">
+<details id="timeline" class="scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200">
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Interview timeline</h2></summary>
+<div class="px-5 pb-5">
+    <p class="text-base leading-relaxed text-gray-600 mb-4 max-w-[68ch]">
         The thread this verdict came out of, interleaved with the specialist panel
         {% if admin_view %}and the hub's tool calls{% endif %}.
         {% if admin_view and retro_consult_count and not consult_count %}
@@ -1100,7 +1166,14 @@
                        same as the discussions pages: if /static/js/markdown.js itself fails to load,
                        this div renders empty — accepted for parity with the existing data-markdown
                        surfaces rather than inventing a second rendering path here. #}
-                    <div class="md-content text-base leading-relaxed text-gray-800 max-h-64 overflow-y-auto max-w-[68ch]" data-markdown="{{ m.content | e }}"></div>
+                    {# Clamped, not a nested scroll box (audit M7): a 256px scroller
+                       inside a 9,000px page scrolls within a scroll. The toggle
+                       below lifts the clamp; print lifts it unconditionally. #}
+                    <div class="timeline-message-clamp relative max-h-64 overflow-hidden max-w-[68ch]" data-clamp>
+                        <div class="md-content text-base leading-relaxed text-gray-800" data-markdown="{{ m.content | e }}"></div>
+                        <div class="timeline-message-fade pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-white"></div>
+                    </div>
+                    <button type="button" class="timeline-message-toggle mt-1 text-sm text-indigo-700 underline-offset-2 hover:underline" data-unclamp>Show full message</button>
 
                     {% if admin_view and entry.tool_turns %}
                     <div class="mt-2 pt-2 border-t border-gray-200">
@@ -1199,9 +1272,9 @@
            what the hub did, and silently discarding it would make this page
            look complete when it is not. #}
         <div class="mt-5 pt-4 border-t border-gray-200">
-            <h4 class="text-base font-semibold text-gray-900 mb-2">
+            <h3 class="text-base font-semibold text-gray-900 mb-2">
                 Unplaced turns ({{ unplaced_turns | length }})
-            </h4>
+            </h3>
             <p class="text-sm text-gray-600 mb-2">
                 Tool activity from this thread's time window whose reply text could not
                 be matched to a message above — not dropped, just unattributed.
@@ -1234,6 +1307,35 @@ document.addEventListener('DOMContentLoaded', function () {
             var open = btn.getAttribute('data-details-toggle') === 'open';
             root.querySelectorAll('details').forEach(function (d) { d.open = open; });
         });
+    });
+    // A link that targets a closed disclosure (e.g. "and 3 more" -> the
+    // timeline) opens it first, so the anchor jump lands on visible content.
+    root.querySelectorAll('[data-open-details]').forEach(function (a) {
+        a.addEventListener('click', function () {
+            var d = document.getElementById(a.getAttribute('data-open-details'));
+            if (d && d.tagName === 'DETAILS') { d.open = true; }
+        });
+    });
+    // Timeline messages are clamped to 16rem with a fade; the button lifts
+    // the clamp for that one message. Hidden when the message is short.
+    root.querySelectorAll('[data-unclamp]').forEach(function (btn) {
+        var box = btn.previousElementSibling;
+        if (!box) { return; }
+        var check = function () {
+            var clamped = box.scrollHeight > box.clientHeight + 2;
+            btn.hidden = !clamped && !box.classList.contains('is-unclamped');
+            var fade = box.querySelector('.timeline-message-fade');
+            if (fade) { fade.hidden = !clamped; }
+        };
+        btn.addEventListener('click', function () {
+            var lifted = box.classList.toggle('is-unclamped');
+            box.classList.toggle('max-h-64', !lifted);
+            box.classList.toggle('overflow-hidden', !lifted);
+            btn.textContent = lifted ? 'Show less' : 'Show full message';
+            check();
+        });
+        // Markdown renders asynchronously after this script; re-check late.
+        setTimeout(check, 0); setTimeout(check, 500);
     });
 });
 </script>

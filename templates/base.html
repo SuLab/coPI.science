@@ -49,14 +49,14 @@
 <!-- Navigation -->
 <nav class="bg-white shadow-sm border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex justify-between h-16">
+        <div class="flex flex-wrap justify-between min-h-16">
             <div class="flex items-center">
                 <a href="/" class="flex-shrink-0 flex items-center">
                     <img src="/static/img/blackbird-laboratories.svg" alt="Blackbird Laboratories" width="46" height="32">
                     <span class="ml-2 text-sm text-gray-500 hidden sm:block">Review Platform</span>
                 </a>
                 {% if current_user %}
-                <div class="ml-8 flex space-x-4">
+                <div class="ml-8 flex flex-wrap gap-x-4 gap-y-1">
                     {% if current_user.user_role == 'pi' or current_user.is_admin %}
                     <a href="/profile" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'profile' %}text-indigo-600 font-semibold{% endif %}">
@@ -131,7 +131,7 @@
 {% if active_page == 'admin' and current_user and current_user.is_admin %}
 <div class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex space-x-6 h-10 items-center text-sm">
+        <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
             <a href="/admin/users" class="{% if active_admin == 'users' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Users</a>
             <a href="/admin/jobs" class="{% if active_admin == 'jobs' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Jobs</a>
             <a href="/admin/activity" class="{% if active_admin == 'activity' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Activity</a>
@@ -151,7 +151,7 @@
 <!-- Manager sub-navigation -->
 <div class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex space-x-6 h-10 items-center text-sm">
+        <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
             <a href="/manager/pis" class="{% if active_manager == 'pis' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">PIs</a>
             <a href="/manager/assessments" class="{% if active_manager == 'assessments' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Assessments</a>
             {% if effective_user.is_staff %}

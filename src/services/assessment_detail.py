@@ -976,6 +976,61 @@ def derive_strengths_and_risks(
     }
 
 
+#: Worst-first ordering for a per-domain chip's colour: a single `blocking`
+#: must colour the whole chip, whatever else the domain said.
+_SIGNAL_SEVERITY = ("blocking", "gap", "caution", "adequate", "clear")
+
+
+def summarize_panel_domains(consults: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per domain, in first-seen order:
+    ``{"domain", "signals": [(signal, count), ...] in first-seen order,
+    "worst": signal | None, "total": int, "cut_off": int}``.
+
+    Truncated consults are counted in ``cut_off`` and NEVER in ``signals`` —
+    their stored `verdict_signal` is the parser's default, not an opinion
+    (see `_load_consults`' `reply_truncated`). A domain whose every consult
+    was cut off therefore has ``signals == []`` and ``worst is None``.
+    """
+    order: list[str] = []
+    per: dict[str, dict[str, Any]] = {}
+    for c in consults or ():
+        if not isinstance(c, dict):
+            continue
+        domain = str(c.get("domain") or "consult")
+        if domain not in per:
+            order.append(domain)
+            per[domain] = {"domain": domain, "_signals": {}, "_order": [], "total": 0, "cut_off": 0}
+        entry = per[domain]
+        entry["total"] += 1
+        if c.get("reply_truncated"):
+            entry["cut_off"] += 1
+            continue
+        signal = c.get("verdict_signal")
+        signal = signal if isinstance(signal, str) and signal else "unknown"
+        if signal not in entry["_signals"]:
+            entry["_order"].append(signal)
+        entry["_signals"][signal] = entry["_signals"].get(signal, 0) + 1
+    out: list[dict[str, Any]] = []
+    for domain in order:
+        entry = per[domain]
+        signals = [(sig, entry["_signals"][sig]) for sig in entry["_order"]]
+        worst = None
+        for candidate in _SIGNAL_SEVERITY:
+            if candidate in entry["_signals"]:
+                worst = candidate
+                break
+        if worst is None and signals:
+            worst = signals[0][0]
+        out.append({
+            "domain": domain,
+            "signals": signals,
+            "worst": worst,
+            "total": entry["total"],
+            "cut_off": entry["cut_off"],
+        })
+    return out
+
+
 async def build_assessment_detail(
     db: AsyncSession,
     assessment_id: uuid.UUID,
@@ -1200,6 +1255,21 @@ async def build_assessment_detail(
             }
             for c in consults
         ],
+        # The same chips GROUPED per domain (2026-09-15 visual audit M6): a
+        # real interview has 25-40 consults, and 37 identical 12px chips in
+        # four rows were unreadable as a set. One chip per domain carries the
+        # signal tally in chronological order; a domain whose replies were
+        # cut off gets its own neutral chip, so the "reply cut off" marker is
+        # never merged into an opinion tally.
+        "panel_domains": summarize_panel_domains(consults),
+        # Live gate descriptions for the gating card (audit L1): the text used
+        # to live only in a `title` tooltip on a non-focusable row. Same
+        # provenance guard as `derive_strengths_and_risks` — an older row
+        # keeps bare labels rather than today's definitions.
+        "gating_descriptions": (
+            {k: v for k, v in load_rubric().gating.items()}
+            if revision_provenance == PROVENANCE_LIVE else {}
+        ),
         # Request 3 / D2: the strengths-risks-not-established brief, DERIVED
         # from the three things already resolved above and stored nowhere.
         "verdict_signals": derive_strengths_and_risks(

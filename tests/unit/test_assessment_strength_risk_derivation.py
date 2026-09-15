@@ -679,3 +679,37 @@ def test_gate_and_dimension_bodies_carry_no_preview():
     )
     assert all(e["preview"] is None for e in result["strengths"])
     assert all(e["body"] for e in result["strengths"])
+
+
+# ---------------------------------------------------------------------------
+# Per-domain panel chips (2026-09-15 visual audit M6)
+# ---------------------------------------------------------------------------
+
+
+def test_panel_domains_group_consults_per_domain_in_first_seen_order():
+    from src.services.assessment_detail import summarize_panel_domains
+
+    consults = [
+        _consult("chemistry", "gap"), _consult("clinical", "gap"),
+        _consult("chemistry", "gap"), _consult("chemistry", "blocking"),
+        _consult("clinical", "adequate"),
+    ]
+    out = summarize_panel_domains(consults)
+    assert [d["domain"] for d in out] == ["chemistry", "clinical"]
+    chem, clin = out
+    assert chem["signals"] == [("gap", 2), ("blocking", 1)]
+    assert chem["worst"] == "blocking" and chem["total"] == 3 and chem["cut_off"] == 0
+    assert clin["signals"] == [("gap", 1), ("adequate", 1)]
+    assert clin["worst"] == "gap"
+
+
+def test_panel_domains_keep_cut_off_replies_out_of_the_tally():
+    from src.services.assessment_detail import summarize_panel_domains
+
+    out = summarize_panel_domains([
+        _consult("legal", "gap", truncated=True), _consult("legal", "adequate"),
+        _consult("ip", "gap", truncated=True),
+    ])
+    legal, ip = out
+    assert legal["signals"] == [("adequate", 1)] and legal["cut_off"] == 1 and legal["total"] == 2
+    assert ip["signals"] == [] and ip["worst"] is None and ip["cut_off"] == 1

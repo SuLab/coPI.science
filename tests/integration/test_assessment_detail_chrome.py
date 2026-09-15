@@ -69,7 +69,8 @@ async def test_both_wrappers_set_the_readable_prose_scale(client, db_session):
         assert "text-wrap: pretty" in html
         # The brief's pitch column is narrower than 68ch already.
         assert ".assessment-brief-pitch .assessment-prose" in html
-        assert "h2.assessment-headline" in html
+        # The hub headline is content, not a section heading (2026-09-15 audit M5).
+        assert "p.assessment-headline" in html
         assert "text-wrap: balance" in html
         # The old 65ch/1rem scale is gone.
         assert "max-width: 65ch" not in html
