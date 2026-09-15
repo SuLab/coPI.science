@@ -182,8 +182,50 @@
    bullet per character or per key. #}
 {% set hub_strengths = a.strengths if (viewer_is_staff and a.strengths is iterable and a.strengths is not string and a.strengths is not mapping) else [] %}
 {% set hub_risks = a.risks if (viewer_is_staff and a.risks is iterable and a.risks is not string and a.risks is not mapping) else [] %}
+{# One derived row. `kind` is strengths|risks|unestablished. Layout is a
+   single full-width line: glyph, label — detail, an optional count badge,
+   and (consults only) a one-line clipped preview that truncates; the
+   quoted text sits behind the click. Only consults and long red flags are
+   collapsible — a gate's rubric description is a tooltip and a dimension's
+   weight is inline, so trivial rows never grow a disclosure control. #}
+{% macro signal_row(item, kind) %}
+{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-600', 'Risk'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
+{% set collapsible = item.body and item.source in ('consult', 'red_flag') %}
+<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0"
+    {% if item.source == 'gating' and item.body %}title="{{ item.body | join(' ') }}"{% endif %}>
+    {% if collapsible %}
+    <details class="signal-collapsible group">
+        <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-baseline gap-x-2 min-w-0">
+            <span class="{{ glyph[1] }} shrink-0" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+            <span class="shrink-0"><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}</span>
+            {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+            {% if item.preview %}<span class="signal-preview flex-1 min-w-0 truncate text-sm text-gray-600 group-open:hidden">{{ item.preview }}</span>{% endif %}
+            <span class="shrink-0 ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
+        </summary>
+        <div class="mt-1 ml-6">
+            {% if item.source == 'consult' %}
+            <div class="text-sm italic text-gray-600">{% if kind == 'strengths' %}what the {{ item.label }} specialist established{% else %}the {{ item.label }} specialist's concerns{% endif %}</div>
+            {% endif %}
+            <ul class="signal-body mt-1 space-y-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for line in item.body %}
+                <li>{{ line }}</li>
+                {% endfor %}
+            </ul>
+            {% if item.note %}<div class="text-sm text-gray-600 mt-1">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
+        </div>
+    </details>
+    {% else %}
+    <div class="flex items-baseline gap-x-2 min-w-0">
+        <span class="{{ glyph[1] }} shrink-0" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+        <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}</span>
+        {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+        {% if item.source == 'gating' and item.body %}<span class="shrink-0 text-sm text-gray-600" aria-hidden="true">&#9432;</span>{% endif %}
+    </div>
+    {% endif %}
+</li>
+{% endmacro %}
 <div id="signals" class="assessment-signals scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-base font-semibold text-gray-900 mb-3">Strengths and risks</h3>
+    <h3 class="text-base font-semibold text-gray-900 mb-1">Strengths and risks</h3>
     {% if vs.get('mid_scale_count') %}
     {% set mid_n = vs.mid_scale_count %}
     {% set scored_n = vs.get('scored_dimension_count') or mid_n %}
@@ -198,54 +240,25 @@
         {{ mid_n }} of {{ scored_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists them.
         {% endif %}
     </p>
+    {% else %}
+    <div class="mb-3"></div>
     {% endif %}
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div class="assessment-signals-strengths rounded-lg border border-green-200 bg-green-50 p-3">
+    {# Three STACKED full-width sections, not three columns: a real interview
+       yields 8-12 risk rows and 3-6 strength rows, and at a third of the card
+       each row wrapped two or three times around its badge. #}
+    <div class="space-y-3">
+        <section class="assessment-signals-strengths rounded-lg border border-green-200 bg-green-50 px-4 py-3">
             <div class="text-sm font-semibold text-green-900">Strengths</div>
             {% if hub_strengths %}
             <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-2">In the hub's words</div>
-            <ul class="signal-hub-words mt-1 space-y-1 text-base leading-relaxed text-gray-700">
-                {% for bullet in hub_strengths %}
-                <li>{{ bullet }}</li>
-                {% endfor %}
+            <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for bullet in hub_strengths %}<li>{{ bullet }}</li>{% endfor %}
             </ul>
-            {% endif %}
-            {% if hub_strengths %}
-            <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-2">Derived from the stored verdict</div>
+            <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
             {% if vs.get('strengths') %}
-            <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['strengths'] %}
-                <li class="signal-entry signal-strength signal-source-{{ item.source }}">
-                    {# An entry with quoted text is a COLLAPSED <details>: the
-                       summary is the label, the signal, an optional badge and
-                       one clipped preview line; the quotes live behind the
-                       click. An entry with nothing to quote is a plain line. #}
-                    {% if item.body %}
-                    <details class="signal-collapsible">
-                        <summary class="cursor-pointer">
-                            <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
-                            <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                            {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-                            {% if item.preview %}<span class="signal-preview block ml-5 text-sm text-gray-600">{{ item.preview }}</span>{% endif %}
-                        </summary>
-                        {% if item.source == 'consult' %}
-                        <div class="text-sm italic text-gray-600 mt-1 ml-5">what the {{ item.label }} specialist established</div>
-                        {% endif %}
-                        <ul class="signal-body mt-1 ml-5 space-y-1 text-sm text-gray-700 list-disc list-inside">
-                            {% for line in item.body %}
-                            <li>{{ line }}</li>
-                            {% endfor %}
-                        </ul>
-                        {% if item.note %}<div class="text-sm text-gray-600 mt-1 ml-5">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
-                    </details>
-                    {% else %}
-                    <span class="text-green-700" title="Strength" aria-label="Strength">&#10003;</span>
-                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-                    {% endif %}
-                </li>
-                {% endfor %}
+            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['strengths'] %}{{ signal_row(item, 'strengths') }}{% endfor %}
             </ul>
             {% else %}
             <p class="signals-empty mt-1 text-sm text-gray-600">
@@ -258,53 +271,19 @@
                 {% endif %}
             </p>
             {% endif %}
-        </div>
-        <div class="assessment-signals-risks rounded-lg border border-red-200 bg-red-50 p-3">
+        </section>
+        <section class="assessment-signals-risks rounded-lg border border-red-200 bg-red-50 px-4 py-3">
             <div class="text-sm font-semibold text-red-900">Risks</div>
             {% if hub_risks %}
             <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-2">In the hub's words</div>
-            <ul class="signal-hub-words mt-1 space-y-1 text-base leading-relaxed text-gray-700">
-                {% for bullet in hub_risks %}
-                <li>{{ bullet }}</li>
-                {% endfor %}
+            <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for bullet in hub_risks %}<li>{{ bullet }}</li>{% endfor %}
             </ul>
-            {% endif %}
-            {% if hub_risks %}
-            <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-2">Derived from the stored verdict</div>
+            <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
             {% if vs.get('risks') %}
-            <ul class="signal-derived mt-1 space-y-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['risks'] %}
-                <li class="signal-entry signal-risk signal-source-{{ item.source }}">
-                    {# An entry with quoted text is a COLLAPSED <details>: the
-                       summary is the label, the signal, an optional badge and
-                       one clipped preview line; the quotes live behind the
-                       click. An entry with nothing to quote is a plain line. #}
-                    {% if item.body %}
-                    <details class="signal-collapsible">
-                        <summary class="cursor-pointer">
-                            <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
-                            <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                            {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-                            {% if item.preview %}<span class="signal-preview block ml-5 text-sm text-gray-600">{{ item.preview }}</span>{% endif %}
-                        </summary>
-                        {% if item.source == 'consult' %}
-                        <div class="text-sm italic text-gray-600 mt-1 ml-5">the {{ item.label }} specialist's concerns</div>
-                        {% endif %}
-                        <ul class="signal-body mt-1 ml-5 space-y-1 text-sm text-gray-700 list-disc list-inside">
-                            {% for line in item.body %}
-                            <li>{{ line }}</li>
-                            {% endfor %}
-                        </ul>
-                        {% if item.note %}<div class="text-sm text-gray-600 mt-1 ml-5">Earlier consults in this domain are listed in full on the panel card below.</div>{% endif %}
-                    </details>
-                    {% else %}
-                    <span class="text-red-600" title="Risk" aria-label="Risk">&#10007;</span>
-                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-                    {% endif %}
-                </li>
-                {% endfor %}
+            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['risks'] %}{{ signal_row(item, 'risks') }}{% endfor %}
             </ul>
             {% else %}
             <p class="signals-empty mt-1 text-sm text-gray-600">
@@ -317,51 +296,38 @@
                 {% endif %}
             </p>
             {% endif %}
-        </div>
-        <div class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <div class="text-sm font-semibold text-slate-900">Not established</div>
+        </section>
+        {# Collapses to one line when there is nothing in it: an empty third
+           of the card said less than the sentence does. #}
+        <section class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             {% if vs.get('unestablished') %}
-            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['unestablished'] %}
-                <li class="signal-entry signal-unestablished signal-source-{{ item.source }}">
-                    <span class="text-slate-700" title="Not established" aria-label="Not established">?</span>
-                    <span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}
-                    {% if item.note %}<span class="signal-note ml-1 rounded-full bg-white/70 border border-gray-300 px-2 py-0.5 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-                </li>
-                {% endfor %}
+            <div class="text-sm font-semibold text-slate-900">Not established</div>
+            <ul class="mt-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['unestablished'] %}{{ signal_row(item, 'unestablished') }}{% endfor %}
             </ul>
             {% else %}
-            <p class="signals-empty mt-1 text-sm text-gray-600">Nothing left unanswered.</p>
+            <p class="signals-empty text-sm text-gray-700"><span class="font-semibold text-slate-900">Not established</span> &mdash; nothing left unanswered.</p>
             {% endif %}
-        </div>
+        </section>
     </div>
-    {# Legend + provenance, always visible (never behind a disclosure): the
-       glyphs are restated in words here as well as on every entry, and the
-       one-sentence provenance keeps a reader from reading a derived summary
-       as something the hub wrote. #}
+    {# Legend + provenance, always visible (never behind a disclosure). #}
     <p class="signals-legend text-sm text-gray-600 mt-3">
-        &#10003; strength &middot; &#10007; risk &middot; ? not established &middot; a row with a &#9656; opens to the quoted text
+        &#10003; strength &middot; &#10007; risk &middot; ? not established &middot; "show" opens a row's quoted text &middot; &#9432; hover for the gate's definition
     </p>
-    <p class="signals-provenance text-sm text-gray-600 mt-1 max-w-[68ch]">
+    <p class="signals-provenance text-sm text-gray-600 mt-1 max-w-[80ch]">
         Derived from this verdict's stored dimension scores, gating states, red
-        flags and specialist signals, with the score thresholds taken from the
-        rubric revision that scored this row.
+        flags and specialist signals; thresholds come from the rubric revision that scored this row.
         {% if not vs.get('scale_known') %}
         This row's rubric revision is not in the registry, so its dimension
-        scores could not be classified as strengths or risks &mdash; only its
-        gating, red flags and specialist signals are represented above.
+        scores could not be classified as strengths or risks.
         {% endif %}
         {% if hub_strengths or hub_risks %}
-        "In the hub's words" bullets are written by BlackbirdBot inside its
-        verdict sidecar; derived entries are classified from stored scores,
-        gates, flags and specialist signals and quote the specialists' stored
-        text.
+        "In the hub's words" is BlackbirdBot's own text from the verdict sidecar; derived rows quote the specialists' stored text.
         {% else %}
-        Derived entries are classified from stored scores, gates, flags and
-        specialist signals and quote the specialists' stored text.
+        Consult rows quote the specialists' stored text.
         {% endif %}
         {% if a.score_rationale %}
-        The hub's own account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
+        The hub's account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
         {% endif %}
     </p>
 </div>

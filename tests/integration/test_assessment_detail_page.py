@@ -2355,7 +2355,7 @@ async def test_quoted_consult_text_is_collapsed_by_default_with_a_one_line_previ
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     _strengths, risks, _unestablished = _signal_columns(body)
-    entry = re.search(r'<details class="signal-collapsible"[^>]*>(.*?)</details>', risks, re.DOTALL)
+    entry = re.search(r'<details class="signal-collapsible[^"]*"[^>]*>(.*?)</details>', risks, re.DOTALL)
     assert entry is not None, "the consult entry did not render as a <details>"
     assert " open" not in entry.group(0).split(">", 1)[0]
     summary = re.search(r"<summary.*?</summary>", entry.group(1), re.DOTALL).group(0)
