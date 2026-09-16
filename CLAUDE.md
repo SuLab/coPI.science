@@ -115,6 +115,39 @@ they can decide whether to restart.** Roster changes — activating/inactivating
 setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're
 picked up live by `_sync_roster_from_db`.
 
+## Daily Audit + Dead-Man's Switch
+
+Two cron jobs (user `ubuntu`, `crontab -l`) — neither is in compose or systemd, so
+a host rebuild loses them silently unless you reinstall them:
+
+```
+0 7 * * * cd /home/ubuntu/copi-python && ./scripts/run_daily_audit.sh  >> logs/daily-audit-cron.log 2>&1
+0 9 * * * cd /home/ubuntu/copi-python && ./scripts/audit_watchdog.sh   >> logs/audit-watchdog.log   2>&1
+```
+
+`scripts/run_daily_audit.sh` runs `claude -p < prompts/daily_audit.md`, appends the
+transcript to `logs/daily-audit.log`, and writes `logs/.audit-heartbeat` **only** if
+claude exited 0 *and* the run appended a new `MessageId:` line. The heartbeat is
+deliberately the wrapper's job, not the audit prompt's: "the LLM will write a file
+when it succeeds" is a request, not a guarantee.
+
+`scripts/audit_watchdog.sh` emails an alert if that heartbeat is older than 24h or
+missing. It exists because **agent dormancy no longer raises an alarm** (see the
+`AGENT DORMANCY IS NOT A BUG` section of `prompts/daily_audit.md`), so most days are
+`✅` and a *missing* email became the failure mode that hides. Precedent: 12 silent
+days, 2026-08-23 to 09-03, when the Claude OAuth token expired — `logs/daily-audit.log`
+kept growing with `OAuth session expired`, so file mtime alone would not have caught it.
+
+Alerting shares SES and the app container with the thing it monitors, so every
+send failure is also written to syslog:
+`journalctl -t copi-audit-watchdog --since '3 days ago'`.
+
+Test either script without mailing the real recipients:
+
+```bash
+AUDIT_WATCHDOG_REPO=/tmp/fake AUDIT_WATCHDOG_TO=you@example.com ./scripts/audit_watchdog.sh
+```
+
 ## Adding New PIs
 
 **The `AgentRegistry` table is the single source of truth for the agent roster.**
