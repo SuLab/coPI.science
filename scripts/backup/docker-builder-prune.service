@@ -1,0 +1,20 @@
+[Unit]
+Description=Reclaim Docker build cache so the backup free-space guard stays satisfiable
+Documentation=file:///home/ubuntu/copi-python/docs/specs/2026-08-18-postgres-backup-verification-design.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# --keep-storage, not a bare prune: recent cache is what makes a redeploy fast, and
+# throwing all of it away every week trades one problem for another. 10 GiB is just
+# above the 8.3 GiB that was still referenced after the 2026-09-16 reclaim, so this
+# is a cap on growth rather than a weekly cold start.
+# `docker builder prune`, not `docker buildx prune`: the buildx component is not
+# installed on this host. Docker prints "DEPRECATED: The legacy builder is deprecated"
+# on every invocation, so expect that line in the journal weekly — the prune itself
+# works (it reclaimed 30.25GB on 2026-09-16). Switch to `buildx prune --keep-storage`
+# if buildx is ever installed here.
+ExecStart=/usr/bin/docker builder prune -f --keep-storage 10737418240
+Nice=10
+IOSchedulingClass=idle

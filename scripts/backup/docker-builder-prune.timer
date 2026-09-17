@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Docker build-cache reclaim
+
+[Timer]
+# Sundays, two hours before the 01:00 America/Los_Angeles backup, so each week starts
+# with the disk at its cleanest.
+OnCalendar=Sun *-*-* 06:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

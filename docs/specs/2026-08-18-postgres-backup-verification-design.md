@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-18
 **Status:** IMPLEMENTED AND LIVE as of 2026-08-18. Timers armed for 01:00
-America/Los_Angeles. Five verified backups per stack on disk; failure-injection harness
+America/Los_Angeles. Three verified backups per stack on disk; failure-injection harness
 12/12; SES alert path confirmed received by a human. Three audit rounds; final
 whole-branch audit found no Critical. Parked residuals are recorded in the commit
 history and summarised at the end of this document.
@@ -45,7 +45,7 @@ looks like paranoia traces to that finding.
 | 1 | Nightly logical dumps (`pg_dump -Fc`) | ~1.5 GB total; a full dump is minutes. RPO of 24h accepted. |
 | 2 | Local storage only, offsite via a hook | Offsite target does not exist yet. Hook keeps it a config change, not a rewrite. |
 | 3 | Verify by restore + per-table row-count parity | Catches truncated/partial dumps, which a bare `pg_restore` exit code does not. |
-| 4 | Retention: 5 most recent **verified** per stack, count-based | Day-based pruning empties the directory if the producer breaks. See §5. |
+| 4 | Retention: 3 most recent **verified** per stack, count-based | Day-based pruning empties the directory if the producer breaks. See §5. |
 | 5 | Alerting: SES email on failure + weekly heartbeat | Recipients: `malanjary@`, `ahuebschen@`, `asu@scripps.edu`. SES v1 API, matching the app (§7.1). |
 | 5b | Plus a local `status.json` second channel | Added by audit: a single alert channel cannot report its own silence. |
 | 6 | Python 3, not bash | Snapshot-consistent counting needs a psql session held across `pg_dump`. See §4.2. |
@@ -88,12 +88,14 @@ STACKS="copi-python:copi-python-postgres-1:copi:copi
         copi-blackbird:copi-blackbird-postgres-1:copi:copi"
 
 BACKUP_ROOT=/var/backups/copi
-RETENTION_COUNT=5          # verified dumps kept per stack
+RETENTION_COUNT=3          # verified dumps kept per stack
 RETENTION_UNVERIFIED=2     # failed-verify dumps kept for diagnosis
 VERIFY_IMAGE=postgres:15   # MUST match the source server image
 VERIFY_MEM=768m            # measured: peak 195.4MiB restoring the 1333MB db
 VERIFY_TIMEOUT_SEC=1800
-FREE_SPACE_FACTOR=3        # require 3x last dump size before starting
+FREE_SPACE_FACTOR=7        # require 7x that stack's last dump before starting
+MIN_FREE_BYTES=2147483648  # absolute floor, checked alongside the factor
+WARN_SPACE_FACTOR=14       # soft warning threshold; 0 disables
 OFFSITE_CMD=""             # empty = local only
 
 AWS_REGION=us-east-2
@@ -126,10 +128,20 @@ and is already ~1.2 GB into swap.
    prune on this host would destroy `copi-prod_pgdata`, `copi_pgdata`,
    `copi-python_grantbot_data` and `collab-platform_mongodb_data` — 512 MB of
    unreferenced but un-backed-up data.
-3. Free-space check: require
-   `free_bytes >= FREE_SPACE_FACTOR * last_dump_size` (falling back to the live DB
-   size on first run). **Abort the whole run and mail if short.** A backup job that
-   fills `/dev/root` takes production down with it.
+3. Free-space check, **per stack**, re-measured at the top of each stack's turn:
+   require `free_bytes >= max(FREE_SPACE_FACTOR * that_stack_last_dump_size,
+   MIN_FREE_BYTES)` (falling back to that stack's live DB size when it has no dump
+   yet). **Abort that stack and mail if short; continue with the others.** A backup
+   job that fills `/dev/root` takes production down with it — which is what
+   `MIN_FREE_BYTES` is for, because a per-stack factor alone scales to nothing for a
+   small stack and would clear it to start a restore on a nearly-full filesystem.
+
+   Amended 2026-09-16. This was a whole-run abort until then, and the cost was
+   measured: on 2026-09-15 and 2026-09-16 copi-blackbird needed 884 MB, had ~4 GB
+   free, and was skipped anyway because the guard charged it copi-python's 847 MB
+   demand. Stacks are processed in ascending demand so a large stack cannot starve a
+   small one of the remaining headroom; a stack whose demand cannot be measured is
+   processed last and, per the F3 invariant, is refused rather than passed.
 
 ### 4.2 Dump with a consistent snapshot
 
@@ -318,7 +330,7 @@ for a hard kill of the script itself.
 Count-based, not day-based.
 
 ```
-keep the RETENTION_COUNT (5) most recent VERIFIED dumps per stack
+keep the RETENTION_COUNT (3) most recent VERIFIED dumps per stack
 keep the RETENTION_UNVERIFIED (2) most recent .unverified dumps per stack
 delete nothing if it would leave zero dumps of ANY kind for a stack
 deleting a dump also deletes its .json sidecar (never the reverse)
@@ -339,7 +351,16 @@ Day-based pruning (`find -mtime +5 -delete`) has a failure mode that this design
 rejects: the pruner outlives the producer. If dumping breaks for a week, day-based
 retention deletes every backup and leaves an empty directory. Count-based retention
 degrades to "stale but present". In steady state with nightly runs the two are
-identical — 5 nightly dumps is 5 days.
+identical — 3 nightly dumps is 3 days.
+
+The count was 5 at go-live and is 3 as of 2026-09-16. The reason is disk, not policy
+preference: rebuilds on this host add Docker image layers and BuildKit cache faster than
+anything reclaims them (§8.1), and `/var/backups/copi` shares `/dev/root` with both
+pgdata volumes, so every retained copy is headroom that churn cannot use. 3 costs
+~1.95 GB less than 5. The price is a **3-day recovery window**, which matters more than
+it looks because there is still no offsite copy (§12.1) and no PITR (§12.3): logical
+corruption not noticed within 3 days is unrecoverable. Revisit this the moment
+`OFFSITE_CMD` is real.
 
 Pruning is deliberately narrow and only ever deletes paths that:
 
@@ -449,13 +470,28 @@ role, or an SES change all look like a quiet week. Every run therefore also writ
 `/var/backups/copi/status.json`:
 
 ```json
-{"last_run_utc": "...", "last_success_utc": "...", "stacks": {
-  "copi-python": {"verified": true, "age_hours": 9, "retained": 5}}}
+{"last_run_utc": "...", "last_success_utc": "...", "ok": false,
+ "stacks": {"copi-python": {"verified": true, "dump_bytes": 0, "problems": [], "error": null}},
+ "regressed": {}, "warnings": [], "config": {"retention_count": 5, "...": "..."},
+ "reason": "only when the run aborted before producing per-stack results"}
 ```
 
-This costs a few lines, depends on nothing external, and is readable by the 07:00
-`daily_audit.md` Claude cron — which already inspects this host daily. It is not a
-replacement for mail; it is insurance against mail being silently undeliverable.
+This costs a few lines, depends on nothing external, and is insurance against mail
+being silently undeliverable.
+
+`regressed` is carried forward across runs that produce no results at all (preflight
+abort, unexpected exception, signal): a suspected data loss is evidence that must
+outlive the run that spotted it, and a flag erased by an aborted night would be gone
+after two bad ones. A stack drops its flag only by producing a verified dump that does
+not regress. `prune` excludes every stack listed here, not just ones flagged this run.
+
+`config` records the tunables that decide what is kept and what is deleted, so that a
+change to them is visible without reading `/etc`. The nightly run also logs them, and
+logs a WARNING naming any value that differs from the shipped default.
+
+**This file has no automated consumer.** An earlier version of this section claimed the
+07:00 `daily_audit.md` cron reads it; it does not, and never did. Treat status.json as
+a channel a human must be pointed at, not one that raises anything by itself.
 
 ## 8. Scheduling and resource guards
 
@@ -475,7 +511,27 @@ consumer on this host — which runs for roughly 8 minutes (measured: log last w
 winter.
 
 Service hardening: `Nice=10`, `IOSchedulingClass=idle`, `TimeoutStartSec=3600`,
-`ProtectSystem=strict` with `ReadWritePaths=/var/backups/copi /run`.
+`ProtectSystem=strict` with `ReadWritePaths=/var/backups /run` (the shipped unit
+grants `/var/backups`, not `/var/backups/copi`).
+
+### 8.1 Build-cache reclaim (added 2026-09-16)
+
+`docker-builder-prune.timer` runs `docker builder prune -f --keep-storage 10GiB` every
+Sunday at 06:00 UTC, two hours before the backup. It is not part of the backup system
+and it is installed by the same `install.sh` anyway, because the backup system cannot
+run without it: the 2026-09-15/16 outage was BuildKit cache filling `/dev/root` until
+the free-space guard could no longer be satisfied, and nothing on this host reclaimed
+it. It regrows with every rebuild, so a one-off cleanup is not a fix.
+
+`--keep-storage`, not a bare prune: recent cache is what makes a redeploy fast. The cap
+is set just above the ~8.3 GiB still referenced after the 2026-09-16 reclaim, making
+this a ceiling on growth rather than a weekly cold start.
+
+Note for anyone reclaiming by hand: deleting **images** is close to useless here.
+On 2026-09-16, removing 41 images (32 dangling plus 9 stale rollback tags) reclaimed
+**~1.2 MB**, because BuildKit still referenced every layer — `docker image prune`
+reported `Total reclaimed space: 0B` while build-cache reclaimable rose from 6.098 GB
+to 30.25 GB. Prune the build cache first; it is the gate, not the cheap first step.
 
 `MemoryMax=` is deliberately **not** set on the unit. `docker run` children are
 parented into `docker.service`'s cgroup, not the unit's, so a unit-level memory cap
@@ -486,7 +542,8 @@ The cap that matters is `--memory` in §4.4.
 
 | Failure | Behaviour | Backup kept? | Mail | Exit |
 |---|---|---|---|---|
-| Insufficient free space | Abort before dumping | n/a | yes | ≠0 |
+| Insufficient free space for a stack | Abort **that stack** before dumping, continue others | n/a | yes | ≠0 |
+| Insufficient free space for every stack | Nothing dumped; top-level `reason` in status.json | n/a | yes | ≠0 |
 | `pg_dump` fails / killed | `.partial` deleted | no | yes | ≠0 |
 | Snapshot export fails | Abort that stack, continue others | no | yes | ≠0 |
 | Session S killed mid-dump | `pg_dump` fails on invalid snapshot; `.partial` deleted | no | yes | ≠0 |
@@ -517,7 +574,9 @@ considered live:
 | 4 | `docker kill` verify container mid-restore | No stray container, no leaked volume |
 | 5 | `INSERT` into restored copy pre-count | Mismatch detected, correct table named |
 | 6 | Run with zero verified dumps present | Prune deletes nothing (floor holds) |
-| 7 | Simulate low disk | Aborts before dumping |
+| 7a | Simulate low disk (sparse dump, both stacks) | Dumps nothing, non-zero exit, `reason` in status.json |
+| 7b | Simulate low disk for ONE stack | That stack is skipped; the other is backed up |
+| 7c | `MIN_FREE_BYTES` above real free space | Stack refused even though the factor is satisfied |
 | 8 | Stray container left from prior run | Startup sweep removes it |
 | 9 | **Real SES send to all three recipients** | Mail arrives in all three inboxes; confirm out-of-band |
 | 10 | Concurrent manual + timer invocation | `flock` serialises; no double run |
@@ -616,6 +675,18 @@ required today; that changes the moment a second role is added.
 8. **`relkind='r'` counting is correct only while no partitioned tables exist.**
    True today (30 ordinary tables, zero partitioned, zero matviews). §4.3 must be
    revisited if that changes.
+9. **The weekly heartbeat renderer is load-bearing as an alert path.** `OnFailure=`
+   runs `copi-backup report`, so `render_heartbeat_mail` is not only the Monday
+   summary — it is the independent path of §14.4. Its staleness check is therefore
+   evaluated **per stack** (any configured stack past `HEARTBEAT_STALE_HOURS`, plus
+   any stack with no sidecar at all). It must not be reverted to a single `max()`
+   over all entries: with a per-stack free-space guard, one healthy stack would
+   silence the alarm for a stack that had not been backed up in weeks, while its old
+   sidecars kept rendering as clean `verified` lines.
+10. **Backups still cover Postgres only, and still only locally.** `OFFSITE_CMD` is
+   empty, so every copy of both databases lives on the same EBS volume as the
+   databases. This remains the largest single risk in the design and is untouched by
+   the 2026-09-16 work.
 
 ## 13. Follow-ups (not in scope)
 
@@ -643,14 +714,47 @@ adjudicated during the final audit.
    unavailable in exactly that case.
 3. **Sidecars are `chmod 0600` immediately after write**, leaving a sub-millisecond
    window at the default mode. The `0700` parent contains it throughout.
-4. **No `OnFailure=` on the units.** A failure surfaces via a non-zero exit
-   (`systemctl --failed`), the journal, `status.json`, and SES. A dedicated
-   `OnFailure=` handler would add a fifth, independent path.
+4. ~~**No `OnFailure=` on the units.**~~ **Resolved** — `copi-backup.service` carries
+   `OnFailure=copi-backup-failure@%n.service` (commit c7c3427), the fifth independent
+   path. Note the consequence: that unit runs `copi-backup report`, so the weekly
+   heartbeat renderer IS the independent alert path and its staleness check must stay
+   per stack (see 12.9).
 5. **`failure_injection.sh` is expensive.** Its sweep check invokes a real
    `copi-backup run`, dumping both stacks (~800 MB, ~4 minutes). Retention bounds the
-   accumulation at five per stack, but do not run it casually.
+   accumulation at RETENTION_COUNT per stack, but do not run it casually.
 6. **The offsite hook has never been exercised.** `OFFSITE_CMD` ships empty. Its failure
    path now mails and exits non-zero (audit F7), but no real hook has ever run.
+
+### Change log after go-live
+
+**2026-08-30 — `RETENTION_COUNT` 5 -> 3, on the live host only.** A response to disk
+pressure: `cp -a backup.env backup.env.bak-20260830` then
+`sed -i s/^RETENTION_COUNT=5$/RETENTION_COUNT=3/`, verified with `prune --dry-run` and a
+manual run. Defensible in the moment, but it left the spec, `backup.env.example` and the
+`DEFAULTS` comment all still saying 5, and **no channel reported the divergence** — the
+value appeared in no log, no mail and no status document.
+
+Resolved 2026-09-16 by **adopting 3 as the documented value** in the spec, the template
+and the code default, rather than by reverting the host. 3 was briefly set back to 5
+during that day's work and then returned to 3 by operator decision; the rationale is in
+§5. The durable fix was never the number: `config_drift()` now names any value that
+differs from the shipped default, every night, in the journal.
+
+**2026-09-15/16 — two nights with no backups at all.** `insufficient free space:
+4,048,744,448 available, need >= 5,932,680,516`. Root cause was outside this system: a
+rebuild and redeploy of the blackbird stack on the evening of 09-14 added image layers
+and BuildKit cache. Recovery reclaimed 30.25 GB from `docker builder prune` alone, which
+took the volume from 94% to 43%. Two properties of this design worked exactly as
+intended and are worth keeping: the guard failed **closed** (three good dumps per stack
+survived untouched, where day-based retention would have deleted them), and all four
+alert channels fired. Two did not:
+
+- the guard was global, so copi-blackbird was skipped on both nights despite needing
+  884 MB against ~4 GB free (fixed: §4.1.3, per-stack);
+- deleting Docker images reclaimed **0 bytes** while BuildKit still referenced their
+  layers — 41 images removed for ~1.2 MB. Build-cache reclaim is the gate, not a
+  cheap first step. Anything scheduling disk reclaim on this host must prune the
+  build cache, and must do so **recurringly**: it regrows with every rebuild.
 
 ### Not yet confirmed
 
