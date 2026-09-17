@@ -164,6 +164,81 @@ CNT_AFTER=$(find "$TMPD/$STACK" -type f | wc -l)
 [ "$CNT_BEFORE" -eq "$CNT_AFTER" ] && ok "floor held: nothing pruned with zero verified" || bad "floor breached"
 rm -rf "$TMPD"
 
+# Spec 10 listed "test 7 | Simulate low disk | Aborts before dumping" at go-live and it
+# was never written — so the guard that took production backups down on 2026-09-15 and
+# 2026-09-16 had never been exercised end to end. These three close it.
+#
+# No loopback mount and no filled filesystem: a SPARSE file reports a huge
+# st_size while consuming no blocks, and the guard sizes itself from st_size. That
+# makes "the disk is nearly full" expressible against the real binary, on the real
+# filesystem, for free.
+# Single-line KEYs only. STACKS is a multi-line quoted value, so deleting its first
+# line strands the continuation and the config stops parsing — which is exactly how
+# the first version of test 7c "failed": the run died on a ConfigError before it ever
+# reached the check under test.
+lowdisk_cfg() {   # $1 = BACKUP_ROOT, rest = extra KEY=VALUE lines
+  local root="$1"; shift
+  local out; out=$(mktemp)
+  sed "s|^BACKUP_ROOT=.*|BACKUP_ROOT=$root|" "$CFG" > "$out"
+  local kv; for kv in "$@"; do
+    case "${kv%%=*}" in
+      STACKS) echo "lowdisk_cfg: refusing to override multi-line STACKS" >&2; return 1 ;;
+    esac
+    sed -i "/^${kv%%=*}=/d" "$out"; echo "$kv" >> "$out"
+  done
+  echo "$out"
+}
+
+echo "== test 7a: the hard free-space guard refuses to dump =="
+TMPD=$(mktemp -d)
+mkdir -p "$TMPD/copi-python" "$TMPD/copi-blackbird"
+truncate -s 100G "$TMPD/copi-python/copi-python_copi_20260101T000000Z.dump"
+truncate -s 100G "$TMPD/copi-blackbird/copi-blackbird_copi_20260101T000000Z.dump"
+TMPCFG=$(lowdisk_cfg "$TMPD")
+/usr/local/bin/copi-backup run --config "$TMPCFG" --no-prune >/dev/null 2>&1
+RC=$?
+NEW=$(find "$TMPD" -name '*_2026*T*Z.dump' ! -name '*20260101*' | wc -l)
+if [ "$RC" -ne 0 ] && [ "$NEW" -eq 0 ] && grep -q '"reason"' "$TMPD/status.json" 2>/dev/null; then
+  ok "guard refused, dumped nothing, and wrote a reason to status.json"
+else
+  bad "low-disk guard did not abort cleanly (rc=$RC new_dumps=$NEW)"
+fi
+rm -f "$TMPCFG"; rm -rf "$TMPD"
+
+echo "== test 7b: one stack short of space does not skip the other =="
+# The 2026-09-15/16 regression: copi-blackbird needed 884MB, ~4GB was free, and it was
+# skipped because the guard charged it copi-python's 847MB demand.
+TMPD=$(mktemp -d)
+mkdir -p "$TMPD/copi-python" "$TMPD/copi-blackbird"
+truncate -s 100G "$TMPD/copi-python/copi-python_copi_20260101T000000Z.dump"
+TMPCFG=$(lowdisk_cfg "$TMPD")
+/usr/local/bin/copi-backup run --config "$TMPCFG" --no-prune >/dev/null 2>&1
+BB=$(find "$TMPD/copi-blackbird" -name 'copi-blackbird_copi_*.dump' | wc -l)
+PY=$(find "$TMPD/copi-python" -name '*.dump' ! -name '*20260101*' | wc -l)
+if [ "$BB" -ge 1 ] && [ "$PY" -eq 0 ]; then
+  ok "copi-blackbird was backed up while copi-python was blocked"
+else
+  bad "per-stack preflight failed (blackbird=$BB python=$PY)"
+fi
+rm -f "$TMPCFG"; rm -rf "$TMPD"
+
+echo "== test 7c: MIN_FREE_BYTES floor blocks a stack the factor would have cleared =="
+TMPD=$(mktemp -d)
+mkdir -p "$TMPD/copi-python" "$TMPD/copi-blackbird"
+# 1-byte dumps clear any factor; only the absolute floor can stop them.
+printf x > "$TMPD/copi-python/copi-python_copi_20260101T000000Z.dump"
+printf x > "$TMPD/copi-blackbird/copi-blackbird_copi_20260101T000000Z.dump"
+TMPCFG=$(lowdisk_cfg "$TMPD" "MIN_FREE_BYTES=999999999999999")
+/usr/local/bin/copi-backup run --config "$TMPCFG" --no-prune >/dev/null 2>&1
+RC=$?
+NEW=$(find "$TMPD" -name '*.dump' ! -name '*20260101*' | wc -l)
+if [ "$RC" -ne 0 ] && [ "$NEW" -eq 0 ] && grep -q 'floor' "$TMPD/status.json" 2>/dev/null; then
+  ok "absolute floor refused a stack the factor alone would have cleared"
+else
+  bad "MIN_FREE_BYTES floor not enforced (rc=$RC new_dumps=$NEW)"
+fi
+rm -f "$TMPCFG"; rm -rf "$TMPD"
+
 echo "== test 8: sweep clears a stray labelled container and volume =="
 docker volume create --label copi.backup.ephemeral=true copi-verify-stray >/dev/null
 docker run -d --name copi-verify-stray --label copi.backup.ephemeral=true \

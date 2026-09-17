@@ -37,20 +37,29 @@ logger = logging.getLogger("copi_backup")
 
 DEFAULTS = {
     "BACKUP_ROOT": "/var/backups/copi",
-    "RETENTION_COUNT": "5",
+    "RETENTION_COUNT": "3",
     "RETENTION_UNVERIFIED": "2",
     "VERIFY_IMAGE": "postgres:15",
     "VERIFY_MEM": "768m",
     "VERIFY_TIMEOUT_SEC": "1800",
     # Peak concurrent usage for ONE stack is roughly 2x the dump (container-side
     # temp file plus the host .partial) PLUS the restored verify volume (~2.3 GB
-    # measured for copi-python), and prune runs last so a 6th copy can briefly
-    # coexist with 5 retained ones. Measured need ~= 3.74 GB against a 2.16 GB
+    # measured for copi-python), and prune runs last so an extra copy can briefly
+    # coexist with the RETENTION_COUNT retained ones. Measured need ~= 3.74 GB
+    # against a 2.16 GB
     # demand at the old factor of 3 — audit finding F3, 2026-08-18. Raised to 7.
-    # NOTE: scripts/backup/backup.env.example still documents 3; it is out of
-    # scope for this fix (not in the editable file list) and should be updated
-    # separately.
     "FREE_SPACE_FACTOR": "7",
+    # An absolute floor, checked alongside the factor. The factor alone scales with
+    # the stack being backed up, so once the guard went per-stack a small stack could
+    # clear 7x its own tiny dump on a nearly-full root filesystem and then start a
+    # restore container on it. /var/backups/copi shares /dev/root with both pgdata
+    # volumes: filling it takes production down, which is the whole reason the guard
+    # exists (spec 4.1.3).
+    "MIN_FREE_BYTES": str(2 * 1024**3),
+    # Soft threshold: run, but say so. 2x the hard requirement. The hard guard is
+    # binary — green one night, dead the next — and the 2026-09-15 outage crossed it
+    # in a single step with no prior signal. 0 disables.
+    "WARN_SPACE_FACTOR": "14",
     "OFFSITE_CMD": "",
     "AWS_REGION": "us-east-2",
     "SES_SENDER_EMAIL": "",
@@ -89,6 +98,8 @@ class Config:
     verify_mem: str
     verify_timeout_sec: int
     free_space_factor: int
+    min_free_bytes: int
+    warn_space_factor: int
     offsite_cmd: str
     aws_region: str
     ses_sender_email: str
@@ -166,6 +177,9 @@ def load_config(env: dict[str, str]) -> Config:
         verify_mem=env.get("VERIFY_MEM", DEFAULTS["VERIFY_MEM"]).strip(),
         verify_timeout_sec=_as_int(env, "VERIFY_TIMEOUT_SEC", 60),
         free_space_factor=_as_int(env, "FREE_SPACE_FACTOR", 1),
+        min_free_bytes=_as_int(env, "MIN_FREE_BYTES", 0),
+        # Clamped to >=0: 0 disables the soft warning without disabling the hard guard.
+        warn_space_factor=_as_int(env, "WARN_SPACE_FACTOR", 0),
         offsite_cmd=env.get("OFFSITE_CMD", DEFAULTS["OFFSITE_CMD"]).strip(),
         aws_region=env.get("AWS_REGION", DEFAULTS["AWS_REGION"]).strip(),
         ses_sender_email=env.get("SES_SENDER_EMAIL", DEFAULTS["SES_SENDER_EMAIL"]).strip(),
@@ -920,6 +934,9 @@ def build_status(
     now: datetime,
     previous: dict | None = None,
     reason: str | None = None,
+    regressed: dict[str, str] | None = None,
+    config: dict | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     """Build the status.json document.
 
@@ -927,6 +944,13 @@ def build_status(
     "did not run" (spec §7.2). On a failed run it is carried forward from
     ``previous`` (yesterday's status.json, if any) rather than dropped; on a
     successful run it is stamped to ``now``.
+
+    ``regressed`` is carried forward on the same principle, and for a sharper reason:
+    a suspected data loss is evidence that must outlive the run that spotted it. Three
+    paths call this with ``results=[]`` — preflight abort, unexpected exception, and
+    the signal handler — and a flag erased by any of them would be gone after two bad
+    nights. A stack only loses its flag by producing a verified dump that does not
+    regress; one that was not evaluated keeps it.
     """
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     ok = all(r.ok for r in results) and bool(results)
@@ -945,6 +969,18 @@ def build_status(
             for r in results
         },
     }
+    previous_regressed = (previous or {}).get("regressed")
+    if not isinstance(previous_regressed, dict):
+        previous_regressed = {}
+    effective_regressed = dict(regressed or {})
+    cleared = {r.stack for r in results if r.ok}
+    for stack, why in previous_regressed.items():
+        if stack not in cleared:
+            effective_regressed.setdefault(stack, why)
+    status["regressed"] = effective_regressed
+    status["warnings"] = list(warnings or [])
+    if config is not None:
+        status["config"] = config
     if reason is not None:
         status["reason"] = reason
     return status
@@ -1023,23 +1059,59 @@ HEARTBEAT_STALE_HOURS = 26
 SIDECAR_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def render_heartbeat_mail(history: list[dict], now: datetime) -> tuple[str, str]:
+def render_heartbeat_mail(
+    history: list[dict],
+    now: datetime,
+    stacks: list[str] | None = None,
+    config: dict | None = None,
+) -> tuple[str, str]:
+    """Render the weekly summary, warning per stack rather than per run.
+
+    Staleness used to be ``max()`` over every entry, which meant one healthy stack
+    silenced the alarm for a stack that had not been backed up in days — and its old
+    sidecars still rendered as clean "verified" lines. That masking only became
+    reachable once the free-space guard went per-stack (before, both stacks failed
+    together), and this is not a side channel: copi-backup.service's OnFailure= runs
+    `copi-backup report`, so the heartbeat IS the independent alert path.
+
+    ``stacks`` is the configured roster. Passing it is what lets a stack with NO
+    sidecar at all be reported, which history alone cannot express.
+    """
     subject = f"[copi-backup] weekly summary {now:%Y-%m-%d}"
     lines = [f"Weekly backup summary, {now:%Y-%m-%d} UTC", ""]
-    if not history:
+
+    newest_by_stack: dict[str, datetime] = {}
+    for entry in history:
+        try:
+            taken = datetime.strptime(
+                entry["started_utc"], SIDECAR_TS_FORMAT
+            ).replace(tzinfo=UTC)
+        except (KeyError, TypeError, ValueError):
+            continue
+        name = entry.get("stack", "<unknown>")
+        if name not in newest_by_stack or taken > newest_by_stack[name]:
+            newest_by_stack[name] = taken
+
+    expected = list(stacks) if stacks else sorted(newest_by_stack)
+    if not expected:
         lines.append("NO RUNS RECORDED IN THE LAST 7 DAYS — the timer may not be firing.")
     else:
-        newest = max(
-            datetime.strptime(e["started_utc"], SIDECAR_TS_FORMAT).replace(tzinfo=UTC)
-            for e in history
-        )
-        age_hours = (now - newest).total_seconds() / 3600
-        if age_hours > HEARTBEAT_STALE_HOURS:
+        stale: list[str] = []
+        for name in expected:
+            taken = newest_by_stack.get(name)
+            if taken is None:
+                stale.append(f"{name}: NO RUN RECORDED in the last 7 days")
+                continue
+            age_hours = (now - taken).total_seconds() / 3600
+            if age_hours > HEARTBEAT_STALE_HOURS:
+                stale.append(f"{name}: newest run is {age_hours:.1f} hours old")
+        if stale:
             lines.append(
-                f"WARNING: the newest recorded run is {age_hours:.1f} hours old "
-                f"(threshold {HEARTBEAT_STALE_HOURS}h) — the nightly job may be "
-                "failing silently, or the timer may not be firing."
+                f"WARNING: {len(stale)} of {len(expected)} stack(s) past the "
+                f"{HEARTBEAT_STALE_HOURS}h threshold — the nightly job may be failing "
+                "for them, or the timer may not be firing."
             )
+            lines += [f"  {item}" for item in stale]
             lines.append("")
     for entry in history:
         lines.append(
@@ -1047,6 +1119,9 @@ def render_heartbeat_mail(history: list[dict], now: datetime) -> tuple[str, str]
             f"{entry['dump_bytes']:>12,} B  "
             f"{'verified' if entry['verified'] else 'UNVERIFIED'}"
         )
+    if config is not None:
+        lines += ["", "Effective config:"]
+        lines += [f"  {key}={value}" for key, value in sorted(config.items())]
     return subject, "\n".join(lines)
 
 
@@ -1083,8 +1158,10 @@ def send_mail(cfg: Config, subject: str, body: str, client_factory=None) -> bool
 LOCK_PATH = "/run/copi-backup.lock"
 
 
-def enough_free_space(free_bytes: int, last_dump_bytes: int, factor: int) -> bool:
-    """True iff ``free_bytes`` covers ``factor`` times the expected backup demand.
+def enough_free_space(
+    free_bytes: int, last_dump_bytes: int, factor: int, min_free_bytes: int = 0
+) -> bool:
+    """True iff ``free_bytes`` covers the demand AND clears ``min_free_bytes``.
 
     A ``last_dump_bytes`` of zero must never read as "no constraint": that is
     exactly the no-verified-dump-yet gap (audit F3) that let this guard pass on a
@@ -1095,7 +1172,7 @@ def enough_free_space(free_bytes: int, last_dump_bytes: int, factor: int) -> boo
     """
     if last_dump_bytes <= 0:
         return False
-    return free_bytes >= factor * last_dump_bytes
+    return free_bytes >= max(factor * last_dump_bytes, min_free_bytes)
 
 
 def sweep(runner: Runner, cfg: Config, now: datetime) -> None:
@@ -1179,6 +1256,76 @@ def _last_dump_bytes(cfg: Config) -> int:
     return max(sizes) if sizes else 0
 
 
+def _last_dump_bytes_for(cfg: Config, stack: str) -> int:
+    """Largest dump on disk for ONE stack, or 0 if it has none.
+
+    The global ``_last_dump_bytes`` takes the max across every stack, so a 126MB
+    stack was charged an 847MB stack's demand and skipped on nights it had ample
+    room (measured 2026-09-15 and 2026-09-16). The guard sizes itself per stack now;
+    the global helper is kept because prune-era callers still want the whole picture.
+    """
+    sizes = [
+        p.stat().st_size
+        for p in (Path(cfg.backup_root) / stack).glob("*.dump")
+        if p.is_file()
+    ]
+    return max(sizes) if sizes else 0
+
+
+def _ordered_stacks(cfg: Config) -> list[Stack]:
+    """Stacks in ascending demand, unmeasurable ones last.
+
+    Processing order decides who gets the remaining headroom as a disk tightens:
+    in config order the 847MB stack runs first and starves the 126MB one, which is
+    backwards when the goal is "as many stacks as possible hold a fresh backup".
+    A stack with no dump yet sorts last — its cost is unknown, so it must not be
+    the one that consumes the headroom a measurable stack was going to fit into.
+    """
+    def key(stack: Stack) -> tuple[int, int, str]:
+        demand = _last_dump_bytes_for(cfg, stack.name)
+        return (1, 0, stack.name) if demand == 0 else (0, demand, stack.name)
+
+    return sorted(cfg.stacks, key=key)
+
+
+def config_summary(cfg: Config) -> dict:
+    """The tunables that decide what is kept and what is deleted. No credentials."""
+    return {
+        "retention_count": cfg.retention_count,
+        "retention_unverified": cfg.retention_unverified,
+        "free_space_factor": cfg.free_space_factor,
+        "min_free_bytes": cfg.min_free_bytes,
+        "warn_space_factor": cfg.warn_space_factor,
+        "regression_tolerance_pct": cfg.regression_tolerance_pct,
+        "offsite_enabled": bool(cfg.offsite_cmd),
+        "stacks": [s.name for s in cfg.stacks],
+    }
+
+
+def config_drift(cfg: Config) -> list[str]:
+    """Effective values that differ from the shipped defaults, as "KEY=v (default d)".
+
+On 2026-08-30 a one-line ``sed`` cut RETENTION_COUNT from 5 to 3 on the live host.
+    The value was a defensible response to a full disk and is now the documented
+    default, but at the time it left no trace in any channel a human reads while the
+    spec, the template and the code comments all went on saying 5. Displaying a value
+    is not enough — this names the divergence.
+    """
+    checked = {
+        "RETENTION_COUNT": cfg.retention_count,
+        "RETENTION_UNVERIFIED": cfg.retention_unverified,
+        "FREE_SPACE_FACTOR": cfg.free_space_factor,
+        "MIN_FREE_BYTES": cfg.min_free_bytes,
+        "WARN_SPACE_FACTOR": cfg.warn_space_factor,
+        "REGRESSION_TOLERANCE_PCT": cfg.regression_tolerance_pct,
+    }
+    return [
+        f"{key}={value} (default {DEFAULTS[key]})"
+        for key, value in checked.items()
+        if str(value) != DEFAULTS[key]
+    ]
+
+
 def _live_db_bytes(runner: Runner, cfg: Config) -> int:
     """Sum of live database sizes across every configured stack.
 
@@ -1188,15 +1335,17 @@ def _live_db_bytes(runner: Runner, cfg: Config) -> int:
     unconditionally. If this also fails to produce a number, the caller must
     treat it as a hard preflight failure — see ``enough_free_space``.
     """
-    total = 0
-    for stack in cfg.stacks:
-        sql = f"SELECT pg_database_size('{stack.db}')"
-        result = runner.run(psql_argv(stack, sql))
-        raw = result.stdout.strip()
-        if not raw.isdigit():
-            raise BackupError(f"{stack.name}: could not read live database size: {raw!r}")
-        total += int(raw)
-    return total
+    return sum(_live_db_bytes_for(runner, stack) for stack in cfg.stacks)
+
+
+def _live_db_bytes_for(runner: Runner, stack: Stack) -> int:
+    """Live size of ONE stack's database. Raises BackupError if unreadable."""
+    sql = f"SELECT pg_database_size('{stack.db}')"
+    result = runner.run(psql_argv(stack, sql))
+    raw = result.stdout.strip()
+    if not raw.isdigit():
+        raise BackupError(f"{stack.name}: could not read live database size: {raw!r}")
+    return int(raw)
 
 
 def _run_ok(
@@ -1215,7 +1364,12 @@ def _run_ok(
 
 
 def _write_status(
-    cfg: Config, results: list[StackResult], now: datetime, reason: str | None = None
+    cfg: Config,
+    results: list[StackResult],
+    now: datetime,
+    reason: str | None = None,
+    regressed: dict[str, str] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     """Build and persist status.json, carrying last_success_utc forward on failure.
 
@@ -1230,7 +1384,15 @@ def _write_status(
             previous = json.loads(status_path.read_text())
         except (OSError, json.JSONDecodeError):
             previous = None
-    status = build_status(results, now, previous=previous, reason=reason)
+    status = build_status(
+        results,
+        now,
+        previous=previous,
+        reason=reason,
+        regressed=regressed,
+        config=config_summary(cfg),
+        warnings=warnings,
+    )
     status_path.write_text(json.dumps(status, indent=2))
     return status
 
@@ -1284,40 +1446,81 @@ def _detect_regressions(
     return regressed
 
 
+def _stack_preflight(
+    cfg: Config, runner: Runner, stack: Stack, warnings: list[str]
+) -> str | None:
+    """Decide whether ONE stack may proceed. Returns None to proceed, else a reason.
+
+    Free space is re-measured here, per stack, rather than once for the run: an
+    earlier stack's dump consumes space a later one then needs, so a hoisted
+    measurement would be stale by the time the second stack is checked.
+
+    The returned reason is prefixed ``preflight:`` so the stage that broke stays
+    identifiable in the failure mail now that the subject names stacks rather than
+    the word "preflight" (spec 7).
+    """
+    free = shutil.disk_usage(cfg.backup_root).free
+    demand = _last_dump_bytes_for(cfg, stack.name)
+    if demand == 0:
+        # No dump on disk for this stack yet (first run, or verification has been
+        # failing) — size the guard against the live DB rather than let a 0 demand
+        # pass unconditionally (audit F3).
+        try:
+            demand = _live_db_bytes_for(runner, stack)
+            logger.info(
+                "%s: no dump on disk yet; sized the guard against the live DB: %d bytes",
+                stack.name, demand,
+            )
+        except (CommandError, BackupError) as exc:
+            return f"preflight: free-space guard could not measure demand: {exc}"
+
+    required = max(cfg.free_space_factor * demand, cfg.min_free_bytes)
+    if not enough_free_space(free, demand, cfg.free_space_factor, cfg.min_free_bytes):
+        return (
+            f"preflight: insufficient free space: {free:,} bytes available, "
+            f"need >= {required:,} ({cfg.free_space_factor}x{demand:,}, "
+            f"floor {cfg.min_free_bytes:,})"
+        )
+
+    if cfg.warn_space_factor:
+        warn_at = cfg.warn_space_factor * demand
+        if free < warn_at:
+            message = (
+                f"{stack.name}: free space {free:,} is below the warning threshold "
+                f"{warn_at:,} ({cfg.warn_space_factor}x{demand:,}); the hard guard "
+                f"fails at {required:,}"
+            )
+            logger.warning("%s", message)
+            warnings.append(message)
+    return None
+
+
 def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
     logger.info("run start: stacks=%s", [s.name for s in cfg.stacks])
+    # Logged every night, in the persistent journal, because the tunables below decide
+    # what is kept and what is deleted and nothing else reports them. Displaying the
+    # value is not the point; the drift line below is.
+    logger.info("effective config: %s", json.dumps(config_summary(cfg), sort_keys=True))
+    drift = config_drift(cfg)
+    if drift:
+        logger.warning("CONFIG DRIFT vs shipped defaults: %s", "; ".join(drift))
     _ensure_dir(Path(cfg.backup_root))
     sweep(runner, cfg, now)
 
-    free = shutil.disk_usage(cfg.backup_root).free
-    demand = _last_dump_bytes(cfg)
-    if demand == 0:
-        # No verified dump on disk yet (first run, or verification has been
-        # failing) — fall back to the live DB size rather than let a 0 demand
-        # pass the guard unconditionally (audit F3).
-        try:
-            demand = _live_db_bytes(runner, cfg)
-            logger.info("no dump on disk yet; sized the guard against the live DB: %d bytes", demand)
-        except (CommandError, BackupError) as exc:
-            reason = f"free-space guard could not measure demand: {exc}"
-            logger.error(reason)
-            _write_status(cfg, [], now, reason=reason)
-            _mail_failure(cfg, f"[copi-backup] FAILED preflight {now:%Y-%m-%d}", reason)
-            return 1
-    if not enough_free_space(free, demand, cfg.free_space_factor):
-        reason = (
-            f"insufficient free space: {free:,} bytes available, "
-            f"need >= {cfg.free_space_factor * demand:,} "
-            f"({cfg.free_space_factor}x{demand:,})"
-        )
-        logger.error(reason)
-        _write_status(cfg, [], now, reason=reason)
-        _mail_failure(cfg, f"[copi-backup] FAILED preflight {now:%Y-%m-%d}", reason)
-        return 1
-
     results: list[StackResult] = []
     offsite_failed: list[str] = []
-    for stack in cfg.stacks:
+    warnings: list[str] = []
+    preflight_failures = 0
+    for stack in _ordered_stacks(cfg):
+        blocked = _stack_preflight(cfg, runner, stack, warnings)
+        if blocked is not None:
+            # One stack short of space must not cost the others their backup. The
+            # whole-run abort this replaces skipped a 126MB stack on nights it had
+            # 4GB free, because the guard charged it an 847MB stack's demand.
+            logger.error("%s: %s", stack.name, blocked)
+            results.append(StackResult(stack.name, None, None, False, blocked))
+            preflight_failures += 1
+            continue
         dest = Path(cfg.backup_root) / stack.name
         try:
             dump = dump_stack(runner, cfg, stack, dest, now)
@@ -1364,7 +1567,18 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
     # prune pass below, since its older copies are the only remaining evidence.
     regressed = _detect_regressions(cfg, results, now)
 
-    status = _write_status(cfg, results, now)
+    # When every stack was blocked before it dumped, nothing ran at all — keep the
+    # top-level "did it even try" reason that the old whole-run abort wrote, so the
+    # F4 invariant (status.json always explains an aborted run) survives the split
+    # into per-stack verdicts.
+    reason = None
+    if preflight_failures and preflight_failures == len(cfg.stacks):
+        reason = "every stack failed preflight: " + "; ".join(
+            f"{r.stack}: {r.error}" for r in results if r.error
+        )
+    status = _write_status(
+        cfg, results, now, reason=reason, regressed=regressed, warnings=warnings
+    )
     overall_ok = _run_ok(status, offsite_failed, regressed)
     logger.info("run complete: overall=%s", "OK" if overall_ok else "FAILED")
 
@@ -1378,7 +1592,13 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
 
     if not skip_prune:
         try:
-            deleted = prune(cfg, dry_run=False, exclude_stacks=set(regressed))
+            # The PERSISTED set, not just this run's: per-stack preflight makes prune
+            # reachable on nights the whole-run abort used to skip it entirely, so a
+            # stack flagged on an earlier night would otherwise have the older copies
+            # that are its only evidence pruned tonight.
+            deleted = prune(
+                cfg, dry_run=False, exclude_stacks=set(status.get("regressed") or {})
+            )
             logger.info("prune deleted %d file(s): %s", len(deleted), [str(p) for p in deleted])
         except Exception as exc:
             # Must not mask the run's verdict computed above.
@@ -1417,7 +1637,9 @@ def cmd_report(cfg: Config, now: datetime) -> int:
             history.append(json.loads(sidecar.read_text()))
         except json.JSONDecodeError:
             continue
-    subject, body = render_heartbeat_mail(history, now)
+    subject, body = render_heartbeat_mail(
+        history, now, stacks=[s.name for s in cfg.stacks], config=config_summary(cfg)
+    )
     mailed = send_mail(cfg, subject, body)
     if not mailed:
         logger.error("weekly heartbeat mail was NOT accepted by SES: %s", subject)
