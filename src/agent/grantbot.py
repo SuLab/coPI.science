@@ -27,13 +27,15 @@ MIN_LEAD_DAYS = 21
 import typer
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.agent.ids import WRITER_GRANTBOT, set_default_writer_id
 from src.agent.slack_client import SLACK_MAX_TEXT_CHARS, split_for_slack
 from src.config import get_settings
+from src.database import make_engine  # noqa: E402
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
+from src.services.slack_executor import run_slack_call  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,94 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles/public")
-
 app = typer.Typer(invoke_without_command=True)
-
-
-def _load_researcher_profiles() -> dict[str, dict[str, Any]]:
-    """Load all public profiles and extract searchable fields.
-
-    Returns {agent_id: {name, keywords, disease_areas, techniques, ...}}
-    """
-    profiles = {}
-    for md_file in sorted(PROFILES_DIR.glob("*.md")):
-        agent_id = md_file.stem
-        text = md_file.read_text(encoding="utf-8")
-
-        profile: dict[str, Any] = {"agent_id": agent_id, "raw": text}
-
-        # Extract PI name from first heading
-        for line in text.splitlines():
-            if line.startswith("# ") and "Lab" in line:
-                profile["name"] = line.replace("# ", "").replace(" Lab — Public Profile", "").strip()
-                break
-
-        # Extract keywords section
-        profile["keywords"] = _extract_list_section(text, "Keywords")
-        profile["disease_areas"] = _extract_list_section(text, "Disease Areas")
-        profile["techniques"] = _extract_list_section(text, "Key Methods and Technologies")
-        profile["targets"] = _extract_list_section(text, "Key Molecular Targets")
-
-        profiles[agent_id] = profile
-
-    logger.info("Loaded %d researcher profiles", len(profiles))
-    return profiles
-
-
-def _extract_list_section(text: str, section_name: str) -> list[str]:
-    """Extract bullet-pointed or comma-separated items from a markdown section."""
-    items = []
-    in_section = False
-    for line in text.splitlines():
-        if section_name.lower() in line.lower() and line.startswith("##"):
-            in_section = True
-            continue
-        if in_section:
-            if line.startswith("##"):
-                break
-            line = line.strip()
-            if line.startswith("- "):
-                items.append(line[2:].strip())
-            elif line and not line.startswith("#"):
-                # Comma-separated keywords
-                items.extend(kw.strip() for kw in line.split(",") if kw.strip())
-    return items
-
-
-def _build_search_queries(profiles: dict[str, dict]) -> list[str]:
-    """Build a deduplicated set of search queries from all profiles.
-
-    Prioritizes disease areas (best match for grant language), then
-    high-level keywords. Avoids overly specific technique names that
-    won't match FOA descriptions.
-    """
-    # Priority 1: Disease areas (most grant-relevant)
-    priority_queries: list[str] = []
-    seen: set[str] = set()
-
-    for profile in profiles.values():
-        for da in profile.get("disease_areas", []):
-            simplified = da.split("(")[0].strip()
-            if len(simplified.split()) <= 5 and simplified.lower() not in seen:
-                seen.add(simplified.lower())
-                priority_queries.append(simplified.lower())
-
-    # Priority 2: Keywords (broader research themes)
-    keyword_queries: list[str] = []
-    for profile in profiles.values():
-        for kw in profile.get("keywords", []):
-            if len(kw.split()) <= 4 and kw.lower() not in seen:
-                seen.add(kw.lower())
-                keyword_queries.append(kw.lower())
-
-    # Interleave: disease areas first, then keywords
-    queries = priority_queries + keyword_queries
-    logger.info(
-        "Built %d search queries (%d disease areas, %d keywords)",
-        len(queries), len(priority_queries), len(keyword_queries),
-    )
-    return queries
 
 
 def _parse_close_date(raw: str) -> datetime | None:
@@ -317,16 +232,25 @@ Respond with ONLY a JSON array of FOA numbers:
 
     user_msg = f"""## Funding Opportunities\n\n{opp_list}"""
 
-    try:
-        settings = get_settings()
-        response = await generate_agent_response(
-            system_prompt=system_prompt,
-            messages=[{"role": "user", "content": user_msg}],
-            model=settings.llm_agent_model_sonnet,
-            max_tokens=1500,
-            log_meta={"agent_id": "grantbot", "phase": "select"},
-        )
+    # The LLM call itself is deliberately OUTSIDE the try/except below: a
+    # transport failure (429/529/timeout) here must propagate rather than hard-fail to `[]`,
+    # because `_run_grantbot_with_session` completing normally marks the day complete
+    # (`_mark_run_complete()`), and `_should_run_today()` is then False until tomorrow — one
+    # transient failure would otherwise cost GrantBot every funding post for the day. Production
+    # runs this via `scheduler`, whose `except Exception` logs and does NOT mark the day complete,
+    # so a propagated exception here is retried on the next 15-minute tick instead of crashing the
+    # container. The `[]` hard-fail below stays for the deterministic parse-failure class
+    # (json.JSONDecodeError / ValueError), which retrying would not fix.
+    settings = get_settings()
+    response = await generate_agent_response(
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_msg}],
+        model=settings.llm_agent_model_sonnet,
+        max_tokens=1500,
+        log_meta={"agent_id": "grantbot", "phase": "select"},
+    )
 
+    try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
@@ -339,11 +263,37 @@ Respond with ONLY a JSON array of FOA numbers:
             cleaned = cleaned[start:end + 1]
 
         selected = json.loads(cleaned)
-        logger.info("Selected %d of %d opportunities", len(selected), len(opportunities))
-        return selected[:max_select]
+        if not isinstance(selected, list):
+            raise ValueError(
+                f"selection response was not a JSON list: {type(selected).__name__}"
+            )
+        validated: list[str | int] = []
+        for item in selected:
+            if isinstance(item, bool) or not isinstance(item, (str, int)):
+                raise ValueError(f"selection contained a non-FOA-key element: {item!r}")
+            if item in opportunities:
+                validated.append(item)
+        logger.info("Selected %d of %d opportunities", len(validated), len(opportunities))
+        return validated[:max_select]
     except Exception as exc:
-        logger.warning("Selection failed: %s — falling back to all", exc)
-        return list(opportunities.keys())[:max_select]
+        # Hard-fail: falling back to posting every
+        # opportunity's key on ANY parse failure would post up to `max_select` UNVETTED
+        # FOAs, exactly what a selection step exists to prevent. Returning []
+        # means this run posts nothing AND (because run_grantbot returns
+        # normally) the scheduler marks the day complete, so the next attempt is
+        # tomorrow's run, not the next 15-minute tick. That is the accepted
+        # trade for THIS class of failure: a deterministic parse bug
+        # (json.JSONDecodeError / ValueError, from a malformed-but-returned
+        # response) would otherwise be retried ~64 times a day for no benefit —
+        # re-querying can't fix a bug in how we parse an already-received
+        # answer. A transport failure (LLM 429/529/timeout) is the opposite
+        # case and is handled above, outside this try, by letting the
+        # exception propagate instead of landing here.
+        logger.error(
+            "Selection failed (%s) — refusing to post unvetted opportunities this run",
+            exc,
+        )
+        return []
 
 
 async def _draft_post(
@@ -470,7 +420,7 @@ async def run_grantbot(
     Returns list of posted opportunities.
     """
     settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+    engine = make_engine(settings.database_url)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     try:
@@ -541,9 +491,9 @@ async def _run_grantbot_with_session(
     # 4. Fetch details for selected opportunities
     #
     # The fallback to the search-shaped `opp` is deliberate — a post with no
-    # description beats no post. But it used to be SILENT, and that hid an
-    # upstream outage completely: measured 2026-08-04, grants.gov's detail
-    # backend answered every id with an outer "Webservice Succeeds" wrapping an
+    # description beats no post. But a silent fallback would hide an
+    # upstream outage completely: grants.gov's detail
+    # backend has been observed answering every id with an outer "Webservice Succeeds" wrapping an
     # inner "No response received ... at the backend server", so
     # fetch_opportunity_detail returned None for 5/5 real ids. Search hits carry
     # no description either, so every drafted post went to the LLM with an empty
@@ -612,23 +562,32 @@ async def _run_grantbot_with_session(
         from src.services.slack_tokens import slack_globally_enabled
         slack_on = await slack_globally_enabled(session)
         if slack_on:
-            candidate = getattr(settings, "slack_bot_token_grantbot", "")
-            if not candidate or candidate.startswith("xoxb-placeholder"):
-                candidate = settings.slack_bot_token_su
-                # WARNING, not INFO: posts made on this token carry SuBot's Slack
-                # uid, so the engine attributes them to `su` (the uid map resolves
-                # roster bots first, by design — see _bot_uid_map). The FOA still
-                # lands; its provenance is wrong until grantbot has its own token.
-                logger.warning(
-                    "No grantbot Slack token — using SuBot's token as fallback; "
-                    "these posts will be attributed to su, not grantbot",
+            from src.services.slack_tokens import get_agent_bot_token, is_valid_token
+            # DB first (this is what /admin/agents writes), then the .env field.
+            candidate = await get_agent_bot_token(session, "grantbot") or getattr(
+                settings, "slack_bot_token_grantbot", ""
+            )
+            if not is_valid_token(candidate):
+                # Do NOT fall back to SuBot's token: a post made on a
+                # borrowed token carries that bot's Slack uid, so the engine's _bot_uid_map
+                # (roster bots resolve first, by design) attributes GrantBot's funding posts
+                # to `su`. Refuse rather than publish under the wrong identity — the per-FOA
+                # `if not bot_token:` branch below releases the claim so a future run with a
+                # real grantbot token can still post it.
+                candidate = ""
+                logger.error(
+                    "No grantbot Slack token configured (AgentRegistry row for 'grantbot', "
+                    "or SLACK_BOT_TOKEN_GRANTBOT) — refusing to post funding opportunities "
+                    "under another bot's identity this run",
                 )
-            if candidate and not candidate.startswith("xoxb-placeholder"):
+            if candidate:
                 bot_token = candidate
-                # to_thread: the helper is sync and makes paginated Slack calls
-                # with backoff, and this caller is async. Run inline it would hold
-                # the event loop for the whole listing plus any retry.
-                await asyncio.to_thread(
+                # run_slack_call: the helper is sync and makes paginated Slack
+                # calls with backoff, and this caller is async. Run inline it
+                # would hold the event loop for the whole listing plus any
+                # retry; the dedicated Slack executor also keeps it off
+                # the process-wide default to_thread pool.
+                await run_slack_call(
                     _ensure_channel_membership,
                     bot_token, {item.get("channel", channel) for item in to_post},
                 )

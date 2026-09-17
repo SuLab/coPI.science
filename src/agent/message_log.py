@@ -1,10 +1,11 @@
 """Global append-only message log — single source of truth for the simulation."""
 
 import logging
-import re
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
+from src.agent.mentions import extract_bot_mentions
 from src.services.cohorts import SERVICE_AGENT_IDS
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
@@ -24,9 +25,9 @@ class LogEntry:
     posted_at: float = 0.0  # Unix timestamp (float(ts))
     is_bot: bool = True
     # Visibility class of the channel this entry was posted in. Drives memory-
-    # synthesis filtering (G2) — private-channel entries never feed the public
+    # synthesis filtering — private-channel entries never feed the public
     # memory segment. Default 'public' is safe for all existing callers.
-    # See specs/privacy-and-channel-visibility.md §G2.
+    # See specs/privacy-and-channel-visibility.md.
     visibility: str = "public"
     # Slack-mirror mapping — set when this message was posted to (or came from)
     # Slack. In pure Slack-on mode slack_ts == ts. Persisted to the DB row so the
@@ -39,6 +40,13 @@ class LogEntry:
     # entry has no Slack parent — either it is not a reply, or its thread has no
     # Slack presence. See SimulationEngine._slack_parent_ts.
     slack_thread_ts: str | None = None
+    # The DB user id who actually wrote this entry — set only for a human/PI
+    # row (mirrors agent_messages.sender_user_id), None for every bot-authored
+    # entry and for a PI row with no recorded sender (a pre-migration row, or a
+    # since-deleted user). SimulationEngine._handle_pi_inbound_entry resolves
+    # this to an owned-agent set and gates every side effect on it instead of
+    # on thread membership.
+    sender_user_id: uuid.UUID | None = None
 
 
 def is_funding_post(content: str) -> bool:
@@ -47,7 +55,7 @@ def is_funding_post(content: str) -> bool:
 
 
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:
-    """Cohort gate for one log entry. See .notes/cohort-system-v2.md §5.1.
+    """Cohort gate for one log entry.
 
     Returns True (entry is visible to the viewing agent) when:
 
@@ -88,7 +96,7 @@ class MessageLog:
     All posts and replies are recorded here. Agents query it to find
     new posts since their last turn, thread histories, etc.
 
-    **Cohort-gate classification (.notes/cohort-system-v2.md §6).** Every public
+    **Cohort-gate classification.** Every public
     read method is classified GATED or UNGATED below, and the classification is
     repeated in each method's docstring. ``tests/unit/test_cohort_isolation.py``
     fails if a new public ``get_*``/``has_*`` method appears without one, so the
@@ -106,7 +114,7 @@ class MessageLog:
 
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
-    all of them at once. The gate belongs at the per-agent read. See v2 §6.2.
+    all of them at once. The gate belongs at the per-agent read.
     """
 
     def __init__(self) -> None:
@@ -114,6 +122,9 @@ class MessageLog:
         self._by_ts: dict[str, LogEntry] = {}  # ts -> entry for fast lookup
         # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
         self._bot_name_to_id: dict[str, str] = {}
+        # Slack bot_user_id -> agent_id, set by SimulationEngine (mirrors
+        # _bot_name_to_id but for real Slack <@Uxxx> mentions).
+        self._bot_uid_to_agent: dict[str, str] = {}
         # Optional persistence hook, invoked once per *new* append. The engine
         # registers this to mirror the log into the DB (the primary store).
         # Kept as a plain callback so this module stays DB-agnostic. See
@@ -127,6 +138,10 @@ class MessageLog:
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
         self._bot_name_to_id = dict(mapping)
+
+    def set_bot_uid_map(self, mapping: dict[str, str]) -> None:
+        """Register Slack bot_user_id -> agent_id mapping."""
+        self._bot_uid_to_agent = dict(mapping)
 
     def set_persist_callback(self, cb: Callable[[LogEntry], None] | None) -> None:
         """Register a callback fired after each new append (for DB persistence)."""
@@ -179,6 +194,40 @@ class MessageLog:
         """
         return self._by_ts.get(ts)
 
+    def purge_thread(self, thread_id: str) -> int:
+        """Remove every entry belonging to a thread whose Slack parent is dead.
+
+        Called only from ``SimulationEngine._evict_dead_thread`` when Slack has
+        reported the root deleted (ThreadNotFound / silent thread_ts drop).
+        Removes the root itself (``ts == thread_id``) and every reply
+        (``thread_ts == thread_id``) from the in-memory log, so Phase 2/3/4/5
+        and the prior-thread context stop acting on history that no longer
+        exists on Slack. The corresponding ``agent_messages`` DB rows are left
+        alone — they are the historical record of what really got sent; this
+        only purges the *working* copy the engine reasons from. Returns the
+        number of entries removed.
+        """
+        removed = 0
+        kept: list[LogEntry] = []
+        for entry in self._entries:
+            if entry.ts == thread_id or entry.thread_ts == thread_id:
+                self._by_ts.pop(entry.ts, None)
+                removed += 1
+            else:
+                kept.append(entry)
+        self._entries = kept
+        if removed:
+            # latest_timestamp returns _max_posted_at directly —
+            # recompute it so a purge of the newest thread doesn't leave a
+            # cursor derived from latest_timestamp sitting above
+            # every surviving entry. Conservative either way
+            # (nothing gets re-scanned that shouldn't be), but state and log
+            # would otherwise silently disagree.
+            self._max_posted_at = max(
+                (e.posted_at for e in self._entries), default=0.0,
+            )
+        return removed
+
     def get_new_top_level_posts(
         self,
         since: float,
@@ -223,7 +272,7 @@ class MessageLog:
         posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
 
         COHORT-GATE: UNGATED by design — once a thread is open its full history
-        is context, including a partner who has since left the cohort (v2 §8).
+        is context, including a partner who has since left the cohort.
         """
         root = self._by_ts.get(thread_ts)
         replies = sorted(
@@ -275,7 +324,7 @@ class MessageLog:
         hand the turn to the wrong bot. Ties keep the later insertion, matching
         the previous behaviour when posted_at values collide.
                 COHORT-GATE: UNGATED by design — turn-taking within one channel, and the
-        only callers are collab_private channels, which the gate exempts (v2 §7).
+        only callers are collab_private channels, which the gate exempts.
         """
         best: LogEntry | None = None
         for entry in self._entries:
@@ -349,8 +398,8 @@ class MessageLog:
 
         Rules:
         - Funding threads (:moneybag:) are open to all → returns None.
-        - If the root post tags a specific agent, only the poster and tagged
-          agent may participate → returns {poster, tagged}.
+        - If the root post tags agents, only the poster and *every* tagged
+          agent may participate → returns {poster, *tagged}.
         - If no tag, falls back to generic 2-party rule: the first two distinct
           agents to post are the only allowed participants.
         - Returns None if the thread root is not found.
@@ -366,10 +415,16 @@ class MessageLog:
 
         poster_id = root.sender_agent_id
 
-        # Check if root post tags a specific agent (e.g. @WisemanBot)
-        tagged_id = self._extract_tagged_agent(root.content)
-        if tagged_id and tagged_id != poster_id:
-            return {poster_id, tagged_id} if poster_id else {tagged_id}
+        # Check if the root post tags agents (e.g. @WisemanBot, or <@Uxxx>).
+        # EVERY tagged agent reserves a slot, not just the first: a PI who tags
+        # two bots addressed both, and keeping only the first left the second
+        # burning one Phase-5 LLM call per turn on a thread it could never post
+        # in. Returning None here instead would open the thread to
+        # the whole roster, which specs/agent-system.md's Thread Participation
+        # Rules forbid ("No third agent may join").
+        tagged = [a for a in self._extract_tagged_agents(root.content) if a != poster_id]
+        if tagged:
+            return {poster_id, *tagged} if poster_id else set(tagged)
 
         # No tag — use generic 2-party rule: first 2 distinct agent_ids in thread.
         # If fewer than 2 participants, the thread is open for anyone to join.
@@ -396,20 +451,66 @@ class MessageLog:
         return bool(root and is_funding_post(root.content))
 
     def _extract_tagged_agent(self, content: str) -> str | None:
-        """Extract a tagged agent_id from message content (e.g. @WisemanBot).
+        """Extract a tagged agent_id from message content (e.g. @WisemanBot
+        or a real Slack <@Uxxx> mention).
 
-        Service bots resolve in the name map (ingestion must attribute their
-        posts) but must never come out of here: a non-funding root that leads
-        with @GrantBot would otherwise lock the thread to {poster, grantbot}
-        via get_thread_allowed_agents, and a service bot never replies — the
+        Only the FIRST mention in ``content`` is considered — documented, not
+        desired (see tests/unit/test_message_log.py's
+        TestServiceBotTagsDoNotReserveThreads.
+        test_a_service_tag_shadows_a_later_roster_tag): a service-bot mention
+        earlier in the text shadows a real roster tag later in the same
+        message. Kept because this reads as *routing* — its remaining caller
+        (SimulationEngine's inbound PI-tag route) can only hand the message to
+        one agent. Thread *participation* uses _extract_tagged_agents, which
+        scans them all.
+
+        Service bots resolve (ingestion must attribute their posts) but must
+        never come out of here: a non-funding root that leads with @GrantBot
+        would otherwise reserve the thread for {poster, grantbot} via
+        get_thread_allowed_agents, and a service bot never replies — the
         thread would be dead on arrival.
         """
-        match = re.search(r"@(\w+[Bb]ot)\b", content)
-        if match:
-            bot_name = match.group(1).lower()
-            agent_id = self._bot_name_to_id.get(bot_name)
-            return None if agent_id in SERVICE_AGENT_IDS else agent_id
-        return None
+        mentions = extract_bot_mentions(content, self._bot_uid_to_agent)
+        if not mentions:
+            return None
+        return self._resolve_mention_token(mentions[0])
+
+    def _resolve_mention_token(self, token: str) -> str | None:
+        """Resolve one ``extract_bot_mentions`` token to a repliable agent_id.
+
+        Two namespaces come out of extract_bot_mentions: a lowercased bot NAME
+        (literal @Tag) and an already-resolved agent_id (a <@Uxxx> mention).
+        Resolve the first through the name map; accept the second only if it
+        really is a roster agent_id. An UNKNOWN bot name must stay unknown —
+        get_thread_allowed_agents reserves a thread on this value, so returning
+        the raw name would reserve it for a phantom agent.
+
+        Service bots resolve through the name map (ingestion must attribute
+        their posts) but never come out of here — see _extract_tagged_agent.
+        """
+        agent_id = self._bot_name_to_id.get(token)
+        if agent_id is None and token in set(self._bot_name_to_id.values()):
+            agent_id = token
+        if agent_id is None:
+            return None
+        return None if agent_id in SERVICE_AGENT_IDS else agent_id
+
+    def _extract_tagged_agents(self, content: str) -> list[str]:
+        """Every tagged, repliable agent_id in ``content``, in order, deduped.
+
+        The plural form of _extract_tagged_agent, and the only caller is
+        get_thread_allowed_agents. Because it filters per mention rather than
+        stopping at the first, a service-bot mention no longer shadows a roster
+        tag later in the same message (the "documented, not desired" behaviour
+        _extract_tagged_agent still has for tag *routing*, whose consumer can
+        only act on one agent).
+        """
+        tagged: list[str] = []
+        for token in extract_bot_mentions(content, self._bot_uid_to_agent):
+            agent_id = self._resolve_mention_token(token)
+            if agent_id is not None and agent_id not in tagged:
+                tagged.append(agent_id)
+        return tagged
 
     def has_new_reply_from_other(
         self,
@@ -422,12 +523,13 @@ class MessageLog:
 
         COHORT-GATE: GATED via allowed_sender_ids.
 
-        See .notes/cohort-system-v2.md §6, §8. This is the read that drives
-        both the reactive-priority tier (``_owes_reply``) and the Phase 4 reply
-        decision, so leaving it ungated made the scheduler prioritise exactly the
-        threads the gate had rejected. Callers pass ``allowed_sender_ids=None`` for
-        a thread that is already open and not grandfathered — an open conversation
-        is entitled to conclude (v2 §8) — and pass the agent's gate otherwise.
+        This is the read that drives both the reactive-priority tier
+        (``_owes_reply``) and the Phase 4 reply decision, so leaving it
+        ungated would make the scheduler prioritise exactly the threads the
+        gate had rejected. Callers pass ``allowed_sender_ids=None`` for a
+        thread that is already open and not grandfathered — an open
+        conversation is entitled to conclude — and pass the agent's gate
+        otherwise.
         """
         for entry in self._entries:
             if entry.thread_ts != thread_ts:

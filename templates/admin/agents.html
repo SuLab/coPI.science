@@ -76,7 +76,7 @@
             {% for a in active %}
             {% set total_proposals = proposal_counts.get(a.agent_id, 0) %}
             {% set total_reviewed = review_counts.get(a.agent_id, 0) %}
-            {% set unreviewed = total_proposals - total_reviewed %}
+            {% set unreviewed = [total_proposals - total_reviewed, 0] | max %}
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
                 <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>

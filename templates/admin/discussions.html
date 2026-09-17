@@ -192,5 +192,6 @@
 
 {% block scripts %}
 <!-- [data-markdown] rendering is handled by the shared sanitizing renderer
-     (/static/js/markdown.js, loaded in extra_head) — see SEC-2. -->
+     (/static/js/markdown.js, loaded in extra_head) so untrusted markdown is
+     never rendered without sanitization first. -->
 {% endblock %}

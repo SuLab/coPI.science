@@ -4,26 +4,16 @@
 # must fail with it applied. A SURVIVING mutant means the suite does not actually test
 # that behaviour, whatever its test names claim.
 #
-# This exists because four cohort tests were written that structurally could not fail,
-# and each hid something. Two of the mutants below are the real defects those tests
-# missed (M2, M6): both were found by a real multi-turn run, not by the suite. Running
-# this after adding a cohort test is how you find that out in seconds instead.
-#
 # Offline: runs only the non-real_llm tests, so no API key and no spend.
 #
-# NOTHING IN THIS REPOSITORY IS EVER WRITTEN TO.
-# Until 2026-08-04 this script mutated src/ IN PLACE and restored from a `.mutbak`
-# copy — the same strategy scripts/mutate_system.sh documents as having been
-# auto-reverted mid-run by a repo guard, silently corrupting three earlier agents'
-# results (mutants reported as SURVIVING would in fact have been killed). It now uses
-# mutate_system.sh's strategy instead, so the two harnesses share one isolation model:
-# copy the tree into the container's /tmp, mutate the COPY, run pytest with the copy as
-# its working directory, and PROVE — by importing `src` and checking `src.__file__` —
-# that the copy is what is under test. That last check is not ceremony: `src` is also
-# installed into site-packages in this image, so without it a run can exercise
-# unmutated code and report every mutant as SURVIVED.
+# NOTHING IN THIS REPOSITORY IS EVER WRITTEN TO. The script copies the tree into the
+# container's /tmp, mutates the COPY, runs pytest with the copy as its working
+# directory, and PROVES — by importing `src` and checking `src.__file__` — that the
+# copy is what is under test. That last check is not ceremony: `src` is also installed
+# into site-packages in this image, so without it a run can exercise unmutated code and
+# report every mutant as SURVIVED. Isolation model shared with scripts/mutate_system.sh.
 #
-# Three guards, all lifted from mutate_system.sh:
+# Three guards:
 #   1. provenance — `import src` from the copy must resolve inside the copy;
 #   2. the mutant must still IMPORT — otherwise a SyntaxError fakes a kill, and a
 #      harness that cannot tell "the behaviour is tested" from "the file no longer
@@ -48,17 +38,6 @@
 #   MUTCOH_COPY_DIR     where the mutated tree lives inside the container
 #   MUTCOH_LOGDIR       where per-mutant pytest logs are kept (default: a mktemp dir)
 #   MUTCOH_KEEP_COPY    set to 1 to leave the mutated tree behind for inspection
-#
-# `RUNNER` is gone. It used to be a whole pytest invocation pasted in as a string,
-# which cannot express "run in the container but with the copy as cwd" — the override
-# and the isolation strategy were mutually exclusive. Use MUTCOH_SERVICE /
-# MUTCOH_COPY_DIR instead.
-#
-# MEASURED 2026-08-04, after the conversion: 9/9 real mutants killed, inert control
-# survived, src/ clean. Same 9/9 the in-place harness reported, so no mutant moved —
-# but that agreement is now backed by asserted provenance rather than assumed, and by
-# an inert control the old harness did not have. The unmutated selection is 239 passed,
-# checked separately, which is the other half of why the 9/9 means something.
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -110,13 +89,10 @@ MUTANTS=(
 "src/services/cohorts.py~~effective = cohort_count if live_members is None else live_members~~effective = cohort_count~~M3 preflight counts cohorts, not live members, so an empty cohort silences the roster"
 "src/agent/message_log.py~~    if not entry.is_bot:~~    if entry.sender_agent_id is None:~~M4 the human bypass keys on a NULL agent_id, so an unattributable bot row leaks"
 "src/agent/message_log.py~~    if entry.visibility == VISIBILITY_COLLAB_PRIVATE:~~    if False:~~M5 the private-channel exemption is dead"
-# M6 was pinned to `visibility=self._resolve_channel_visibility(channel),` — the
-# keyword argument inside the LogEntry(...) call. d311170 hoisted the resolution out of
-# that call so the chunk loop could reuse one value, and the old target stopped existing.
-# Re-pointed 2026-08-04 at the assignment, which is the same defect: every chunk of every
-# outbound post is then stamped public. Nothing detected the drift for five days because
-# nothing re-ran this script; when it was re-run it reported ERROR rather than a false
-# kill, which is the one thing the old harness did get right.
+# M6 targets the hoisted visibility assignment (reused across the chunk loop, rather
+# than inlined per-call) — if the mutant's exact source substring ever stops matching
+# because that assignment moves again, the applier reports ERROR rather than a false
+# kill, which is what makes a moved target safe to notice instead of silently drifting.
 "src/agent/simulation.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
 "src/agent/simulation.py~~            if thread.grandfathered:\n                continue~~            if False:\n                continue~~M7 a grandfathered thread keeps reactive priority"
 "src/agent/simulation.py~~        if self._reactive_streak < settings.max_consecutive_reactive_turns:~~        if True:~~M8 the fairness valve never closes"

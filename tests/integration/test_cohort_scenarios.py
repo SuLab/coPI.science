@@ -83,8 +83,8 @@ LABS = {
     ),
 }
 
-# 8 turns is enough now that scenarios start from an open thread: Phase 4 fires on
-# the first turn rather than waiting for Phase 5 to spontaneously choose to reply.
+# 8 turns is enough now that scenarios start from an open thread: phase 4 fires on
+# the first turn rather than waiting for phase 5 to spontaneously choose to reply.
 TURNS = int(os.environ.get("SCENARIO_TURNS", "8"))
 BUDGET = int(os.environ.get("SCENARIO_BUDGET", "10"))
 
@@ -106,7 +106,7 @@ class ScenarioResult:
     # which is the successful outcome, misread as the failure.
     grandfathered: list = field(default_factory=list)
     grandfathered_at_end: list = field(default_factory=list)
-    # {agent_id: sorted senders whose posts this agent's GATED Phase 2 scan accepted}.
+    # {agent_id: sorted senders whose posts this agent's GATED phase 2 scan accepted}.
     # Accumulated every turn, because interesting_posts is consumed as threads form.
     interesting_senders: dict = field(default_factory=dict)
     strips: dict = field(default_factory=dict)
@@ -298,7 +298,7 @@ async def _private_channel_pairs(factory, run_id, exclude_ts):
 def _build_engine(factory, run_id, roster, policy):
     # ONE public channel for the whole scenario.
     #
-    # Phase 1 joins channels by keyword-matching the profile, and Phase 5 posts into
+    # phase 1 joins channels by keyword-matching the profile, and phase 5 posts into
     # whichever of the agent's subscribed channels the model names. With the real
     # seven-channel workspace the agents scattered: in a measured 8-turn run su joined
     # {general, aging-and-longevity, funding-opportunities} and cravatt joined all
@@ -353,7 +353,7 @@ async def _seed_thread(factory, eng, run_id, root_agent, replier):
     """Open a thread between two agents and register it on both, as a resumed run does.
 
     The thread's *existence* is a precondition here, not the claim. Left to chance it is
-    an unreliable one: measured over 16 real turns with two agents, Phase 5 chose "skip"
+    an unreliable one: measured over 16 real turns with two agents, phase 5 chose "skip"
     or "new post" almost every time and produced 3 agent messages and zero threaded
     replies. Waiting for a specific pair to spontaneously thread up made every downstream
     outcome claim INCONCLUSIVE rather than wrong.
@@ -361,8 +361,8 @@ async def _seed_thread(factory, eng, run_id, root_agent, replier):
     This mirrors `_rebuild_agent_state`, which is what happens on every resumed run: the
     thread exists in the log and both agents carry a ThreadState for it. What the
     scenario then measures is emergent — whether a real model continues the thread, and
-    whether the gate marks or blocks it. See v2 §8, which frames the resumed-run rebuild
-    as the normal path rather than an edge case.
+    whether the gate marks or blocks it. The resumed-run rebuild is the normal path
+    rather than an edge case.
 
     Returns the thread's root ts. Both messages are seeds and are excluded from every
     pair measurement.
@@ -472,8 +472,8 @@ async def run_scenario(
         if mid_run and t == mid_run[0]:
             await _set_topology(factory, mid_run[1])
             await eng._recompute_allowed_sender_ids()
-            # Snapshot here: by the end of the run a grandfathered thread that did what
-            # §8 wants — concluded — has been popped out of active_threads.
+            # Snapshot here: by the end of the run a grandfathered thread that
+            # concluded, as intended, has been popped out of active_threads.
             grandfathered_at_split = _grandfathered_now()
         agent = eng._select_agent()
         if agent is None:
@@ -486,7 +486,7 @@ async def run_scenario(
             did = False
         agent.state.last_selected = time.time()
         eng._last_llm_caller = agent.agent_id if did else None
-        # Phase 2's output is consumed as threads form, so accumulate per turn.
+        # phase 2's output is consumed as threads form, so accumulate per turn.
         for aid, a in eng.agents.items():
             interesting[aid].update(
                 p.sender_agent_id for p in a.state.interesting_posts
@@ -556,10 +556,10 @@ async def test_harness_produces_conversation_at_all(scenario_db):
 
 
 async def test_open_policy_lets_an_uncohorted_agent_be_acted_on(scenario_db):
-    """§5.2 end to end, measured on the read path the gate actually filters.
+    """The open-policy asymmetry end to end, measured on the read path the gate actually filters.
 
     Before the asymmetry fix, `su`'s gate was `{su, wiseman}` — it excluded the
-    uncohorted agent, so cravatt's posts never reached su's Phase 2 scan and su could
+    uncohorted agent, so cravatt's posts never reached su's phase 2 scan and su could
     never engage. cravatt could react to anyone and be answered by nobody.
 
     The assertion is that su's **gated** scan accepted a post authored by cravatt. That
@@ -624,7 +624,7 @@ async def test_hub_converses_with_both_sides_but_spokes_do_not(scenario_db):
 
 
 async def test_grandfathered_thread_survives_a_mid_run_split(scenario_db):
-    """§8 under real conversational load.
+    """Grandfathering under real conversational load.
 
     A thread is open between two cohort-mates; the topology then splits them. Three
     things must hold, and the third is the one a marked-but-stalled thread would fail:
@@ -665,7 +665,7 @@ async def test_grandfathered_thread_survives_a_mid_run_split(scenario_db):
 
 
 async def test_private_channel_beats_the_cohort_gate(scenario_db):
-    """§7: a PI-created pairing outranks an admin grouping.
+    """A PI-created pairing outranks an admin grouping.
 
     su and cravatt are in different cohorts and maximally gated — each can act only on
     itself. They must still converse in the channel the PI made for them.

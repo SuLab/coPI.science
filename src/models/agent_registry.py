@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, SmallInteger, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,9 @@ from src.database import Base
 
 class AgentRegistry(Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        Index("ix_agents_approved_by", "approved_by"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -51,16 +54,27 @@ class AgentRegistry(Base):
         "User", foreign_keys=[user_id], back_populates="agent"
     )
     delegates: Mapped[list["AgentDelegate"]] = relationship(
-        "AgentDelegate", back_populates="agent", cascade="all, delete-orphan"
+        "AgentDelegate", back_populates="agent", cascade="all, delete-orphan", passive_deletes=True
     )
     invitations: Mapped[list["DelegateInvitation"]] = relationship(
         "DelegateInvitation",
         foreign_keys="DelegateInvitation.agent_registry_id",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
         return f"<AgentRegistry agent_id={self.agent_id} status={self.status}>"
+
+
+#: The two `ProposalReview.rating` values that are MARKERS, not a PI's answer: -1 is
+#: the engine's implicit marker written the first time a PI engages a proposal thread
+#: (so the rebuild does not re-block it), and 0 is the reopen-with-guidance sentinel the
+#: web route writes. A real review is 1..4, the only range the form, `agent_page.py`,
+#: and `email_inbound.py` accept. Every predicate asking "has this been reviewed?" or
+#: "may I upgrade this row in place?" must use this tuple so the two questions cannot
+#: drift apart.
+REVIEW_MARKER_RATINGS = (-1, 0)
 
 
 class ProposalReview(Base):
@@ -94,7 +108,8 @@ class ProposalReview(Base):
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_via: Mapped[str] = mapped_column(
         String(10), nullable=False, default="web"
-    )  # web, email
+    )  # web, email, engine (implicit rating=-1 marker, upgraded in place by the
+    # first explicit action)
     reviewed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -103,6 +118,9 @@ class ProposalReview(Base):
     thread_decision: Mapped["ThreadDecision"] = relationship("ThreadDecision")
 
     __table_args__ = (
+        Index("ix_proposal_reviews_user_id", "user_id"),
+        Index("ix_proposal_reviews_delegate_user_id", "delegate_user_id"),
+        Index("ix_proposal_reviews_reviewed_by_user_id", "reviewed_by_user_id"),
         # Each agent can only review a thread decision once
         {"comment": "unique constraint on (thread_decision_id, agent_id) added in migration"},
     )

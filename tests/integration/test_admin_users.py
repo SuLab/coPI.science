@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 import pytest
 from itsdangerous import TimestampSigner
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.config import get_settings
 from src.models import Job, User
@@ -457,3 +458,79 @@ async def test_impersonating_an_unknown_orcid_creates_an_allowed_user(
     assert "Fetched Newcomer" not in _rendered_names(pending_page.text)
     allowed_page = await client.get("/admin/users?access_filter=allowed", headers=h)
     assert "Fetched Newcomer" in _rendered_names(allowed_page.text)
+
+
+async def test_admin_delete_user_returns_409_on_integrity_error(
+    client, db_session, admin, monkeypatch
+):
+    target = await factories.make_user(db_session)
+    target_id = target.id
+    # factories.make_user only flushes, it never commits — this session's savepoint
+    # scope otherwise still covers target's own INSERT. Commit it for real here so the
+    # ROLLBACK TO SAVEPOINT the route issues below (a real db.rollback(), only its
+    # commit() is mocked) can't unwind past the fixture setup and take target's row
+    # with it; that would make the assertion below pass for the wrong reason (target
+    # never existed at all by that point) regardless of what the route does.
+    await db_session.commit()
+
+    async def _boom(*a, **kw):
+        raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
+
+    monkeypatch.setattr(db_session, "commit", _boom)
+
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
+    assert r.status_code == 409
+
+    # The route rolls back on IntegrityError before returning 409 — a mutant that
+    # dropped the rollback (or the whole except block) could still return 409 from a
+    # stale response while the delete had actually gone through in a separate
+    # connection. Confirm the row genuinely survives the failed commit. (Read by
+    # target_id, not target.id: the route's real rollback() expires target's
+    # attributes, and re-loading an expired attribute outside an awaited ORM call is
+    # not greenlet-safe.)
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is not None, "user row was deleted despite the simulated commit failure"
+
+
+async def test_admin_delete_user_refuses_when_it_would_orphan_an_active_agent(
+    client, db_session, admin
+):
+    """admin_delete_user must apply the same orphan guard as the self-service
+    delete-account route: agents.user_id is ondelete='SET NULL' (not CASCADE), so
+    deleting the owner of a live agent would leave a Slack bot posting under
+    nobody's account -- active on the roster, but with no owner able to
+    deactivate, edit, or answer proposals for it."""
+    target = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=target, status="active")
+    target_id = target.id
+    await db_session.commit()
+
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
+
+    assert r.status_code == 409
+    assert agent.bot_name in r.text, "the 409 detail must name the blocking agent"
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is not None, "user was deleted despite owning an active agent"
+
+
+async def test_admin_delete_user_allowed_when_the_owned_agent_is_inactive(
+    client, db_session, admin
+):
+    """Control: an inactive/suspended agent does not block the delete -- 'deactivate the
+    agent' is the remedy the refusal names, so it has to actually unblock things."""
+    target = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=target, status="inactive")
+    target_id = target.id
+    await db_session.commit()
+
+    r = await client.post(f"/admin/users/{target_id}/delete", headers=_auth(admin.id))
+
+    assert r.status_code in (302, 303)
+    row = (
+        await db_session.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    assert row is None, "an inactive owned agent should not have blocked the delete"

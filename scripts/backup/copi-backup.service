@@ -5,7 +5,7 @@ After=docker.service
 Requires=docker.service
 # Independent path that fires even when the main process dies without running its
 # own error handling — e.g. SIGTERM from TimeoutStartSec landing outside a Python
-# try/except entirely (audit C2). Runs `copi-backup report`, which mails whatever
+# try/except entirely. Runs `copi-backup report`, which mails whatever
 # status.json/sidecars are on disk regardless of why this unit failed.
 OnFailure=copi-backup-failure@%n.service
 

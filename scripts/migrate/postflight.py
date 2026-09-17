@@ -127,6 +127,23 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     # 0024. NOT NULL with a server_default, so every existing agent reads as pi_lab
     # — which is exactly the pre-0024 behaviour.
     ("agents", "role", "character varying", False, "'pi_lab'::character varying"),
+    # 0028 — nullable, no default; NULL means "never reopened".
+    ("thread_decisions", "reopened_at", "timestamp with time zone", True, ""),
+    # 0029 — both nullable, both with no default and no backfill. NULL means
+    # "unknown" on each: "no PI engagement recorded" on thread_decisions, and "no
+    # inbound poller has claimed this row" on agent_messages. A server default here
+    # would invent a fact about every pre-0029 row (see 0023's columns for the same
+    # reasoning).
+    ("thread_decisions", "pi_engaged_at", "timestamp with time zone", True, ""),
+    ("agent_messages", "pi_inbound_state", "character varying", True, ""),
+    # 0030 — the sender ownership carrier and the DM handled-marker. Both
+    # nullable, no default; sender_user_id has no backfill (there is no way to
+    # recover who wrote a pre-existing row), handled_at IS backfilled by the
+    # migration itself for pre-existing inbound rows (to created_at) — but a
+    # freshly-migrated row observed here can still legitimately be NULL
+    # (outbound, or not yet processed), so the column stays declared nullable.
+    ("agent_messages", "sender_user_id", "uuid", True, ""),
+    ("pi_dm_messages", "handled_at", "timestamp with time zone", True, ""),
 )
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
@@ -158,6 +175,34 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_cohort_audit_events_cohort_id": "USING btree (cohort_id)",
     "ix_cohort_audit_events_created_at": "USING btree (created_at)",
     "uq_cohort_membership_cohort_agent": "USING btree (cohort_id, agent_id)",
+    # 0025 — a UNIQUE constraint also materialises a unique index of the same name
+    # (the existing uq_* entries appear in both dicts for the same reason, and
+    # test_postflight_expects_an_index_for_every_index_the_chain_creates requires it).
+    "uq_publications_user_pmid": "USING btree (user_id, pmid)",
+    # 0027 (copy the column lists from the literal op.create_index calls in
+    # alembic/versions/0027_fk_and_badge_indexes.py)
+    "ix_access_allowlist_added_by_user_id": "USING btree (added_by_user_id)",
+    "ix_agent_delegates_user_id": "USING btree (user_id)",
+    "ix_agent_delegates_invitation_id": "USING btree (invitation_id)",
+    "ix_agents_approved_by": "USING btree (approved_by)",
+    "ix_cohort_audit_events_actor_id": "USING btree (actor_id)",
+    "ix_cohort_memberships_added_by": "USING btree (added_by)",
+    "ix_cohorts_created_by": "USING btree (created_by)",
+    "ix_delegate_invitations_invited_by_user_id": "USING btree (invited_by_user_id)",
+    "ix_delegate_invitations_accepted_by_user_id": "USING btree (accepted_by_user_id)",
+    "ix_email_notifications_thread_decision_id": "USING btree (thread_decision_id)",
+    "ix_email_notifications_agent_registry_id": "USING btree (agent_registry_id)",
+    "ix_private_channel_members_user_id": "USING btree (user_id)",
+    "ix_private_channel_members_added_by_user_id": "USING btree (added_by_user_id)",
+    "ix_profile_revisions_changed_by_user_id": "USING btree (changed_by_user_id)",
+    "ix_proposal_reviews_user_id": "USING btree (user_id)",
+    "ix_proposal_reviews_delegate_user_id": "USING btree (delegate_user_id)",
+    "ix_proposal_reviews_reviewed_by_user_id": "USING btree (reviewed_by_user_id)",
+    "ix_slack_app_provisions_agent_registry_id": "USING btree (agent_registry_id)",
+    "ix_thread_decisions_agent_a_outcome": "USING btree (agent_a, outcome)",
+    "ix_thread_decisions_agent_b_outcome": "USING btree (agent_b, outcome)",
+    # 0030
+    "ix_agent_messages_sender_user_id": "USING btree (sender_user_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -169,6 +214,24 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "uq_cohort_membership_cohort_agent": (
         "cohort_memberships",
         "UNIQUE (cohort_id, agent_id)",
+    ),
+    # 0025
+    "uq_publications_user_pmid": ("publications", "UNIQUE (user_id, pmid)"),
+    # 0026 flips this FK from SET NULL to CASCADE; added_by_user_id is the contrast case
+    # that must NOT change. (Both FKs were created unnamed in 0011, so Postgres named
+    # them <table>_<column>_fkey.)
+    "private_channel_members_user_id_fkey": (
+        "private_channel_members",
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+    ),
+    "private_channel_members_added_by_user_id_fkey": (
+        "private_channel_members",
+        "FOREIGN KEY (added_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
+    ),
+    # 0030
+    "agent_messages_sender_user_id_fkey": (
+        "agent_messages",
+        "FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE SET NULL",
     ),
 }
 
@@ -204,9 +267,15 @@ DRIFT_FAIL_OPS = frozenset(
         "add_constraint",
         "modify_nullable",
         "modify_type",
-        "remove_table",
     }
 )
+#: Reported, never fatal. ``remove_table`` means the DATABASE has a table no model
+#: declares — an operator artefact, not something the ORM can trip over. Production
+#: carries one such table (``email_notifications_expired_bak_20260814``, a manual
+#: backup snapshot), and classifying it as fatal turned a correct migration into
+#: "VERIFICATION FAILED ... Restore" inside the migration window. postflight runs
+#: with warn_exit_code=0, so a WARN here still lets the deploy proceed.
+DRIFT_WARN_OPS = frozenset({"remove_table"})
 DRIFT_IGNORED_OPS = frozenset(
     {"remove_index", "remove_constraint", "add_table_comment", "remove_column"}
 )
@@ -542,7 +611,53 @@ async def check_index_validity(conn):
     return (title, PASS, "every index in public is valid, ready and live.", [], {})
 
 
-async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
+def _snapshot_binding_problems(payload: dict, conn_target: str | None, conn_url: str | None):
+    """Reasons this snapshot does not describe the run being verified.
+
+    Cheap identity checks on a file the row-count comparison otherwise trusts wholesale:
+    it is the only record of the pre-migration state, so a snapshot from another database
+    or another target is worse than none at all.
+    """
+    problems: list[str] = []
+    kind = payload.get("kind")
+    if kind != "preflight-snapshot":
+        problems.append(f"kind is {kind!r}, expected 'preflight-snapshot'")
+    snap_target = payload.get("target")
+    if conn_target and snap_target and str(snap_target) != str(conn_target):
+        problems.append(
+            f"snapshot targets {snap_target!r} but this run verifies {conn_target!r}"
+        )
+    snap_url = payload.get("database_url")
+    if conn_url and snap_url and _pf.redact_url(conn_url) != str(snap_url):
+        problems.append(
+            f"snapshot was taken against {snap_url!r}, this run is verifying "
+            f"{_pf.redact_url(conn_url)!r}"
+        )
+    return problems
+
+
+async def _count_ids_present(conn, table: str, ids: list[str]) -> int:
+    """How many of ``ids`` still exist in ``table``. Chunked: an IN list of every id in a
+    duplicate set is fine at production scale (446 uuids) but should not become a
+    pathological single statement if a future chain names far more rows."""
+    if not ids:
+        return 0
+    total = 0
+    for i in range(0, len(ids), 1000):
+        chunk = ids[i : i + 1000]
+        rows = await _pf.fetch_all(
+            conn,
+            f"SELECT count(*) AS n FROM {table} WHERE id = ANY(CAST(:ids AS uuid[]))",
+            ids=chunk,
+        )
+        total += int(rows[0]["n"]) if rows else 0
+    return total
+
+
+async def check_row_counts(
+    conn, snapshot_path: str | None, allow_growth: bool,
+    target: str | None = None, conn_url: str | None = None,
+):
     title = "Row counts match the preflight snapshot"
     counts = await _pf.snapshot_row_counts(conn)
     if not snapshot_path:
@@ -563,20 +678,89 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
     except (OSError, ValueError) as exc:
         return (title, FAIL, f"snapshot {snapshot_path} is unreadable: {exc}", [],
                 {"row_counts": counts})
+    # The snapshot must belong to THIS run. Nothing used to check, so a snapshot from a
+    # different database (or a different target) verified happily against whatever was in
+    # front of it — and it is the one file whose contents this check trusts completely.
+    binding = _snapshot_binding_problems(payload, conn_target=target, conn_url=conn_url)
+    if binding:
+        return (title, FAIL,
+                "\n".join([f"snapshot {snapshot_path} does not belong to this run:"]
+                          + [f"  {b}" for b in binding]),
+                ["Re-run preflight against THIS database and target, then pass the snapshot "
+                 "it writes. Verifying against another run's snapshot proves nothing about "
+                 "this one.",
+                 "If you are deliberately re-verifying an older run, say so out loud in the "
+                 "deploy log — this check will keep refusing it."],
+                {"row_counts": counts, "snapshot_binding": binding})
     before = {k: int(v) for k, v in (payload.get("row_counts") or {}).items()}
+    # Rows a pending revision removes on purpose, as counted AND NAMED by preflight
+    # (0025's duplicate publications). Absent from snapshots written before this existed,
+    # in which case any shrinkage stays a failure exactly as it always did.
+    expected_deletions = {
+        k: int(v) for k, v in (payload.get("expected_deletions") or {}).items()
+    }
+    expected_deleted_ids = {
+        k: [str(x) for x in v] for k, v in (payload.get("expected_deleted_ids") or {}).items()
+    }
+    expected_kept_ids = {
+        k: [str(x) for x in v] for k, v in (payload.get("expected_kept_ids") or {}).items()
+    }
+    # Identity, not arithmetic. A count cannot see a concurrent deleter working INSIDE a
+    # duplicate group: every row it removes reduces 0025's own delete count by one, so the
+    # net always lands on the prediction. Demonstrated on a real database — 5 group keepers
+    # deleted mid-window, 0025 then deleted 218, total 223, count check "PASS" with five
+    # rows of real data gone. So ask the database which rows are actually there.
+    identity_problems: list[str] = []
+    for table, doomed in sorted(expected_deleted_ids.items()):
+        if doomed:
+            survived = await _count_ids_present(conn, table, doomed)
+            if survived:
+                identity_problems.append(
+                    f"{table}: {survived:,} of the {len(doomed):,} rows 0025 was supposed to "
+                    "delete are still present"
+                )
+    for table, keepers in sorted(expected_kept_ids.items()):
+        if keepers:
+            present = await _count_ids_present(conn, table, keepers)
+            missing = len(keepers) - present
+            if missing:
+                identity_problems.append(
+                    f"{table}: {missing:,} of the {len(keepers):,} rows 0025 was supposed to "
+                    "KEEP are gone — those are the rows it merges each duplicate group into, "
+                    "so this is real data loss, not a dedup"
+                )
     ok, problems = compare_row_counts(
-        before, counts, allow_growth=allow_growth, expected_new=CHAIN_CREATED_TABLES
+        before,
+        counts,
+        allow_growth=allow_growth,
+        expected_new=CHAIN_CREATED_TABLES,
+        expected_deletions=expected_deletions,
     )
-    data = {"row_counts": counts, "snapshot_row_counts": before, "problems": problems}
+    problems = identity_problems + problems
+    ok = ok and not identity_problems
+    data = {
+        "row_counts": counts,
+        "snapshot_row_counts": before,
+        "expected_deletions": expected_deletions,
+        "identity_checked": {k: len(v) for k, v in expected_deleted_ids.items()},
+        "problems": problems,
+    }
     if ok:
+        planned = "".join(
+            f" {t} is {n:,} row(s) smaller, and those are exactly the {n:,} rows preflight "
+            f"named (verified by id, and every keeper it named is still present)."
+            for t, n in sorted(expected_deletions.items()) if n
+        )
         return (title, PASS,
-                f"{len(before)} tables, {sum(before.values()):,} rows, identical before and "
-                "after.", [], data)
+                f"{len(before)} tables, {sum(before.values()):,} rows before."
+                + (planned or " Counts identical before and after."), [], data)
     return (title, FAIL,
             "\n".join([f"{len(problems)} row-count problem(s):"] + [f"  {x}" for x in problems]),
-            ["Row loss is not something a migration in this chain can cause, so treat it as "
-             "either the wrong snapshot file or a concurrent writer/deleter. Compare against "
-             "the backup before doing anything else.",
+            ["Only 0025 deletes rows in this chain, and only the duplicate publications "
+             "preflight counted into the snapshot's expected_deletions. Any other loss is "
+             "the wrong snapshot file or a concurrent writer/deleter — compare against the "
+             "backup before doing anything else. A count that differs from the prediction "
+             "means 0025 did not do what preflight measured; re-read check 12's output.",
              "Growth alone (not loss) can be accepted with --allow-row-growth, but only if "
              "you know a writer was live."],
             data)
@@ -644,6 +828,7 @@ async def check_orm_drift(conn_url: str):
         await engine.dispose()
 
     failures: list[str] = []
+    warnings: list[str] = []
     ignored = 0
     unknown: list[str] = []
     for entry in raw:
@@ -652,11 +837,21 @@ async def check_orm_drift(conn_url: str):
             op = item[0] if isinstance(item, (tuple, list)) else str(item)
             if op in DRIFT_FAIL_OPS:
                 failures.append(f"{op}: {str(item)[:180]}")
+            elif op in DRIFT_WARN_OPS:
+                name = ""
+                if isinstance(item, (tuple, list)) and len(item) > 1:
+                    name = getattr(item[1], "name", "") or ""
+                warnings.append(f"{op}: {name or str(item)[:120]}")
             elif op in DRIFT_IGNORED_OPS:
                 ignored += 1
             else:
                 unknown.append(f"{op}: {str(item)[:180]}")
-    data = {"failures": failures, "ignored": ignored, "unclassified": unknown}
+    data = {
+        "failures": failures,
+        "warnings": warnings,
+        "ignored": ignored,
+        "unclassified": unknown,
+    }
     if failures:
         return (title, FAIL,
                 "\n".join([f"{len(failures)} drift finding(s) the models cannot tolerate:"]
@@ -672,6 +867,22 @@ async def check_orm_drift(conn_url: str):
     )
     if unknown:
         return (title, WARN, detail + f" {len(unknown)} unclassified op(s): {unknown}", [], data)
+    if warnings:
+        return (
+            title,
+            WARN,
+            detail
+            + f" {len(warnings)} table(s) present in the database that no model declares: "
+            + ", ".join(warnings)
+            + ".",
+            [
+                "An extra table is an operator artefact (a manual backup table, a leftover "
+                "scratch table), not something the ORM can trip over — it is reported so it "
+                "is not a surprise, and it does not fail this run. Drop it when you no "
+                "longer need it.",
+            ],
+            data,
+        )
     return (title, PASS, detail, [], data)
 
 
@@ -729,7 +940,10 @@ async def run_postflight(args) -> Report:
         )
         await report.add_guarded(
             "Row counts match the preflight snapshot",
-            lambda: check_row_counts(conn, args.snapshot, args.allow_row_growth),
+            lambda: check_row_counts(
+                conn, args.snapshot, args.allow_row_growth,
+                target=args.target, conn_url=url,
+            ),
         )
     finally:
         await conn.close()

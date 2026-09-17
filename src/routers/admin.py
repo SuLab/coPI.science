@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -24,6 +25,7 @@ from src.models import (
     COHORT_ACTION_CREATED,
     COHORT_ACTION_DELETED,
     COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+    REVIEW_MARKER_RATINGS,
     AccessAllowlist,
     AgentChannel,
     AgentMessage,
@@ -40,6 +42,7 @@ from src.models import (
     User,
     WaitlistSignup,
 )
+from src.services.account_deletion import agent_blocking_account_delete
 from src.services.cohorts import (
     SERVICE_AGENT_IDS,
     compute_gates,
@@ -117,8 +120,6 @@ async def admin_users(
         # Profile status
         if not profile:
             profile_status = "no_profile"
-        elif profile.pending_profile:
-            profile_status = "pending_update"
         elif profile.research_summary:
             profile_status = "complete"
         else:
@@ -225,9 +226,35 @@ async def admin_delete_user(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
+    # agents.user_id is ondelete="SET NULL", so deleting the owner of a live agent
+    # leaves status='active' with no owner -- a bot on Slack in this PI's name that
+    # nobody can deactivate, edit, or answer proposals for. Refuse, and say what to
+    # do about it, mirroring the self-service guard in profile.py's delete-account
+    # route.
+    blocking_agent = await agent_blocking_account_delete(db, user)
+    if blocking_agent is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot delete {user.name}: they own {blocking_agent.bot_name} "
+                f"(status={blocking_agent.status}), which would be left with no "
+                "owner. Deactivate the agent or re-link it to another user first."
+            ),
+        )
+
     name = user.name
-    await db.delete(user)
-    await db.commit()
+    try:
+        await db.delete(user)
+        await db.commit()
+    except IntegrityError as exc:
+        # Defense in depth: migration 0026 makes the PCM case impossible, but any
+        # OTHER lingering FK reference should surface as a clean 409, not a raw
+        # 500 — see the equivalent pattern in agent_page.py's message-write path.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="User could not be deleted due to a database conflict; please retry.",
+        ) from exc
     logger.info("Admin %s deleted user %s (%s)", current_user.name, name, user_id)
     return RedirectResponse(url="/admin/users", status_code=302)
 
@@ -373,8 +400,7 @@ async def admin_activity_detail(
     # `is_bot=True, agent_id=NULL`. This set is sorted() in the template
     # (activity_detail.html), so an unguarded add of a single None took the
     # whole page down with "'<' not supported between instances of
-    # 'NoneType' and 'str'" — the same bug class fixed for /admin/discussions
-    # in 73a78c3.
+    # 'NoneType' and 'str'" — the same bug class fixed for /admin/discussions.
     channel_stats: dict[str, dict] = {}
     for msg in messages:
         if msg.channel_name not in channel_stats:
@@ -640,9 +666,17 @@ async def admin_discussions(
     if status_filter:
         threads = [t for t in threads if t["status"] == status_filter]
 
-    # Get proposal reviews
+    # Get proposal reviews. `proposal_reviews` carries two sentinels that are not
+    # ratings: -1, the engine's implicit review (simulation.py:3510), and 0, the
+    # reopen-with-guidance marker the same docstring names next to it
+    # (agent_page.py:1013, email_inbound.py:1070). Neither is submittable — both
+    # writers reject anything outside 1-4 (agent_page.py:509, email_inbound.py:383)
+    # — so anything <= 0 here is a marker. Excluding only -1 printed every reopen
+    # as "0/4" under the "PI Reviews" heading: 130 times on the production copy.
     from src.models import ProposalReview as PR
-    reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
+    reviews_query = select(PR).join(
+        ThreadDecision, PR.thread_decision_id == ThreadDecision.id
+    ).where(PR.rating.notin_(REVIEW_MARKER_RATINGS))
     if not show_all_runs:
         reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
     reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
@@ -827,9 +861,24 @@ async def admin_agents(
             )
         )
         proposal_counts[aid] = total_result.scalar() or 0
+        # Scope the reviewed count to the SAME rows proposal_counts counts (see the note
+        # in src/main.py's badge middleware): counting every ProposalReview with this
+        # agent_id also counts reviews of decisions whose outcome later moved off
+        # 'proposal', which can make total - reviewed go negative and render a green "N
+        # reviewed" for agents whose own dashboards still list outstanding proposals.
+        #
+        # rating <= 0 is a marker, not a review: -1 is the engine's implicit review and
+        # 0 is the reopen-with-guidance marker (see the note on the discussions query
+        # above). A reopened proposal is *awaiting* a rating, so counting its marker as
+        # a review would be a second, larger source of the same mis-count.
         rev_result = await db.execute(
-            select(func.count(ProposalReview.id)).where(
+            select(func.count(ProposalReview.id))
+            .join(ThreadDecision, ThreadDecision.id == ProposalReview.thread_decision_id)
+            .where(
                 ProposalReview.agent_id == aid,
+                ProposalReview.rating.notin_(REVIEW_MARKER_RATINGS),
+                ThreadDecision.outcome == "proposal",
+                (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
             )
         )
         review_counts[aid] = rev_result.scalar() or 0
@@ -1358,7 +1407,7 @@ async def admin_waitlist_export(
     writer.writerow(["email", "name", "institution", "note", "created_at", "contacted_at"])
     for s in signups:
         # All four text fields are attacker-controlled (public waitlist form),
-        # so neutralize CSV formula/DDE injection before export (SEC-20). The
+        # so neutralize CSV formula/DDE injection before export. The
         # timestamps are app-generated ISO strings and safe as-is.
         writer.writerow(
             [
@@ -1400,13 +1449,13 @@ async def admin_waitlist_mark_contacted(
 #
 # The gate is an agent-BEHAVIOUR filter, never access control: it changes what an
 # agent acts on, never what a human can read. Nothing in this section may be reused
-# to scope a PI-facing view. See .notes/cohort-system-v2.md §6.2.
+# to scope a PI-facing view.
 #
 # Enforcement only happens in the running simulation, and only when
 # settings.cohort_isolation_enabled is True. Membership edits are picked up live on
 # the engine's roster-sync cadence (~30s) — no restart. Filtering is forward-only:
 # adding an agent to a cohort does not reveal the backlog it missed while excluded,
-# because the agent's cursor has already advanced past it (v2 §6.3).
+# because the agent's cursor has already advanced past it.
 # ---------------------------------------------------------------------------
 
 # Cohort name: lowercase alphanumeric + hyphens, max 48 chars (slug style).
@@ -1425,7 +1474,6 @@ async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
     Uses the same ``compute_gates`` the engine uses, so the preview cannot drift from
     the behaviour. The roster is AgentRegistry's *active* agents — what the engine
     loads — so an inactive agent shows as absent rather than as unrestricted.
-    See v2 §12.
     """
     settings = get_settings()
     active = (await db.execute(
@@ -1451,7 +1499,7 @@ async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
     )
 
     # Most recent topology snapshot written by a running engine — the only way this
-    # process can see the engine's in-memory counters (v2 §9.4 / §13.1).
+    # process can see the engine's in-memory counters.
     snapshot = (await db.execute(
         select(CohortAuditEvent)
         .where(CohortAuditEvent.action == COHORT_ACTION_TOPOLOGY_SNAPSHOT)
@@ -1558,7 +1606,7 @@ async def admin_cohort_topology(
     Granular control: every (agent, cohort) pair is a checkbox, so an admin can move
     several agents across several cohorts in one save instead of walking the
     per-cohort add/remove forms. The resulting per-agent gate is shown alongside,
-    computed with the engine's own logic. See v2 §12.
+    computed with the engine's own logic.
 
     Registered before /cohorts/{cohort_id} so "topology" is not swallowed as a UUID
     path parameter.
@@ -1798,7 +1846,7 @@ async def admin_cohort_delete(
     A server-side guard, not just a disabled button: deleting a populated cohort
     cascades its memberships away, silently reshaping the interaction topology of a
     running simulation. Remove the members first so each removal is an audited,
-    individually reversible step. See v2 §12.
+    individually reversible step.
 
     A cohort id that does not exist is a 404, matching every other route in this
     module whose path-addressed row is missing (and ``admin_cohort_detail`` for

@@ -1,4 +1,4 @@
-"""Tests for the shared validators (SEC-16 ReDoS cap, SEC-20 CSV safety)."""
+"""Tests for the shared validators: ReDoS cap and CSV safety."""
 
 import time
 
@@ -29,7 +29,7 @@ def test_rejects_over_length():
 
 
 def test_length_boundary_is_254_inclusive():
-    # RFC 5321 caps an address at exactly 254 chars (SEC-16). Hard-code the boundary
+    # RFC 5321 caps an address at exactly 254 chars. Hard-code the boundary
     # here — do NOT derive the lengths from MAX_EMAIL_LENGTH — so this pins the actual
     # value: a bumped constant or a `>` -> `>=` slip is caught (mutation-tested).
     suffix = "@example.com"

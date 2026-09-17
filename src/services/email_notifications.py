@@ -2,7 +2,8 @@
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
+from enum import Enum
 
 from itsdangerous import URLSafeTimedSerializer
 from sqlalchemy import select
@@ -21,11 +22,16 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.io_executor import run_blocking
 
 logger = logging.getLogger(__name__)
 
-# Frequency ladder for auto-downgrade (ordered from most to least frequent)
-FREQUENCY_LADDER = ["daily", "twice_weekly", "weekly", "biweekly", "off"]
+# Frequency ladder for auto-downgrade (ordered from most to least frequent).
+# "monthly" is user-selectable (routers/settings.py's VALID_FREQUENCIES,
+# templates/settings.html) and FREQUENCY_INTERVALS already carries it (below) --
+# omitting it here makes FREQUENCY_LADDER.index() raise ValueError for a
+# monthly subscriber once MISSED_THRESHOLD becomes reachable.
+FREQUENCY_LADDER = ["daily", "twice_weekly", "weekly", "biweekly", "monthly", "off"]
 
 # How often each frequency should send (minimum interval in hours)
 FREQUENCY_INTERVALS = {
@@ -166,11 +172,18 @@ async def _get_unreviewed_proposals_for_user(
             )
         )
         for td in td_result.scalars().all():
-            # Check if reviewed by this agent
+            # Check if reviewed by this agent. rating <= 0 is a marker, not a review: -1 is
+            # the engine's implicit review and 0 is the reopen-with-guidance marker
+            # (simulation.py:3510-3512 names them together; neither is submittable —
+            # agent_page.py:509 and email_inbound.py:383 both reject anything outside 1-4).
+            # Excluding only -1 meant a proposal the PI had explicitly REOPENED counted as
+            # reviewed, so no further reminder about it was ever sent. Same predicate as
+            # admin.py:656/:865.
             review_result = await db.execute(
                 select(ProposalReview).where(
                     ProposalReview.thread_decision_id == td.id,
                     ProposalReview.agent_id == agent.agent_id,
+                    ProposalReview.rating.notin_((-1, 0)),
                 )
             )
             if not review_result.scalar_one_or_none():
@@ -198,17 +211,38 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
                 User.email.isnot(None),
             )
         )
-        users = result.scalars().all()
+        # ids only -- NOT the ORM objects -- are captured before the
+        # loop. Session.rollback() expires every object in the identity map, not just
+        # the one that failed, so a pre-loaded object from THIS bulk query can be
+        # expired by an EARLIER iteration's rollback by the time this iteration reads
+        # it. Each id is re-loaded fresh, inside the guarded block below, right before
+        # use. See tests/integration/test_email_notification_sweeps_resilience.py.
+        user_ids = [u.id for u in result.scalars().all()]
 
-        for user in users:
+        for user_id in user_ids:
             try:
+                user = (
+                    await db.execute(
+                        select(User)
+                        .options(selectinload(User.agent))
+                        .where(User.id == user_id)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    continue  # deleted between the bulk SELECT and here
                 sent = await _process_user_notifications(user, db)
                 if sent:
                     sent_count += 1
+                # Per-item commit: the sweep shares ONE session, so a later
+                # user's failure must not be able to discard a row for a user whose
+                # email has ALREADY gone out. Commit each item, roll back only the
+                # item that failed.
+                await db.commit()
             except Exception as exc:
+                await db.rollback()
                 logger.error(
                     "Error processing notifications for user %s: %s",
-                    user.id,
+                    user_id,
                     exc,
                     exc_info=True,
                 )
@@ -216,6 +250,39 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
         await db.commit()
 
     return sent_count
+
+
+async def _expire_lapsed_outstanding(
+    outstanding_notification: EmailNotification | None,
+    user: User,
+    db: AsyncSession,
+    *,
+    reason: str,
+) -> None:
+    """Mark an outstanding proposal_review row `expired`, if there is one AND it
+    is actually past the reply window.
+
+    Re-checks `sent_at` against `settings.email_notification_expiry_days` itself
+    rather than trusting that a caller's earlier check
+    still holds -- callers currently only reach here after the reply-window check
+    earlier in `_process_user_notifications` has already let a non-None
+    `outstanding_notification` fall through, but correctness must not depend on
+    control flow 40 lines away surviving a future edit. A no-op when there is nothing
+    outstanding, or when the outstanding row is still inside its reply window.
+    """
+    if outstanding_notification is None:
+        return
+    settings = get_settings()
+    age = datetime.now(UTC) - outstanding_notification.sent_at
+    if age < timedelta(days=settings.email_notification_expiry_days):
+        return
+    outstanding_notification.status = "expired"
+    await db.flush()
+    logger.info(
+        "Expired unanswered proposal_review notification %s for user %s (%s, and the "
+        "reply window has passed)",
+        outstanding_notification.id, user.id, reason,
+    )
 
 
 async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
@@ -244,14 +311,51 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
             EmailNotification.status == "sent",
         )
     )
-    if outstanding.scalar_one_or_none():
-        # There's already an unanswered email — check engagement and maybe downgrade
-        await _check_engagement_and_downgrade(user, tracker, db)
-        return False
+    outstanding_notification = outstanding.scalar_one_or_none()
+    if outstanding_notification:
+        settings = get_settings()
+        age = datetime.now(UTC) - outstanding_notification.sent_at
+        if age < timedelta(days=settings.email_notification_expiry_days):
+            # There's already an unanswered email, still within the reply window — check
+            # engagement and maybe downgrade, but don't pile on a second reminder.
+            await _check_engagement_and_downgrade(user, tracker, db)
+            return False
+        # The PI never answered within the reply window, so the slot is free again
+        # and we fall through — a new reminder can go out and continue the missed-email tally
+        # (the increment on a successful send, below) instead of being stuck here forever after
+        # the very first miss. The re-send below reconciles THIS SAME row rather than inserting
+        # a new one -- a plain second INSERT would collide with
+        # uq_email_notification_user_thread_category.
+        #
+        # What must NOT happen here is the status write itself. THREE of the paths below reach
+        # the end of this function without sending anything — nothing left to review (the
+        # `if not proposals` bail), the outbound allowlist, and an SES refusal inside
+        # send_proposal_notification — and on each of them 'expired' would kill the
+        # reply+<token> address of the e-mail the PI is still holding, since
+        # email_inbound.process_inbound_email drops any reply whose notification is not 'sent'.
+        # So the write is deferred to after the send (see the `if success:` block below),
+        # mirroring row CREATION's ordering: persist only once SES
+        # has accepted. Reaching that block with a non-None outstanding_notification means
+        # exactly this branch ran, because the in-window branch above returns.
+        logger.info(
+            "Unanswered proposal_review notification %s for user %s is past the reply window; "
+            "keeping it answerable until a replacement reminder is accepted by SES",
+            outstanding_notification.id, user.id,
+        )
 
     # Get unreviewed proposals
     proposals = await _get_unreviewed_proposals_for_user(user, db)
     if not proposals:
+        # Reaching here with a non-None `outstanding_notification` means
+        # the age check above already fell through (it's past the reply window), and
+        # there is nothing left to review that would ever replace it. Retiring it is now
+        # safe: email_inbound.process_inbound_email refuses a reply whose
+        # `sent_at` is past the window on its own, independent of `status` -- so this
+        # write changes bookkeeping, not what a stray reply to the old token would do.
+        await _expire_lapsed_outstanding(
+            outstanding_notification, user, db,
+            reason="no unreviewed proposals remain",
+        )
         return False
 
     # Send one email for the oldest unreviewed proposal
@@ -265,6 +369,14 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(user.email):
         tracker.last_notification_sent_at = datetime.now(timezone.utc)
+        # Same reasoning as the no-proposals bail above -- nothing will ever
+        # replace this row while the allowlist keeps blocking this recipient, and it
+        # is already past the reply window, so email_inbound refuses a reply to it
+        # regardless of `status`.
+        await _expire_lapsed_outstanding(
+            outstanding_notification, user, db,
+            reason="the replacement was suppressed by the outbound allowlist",
+        )
         logger.info(
             "Proposal notification to %s suppressed by outbound allowlist; "
             "advancing send clock to pace by frequency (proposal %s)",
@@ -293,6 +405,25 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     if success:
         tracker.last_notification_sent_at = datetime.now(timezone.utc)
         tracker.consecutive_missed += 1  # Will be reset if they engage
+        # V4-3: only NOW is the lapsed reminder retired — SES has accepted a replacement, so
+        # the PI holds a live reply address again. Skip the row send_proposal_notification just
+        # reconciled: when the replacement is for the SAME proposal it IS this row, already
+        # flipped back to 'sent' with a fresh sent_at, and writing 'expired' over it would
+        # retire the e-mail that has just gone out. Only a replacement for a DIFFERENT proposal
+        # leaves this row behind — and that one must not stay 'sent', because the outstanding
+        # lookup above is scalar_one_or_none() and two live rows raise MultipleResultsFound
+        # into the sweep's per-item `except` every cycle from then on.
+        if (
+            outstanding_notification is not None
+            and outstanding_notification.thread_decision_id != td.id
+        ):
+            outstanding_notification.status = "expired"
+            await db.flush()  # same as the row write it mirrors: durable before we return
+            logger.info(
+                "Expired unanswered proposal_review notification %s for user %s "
+                "(superseded by a reminder for proposal %s)",
+                outstanding_notification.id, user.id, td.id,
+            )
 
     return success
 
@@ -325,23 +456,34 @@ async def send_proposal_notification(
         )
         return False
 
-    reply_token = secrets.token_urlsafe(48)  # 64-char base64
-
-    # Create notification record
-    notification = EmailNotification(
-        user_id=user.id,
-        thread_decision_id=thread_decision.id,
-        agent_registry_id=agent.id,
-        reply_token=reply_token,
-        category="proposal_review",
-        status="sent",
+    # Look up any existing row for this (user, proposal, category) —
+    # uq_email_notification_user_thread_category means a re-send (e.g. a lapsed
+    # reminder, or a resend of an expired row) reconciles this SAME row rather
+    # than inserting a new one.
+    #
+    # Every (re)send mints a FRESH reply_token, written onto the reconciled row
+    # below. Reusing the existing token here (so a PI who answered the first
+    # reminder after a second had gone out wasn't told "No notification found
+    # for token") left the first e-mail's reply address permanently
+    # redeemable (process_inbound_email looks up purely by token, with no
+    # per-send identity) and let an `expired` row flip back to `sent` carrying
+    # its already-superseded token, defeating the reply token's own expiry
+    # window (measured from `sent_at`). Only the most-recently-sent e-mail's token may
+    # be valid; a reply to a stale token now fails the same "No notification
+    # found" lookup that an unrelated stranger's token would.
+    result = await db.execute(
+        select(EmailNotification).where(
+            EmailNotification.user_id == user.id,
+            EmailNotification.thread_decision_id == thread_decision.id,
+            EmailNotification.category == "proposal_review",
+        )
     )
-    db.add(notification)
-    await db.flush()
+    notification = result.scalar_one_or_none()
+    reply_token = secrets.token_urlsafe(48)  # 64-char base64
 
     # Build email. Soliciting a reply is only honest when the inbound pipeline
     # is actually on — otherwise PIs answer a dead reply domain and get
-    # silence (this is exactly what happened on prod through 2026-08).
+    # silence.
     reply_enabled = settings.enable_inbound_email
     reply_to = build_reply_address(reply_token) if reply_enabled else None
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
@@ -353,7 +495,7 @@ async def send_proposal_notification(
     channel = thread_decision.channel or "unknown"
 
     # HTML-escaped copies for the HTML body: bot names are PI-chosen and the
-    # summary is LLM-written, so both are untrusted in an HTML context (SEC-13).
+    # summary is LLM-written, so both are untrusted in an HTML context.
     # The plain-text body keeps the raw values.
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
@@ -489,6 +631,33 @@ async def send_proposal_notification(
             agent.bot_name,
             thread_decision.id,
         )
+        # Log the notification only now that SES actually accepted it. The write
+        # must not be able to un-send mail that already went out:
+        # uq_email_notification_user_thread_category means a PREVIOUS
+        # row for this (user, proposal, 'proposal_review') — e.g. one the expiry
+        # sweep just marked 'expired', or one an earlier _handle_instruction failure
+        # already marked 'responded' for a still-unreviewed proposal — makes a plain
+        # INSERT fail. Reconcile that row instead of blindly inserting. `notification`
+        # was already looked up above — reuse it rather than re-querying, and
+        # write the freshly minted `reply_token` onto it: the e-mail that was just sent
+        # carries THIS token, and the row's previous token (if any) must stop working.
+        if notification is None:
+            db.add(EmailNotification(
+                user_id=user.id,
+                thread_decision_id=thread_decision.id,
+                agent_registry_id=agent.id,
+                reply_token=reply_token,
+                category="proposal_review",
+                status="sent",
+            ))
+        else:
+            notification.agent_registry_id = agent.id
+            notification.status = "sent"
+            notification.response_type = None
+            notification.responded_at = None
+            notification.reply_token = reply_token
+            notification.sent_at = datetime.now(UTC)
+        await db.flush()
         return True
     except Exception as exc:
         logger.error("Failed to send proposal notification to %s: %s", user.email, exc)
@@ -563,23 +732,17 @@ async def _send_paused_email(user: User) -> None:
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    try:
-        import boto3
-
-        client = boto3.client("ses", region_name=settings.aws_region)
-        client.send_email(
-            Source=settings.ses_sender_email,
-            Destination={"ToAddresses": [user.email]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Text": {"Data": text_body, "Charset": "UTF-8"},
-                    "Html": {"Data": html_body, "Charset": "UTF-8"},
-                },
-            },
-        )
-    except Exception as exc:
-        logger.error("Failed to send paused notification to %s: %s", user.email, exc)
+    # V4-4: this used to reach boto3 directly, and it was the one send in this module with no
+    # is_allowed_recipient() check — _process_user_notifications, send_proposal_notification and
+    # _send_html_email all have one. The allowlist is what keeps a staging or partially
+    # migrated deployment from mailing real PIs, so a single ungated path defeats it for
+    # whoever the downgrade ladder happens to auto-pause. Go through the shared helper instead
+    # of adding a second gate here: it applies the same check, logs the suppression (at info,
+    # with this subject) and logs a send failure (at error), so neither outcome is silent.
+    await run_blocking(
+        _send_html_email,
+        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url,
+    )
 
 
 async def record_engagement(user_id, db: AsyncSession) -> None:
@@ -596,16 +759,22 @@ async def record_engagement(user_id, db: AsyncSession) -> None:
 
 
 async def mark_notification_responded(
-    user_id, thread_decision_id, response_type: str, db: AsyncSession
+    agent_registry_id, thread_decision_id, response_type: str, db: AsyncSession
 ) -> None:
-    """Mark outstanding email notifications for this user+proposal as responded.
+    """Mark outstanding email notifications for this AGENT's proposal as responded.
 
-    Clears any category (proposal_review reminder and/or new_proposal alert) so a
-    single web review retires every outstanding email about that proposal.
+    Scoped to agent_registry_id, not the responding user (V4-4b): a ProposalReview is
+    unique per (thread_decision_id, agent_id), not per responder, so ANY authorized
+    response — the owning PI's or a delegate's — retires every recipient's outstanding
+    reminder about this agent's copy of the decision. Without this, a delegate's review
+    left the PI's own notification 'sent' forever, since only the responder's row was
+    ever touched. Scoped to agent_registry_id rather than thread_decision_id alone
+    because a proposal has up to two independent per-agent decisions (agent_a and
+    agent_b) and must not cross-retire the other agent's notifications.
     """
     result = await db.execute(
         select(EmailNotification).where(
-            EmailNotification.user_id == user_id,
+            EmailNotification.agent_registry_id == agent_registry_id,
             EmailNotification.thread_decision_id == thread_decision_id,
             EmailNotification.status == "sent",
         )
@@ -621,29 +790,79 @@ async def mark_notification_responded(
 # ---------------------------------------------------------------------------
 
 
-def _send_html_email(
-    to_email: str,
+class SendOutcome(Enum):
+    """The distinguishable outcomes of ``send_html_email_outcome``.
+
+    ``_send_html_email``'s single bool return conflated several different things
+    a caller might want to react to differently: suppressed before any SES call
+    was attempted (no recipient / allowlist), ``boto3.client(...)`` construction
+    failing (a persistent misconfiguration — bad/missing AWS credentials, a bad
+    region — that will keep failing for every message until an operator fixes
+    it), MIME/message construction failing (a property of THIS message, e.g. a
+    header that can't be encoded — the next message can still succeed), and
+    ``send_raw_email`` itself raising. A budget consumer like
+    ``_maybe_send_stale_token_bounce`` needs exactly this distinction: charging
+    an address's bounce budget for a suppression it never caused would let an
+    allowlist change (or a bug) burn the budget with nothing ever reaching SES —
+    but CLIENT_UNAVAILABLE is different from NOT_DISPATCHED in that respect: a
+    persistently broken SES client is worth capping bounce attempts over (it is
+    not going to start working mid-flood), where a one-off MIME failure is not.
+    """
+
+    SUPPRESSED = "suppressed"       # no recipient, or blocked by the outbound allowlist
+    CLIENT_UNAVAILABLE = "client_unavailable"  # boto3.client(...) itself raised (persistent misconfig)
+    NOT_DISPATCHED = "not_dispatched"  # MIME/message construction failed before send_raw_email
+    FAILED = "failed"                # send_raw_email raised
+    SENT = "sent"
+
+
+def send_html_email_outcome(
+    to_email: str | None,
     subject: str,
     text_body: str,
     html_body: str,
     reply_to: str | None = None,
     unsubscribe_url: str | None = None,
-) -> bool:
-    """Send a multipart text+HTML email via SES. Honors the outbound allowlist."""
+) -> SendOutcome:
+    """Send a multipart text+HTML email via SES. Honors the outbound allowlist.
+
+    Returns the specific ``SendOutcome`` rather than a bool — see that class's
+    docstring. ``_send_html_email`` below is a thin bool wrapper kept so its four
+    existing callers, which only ever cared about "did it go out", stay unchanged.
+    """
     settings = get_settings()
     from src.services.email import is_allowed_recipient
 
+    # `User.email` is nullable (a private-ORCID account has none) and all four call sites
+    # pass one straight through, so the parameter has to admit None -- and then say so
+    # rather than handing SES a None address, which it reports as an opaque client error.
+    # Same shape as _notify_instruction_failure.
+    if not to_email:
+        logger.info("Email suppressed: no recipient address on record (subject=%r)", subject)
+        return SendOutcome.SUPPRESSED
     if not is_allowed_recipient(to_email):
         logger.info(
             "Email to %s suppressed by outbound allowlist (subject=%r)", to_email, subject
         )
-        return False
+        return SendOutcome.SUPPRESSED
     try:
         import boto3
+
+        client = boto3.client("ses", region_name=settings.aws_region)
+    except Exception as exc:
+        # boto3.client(...) itself failing is a persistent misconfiguration (bad
+        # or missing AWS credentials, a bad region) — it will keep failing for
+        # every message until an operator fixes it, unlike a one-off MIME error
+        # below. One ERROR log per call (no separate dedup/throttling here: the
+        # bounce budget this feeds is itself a per-address cap, so a broken
+        # client cannot spam more than MAX_STALE_TOKEN_BOUNCES_PER_ADDRESS logs
+        # for any one sender).
+        logger.error("SES client unavailable, could not send email to %s: %s", to_email, exc)
+        return SendOutcome.CLIENT_UNAVAILABLE
+    try:
         import email.mime.multipart
         import email.mime.text
 
-        client = boto3.client("ses", region_name=settings.aws_region)
         raw_msg = email.mime.multipart.MIMEMultipart("alternative")
         raw_msg["From"] = settings.ses_sender_email
         raw_msg["To"] = to_email
@@ -655,15 +874,43 @@ def _send_html_email(
             raw_msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
         raw_msg.attach(email.mime.text.MIMEText(text_body, "plain", "utf-8"))
         raw_msg.attach(email.mime.text.MIMEText(html_body, "html", "utf-8"))
+    except Exception as exc:
+        # Never reached send_raw_email -- nothing was dispatched to SES, so a
+        # budget keyed on "did this hit SES" must not charge for it. Unlike
+        # CLIENT_UNAVAILABLE, this is a property of THIS message (e.g. a header
+        # that can't be encoded) -- the next message can still succeed.
+        logger.error("Failed to construct email to %s: %s", to_email, exc)
+        return SendOutcome.NOT_DISPATCHED
+    try:
         client.send_raw_email(
             Source=settings.ses_sender_email,
             Destinations=[to_email],
             RawMessage={"Data": raw_msg.as_string()},
         )
-        return True
+        return SendOutcome.SENT
     except Exception as exc:
         logger.error("Failed to send email to %s: %s", to_email, exc)
-        return False
+        return SendOutcome.FAILED
+
+
+def _send_html_email(
+    to_email: str | None,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    reply_to: str | None = None,
+    unsubscribe_url: str | None = None,
+) -> bool:
+    """Send a multipart text+HTML email via SES. Honors the outbound allowlist.
+
+    Thin bool wrapper over ``send_html_email_outcome`` — "did it go out",
+    collapsing SUPPRESSED/CLIENT_UNAVAILABLE/NOT_DISPATCHED/FAILED into the
+    same False every caller already treated them as.
+    """
+    return send_html_email_outcome(
+        to_email, subject, text_body, html_body,
+        reply_to=reply_to, unsubscribe_url=unsubscribe_url,
+    ) is SendOutcome.SENT
 
 
 async def _get_user_agent_records(user: User, db: AsyncSession) -> list[AgentRegistry]:
@@ -708,20 +955,29 @@ async def check_and_send_status_overviews(session_factory: async_sessionmaker) -
         result = await db.execute(
             select(User).options(selectinload(User.agent)).where(User.email.isnot(None))
         )
-        users = result.scalars().all()
-        for user in users:
+        # Re-load by id inside the guarded block below -- see the
+        # comment in check_and_send_notifications above for why the pre-loaded object
+        # cannot be trusted after an earlier iteration's rollback.
+        user_ids = [u.id for u in result.scalars().all()]
+        for user_id in user_ids:
             try:
+                user = (
+                    await db.execute(
+                        select(User).options(selectinload(User.agent)).where(User.id == user_id)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    continue  # deleted between the bulk SELECT and here
                 pref = await get_or_create_pref(user.id, "status_overview", db)
-                if not pref.enabled:
-                    continue
-                if not _is_time_to_send(pref.frequency, pref.last_sent_at):
-                    continue
-                if await _send_status_overview(user, pref, db):
-                    sent_count += 1
+                if pref.enabled and _is_time_to_send(pref.frequency, pref.last_sent_at):
+                    if await _send_status_overview(user, pref, db):
+                        sent_count += 1
+                await db.commit()
             except Exception as exc:
+                await db.rollback()
                 logger.error(
                     "Error sending status overview for user %s: %s",
-                    user.id, exc, exc_info=True,
+                    user_id, exc, exc_info=True,
                 )
         await db.commit()
     return sent_count
@@ -756,12 +1012,20 @@ async def _send_status_overview(
     proposals = [td for td in tds if td.outcome == "proposal"]
     no_proposal_count = sum(1 for td in tds if td.outcome == "no_proposal")
 
-    # Ratings for proposals (max rating per proposal decides successful vs no-go)
+    # Ratings for proposals (max rating per proposal decides successful vs no-go).
+    # Same marker exclusion as _get_unreviewed_proposals_for_user above: 0 is the
+    # reopen-with-guidance marker, and admitting it put a reopened proposal into
+    # ratings_by_td with a value _status_label has no key for, so it fell through to that
+    # dict's "reviewed" default — the digest told the PI in writing that a proposal still
+    # awaiting their rating had been reviewed. Excluding it leaves ratings_by_td empty for
+    # that proposal, which is the existing "awaiting your review" branch. The successful /
+    # no_go counts are unaffected either way (both default to 0 and test >= 3 / 1..2).
     ratings_by_td: dict = {}
     if proposals:
         rev_result = await db.execute(
             select(ProposalReview.thread_decision_id, ProposalReview.rating).where(
-                ProposalReview.thread_decision_id.in_([td.id for td in proposals])
+                ProposalReview.thread_decision_id.in_([td.id for td in proposals]),
+                ProposalReview.rating.notin_((-1, 0)),
             )
         )
         for td_id, rating in rev_result.all():
@@ -843,7 +1107,7 @@ async def _send_status_overview(
 
     # Escape the untrusted parts for the HTML body: pair is built from
     # PI-chosen bot names and summary from the LLM (status is a fixed label).
-    # The plain-text body above uses the raw values (SEC-13).
+    # The plain-text body above uses the raw values.
     idea_html = "".join(
         f'<li style="margin-bottom: 8px;"><span style="color:#4f46e5;font-weight:600;">'
         f'{esc(pair)}</span><br><span style="color:#374151;">{esc(summary)}</span> '
@@ -875,8 +1139,9 @@ async def _send_status_overview(
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    sent = _send_html_email(
-        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url
+    sent = await run_blocking(
+        _send_html_email,
+        user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url,
     )
     if sent:
         pref.last_sent_at = now
@@ -903,16 +1168,33 @@ async def check_and_send_new_proposal_emails(session_factory: async_sessionmaker
                 ThreadDecision.decided_at >= cutoff,
             )
         )
-        proposals = list(td_result.scalars().all())
-        for td in proposals:
-            for agent_id_str in (td.agent_a, td.agent_b):
+        # Only plain ids are captured before the loop -- see the
+        # comment in check_and_send_notifications above for why the pre-loaded object
+        # cannot be trusted after an earlier iteration's rollback. Unlike the other two
+        # sweeps, each td has TWO guarded slots (one per agent side), each with its own
+        # try/except, so the row is re-loaded once per SLOT, not once per proposal: a
+        # failure on the first slot must not leave the second slot's td stale either.
+        td_ids = [td.id for td in td_result.scalars().all()]
+        for td_id in td_ids:
+            for which in ("agent_a", "agent_b"):
+                agent_id_str = which  # fallback for logging if the re-load itself fails
                 try:
+                    td = (
+                        await db.execute(
+                            select(ThreadDecision).where(ThreadDecision.id == td_id)
+                        )
+                    ).scalar_one_or_none()
+                    if td is None:
+                        continue  # deleted between the bulk SELECT and here
+                    agent_id_str = getattr(td, which)
                     if await _maybe_send_new_proposal(td, agent_id_str, db):
                         sent_count += 1
+                    await db.commit()
                 except Exception as exc:
+                    await db.rollback()
                     logger.error(
                         "Error sending new-proposal email (proposal %s, agent %s): %s",
-                        td.id, agent_id_str, exc, exc_info=True,
+                        td_id, agent_id_str, exc, exc_info=True,
                     )
         await db.commit()
     return sent_count
@@ -990,18 +1272,21 @@ async def _send_new_proposal_email(
 ) -> bool:
     """Compose and send a single new-proposal email; logs an EmailNotification."""
     settings = get_settings()
-    reply_token = secrets.token_urlsafe(48)
 
-    notification = EmailNotification(
-        user_id=user.id,
-        thread_decision_id=td.id,
-        agent_registry_id=agent.id,
-        reply_token=reply_token,
-        category="new_proposal",
-        status="sent",
+    # Same shape as send_proposal_notification above — look up any existing row for
+    # this (user, proposal, category). Every
+    # (re)send mints a FRESH reply_token (written onto the reconciled row below)
+    # rather than reusing the old one — see send_proposal_notification's comment for
+    # why reuse was wrong.
+    result = await db.execute(
+        select(EmailNotification).where(
+            EmailNotification.user_id == user.id,
+            EmailNotification.thread_decision_id == td.id,
+            EmailNotification.category == "new_proposal",
+        )
     )
-    db.add(notification)
-    await db.flush()
+    notification = result.scalar_one_or_none()
+    reply_token = secrets.token_urlsafe(48)
 
     summary = td.summary_text or "(No summary available)"
     channel = td.channel or "unknown"
@@ -1015,7 +1300,7 @@ async def _send_new_proposal_email(
     settings_url = f"{settings.base_url}/settings"
 
     # HTML-escaped copies for the HTML body (PI-chosen bot names + LLM summary
-    # are untrusted in an HTML context) (SEC-13).
+    # are untrusted in an HTML context).
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
     channel_html = esc(channel)
@@ -1063,11 +1348,37 @@ async def _send_new_proposal_email(
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
-    sent = _send_html_email(
+    sent = await run_blocking(
+        _send_html_email,
         user.email, subject, text_body, html_body,
         reply_to=reply_to, unsubscribe_url=unsubscribe_url,
     )
     if sent:
+        # Log the notification only now that _send_html_email actually sent it: its
+        # OWN allowlist check runs before this point, so a suppressed recipient never gets a
+        # phantom row that would block a resend once the allowlist is widened. Same
+        # reconcile-not-insert shape as send_proposal_notification, and for the same reason
+        # (uq_email_notification_user_thread_category). `notification` was already
+        # looked up above — reuse it rather than re-querying, and write the
+        # freshly minted `reply_token` onto it, retiring whatever token the row carried
+        # before.
+        if notification is None:
+            db.add(EmailNotification(
+                user_id=user.id,
+                thread_decision_id=td.id,
+                agent_registry_id=agent.id,
+                reply_token=reply_token,
+                category="new_proposal",
+                status="sent",
+            ))
+        else:
+            notification.agent_registry_id = agent.id
+            notification.status = "sent"
+            notification.response_type = None
+            notification.responded_at = None
+            notification.reply_token = reply_token
+            notification.sent_at = datetime.now(UTC)
+        await db.flush()
         logger.info(
             "New-proposal email sent to %s for %s (proposal %s)",
             user.email, agent.bot_name, td.id,

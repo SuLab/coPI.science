@@ -207,10 +207,9 @@ copi-python/
 │   │   ├── profile.py
 │   │   ├── publication.py
 │   │   ├── job.py
-│   │   ├── agent_activity.py   # SimulationRun, AgentMessage, AgentChannel
+│   │   ├── agent_activity.py   # SimulationRun, AgentMessage, AgentChannel, LlmCallLog
 │   │   ├── agent_registry.py   # AgentRegistry, ProposalReview
-│   │   ├── email_notification.py # EmailNotification, EmailEngagementTracker
-���   │   └── llm_call_log.py     # LlmCallLog
+│   │   └── email_notification.py # EmailNotification, EmailEngagementTracker
 │   ├── routers/                # FastAPI routers
 │   │   ├── auth.py             # ORCID OAuth flow
 │   │   ├── profile.py          # Profile view/edit

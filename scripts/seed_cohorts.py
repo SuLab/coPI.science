@@ -11,8 +11,8 @@ target regardless of --prune.
 This does NOT enable the interaction gate. `cohort_isolation_enabled` is a
 separate setting, default False, read by a running `agent-run` through an
 lru_cached get_settings(); flipping it needs the container recreated, not just
-restarted. See docs/specs/2026-08-18-cohort-seeding-design.md §1.1 for why
-enabling it against the current 33-agent roster would gate nothing.
+restarted. Enabling it before every agent in the roster has a cohort assigned
+would gate nothing.
 
 `scripts/` and `cohorts.json` are baked into the app image, not bind-mounted, so
 a code or manifest change needs a rebuild before a container can see it — and

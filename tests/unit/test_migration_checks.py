@@ -220,16 +220,82 @@ def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "0024", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
     assert rev in reason
 
 
-def test_supported_start_revisions_are_exactly_the_documented_set():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023")
-    assert pf.DEFAULT_TARGET == "0024"
+@pytest.mark.parametrize("rev", ["0022", "0025", "0026", "0027", "0028"])
+def test_revision_status_accepts_every_start_in_the_chain_below_the_head(rev):
+    """preflight BLOCKed a start it had no reason to refuse.
+
+    `SUPPORTED_START_REVISIONS` stopped at 0024 while the head moved to 0029, so a
+    database at 0025-0028 -- where a rolled-back-and-retried migration leaves one, and
+    where every future deployment sits the moment a new head lands -- was refused with
+    "not a supported starting point".
+    """
+    status, reason = pf.revision_status(rev, pf.DEFAULT_TARGET)
+    assert status == pf.PASS, reason
+
+
+def test_supported_start_revisions_are_the_whole_chain_below_the_head():
+    """The allowlist is derived, not hand-maintained.
+
+    It stopped at 0024 while the head moved to 0029, so a start at 0025-0028 -- which
+    is where a rolled-back-and-retried migration leaves a database -- was refused. The
+    same omission had to be repaired by hand twice before (c70b48b added 0023,
+    3a726bb added 0024), each time one release late.
+    """
+    # Assert the PROPERTY, with concrete values -- never re-derive the expression the
+    # module uses. A version of this test that is a character-for-character copy of
+    # preflight.py's own comprehension asserts the implementation against itself and
+    # cannot fail: the 0024 bug it exists to catch would sail straight through it.
+    supported = pf.SUPPORTED_START_REVISIONS
+
+    # The defect this test exists for: a rolled-back-and-retried migration leaves the
+    # database at 0025-0028, and every one of those was refused.
+    for rev in ("0025", "0026", "0027", "0028"):
+        assert rev in supported, (
+            f"{rev} is where a rolled-back migration leaves a database, and it is not a "
+            f"supported start: {supported}"
+        )
+    # The oldest deployment we still support, and the two ends of the range.
+    assert "0018" in supported
+    assert pf.OLDEST_SUPPORTED_START == "0018"
+    assert "0017" not in supported, "0017 predates the oldest supported deployment"
+    # The target itself is not a *start* -- preflight has a separate already-at-target path.
+    assert pf.DEFAULT_TARGET not in supported, (
+        f"the target {pf.DEFAULT_TARGET} must not appear as a supported start: {supported}"
+    )
+    # And it must not go stale the way the hand-maintained tuple did: every revision
+    # between the oldest and the head is reachable as a start.
+    head_idx = pf.REVISION_ORDER.index(pf.DEFAULT_TARGET)
+    oldest_idx = pf.REVISION_ORDER.index(pf.OLDEST_SUPPORTED_START)
+    assert len(supported) == head_idx - oldest_idx, (
+        f"the allowlist has gaps: {supported} against "
+        f"{pf.REVISION_ORDER[oldest_idx:head_idx]}"
+    )
+    for rev in ("0025", "0026", "0027", "0028"):
+        assert rev in pf.SUPPORTED_START_REVISIONS, (
+            f"{rev} is in the chain below the head but is not an accepted starting point"
+        )
+
+
+def test_the_revision_below_the_head_is_always_an_accepted_start():
+    """The treadmill, stated as an invariant.
+
+    The moment a new head lands, production sits at the *previous* head. That revision
+    must already be accepted, or the next deploy's preflight BLOCKs on the state this
+    deploy created. This is the exact failure c70b48b and 3a726bb each fixed after the
+    fact.
+    """
+    previous_head = pf.REVISION_ORDER[-2]
+    assert previous_head in pf.SUPPORTED_START_REVISIONS, (
+        f"the revision below the head ({previous_head}) must be an accepted starting "
+        f"point, because that is where production sits when the head advances"
+    )
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
@@ -240,20 +306,53 @@ def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
     that state -- preflight refused the one starting point main itself produces, which
     was found by auditing the branch for a PR into main rather than by any test.
 
-    0022 is deliberately NOT here: no deployment reaches it (main stops at 0021, this
-    branch's head is 0023) and the path has not been exercised from there. An allowlist
-    for a safety gate should contain what was tested, not what seems plausible.
+    0022 used to be excluded here on the grounds that "no deployment reaches it". That
+    was a statement about deployments, not a hazard finding about 0022, and it is
+    equally true of 0025-0028, which F24 requires be accepted -- so the two rules could
+    not both stand. The chain is linear and runs in one transaction, and the gate
+    migrates all of it on every run, so starting at any revision at or after
+    OLDEST_SUPPORTED_START applies a suffix of a rehearsed chain.
     """
     assert "0021" in pf.SUPPORTED_START_REVISIONS
     assert "0020" in pf.SUPPORTED_START_REVISIONS
-    assert "0022" not in pf.SUPPORTED_START_REVISIONS
+    assert "0022" in pf.SUPPORTED_START_REVISIONS
+    assert "0017" not in pf.SUPPORTED_START_REVISIONS
 
 
 def test_sizing_does_not_quote_the_0019_index_build_once_0019_has_run():
     """The row-scaled lock estimate only applies while 0019 is still pending."""
-    assert pf.POST_0019_STARTS == ("0020", "0021")
+    assert pf.POST_0019_STARTS == tuple(pf.REVISION_ORDER[pf.REVISION_ORDER.index("0019") + 1 :])
     for rev in pf.POST_0019_STARTS:
-        assert rev in pf.SUPPORTED_START_REVISIONS
+        assert rev == pf.DEFAULT_TARGET or rev in pf.SUPPORTED_START_REVISIONS
+
+
+def test_the_remaining_chain_is_described_from_what_is_actually_pending():
+    """check_sizing's operator text must not name a revision that is already applied.
+
+    Widening the allowlist to 0025-0028 makes those branches reachable; the sentence was
+    a fixed list written when 0024 was the only post-0019 start, so from 0026 it told the
+    operator to expect 0025's publications index build and 0026's FK swap -- both behind
+    them.
+    """
+    from_0024 = pf.remaining_chain_notes("0024", "0029", publications_rows=4508)
+    assert "0025 ADD CONSTRAINT UNIQUE on publications (4,508 rows" in from_0024
+    assert "0027" in from_0024
+
+    from_0027 = pf.remaining_chain_notes("0027", "0029", publications_rows=4508)
+    assert "0025" not in from_0027, from_0027
+    assert "0026" not in from_0027, from_0027
+    assert "0028" in from_0027
+    assert "0029" in from_0027
+
+
+def test_the_remaining_chain_notes_cover_every_revision_they_can_be_asked_about():
+    """A revision with no note would silently vanish from the operator's list."""
+    missing = [
+        r
+        for r in pf.pending_revisions(pf.OLDEST_SUPPORTED_START, pf.DEFAULT_TARGET)
+        if r not in pf.REVISION_COST_NOTES
+    ]
+    assert missing == [], f"REVISION_COST_NOTES has no entry for {sorted(missing)}"
 
 
 # --------------------------------------------------------------------------- #
@@ -673,6 +772,74 @@ def test_legacy_inventory_reports_both_buckets_separately():
 
 
 # --------------------------------------------------------------------------- #
+# Publication (user_id, pmid) duplicate inventory
+# --------------------------------------------------------------------------- #
+
+
+def test_publication_duplicate_status_passes_with_no_groups():
+    status, note = pf.publication_duplicate_status(0, 0)
+    assert status == pf.PASS
+    assert "nothing to merge" in note
+
+
+def test_publication_duplicate_status_warns_with_group_and_row_counts():
+    status, note = pf.publication_duplicate_status(2, 5)
+    assert status == pf.WARN
+    assert "2 duplicate (user_id, pmid) pair(s)" in note
+    assert "5 row(s)" in note
+
+
+async def test_check_publication_duplicates_passes_when_the_table_does_not_exist(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return False
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert title == "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    assert status == pf.PASS
+    assert "does not exist" in detail
+    assert rem == []
+    assert data == {}
+
+
+async def test_check_publication_duplicates_passes_when_there_are_none(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return True
+
+    async def _fetch_all(_conn, sql, **params):
+        return []
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    monkeypatch.setattr(pf, "fetch_all", _fetch_all)
+    _title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert status == pf.PASS
+    assert "nothing to merge" in detail
+    assert rem == []
+    assert data == {"duplicate_groups": 0, "duplicate_rows": 0}
+
+
+async def test_check_publication_duplicates_warns_and_names_the_pairs(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return True
+
+    async def _fetch_all(_conn, sql, **params):
+        return [
+            {"user_id": "u1", "pmid": "111", "n": 2},
+            {"user_id": "u2", "pmid": "222", "n": 3},
+        ]
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    monkeypatch.setattr(pf, "fetch_all", _fetch_all)
+    title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert title == "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    assert status == pf.WARN
+    assert "(u1, 111)" in detail
+    assert "(u2, 222)" in detail
+    assert data == {"duplicate_groups": 2, "duplicate_rows": 5}
+    assert any("\\copy" in r for r in rem)
+
+
+# --------------------------------------------------------------------------- #
 # Row-count comparison (the preflight -> postflight handoff)
 # --------------------------------------------------------------------------- #
 
@@ -835,7 +1002,10 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         "column": re.compile(r'add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"'),
         "constraint": re.compile(r'create_unique_constraint\(\s*\n?\s*"([^"]+)"'),
     }
-    for revision in ("0019", "0020", "0021", "0022", "0023", "0024"):
+    for revision in (
+        "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+        "0029", "0030",
+    ):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()
@@ -954,6 +1124,35 @@ def test_revision_order_covers_the_supported_range():
     assert list(pf.REVISION_ORDER) == sorted(pf.REVISION_ORDER)
 
 
+def test_revision_order_ends_at_the_repo_head():
+    import re
+
+    versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    heads = []
+    for p in sorted(versions.glob("0*.py")):
+        m = re.search(r'^revision(?::\s*str)?\s*=\s*"(\d{4})"', p.read_text(), re.M)
+        assert m, p
+        heads.append(m.group(1))
+    assert pf.REVISION_ORDER[-1] == max(heads)
+    assert pf.DEFAULT_TARGET == pf.REVISION_ORDER[-1]
+
+
+def test_0024_is_a_supported_start_because_org1_sits_there():
+    assert "0024" in pf.SUPPORTED_START_REVISIONS
+
+
+def test_new_chain_objects_are_planned():
+    names = {o.name for o in pf.planned_objects_between("0024", pf.DEFAULT_TARGET)}
+    assert "uq_publications_user_pmid" in names            # 0025
+    assert "ix_thread_decisions_agent_a_outcome" in names  # 0027 badge composite
+    assert "ix_agent_delegates_user_id" in names           # 0027 FK index
+    assert "reopened_at" in names                          # 0028
+    assert "pi_engaged_at" in names                        # 0029
+    assert "pi_inbound_state" in names                     # 0029
+    assert "sender_user_id" in names                       # 0030
+    assert "handled_at" in names                           # 0030
+
+
 # --------------------------------------------------------------------------- #
 # Query builders
 # --------------------------------------------------------------------------- #
@@ -1070,8 +1269,12 @@ def test_postflight_keeps_the_partial_predicate_in_the_expected_index_definition
 
 
 def test_postflight_expects_an_index_for_every_index_the_chain_creates():
+    """Every planned index/constraint must be checked by postflight somewhere. A
+    UNIQUE constraint gets a Postgres-backed index (EXPECTED_INDEXES); a FOREIGN
+    KEY constraint (e.g. agent_messages_sender_user_id_fkey) does not, and is
+    instead checked by definition in EXPECTED_CONSTRAINTS."""
     planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind in {"index", "constraint"}}
-    assert planned <= set(po.EXPECTED_INDEXES)
+    assert planned <= set(po.EXPECTED_INDEXES) | set(po.EXPECTED_CONSTRAINTS)
 
 
 def test_postflight_expects_a_table_for_every_table_the_chain_creates():
@@ -1126,7 +1329,7 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0024"
+    assert args.target == pf.DEFAULT_TARGET
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1167,7 +1370,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0024"
+    assert args.target == po.DEFAULT_TARGET
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False
@@ -1348,3 +1551,150 @@ async def test_ambiguous_revision_distinguishes_all_three_signatures(monkeypatch
         assert status == pf.BLOCK
         seen.append(detail)
     assert len(set(seen)) == 3, "each of the three states must be diagnosed differently"
+
+
+# --------------------------------------------------------------------------- #
+# 0025 deletes rows on purpose: the row-count comparison has to know the
+# difference between "the migration removed exactly the duplicates preflight
+# counted" and "rows went missing". Found by running the real chain against a
+# copy of production, where 0025 legitimately deletes 223 publications and
+# postflight BLOCKed with "223 rows LOST ... Compare against the backup before
+# doing anything else" in the middle of the migration window.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_exact_deletion_0025_predicted_is_not_row_loss():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4508},
+        expected_deletions={"publications": 223},
+    )
+    assert ok, problems
+    assert problems == []
+
+
+def test_deleting_more_than_predicted_still_fails():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4507},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert "224" in problems[0] and "223" in problems[0], problems
+
+
+def test_deleting_fewer_than_predicted_still_fails():
+    """A short delete means 0025 did not do what preflight measured — the constraint
+    it then adds would have failed, so this must not pass silently either."""
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4600},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert "131" in problems[0] and "223" in problems[0], problems
+
+
+def test_an_expected_deletion_does_not_license_loss_in_other_tables():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731, "users": 144},
+        {"publications": 4508, "users": 143},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert any("users" in p and "LOST" in p for p in problems), problems
+
+
+def test_a_snapshot_without_expected_deletions_keeps_the_strict_behaviour():
+    """Backward compatibility: an older snapshot file has no expected_deletions key,
+    and must still make any shrinkage a failure."""
+    ok, problems = pf.compare_row_counts({"publications": 4731}, {"publications": 4508})
+    assert not ok
+    assert "223 rows LOST" in problems[0]
+
+
+def test_write_snapshot_records_the_deletions_postflight_must_expect(tmp_path):
+    import json
+
+    class _Args:
+        target = "0028"
+
+        def __init__(self, path):
+            self.snapshot = str(path)
+
+    status, _, _ = pf.write_snapshot(
+        _Args(tmp_path / "snap.json"),
+        pf.Report("preflight"),
+        {"publications": 4731},
+        "0024",
+        expected_deletions={"publications": 223},
+    )
+    assert status == pf.PASS
+    payload = json.loads((tmp_path / "snap.json").read_text())
+    assert payload["expected_deletions"] == {"publications": 223}
+
+
+def test_an_extra_table_the_models_do_not_declare_is_not_a_blocking_drift():
+    """A real production database carries operator artefacts, e.g. a manual backup
+    table left behind by an earlier deploy. The ORM is entirely unaffected by an
+    extra table, so classifying remove_table as
+    a failure BLOCKed a perfectly good migration."""
+    import scripts.migrate.postflight as post
+
+    assert "remove_table" not in post.DRIFT_FAIL_OPS
+    assert "remove_table" in post.DRIFT_WARN_OPS
+
+
+# --------------------------------------------------------------------------- #
+# The snapshot must belong to the run being verified, and an
+# expectation must only be recorded for a chain that will actually run 0025.
+# --------------------------------------------------------------------------- #
+
+
+def test_pending_revisions_reports_what_the_upgrade_will_run():
+    assert pf.pending_revisions("0024", "0028") == frozenset({"0025", "0026", "0027", "0028"})
+    assert pf.pending_revisions("0024", "0024") == frozenset()
+    assert "0025" not in pf.pending_revisions("0026", "0028")
+    assert "0025" in pf.pending_revisions("0018", "0028")
+
+
+def test_a_snapshot_from_another_database_is_refused():
+    import scripts.migrate.postflight as post
+
+    payload = {
+        "kind": "preflight-snapshot",
+        "target": "0028",
+        "database_url": "postgresql+asyncpg://copi:***@host-a:5432/copi",
+    }
+    problems = post._snapshot_binding_problems(
+        payload, conn_target="0028",
+        conn_url="postgresql+asyncpg://copi:secret@host-b:5432/copi",
+    )
+    assert problems and "host-a" in problems[0]
+
+
+def test_a_snapshot_for_another_target_is_refused():
+    import scripts.migrate.postflight as post
+
+    payload = {"kind": "preflight-snapshot", "target": "0024", "database_url": ""}
+    problems = post._snapshot_binding_problems(payload, conn_target="0028", conn_url=None)
+    assert problems and "0024" in problems[0]
+
+
+def test_a_file_that_is_not_a_preflight_snapshot_is_refused():
+    import scripts.migrate.postflight as post
+
+    problems = post._snapshot_binding_problems({"kind": "something-else"}, None, None)
+    assert problems and "preflight-snapshot" in problems[0]
+
+
+def test_the_matching_snapshot_binds_cleanly():
+    import scripts.migrate.postflight as post
+
+    url = "postgresql+asyncpg://copi:secret@host:5432/copi"
+    payload = {
+        "kind": "preflight-snapshot",
+        "target": "0028",
+        "database_url": pf.redact_url(url),
+    }
+    assert post._snapshot_binding_problems(payload, conn_target="0028", conn_url=url) == []

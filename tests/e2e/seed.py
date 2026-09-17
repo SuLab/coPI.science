@@ -181,9 +181,9 @@ async def seed(session) -> dict[str, str]:
     # status 'completed' behind. Any of the three and the flow is unreplayable —
     # `onboarding_complete` makes /onboarding 302 straight to /profile
     # (src/routers/onboarding.py::onboarding_start, first statement), and a
-    # 'completed' job takes profile_review.html past the spinner branch. Measured
-    # on copi_slack_test 2026-08-04: all three were set from the 2026-07-31 run,
-    # so the flow had silently stopped testing anything a browser would see.
+    # 'completed' job takes profile_review.html past the spinner branch. Left over
+    # from a prior run, all three would silently stop the flow from testing
+    # anything a browser would see.
     # Scoped to this one fixture ORCID; nothing else is deleted anywhere here.
     onboarding.onboarding_complete = False
     await session.execute(

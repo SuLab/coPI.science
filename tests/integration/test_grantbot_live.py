@@ -553,7 +553,7 @@ async def test_a_live_opportunity_flows_through_to_a_drafted_funding_message(
         assert message.phase == "new_post" and message.visibility == "public", (
             f"funding post stored with phase={message.phase!r} "
             f"visibility={message.visibility!r}; funding threads are open to all and the "
-            "Phase 2 scan only sees top-level public posts"
+            "phase 2 scan only sees top-level public posts"
         )
         assert message.channel_name == record["channel"]
         assert message.channel_id == f"local:{record['channel']}"
@@ -1189,7 +1189,7 @@ async def test_a_long_funding_post_becomes_one_db_row_per_slack_message(
     )
     assert all(r.phase == "new_post" for r in rows), (
         "a chunk was stored as a thread_reply; every chunk is a top-level post, which is "
-        "what Phase 2 scans"
+        "what phase 2 scans"
     )
     assert await _claimed_numbers(db_session) == {opportunity["number"]}, (
         "the FOA was not claimed, so a later run would post it again"
@@ -1363,7 +1363,7 @@ def test_the_announcement_detector_only_matches_first_person_openers():
     `_ANNOUNCEMENT_PHRASES` in funding_rules.py is anchored on an explicit first-person
     subject — `I'll <verb>`, `I will <verb>`, `I'm going to <verb>`. Slack prose drops
     the subject, and every one of the three replies below (verbatim
-    `claude-sonnet-4-6` output from the live test, 2026-07-30) announces a spin-off and
+    live-model output) announces a spin-off and
     is NOT flagged. The consequence is the incident the rule was written for: an agent
     replies "will spin up a thread", never does, and the funding thread dies with an
     announcement instead of a contribution.

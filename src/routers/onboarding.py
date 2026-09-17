@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -13,9 +13,10 @@ from src.dependencies import get_current_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
 from src.services.profile_export import (
-    PRIVATE_PROFILES_DIR,
+    _private_profiles_dir,
     export_private_profile,
 )
+from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ async def save_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile edits from onboarding."""
+    form = await request.form()
 
     # Email is required at onboarding. Validate before persisting anything so a
     # bad value rejects the whole submission (mirrors profile_save on /profile).
@@ -144,14 +146,22 @@ async def save_profile(
     if not profile:
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
+        await db.flush()
 
-    profile.research_summary = research_summary
-    profile.techniques = parse_list(techniques)
-    profile.experimental_models = parse_list(experimental_models)
-    profile.disease_areas = parse_list(disease_areas)
-    profile.key_targets = parse_list(key_targets)
-    profile.keywords = parse_list(keywords)
-    profile.profile_version = (profile.profile_version or 0) + 1
+    if "research_summary" in form:
+        profile.research_summary = research_summary
+    if "techniques" in form:
+        profile.techniques = parse_list(techniques)
+    if "experimental_models" in form:
+        profile.experimental_models = parse_list(experimental_models)
+    if "disease_areas" in form:
+        profile.disease_areas = parse_list(disease_areas)
+    if "key_targets" in form:
+        profile.key_targets = parse_list(key_targets)
+    if "keywords" in form:
+        profile.keywords = parse_list(keywords)
+    profile.synthesis_validated = None
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.commit()
 
@@ -218,7 +228,7 @@ async def private_profile(
         )
         agent_reg = agent_result.scalar_one_or_none()
         if agent_reg:
-            disk_path = PRIVATE_PROFILES_DIR / f"{agent_reg.agent_id}.md"
+            disk_path = _private_profiles_dir() / f"{agent_reg.agent_id}.md"
             if disk_path.exists():
                 content = disk_path.read_text(encoding="utf-8").strip()
 
@@ -252,11 +262,24 @@ async def private_profile(
 @router.post("/private-profile")
 async def save_private_profile(
     request: Request,
+    # Form(""), not Form(...): an omitted field must still be distinguished
+    # from a present-but-empty one, but FastAPI's Form() dependency collapses
+    # both to the SAME default no matter what that default is -- see the
+    # agent_page.py twin for the full investigation. `form` below is the raw
+    # Starlette FormData, which does distinguish them. The browser's textarea
+    # always submits the field, so this is not reachable from the UI; it
+    # protects any other client.
     content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save the private profile from onboarding step 4."""
+    form = await request.form()
+    if "content" not in form:
+        raise HTTPException(
+            status_code=400,
+            detail="content is required (send an empty string to clear the private profile)",
+        )
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
     )
@@ -281,8 +304,13 @@ async def save_private_profile(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
-    # Export to disk
-    export_private_profile(current_user, profile, agent_id_for_export)
+    # Export to disk. remove_if_empty=True: this is a genuine PI-initiated
+    # clear (blank content.strip()), one of the two real clear paths — unlike
+    # run_profile_pipeline, which must never delete a disk-only private
+    # profile it did not itself create.
+    export_private_profile(
+        current_user, profile, agent_id_for_export, remove_if_empty=True
+    )
 
     # Record revision
     from src.services.profile_versioning import create_revision
@@ -325,7 +353,7 @@ async def retry_pipeline(
     POST-only: this creates and commits a Job, so over GET it was a
     cross-site request-forgery target (a forged navigation could enqueue work
     on the victim's behalf). SameSite=lax on the session cookie blocks forged
-    cross-site POSTs, so the "Try Again" control posts this form. (SEC-8)
+    cross-site POSTs, so the "Try Again" control posts this form.
     """
     job = Job(
         type="generate_profile",

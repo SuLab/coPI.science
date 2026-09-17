@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,8 @@ _MASK = "***REDACTED***"
 
 # Field-name substrings that mark a setting whose ENTIRE value is a credential. Any
 # such field with a non-empty value is masked in repr()/str() of the Settings object
-# so an accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
+# so an accidental log line or `repr(settings)` can't dump every secret in the
+# config.
 #
 # Deliberately NOT hinted: "url"/"uri". Those fields carry a credential only inside
 # their userinfo or query string, and blanking base_url or database_url wholesale
@@ -96,7 +97,9 @@ def _redact_url_credentials(value: str) -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # Deployment environment. "development" (default) tolerates the insecure
     # default SECRET_KEY; any other value (e.g. "production") fails fast.
@@ -171,6 +174,19 @@ class Settings(BaseSettings):
     # Email notification scheduling
     notification_check_interval: int = 300  # seconds (5 minutes)
     inbound_poll_interval: int = 60  # seconds
+    # How long an unanswered proposal_review reminder stays outstanding before it is marked
+    # 'expired' (src/models/email_notification.py's status comment already documents this value
+    # as valid). Chosen to match FREQUENCY_INTERVALS'
+    # "biweekly" cadence — long enough that a PI on any frequency has had at least one more
+    # regularly-scheduled nudge before being written off.
+    #
+    # Also the bound the inbound poller enforces on its end:
+    # email_inbound.process_inbound_email refuses ANY reply -- proposal_review or
+    # new_proposal, the category is not distinguished on this path -- whose
+    # EmailNotification.sent_at is older than this many days, independent of the row's
+    # `status`. A `review+<token>@...` address is otherwise a bearer credential with no
+    # expiry of its own.
+    email_notification_expiry_days: int = 14
 
     # Slack bot tokens — one per agent
     slack_bot_token_su: str = ""
@@ -259,7 +275,7 @@ class Settings(BaseSettings):
     slack_bot_token_wliu: str = ""
     slack_bot_token_xiao: str = ""
     slack_bot_token_yang: str = ""
-    # Onboarding batch 3 — Schultz reunion attendees (2026-06-06)
+    # Onboarding batch 3 — Schultz reunion attendees
     slack_bot_token_mcnamara: str = ""
     slack_bot_token_watanabe: str = ""
     slack_bot_token_summerer: str = ""
@@ -306,6 +322,14 @@ class Settings(BaseSettings):
     # Analytics
     posthog_api_key: str = ""
 
+    # Root directory for agent public/private/memory profile files on disk. Shared
+    # by src/agent/agent.py, src/agent/tools.py, src/routers/agent_page.py and
+    # src/services/profile_export.py rather than each hardcoding a CWD-relative
+    # `Path("profiles")` literal, so on a host where profiles/ is root-owned (see
+    # CLAUDE.md's UID 10001 precondition) a write under any of those paths fails
+    # loudly rather than silently on just one. Default unchanged.
+    profiles_dir: str = Field(default="profiles", validation_alias="COPI_PROFILES_DIR")
+
     # LLM models
     llm_profile_model: str = "claude-opus-5"
     # Agent-turn models, tiered by phase. llm_agent_model is the default for
@@ -343,7 +367,7 @@ class Settings(BaseSettings):
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
     daily_post_cap: int = 5                 # max new top-level posts per agent per day
-    phase5_spontaneous_interval: float = 20.0  # minutes before allowing a spontaneous Phase 5
+    phase5_spontaneous_interval: float = 20.0  # minutes before allowing a spontaneous Phase 5 post
     phase5_spontaneous_interval_max_multiplier: int = 5  # cap for skip-backoff stretch
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
@@ -352,7 +376,6 @@ class Settings(BaseSettings):
     # agents that share at least one cohort with it. When False (default), the
     # roster is all-vs-all as before. Humans, PI-created private channels and
     # already-open threads always pass the gate.
-    # See .notes/cohort-system-v2.md §5.
     cohort_isolation_enabled: bool = False
     # What happens to an agent that belongs to no cohort while isolation is on:
     #   "open"     — unrestricted (default). Enabling isolation is then safe even
@@ -363,14 +386,12 @@ class Settings(BaseSettings):
     #                (_cohort_preflight): with zero cohorts defined this policy
     #                would silence the entire roster, so it is refused and
     #                isolation is forced off with an ERROR.
-    # See .notes/cohort-system-v2.md §5.2 / §5.3.
     cohort_default_policy: Literal["open", "isolated"] = "open"
     # Reactive-priority scheduler: after this many consecutive turns given to
     # agents that owe a thread reply, force a normal (proactive) selection so
     # new-conversation formation isn't starved. Default matches
     # active_thread_threshold so the two levers stay in proportion — at the
-    # original 8 a single live pair took 24 of 27 turns. See _select_agent and
-    # .notes/cohort-system-v2.md §10.3.
+    # original 8 a single live pair took most of the turns. See _select_agent.
     max_consecutive_reactive_turns: int = 3
 
     # Load-proportional rate limiter. Replaces the cumulative --budget cap as the
@@ -380,19 +401,17 @@ class Settings(BaseSettings):
     # A rate self-heals — a throttled agent is eligible again as the window slides
     # — where a cumulative cap benches permanently, and, because _rebuild_state
     # restores api_call_count from llm_call_logs, benches permanently ACROSS
-    # RESTARTS. That is what took the blackbird hub off the air for 161 turns.
+    # RESTARTS. A hub bench of that kind can take a hub off the air for many turns.
     #
-    # Calibrated against run 4f1e8395: a spoke ran ~0.27 calls/10min and the hub
-    # ~2.6, so 8 leaves a spoke ~30x headroom while tripping a runaway (back-to-back
-    # calls) in ~25s. Lower this to tighten it.
+    # Calibrated so a spoke has wide headroom under normal load while a runaway
+    # (back-to-back calls) still trips the limit within seconds. Lower this to
+    # tighten it.
     #
     # The hub's ceiling depends on active_thread_threshold, which _agent_load
     # clamps to. At the IN-CODE default of 3 a hub gets at most 3 * 8 = 24 calls
-    # per window (and 3x the selection weight of an idle spoke). The deployed
-    # blackbird .env raises active_thread_threshold to 12, which is where the
-    # often-quoted 96/window and 12x weight come from — a fresh checkout gets
-    # neither. Raise active_thread_threshold, not this number, to widen a hub.
-    # See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2 / §5.
+    # per window (and 3x the selection weight of an idle spoke). Raising
+    # active_thread_threshold in a deployment's own config raises both proportionally
+    # — raise that, not this number, to widen a hub.
     llm_rate_window_seconds: int = 600
     llm_calls_per_load_per_window: int = 8
 
@@ -400,8 +419,7 @@ class Settings(BaseSettings):
     # migrates the thread into a new collab_private channel instead of posting
     # the PI's guidance text into the origin public thread. Can be set to False
     # to restore the legacy behavior during initial rollout or in an emergency.
-    # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
-    # §"PI Reopens a Proposal".
+    # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md.
     enable_private_refinement: bool = True
 
     def __repr_args__(self):
@@ -411,8 +429,8 @@ class Settings(BaseSettings):
         ``__repr_args__`` (``BaseModel.__str__`` -> ``__repr_str__`` ->
         ``__repr_args__``; verified against pydantic 2.13 and asserted in
         tests/unit/test_config_secret_redaction.py), so masking here closes the
-        only described leak path for SEC-19 (an accidental log/repr of the
-        settings object) with no change to how any field is *read*. Fields keep
+        only known leak path (an accidental log/repr of the settings object)
+        with no change to how any field is *read*. Fields keep
         their plain ``str`` type, avoiding a ``.get_secret_value()`` churn across
         ~130 call sites; a deliberate reader of a specific attribute still gets
         the real value.
@@ -586,7 +604,7 @@ class Settings(BaseSettings):
             "wliu": self.slack_bot_token_wliu,
             "xiao": self.slack_bot_token_xiao,
             "yang": self.slack_bot_token_yang,
-            # Onboarding batch 3 — Schultz reunion attendees (2026-06-06)
+            # Onboarding batch 3 — Schultz reunion attendees
             "mcnamara": self.slack_bot_token_mcnamara,
             "watanabe": self.slack_bot_token_watanabe,
             "summerer": self.slack_bot_token_summerer,

@@ -73,6 +73,27 @@ class TestRejectUngroundedAuthorship:
         assert engine._reject_ungrounded_authorship(engine.agents["good"], None) is None
 
 
+class TestReUngroundedAuthorshipTagScanIsCaseInsensitive:
+    def test_an_all_caps_tag_is_still_resolved_for_the_co_authorship_check(self, engine):
+        text_mixed = (
+            "We co-authored *Desiderata* "
+            "(https://doi.org/10.1093/bioadv/vbag036) with @GoodBot."
+        )
+        text_upper = (
+            "We co-authored *Desiderata* "
+            "(https://doi.org/10.1093/bioadv/vbag036) with @GOODBOT."
+        )
+        reason_mixed = engine._reject_ungrounded_authorship(engine.agents["su"], text_mixed)
+        reason_upper = engine._reject_ungrounded_authorship(engine.agents["su"], text_upper)
+        assert reason_mixed is not None
+        assert reason_upper is not None
+        # The rejection reason embeds the literal tag text ("@GoodBot" vs
+        # "@GOODBOT"), so compare case-insensitively rather than for exact
+        # string equality — the point is that both cases reject, not that the
+        # message text is byte-identical.
+        assert reason_upper.lower() == reason_mixed.lower()
+
+
 class TestProseNamedCoauthors:
     # Audit finding I4: naming the fabricated co-author lab in prose instead
     # of @-tagging it dodged the tagged-lab records check entirely.

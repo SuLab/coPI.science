@@ -101,7 +101,7 @@ def test_delegate_invitation_uses_shared_branding(monkeypatch):
 
 
 def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
-    """PI-chosen pi_name/bot_name must be HTML-escaped in the invite body (SEC-13)."""
+    """PI-chosen pi_name/bot_name must be HTML-escaped in the invite body."""
     from src.config import get_settings
 
     # Hermetic for the same reason as the branding test above: pin the allowlist
@@ -157,6 +157,12 @@ async def test_new_proposal_email_uses_shared_footer(monkeypatch):
 
         async def flush(self):
             pass
+
+        async def execute(self, *a, **k):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+            return _Result()
 
     user = types.SimpleNamespace(id=uuid.uuid4(), email="pi@example.com")
     agent = types.SimpleNamespace(id=uuid.uuid4(), agent_id="su", bot_name="SuBot")

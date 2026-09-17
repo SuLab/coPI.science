@@ -4,8 +4,8 @@
 endpoints *render*. This file covers the two things rendering cannot show:
 
 1. **The arithmetic.** The graph routes slice one long-running simulation into
-   date-bounded **run windows** (``.notes/cohort-system-v2.md`` §1 renamed the
-   concept; the constants live in ``src/routers/public.py``). Three boundaries are
+   date-bounded **run windows** (the constants live in ``src/routers/public.py``).
+   Three boundaries are
    in play and each is tested *at the exact edge*, never at a comfortable value in
    the middle:
 

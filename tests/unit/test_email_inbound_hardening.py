@@ -1,18 +1,20 @@
 """Hardening for inbound email reply processing.
 
-These pin the defects found while investigating the dead prod reply flow
-(2026-08-11): a sender-forged ``Authentication-Results: ... pass`` header
-defeated the SEC-5 anti-spoofing gate, HTML-only replies were silently
-dropped, auto-responders could loop with the help email, the declared
-per-token rate limit was never enforced, and a poison message in the inbound
-bucket was retried forever.
+These pin defects that broke the inbound reply flow: a sender-forged
+``Authentication-Results: ... pass`` header must not defeat the anti-spoofing
+gate, HTML-only replies must not be silently dropped, auto-responders must
+not loop with the help email, the declared per-token rate limit must be
+enforced, and a poison message in the inbound bucket must not be retried
+forever.
 """
 
 import email
 
 import pytest
+from sqlalchemy import select
 
 import src.services.email_inbound as inbound
+from src.models import AgentChannel, EmailNotification
 from src.services.email_inbound import (
     MAX_REPLIES_PER_TOKEN_PER_HOUR,
     _authentication_results_ok,
@@ -21,7 +23,9 @@ from src.services.email_inbound import (
     poll_inbound_emails,
     process_inbound_email,
 )
+from tests import factories
 from tests.factories import SES_PASS_HEADER
+from tests.fakes import FakeSlackClient
 
 
 def _msg(raw: str) -> email.message.Message:
@@ -33,7 +37,7 @@ def _msg(raw: str) -> email.message.Message:
 
 def test_forged_pass_header_below_ses_fail_is_rejected():
     """SES prepends its header on receipt, so a sender-supplied pass sits below
-    it. Merging verdicts across headers let the forged pass win (SEC-5)."""
+    it. Merging verdicts across headers would let the forged pass win."""
     raw = (
         "Authentication-Results: amazonses.com; spf=fail smtp.mailfrom=evil.com; "
         "dkim=none; dmarc=fail header.from=scripps.edu\n"
@@ -118,6 +122,54 @@ def test_plain_text_part_still_wins_over_html():
     assert _extract_reply_body(_msg(raw)) == "3 sounds great"
 
 
+def test_unknown_declared_charset_falls_back_instead_of_raising():
+    raw = (
+        "From: pi@scripps.edu\n"
+        'Content-Type: text/plain; charset="unknown-8bit"\n'
+        "\n"
+        "3 sounds great\n"
+    )
+    body = _extract_reply_body(_msg(raw))
+    assert "3 sounds great" in body
+
+
+def test_a_garbled_but_known_charset_still_decodes_lossily():
+    """Control: a KNOWN charset with genuinely undecodable bytes must still use
+    errors='replace' rather than raising — this pins that the fix didn't remove the
+    existing fallback for the case it always handled correctly."""
+    raw_bytes = (
+        b"From: pi@scripps.edu\n"
+        b'Content-Type: text/plain; charset="utf-8"\n'
+        b"\n"
+        b"3 sounds great \xff\xfe garbled\n"
+    )
+    body = _extract_reply_body(email.message_from_bytes(raw_bytes))
+    assert "3 sounds great" in body
+
+
+def test_a_bytes_to_bytes_codec_charset_falls_back_to_utf8():
+    """`base64` is a real codec name, but a bytes-to-bytes one: `.decode("base64")`
+    raises `LookupError: ... not a text encoding`, not the plain "unknown encoding"
+    LookupError an unrecognized name raises. The guarded decode in _decode_part must
+    catch this shape too, not just codecs.lookup's original probe case."""
+    raw = (
+        b"From: pi@scripps.edu\n"
+        b'Content-Type: text/plain; charset="base64"\n'
+        b"\n"
+        b"3 sounds great\n"
+    )
+    body = inbound._decode_part(email.message_from_bytes(raw))
+    assert "3 sounds great" in body
+
+
+def test_a_nul_containing_charset_falls_back_to_utf8():
+    """A charset value with an embedded NUL raises ValueError from .decode() (not
+    LookupError) — the guarded decode in _decode_part must catch both."""
+    raw = b'From: pi@scripps.edu\nContent-Type: text/plain; charset="utf-8\x00"\n\n3 sounds great\n'
+    body = inbound._decode_part(email.message_from_bytes(raw))
+    assert "3 sounds great" in body
+
+
 # --- Auto-submitted mail is dropped before any processing --------------------
 
 
@@ -189,6 +241,65 @@ async def test_auto_submitted_no_is_not_treated_as_an_auto_reply():
         await process_inbound_email(raw, db=None)
 
 
+# --- Reply token falls back through Cc/Delivered-To/X-Original-To ----------
+
+
+async def test_reply_token_falls_back_to_cc_when_absent_from_to():
+    """A PI who Ccs the reply address instead of (or
+    in addition to) putting it in To must still be recognized -- reaching the
+    token-lookup db.execute (the AttributeError on db=None) is the evidence
+    the fallback found the token, not the early "no token" return.
+    """
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Cc: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_reply_token_falls_back_to_delivered_to_when_absent_from_to_and_cc():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Delivered-To: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_reply_token_falls_back_to_x_original_to_as_a_last_resort():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "X-Original-To: review+sometoken@reply.copi.science\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    with pytest.raises(AttributeError):
+        await process_inbound_email(raw, db=None)
+
+
+async def test_no_reply_token_anywhere_is_still_dropped_without_touching_the_db():
+    raw = (
+        SES_PASS_HEADER
+        + "From: pi@scripps.edu\n"
+        "To: someone-else@scripps.edu\n"
+        "Cc: also-not-it@scripps.edu\n"
+        "\n"
+        "3 great idea\n"
+    ).encode()
+    await process_inbound_email(raw, db=None)  # must not raise
+
+
 # --- The declared per-token rate limit is enforced ---------------------------
 
 
@@ -221,12 +332,24 @@ class _FakeS3:
         self.objects = {k: b"raw email bytes" for k in keys}
         self.copied: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.list_calls: list[dict] = []
 
-    def list_objects_v2(self, Bucket, Prefix, MaxKeys):
-        return {
-            "Contents": [{"Key": k} for k in sorted(self.objects)],
-            "KeyCount": len(self.objects),
-        }
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+        """Real pagination by key order, so a >MaxKeys backlog exercises more than
+        one page — the pre-fix caller never passed ContinuationToken at all, so
+        this stays 100% backward compatible with every existing single-page test."""
+        self.list_calls.append({"ContinuationToken": ContinuationToken})
+        all_keys = sorted(self.objects)
+        start = int(ContinuationToken) if ContinuationToken else 0
+        page = all_keys[start : start + MaxKeys]
+        end = start + len(page)
+        result = {"Contents": [{"Key": k} for k in page], "KeyCount": len(page)}
+        if end < len(all_keys):
+            result["IsTruncated"] = True
+            result["NextContinuationToken"] = str(end)
+        else:
+            result["IsTruncated"] = False
+        return result
 
     def get_object(self, Bucket, Key):
         import io
@@ -289,3 +412,398 @@ async def test_a_transient_failure_is_retried_not_quarantined(monkeypatch):
 
     assert fake.copied == []
     assert "inbound/flaky" in fake.objects  # still there for the next poll
+
+
+async def test_list_objects_v2_is_paginated_across_multiple_pages(monkeypatch):
+    keys = [f"inbound/msg-{i:03d}" for i in range(120)]
+    fake = _FakeS3(keys)
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    processed: list[bytes] = []
+
+    async def _record(raw, db):
+        processed.append(raw)
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert count == 120, (
+        f"only {count}/120 objects were processed — the listing stopped after the first page"
+    )
+    assert len(fake.deleted) == 120
+    assert len(fake.list_calls) >= 3, (
+        f"expected at least 3 pages of 50 for 120 keys, got {len(fake.list_calls)} list_objects_v2 calls"
+    )
+
+
+class _StuckCursorS3:
+    """Always claims IsTruncated with the SAME NextContinuationToken — a buggy or
+    misbehaving S3-compatible endpoint. Without a cursor-repeat guard, poll_inbound_emails
+    would fetch this same page _MAX_S3_LIST_PAGES times."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+        self.calls += 1
+        return {
+            "Contents": [{"Key": "inbound/msg-stuck"}],
+            "IsTruncated": True,
+            "NextContinuationToken": "stuck-token",
+        }
+
+    def get_object(self, Bucket, Key):
+        import io
+
+        return {"Body": io.BytesIO(b"raw email bytes")}
+
+    def delete_object(self, Bucket, Key):
+        pass
+
+
+async def test_a_repeated_continuation_token_stops_pagination(monkeypatch):
+    fake = _StuckCursorS3()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    async def _record(raw, db):
+        pass
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert fake.calls == 2, (
+        "pagination must stop as soon as the continuation token repeats, not loop "
+        "up to _MAX_S3_LIST_PAGES times"
+    )
+    assert count == 1, "the same key fetched across the two (pre-stop) pages must be processed only once"
+
+
+async def test_duplicate_keys_across_pages_are_processed_once(monkeypatch):
+    """De-duplicated independently of the cursor-repeat guard above: S3 listing
+    consistency can hand back the same key on two different (genuinely advancing)
+    pages — each key must still be processed exactly once."""
+    pages = [
+        {"Contents": [{"Key": "inbound/msg-a"}, {"Key": "inbound/msg-b"}],
+         "IsTruncated": True, "NextContinuationToken": "page2"},
+        {"Contents": [{"Key": "inbound/msg-b"}, {"Key": "inbound/msg-c"}],
+         "IsTruncated": False},
+    ]
+    seen_calls: list[dict] = []
+
+    class _OverlapS3:
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+            seen_calls.append({"ContinuationToken": ContinuationToken})
+            return pages[len(seen_calls) - 1]
+
+        def get_object(self, Bucket, Key):
+            import io
+
+            return {"Body": io.BytesIO(b"raw email bytes")}
+
+        def delete_object(self, Bucket, Key):
+            pass
+
+    fake = _OverlapS3()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    processed: list[bytes] = []
+
+    async def _record(raw, db):
+        processed.append(raw)
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert len(seen_calls) == 2, "both pages must still be fetched — dedup happens after listing"
+    assert count == 3, "msg-a, msg-b (once, not twice), msg-c — 3 distinct keys"
+
+
+# --- The LLM-classified rating is coerced to int, rejecting bool ------------
+
+
+class TestCoerceRating:
+    def test_accepts_a_numeric_string(self):
+        assert inbound._coerce_rating("3") == 3
+
+    def test_accepts_a_numeric_string_with_surrounding_space(self):
+        assert inbound._coerce_rating(" 3 ") == 3
+
+    def test_accepts_a_whole_float(self):
+        assert inbound._coerce_rating(3.0) == 3
+
+    def test_accepts_a_whole_float_as_a_string(self):
+        assert inbound._coerce_rating("3.0") == 3
+
+    def test_accepts_a_real_int(self):
+        assert inbound._coerce_rating(3) == 3
+
+    def test_rejects_bool_even_though_bool_is_an_int_subclass(self):
+        assert inbound._coerce_rating(True) is None
+        assert inbound._coerce_rating(False) is None
+
+    def test_rejects_a_fractional_value(self):
+        assert inbound._coerce_rating(2.5) is None
+
+    def test_rejects_unparseable_strings_and_none(self):
+        assert inbound._coerce_rating("abc") is None
+        assert inbound._coerce_rating(None) is None
+
+    def test_passes_through_an_out_of_range_int_unchanged(self):
+        """_coerce_rating only type-coerces; range validation is process_inbound_email's
+        job (see test_an_out_of_range_rating_falls_back_to_the_help_email_path in
+        test_email_inbound_reply_paths.py, which pins what happens to it downstream)."""
+        assert inbound._coerce_rating(7) == 7
+
+
+async def test_classify_reply_coerces_a_string_rating_to_int(monkeypatch):
+    """End-to-end through classify_reply: a model that returns the rating as a numeric
+    string ('3') must come back as int 3, not a string process_inbound_email's own
+    `rating < 1 or rating > 4` guard would TypeError on."""
+    from tests.fakes import FakeAnthropic, text_response
+
+    fake = FakeAnthropic(responses=[
+        text_response('{"category": "review", "rating": "3", "comment": "", "instruction": ""}')
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    result = await inbound.classify_reply("3 sounds great", "A proposal.")
+
+    assert result["rating"] == 3
+    assert isinstance(result["rating"], int) and not isinstance(result["rating"], bool)
+
+
+# --- The retry/terminal split follows the Slack mutation, not the exception ---
+
+
+class _UnhappySlackClient(FakeSlackClient):
+    """Raises one identical exception at a configurable point in the migration.
+
+    ``connect()`` is reached by ``_make_client`` before any Slack write; the first
+    ``invite_to_channel`` happens immediately after ``conversations.create`` has
+    returned a real private channel. Same type, same message, opposite sides of the
+    migration's point of no return.
+    """
+
+    fail_at = "before"
+
+    def connect(self) -> bool:
+        if self.fail_at == "before":
+            raise RuntimeError("slack is unhappy")
+        return True
+
+    def invite_to_channel(self, channel_id, user_ids):
+        if self.fail_at == "after":
+            raise RuntimeError("slack is unhappy")
+        return super().invite_to_channel(channel_id, user_ids)
+
+
+async def _instruction_world(db, *, email_addr, token):
+    owner = await factories.make_user(db)
+    recipient = await factories.make_user(db, email=email_addr)
+    agent = await factories.make_agent(db, user=owner)
+    td = await factories.make_thread_decision(
+        db, agent_a=agent.agent_id, summary_text="A proposal to collaborate."
+    )
+    notification = EmailNotification(
+        user_id=recipient.id,
+        thread_decision_id=td.id,
+        agent_registry_id=agent.id,
+        reply_token=token,
+        category="proposal_review",
+        status="sent",
+    )
+    db.add(notification)
+    await db.flush()
+    return recipient, td, notification
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("fail_at,retried", [("before", True), ("after", False)])
+async def test_the_retry_split_follows_the_slack_mutation_not_the_exception_type(
+    db_session, monkeypatch, fail_at, retried,
+):
+    """What makes a failure terminal is that a Slack channel now exists.
+
+    Both halves raise the *same* ``RuntimeError("slack is unhappy")`` out of
+    ``migrate_public_thread_to_private``; the only difference is where the migration
+    was when it happened. So nothing about the exception can be used to route it, and
+    a handler that routes on type (or that treats "the migration raised" as terminal
+    full stop, which is the pre-fix behaviour) gets exactly one of the two wrong.
+
+    The fact the split is made on is asserted directly: ``created_channels`` is 0 on
+    the retried side and 1 on the terminal side.
+    """
+    inbound._INSTRUCTION_FAILURE_EMAILS_SENT.clear()
+    addr = f"pi.boundary.{fail_at}@scripps.edu"
+    recipient, td, notification = await _instruction_world(
+        db_session, email_addr=addr, token=f"boundary{fail_at}".ljust(48, "b")[:48]
+    )
+    await db_session.commit()
+    run_id = td.simulation_run_id
+
+    mails: list[dict] = []
+
+    def _record(to_email, subject, text_body, reply_to=None):
+        mails.append({"to": to_email, "subject": subject, "body": text_body})
+        return True
+
+    monkeypatch.setattr(inbound, "_send_simple_email", _record)
+
+    made: list[_UnhappySlackClient] = []
+
+    async def _on(*a, **k):
+        return True
+
+    async def _token(db, agent_id):
+        return f"xoxb-fake-{agent_id}"
+
+    def _build(agent_id, bot_token):
+        client = _UnhappySlackClient(agent_id=agent_id, bot_token=bot_token)
+        client.fail_at = fail_at
+        made.append(client)
+        return client
+
+    monkeypatch.setattr("src.services.private_channels._slack_enabled_for_migration", _on)
+    monkeypatch.setattr("src.services.private_channels._get_or_fail_bot_token", _token)
+    monkeypatch.setattr("src.services.private_channels.AgentSlackClient", _build)
+
+    if retried:
+        with pytest.raises(inbound.InstructionApplyFailed):
+            await inbound._handle_instruction(
+                user=recipient, notification=notification, td=td,
+                instruction="focus on X", db=db_session,
+            )
+    else:
+        assert await inbound._handle_instruction(
+            user=recipient, notification=notification, td=td,
+            instruction="focus on X", db=db_session,
+        ) is False
+
+    created = sum(len(c.created_channels) for c in made)
+    assert created == (0 if retried else 1), (
+        "the test's own premise: 'before' must not have created a channel, "
+        "'after' must have"
+    )
+    channels = (await db_session.execute(
+        select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
+    )).scalars().all()
+    assert channels == [], "neither half commits an AgentChannel row"
+    (mail,) = mails
+    assert ("will not be retried" in mail["body"]) is not retried
+    assert ("We'll retry automatically" in mail["body"]) is retried
+
+
+# --- Unbounded in-memory dedup/rate-limit maps are pruned ------------------
+#
+# _RECENT_REPLY_TIMES, _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT,
+# _INSTRUCTION_FAILURE_EMAILS_SENT and _S3_FAILURE_COUNTS are keyed by
+# notification id / sender address / S3 key and never removed, so a
+# long-lived worker process accumulates one entry per key forever.
+#
+# A single 24h window for all four maps is not safe: _HELP_EMAILS_SENT, _STALE_TOKEN_BOUNCES_SENT
+# and _INSTRUCTION_FAILURE_EMAILS_SENT are documented, deliberate LIFETIME
+# caps (MAX_HELP_EMAILS_PER_NOTIFICATION etc. — "per notification"/"per
+# address", not "per day") — pruning them on a 24h clock silently turned them
+# into 24h ROLLING caps, letting a sender who keeps a notification's reply
+# window open (or keeps retrying the same stale token) simply wait out the
+# day and get a fresh budget. Only _RECENT_REPLY_TIMES (an explicitly hourly
+# rate limit) and _S3_FAILURE_COUNTS (bounded in value by
+# MAX_S3_PROCESS_ATTEMPTS and reset on every processing attempt) are safe to
+# prune on a short clock. The three lifetime caps get a 30-day window instead
+# — long enough that no real notification/address exchange is still "live"
+# when it fires, but still eventually reclaims memory for abandoned ones.
+
+
+def test_prune_drops_a_short_window_entry_untouched_for_over_24_hours(monkeypatch):
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [100.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 100.0})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {"s3/stale": 1})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {"s3/stale": 100.0})
+
+    now = 100.0 + 24 * 3600 + 1
+    inbound._prune_stale_entries(now=now)
+
+    assert inbound._RECENT_REPLY_TIMES == {}
+    assert inbound._RECENT_REPLY_TOUCHED == {}
+    assert inbound._S3_FAILURE_COUNTS == {}
+    assert inbound._S3_FAILURE_TOUCHED == {}
+
+
+def test_prune_keeps_a_fresh_entry(monkeypatch):
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"fresh": [100.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"fresh": 100.0})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"fresh": 1})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"fresh": 100.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {})
+
+    now = 100.0 + 3600  # well within the 24h window
+    inbound._prune_stale_entries(now=now)
+
+    assert inbound._RECENT_REPLY_TIMES == {"fresh": [100.0]}
+    assert inbound._RECENT_REPLY_TOUCHED == {"fresh": 100.0}
+    assert inbound._HELP_EMAILS_SENT == {"fresh": 1}
+    assert inbound._HELP_EMAILS_TOUCHED == {"fresh": 100.0}
+
+
+def test_prune_keeps_a_lifetime_cap_entry_older_than_24h_but_within_30_days(monkeypatch):
+    """The three lifetime caps must NOT be weakened into 24h rolling caps: an
+    entry untouched for 2 days (well past 24h, well within 30 days) survives."""
+    two_days = 2 * 24 * 3600
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"live": 3})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"live": 0.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"live@x.com": 3})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"live@x.com": 0.0})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"live": 1})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"live": 0.0})
+
+    inbound._prune_stale_entries(now=float(two_days))
+
+    assert inbound._HELP_EMAILS_SENT == {"live": 3}
+    assert inbound._STALE_TOKEN_BOUNCES_SENT == {"live@x.com": 3}
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {"live": 1}
+
+
+def test_prune_drops_a_lifetime_cap_entry_untouched_for_over_30_days(monkeypatch):
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_SENT", {"stale": 3})
+    monkeypatch.setattr(inbound, "_HELP_EMAILS_TOUCHED", {"stale": 0.0})
+    monkeypatch.setattr(inbound, "_STALE_TOKEN_BOUNCES_SENT", {"stale@x.com": 3})
+    monkeypatch.setattr(inbound, "_STALE_BOUNCES_TOUCHED", {"stale@x.com": 0.0})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {"stale": 1})
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_TOUCHED", {"stale": 0.0})
+
+    now = 30 * 24 * 3600 + 1
+    inbound._prune_stale_entries(now=float(now))
+
+    assert inbound._HELP_EMAILS_SENT == {}
+    assert inbound._HELP_EMAILS_TOUCHED == {}
+    assert inbound._STALE_TOKEN_BOUNCES_SENT == {}
+    assert inbound._STALE_BOUNCES_TOUCHED == {}
+    assert inbound._INSTRUCTION_FAILURE_EMAILS_SENT == {}
+    assert inbound._INSTRUCTION_FAILURE_TOUCHED == {}
+
+
+async def test_poll_inbound_emails_prunes_stale_entries(monkeypatch):
+    fake = _FakeS3([])
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {"s3/stale": 1})
+    monkeypatch.setattr(inbound, "_S3_FAILURE_TOUCHED", {"s3/stale": 1.0})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {"stale": [1.0]})
+    monkeypatch.setattr(inbound, "_RECENT_REPLY_TOUCHED", {"stale": 1.0})
+
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 1.0 + 24 * 3600 + 1)
+    await poll_inbound_emails(_NullSessionFactory())
+
+    assert inbound._RECENT_REPLY_TIMES == {}
+    assert inbound._RECENT_REPLY_TOUCHED == {}
+    assert inbound._S3_FAILURE_COUNTS == {}
+    assert inbound._S3_FAILURE_TOUCHED == {}

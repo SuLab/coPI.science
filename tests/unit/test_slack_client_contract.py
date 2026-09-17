@@ -17,15 +17,19 @@ die, not on a tier that needs a real workspace and four minutes.
 """
 
 import ast
+import threading
 import time
 from pathlib import Path
 
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from src.agent import slack_client as slack_client_module
 from src.agent.slack_client import (
     MAX_PAGES,
     MAX_RETRIES,
+    RATE_LIMIT_WAIT_BUDGET_SECONDS,
+    SHUTTING_DOWN,
     SLACK_MAX_TEXT_CHARS,
     SLACK_PAGE_LIMIT,
     AgentSlackClient,
@@ -36,6 +40,12 @@ from src.agent.slack_client import (
     split_for_slack,
 )
 from tests.fakes import RecordingSlackClient, _SlackResponse, slack_error
+
+# Captured before the module-level `_no_real_sleep` autouse fixture below ever
+# monkeypatches `time.sleep` to a no-op, so the abort-latency test below can
+# restore genuine sleeping for the one test that needs real wall-clock time to
+# pass or fail meaningfully.
+_REAL_SLEEP = time.sleep
 
 
 def _client(fake, *, visibility_lookup=None) -> AgentSlackClient:
@@ -179,7 +189,216 @@ def test_retry_after_header_is_honoured(monkeypatch):
         errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
     )
     _client(fake).post_message("general", "hi")
-    assert slept == [17], f"slept {slept}, expected Slack's Retry-After of 17"
+    # The sleep is sliced into <=1s chunks so a shutdown can
+    # interrupt it promptly, so it is a list of one-second slices
+    # rather than one call carrying the full duration.
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 17, f"slept {slept}, expected Slack's Retry-After of 17"
+
+
+def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
+    """A non-integer Retry-After (HTTP-date, float string, negative) must not raise ValueError
+    *inside* the `except SlackApiError:` block, escaping post_message's `except SlackApiError` entirely
+    and crashing the turn — exactly when Slack is already throttling us."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.20"}},
+        errors={"chat_postMessage": [
+            slack_error("ratelimited", retry_after="Wed, 21 Oct 2015 07:28:00 GMT")
+        ]},
+    )
+    assert _client(fake).post_message("general", "hi") is not None
+    # A past-dated HTTP-date is unusable, so parse_retry_after must fall back to the caller's
+    # `default` (5.0 here) rather than compute 0.0 — a zero backoff is a hot
+    # retry against an API that just throttled us.
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 5.0
+
+
+def test_a_huge_retry_after_is_capped(monkeypatch):
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.21"}},
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after="99999999")]},
+    )
+    _client(fake).post_message("general", "hi")
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 30.0
+
+
+def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.22"}},
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after="-5")]},
+    )
+    _client(fake).post_message("general", "hi")
+    # Same as above: a negative header is not a valid backoff, so the caller's default wins.
+    # The point of this test is that nothing raises and `time.sleep` gets a sane float.
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 5.0
+
+
+def test_a_60s_retry_after_is_honoured_across_multiple_throttled_attempts(monkeypatch):
+    """`Retry-After: 60` used to be indistinguishable from a dropped post — the
+    old fixed `MAX_RETRIES = 3` exhausted after three 30s-capped sleeps (90s total) even
+    though Slack asked for only three real waits' worth of patience. The wait budget
+    (180s) must let this succeed instead of raising."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.30"}},
+        errors={"chat_postMessage": [
+            slack_error("ratelimited", retry_after=60),
+            slack_error("ratelimited", retry_after=60),
+            slack_error("ratelimited", retry_after=60),
+        ]},
+    )
+    out = _client(fake).post_message("general", "hi")
+    assert out is not None, "a budget-honouring retry should have succeeded, not exhausted"
+    assert out["ts"] == "1.30"
+    assert len(fake.calls_to("chat_postMessage")) == 4
+    # Each 60s header is capped to MAX_RETRY_AFTER (30s) per sleep, as before.
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 90.0
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS
+
+
+def test_a_persistently_short_retry_after_exhausts_at_the_attempt_ceiling(monkeypatch):
+    """A 1s header forever must still give up eventually (never spin) — bounded by
+    MAX_RETRIES, not by the (much larger) wait budget, since the cumulative sleep never
+    gets close to it."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after=1)] * 50})
+    assert _client(fake).post_message("general", "hi") is None
+    assert len(fake.calls_to("chat_postMessage")) == MAX_RETRIES
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS
+
+
+def test_exhaustion_error_states_how_long_was_waited(monkeypatch):
+    """The exhaustion message is the only diagnostic an operator sees in the logs for a
+    dropped-to-DB-only post; it must say how long the client actually waited, not just
+    that it gave up."""
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    fake = RecordingSlackClient(
+        errors={"conversations_history": [slack_error("ratelimited", retry_after=1)] * 50})
+    c = _client(fake)
+    from slack_sdk.errors import SlackApiError
+    with pytest.raises(SlackApiError) as exc_info:
+        c._call_with_retry(fake.conversations_history, channel="C_GENERAL")
+    assert "waited" in str(exc_info.value).lower()
+    assert "s" in str(exc_info.value)  # a seconds figure is present
+
+
+def test_call_with_retry_aborts_before_attempt_zero_when_already_shutting_down(monkeypatch):
+    """A call that is still queued (or just hasn't started yet) when shutdown
+    is signalled must not make its first attempt regardless — `_call_with_retry`
+    must not only check `SHUTTING_DOWN` inside the `except SlackApiError`
+    retry-sleep branch, or attempt 0 always runs a full network round trip
+    even when the process has already decided to exit. Checking the event
+    before attempt 0 means that work aborts immediately with zero Slack calls
+    made.
+    """
+    SHUTTING_DOWN.set()
+    try:
+        fake = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
+        c = _client(fake)
+        with pytest.raises(SlackApiError) as exc_info:
+            c._call_with_retry(fake.chat_postMessage)
+        assert exc_info.value.response.get("error") == "shutting_down"
+        assert fake.calls_to("chat_postMessage") == [], (
+            "no network round trip should be made once shutdown was already signalled"
+        )
+    finally:
+        SHUTTING_DOWN.clear()
+
+
+def test_a_retry_sleep_aborts_within_a_second_of_shutdown_being_set(monkeypatch):
+    """A worker thread sleeping through a
+    Retry-After backoff must not hold interpreter shutdown open for the whole
+    (up to 180s) wait budget. `_call_with_retry` sleeps in <=1s slices and
+    checks `SHUTTING_DOWN` between them, so once shutdown is signalled the
+    sleeping thread aborts within about a second, raising `SlackApiError`
+    rather than finishing out a 30s Retry-After.
+
+    Restores real `time.sleep` (the module-level `_no_real_sleep` fixture
+    otherwise makes it a no-op) because this test's assertion is about actual
+    elapsed wall-clock time.
+    """
+    monkeypatch.setattr(time, "sleep", _REAL_SLEEP)
+    SHUTTING_DOWN.clear()
+    try:
+        fake = RecordingSlackClient(
+            errors={"chat_postMessage": [slack_error("ratelimited", retry_after=30)] * 50})
+        c = _client(fake)
+        outcome: dict = {}
+
+        def run():
+            try:
+                c._call_with_retry(fake.chat_postMessage)
+            except Exception as exc:
+                outcome["exc"] = exc
+
+        t = threading.Thread(target=run)
+        start = time.monotonic()
+        t.start()
+        _REAL_SLEEP(0.05)  # let the thread get into its first 1s sleep slice
+        SHUTTING_DOWN.set()
+        t.join(timeout=3.0)
+        elapsed = time.monotonic() - start
+
+        assert not t.is_alive(), "the retry thread did not abort promptly on shutdown"
+        assert elapsed < 2.0, f"took {elapsed:.2f}s to abort after SHUTTING_DOWN was set"
+        assert isinstance(outcome.get("exc"), SlackApiError)
+        assert "shutting down" in str(outcome["exc"]).lower()
+    finally:
+        SHUTTING_DOWN.clear()
+
+
+def test_post_one_handles_a_shutdown_abort_without_an_attributeerror(monkeypatch):
+    """Every ``except
+    SlackApiError as exc:`` handler in this module reads
+    ``exc.response.get("error")`` unconditionally — a plain
+    ``SlackApiError("shutting down", response=None)`` broke that contract and
+    turned a clean shutdown into an ``AttributeError`` escaping ``_post_one``
+    instead of its documented "returns None on a handled failure" behaviour.
+    ``SlackShuttingDown`` carries a real dict response so the existing handler
+    just falls through to its generic branch."""
+    monkeypatch.setattr(time, "sleep", _REAL_SLEEP)
+    SHUTTING_DOWN.clear()
+    try:
+        fake = RecordingSlackClient(
+            errors={"chat_postMessage": [slack_error("ratelimited", retry_after=30)] * 50})
+        c = _client(fake)
+        outcome: dict = {}
+
+        def run():
+            try:
+                outcome["result"] = c._post_one(
+                    "C_GENERAL", "general", "hello", None,
+                    may_raise_thread_not_found=False,
+                )
+            except Exception as exc:
+                outcome["exc"] = exc
+
+        t = threading.Thread(target=run)
+        t.start()
+        _REAL_SLEEP(0.05)
+        SHUTTING_DOWN.set()
+        t.join(timeout=3.0)
+
+        assert not t.is_alive()
+        assert "exc" not in outcome, (
+            f"_post_one must not let an exception escape, got {outcome.get('exc')!r}"
+        )
+        assert outcome.get("result") is None
+    finally:
+        SHUTTING_DOWN.clear()
 
 
 # --- what actually goes on the wire ------------------------------------------------
@@ -554,6 +773,111 @@ def test_the_page_walk_is_bounded_even_if_slack_never_repeats_a_cursor():
         _client(fake).list_channels()
     assert fake.n == MAX_PAGES
     assert len(exc.value.partial) == MAX_PAGES
+
+
+def test_the_private_wait_budget_kwarg_never_reaches_the_slack_method():
+    """`_wait_budget` is `_call_with_retry`/`_api`'s own seam for `_paginate` — it must
+    never be forwarded into the kwargs a slack_sdk method receives."""
+    seen: dict = {}
+
+    def fake_method(**kwargs):
+        seen.update(kwargs)
+        return {"ok": True}
+
+    c = _client(RecordingSlackClient())
+    c._call_with_retry(fake_method, _wait_budget=5.0, channel="C_GENERAL")
+    assert "_wait_budget" not in seen
+    assert seen == {"channel": "C_GENERAL"}
+
+
+def test_a_single_call_with_no_wait_budget_override_is_unchanged(monkeypatch):
+    """A caller that never touches `_wait_budget` (i.e. everything except
+    `_paginate`) keeps using the module default, exactly as before this seam
+    existed."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after=17)]},
+    )
+    _client(fake).post_message("general", "hi")
+    assert all(s <= 1.0 for s in slept)
+    assert sum(slept) == 17.0
+    assert len(fake.calls_to("chat_postMessage")) == 2
+
+
+def test_pagination_total_wait_is_bounded_by_the_listing_budget_not_per_page(monkeypatch):
+    """Every page must not get its own full `RATE_LIMIT_WAIT_BUDGET_SECONDS`,
+    or a listing that stays throttled across many pages could block for
+    MAX_PAGES * that budget. `_paginate` owns one listing-level budget shared
+    across all its pages.
+
+    Uses a fake monotonic clock that only advances on `time.sleep` (which the
+    module-level `_no_real_sleep` fixture would otherwise make free) so the
+    listing deadline is exercised deterministically and fast, without a real
+    multi-second sleep.
+    """
+    monkeypatch.setattr(slack_client_module, "PAGINATION_WAIT_BUDGET_SECONDS", 0.2)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+
+    class _RateLimitedEveryOtherPage:
+        """Two 429s (0.05s Retry-After each) before every page's success, forever —
+        an endless cursor that never stops on its own, standing in for a
+        listing Slack keeps throttling."""
+
+        def __init__(self):
+            self.calls = 0
+            self._fails_left = 2
+            self.page_n = 0
+
+        def conversations_list(self, **kwargs):
+            self.calls += 1
+            if self._fails_left > 0:
+                self._fails_left -= 1
+                raise slack_error("ratelimited", retry_after=0.05)
+            self._fails_left = 2
+            self.page_n += 1
+            return _SlackResponse({
+                "ok": True,
+                "channels": [{"name": f"c{self.page_n}", "id": f"C{self.page_n}"}],
+                "response_metadata": {"next_cursor": f"cur{self.page_n}"},
+            })
+
+    fake = _RateLimitedEveryOtherPage()
+    c = _client(fake)
+    with pytest.raises(SlackListingIncomplete):
+        c._paginate("conversations_list", "channels")
+    # If the bug were still here, exhausting this fake's endless throttle would take
+    # up to MAX_PAGES pages, each independently allowed to sleep up to its own
+    # (unrelated, much larger) per-call budget — clock["t"] would climb well past the
+    # listing budget. Bounding it near the listing budget confirms the budget is
+    # shared across pages, not reset per page.
+    assert clock["t"] < 2 * 0.2
+    assert fake.page_n < MAX_PAGES
+
+
+def test_a_single_pages_wait_budget_is_capped_at_the_per_call_default(monkeypatch):
+    """PAGINATION_WAIT_BUDGET_SECONDS (600s) is
+    much larger than RATE_LIMIT_WAIT_BUDGET_SECONDS (180s), and page 0 starts
+    with the *entire* listing budget as its remaining allowance — so a lone
+    first page must not be given ~600s instead of the per-call
+    180s default. Each page's `_wait_budget` must be capped at
+    RATE_LIMIT_WAIT_BUDGET_SECONDS regardless of how much listing budget
+    remains."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = SequencedWebClient(sequences={"conversations_list": [
+        slack_error("ratelimited", retry_after=200),
+    ] * 50})
+    c = _client(fake)
+    from slack_sdk.errors import SlackApiError
+    with pytest.raises(SlackApiError):
+        c._paginate("conversations_list", "channels")
+    assert sum(slept) <= RATE_LIMIT_WAIT_BUDGET_SECONDS, (
+        f"a single page slept {sum(slept)}s, above the {RATE_LIMIT_WAIT_BUDGET_SECONDS}s "
+        "per-call cap — the listing's much larger budget leaked into page 0"
+    )
 
 
 def test_exclude_archived_defaults_to_false_because_an_archived_channel_owns_its_name():
@@ -1005,3 +1329,50 @@ def test_an_unconnected_client_raises_rather_than_calling_a_missing_endpoint():
     c = AgentSlackClient(agent_id="su", bot_token="xoxb-test")
     with pytest.raises(SlackNotConnected):
         c._api("auth_test")
+
+
+def test_resolve_user_name_reads_the_nested_profile_display_name():
+    """Slack's users.info nests display_name under `user.profile`, not at the top level (V7d) — the
+    top-level object only carries `name`/`real_name`, which is exactly what agent_page.py's own
+    consumer of the same shape reads. The dead top-level branch meant every resolution silently fell
+    through to real_name/user_id."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name",
+            "profile": {"display_name": "Display Name"},
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Display Name"
+
+
+def test_resolve_user_name_falls_back_to_real_name_with_no_display_name():
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name", "profile": {},
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Real Name"
+
+
+def test_resolve_user_name_tolerates_a_null_profile():
+    """Type-substitution sibling case: `dict.get(k, {})` returns the actual value —
+    `None`, not the default `{}` — when Slack sends the key present with a null value
+    (`"profile": null`). The old chained `.get("profile", {}).get("display_name")` then raised
+    `AttributeError` on `None`, which the surrounding `except SlackApiError` does not catch, so it
+    escaped into simulation.py's callers."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name", "profile": None,
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Real Name"
+
+
+def test_is_bot_user_tolerates_a_null_user_object():
+    """Same type-substitution class one screen up: `info.get("user", {})` is `None`, not `{}`,
+    when Slack sends `"user": null` — `is_bot_user`'s sibling chained `.get("is_bot", False)`
+    would raise `AttributeError` the same way `resolve_user_name` did."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": None}},
+    )
+    assert _client(fake).is_bot_user("U123") is False

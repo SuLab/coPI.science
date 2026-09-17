@@ -1,4 +1,4 @@
-"""The one-time memory sweep for issue #29."""
+"""The one-time memory sweep for ungrounded authorship claims."""
 
 from pathlib import Path
 

@@ -63,8 +63,16 @@ by **reusing the existing schema** wherever possible.
    float, which cannot hold microsecond precision at current epoch magnitudes)
    and strictly advance; the high-water mark is seeded at rebuild from
    `max(posted_at)` so minted ids sort after restored history. This preserves
-   `posted_at = float(ts)` ordering. Three processes mint into the same run — the
-   engine, the web app and GrantBot — so each minter also owns a **writer slot**:
+   `posted_at = float(ts)` ordering. Five writer-slot claims exist in `src/agent/ids.py`:
+   the engine's own minter (`WRITER_ENGINE` = 0), the engine process's module-default minter used for
+   PI DMs (`WRITER_ENGINE_AUX` = 3), the web app (`WRITER_WEB` = 1), GrantBot (`WRITER_GRANTBOT` = 2),
+   and the worker (`WRITER_WORKER` = 4, only reachable once `ENABLE_INBOUND_EMAIL` is on). A sixth
+   claim lives outside that module: the one-shot duplicate remediation script reserves
+   `REMEDIATION_WRITER_SLOT = 99` (`scripts/migrate/remediate_duplicates.py:132`) so the ids it
+   re-mints cannot collide with any running process's residue class — it validates at runtime that
+   99 is not among the slots `ids.py` hands out. Count six when reasoning about collisions, not
+   five (issue #21 V11-h). Each minter also owns a
+   **writer slot**:
    ids are quantized to `WRITER_SLOT_MODULUS` (100 µs) and the writer id occupies
    the low microsecond digits, giving every writer its own residue class. Without
    this, two processes minting in the same microsecond produce the identical id,

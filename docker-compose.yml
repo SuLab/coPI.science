@@ -17,6 +17,8 @@ services:
 
   app:
     build: .
+    # dev only: the prod image runs as UID 10001 (Dockerfile); the dev bind-mount is owned by the host user, so run as root here
+    user: "0:0"
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8001:8000"
@@ -31,6 +33,8 @@ services:
 
   worker:
     build: .
+    # dev only: the prod image runs as UID 10001 (Dockerfile); the dev bind-mount is owned by the host user, so run as root here
+    user: "0:0"
     command: python -m src.worker.main
     env_file: .env
     volumes:
@@ -45,6 +49,8 @@ services:
 
   agent:
     build: .
+    # dev only: the prod image runs as UID 10001 (Dockerfile); the dev bind-mount is owned by the host user, so run as root here
+    user: "0:0"
     command: python -m src.agent.main
     # On SIGTERM the engine finishes the current turn and flushes buffered
     # messages to Postgres (the durable store). The 10s default can cut that
@@ -64,6 +70,8 @@ services:
 
   grantbot:
     build: .
+    # dev only: the prod image runs as UID 10001 (Dockerfile); the dev bind-mount is owned by the host user, so run as root here
+    user: "0:0"
     command: python -m src.agent.grantbot scheduler --run-hour 8 --max-per-channel 1
     env_file: .env
     volumes:

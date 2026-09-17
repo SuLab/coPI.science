@@ -13,7 +13,7 @@ def esc(value: object) -> str:
     User-controlled strings (ORCID display names, PI-chosen bot/pi names,
     LLM-written proposal summaries) are interpolated into HTML email bodies via
     f-strings. Without escaping, a name like ``<img src=x onerror=...>`` injects
-    markup into the recipient's email (audit SEC-13). Always wrap such values in
+    markup into the recipient's email. Always wrap such values in
     ``esc()`` in HTML contexts; plain-text bodies don't need it.
     """
     return html.escape("" if value is None else str(value))
@@ -111,7 +111,7 @@ def send_delegate_invitation(
 
     subject = f"{clean_subject(pi_name)} invited you to join their lab on CoPI"
 
-    # HTML-escaped copies for the HTML body (SEC-13). Plain-text body below uses
+    # HTML-escaped copies for the HTML body. Plain-text body below uses
     # the raw values — no markup interpretation there.
     pi_html = esc(pi_name)
     bot_html = esc(bot_name)
@@ -236,7 +236,7 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
             "            <li><strong>Give instructions</strong> to refine it, and your agent re-engages.</li>"
         )
     # HTML-escaped greeting for the HTML body (the name is the ORCID display
-    # name, i.e. user-controlled) (SEC-13).
+    # name, i.e. user-controlled).
     greeting_html = f"Hi {esc(greeting_name)}," if greeting_name else "Hi there,"
 
     subject = "Welcome to CoPI — your research collaboration agent"

@@ -13,11 +13,8 @@
 #     ./scripts/mutate_slack_mirror.sh
 #
 # ---------------------------------------------------------------------------------------
-# CONVERTED 2026-08-04, when live workspace credentials first became available. Until then
-# this script edited src/ IN PLACE via a .mutbak copy, and could not be run even once — so
-# it was left alone deliberately, on the grounds that rewriting a measurement harness you
-# cannot execute converts a known weakness into an unknown one. All four defects its own
-# header listed are now fixed, and the result was run three times:
+# This harness never edits src/ in place. Isolation model, same shape as the other two
+# mutation harnesses:
 #
 #   1. the tree is copied into the container's /tmp and the COPY is mutated, with pytest
 #      run from the copy as its working directory;
@@ -33,9 +30,8 @@
 #      indistinguishable from a real kill.
 #
 # S4 is the inert control and MUST SURVIVE — a tier without one scores 100% precisely when
-# it is broken. mutate_system.sh once printed "killed 6/6" beside "inert controls: 0/4
-# survived" because its log directory did not exist and every redirect failed; the inert
-# control was the only signal. Hence the mkdir -p below.
+# it is broken and every redirect into a missing log directory fails closed as a "kill".
+# Hence the mkdir -p below.
 # ---------------------------------------------------------------------------------------
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

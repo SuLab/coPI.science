@@ -2,7 +2,6 @@
 
 Revision ID: 0020
 Revises: 0019
-Create Date: 2026-07-20 00:00:00.000000
 
 DMs never entered the shared message log, so they had no durable home. This
 table stores them so a PI can DM their bot (standing instructions, questions)

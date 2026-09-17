@@ -2,6 +2,10 @@ services:
   postgres:
     image: postgres:15
     restart: unless-stopped
+    # Decision D24: no mem_limit/cpus here. A cgroup mem cap on a ~2.3 GB
+    # database also caps its page cache, and an OOM-killed backend restarts
+    # the whole cluster -- worse than the failure mode caps elsewhere guard
+    # against.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-copi}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -22,10 +26,39 @@ services:
         awslogs-create-group: "true"
         awslogs-region: ${AWS_REGION:-us-east-2}
 
+  migrate:
+    build:
+      context: .
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-copi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-copi}
+      SECRET_KEY: ${SECRET_KEY:?Set a strong random SECRET_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      # Same knob run_migration.sh already reads (alembic/env.py:66) — a
+      # routine `alembic upgrade head` here should never need to wait long,
+      # but give it the same override surface as the gated runbook.
+      ALEMBIC_LOCK_TIMEOUT_MS: ${ALEMBIC_LOCK_TIMEOUT_MS:-10000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: /copi/migrate
+        tag: migrate
+        awslogs-create-group: "true"
+        awslogs-region: ${AWS_REGION:-us-east-2}
+
   app:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 384m
+    cpus: 1.0
     command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
     expose:
       - "8000"
@@ -42,6 +75,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen(\\\"http://127.0.0.1:8000/api/health\\\")\""]
       interval: 30s
@@ -60,6 +95,8 @@ services:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
     command: ["python", "-m", "src.worker.main"]
     env_file: .env
     environment:
@@ -70,9 +107,16 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
     volumes:
       - ./profiles:/app/profiles
+      # No ./prompts bind mount here: prompts/ is baked into the image by the
+      # Dockerfile's `COPY . .`, and prompt text must never be edited on the
+      # host without a rebuild, so a bind mount would silently shadow the
+      # image's prompts with stale host-side text. A few other services do
+      # bind-mount prompts/ as a stated residual, not a pattern to extend.
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     logging:
       driver: awslogs
       options:
@@ -84,6 +128,18 @@ services:
   agent:
     build:
       context: .
+    # 768m is a measured ceiling with headroom over the agent process's real
+    # working set (peak usage well under half this limit across a full
+    # multi-agent sweep and hundreds of turns, with no growth over time — the
+    # turn loop does not leak). NOT raised (the host also runs the blackbird
+    # stack) and NOT left uncapped the way postgres is: uncapping moves the
+    # choice of OOM victim to the kernel, which on this host can pick
+    # postgres -- the durable store that is deliberately left uncapped.
+    mem_limit: 768m
+    cpus: 1.0
+    # An OOM kill is SIGKILL and skips the shutdown flush that persists the
+    # in-flight turn; the runbook's `docker stop -t 30` relies on this.
+    stop_grace_period: 30s
     command: ["python", "-m", "src.agent.main"]
     env_file: .env
     environment:
@@ -113,6 +169,8 @@ services:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
     command: ["python", "-m", "src.agent.grantbot", "scheduler", "--run-hour", "8", "--max-per-channel", "1"]
     env_file: .env
     environment:
@@ -128,6 +186,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     logging:
       driver: awslogs
       options:
@@ -139,6 +199,22 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    # Memory budget. This comment deliberately does not restate nginx.conf's
+    # shared-memory total as a number — that goes stale the moment a zone is
+    # added, split or resized. Instead it states only the terms nginx.conf
+    # cannot know, and tests/unit/test_nginx_config.py sums the zones from
+    # nginx.conf itself and checks the whole budget against mem_limit:
+    #   nginx-mem-budget: zones + 48 workers x 1.0 MiB + 16 MiB headroom
+    # 48 is the worker count the image's stock `worker_processes auto` picks
+    # on the prod host (this is not ours to pin -- the mounted file is a
+    # conf.d snippet and worker_processes is a main-context directive). 1.0
+    # MiB per worker is the measured RSS for master + workers idle, rounded
+    # up for proxy/request buffers under load; the 16 MiB flat headroom
+    # covers TLS handshake scratch and page-cache churn. 64m OOMs under load.
+    # 1.0 cpus so a hard CFS quota doesn't throttle TLS termination for all
+    # three vhosts even on an idle host.
+    mem_limit: 128m
+    cpus: 1.0
     ports:
       - "80:80"
       - "443:443"
@@ -180,6 +256,11 @@ services:
   certbot:
     image: certbot/certbot:latest
     restart: unless-stopped
+    # certbot's import graph alone exceeds 32 MiB; PID 1 is a shell loop, so
+    # the OOM killer takes the python child silently and renewals stop while
+    # the container still reports "running".
+    mem_limit: 128m
+    cpus: 0.1
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot

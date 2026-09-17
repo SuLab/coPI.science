@@ -10,11 +10,33 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
+from src.config import get_settings
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles")
+# Root for public/private/memory profile files on disk. Resolved from `profiles_dir`
+# (env COPI_PROFILES_DIR, default "profiles") so a host where
+# profiles/ is not writable from the CWD can point this elsewhere.
+#
+# Kept as a module attribute — many tests
+# monkeypatch it directly to a tmp_path — but None by default rather than resolved
+# once at import time, so a later COPI_PROFILES_DIR + get_settings.cache_clear()
+# (what scripts/live_slack_preflight.py's runtime check does) is honored. Every
+# call site below goes through _profiles_dir() instead of the constant directly.
+PROFILES_DIR: Path | None = None
+
+# Named so a caller that needs to force
+# an agent's cache to "cleared" WITHOUT going through a disk read (e.g. when
+# the disk file could not be removed) can do so without duplicating this
+# literal — see SimulationEngine._sync_one_agent_private_profile_from_db.
+DEFAULT_PRIVATE_PROFILE_TEXT = "No private instructions yet."
+
+
+def _profiles_dir() -> Path:
+    """Resolve the profiles directory, live, unless a test has overridden it."""
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets and the
@@ -32,7 +54,7 @@ def _extract_dois(text: str | None) -> set[str]:
 
 
 # Private Channel Rules block — appended to the system prompt when the agent is
-# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
+# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md.
 PRIVATE_CHANNEL_RULES = """
 ## Private channel rules
 You are in a private channel with a small membership (two bots plus up to two
@@ -80,7 +102,7 @@ class Agent:
         # DB-backed ground truth (publications table), pushed in by the
         # simulation engine at roster sync. Unioned into own_publication_dois
         # so the intake guard benefits from the same grounding as the emit
-        # guard. See issue #29.
+        # guard.
         self.db_publication_dois: set[str] = set()
         self._lab_directory: str | None = None
         self.api_call_count: int = 0
@@ -111,7 +133,7 @@ class Agent:
     def public_profile(self) -> str:
         if self._public_profile is None:
             self._public_profile = self._load_file(
-                PROFILES_DIR / "public" / f"{self.agent_id}.md",
+                _profiles_dir() / "public" / f"{self.agent_id}.md",
                 f"# {self.pi_name} Lab\n\nProfile not yet available.",
             )
         return self._public_profile
@@ -120,8 +142,8 @@ class Agent:
     def private_profile(self) -> str:
         if self._private_profile is None:
             self._private_profile = self._load_file(
-                PROFILES_DIR / "private" / f"{self.agent_id}.md",
-                "No private instructions yet.",
+                _profiles_dir() / "private" / f"{self.agent_id}.md",
+                DEFAULT_PRIVATE_PROFILE_TEXT,
             )
         return self._private_profile
 
@@ -134,11 +156,11 @@ class Agent:
         been created yet — safe because all legacy content derives from public
         channels (private channels didn't exist pre-partition).
 
-        See specs/privacy-and-channel-visibility.md §G2.
+        See specs/privacy-and-channel-visibility.md.
         """
         if self._public_working_memory is None:
-            new_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
-            legacy_path = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+            new_path = _profiles_dir() / "memory" / self.agent_id / "public.md"
+            legacy_path = _profiles_dir() / "memory" / f"{self.agent_id}.md"
             if new_path.exists():
                 self._public_working_memory = self._load_file(new_path, "")
             else:
@@ -152,7 +174,7 @@ class Agent:
         channel. Not cached — files are small and read only when the agent
         acts in the channel.
         """
-        path = PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+        path = _profiles_dir() / "memory" / self.agent_id / "private" / f"{channel_id}.md"
         return self._load_file(path, "")
 
     # Back-compat alias: internal callers that don't yet thread a visibility
@@ -187,12 +209,45 @@ class Agent:
             return False
         return bool(_extract_dois(content) & own)
 
-    def reload_profiles(self):
-        """Reload profiles from disk."""
-        self._public_profile = None
+    def reload_private_profile(self) -> None:
+        """Invalidate the private-profile cache only, forcing a re-read from disk.
+
+        Split out from ``reload_profiles``: an external reload keyed to a
+        single combined (private, public) signature called ``reload_profiles``
+        — which clears both caches — for
+        ANY change to either file. That let an unrelated public-profile edit
+        resurrect a stale private file: if a private disk write had just
+        failed (leaving the on-disk file's mtime unchanged, per
+        ``atomic_write.py``'s write-then-``os.replace`` semantics) while
+        ``self._private_profile`` correctly held the newly-accepted
+        instruction, the next public-only reload still cleared
+        ``self._private_profile`` too — and the next read re-loaded the stale
+        on-disk file, discarding the accepted instruction. Reloading only the
+        cache whose own file actually changed is what closes that path. See
+        ``SimulationEngine._sync_profiles_from_disk``.
+        """
         self._private_profile = None
+        self._own_publication_dois = None  # derived from both profiles
+
+    def force_clear_private_profile(self) -> None:
+        """Set the private-profile cache directly to the default "cleared"
+        text, WITHOUT going through a disk read.
+
+        For when the caller already knows the profile is cleared (e.g. the
+        DB row says so) but could not remove the stale on-disk file — unlike
+        ``reload_private_profile()``, which invalidates the cache to ``None``
+        and lets the NEXT read re-load whatever is still on disk, this
+        forces the in-memory value itself so a file that could not be
+        deleted does not keep being served for the rest of the session.
+        """
+        self._private_profile = DEFAULT_PRIVATE_PROFILE_TEXT
+        self._own_publication_dois = None  # derived from both profiles
+
+    def reload_public_profile(self) -> None:
+        """Invalidate the public-profile cache (and its derivatives) only."""
+        self._public_profile = None
         self._public_working_memory = None
-        self._own_publication_dois = None
+        self._own_publication_dois = None  # derived from both profiles
 
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)
@@ -208,7 +263,7 @@ class Agent:
         visibility: the visibility class of the channel the agent is about to
         act in. When 'collab_private', the private-channel memory segment for
         ``channel_id`` is also injected and a Private Channel Rules block is
-        appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
+        appended. See specs/privacy-and-channel-visibility.md.
         """
         return self._compose_system_prompt(
             include_memory=True,
@@ -328,7 +383,7 @@ Use these to reference other labs' work in conversations. Include links when cit
 
         Public-only for public/collab_public actions; public + the specific
         private-channel segment for collab_private actions. See
-        specs/privacy-and-channel-visibility.md §G1, §G2.
+        specs/privacy-and-channel-visibility.md.
         """
         segments: list[str] = []
         public_segment = self.public_working_memory
@@ -375,7 +430,7 @@ Use these to reference other labs' work in conversations. Include links when cit
                 )
             # Post bodies come from other labs' agents — fence as untrusted
             # peer content so an injected instruction can't hijack the scan
-            # decision (SEC-14).
+            # decision.
             post_blocks.append(f"{header}\n{delimit(p['content_snippet'], 'post_content')}")
         posts_text = "\n\n".join(post_blocks)
         prompt = phase2_template.replace("{new_posts}", posts_text)
@@ -695,25 +750,25 @@ Use these to reference other labs' work in conversations. Include links when cit
 
         Public memory → profiles/memory/{agent_id}/public.md.
         Private memory → profiles/memory/{agent_id}/private/{channel_id}.md
-        (requires channel_id). See specs/privacy-and-channel-visibility.md §G2.
+        (requires channel_id). See specs/privacy-and-channel-visibility.md.
         """
         if visibility == VISIBILITY_COLLAB_PRIVATE:
             if not channel_id:
                 logger.error("[%s] Private memory update missing channel_id", self.agent_id)
                 return
             memory_path = (
-                PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+                _profiles_dir() / "memory" / self.agent_id / "private" / f"{channel_id}.md"
             )
         else:
-            memory_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
+            memory_path = _profiles_dir() / "memory" / self.agent_id / "public.md"
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_path.write_text(new_memory + "\n", encoding="utf-8")
+            atomic_write_text(memory_path, new_memory + "\n", encoding="utf-8")
             # Best-effort cleanup of the legacy unpartitioned file so subsequent
             # loads go through the new path — only on public writes, and only
             # if we just wrote to the partitioned location.
             if visibility == VISIBILITY_PUBLIC:
-                legacy = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+                legacy = _profiles_dir() / "memory" / f"{self.agent_id}.md"
                 if legacy.exists():
                     try:
                         legacy.unlink()
@@ -727,21 +782,51 @@ Use these to reference other labs' work in conversations. Include links when cit
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 
-    def update_private_profile(self, new_profile: str) -> None:
+    def update_private_profile(self, new_profile: str) -> bool:
         """Write private profile to profiles/private/{agent_id}.md (disk only).
 
-        For DB persistence, call persist_private_profile_to_db() afterward.
+        Returns True if the disk write succeeded, False otherwise (and logs an
+        ERROR). Either way, the in-memory cache is set to ``new_profile`` — an
+        accepted instruction must be reflected in the agent's behaviour
+        immediately, even if it could not (yet) be written to disk. Invalidating
+        the cache to None on failure instead would mean the *next* read re-loads
+        the (unchanged, stale) file from
+        disk — and callers that then persisted "the current private profile"
+        to the database silently overwrote a good DB copy with that stale
+        content. Making the write's own argument the source of truth for the
+        cache, on both branches, closes that path entirely: the cache can only
+        ever hold what was actually attempted, never a reload of something
+        older.
+
+        For DB persistence, call persist_private_profile_to_db() with this
+        same content afterward (never with `self.private_profile` — see that
+        method's docstring).
         """
-        profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
+        profile_path = _profiles_dir() / "private" / f"{self.agent_id}.md"
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_path.write_text(new_profile + "\n", encoding="utf-8")
-            self._private_profile = None  # Invalidate cache
+            atomic_write_text(profile_path, new_profile + "\n", encoding="utf-8")
+            self._private_profile = new_profile
+            return True
         except Exception as exc:
             logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)
+            self._private_profile = new_profile
+            return False
 
-    async def persist_private_profile_to_db(self, db: "AsyncSession") -> None:
-        """Sync the on-disk private profile to the database."""
+    async def persist_private_profile_to_db(self, db: "AsyncSession", content: str) -> bool:
+        """Sync ``content`` to the database. Returns True on success.
+
+        Takes the content to persist explicitly and never reads
+        ``self.private_profile`` (disk or cache). Re-reading
+        ``self.private_profile`` here instead would, on a
+        cache miss, re-load the on-disk file; if a prior
+        ``update_private_profile`` call had just failed to write that file,
+        this method would faithfully persist the STALE file over a DB row the
+        caller believed it was updating with the PI's new instruction. Taking
+        the content as a parameter makes this method's output depend only on
+        its argument, decoupled from whatever the disk write did or did not
+        do.
+        """
         from sqlalchemy import select
         from src.models import AgentRegistry, ResearcherProfile
 
@@ -751,18 +836,29 @@ Use these to reference other labs' work in conversations. Include links when cit
             )
             agent_reg = agent_result.scalar_one_or_none()
             if not agent_reg:
-                return
+                logger.error(
+                    "[%s] Failed to persist private profile to DB: no AgentRegistry row",
+                    self.agent_id,
+                )
+                return False
             profile_result = await db.execute(
                 select(ResearcherProfile).where(
                     ResearcherProfile.user_id == agent_reg.user_id
                 )
             )
             profile = profile_result.scalar_one_or_none()
-            if profile:
-                profile.private_profile_md = self.private_profile
-                await db.commit()
+            if not profile:
+                logger.error(
+                    "[%s] Failed to persist private profile to DB: no ResearcherProfile row",
+                    self.agent_id,
+                )
+                return False
+            profile.private_profile_md = content
+            await db.commit()
+            return True
         except Exception as exc:
             logger.error("[%s] Failed to persist private profile to DB: %s", self.agent_id, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Helpers

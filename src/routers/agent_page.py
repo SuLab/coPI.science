@@ -1,6 +1,5 @@
 """My Agent page router."""
 
-import asyncio
 import logging
 import re
 import uuid
@@ -15,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_agent_with_access, get_current_user
 from src.models import (
@@ -27,14 +27,23 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.atomic_write import atomic_write_text
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-PROFILES_DIR = Path("profiles")
+# See src/agent/agent.py's PROFILES_DIR — same setting, same default. None by
+# default, resolved lazily via _profiles_dir() — see agent.py's own accessor
+# for the full rationale.
+PROFILES_DIR: Path | None = None
+
+
+def _profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir)
 SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"
@@ -249,7 +258,13 @@ async def agent_dashboard(
     # Get existing reviews by this agent
     reviewed_ids_result = await db.execute(
         select(ProposalReview.thread_decision_id).where(
-            ProposalReview.agent_id == aid
+            ProposalReview.agent_id == aid,
+            # `!= -1` deliberately, NOT notin_((-1, 0)): a reopened proposal belongs in
+            # this bucket so the web form is NOT re-offered while it is being refined
+            # (pinned by test_reopen_opens_the_private_channel_and_files_the_review
+            # _together). The PI's rating for it arrives by e-mail reply, which
+            # email_inbound.py accepts -- see task-D1-D2.md.
+            ProposalReview.rating != -1,
         )
     )
     reviewed_ids = {r[0] for r in reviewed_ids_result}
@@ -305,18 +320,19 @@ async def agent_dashboard(
             unreviewed.append(entry)
 
     # Private profile path
-    private_profile_path = PROFILES_DIR / "private" / f"{aid}.md"
+    private_profile_path = _profiles_dir() / "private" / f"{aid}.md"
     has_private_profile = private_profile_path.exists()
 
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
+        from src.services.slack_executor import run_slack_call
         from src.services.slack_tokens import get_any_bot_token
-        # to_thread because _resolve_delegate_names is sync and calls
+        # run_slack_call because _resolve_delegate_names is sync and calls
         # slack_web.get_user_info once per delegate, each of which can retry with
         # backoff. Run inline it would block the event loop for every other
         # request the process is serving, not just this dashboard render.
-        delegates = await asyncio.to_thread(
+        delegates = await run_slack_call(
             _resolve_delegate_names,
             agent.delegate_slack_ids, await get_any_bot_token(db),
         )
@@ -400,6 +416,11 @@ async def derive_agent_identity(
     rebuilt from the bare last name four lines later, so Peng Wu got
     ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids differed.
     CLAUDE.md documents ``pwu`` / ``PWuBot``.
+
+    A third same-initial namesake collides on the prefixed candidate too:
+    fall back to a numeric suffix appended to the prefixed
+    candidate (``pwu2``, ``pwu3``, ...), matching
+    ``scripts/backfill_agents.py``'s ``_resolve_agent_id``/``_bot_name_for``.
     """
     last_name = full_name.split()[-1]
     stem = "".join(c for c in last_name.lower() if c.isalpha())
@@ -408,10 +429,28 @@ async def derive_agent_identity(
     collision = await db.execute(
         select(AgentRegistry).where(AgentRegistry.agent_id == stem)
     )
-    if collision.scalar_one_or_none():
-        initial = full_name[0]
-        return f"{initial.lower()}{stem}", f"{initial.upper()}{display}Bot"
-    return stem, f"{display}Bot"
+    if not collision.scalar_one_or_none():
+        return stem, f"{display}Bot"
+
+    initial = full_name[0]
+    prefixed = f"{initial.lower()}{stem}"
+    collision = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == prefixed)
+    )
+    if not collision.scalar_one_or_none():
+        return prefixed, f"{initial.upper()}{display}Bot"
+
+    for i in range(2, 20):
+        candidate = f"{prefixed}{i}"
+        collision = await db.execute(
+            select(AgentRegistry).where(AgentRegistry.agent_id == candidate)
+        )
+        if not collision.scalar_one_or_none():
+            return candidate, f"{initial.upper()}{display}{i}Bot"
+    raise HTTPException(
+        status_code=409,
+        detail="Could not derive a unique agent identity, please contact support",
+    )
 
 
 @router.post("/request")
@@ -440,7 +479,18 @@ async def request_agent(
         status="pending",
     )
     db.add(agent)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Lost a race on the agent_id unique constraint — another request
+        # committed the same derived identity between our SELECT and our
+        # commit. Retrying would recompute the identical candidate from the
+        # same now-stale read, so fail fast instead of looping.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An agent request for this identity is already in progress, please retry",
+        ) from exc
 
     return RedirectResponse(url="/agent", status_code=302)
 
@@ -467,6 +517,8 @@ async def review_proposal(
     inactive agent's owner can still review proposals generated before the
     agent was parked.
     """
+    from datetime import datetime
+
     if rating < 1 or rating > 4:
         raise HTTPException(status_code=400, detail="Rating must be 1-4")
 
@@ -490,27 +542,144 @@ async def review_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if existing.scalar_one_or_none():
+    existing_row = existing.scalar_one_or_none()
+    if existing_row is not None and existing_row.rating != -1:
+        # A delegate (or the PI) may have already reviewed. Retire every recipient's
+        # outstanding notification for this agent + proposal before rejecting --
+        # otherwise whoever loses this race has no other web path to clear their
+        # notification.
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(agent.id, thread_decision_id, "review", db)
+        await db.commit()
         raise HTTPException(status_code=400, detail="Already reviewed")
 
-    review = ProposalReview(
-        thread_decision_id=thread_decision_id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,  # Always the PI
-        delegate_user_id=current_user.id if not is_owner else None,
-        reviewed_by_user_id=current_user.id,
-        rating=rating,
-        comment=comment.strip() or None,
-        submitted_via="web",
+    # Captured before the try: on an AsyncSession, a failed flush expires every
+    # attribute of every tracked object (including these primary keys), and there is
+    # no implicit re-fetch, so the except arm below needs its own copies. Named to
+    # avoid colliding with the `agent_id` path parameter (the string slug).
+    current_user_id = current_user.id
+    agent_registry_id = agent.id
+    agent_agent_id = agent.agent_id
+    pi_user_id = agent.user_id
+
+    # Hoisted above the try: the except arm also needs these to retire the race
+    # loser's own notification, and a local import inside the try body would not be
+    # in scope in the except.
+    from src.services.email_notifications import (
+        mark_notification_responded,
+        record_engagement,
     )
-    db.add(review)
 
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
+    # Two concurrent first-time reviews for the same (thread_decision, agent) both
+    # pass the SELECT guard above and then race on
+    # uq_proposal_reviews_decision_agent. Autoflush fires on the next db.execute after
+    # db.add() below (record_engagement's SELECT), not the final commit, so the
+    # loser's IntegrityError surfaces there -- the guard has to span from db.add
+    # through commit, not just wrap commit().
+    #
+    # existing_row is not None here only when its rating == -1 (the engine's implicit
+    # marker; != -1 already returned 400 above), so it is upgraded in place rather
+    # than inserted (proposal_reviews has a real UNIQUE on (thread_decision_id,
+    # agent_id)). An update cannot raise IntegrityError, so the guard below is inert
+    # on this path -- two simultaneous first reviews over a -1 marker both update and
+    # the last writer wins, which is accepted.
+    try:
+        if existing_row is not None:
+            existing_row.user_id = agent.user_id  # Always the PI
+            existing_row.delegate_user_id = current_user_id if not is_owner else None
+            existing_row.reviewed_by_user_id = current_user_id
+            existing_row.rating = rating
+            existing_row.comment = comment.strip() or None
+            existing_row.submitted_via = "web"
+            existing_row.reviewed_at = datetime.now(UTC)
+        else:
+            review = ProposalReview(
+                thread_decision_id=thread_decision_id,
+                agent_id=agent.agent_id,
+                user_id=agent.user_id,  # Always the PI
+                delegate_user_id=current_user_id if not is_owner else None,
+                reviewed_by_user_id=current_user_id,
+                rating=rating,
+                comment=comment.strip() or None,
+                submitted_via="web",
+            )
+            db.add(review)
 
-    await db.commit()
+        # Record engagement and mark any outstanding email notification as responded
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # The reachable race here is web-vs-engine: _persist_implicit_proposal_review
+        # (a separate process, its own session) can insert rating=-1 between this
+        # request's guard SELECT and this request's flush. Unconditionally raising
+        # "Already reviewed" would be wrong (a -1 row is not a decision) and would
+        # throw away the PI's rating/comment for nothing, so re-select the winning
+        # row: if it is still the engine's implicit marker, upgrade it in place (the
+        # same fields the happy path would have set) and commit; only a real winning
+        # review (rating != -1) is actually "already reviewed". scalar_one_or_none(),
+        # not scalar_one(): an IntegrityError that was NOT the uniqueness conflict
+        # (e.g. an FK/NOT-NULL violation from a concurrent delete) finds no winning
+        # row here, and scalar_one() would raise NoResultFound instead. Mirrors
+        # reopen_proposal's sibling recovery arm.
+        winner = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision_id,
+                ProposalReview.agent_id == agent_agent_id,
+            )
+        )).scalar_one_or_none()
+        if winner is not None and winner.rating == -1:
+            winner.user_id = pi_user_id  # Always the PI
+            winner.delegate_user_id = current_user_id if not is_owner else None
+            winner.reviewed_by_user_id = current_user_id
+            winner.rating = rating
+            winner.comment = comment.strip() or None
+            winner.submitted_via = "web"
+            winner.reviewed_at = datetime.now(UTC)
+            # A real review WAS just filed by this request -- it only lost the INSERT
+            # race to the engine's own marker -- so retire the notification exactly as
+            # the happy path above does for every successful review, insert or upgrade.
+            await record_engagement(current_user_id, db)
+            await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+            await db.commit()
+            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+        if winner is None:
+            # No winning row means the IntegrityError was not the uniqueness conflict,
+            # so there is nothing to reject as "already reviewed" -- but the rollback
+            # above also threw this request's insert away, so the PI's rating/comment
+            # were persisted nowhere. Answer with a coded 409 (not the redirect
+            # carriers dashboard.html renders conditionally, which this handler's
+            # broader audience -- inactive agents, delegates -- could silently miss)
+            # so the PI knows to retry, and skip mark_notification_responded: leaving
+            # the notification row 'sent' is the state that would have existed had the
+            # request never happened, and every consumer (the reminder sweep, a later
+            # successful review) already handles that state correctly.
+            # record_engagement still commits: the PI did act, and skipping it would
+            # count our own write failure against their engagement streak.
+            logger.error(
+                "IntegrityError on proposal %s review write but no winning row was "
+                "found on re-select -- nothing was persisted, so the reviewer gets a "
+                "409 and the outstanding reminder is left alone",
+                thread_decision_id,
+            )
+            await record_engagement(current_user_id, db)
+            await db.commit()
+            raise HTTPException(
+                status_code=409,
+                detail="Your review could not be saved due to a conflict, please retry",
+            ) from None
+
+        # A real review won the race. Their review is the decision for this agent, so
+        # still retire this responder's outstanding notification before bouncing them
+        # -- the rollback above threw away the retire that ran inside the try.
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+        await db.commit()
+        raise HTTPException(status_code=400, detail="Already reviewed") from None
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
@@ -520,7 +689,12 @@ async def reopen_proposal(
     agent_id: str,
     thread_decision_id: uuid.UUID,
     request: Request,
-    guidance: str = Form(...),
+    # Form("") not Form(...), same reason as save_private_profile's `content` below:
+    # an empty textarea submits `guidance=`, which Starlette's form parser hands to
+    # FastAPI as a MISSING field, turning a required parameter into a raw 422 before
+    # the coded 400 below is ever reached. With the default the handler sees "",
+    # strips it, and returns its own "Guidance text is required".
+    guidance: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -530,13 +704,14 @@ async def reopen_proposal(
     thread lives in a public channel, migrate it to a new ``collab_private``
     channel, post the PI's guidance there, and close the origin thread with a
     neutral ⏸️ marker — **the PI's text is never echoed into the public
-    thread.** See specs/pi-interaction.md §"PI Reopens a Proposal" and
-    specs/privacy-and-channel-visibility.md §Migration Rule.
+    thread.** See specs/pi-interaction.md and specs/privacy-and-channel-visibility.md.
 
     Legacy behavior (``enable_private_refinement=False``): post the PI's
     guidance verbatim into the origin thread. Retained as an emergency
     rollback lever during early rollout.
     """
+    from datetime import datetime
+
     from src.config import get_settings
 
     guidance = guidance.strip()
@@ -553,7 +728,7 @@ async def reopen_proposal(
     #
     # Note: the reopen flow creates a collab_private channel, and the cohort gate
     # deliberately exempts those — a PI explicitly pairing two agents outranks an
-    # admin-level cohort grouping. See .notes/cohort-system-v2.md §7.
+    # admin-level cohort grouping.
     if agent.status != "active":
         raise HTTPException(
             status_code=403,
@@ -576,7 +751,7 @@ async def reopen_proposal(
     # replay would migrate the thread a second time and mint a duplicate
     # priv-…-N channel (or, in legacy mode, re-post the guidance to the public
     # thread). A reopen writes a rating=0 ProposalReview in the same commit as
-    # refined_in_channel, so the presence of *any* review by this agent means
+    # refined_in_channel, so any *explicit* review (rating ≠ -1) by this agent means
     # the proposal was already acted on — treat the resubmission as a no-op and
     # redirect without touching Slack.
     already_reviewed = (await db.execute(
@@ -585,17 +760,56 @@ async def reopen_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )).scalar_one_or_none()
-    if already_reviewed is not None:
+    if already_reviewed is not None and already_reviewed.rating != -1:
         logger.info(
             "Ignoring duplicate reopen of proposal %s by %s "
             "(existing review id=%s, refined_in_channel=%s)",
             td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
         )
+        # Same reasoning as review_proposal's "Already reviewed" branch: retire every
+        # recipient's outstanding notification for this agent + proposal before
+        # bouncing them.
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
+        await db.commit()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+    # Second idempotency guard, on the migration itself. The review-row check above is
+    # not sufficient, because the review row is exactly what a lost race destroys:
+    # migrate_public_thread_to_private commits its own AgentChannel/member/handover
+    # rows and `refined_in_channel` as soon as its side effects are irreversible, then
+    # the `except IntegrityError` arm below rolls back this route's own ProposalReview
+    # insert. A retry would then find no review row and `origin_visibility` still
+    # 'public' (the migration never flips it), so it would migrate a second time --
+    # and Slack would not refuse the create, since the private-channel name includes a
+    # per-call timestamp. `refined_in_channel` is the durable record that the
+    # migration happened, so read it; the e-mail twin applies the same guard.
+    if td.refined_in_channel:
+        logger.info(
+            "Proposal %s was already migrated to %s on an earlier attempt -- not "
+            "migrating again; the guidance is already in that channel",
+            td.thread_id, td.refined_in_channel,
+        )
+        already_migrated = True
+    else:
+        already_migrated = False
 
     settings = get_settings()
 
-    if settings.enable_private_refinement and td.origin_visibility == "public":
+    # Set only by the legacy Slack-off branch below, and only there because that is the
+    # one branch whose PI text lives in a row this route itself must commit. Declared
+    # here so the `except IntegrityError` arm can read it whichever branch ran.
+    inbox_row: tuple[uuid.UUID, str, str, str, str, uuid.UUID] | None = None
+
+    if already_migrated:
+        # Nothing to do on Slack: the first attempt's migration posted this same
+        # guidance into the private channel as part of its handover. Fall through so
+        # the route still records the review row and retires the notification (again,
+        # matching the e-mail twin) -- skipping the whole request instead would leave
+        # the proposal looking unreviewed for ever.
+        pass
+    elif settings.enable_private_refinement and td.origin_visibility == "public":
         # New behavior: migrate to a collab_private channel before any PI
         # text touches Slack.
         from src.services.private_channels import migrate_public_thread_to_private
@@ -642,26 +856,35 @@ async def reopen_proposal(
             from src.services.pi_inbox import get_latest_run_id, record_pi_message
             run_id = await get_latest_run_id(db)
             if run_id:
+                # Held for the recovery arm below. record_pi_message does not commit --
+                # deliberately, so it can ride the same commit that retires the
+                # notification instead of letting a retried delivery write a second
+                # row. With Slack off, this row is the only copy of what the PI typed,
+                # so a rollback() below would destroy the guidance outright unless the
+                # arm re-creates it from these captured arguments (`td` and
+                # `current_user` are expired by that rollback).
+                inbox_content = f"PI guidance from {current_user.name}: {guidance}"
+                inbox_sender = f"{current_user.name} (PI)"
                 await record_pi_message(
                     db, run_id=run_id, channel_name=td.channel,
-                    content=f"PI guidance from {current_user.name}: {guidance}",
-                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+                    content=inbox_content, sender_name=inbox_sender,
+                    sender_user_id=current_user.id, thread_ts=td.thread_id,
+                )
+                inbox_row = (
+                    run_id, td.channel, inbox_content, inbox_sender, td.thread_id,
+                    current_user.id,
                 )
             logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
         else:
             try:
-                # The channel lookup goes through the boundary. It used to read a
-                # single 200-item page of the paginated conversations.list, so a
-                # workspace with more channels than that reported "Channel not
-                # found" for a channel that exists; list_channel_ids follows every
-                # cursor and raises rather than returning a subset. Archived
-                # channels are counted deliberately — this asks "which id owns
-                # this name", not "can the bot join it".
-                #
-                # The post goes through it too, threaded: post_message takes
-                # thread_ts precisely so this caller does not need a raw client.
-                # It also splits at 4000 characters, which the raw call did not —
-                # long PI guidance was silently chunked by Slack.
+                # The channel lookup goes through the boundary: list_channel_ids
+                # follows every pagination cursor rather than reading a single page,
+                # so it does not misreport "Channel not found" for a channel that
+                # exists in a large workspace. Archived channels are counted
+                # deliberately — this asks "which id owns this name", not "can the bot
+                # join it". The post goes through the boundary too, threaded via
+                # thread_ts, and splits at 4000 characters so long PI guidance is not
+                # silently chunked by Slack.
                 from src.services.slack_web import list_channel_ids_async, post_message_async
 
                 bot_token = token_for_agent_row(agent)
@@ -695,25 +918,154 @@ async def reopen_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if not existing.scalar_one_or_none():
-        review = ProposalReview(
-            thread_decision_id=thread_decision_id,
-            agent_id=agent.agent_id,
-            user_id=agent.user_id,  # Always the PI
-            delegate_user_id=current_user.id if not is_owner else None,
-            reviewed_by_user_id=current_user.id,
-            rating=0,  # 0 = reopened with guidance, not a rating
-            comment=f"[Reopened] {guidance[:500]}",
-            submitted_via="web",
+    existing_row = existing.scalar_one_or_none()
+
+    # Captured before the try for the same reason as review_proposal's guard: a lost
+    # race's IntegrityError expires every attribute of every tracked object, and this
+    # async session has no implicit re-fetch after rollback().
+    current_user_id = current_user.id
+    agent_registry_id = agent.id
+    agent_agent_id = agent.agent_id
+    pi_user_id = agent.user_id
+    # The human thread id, for the recovery arm's log lines -- `td` is expired by the
+    # rollback, and the arm's own re-select cannot supply it if the row is gone by then.
+    td_thread_id = td.thread_id
+
+    # Hoisted above the try (mirrors review_proposal): the except arm also needs
+    # record_engagement/mark_notification_responded, and a local import inside the try
+    # body would not be in scope in the except.
+    from src.services.email_notifications import (
+        mark_notification_responded,
+        record_engagement,
+    )
+
+    # Mirrors review_proposal's guard exactly. The `existing_row is None` branch's
+    # db.add() can lose a race against a concurrent insert for the same
+    # (thread_decision_id, agent_id) -- the engine's implicit marker, an e-mail reply,
+    # a delegate's /review -- surfaced by autoflush at record_engagement. The two
+    # update branches (rating == -1 upgrade; real review left alone) touch no new row,
+    # so they cannot raise IntegrityError -- the guard is inert there.
+    try:
+        if existing_row is None:
+            review = ProposalReview(
+                thread_decision_id=thread_decision_id,
+                agent_id=agent_agent_id,
+                user_id=pi_user_id,  # Always the PI
+                delegate_user_id=current_user_id if not is_owner else None,
+                reviewed_by_user_id=current_user_id,
+                rating=0,  # 0 = reopened with guidance, not a rating
+                comment=f"[Reopened] {guidance[:500]}",
+                submitted_via="web",
+            )
+            db.add(review)
+        elif existing_row.rating == -1:
+            # This SELECT happens after migrate_public_thread_to_private (a multi-call
+            # Slack round-trip), so the invariant is re-checked here rather than
+            # assumed: a real review can be filed by the PI, a delegate, or an e-mail
+            # reply while that round-trip is in flight. Only the engine's implicit
+            # marker (rating == -1) is safe to upgrade in place.
+            existing_row.user_id = pi_user_id  # Always the PI
+            existing_row.delegate_user_id = current_user_id if not is_owner else None
+            existing_row.reviewed_by_user_id = current_user_id
+            existing_row.rating = 0  # 0 = reopened with guidance, not a rating
+            existing_row.comment = f"[Reopened] {guidance[:500]}"
+            existing_row.submitted_via = "web"
+            existing_row.reviewed_at = datetime.now(UTC)
+        else:
+            # A real review was filed for this (thread_decision, agent) while the
+            # migration ran -- leave it alone rather than overwrite it with the
+            # reopen marker.
+            logger.warning(
+                "Proposal %s gained a review (rating=%s) while the reopen migration "
+                "ran -- leaving it alone",
+                td.thread_id, existing_row.rating,
+            )
+
+        # Record engagement and mark any outstanding email notification as responded
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "instruction", db)
+
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Someone else (the engine's implicit marker, an e-mail reply, a delegate's
+        # /review) won the race on uq_proposal_reviews_decision_agent. Do NOT re-run
+        # the migration and do NOT re-raise: both migration paths commit
+        # `refined_in_channel` themselves as soon as their side effects are
+        # irreversible, so this rollback has nothing left of the migration to undo.
+        # The decision-exists check below exists for diagnosis: not every
+        # IntegrityError here is the review-uniqueness conflict, and a missing
+        # decision (an FK violation from a concurrent delete) is the one shape that
+        # explains an empty `winner`. scalar_one_or_none(), not scalar_one(): on that
+        # shape scalar_one() would raise NoResultFound, a 500 out of the arm that
+        # exists to avoid one.
+        decision_still_exists = (await db.execute(
+            select(ThreadDecision.id).where(ThreadDecision.id == thread_decision_id)
+        )).scalar_one_or_none() is not None
+
+        winner = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision_id,
+                ProposalReview.agent_id == agent_agent_id,
+            )
+        )).scalar_one_or_none()
+        if winner is not None and winner.rating == -1:
+            # Same upgrade as the try body above -- the winning row is the engine's
+            # implicit marker, not a real decision.
+            winner.user_id = pi_user_id
+            winner.delegate_user_id = current_user_id if not is_owner else None
+            winner.reviewed_by_user_id = current_user_id
+            winner.rating = 0
+            winner.comment = f"[Reopened] {guidance[:500]}"
+            winner.submitted_via = "web"
+            winner.reviewed_at = datetime.now(UTC)
+        elif winner is not None:
+            logger.warning(
+                "Proposal %s gained a review (rating=%s) while the reopen write "
+                "raced -- leaving it alone",
+                td_thread_id, winner.rating,
+            )
+        elif decision_still_exists:
+            logger.error(
+                "IntegrityError on proposal %s reopen write but no winning row was "
+                "found on re-select and the decision still exists -- unexpected",
+                td_thread_id,
+            )
+        else:
+            logger.warning(
+                "Proposal %s was deleted while its reopen was being written; the "
+                "IntegrityError was that foreign key, not a duplicate review",
+                td_thread_id,
+            )
+
+        if inbox_row is not None:
+            # On the legacy Slack-off path the rollback() above just destroyed the
+            # PI's guidance: with Slack off, the record_pi_message row is the only
+            # place that text exists. Re-create it on the same commit as the recovery
+            # below, so the engine's inbound poller still sees the guidance it would
+            # have seen had the race not happened. record_pi_message itself does not
+            # commit, so a retried delivery cannot mint a second guidance row.
+            from src.services.pi_inbox import record_pi_message
+            (
+                inbox_run, inbox_channel, inbox_text, inbox_from, inbox_thread,
+                inbox_sender_user_id,
+            ) = inbox_row
+            await record_pi_message(
+                db, run_id=inbox_run, channel_name=inbox_channel, content=inbox_text,
+                sender_name=inbox_from, sender_user_id=inbox_sender_user_id,
+                thread_ts=inbox_thread,
+            )
+
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "instruction", db)
+        await db.commit()
+        logger.warning(
+            "Proposal %s reopen write lost a race; the migration's own rows and "
+            "refined_in_channel are already committed, so the recovery is the review "
+            "row (and, on the Slack-off path, the PI's inbox guidance) -- not a "
+            "re-migration",
+            td_thread_id,
         )
-        db.add(review)
-
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
-
-    await db.commit()
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
@@ -774,8 +1126,8 @@ async def agent_conversations(
         # filtering in Python afterwards would leave the page nearly empty.
         gate = await resolve_agent_gate(db, aid)
         # own_or_gated (src/services/conversation_feed.py) is gate_clause widened
-        # with the PI's own-post carve-out — see its docstring for why the OR is
-        # needed. One expression here, in the reply-count query below, and in
+        # with an exception for the PI's own posts — see its docstring for why the
+        # OR is needed. One expression here, in the reply-count query below, and in
         # agent_thread_replies keeps the feed, the badge, and the expansion from
         # ever disagreeing on what a PI may see.
         gated = own_or_gated(gate, aid)
@@ -808,7 +1160,7 @@ async def agent_conversations(
         roots = list(reversed(root_rows.scalars().all()))
 
         # Reply counts, gated with the SAME clause (including the own-post
-        # carve-out) so the badge can never promise turns the expansion will not
+        # exception) so the badge can never promise turns the expansion will not
         # show. The real invariant a reply query must honour is that a reply
         # lives in ITS ROOT's channel — `uq_agent_messages_run_ts`
         # (src/models/agent_activity.py) only proves root ids don't collide
@@ -964,6 +1316,7 @@ async def post_agent_message(
     from src.services.pi_inbox import (
         get_latest_run_id,
         pi_may_post_to_channel,
+        pi_may_reply_in_thread,
         record_pi_message,
     )
 
@@ -997,6 +1350,19 @@ async def post_agent_message(
     ):
         raise HTTPException(status_code=403, detail="Not a member of that channel")
 
+    reply_to = thread_ts.strip() or None
+    if reply_to and not await pi_may_reply_in_thread(
+        db,
+        run_id=run_id,
+        channel_name=target_channel,
+        thread_ts=reply_to,
+        agent_id=agent.agent_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Your agent is not a participant in that thread",
+        )
+
     async def _write() -> None:
         await record_pi_message(
             db,
@@ -1004,7 +1370,8 @@ async def post_agent_message(
             channel_name=target_channel,
             content=text,
             sender_name=f"{current_user.name} (PI)",
-            thread_ts=thread_ts.strip() or None,
+            sender_user_id=current_user.id,
+            thread_ts=reply_to,
         )
         await db.commit()
 
@@ -1075,7 +1442,7 @@ async def view_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
     content = profile_path.read_text() if profile_path.exists() else ""
 
     return templates.TemplateResponse(
@@ -1100,7 +1467,7 @@ async def edit_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
     content = profile_path.read_text() if profile_path.exists() else ""
 
     return templates.TemplateResponse(
@@ -1117,27 +1484,68 @@ async def edit_private_profile(
 async def save_private_profile(
     agent_id: str,
     request: Request,
-    content: str = Form(...),
+    # Form("") not Form(...): an emptied textarea submits `content=`, which Starlette's
+    # form parser hands to FastAPI as a MISSING field, so a required parameter 422s and
+    # the PI cannot clear their instructions at all. FastAPI's Form() dependency
+    # resolution collapses "submitted empty" and "field omitted entirely" to the same
+    # default regardless of what that default is, so distinguishing them cannot be
+    # done via the Form() parameter at all -- `form` below is the raw Starlette
+    # FormData, which does tell them apart (a genuinely missing key is not `in` it),
+    # matching the `"<field>" in form` presence-gating pattern save_public_profile
+    # already uses for its six profile fields, just above. The onboarding twin
+    # (onboarding.py::save_private_profile) has the same shape.
+    content: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save private profile to disk and database."""
+    form = await request.form()
+    if "content" not in form:
+        # A request that omits `content` entirely must not be treated the same as one
+        # that submits it empty (which is a deliberate clear). Not reachable from the
+        # browser (templates/agent/profile.html's textarea is always submitted), but a
+        # data-destroying default for any other client.
+        raise HTTPException(
+            status_code=400,
+            detail="content is required (send an empty string to clear the private profile)",
+        )
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(content)
-
-    # Persist to DB — use the PI's user_id, not the delegate's
+    # Persist to DB first: disk must never be ahead of the DB — use the
+    # PI's user_id, not the delegate's. Create the row if this is the first
+    # private-profile save for this PI: `if profile:` used to make a missing row
+    # a silent, permanent disk-only write with no DB record at all.
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
     )
     profile = profile_result.scalar_one_or_none()
-    if profile:
-        profile.private_profile_md = content.strip() or None
-        await db.commit()
+    if not profile:
+        profile = ResearcherProfile(user_id=agent.user_id)
+        db.add(profile)
+    stripped = content.strip()
+    profile.private_profile_md = stripped or None
+    if not stripped:
+        # A blank save must also clear the model-authored seed (matches
+        # onboarding.py's save_private_profile) — otherwise a leftover seed
+        # from an admin-seeded PI who never completed onboarding is
+        # re-exported to disk by the next profile_pipeline run
+        # (`content = md or seed`), undoing the clear.
+        profile.private_profile_seed = None
+    await db.commit()
+
+    # A blank/whitespace save deletes the exported file rather than writing
+    # whitespace to it — agent.py's private_profile property
+    # falls back to "No private instructions yet." only when the file is
+    # absent, so a stale file left behind after clearing would keep the agent
+    # honouring instructions the PI just deleted.
+    profile_path = _profiles_dir() / "private" / f"{agent.agent_id}.md"
+    if stripped:
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(profile_path, content, encoding="utf-8")
+    else:
+        profile_path.unlink(missing_ok=True)
 
     # Record revision
     from src.services.profile_versioning import create_revision
@@ -1240,6 +1648,7 @@ async def save_public_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Save public profile changes (PI or delegate)."""
+    form = await request.form()
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
@@ -1252,14 +1661,22 @@ async def save_public_profile(
     if not profile:
         profile = ResearcherProfile(user_id=agent.user_id)
         db.add(profile)
+        await db.flush()
 
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
-    profile.profile_version = (profile.profile_version or 0) + 1
+    if "research_summary" in form:
+        profile.research_summary = research_summary
+    if "techniques" in form:
+        profile.techniques = _parse_list(techniques)
+    if "experimental_models" in form:
+        profile.experimental_models = _parse_list(experimental_models)
+    if "disease_areas" in form:
+        profile.disease_areas = _parse_list(disease_areas)
+    if "key_targets" in form:
+        profile.key_targets = _parse_list(key_targets)
+    if "keywords" in form:
+        profile.keywords = _parse_list(keywords)
+    profile.synthesis_validated = None
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.commit()
 
@@ -1401,6 +1818,9 @@ async def delegate_connect_slack(
             status_code=302,
         )
 
+    user_email = current_user.email  # captured before the try: a failed guarded
+    agent_row_id = agent.id  # statement expires attributes the except arm reads
+
     error = None
     try:
         from src.services.slack_tokens import get_any_bot_token
@@ -1413,25 +1833,22 @@ async def delegate_connect_slack(
             # None means Slack has no such user (the boundary translates
             # users_not_found), so the "join the workspace first" message is
             # driven by a value rather than by a substring of an exception.
-            sid = await lookup_user_by_email_async(bot_token, current_user.email)
+            sid = await lookup_user_by_email_async(bot_token, user_email)
             if not sid:
                 error = (
-                    f"No Slack account found for {current_user.email}. "
+                    f"No Slack account found for {user_email}. "
                     "Please join the workspace first."
                 )
             else:
-                current_ids = list(agent.delegate_slack_ids or [])
-                if sid not in current_ids:
-                    current_ids.append(sid)
-                    agent.delegate_slack_ids = current_ids
-                    await db.commit()
+                from src.services.delegate_slack_ids import append_delegate_slack_id_stmt
+
+                await db.execute(append_delegate_slack_id_stmt(agent_row_id, sid))
+                await db.commit()
                 return RedirectResponse(
                     url=f"/agent/{agent_id}/dashboard", status_code=302
                 )
     except Exception as exc:
-        logger.warning(
-            "Delegate Slack lookup failed for %s: %s", current_user.email, exc
-        )
+        logger.warning("Delegate Slack lookup failed for %s: %s", user_email, exc)
         error = f"Slack lookup failed: {str(exc)[:100]}"
 
     return RedirectResponse(
@@ -1480,7 +1897,7 @@ async def invite_delegate(
     errors = []
     sent_count = 0
     for email in email_list:
-        # Basic validation (length-capped to avoid ReDoS; see SEC-16)
+        # Basic validation (length-capped to avoid ReDoS)
         if not is_valid_email(email):
             errors.append(f"Invalid email: {email}")
             continue
@@ -1597,27 +2014,40 @@ async def remove_delegate(
     )
     delegate = result.scalar_one_or_none()
     if delegate:
-        # Remove Slack ID if present
-        if delegate.user.email and agent.delegate_slack_ids:
-            try:
-                from src.services.slack_tokens import get_any_bot_token
-                from src.services.slack_web import lookup_user_by_email_async
+        delegate_user_id = delegate.user_id  # locals captured BEFORE any guarded
+        delegate_email = delegate.user.email  # db.execute() below
+        agent_slug, agent_row_id = agent.agent_id, agent.id
+        actor_name = current_user.name
 
-                bot_token = await get_any_bot_token(db)
-                if bot_token:
-                    sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid and sid in current_ids:
-                        current_ids.remove(sid)
-                        agent.delegate_slack_ids = current_ids if current_ids else None
-            except Exception as exc:
-                logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
+        sid = None
+        if delegate_email:
+            # array_remove is a no-op when the id isn't present, so this must not be gated
+            # on the in-memory `agent.delegate_slack_ids` hint: a concurrent append landing
+            # in another session after this session's `agent` was loaded would leave that
+            # hint stale (None/empty) while the DB row already holds the id, and skipping
+            # the lookup here would let the removed delegate's Slack id keep agent-command
+            # authority (src/agent/simulation.py ~4011-4021).
+            from src.services.slack_tokens import get_any_bot_token
+
+            bot_token = await get_any_bot_token(db)  # SQL — kept OUTSIDE the try below
+            if bot_token:
+                try:  # LOOKUP only — no SQL inside the best-effort try
+                    from src.services.slack_web import lookup_user_by_email_async
+
+                    sid = await lookup_user_by_email_async(bot_token, delegate_email)
+                except Exception as exc:
+                    logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
+
+        if sid:  # OUTSIDE the swallowing try — a failed UPDATE must not be hidden
+            from src.services.delegate_slack_ids import remove_delegate_slack_id_stmt
+
+            await db.execute(remove_delegate_slack_id_stmt(agent_row_id, sid))
 
         await db.delete(delegate)
         await db.commit()
         logger.info(
             "Delegate %s removed from agent %s by %s",
-            delegate.user_id, agent.agent_id, current_user.name,
+            delegate_user_id, agent_slug, actor_name,
         )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

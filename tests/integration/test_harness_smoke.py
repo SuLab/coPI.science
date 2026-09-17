@@ -8,11 +8,14 @@ async def test_container_is_migrated(engine):
     async with engine.connect() as conn:
         v = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         # Head-revision pin: bump it deliberately with each new migration. This is
-        # the guard that catches a branch whose migration was renumbered late — see
-        # .notes/cohort-system-v2.md §14 for what a duplicate revision id costs.
+        # the guard that catches a branch whose migration was renumbered late into
+        # a duplicate revision id.
         # 0019-0021 db-primary-conversations, 0022 cohorts,
-        # 0023 researcher_profiles synthesis provenance, 0024 agents.role column
-        assert v == "0024"
+        # 0023 researcher_profiles synthesis provenance, 0024 agents.role column,
+        # 0025 publications unique (user_id, pmid), 0026 pcm user FK cascade,
+        # 0027 FK-target + badge-count indexes, 0028 thread_decisions.reopened_at,
+        # 0030 agent_messages.sender_user_id + pi_dm_messages.handled_at (0029: pi_engaged_at + pi_inbound_state)
+        assert v == "0030"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -10,13 +10,15 @@ Usage:
 import asyncio
 import logging
 import signal
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime, timezone
 
 import typer
 
 from src.agent.agent import Agent
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
+from src.agent.slack_client import signal_shutdown
 from src.config import get_settings
 
 logging.basicConfig(
@@ -26,6 +28,150 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = typer.Typer()
+
+# Delay before the first SIGTERM/SIGINT aborts an in-flight Slack call, rather
+# than firing at t=0. A typical Slack Retry-After backoff (~10s) would
+# otherwise be aborted mid-sleep, leaving `_post_message` to record that post
+# DB-only (slack_ts=None) and permanently breaking that thread's Slack mirror
+# -- even though the runbook's `docker stop -t 30` grace would have let the
+# sleep finish naturally. 20s comfortably fits inside that 30s grace while
+# covering the common case; a SECOND signal aborts immediately (see
+# `_make_shutdown_handler`).
+SHUTDOWN_SLACK_ABORT_GRACE_SECONDS = 20
+
+
+
+def _restore_signal_default(signum: int) -> None:
+    """Hand ``signum`` back to its default disposition.
+
+    SIGTERM -> ``SIG_DFL`` (the OS default: terminate). SIGINT ->
+    ``signal.default_int_handler`` -- CPython's own handler that raises
+    ``KeyboardInterrupt`` -- NOT ``SIG_DFL``, which would be the OS default
+    and would kill the process without unwinding a single ``finally``.
+    """
+    try:
+        if signum == signal.SIGINT:
+            signal.signal(signum, signal.default_int_handler)
+        else:
+            signal.signal(signum, signal.SIG_DFL)
+    except (ValueError, OSError):  # not on the main thread / bad signum
+        pass
+
+
+def _make_shutdown_handler(loop: asyncio.AbstractEventLoop, sim_engine) -> callable:
+    """Build the SIGTERM/SIGINT handler for ``_run_simulation``.
+
+    Factored out of ``_run_simulation`` so it can be unit-tested without a real
+    DB session factory / agent roster / signal loop (see
+    ``tests/unit/test_agent_main_shutdown_grace.py``).
+
+    Installed with ``signal.signal``, not ``loop.add_signal_handler``: the
+    latter's self-pipe is only drained by the loop's own select/poll wait, so
+    it never fires while the loop thread is blocked inside a synchronous
+    Slack call (e.g. ``AgentSlackClient.connect()`` sitting in Slack's
+    retry/backoff loop). ``signal.signal`` handlers instead run via CPython's
+    EINTR-retry machinery (PEP 475), so they still fire while the loop is
+    stuck.
+
+    Because a signal handler can interrupt code that is itself mid-mutation
+    of the loop's internals, nothing that touches the loop (``call_later``,
+    or ``request_stop()``, which may wake an ``asyncio.Event`` and call
+    ``call_soon``) runs directly here -- only the plain
+    ``sim_engine._running = False`` write happens synchronously; the rest is
+    deferred to the loop's own turn via ``call_soon_threadsafe``.
+
+    The first signal calls ``request_stop()`` (stops the next turn) and
+    schedules a Slack-abort after ``SHUTDOWN_SLACK_ABORT_GRACE_SECONDS``,
+    giving an in-flight Slack retry sleep a chance to finish naturally. The
+    scheduled handle is stashed on ``shutdown.state["timer_handle"]`` so
+    ``_finalize_shutdown`` can cancel it once it's moot. A second signal
+    calls ``signal_shutdown()`` (a ``threading.Event``, safe even when the
+    loop itself is stuck) immediately and restores the default disposition,
+    so a third signal terminates the process.
+    """
+    state = {"signals_received": 0, "timer_handle": None}
+
+    def _schedule_grace_timer() -> None:
+        # Runs as a loop callback (queued below via call_soon_threadsafe),
+        # never directly inside the signal handler -- see the docstring
+        # above for why loop.call_later must only ever run on the loop's own
+        # turn.
+        state["timer_handle"] = loop.call_later(
+            SHUTDOWN_SLACK_ABORT_GRACE_SECONDS, signal_shutdown
+        )
+
+    def _on_loop_first_signal() -> None:
+        # Runs on the loop's own turn: the full request_stop() (which may
+        # wake an asyncio.Event waiter -> loop.call_soon) is only ever
+        # invoked here, never from true signal context.
+        sim_engine.request_stop()
+        _schedule_grace_timer()
+
+    def shutdown(signum=None, frame=None) -> None:
+        logger.info("Received shutdown signal")
+        state["signals_received"] += 1
+        # The flag flip is a plain attribute write -- safe from signal
+        # context and effective for a loop that is blocked in a sync call.
+        sim_engine._running = False
+        # A signal after asyncio.run() closed the loop (status update,
+        # summary logs, atexit) must not raise "Event loop is closed" out of
+        # arbitrary bytecode, and must not be swallowed either: set the abort
+        # event and hand the signal back to the default action so a repeat
+        # terminates the process.
+        if loop.is_closed():
+            signal_shutdown()
+            _restore_default(signum)
+            return
+        if state["signals_received"] == 1:
+            try:
+                loop.call_soon_threadsafe(_on_loop_first_signal)
+            except RuntimeError:
+                signal_shutdown()
+                _restore_default(signum)
+            return
+        # SECOND signal: abort immediately, WITHOUT depending on the loop
+        # ever becoming free -- signal_shutdown() only sets a threading.Event.
+        signal_shutdown()
+        try:
+            loop.call_soon_threadsafe(sim_engine.request_stop)
+        except RuntimeError:
+            pass
+        # A THIRD signal falls through to the default disposition (SIGTERM
+        # terminates; SIGINT -> default_int_handler, which raises
+        # KeyboardInterrupt), so an operator is never left with an inert
+        # Ctrl-C against a wedged flush.
+        _restore_default(signum)
+
+    def _restore_default(signum) -> None:
+        if signum is not None:
+            _restore_signal_default(signum)
+
+    shutdown.state = state
+    return shutdown
+
+
+def _finalize_shutdown(shutdown: callable) -> None:
+    """Unconditionally signal Slack shutdown once teardown has flushed.
+
+    Call this from ``_run_simulation``'s ``finally`` block, AFTER
+    ``sim_engine.stop()``'s DB flush has run.
+
+    The first SIGTERM/SIGINT only *schedules* the abort via
+    ``loop.call_later``. If ``sim_engine.start()`` returns before that timer
+    fires (a ``--max-runtime`` run finishing on schedule, a clean stop, or a
+    flush faster than the grace period), the timer is dropped when the event
+    loop closes and ``SHUTDOWN_REQUESTED`` would never be set even though the
+    process has committed to exiting. Cancels the pending timer handle (now
+    moot) before setting the event, so it does not fire spuriously against a
+    loop that may already be closing.
+    """
+    try:
+        timer_handle = shutdown.state.get("timer_handle")
+        if timer_handle is not None:
+            timer_handle.cancel()
+    except Exception:  # cancelling is best-effort; the signal is not
+        logger.exception("Could not cancel the shutdown grace timer")
+    signal_shutdown()
 
 
 @app.command()
@@ -37,8 +183,7 @@ def main(
             "DEPRECATED legacy cumulative cap: max LLM calls per agent for the "
             "WHOLE run. 0 (default) disables it. Superseded by the sliding-window "
             "rate limiter (llm_calls_per_load_per_window). Passing a nonzero value "
-            "can permanently bench a hub agent — see "
-            "docs/specs/2026-08-06-hub-budget-scheduler-design.md §6."
+            "can permanently bench a hub agent."
         ),
     ),
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
@@ -50,9 +195,31 @@ def main(
     """Run the turn-based agent simulation."""
     # Claim this process's canonical-id writer slot before anything mints. The
     # engine's own minter owns WRITER_ENGINE; the module default is used here
-    # only for PI DM rows, so it takes the aux slot (R1).
+    # only for PI DM rows, so it takes the aux slot.
     set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
+
+
+async def _reconcile_stale_runs(session_factory, current_run_id: uuid.UUID) -> None:
+    """Mark every 'running' SimulationRun other than the current one as 'stopped'.
+
+    A crash, OOM-kill, or `docker kill` can leave a run's status stuck at
+    "running" forever: --fresh only inserts a new row and resume's
+    `order_by(started_at.desc()).limit(1)` only ever repairs the single
+    latest row. Called once at startup, after simulation_run_id is resolved,
+    from both the --fresh and resume paths.
+    """
+    from sqlalchemy import update
+
+    from src.models import SimulationRun
+
+    async with session_factory() as db:
+        await db.execute(
+            update(SimulationRun)
+            .where(SimulationRun.status == "running", SimulationRun.id != current_run_id)
+            .values(status="stopped", ended_at=datetime.now(UTC))
+        )
+        await db.commit()
 
 
 async def _run_simulation(
@@ -155,9 +322,10 @@ async def _run_simulation(
 
     if not no_db:
         from sqlalchemy import select
-        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+        from src.database import make_engine
         from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
-        engine = create_async_engine(settings.database_url)
+        engine = make_engine(settings.database_url)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         if fresh:
@@ -222,6 +390,8 @@ async def _run_simulation(
                     simulation_run_id = run.id
                     logger.info("Created new simulation run %s", simulation_run_id)
 
+        await _reconcile_stale_runs(session_factory, simulation_run_id)
+
     # Create simulation engine
     runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
     sim_engine = SimulationEngine(
@@ -235,19 +405,32 @@ async def _run_simulation(
         slack_enabled=slack_enabled,
     )
 
-    # Handle shutdown signals
+    # Handle shutdown signals.
+    #
+    # The flush must not run in a fire-and-forget task: the main loop can
+    # return first, and asyncio.run then cancels the still-pending task
+    # mid-await, losing the in-flight turn's messages. It is awaited in the
+    # finally-block below instead.
+    #
+    # There is one process-wide shutdown event (slack_client.SHUTDOWN_REQUESTED),
+    # shared by every AgentSlackClient call regardless of which thread or pool
+    # it runs on -- directly on this event-loop thread or through
+    # src.services.slack_executor's pool. request_stop() alone only stops the
+    # NEXT turn from starting; it does not abort a call already sleeping
+    # through a Slack Retry-After backoff, so the abort is delayed by
+    # SHUTDOWN_SLACK_ABORT_GRACE_SECONDS on the first signal (see
+    # _make_shutdown_handler) instead of firing at t=0, letting a typical
+    # ~10s backoff finish naturally within docker stop -t 30's grace.
+    #
+    # Installed with signal.signal, not loop.add_signal_handler, so the
+    # handler still fires while the loop thread is stuck inside a synchronous
+    # Slack call; see _make_shutdown_handler's docstring for the full
+    # reasoning.
     loop = asyncio.get_event_loop()
-
-    def shutdown():
-        # Only flip the stop flag here. The flush must not run in a
-        # fire-and-forget task: the main loop can return first, and asyncio.run
-        # then cancels the still-pending task mid-await, losing the in-flight
-        # turn's messages. It is awaited in the finally-block below instead (R2).
-        logger.info("Received shutdown signal")
-        sim_engine.request_stop()
+    shutdown = _make_shutdown_handler(loop, sim_engine)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown)
+        signal.signal(sig, shutdown)
 
     try:
         if budget > 0:
@@ -278,6 +461,15 @@ async def _run_simulation(
         except Exception:
             logger.exception("Final flush on shutdown failed")
 
+        # Set SHUTDOWN_REQUESTED unconditionally now that the flush above is
+        # done, regardless of whether a signal was ever received or its grace
+        # timer had fired — see _finalize_shutdown's docstring for why relying
+        # on that timer alone drops the event on a run that exits before it
+        # fires.
+        try:
+            _finalize_shutdown(shutdown)
+        except Exception:  # never skip the run-status update below
+            logger.exception("Shutdown finalisation failed")
         # Update simulation run status
         if session_factory and simulation_run_id:
             async with session_factory() as db:
@@ -300,6 +492,12 @@ async def _run_simulation(
             {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
              for a in agents},
         )
+        # Only NOW -- after the flush, the SimulationRun status commit and
+        # the summary -- hand SIGTERM/SIGINT back to their default
+        # dispositions, so a signal during that teardown could not kill the
+        # process with the run row stuck at status='running'.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            _restore_signal_default(sig)
 
 
 if __name__ == "__main__":

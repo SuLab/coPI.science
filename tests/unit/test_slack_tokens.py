@@ -263,12 +263,12 @@ def test_model_dump_is_not_used_on_settings_anywhere_in_src():
     """The redaction covers repr()/str() ONLY, by explicit design.
 
     `Settings.__repr_args__` masks credential-named fields, and its docstring records
-    that as closing "the only described leak path" for SEC-19 — deliberately leaving
+    that as closing the only described leak path — deliberately leaving
     fields as plain `str` rather than SecretStr to avoid churning ~130 call sites.
     `model_dump()` therefore returns every secret in the clear. Measured: it does.
 
     That scoping is only safe while nothing dumps the settings object, so the invariant
-    that actually protects SEC-19 is this one, not a redaction test. If a future caller
+    that actually protects against a leak is this one, not a redaction test. If a future caller
     needs `model_dump()`, the redaction has to be widened first.
 
     Adding the DSN redaction (`database_url`'s password) did not change this: it is a

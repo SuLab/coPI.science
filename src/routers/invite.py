@@ -28,7 +28,6 @@ def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
     Binds acceptance to the invited address so a forwarded or leaked invite link
     cannot let a different logged-in account claim delegate access (read/write on
     the PI's proposals and profile). Fails closed when either address is missing.
-    See SEC-6.
     """
     invited = (invitation.email or "").strip().lower()
     account = (getattr(user, "email", None) or "").strip().lower()
@@ -179,7 +178,7 @@ async def _accept_invitation(
     """Create the delegation relationship and mark invitation accepted."""
     # Enforce the email binding at the mutation chokepoint (defense in depth
     # behind the GET-side check): never grant delegate access to an account
-    # whose email differs from the invited address. See SEC-6.
+    # whose email differs from the invited address.
     if not _invite_matches_user(invitation, user):
         logger.warning(
             "Rejecting invite acceptance: invitation %s for %r, user %s has %r",
@@ -233,33 +232,49 @@ async def _accept_invitation(
     )
     agent = agent_result.scalar_one()
 
+    agent_slug = agent.agent_id  # captured BEFORE any guarded db.execute(): a failed flush
+    agent_row_id = agent.id  # expires every attribute on agent/user (the 21.2/21.13 trap)
+    delegate_user_id = user.id
+    sid = None
     if user.email:
-        try:
+        try:  # LOOKUP only — no SQL inside the best-effort try
             from src.services.slack_tokens import token_for_agent_row
             from src.services.slack_web import lookup_user_by_email_async
 
             bot_token = token_for_agent_row(agent)
             if bot_token:
                 sid = await lookup_user_by_email_async(bot_token, user.email)
-                if sid:
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid not in current_ids:
-                        current_ids.append(sid)
-                        agent.delegate_slack_ids = current_ids
+            else:
+                logger.info(
+                    "No Slack bot token for agent %s — skipping delegate Slack-ID sync for %s",
+                    agent_slug, user.email,
+                )
         except Exception as exc:
-            # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
-            # delegate is useful without a Slack id. But LOG it — a bare `pass`
-            # here hid an ImportError for an unknown length of time, and the
-            # whole sync was dead code with nothing to show for it.
+            # Best-effort by design: a delegate is useful without a Slack id. But
+            # LOG it — a bare `pass` here would silently hide failures (an
+            # ImportError, previously) and leave the sync dead with nothing to
+            # show for it.
             logger.warning(
-                "Delegate Slack-ID sync failed for agent %s: %s", agent.agent_id, exc
+                "Delegate Slack-ID sync failed for agent %s: %s", agent_slug, exc
             )
 
     await db.commit()
 
+    if sid:  # own unit of work, AFTER the delegation is durable: a failure here must
+        try:  # neither roll the delegation back nor poison the session
+            from src.services.delegate_slack_ids import append_delegate_slack_id_stmt
+
+            await db.execute(append_delegate_slack_id_stmt(agent_row_id, sid))
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.warning(
+                "Delegate Slack-ID append failed for agent %s: %s", agent_slug, exc
+            )
+
     logger.info(
         "Delegate %s accepted invitation for agent %s",
-        user.id, agent.agent_id,
+        delegate_user_id, agent_slug,
     )
 
-    return RedirectResponse(url=f"/agent/{agent.agent_id}/dashboard", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_slug}/dashboard", status_code=302)

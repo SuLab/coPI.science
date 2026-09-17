@@ -20,7 +20,6 @@ of those stalls the whole event loop, not just that request — see ``_call``.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any
@@ -35,6 +34,7 @@ from src.agent.slack_client import (
     SlackListingIncomplete,
     split_for_slack,
 )
+from src.services.slack_executor import run_slack_call
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +258,11 @@ def post_message(
 # WebClient these functions replaced: it had no retry, so its worst case was a
 # single blocking HTTP call rather than four plus backoff.
 #
-# asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
-# that request its latency and nothing else. Six of the seven call sites are async;
-# GrantBot and _resolve_delegate_names are sync and use the plain functions.
+# run_slack_call moves the whole thing to the dedicated Slack I/O executor, so
+# the wait costs that request its latency and nothing else — and, unlike the
+# default asyncio.to_thread pool, cannot starve unrelated to_thread work
+# elsewhere in the process. Six of the seven call sites are async; GrantBot and
+# _resolve_delegate_names are sync and use the plain functions.
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +273,7 @@ async def list_channel_ids_async(
     exclude_archived: bool = False,
 ) -> dict[str, str]:
     """``list_channel_ids`` off the event loop."""
-    return await asyncio.to_thread(
+    return await run_slack_call(
         list_channel_ids, token,
         include_private=include_private, exclude_archived=exclude_archived,
     )
@@ -279,22 +281,22 @@ async def list_channel_ids_async(
 
 async def lookup_user_by_email_async(token: str, email: str) -> str | None:
     """``lookup_user_by_email`` off the event loop."""
-    return await asyncio.to_thread(lookup_user_by_email, token, email)
+    return await run_slack_call(lookup_user_by_email, token, email)
 
 
 async def get_user_info_async(token: str, user_id: str) -> dict[str, Any] | None:
     """``get_user_info`` off the event loop."""
-    return await asyncio.to_thread(get_user_info, token, user_id)
+    return await run_slack_call(get_user_info, token, user_id)
 
 
 async def join_channel_async(token: str, channel_id: str) -> None:
     """``join_channel`` off the event loop."""
-    return await asyncio.to_thread(join_channel, token, channel_id)
+    return await run_slack_call(join_channel, token, channel_id)
 
 
 async def post_message_async(
     token: str, channel: str, text: str, *, thread_ts: str | None = None
 ) -> list[dict[str, Any]]:
     """``post_message`` off the event loop."""
-    return await asyncio.to_thread(
+    return await run_slack_call(
         post_message, token, channel, text, thread_ts=thread_ts)

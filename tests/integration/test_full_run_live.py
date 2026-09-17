@@ -16,7 +16,7 @@ cost a rewrite there:
 1. **The labs are complementary.** Every pair is a plausible collaboration, so nothing
    the agents fail to do can be explained away by scientific irrelevance.
 2. **The roster is trimmed to the agents under test**, and the workspace is collapsed to
-   ONE channel. Phase 1 keyword-matches profiles against seven seeded channels and Phase 5
+   ONE channel. phase 1 keyword-matches profiles against seven seeded channels and phase 5
    posts into whichever subscribed channel the model names; left alone, three agents
    scatter and never meet, and every outcome claim comes back inconclusive.
 3. **Harness-authored messages are recorded and excluded** from every "the agents
@@ -44,7 +44,7 @@ Two more are specific to running both dependencies at once:
    zero — a violation is a finding, not a flake.
 
 The near-concluded seeded thread is a **precondition, not the claim**. Measured over 16
-real turns in the cohort tier, Phase 5 chose "skip" or "new post" almost every time and
+real turns in the cohort tier, phase 5 chose "skip" or "new post" almost every time and
 produced zero threaded replies; waiting for a specific pair to spontaneously reach a
 `:memo:`→✅ handshake makes the ThreadDecision assertion untestable rather than merely
 slow. The seeded history is written through the real `_post_message` (so it exists in both
@@ -233,7 +233,7 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
     # (profiles/memory/{agent}/public.md), written by `_update_agent_memory` on every
     # thread closure and read back into every later prompt. Left at the real path, run N+1
     # inherits run N's conclusions: measured, a second run whose memory already said
-    # "closed: no_proposal" produced Phase 5 skips on nine consecutive turns. That biases
+    # "closed: no_proposal" produced phase 5 skips on nine consecutive turns. That biases
     # a run toward INCONCLUSIVE, so isolate it per test. Both bindings are patched —
     # simulation.py imports the constant by value (`from src.agent.agent import
     # PROFILES_DIR`), so patching only the source module would leave the profile-mtime
@@ -384,8 +384,8 @@ def _make_engine(ctx, *, budget, bare=False):
         # `--reset-cursors` (a real production flag), and it is load-bearing here.
         # `_rebuild_agent_state` step 5 advances every agent's last_seen_cursor to
         # max(posted_at), so on a resumed run the harness's own seeded intros are
-        # already "seen": Phase 2 returns nothing, interesting_posts stays empty and
-        # Phase 5 has nothing to reply to. Measured without it — turn 1 concluded the
+        # already "seen": phase 2 returns nothing, interesting_posts stays empty and
+        # phase 5 has nothing to reply to. Measured without it — turn 1 concluded the
         # seeded thread and turns 2-5 were all "Agent chose to skip", then the loop
         # went idle. Resetting the cursors is what lets three agents actually discover
         # each other, which is the precondition for a multi-turn run to exist at all.
@@ -475,10 +475,10 @@ async def _seed(ctx, *, replies: int) -> str:
     none of them. What is seeded is the *opportunity*, not the outcome.
 
     Strictly two-party: the root tags CravattProbeBot, so
-    `MessageLog.get_thread_allowed_agents` pins the thread to {su, cravatt} and Phase 4
+    `MessageLog.get_thread_allowed_agents` pins the thread to {su, cravatt} and phase 4
     aborts for anyone else. Seeding a third voice into it would build a thread the engine
     then refuses to continue. wiseman is the third agent for a reason — it has to reach
-    the others through Phase 2/5 like a real participant.
+    the others through phase 2/5 like a real participant.
     """
     seeder = _make_engine(ctx, budget=0, bare=True)
 
@@ -870,7 +870,7 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
     tail's clock, and the next restart's `_rebuild_state_from_slack` saw the unrecorded
     head chunks as brand-new inbound messages and ingested them.
 
-    Phase 4 replies are generated with `max_tokens=1500`, roughly 6000 characters, so
+    phase 4 replies are generated with `max_tokens=1500`, roughly 6000 characters, so
     this is reached by ordinary agent traffic: it is what the 20-turn run tripped over.
     The client now cuts at the boundary itself and reports every message it created, and
     the engine writes one row each — so the set equality below is exact, with no
@@ -909,7 +909,7 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
     assert all(len(markdown_to_mrkdwn(r.content)) <= SLACK_TEXT_CHUNK
                for r in db_rows.values()), detail
     # One logical post stays ONE top-level post. Without this, the continuations arrive
-    # as N fresh roots and every other agent's Phase 2 scan sees N posts for one.
+    # as N fresh roots and every other agent's phase 2 scan sees N posts for one.
     roots = [r for r in db_rows.values() if r.thread_ts is None]
     assert len(roots) == 1, (
         f"the split produced {len(roots)} top-level posts: "
@@ -929,16 +929,13 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
 
 
 # ===========================================================================
-# T13.2 — SIGTERM, restart, and the property the DB-primary design exists for
+# SIGTERM, restart, and the property the DB-primary design exists for
 # ===========================================================================
 
 
-# NOT xfailed. It was, on the reasoning that this test's phase B builds a fresh
-# engine so the _rebuild_agent_state idempotency fixes could not have addressed
-# it — reasoning made without credentials to check it. Run live for the first time
-# on 2026-08-04 with all three probe bots, it PASSED, and the strict xfail turned
-# that into a failure, which is the marker doing its job. The defect 8515f65
-# recorded is fixed; the pin is gone rather than relaxed.
+# NOT xfailed: run live with all three probe bots, this test passes, confirming
+# the restart-idempotency fixes hold even though this test's phase B builds a
+# fresh engine.
 async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
     """Stop the engine with a real SIGTERM mid-turn, resume the same run, compare stores.
 

@@ -4,12 +4,28 @@ import logging
 import re
 from pathlib import Path
 
+from src.config import get_settings
 from src.models import Publication, ResearcherProfile, User
+from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path("profiles/public")
-PRIVATE_PROFILES_DIR = Path("profiles/private")
+# See src/agent/agent.py's PROFILES_DIR — same setting, same defaults.
+# None by default, resolved lazily via the
+# accessors below — see agent.py's own accessor for the full rationale.
+PROFILES_DIR: Path | None = None
+PRIVATE_PROFILES_DIR: Path | None = None
+
+
+def _public_profiles_dir() -> Path:
+    return PROFILES_DIR if PROFILES_DIR is not None else Path(get_settings().profiles_dir) / "public"
+
+
+def _private_profiles_dir() -> Path:
+    return (
+        PRIVATE_PROFILES_DIR if PRIVATE_PROFILES_DIR is not None
+        else Path(get_settings().profiles_dir) / "private"
+    )
 
 
 def export_profile_to_markdown(
@@ -112,10 +128,11 @@ def export_profile_to_markdown(
             lines.append(f"- {g}")
         lines.append("")
 
-    path = PROFILES_DIR / f"{agent_id}.md"
+    public_dir = _public_profiles_dir()
+    path = public_dir / f"{agent_id}.md"
     try:
-        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        public_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, "\n".join(lines), encoding="utf-8")
         logger.info("Exported profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
@@ -124,22 +141,49 @@ def export_profile_to_markdown(
 
 
 def export_private_profile(
-    user: User, profile: ResearcherProfile, agent_id: str | None
+    user: User,
+    profile: ResearcherProfile,
+    agent_id: str | None,
+    *,
+    remove_if_empty: bool = False,
 ) -> Path | None:
-    """Export private_profile_md to profiles/private/{agent_id}.md.
+    """Export private_profile_md (or, absent that, private_profile_seed) to
+    profiles/private/{agent_id}.md.
 
-    Returns the path written, or None if the user has no AgentRegistry entry
-    or no private profile content.
+    Returns the path written, or None if the user has no AgentRegistry entry or
+    there is no private content of either kind (a seed with nothing
+    exported yet must not read to the agent as "no private instructions").
+
+    `remove_if_empty` defaults to False: a run_profile_pipeline call has no
+    empty-content case to delete — the pipeline adopts a disk-only
+    private profile into `profile.private_profile_md` before ever calling
+    this, so `content` is only empty here for a PI who has genuinely never
+    written one. Pass `remove_if_empty=True` only from a real "the PI just
+    cleared this" write path (onboarding.py's save_private_profile) so that,
+    and only that, path removes a previously exported file rather than
+    leaving a stale one in place: src/agent/agent.py's private_profile
+    property falls back to "No private instructions yet." only when the file
+    is ABSENT, so a cleared profile that left a stale file on disk would keep
+    the agent honouring instructions the PI deleted.
     """
     if not agent_id:
         return None
-    if not profile.private_profile_md:
+    content = profile.private_profile_md or profile.private_profile_seed
+    private_dir = _private_profiles_dir()
+    path = private_dir / f"{agent_id}.md"
+    if not content:
+        if remove_if_empty:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove cleared private profile for %s: %s", user.name, exc
+                )
         return None
 
-    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     try:
-        PRIVATE_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(profile.private_profile_md + "\n", encoding="utf-8")
+        private_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, content + "\n", encoding="utf-8")
         logger.info("Exported private profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
