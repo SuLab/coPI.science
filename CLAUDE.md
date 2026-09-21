@@ -1435,9 +1435,14 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >   link** (`src/services/prose_citations.py`, registered as the Jinja globals
 >   `md_citations`/`plain_citations` on BOTH routers — each owns its own
 >   `Jinja2Templates`, so one registration would 500 the other surface). The
->   anchor carries `href`, `title` and `class` and no `target`: DOMPurify
->   3.1.6's default `ALLOWED_ATTR` has no `target`, so one would be stripped on
->   the markdown path and survive on the plain one. `#assessments-summary` is
+>   anchor carries `href`, `title`, `class` and — on the plain path only —
+>   `rel="noreferrer"`. It carries no `target`: DOMPurify 3.1.6's default
+>   `ALLOWED_ATTR` has no `target`, so one would be stripped on the markdown
+>   path and survive on the plain one, and the two renderings would disagree
+>   visibly. `rel` is the opposite case: DOMPurify keeps it and it has no
+>   visible behaviour, so it is emitted where it can be. Markdown has no
+>   syntax for `rel`, so a `prose_format='markdown'` row's links carry none
+>   and fall back to the browser's referrer policy. `#assessments-summary` is
 >   untouched — `render_assessment_headline` still clips the RAW pitch, and
 >   moving that would move the 600-character sentence boundary.
 >
@@ -1447,9 +1452,39 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >     $DC up -d blackbird-app worker
 >     $DC up -d agent                                 # supervisor returns IDLE
 >
-> The agent rebuild is for the prompt-set bump's version stamp, not for a
-> parser change: image-without-prompt and prompt-without-image are both benign
-> here, since no sidecar key changed.
+> **The agent rebuild in that list changed the agent image's contents but
+> changed no agent behaviour — and the distinction is the whole point.** The
+> `src/` edits are six files: `src/routers/{admin,manager,reviews}.py` and
+> `src/services/{directory,assessment_detail,prose_citations}.py`. Five of
+> those the engine never imports. The sixth does matter:
+> **`src/services/assessment_detail.py` IS on the engine's import graph** —
+> `src/agent/simulation.py` pulls `KEY_POINT_GROUPS`, `normalize_bullets` and
+> `normalize_key_points` from it, which is the sidecar parser. What this
+> change added to that module is one new function, `has_review_filter()`,
+> called only from `src/services/directory.py`; nothing the engine reaches
+> was touched. So the rebuild was REQUIRED for image/tree parity and was
+> behaviourally inert — not, as an earlier draft of this box said, a rebuild
+> the agent did not need.
+>
+> Do not generalise this into "the agent never needs rebuilding". The rule is
+> the one the "agent image does NOT mount `src/`" box states: **`src/` is
+> baked, `prompts/` is mounted.** Any change under `src/agent/` — or under
+> anything it imports, `assessment_detail.py` included — still requires
+> `$DC --profile agent build agent` before the new code runs.
+>
+> The converse, which this file had never said outright: an edit under
+> **`prompts/roles/**`** reaches a RUNNING agent with no build and no
+> restart, version bump included. `Agent._load_prompt` → `_load_file` does a
+> `read_text()` **per use**, and `prompt_set_stamp` re-reads `role.toml` the
+> same way. **`prompts/rubric/blackbird-rubric.toml` is the exception** and
+> still needs a process restart — `src/services/blackbird_rubric.py` parses
+> it ONCE at import (`_RUBRIC = parse_rubric(RUBRIC_PATH)` at module level),
+> which is what the "Editing the rubric takes effect on restart, not on
+> rebuild" box above already says. Both statements are true; they are about
+> different subtrees of `prompts/`.
+>
+> No sidecar key changed, so image-without-prompt and prompt-without-image are
+> both benign for this change.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
