@@ -52,7 +52,7 @@
    --------------------------------------------------------------------------- #}
 <nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
-    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#signals">Strengths &amp; risks</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#signals">Evidence</a>
     {% if a.recommended_next_experiment %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#ask">Ask</a>{% endif %}
     {% if a.rationale %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#rationale">Rationale</a>{% endif %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#panel">Panel</a>
@@ -190,7 +190,7 @@
 </div>
 
 {# --------------------------------------------------------------------------
-   Strengths and risks (request 3, plan Task B1). DERIVED from what this row
+   Evidence summary (request 3, plan Task B1). DERIVED from what this row
    already stores — dimension scores, gating states, red flags and specialist
    signals (decision D2) — so it works on every existing row without a
    migration. `verdict_signals` is the service's single new context key
@@ -215,6 +215,13 @@
    bullet per character or per key. #}
 {% set hub_strengths = a.strengths if (viewer_is_staff and a.strengths is iterable and a.strengths is not string and a.strengths is not mapping) else [] %}
 {% set hub_risks = a.risks if (viewer_is_staff and a.risks is iterable and a.risks is not string and a.risks is not mapping) else [] %}
+{# Sidecar items 13/14 (0050). Staff-only on the page for the same reason as the
+   0049 bullets above: the prompt promises the model these are never seen outside
+   staff, and a reviewer account reaches the manager route. A column is raw JSONB,
+   so anything that is not a real list renders as nothing rather than as one
+   bullet per character or per key. #}
+{% set hub_landscape = a.competitive_landscape if (viewer_is_staff and a.competitive_landscape is iterable and a.competitive_landscape is not string and a.competitive_landscape is not mapping) else [] %}
+{% set hub_maturity = a.evidence_maturity if (viewer_is_staff and a.evidence_maturity is iterable and a.evidence_maturity is not string and a.evidence_maturity is not mapping) else [] %}
 {# One derived row. `kind` is strengths|risks|unestablished. Layout is a
    single full-width line: glyph, label — detail, an optional count badge,
    and (consults only) a one-line clipped preview that truncates; the
@@ -268,7 +275,7 @@
 </li>
 {% endmacro %}
 <div id="signals" class="assessment-signals scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h2 class="text-base font-semibold text-gray-900 mb-1">Strengths and risks</h2>
+    <h2 class="text-base font-semibold text-gray-900 mb-1">Evidence summary</h2>
     {% if vs.get('mid_scale_count') %}
     {% set mid_n = vs.mid_scale_count %}
     {% set scored_n = vs.get('scored_dimension_count') or mid_n %}
@@ -340,6 +347,22 @@
             </p>
             {% endif %}
         </section>
+        {% if hub_landscape %}
+        <section class="assessment-signals-landscape rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+            <div class="text-sm font-semibold text-blue-900">Competitive landscape</div>
+            <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for bullet in hub_landscape %}<li>{{ plain_citations(bullet) }}</li>{% endfor %}
+            </ul>
+        </section>
+        {% endif %}
+        {% if hub_maturity %}
+        <section class="assessment-signals-maturity rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+            <div class="text-sm font-semibold text-amber-900">Evidence maturity</div>
+            <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for bullet in hub_maturity %}<li>{{ plain_citations(bullet) }}</li>{% endfor %}
+            </ul>
+        </section>
+        {% endif %}
         {# Collapses to one line when there is nothing in it: an empty third
            of the card said less than the sentence does. #}
         <section class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
@@ -364,8 +387,8 @@
         This row's rubric revision is not in the registry, so its dimension
         scores could not be classified as strengths or risks.
         {% endif %}
-        {% if hub_strengths or hub_risks %}
-        "In the hub's words" is BlackbirdBot's own text from the verdict sidecar; derived rows quote the specialists' stored text.
+        {% if hub_strengths or hub_risks or hub_landscape or hub_maturity %}
+        "In the hub's words", the competitive landscape and the evidence maturity are BlackbirdBot's own text from the verdict sidecar; derived rows quote the specialists' stored text.
         {% else %}
         Consult rows quote the specialists' stored text.
         {% endif %}

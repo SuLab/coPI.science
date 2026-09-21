@@ -1819,14 +1819,32 @@ def _signal_columns(body: str) -> tuple[str, str, str]:
     class names — and ending at the always-present legend — keeps each
     assertion scoped to ONE column. A whole-card substring check cannot tell
     the green column from the red one, which is the entire point of the two
-    absence tests below."""
+    absence tests below.
+
+    The risks slice ends at whichever of the three LATER sections comes first.
+    Since scout_hub 1.7.0 the card also renders `assessment-signals-landscape`
+    and `-maturity` BETWEEN risks and unestablished, and both are conditional
+    on their columns being non-NULL — so an unconditional `index(...
+    -unestablished)` would fold landscape/maturity text into the risks slice
+    whenever a fixture populates them, and attribute it to the red column."""
     card = _signals_card(body)
     i = card.index("assessment-signals-strengths")
     j = card.index("assessment-signals-risks")
     k = card.index("assessment-signals-unestablished")
     legend = card.index("signals-legend")
     assert i < j < k < legend, "the three signal columns rendered out of order"
-    return card[i:j], card[j:k], card[k:legend]
+    risks_end = min(
+        [k] + [
+            card.index(cls)
+            for cls in ("assessment-signals-landscape", "assessment-signals-maturity")
+            if cls in card
+        ]
+    )
+    # Without this, moving either new section ABOVE risks would make the slice
+    # empty and quietly turn every `assert X not in risks` below into a
+    # tautology — a disabled colour-placement check that still reads as green.
+    assert j < risks_end <= k, "the risks column collapsed to an empty slice"
+    return card[i:j], card[j:risks_end], card[k:legend]
 
 
 async def test_the_strengths_and_risks_box_renders_three_columns_and_a_footnote(
@@ -1935,7 +1953,7 @@ async def test_the_box_is_never_inside_a_collapsed_details(
     # before trusting the absence assertions against it.
     assert "Full rationale" in inside
     assert 'id="signals"' not in inside
-    assert "Strengths and risks" not in inside
+    assert "Evidence summary" not in inside
 
 
 SCORE_RATIONALE_MARKER = "SCORE-RATIONALE-MARKER: **weakest** on venture potential"
@@ -2043,6 +2061,9 @@ HUB_STRENGTH_ONE = "HUB STRENGTH ONE: the target has a validated genetic link."
 HUB_STRENGTH_TWO = "HUB STRENGTH TWO: a differentiated mechanism versus standard of care."
 HUB_RISK_ONE = "HUB RISK ONE: no in vivo efficacy data yet."
 HUB_RISK_TWO = "HUB RISK TWO: freedom-to-operate is unconfirmed."
+
+HUB_LANDSCAPE_ONE = "Myrtelle rAAV-Olig001-ASPA is clinical-stage AAV for Canavan."
+HUB_MATURITY_ONE = "Biology: the genetic lesion is unambiguous; therapy is not shown."
 
 ESTABLISHED_MARKER = "ESTABLISHED SENTINEL: the assay is orthogonally validated."
 CONSULT_CONCERN_MARKER = "CONCERN SENTINEL: no isogenic control was run."
@@ -2670,3 +2691,50 @@ async def test_a_flat_key_points_list_also_gets_the_citation_treatment(
     )).text
     assert ">cited paper</a>" in html
     assert f">{DETAIL_DOI}<" not in html
+
+
+async def test_staff_see_the_landscape_and_maturity_sections(client, db_session, admin):
+    """Sidecar items 13/14 (0050) render as their own sections in the card."""
+    _, assessment = await _seed(db_session)
+    assessment.competitive_landscape = [HUB_LANDSCAPE_ONE]
+    assessment.evidence_maturity = [HUB_MATURITY_ONE]
+    await db_session.flush()
+    card = _signals_card(_main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text))
+    assert "Competitive landscape" in card
+    assert "Evidence maturity" in card
+    assert HUB_LANDSCAPE_ONE in card
+    assert HUB_MATURITY_ONE in card
+
+
+async def test_a_reviewer_never_sees_the_landscape_or_maturity(client, db_session):
+    """Same staff-only promise the prompt makes for strengths/risks: a reviewer
+    reaches the manager route but is not staff, so both fields are withheld
+    while the derived half of the card still renders."""
+    from src.models.user import USER_ROLE_REVIEWER
+
+    _, assessment = await _seed(db_session)
+    assessment.competitive_landscape = [HUB_LANDSCAPE_ONE]
+    assessment.evidence_maturity = [HUB_MATURITY_ONE]
+    await db_session.flush()
+    reviewer = await factories.make_user(
+        db_session, user_role=USER_ROLE_REVIEWER, email="landscape-reviewer@example.org"
+    )
+    body = _main((await client.get(
+        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+    )).text)
+    assert 'id="signals"' in body
+    assert HUB_LANDSCAPE_ONE not in body
+    assert HUB_MATURITY_ONE not in body
+
+
+async def test_the_signals_card_is_titled_evidence_summary(client, db_session, admin):
+    """The card now holds five sections, and the jump nav is the page's only
+    navigation — a title naming two of five makes the rest unreachable."""
+    _, assessment = await _seed(db_session)
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "Evidence summary" in body
+    assert "Strengths and risks" not in body
