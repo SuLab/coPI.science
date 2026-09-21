@@ -24,6 +24,25 @@ pytest.
 it before starting. It carries the evidence (four findings), the eight decisions with
 rationale, and six accepted risks. This plan argues from it and does not restate it.
 
+**Revision:** adversarially audited 2026-09-21 against the repository; 8 findings,
+2 of them blocking, all folded in. What the audit changed: Task 3's
+`_clip_at_sentence` test gained the function-local import every other user of that
+symbol has (without it: `NameError` plus an `F821` that fails `ruff`, and the step's
+own "stop and report that the spec is wrong" instruction would fire on a false
+premise); Task 1's migration now writes each `sa.Column(...)` on ONE line, because
+the `PLANNED_OBJECTS` drift regex has no `\s*` after `sa.Column(` and a wrapped call
+makes the guard pass while checking nothing; Task 2 gained two `caplog` assertions
+and a warn-but-store case, without which Step 3's loop extension could be reverted
+with every test still green; Task 2's expected failure mode is corrected (the row
+build is swallowed by a best-effort `except`, so it is `NoResultFound`, not
+`TypeError`); three more stale comments, the `preflight.py` comment block, the
+template's Jinja comment and a now-vacuous assertion at
+`test_assessment_detail_page.py:1938` are named; and the file-disjoint claim is
+qualified — it is true, but Tasks 2 and 4 are semantically dependent on Task 1.
+The audit confirmed every prompt-edit anchor exists verbatim, that Task 3's
+trap-avoidance genuinely works, and that no third-party test the plan omits would
+break.
+
 ## Global Constraints
 
 - **`prompts/` is bind-mounted and read per use; `src/` is baked into the agent
@@ -56,7 +75,8 @@ rationale, and six accepted risks. This plan argues from it and does not restate
 | `tests/unit/test_migration_checks.py` | pins preflight's structures | 1 |
 | `tests/integration/test_harness_smoke.py` | pins `alembic_version` | 1 |
 | `src/agent/simulation.py` | writes them; headline drift alarm | 2 |
-| `src/services/assessment_headline.py` | one stale comment | 2 |
+| `src/services/assessment_headline.py` | three stale comments | 2 |
+| `src/services/assessment_detail.py` | one stale docstring | 2 |
 | `tests/integration/test_assessment_narrative_fields.py` | persist behaviour (extend) | 2 |
 | `prompts/roles/scout_hub/phase4-thread-reply.md` | the contract | 3 |
 | `prompts/roles/scout_hub/role.toml` | version stamp | 3 |
@@ -69,7 +89,22 @@ rationale, and six accepted risks. This plan argues from it and does not restate
 | `tests/integration/test_assessment_detail_page.py` | staff/reviewer visibility | 4 |
 | `CLAUDE.md` | the `0050` deploy box | 5 |
 
-The five tasks are file-disjoint and may be implemented in parallel.
+The five tasks are **file-disjoint** and may be implemented in parallel.
+
+> ⚠️ **File-disjoint is not the same as independently verifiable.** Tasks 2 and 4
+> are SEMANTICALLY DEPENDENT on Task 1: their tests need
+> `OpportunityAssessment.competitive_landscape` / `.evidence_maturity` to be mapped
+> *and* the migration applied to the test container's schema. Neither can pass
+> before Task 1 merges.
+>
+> Under `/engineering:plan-execution` this is a non-issue — **do not run tests
+> inside any task**; the single verification is the post-merge `./scripts/ci.sh` at
+> the integration gate. The per-task "Step 2: run it to verify it fails" and
+> "Step N: run the tests" instructions below are written for a serial TDD executor
+> and are **non-normative under parallel execution**: they record the expected
+> failure mode and the intended post-merge outcome, not a gate to satisfy mid-task.
+> `./scripts/ci.sh` runs `pytest tests/` whole under `set -euo pipefail` and returns
+> one bit, so a per-task scoped green is not obtainable from it in any case.
 
 ---
 
@@ -182,19 +217,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column(
         "opportunity_assessments",
-        sa.Column(
-            "competitive_landscape",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-        ),
+        sa.Column("competitive_landscape", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     )
     op.add_column(
         "opportunity_assessments",
-        sa.Column(
-            "evidence_maturity",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-        ),
+        sa.Column("evidence_maturity", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     )
 
 
@@ -202,6 +229,18 @@ def downgrade() -> None:
     op.drop_column("opportunity_assessments", "evidence_maturity")
     op.drop_column("opportunity_assessments", "competitive_landscape")
 ```
+
+> ⚠️ **Each `sa.Column(...)` must stay on ONE line**, exactly as
+> `alembic/versions/0049_assessment_strengths_risks.py:49` and `:53` write it. The
+> `PLANNED_OBJECTS` drift guard matches
+> `add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"`
+> (`tests/unit/test_migration_checks.py:893`) — there is **no** `\s*` after
+> `sa\.Column\(`. Wrapping the arguments onto their own lines makes the guard find
+> zero columns for `0050`, and since it only asserts `found - declared` is empty,
+> it would report success while checking nothing. That is the exact failure its own
+> docstring records at `:875-879` ("four revisions' worth of new columns … had no
+> collision entry, and nothing failed"). Both lines measure 99 and 95 characters
+> against `line-length = 100` (`pyproject.toml:64`), so they fit.
 
 - [ ] **Step 4: Map the columns**
 
@@ -229,6 +268,15 @@ Line 74:
 
 ```python
 DEFAULT_TARGET = "0050"
+```
+
+The comment block at `:91-134` is the prose the pinning test calls "the documented
+set", and it currently ends "…and 0048 joins now as DEFAULT_TARGET moves to 0049."
+Adding `"0049"` to the tuple makes that sentence false, and no test reads the
+comment. Append, in the sentence form already there:
+
+```
+#: 0049 joins now as DEFAULT_TARGET moves to 0050.
 ```
 
 `SUPPORTED_START_REVISIONS` (line 135) — append `"0049"`:
@@ -290,7 +338,11 @@ git commit -m "feat(assessments): competitive_landscape and evidence_maturity co
 - Modify: `src/agent/simulation.py:4537-4544` (constant use), `:4620` (soft-bound
   loop), `:4691-4692` (kwargs), `:9251` (`_HEADLINE_SOFT_LIMIT`), `:9258-9262`
   (`_PITCH_SOFT_LIMIT` comment)
-- Modify: `src/services/assessment_headline.py:66-71` (comment only)
+- Modify: `src/services/assessment_headline.py:66-71`, `:105`, `:154-156` (comments only)
+- Modify: `src/services/assessment_detail.py:156` (docstring only — `normalize_bullets`
+  says "The hub's own ``strengths`` / ``risks`` sidecar lists" and now gates four
+  fields; extend the sentence to name `competitive_landscape` and `evidence_maturity`.
+  Do not change its behaviour.)
 - Test: `tests/integration/test_assessment_narrative_fields.py` (extend — this is
   where the `0049` persist tests live; do NOT create a new file)
 
@@ -347,8 +399,18 @@ async def test_persist_assessment_stores_landscape_and_evidence_maturity(engine)
         await _delete_run(factory, run_id)
 
 
-async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(engine):
-    """A20: a malformed narrative field costs the field, never the verdict."""
+async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(
+    engine, caplog
+):
+    """A20: a malformed narrative field costs the field, never the verdict.
+
+    The caplog assertions are what pin the SOFT-BOUND LOOP (step 3). Without
+    them the loop could be reverted to ("strengths", "risks") and every other
+    test here would still pass, because the column values come from step 4's
+    `normalize_bullets` kwargs, not from the loop.
+    """
+    import logging
+
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.agent.simulation import SimulationEngine
@@ -364,13 +426,14 @@ async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(engi
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
-            "company_or_project": "Short label",
-            "competitive_landscape": "not a list",
-            "evidence_maturity": ["Biology: settled.", ""],
-            "recommendation": "conditional",
-            "scores": {},
-        })
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "competitive_landscape": "not a list",
+                "evidence_maturity": ["Biology: settled.", ""],
+                "recommendation": "conditional",
+                "scores": {},
+            })
 
         async with factory() as db:
             row = (await db.execute(
@@ -381,6 +444,55 @@ async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(engi
         assert row.competitive_landscape is None
         assert row.evidence_maturity is None
         assert row.raw_verdict["competitive_landscape"] == "not a list"
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "competitive_landscape was DROPPED" in warnings
+        assert "evidence_maturity was DROPPED" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_five_bullet_evidence_maturity_still_stores_and_warns(engine, caplog):
+    """The out-of-range bullet count is a WARNING, never a drop (spec §8), and
+    this is the second test pinning the soft-bound loop's extension."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        five = ["one", "two", "three", "four", "five"]
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "evidence_maturity": five,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.evidence_maturity == five
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "evidence_maturity carries 5 bullets" in warnings
     finally:
         await _delete_run(factory, run_id)
 
@@ -413,7 +525,10 @@ async def test_a_120_character_headline_warns_against_the_110_bound(engine, capl
                 "recommendation": "conditional",
                 "scores": {},
             })
-        assert "contract asks for <=110" in caplog.text
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "contract asks for <=110" in warnings
     finally:
         await _delete_run(factory, run_id)
 ```
@@ -425,8 +540,12 @@ Run:
 .venv-test/bin/python -m pytest tests/integration/test_assessment_narrative_fields.py \
   -k "landscape or evidence_maturity or 120_character" -v
 ```
-Expected: FAIL — `TypeError: 'competitive_landscape' is an invalid keyword argument`
-(or `AttributeError` on the column), and no `<=110` warning in `caplog`.
+Expected: FAIL — `sqlalchemy.exc.NoResultFound` from `.scalars().one()`, preceded by
+a `Failed to persist assessment on first attempt` ERROR line, and no `<=110` warning.
+**Not** a visible `TypeError`: `_persist_assessment` builds the row inside a
+best-effort `except Exception` (`src/agent/simulation.py:4768-4796`, commented
+"never lose a posted assessment"), which swallows the bad-keyword error, queues the
+kwargs and returns. The row simply never lands.
 
 - [ ] **Step 3: Extend the soft-bound loop**
 
@@ -469,11 +588,13 @@ At `src/agent/simulation.py:9251`:
 _HEADLINE_SOFT_LIMIT = 110
 ```
 
-This is not cosmetic. It mirrors the prose bound, and the pairing is asserted at
-`tests/unit/test_rubric_prompt_sync.py:313-316`. Left at 140, a 126-character
-headline — the class this whole change exists to eliminate — would store with no
-warning at all. `_PROJECT_SOFT_LIMIT` (70) and `_PITCH_SOFT_LIMIT` (900) keep their
-numbers.
+This is not cosmetic. It mirrors the prose bound, and the pairing is **documented**
+at `tests/unit/test_rubric_prompt_sync.py:313-316` — which is a `def` plus a
+docstring; nothing in the repo asserts the constant's value. The only thing that
+will pin it is Task 2 Step 1's new `test_a_120_character_headline_warns_against_the_110_bound`,
+which is why that test is not optional. Left at 140, a 126-character headline — the
+class this whole change exists to eliminate — would store with no warning at all.
+`_PROJECT_SOFT_LIMIT` (70) and `_PITCH_SOFT_LIMIT` (900) keep their numbers.
 
 - [ ] **Step 6: Correct the two stale comments**
 
@@ -496,6 +617,19 @@ with:
 # window; see _clip_at_sentence below, which publishes only COMPLETE sentences.
 ```
 
+**Two more sites say the citation is in sentence TWO, and the reorder makes that
+false.** Both are the stated *justification* for live behaviour — the unconditional
+`" …"` marker — so leaving them stale misrepresents why the code does what it does:
+
+- `src/services/assessment_headline.py:105` — "the pitch contract requires a
+  citation in sentence two, so that boundary can be an abbreviation".
+- `src/services/assessment_headline.py:154-156` — the same claim, restated at the
+  code.
+
+In both, replace "a citation in sentence two" with "a citation sentence (sentence
+four under scout_hub >= 1.7.0)". The reasoning is unchanged and still correct: the
+chosen boundary can still be an abbreviation, so the marker stays unconditional.
+
 - [ ] **Step 7: Run the tests**
 
 Run: `.venv-test/bin/python -m pytest tests/integration/test_assessment_narrative_fields.py -v`
@@ -508,6 +642,7 @@ not change its outcome. If it fails, step 5 hit the wrong constant.
 
 ```bash
 git add src/agent/simulation.py src/services/assessment_headline.py \
+        src/services/assessment_detail.py \
         tests/integration/test_assessment_narrative_fields.py
 git commit -m "feat(assessments): persist competitive_landscape and evidence_maturity; headline alarm to 110"
 ```
@@ -523,7 +658,8 @@ git commit -m "feat(assessments): persist competitive_landscape and evidence_mat
 - Modify: `docs/specs/2026-08-07-hub-bot-prompts.md` (generated — do not hand-edit)
 - Test: `tests/unit/test_headline_contract.py`, `tests/unit/test_rubric_prompt_sync.py`,
   `tests/unit/test_pitch_contract.py` (create),
-  `tests/unit/test_assessment_headline_render.py`
+  `tests/unit/test_assessment_headline_render.py` (new test, plus the docstring at
+  `:261`, which also claims the citation is in sentence two)
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
@@ -647,6 +783,8 @@ def test_a_late_citation_sentence_is_dropped_whole_not_clipped():
     """Evidence for the 550-character budget: _clip_at_sentence cuts at the last
     terminator INSIDE value[:600], so a citation sentence that starts before 600
     but ends after it is removed entirely, not truncated."""
+    from src.services.assessment_headline import _clip_at_sentence
+
     s1_3 = ("A. " * 4) + "B" * 388 + ". "   # ends at ~400
     s4 = "The work builds on " + "c" * 190 + "."   # 210 chars, ends past 600
     pitch = s1_3 + s4 + " Tail sentence."
@@ -656,6 +794,14 @@ def test_a_late_citation_sentence_is_dropped_whole_not_clipped():
         "the contract bounds where sentence 4 ENDS, not where it begins"
     )
 ```
+
+> ⚠️ **The function-local import is required, not stylistic.**
+> `tests/unit/test_assessment_headline_render.py:25` imports only
+> `render_assessment_headline` at module scope; all nine existing users of
+> `_clip_at_sentence` import it inside the test body (`:243`, `:252`, `:265`,
+> `:286`, `:301`, `:319`, `:329`, `:344`). Omitting it is a `NameError` at runtime
+> **and** an `F821` under `ruff check tests/`, which `scripts/ci.sh` requires at
+> zero findings.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -991,6 +1137,17 @@ Line 271:
 The card now holds five sections — Strengths, Risks, Not established, Competitive
 landscape, Evidence maturity — and the page's only navigation is this nav, so a
 title naming two of five would make the new sections unreachable.
+
+Two more stale artifacts go with the retitle:
+
+- `templates/admin/_assessment_detail_body.html:193` — the section's own Jinja
+  comment is still headed "Strengths and risks". It is inside `{# … #}` so it never
+  renders and no test sees it, but leaving it makes the file's own map wrong.
+- `tests/integration/test_assessment_detail_page.py:1938` — an existing
+  `assert "Strengths and risks" not in inside` becomes **vacuously true** once the
+  string exists nowhere in the template. Retarget it to
+  `assert "Evidence summary" not in inside` so it keeps testing what it was written
+  to test.
 
 - [ ] **Step 5: Add the two sections**
 
