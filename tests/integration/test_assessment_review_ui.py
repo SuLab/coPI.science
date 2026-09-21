@@ -184,7 +184,13 @@ async def test_the_forms_post_to_literal_review_paths(
     for html in (admin_html, manager_html, reviewer_html):
         assert 'action="/reviews/assessments/' in html
         assert f"/reviews/assessments/{assessment.id}/feedback" in html
-        assert f"/reviews/assessments/{assessment.id}/status" in html
+        # The approve/disapprove/clear form was removed from the detail page
+        # on operator request 2026-09-21 (spec §3): no surface posts to
+        # /status any more, though the handler and the history render stay.
+        assert f"/reviews/assessments/{assessment.id}/status" not in html
+        # The BUTTONS, not just the action path: a status control re-added
+        # with a different action would pass the assertion above.
+        assert 'name="action"' not in html
         assert 'method="post"' in html.lower()
 
     # Assign only for staff surfaces, never for a reviewer.

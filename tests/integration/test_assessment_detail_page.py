@@ -2434,3 +2434,239 @@ async def test_the_score_rationale_pointer_is_conditional(client, db_session, ad
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert 'href="#score-rationale"' not in body
+
+
+# ---------------------------------------------------------------------------
+# Cited-paper links, and the review form's default state (spec 2026-09-21)
+# ---------------------------------------------------------------------------
+
+DETAIL_DOI = "https://doi.org/10.1021/acsmedchemlett.5c00623"
+
+
+async def _seed_assessment(db_session, **overrides) -> OpportunityAssessment:
+    """One minimal assessment on its own run, with `**overrides` passed
+    straight through to the model.
+
+    Deliberately NOT `_seed`: these tests assert on a single narrative field
+    at a time, and the big fixture's rationale/red flags/consults would put
+    other prose on the page that a substring assertion could latch onto.
+    """
+    run = await factories.make_simulation_run(db_session)
+    fields = {
+        "simulation_run_id": run.id,
+        "agent_id": HUB,
+        "subject_agent_id": SUBJECT,
+        "channel_name": CHANNEL,
+        "company_or_project": "Cited Detail Co",
+        "recommendation": "conditional",
+        "weighted_score": 3.05,
+        "band": "conditional",
+    }
+    fields.update(overrides)
+    assessment = OpportunityAssessment(**fields)
+    db_session.add(assessment)
+    await db_session.flush()
+    return assessment
+
+
+async def test_the_detail_brief_renders_a_cited_paper_link(client, db_session, admin):
+    """Spec §7. Same rewrite as the card, on the detail page's own pitch."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format="markdown",
+        elevator_pitch=f"Published in ACS Med Chem Lett 2026 ({DETAIL_DOI}).",
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "cited paper" in html
+    assert f"&lt;{DETAIL_DOI}&gt;" in html
+
+
+async def test_a_plain_rationale_paragraph_keeps_its_paragraphs_and_gains_a_link(
+    client, db_session, admin
+):
+    """The plain `rationale` path is NOT one block: it splits on a blank line
+    and emits one <p> per paragraph, so the helper runs per paragraph. A single
+    whole-field call would collapse the paragraphs."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format=None,
+        rationale=f"First paragraph, see {DETAIL_DOI}.\n\nSecond paragraph.",
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert html.count('<p class="whitespace-pre-line">') >= 2
+    assert f'<a class="citation-link" href="{DETAIL_DOI}"' in html
+
+
+async def test_a_plain_next_experiment_url_becomes_a_link(client, db_session, admin):
+    """One production row has a URL in a PLAIN `recommended_next_experiment`;
+    that field has four render branches and all four take the rewrite."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format=None,
+        recommended_next_experiment=f"Run the panel; protocol at {DETAIL_DOI}.",
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert ">cited paper</a>" in html
+
+
+async def test_the_manager_detail_page_renders_citation_links(client, db_session):
+    manager = await factories.make_user(
+        db_session, user_role=USER_ROLE_MANAGER, email="cite-detail-mgr@example.org"
+    )
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format=None,
+        elevator_pitch=f"See {DETAIL_DOI}.",
+    )
+    resp = await client.get(
+        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+    )
+    assert resp.status_code == 200
+    assert ">cited paper</a>" in resp.text
+
+
+async def test_add_feedback_is_open_by_default(client, db_session, admin):
+    """Matches the queue card's quick review (spec §5): the review form is
+    visible without a click on both surfaces."""
+    assessment = await _seed_assessment(db_session)
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    at = html.index("Add feedback")
+    start = html.rfind("<details", 0, at)
+    assert " open" in html[start : html.index(">", start) + 1]
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 audit: gaps the first pass left. Each of these covers an
+# acceptance criterion from the spec that no test previously proved.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "role"), [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)]
+)
+async def test_both_detail_pages_style_prose_links(client, db_session, base, role):
+    """No test compares the four wrappers to each other, so a rule deleted
+    from one detail wrapper would pass everything else while "blue and
+    underlined" silently regressed on that surface. The list pair has
+    test_both_list_pages_style_prose_links; this is its twin."""
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"cite-css-{role}@example.org"
+    )
+    assessment = await _seed_assessment(db_session)
+    html = (await client.get(
+        f"{base}/assessments/{assessment.id}", headers=auth_headers(staff.id)
+    )).text
+    assert ".citation-link" in html
+    assert ".md-content a" in html
+
+
+async def test_the_detail_brief_renders_two_dois_as_two_links(
+    client, db_session, admin
+):
+    """The real production shape — one pitch, two parenthesised DOIs — proved
+    through the template, not only in the helper's unit tests."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format="markdown",
+        elevator_pitch=(
+            f"Published in ACS Med Chem Lett 2026 ({DETAIL_DOI}), with modelling "
+            "on bioRxiv (https://doi.org/10.64898/2026.06.29.735215)."
+        ),
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert html.count("cited paper") >= 2
+    assert f">{DETAIL_DOI}<" not in html
+
+
+async def test_a_plain_field_with_a_url_still_escapes_its_surrounding_prose(
+    client, db_session, admin
+):
+    """`plain_citations` returns Markup, which Jinja renders UNESCAPED — so
+    the escaping has to be proved through the template, where that
+    interaction actually lives, not only in the helper."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format=None,
+        recommended_next_experiment=(
+            f"<script>alert(1)</script> Smith & Jones; protocol at {DETAIL_DOI}."
+        ),
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "Smith &amp; Jones" in html
+    assert ">cited paper</a>" in html
+
+
+async def test_detail_key_points_get_the_same_citation_treatment_as_the_card(
+    client, db_session, admin
+):
+    """Parity. The same field rendered two ways on two screens one click
+    apart is the drift this whole helper exists to avoid: the card linkified
+    key-point bullets from the first pass, the detail page did not."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format="markdown",
+        key_points={
+            "significance": [f"Shown in the 2025 paper ({DETAIL_DOI})"],
+            "innovation": [],
+            "clinical_actionability": [],
+            "key_questions": [],
+            "commercial_potential": [],
+        },
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert ">cited paper</a>" in html
+    assert f">{DETAIL_DOI}<" not in html
+
+
+@pytest.mark.parametrize(
+    ("base", "role"), [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)]
+)
+async def test_add_feedback_is_open_on_both_surfaces(client, db_session, base, role):
+    """The single-surface version above cannot see a wrapper-specific
+    regression; the disclosure lives in the shared body, but only a
+    both-surface assertion proves both wrappers render it."""
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"addfb-{role}@example.org"
+    )
+    assessment = await _seed_assessment(db_session)
+    html = (await client.get(
+        f"{base}/assessments/{assessment.id}", headers=auth_headers(staff.id)
+    )).text
+    at = html.index("Add feedback")
+    start = html.rfind("<details", 0, at)
+    assert " open" in html[start : html.index(">", start) + 1]
+
+
+async def test_a_flat_key_points_list_also_gets_the_citation_treatment(
+    client, db_session, admin
+):
+    """The mapping branch and the FLAT branch are separate loops. The flat one
+    is the shape of every pre-1.3.0 row and the one `normalize_key_points`
+    passes through for a plain list, and it was covered by nothing — reverting
+    it alone left the suite green (2026-09-21 re-audit)."""
+    assessment = await _seed_assessment(
+        db_session,
+        prose_format="markdown",
+        key_points=[f"Shown in the 2025 paper ({DETAIL_DOI})"],
+    )
+    html = (await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text
+    assert ">cited paper</a>" in html
+    assert f">{DETAIL_DOI}<" not in html

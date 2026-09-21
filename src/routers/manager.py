@@ -84,6 +84,10 @@ from src.services.pi_onboarding import (
 )
 from src.services.profile_edit import apply_profile_edits
 from src.services.profile_export import export_profile_to_markdown
+from src.services.prose_citations import (
+    markdown_with_citation_links,
+    plain_with_citation_links,
+)
 from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
 
@@ -95,6 +99,13 @@ templates = Jinja2Templates(directory="templates")
 # same `_assessments_body.html`/`_assessment_detail_body.html` partials, and
 # each `Jinja2Templates` instance keeps its own globals.
 templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
+
+# Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). See the
+# identical registration in src/routers/admin.py for why it is a global and
+# why it has to be done twice: each router owns its own Jinja2Templates
+# instance, so registering on one leaves the other 500ing on UndefinedError.
+templates.env.globals["md_citations"] = markdown_with_citation_links
+templates.env.globals["plain_citations"] = plain_with_citation_links
 
 _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity
@@ -626,13 +637,15 @@ async def manager_assessments(
     run_id: str | None = None,
     sort: str | None = None,
     lab: str | None = None,
+    review: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
     """BlackbirdBot's screening verdicts. Same data, same run-scoping and the
-    same sort/lab controls as /admin/assessments; read-only, and it has no
-    export path."""
-    view = await list_assessments(db, run_id, sort=sort, lab=lab)
+    same sort/lab/review controls as /admin/assessments; read-only, and it has
+    no export path. The `**view` splat carries `review`/`review_counts` here;
+    the admin twin has to name them."""
+    view = await list_assessments(db, run_id, sort=sort, lab=lab, review=review)
     return templates.TemplateResponse(
         request,
         "manager/assessments.html",

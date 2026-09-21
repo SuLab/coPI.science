@@ -439,9 +439,12 @@ async def test_reviewer_sees_the_review_columns_on_manager_assessments(
     run = await factories.make_simulation_run(db_session)
     await _seed_reviewed_row(db_session, run, project="Reviewer Role Co")
 
+    # `&review=all`: the default tab is Unreviewed (2026-09-21) and this
+    # fixture carries feedback, so it lives on the Reviewed tab now.
     html = (
         await client.get(
-            f"/manager/assessments?run_id={run.id}", headers=auth_headers(rev.id)
+            f"/manager/assessments?run_id={run.id}&review=all",
+            headers=auth_headers(rev.id),
         )
     ).text
 

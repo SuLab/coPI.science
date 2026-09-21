@@ -25,6 +25,13 @@
   .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; font-size: inherit; margin: .6em 0 .3em; }
   .md-content strong { font-weight: 600; }
   .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* Links inside rendered prose. Tailwind's preflight sets
+     `a{color:inherit;text-decoration:inherit}`, so without this an anchor is
+     indistinguishable from body text. `.citation-link` is the server-rendered
+     plain-text path; `.md-content a` covers everything marked builds,
+     including the interview transcript on the detail page — a link should
+     look like a link everywhere on the page. */
+  .md-content a, .citation-link { color: #2563eb; text-decoration: underline; }
   /* Reading scale for the verdict's running prose. 17px/1.6 at a 68ch measure
      is the readability target of the 2026-09-11 audit; keep the two wrappers'
      style blocks IDENTICAL to each other. */

@@ -4,6 +4,8 @@ Storing it (Task 3) is only safe if the page says so — otherwise Task 3 turns
 a loud refusal into a silent, ordinary-looking row.
 """
 
+import pathlib
+
 import pytest
 
 from src.models.opportunity import OpportunityAssessment
@@ -527,7 +529,16 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
     `assessments`, never as a new top-level key — a new key would reach the
     admin template (which allowlists every key it forwards,
     `src/routers/admin.py`) or the manager template (which splats the whole
-    view) but not both."""
+    view) but not both.
+
+    `review` and `review_counts` (the review sub-tabs, 2026-09-21) ARE new
+    top-level keys, and they are admissible only because `admin_assessments`
+    forwards both explicitly. They are page-level state — which tab is active,
+    and how big each tab is — so there is no row to ride on. The second
+    assertion below is what makes this tripwire enforce the rule rather than
+    merely record the new names: adding a key here without adding it to the
+    admin handler fails the test, which is exactly the half-arrival this test
+    exists to prevent."""
     run = await factories.make_simulation_run(db_session)
     db_session.add(OpportunityAssessment(
         simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
@@ -548,6 +559,8 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
         "sort_options",
         "lab_filter",
         "lab_options",
+        "review",
+        "review_counts",
         "pi_user_ids",
         "total_count",
         "assessments_limit",
@@ -559,6 +572,22 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
         "assessment_counts_by_run",
         "off_rubric_count",
     }
+
+    # Every key above must be named in `admin_assessments`' allowlisted
+    # context, or it silently becomes Jinja Undefined on the admin surface
+    # while rendering fine on the manager one (which splats `**view`).
+    # `assessments_limit` and friends are passed as `key=view["key"]`, so the
+    # key's own name appears in the source either way.
+    admin_src = (
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "routers" / "admin.py"
+    ).read_text()
+    handler = admin_src[admin_src.index("async def admin_assessments") :]
+    handler = handler[: handler.index("\n@router.")]
+    missing = sorted(k for k in view if f'view["{k}"]' not in handler)
+    assert missing == [], (
+        "every key list_assessments returns must be forwarded explicitly by "
+        f"admin_assessments as view[...]; these are not: {missing}"
+    )
 
 
 async def test_a_row_with_no_scores_yields_the_same_rows_as_the_detail_page(db_session):

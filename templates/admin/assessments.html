@@ -25,6 +25,13 @@
   .md-content h1, .md-content h2, .md-content h3 { font-weight: 600; margin: .6em 0 .3em; }
   .md-content strong { font-weight: 600; }
   .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* Links inside rendered prose. Tailwind's preflight sets
+     `a{color:inherit;text-decoration:inherit}`, so without this an anchor is
+     indistinguishable from body text. `.citation-link` is the server-rendered
+     plain-text path; `.md-content a` covers everything marked builds,
+     including the interview transcript on the detail page — a link should
+     look like a link everywhere on the page. */
+  .md-content a, .citation-link { color: #2563eb; text-decoration: underline; }
   /* Reading scale for the verdict's running prose. 17px/1.6 at a 68ch measure
      is the readability target of the 2026-09-11 audit; keep the two wrappers'
      style blocks IDENTICAL to each other. */
@@ -131,6 +138,10 @@
             {% endfor %}
         </select>
         {% endif %}
+        {# Not a control: the review sub-tab lives in the tab strip below, and
+           without this hidden input every select would drop it and silently
+           return the reader to the default tab. #}
+        <input type="hidden" name="review" value="{{ review }}">
     </form>
     {% endif %}
 </div>
@@ -154,7 +165,7 @@
         Showing the current run only — verdict rows survive <code>--fresh</code>
         restarts and nothing in the app deletes them (the one operator purge on
         record, 2026-08-27, was backed up first); pick a run above or
-        <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
+        <a class="underline" href="/admin/assessments?run_id=all&amp;review={{ review }}">view all runs</a>.
     {% endif %}
     {# Worded for whichever sort is active. It used to say "by score; the rest
        are lower-scoring", which became false the moment `sort` existed: under
@@ -164,10 +175,23 @@
     {% if total_count > assessments_limit %}
         Displaying the top {{ assessments_limit }} of {{ total_count }} matching
         assessments in the current sort order; the rest sit further down that
-        order — not excluded by the run or lab filter. Re-sort, or narrow by
-        lab, to reach them.
+        order — not excluded by the run, lab or review filter. Re-sort, narrow
+        by lab, or switch tab to reach them.
     {% endif %}
 </p>
+{# Review sub-tabs (2026-09-21). Links, not a form: they carry the reader's
+   current run/sort/lab so changing tab never resets the queue. The run id uses
+   the same `'all' if show_all_runs` expression qs_filters uses — passing
+   selected_run_id alone renders a UUID for an All-Runs view and silently pins
+   the tab to one run. The active tab is marked by aria-current AND by visible
+   styling, never by colour alone. #}
+<nav class="assessment-review-tabs mb-4 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Review status">
+    {% for value, label in [('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed'), ('all', 'All')] %}
+    <a href="/admin/assessments?run_id={{ 'all' if show_all_runs else selected_run_id }}&amp;sort={{ sort }}&amp;lab={{ lab_filter or '' }}&amp;review={{ value }}"
+       {% if review == value %}aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %}class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>{{ label }} ({{ review_counts[value] }})</a>
+    {% endfor %}
+    <span class="ml-2 text-xs text-gray-500">A tab counts written review feedback, not assignment.</span>
+</nav>
 {# The per-row link to the detail page. It lives HERE, in the wrapper, and not
    in the shared body, for the reason that file's header comment gives: a link
    assembled from a templated base path ("{{ base }}/{{ a.id }}") credits no
@@ -180,7 +204,7 @@
    The class name deliberately avoids the substring "assessment-detail":
    test_admin_assessments_page_renders_no_inline_detail_rows asserts the page
    contains no such string anywhere. #}
-{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{% macro assessment_link(a) %}<a class="assessment-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
 {# Same reasoning as assessment_link above, applied to the Lab cell: a link to
    the PI's own profile has to be a literal /admin/users/{id} URL for
    test_reachability's _link_credits to see it, so it is defined here as a

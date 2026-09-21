@@ -147,6 +147,20 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "Same as /cabo-graph: hand-shared public graph URL for the Schultz group "
         "alumni cohort, whitelisted in nginx/nginx.conf:111."
     ),
+    ("POST", "/reviews/assessments/{assessment_id}/status"): (
+        "Deliberately caller-less, which is a NEW category on this list: every "
+        "other entry names a real external caller, and this one names none. The "
+        "approve/disapprove/clear buttons were removed from both the queue card "
+        "and the detail page on operator request 2026-09-21 (see "
+        "docs/specs/2026-09-21-assessment-queue-and-headline-contract-design.md, "
+        "decisions D2/D3). The handler, VALID_STATUS_ACTIONS and the "
+        "assessment_review_events table are kept so the capability can be "
+        "restored without a migration, and the read-only Status line, Status "
+        "history and the card's chip still render whatever history a database "
+        "holds. Do not go looking for a caller: there is none. Re-adding a "
+        "button makes this entry stale and test_route_allowlist_has_no_stale_"
+        "entries will say so."
+    ),
 }
 
 # Optional third-party imports that are allowed to be absent at test time. Empty

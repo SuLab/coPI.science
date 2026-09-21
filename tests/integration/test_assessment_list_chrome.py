@@ -71,6 +71,14 @@ async def test_both_list_pages_set_the_readable_prose_scale(client, db_session):
         assert "max-width: 68ch" in html
 
 
+async def test_both_list_pages_style_prose_links(client, db_session):
+    for html in await _both_surfaces(client, db_session):
+        assert ".citation-link" in html, (
+            "the citation link rule must be in BOTH list wrappers; no test compares "
+            "the two wrappers to each other, so a one-sided edit passes everything else"
+        )
+
+
 async def test_both_list_pages_make_keyboard_focus_visible(client, db_session):
     for html in await _both_surfaces(client, db_session):
         assert "a:focus-visible" in html

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from src.models import AssessmentReview
 from src.models.opportunity import OpportunityAssessment
 from src.services.directory import (
     ASSESSMENT_SORT_OPTIONS,
@@ -307,3 +308,70 @@ async def test_the_lab_filter_does_not_narrow_the_incomplete_panel_warning(db_se
     view = await list_assessments(db_session, str(run.id), lab="wang")
     assert _projects(view) == ["Clean Co"]
     assert view["incomplete_panel_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_review_filter_splits_the_queue(db_session):
+    """Spec §4/D4. Reviewed == at least one assessment_reviews row."""
+    run = await factories.make_simulation_run(db_session)
+    reviewed = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Reviewed One",
+    )
+    unreviewed = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Unreviewed One",
+    )
+    db_session.add_all([reviewed, unreviewed])
+    await db_session.flush()
+    reviewer = await factories.make_user(db_session)
+    db_session.add(AssessmentReview(
+        assessment_id=reviewed.id, reviewer_user_id=reviewer.id,
+        reviewer_name="R", score=4, comment="ok", feedback_mode="log_only",
+    ))
+    await db_session.flush()
+
+    only_unreviewed = await list_assessments(db_session, str(run.id), review="unreviewed")
+    only_reviewed = await list_assessments(db_session, str(run.id), review="reviewed")
+    everything = await list_assessments(db_session, str(run.id), review="all")
+
+    assert [a.company_or_project for a in only_unreviewed["assessments"]] == [
+        "Unreviewed One"
+    ]
+    assert [a.company_or_project for a in only_reviewed["assessments"]] == ["Reviewed One"]
+    assert len(everything["assessments"]) == 2
+    # total_count follows the tab; the counts sum.
+    assert only_unreviewed["total_count"] == 1
+    assert everything["review_counts"] == {"unreviewed": 1, "reviewed": 1, "all": 2}
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_review_value_falls_back_to_the_default(db_session):
+    run = await factories.make_simulation_run(db_session)
+    view = await list_assessments(db_session, str(run.id), review="no-such-tab")
+    assert view["review"] == "unreviewed"
+
+
+@pytest.mark.asyncio
+async def test_the_warnings_and_dropdowns_ignore_the_review_filter(db_session):
+    """Warnings under-warn if narrowed, and a dropdown computed post-filter
+    offers no way back — the same rule `lab` already follows."""
+    run = await factories.make_simulation_run(db_session)
+    row = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Unvetted One",
+    )
+    db_session.add(row)
+    await db_session.flush()
+    reviewer = await factories.make_user(db_session)
+    db_session.add(AssessmentReview(
+        assessment_id=row.id, reviewer_user_id=reviewer.id, reviewer_name="R",
+        score=4, comment="ok", feedback_mode="log_only",
+    ))
+    await db_session.flush()
+
+    view = await list_assessments(db_session, str(run.id), review="unreviewed")
+    assert view["assessments"] == []
+    assert view["incomplete_panel_count"] == 1
+    assert view["lab_options"] == ["wang"]
+    assert view["assessment_counts_by_run"][run.id] == 1

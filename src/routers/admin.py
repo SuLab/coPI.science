@@ -71,6 +71,10 @@ from src.services.directory import (
 from src.services.jhu_rules import get_tenure_start
 from src.services.llm import is_truncated_stop
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
+from src.services.prose_citations import (
+    markdown_with_citation_links,
+    plain_with_citation_links,
+)
 from src.services.simulation_control import (
     HEARTBEAT_STALE_SECONDS,
     derive_panel_state,
@@ -141,6 +145,14 @@ templates.env.tests["truncated_stop"] = is_truncated_stop
 # context key: the admin assessments handler forbids a new one (see the
 # comment on `_assessments_body.html`'s card-list block).
 templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
+
+# Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). Registered
+# as globals for the same reason `key_point_groups` is: the admin assessments
+# handler allowlists its context keys and forbids a new one, and BOTH routers
+# include the same two partials while each `Jinja2Templates` keeps its own
+# globals. src/routers/manager.py carries the identical two lines.
+templates.env.globals["md_citations"] = markdown_with_citation_links
+templates.env.globals["plain_citations"] = plain_with_citation_links
 
 # Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
 # can move an already-approved agent between these from the edit page; the sim
@@ -818,6 +830,7 @@ async def admin_assessments(
     run_id: str | None = None,
     sort: str | None = None,
     lab: str | None = None,
+    review: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -825,9 +838,10 @@ async def admin_assessments(
 
     See ``src.services.directory.list_assessments`` for the run-scoping,
     truncation and sort/filter semantics — including why an unrecognized
-    ``sort`` or ``lab`` renders the default view instead of an error.
+    ``sort``, ``lab`` or ``review`` renders the default view instead of an
+    error. ``review`` is the reviewed/unreviewed sub-tab (spec 2026-09-21 §4).
     """
-    view = await list_assessments(db, run_id, sort=sort, lab=lab)
+    view = await list_assessments(db, run_id, sort=sort, lab=lab, review=review)
 
     return templates.TemplateResponse(
         request,
@@ -857,6 +871,12 @@ async def admin_assessments(
             sort_options=view["sort_options"],
             lab_filter=view["lab_filter"],
             lab_options=view["lab_options"],
+            # The review sub-tab and its three counts. Forwarded EXPLICITLY for
+            # the reason the comment above gives: omitted here they would be
+            # silently-falsy Jinja `Undefined` on this surface and correct on
+            # the manager one, which splats the whole view.
+            review=view["review"],
+            review_counts=view["review_counts"],
             pi_user_ids=view["pi_user_ids"],
             total_count=view["total_count"],
             assessments_limit=view["assessments_limit"],

@@ -1067,3 +1067,37 @@ async def test_one_press_is_capped_and_a_second_press_drains_the_rest(
     assert "generated=3" in second.headers["location"]
     assert len(await _analysis_jobs(db_session)) == total
 
+
+async def test_the_review_tab_round_trips_through_a_feedback_write(client, db_session):
+    """Spec §4/D13. A non-default tab survives the write, so scoring a card
+    from the Reviewed tab returns the reader to the Reviewed tab."""
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={
+            "score": "4", "comment": "ok", "feedback_mode": "log_only",
+            "surface": "manager-list", "review": "reviewed",
+        },
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+    assert "review=reviewed" in r.headers["location"]
+
+
+async def test_the_default_review_tab_is_dropped_from_the_redirect(client, db_session):
+    """D13: only a non-default value is emitted, which is what keeps the three
+    exact-Location assertions in this file byte-identical."""
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={
+            "score": "4", "comment": "ok", "feedback_mode": "log_only",
+            "surface": "manager-list", "review": "unreviewed",
+        },
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/assessments#a-{assessment.id}"

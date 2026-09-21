@@ -105,9 +105,9 @@
                this column — the column itself is the measure here. #}
             <div class="assessment-prose max-w-none mt-1">
             {% if a.prose_format == 'markdown' %}
-            <div class="assessment-brief-pitch-body md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
+            <div class="assessment-brief-pitch-body md-content" data-markdown="{{ md_citations(a.elevator_pitch) | e }}"></div>
             {% else %}
-            <p class="assessment-brief-pitch-body whitespace-pre-line">{{ a.elevator_pitch }}</p>
+            <p class="assessment-brief-pitch-body whitespace-pre-line">{{ plain_citations(a.elevator_pitch) }}</p>
             {% endif %}
             </div>
             {% if has_points %}
@@ -126,9 +126,9 @@
                    identifier that a markdown pass would corrupt. #}
                 <div class="assessment-prose max-w-none mt-1">
                 {% if a.prose_format == 'markdown' %}
-                <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+                <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ md_citations(a.score_rationale) | e }}"></div>
                 {% else %}
-                <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+                <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ plain_citations(a.score_rationale) }}</p>
                 {% endif %}
                 </div>
             </div>
@@ -144,7 +144,7 @@
                 {% if a.key_points.get(key) %}
                 <div><span class="font-semibold">{{ label }}</span>
                     <ul class="list-disc list-inside">
-                    {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                    {% for point in a.key_points[key] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
                     </ul></div>
                 {% endif %}
                 {% endfor %}
@@ -154,7 +154,7 @@
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
             <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
-                {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
+                {% for point in a.key_points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
             </ul>
         </div>
         {% endif %}
@@ -179,9 +179,9 @@
            identifier that a markdown pass would corrupt. #}
         <div class="assessment-prose max-w-none mt-1">
         {% if a.prose_format == 'markdown' %}
-        <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+        <div class="assessment-brief-score-rationale-body md-content" data-markdown="{{ md_citations(a.score_rationale) | e }}"></div>
         {% else %}
-        <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+        <p class="assessment-brief-score-rationale-body whitespace-pre-line">{{ plain_citations(a.score_rationale) }}</p>
         {% endif %}
         </div>
     </div>
@@ -295,7 +295,7 @@
             {% if hub_strengths %}
             <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-2">In the hub's words</div>
             <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
-                {% for bullet in hub_strengths %}<li>{{ bullet }}</li>{% endfor %}
+                {% for bullet in hub_strengths %}<li>{{ plain_citations(bullet) }}</li>{% endfor %}
             </ul>
             <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
@@ -320,7 +320,7 @@
             {% if hub_risks %}
             <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-2">In the hub's words</div>
             <ul class="signal-hub-words mt-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
-                {% for bullet in hub_risks %}<li>{{ bullet }}</li>{% endfor %}
+                {% for bullet in hub_risks %}<li>{{ plain_citations(bullet) }}</li>{% endfor %}
             </ul>
             <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
@@ -393,15 +393,15 @@
     {# Same write-time stamp and same safe fallback as Rationale below. #}
     <div class="assessment-prose">
     {% if ask_split %}
-    <div class="assessment-next-experiment md-content" data-markdown="{{ ask_parts[0] | e }}"></div>
+    <div class="assessment-next-experiment md-content" data-markdown="{{ md_citations(ask_parts[0]) | e }}"></div>
     <details class="assessment-ask-plan mt-3">
         <summary class="cursor-pointer text-base text-indigo-700 underline-offset-2 hover:underline">Show the full plan</summary>
-        <div class="md-content mt-2" data-markdown="{{ ask_parts[1] | e }}"></div>
+        <div class="md-content mt-2" data-markdown="{{ md_citations(ask_parts[1]) | e }}"></div>
     </details>
     {% elif a.prose_format == 'markdown' %}
-    <div class="assessment-next-experiment md-content" data-markdown="{{ ask_text | e }}"></div>
+    <div class="assessment-next-experiment md-content" data-markdown="{{ md_citations(ask_text) | e }}"></div>
     {% else %}
-    <p class="assessment-next-experiment whitespace-pre-line">{{ ask_text }}</p>
+    <p class="assessment-next-experiment whitespace-pre-line">{{ plain_citations(ask_text) }}</p>
     {% endif %}
     </div>
 </div>
@@ -733,13 +733,13 @@
        the existing plain rendering, which is always safe. #}
     <div class="assessment-prose">
     {% if a.prose_format == 'markdown' %}
-    <div class="assessment-rationale md-content" data-markdown="{{ a.rationale | e }}"></div>
+    <div class="assessment-rationale md-content" data-markdown="{{ md_citations(a.rationale) | e }}"></div>
     {% else %}
     {# Legacy plain text: one <p> per blank-line-separated paragraph rather
        than a single `whitespace-pre-line` block, so the prose stylesheet's
        paragraph spacing applies. Still autoescaped, still never markdown. #}
     <div class="assessment-rationale">
-        {% for para in a.rationale.split('\n\n') %}<p class="whitespace-pre-line">{{ para }}</p>{% endfor %}
+        {% for para in a.rationale.split('\n\n') %}<p class="whitespace-pre-line">{{ plain_citations(para) }}</p>{% endfor %}
     </div>
     {% endif %}
     </div>
@@ -944,15 +944,6 @@
         {% endif %}
     </div>
 
-    {% if can_write %}
-    <form method="post" action="/reviews/assessments/{{ a.id }}/status" class="mb-4 flex items-center gap-2">
-        <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
-        <button type="submit" name="action" value="approved" class="text-sm font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
-        <button type="submit" name="action" value="disapproved" class="text-sm font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
-        <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Clear</button>
-    </form>
-    {% endif %}
-
     {# --- Feedback: one row per AssessmentReview, oldest first. Comments are
        plain autoescaped text with `whitespace-pre-line` — NEVER
        `data-markdown` — a reviewer's comment is not the PI-facing prose this
@@ -1045,7 +1036,7 @@
     </div>
 
     {% if can_write %}
-    <details class="mb-4">
+    <details class="mb-4" open>
         <summary class="cursor-pointer text-sm text-indigo-600">Add feedback</summary>
         <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
             <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">

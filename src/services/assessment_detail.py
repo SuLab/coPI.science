@@ -522,6 +522,32 @@ def unvetted_panel_filter():
     )
 
 
+def has_review_filter():
+    """The SQL for "a human has written feedback on this assessment".
+
+    Lives beside ``unvetted_panel_filter`` for the same reason that one does:
+    one rule, one place. An EXISTS rather than a JOIN because a row with three
+    reviews must appear ONCE — a join would multiply it by its feedback count
+    and silently inflate both the page and ``total_count``.
+
+    Deliberately narrower than ``review_columns_for``'s "Reviewed by", which
+    unions feedback authors with status-event actors. The two can disagree for
+    a row that carries a status event and no feedback: it renders a "Reviewed
+    by" name and a chip while sitting in the Unreviewed tab. Zero such rows
+    exist in production and nothing in the app can create one since the
+    approve/disapprove controls were removed, but a restore could — which is
+    why the tab strip says in words that a tab counts written feedback.
+
+    Returns a bare correlated predicate with NO run scoping: the caller adds
+    that, exactly as it does for ``unvetted_panel_filter``.
+    """
+    return (
+        select(AssessmentReview.id)
+        .where(AssessmentReview.assessment_id == OpportunityAssessment.id)
+        .exists()
+    )
+
+
 def panel_state(assessment: OpportunityAssessment) -> str:
     """The FIVE findings the specialist floor can leave behind.
 

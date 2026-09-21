@@ -34,7 +34,11 @@ from src.services.assessment_reviews import (
     submit_feedback,
     unassign_reviewer,
 )
-from src.services.directory import ASSESSMENT_SORTS
+from src.services.directory import (
+    ASSESSMENT_REVIEW_DEFAULT,
+    ASSESSMENT_REVIEW_FILTERS,
+    ASSESSMENT_SORTS,
+)
 
 #: Mirrors PromptChangeSuggestion.status's docstring (src/models/review.py).
 #: Kept local rather than shared with src/routers/manager.py's copy — see
@@ -79,17 +83,27 @@ _LIST_SURFACES = frozenset({"admin-list", "manager-list"})
 
 
 def _list_filter_query(
-    run_id: str | None, sort: str | None, lab: str | None
+    run_id: str | None,
+    sort: str | None,
+    lab: str | None,
+    review: str | None = None,
 ) -> str:
-    """The `?run_id=&sort=&lab=` the reader had on the list page, re-emitted.
+    """The `?run_id=&sort=&lab=&review=` the reader had on the list page, re-emitted.
 
     Validated exactly the way ``directory.list_assessments`` validates the
-    same three, and anything that fails is DROPPED rather than 400ing: these
+    same parameters, and anything that fails is DROPPED rather than 400ing: these
     values are echoed straight into a ``Location`` header, and silently
     dropping a junk one reproduces the list page's own "a stale bookmark
     renders the queue, not an error" behaviour. ``sort`` must name a real
     option, ``run_id`` must be ``"all"`` or parse as a UUID, and ``lab`` is
     opaque (the page drops an unknown lab itself).
+
+    ``review`` (the reviewed/unreviewed sub-tab, spec 2026-09-21 §4) is emitted
+    only when it is a recognised value AND not the default: an absent ``review``
+    already means ``unreviewed``, so emitting it would only lengthen the
+    ``Location`` for no gain — and would rewrite three exact-``Location``
+    assertions in tests/integration/test_reviews_router.py that post no
+    ``review`` field at all.
 
     ``urlencode`` — never string concatenation — is what makes CR/LF header
     injection and a smuggled ``&`` impossible here. Returns ``""``, not a bare
@@ -109,6 +123,8 @@ def _list_filter_query(
         params.append(("sort", sort))
     if lab:
         params.append(("lab", lab))
+    if review in ASSESSMENT_REVIEW_FILTERS and review != ASSESSMENT_REVIEW_DEFAULT:
+        params.append(("review", review))
     return f"?{urlencode(params)}" if params else ""
 
 
@@ -120,6 +136,7 @@ def _assessments_redirect(
     run_id: str | None = None,
     sort: str | None = None,
     lab: str | None = None,
+    review: str | None = None,
 ) -> RedirectResponse:
     """Whitelist lives HERE, not at call sites; admin surface only for
     admins. NEVER build this from a bare "/admin" constant: test_reachability's
@@ -134,7 +151,12 @@ def _assessments_redirect(
     and a bad one must land the reader somewhere real rather than 400.
 
     ``run_id``/``sort``/``lab`` are only passed by ``submit_review_feedback``
-    and ``set_review_status``. The other FOUR call sites
+    and ``set_review_status`` — and since 2026-09-21 the second has no UI
+    caller at all (its buttons were removed; see the ROUTE_ALLOWLIST entry in
+    tests/unit/test_reachability.py), so in practice the filtered redirect is
+    the feedback path's. That is also why ``review`` (the sub-tab, 2026-09-21)
+    is threaded from the feedback path ONLY: the callerless status route was
+    not given a tab it can never be posted from. The other FOUR call sites
     (``edit``/``delete``/``assign``/``unassign``) pass nothing, which is a
     documented consequence rather than an oversight: a ``*-list`` surface
     posted to one of those four lands on the UNFILTERED list — the same
@@ -142,7 +164,7 @@ def _assessments_redirect(
     above. Those four are detail-page-only forms today.
     """
     if surface in _LIST_SURFACES:
-        query = _list_filter_query(run_id, sort, lab)
+        query = _list_filter_query(run_id, sort, lab, review)
         fragment = f"#a-{assessment_id}"
         if surface == "admin-list" and current_user.is_admin:
             return RedirectResponse(
@@ -279,7 +301,12 @@ async def submit_review_feedback(
 ):
     assessment = await _load_assessment(db, assessment_id)
     # One `await request.form()` for both jobs: the dimension fields and the
-    # three list-page filters ride on the same POST (contract C6).
+    # four list-page filters ride on the same POST (contract C6). `review` is
+    # read through `_form_str` like the other three rather than declared as a
+    # `Form(...)` parameter: a declared field turns a non-string part of that
+    # name into a 422, and these four filters are display state that must
+    # degrade to "no filter" rather than refuse the write the reader came to
+    # make. `_list_filter_query` validates the value either way.
     form = await request.form()
     dimension_scores = _parse_dimension_scores(form)
     try:
@@ -306,6 +333,7 @@ async def submit_review_feedback(
         run_id=_form_str(form, "run_id"),
         sort=_form_str(form, "sort"),
         lab=_form_str(form, "lab"),
+        review=_form_str(form, "review"),
     )
 
 

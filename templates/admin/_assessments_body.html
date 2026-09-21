@@ -196,6 +196,14 @@
 <details class="mb-6 rounded-xl border border-gray-200 bg-white p-4">
     <summary class="cursor-pointer text-sm font-semibold text-gray-700">
         Dimension distribution
+        {# Scoped to the ACTIVE TAB, not the run, since the review filter
+           applies before these are computed (2026-09-21). Saying so matters:
+           one reviewer writing one comment moves a row out of the default tab
+           and the band line silently drops it, which looks like a data
+           change rather than a filter. #}
+        {% if review != 'all' %}
+        <span class="ml-1 font-normal text-gray-400">({{ review }} only)</span>
+        {% endif %}
         {% if band_counts %}
         <span class="ml-2 font-normal text-gray-400">
             bands: {% for b, n in band_counts %}{{ b }}&times;{{ n }}{{ ", " if not loop.last }}{% endfor %}
@@ -247,14 +255,18 @@
    every key it forwards while `manager_assessments` splats, so a top-level key
    added to list_assessments and not to that allowlist renders as silently-falsy
    Jinja Undefined on the admin surface ONLY. Everything below is either an
-   attribute of `a` or one of the two wrapper macros. #}
-{# Contract C6's four hidden inputs, defined ONCE rather than written out in
-   each of the two quick-scoring forms on each of up to 500 cards: `surface` is
-   the bare `list_surface` token (never a path — see the CONTRACT note at the
-   top of this file) and the other three carry this page's own filter state, so
-   src/routers/reviews.py can send the writer back to the list they were
-   reading, at this card's anchor. #}
-{% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}">{% endmacro %}
+   attribute of `a`, one of the two wrapper macros, or one of the handful of
+   top-level keys already forwarded to both surfaces: `list_surface`,
+   `show_all_runs`, `selected_run_id`, `sort`, `lab_filter`, and — since
+   2026-09-21 — `review` plus `review_counts` for the review sub-tabs, both of
+   which `admin_assessments` forwards explicitly. #}
+{# Contract C6's hidden inputs — FIVE since 2026-09-21 — defined ONCE rather
+   than written out on each of up to 500 cards: `surface` is the bare
+   `list_surface` token (never a path — see the CONTRACT note at the top of
+   this file) and the other four carry this page's own filter state, review
+   sub-tab included, so src/routers/reviews.py can send the writer back to the
+   list they were reading, at this card's anchor. #}
+{% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}"><input type="hidden" name="review" value="{{ review }}">{% endmacro %}
 <div class="space-y-4">
 {% for a in assessments %}
     {# `id` BEFORE `class` (contract C13): the quick-scoring forms post a
@@ -305,6 +317,11 @@
                 </div>
             </div>
             <div class="text-right shrink-0">
+                {# Score and band moved into the collapsed "Why this score"
+                   disclosure below (2026-09-21, operator request). The
+                   recommendation — the model's own call — stays here; the
+                   computed band is one click down, which is an accepted
+                   accessibility regression recorded in the design doc. #}
                 {% if a.recommendation %}
                     {% set rec_chip = {
                         'advance': 'bg-green-100 text-green-700',
@@ -314,22 +331,6 @@
                     } %}
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
                 {% else %}<span class="text-xs text-gray-400">no recommendation</span>{% endif %}
-                <div class="mt-1">
-                    <span class="text-xl font-bold
-                        {% if a.band == 'advance' %}text-green-600
-                        {% elif a.band == 'conditional' %}text-amber-600
-                        {% else %}text-gray-400{% endif %}">
-                        {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
-                    </span>
-                    {# "pass" renders as "decline": it is the PDF's deal
-                       vocabulary (pass ON the deal), and unlabelled it reads as
-                       the opposite of what it means. Always visible text, never
-                       colour alone. #}
-                    <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
-                        {% if a.band == 'advance' %}text-green-600
-                        {% elif a.band == 'conditional' %}text-amber-600
-                        {% else %}text-gray-400{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
-                </div>
             </div>
         </div>
 
@@ -365,11 +366,16 @@
                    which may carry a literal `*` in a scientific identifier
                    that a markdown pass would read as emphasis. #}
                 {% if a.prose_format == 'markdown' %}
-                <div class="assessment-card-pitch-body md-content" data-markdown="{{ a.elevator_pitch | e }}"></div>
+                <div class="assessment-card-pitch-body md-content" data-markdown="{{ md_citations(a.elevator_pitch) | e }}"></div>
                 {% else %}
-                <p class="assessment-card-pitch-body whitespace-pre-line">{{ a.elevator_pitch }}</p>
+                <p class="assessment-card-pitch-body whitespace-pre-line">{{ plain_citations(a.elevator_pitch) }}</p>
                 {% endif %}
                 </div>
+                {# The card's ONE way through to the verdict (D7, 2026-09-21):
+                   a button at the foot of "In one minute", not a text link in
+                   the footer row. The macro lives in each wrapper so the href
+                   stays a literal /admin or /manager path. #}
+                <div class="assessment-card-open mt-3">{{ assessment_link(a) }}</div>
             </div>
             {% endif %}
             {% if has_points and a.key_points is mapping %}
@@ -380,7 +386,7 @@
                     {% if a.key_points.get(key) %}
                     <div><span class="font-semibold text-gray-800">{{ label }}</span>
                         <ul class="list-disc list-inside text-sm text-gray-700">
-                        {% for point in a.key_points[key] %}<li>{{ point }}</li>{% endfor %}
+                        {% for point in a.key_points[key] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
                         </ul></div>
                     {% endif %}
                     {% endfor %}
@@ -390,39 +396,67 @@
             <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
                 <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
                 <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
-                    {% for point in a.key_points %}<li>{{ point }}</li>{% endfor %}
+                    {% for point in a.key_points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
                 </ul>
             </div>
             {% endif %}
         </div>
         {% endif %}
+        {% if not a.elevator_pitch %}
+        {# The button lives at the foot of the pitch box (D7). 12 of 22
+           production rows have no pitch, so without this branch the commonest
+           card on the page would have no way through to the verdict. #}
+        <div class="assessment-card-open mt-3">{{ assessment_link(a) }}</div>
+        {% endif %}
 
-        {# The hub's own account of why it scored the way it did (column
-           `score_rationale`, contract C11 / migration 0048). Whole block
-           conditional: NULL on every row written before 0048, and never
-           backfilled. The eyebrow is the SAME label the detail page uses —
-           "Why this score" — so the two surfaces do not name one field two
-           ways. This is not the `rationale` field the 2026-08-27 removal
-           keeps off this page; that one stays on the detail page. #}
-        {% if a.score_rationale %}
-        <div class="assessment-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
-            <div class="text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</div>
-            <div class="assessment-prose max-w-none mt-1">
+        {# The score, the band and the hub's own account of why it scored that
+           way (column `score_rationale`, contract C11 / migration 0048), one
+           click down — operator request 2026-09-21, spec §8/D8.
+
+           UNCONDITIONAL (D9), unlike the old box: it now carries the score
+           itself, so a pre-0048 row that omitted it would show no score
+           anywhere. CLOSED by default, and the class carries a trailing space
+           in the attribute because _details_open_tag/_details_slice match
+           `class="{klass} ` literally.
+
+           The eyebrow is the SAME label the detail page uses — "Why this
+           score" — so the two surfaces do not name one field two ways, and it
+           reads distinctly from the other disclosure's "Rubric scores &
+           gating". This is not the `rationale` field the 2026-08-27 removal
+           keeps off this page; that one stays on the detail page.
+
+           Whitespace-controlled for the measured reason the scores block
+           above gives: rendered once per card, up to 500 cards. #}
+        <details class="assessment-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
+            <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</summary>
+            {#- "pass" renders as "decline": it is the PDF's deal vocabulary
+                (pass ON the deal), and unlabelled it reads as the opposite of
+                what it means. Always visible text, never colour alone. #}
+            {%- if a.weighted_score is not none %}
+            <div class="mt-2"><span class="text-xl font-bold {% if a.band == 'advance' %}text-green-600{% elif a.band == 'conditional' %}text-amber-600{% else %}text-gray-400{% endif %}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {% if a.band == 'advance' %}text-green-600{% elif a.band == 'conditional' %}text-amber-600{% else %}text-gray-400{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span></div>
+            {%- else %}
+            <div class="mt-2"><span class="text-xl font-bold text-gray-400">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-400">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span></div>
+            {%- endif %}
+            {%- if a.score_rationale %}
+            <div class="assessment-prose max-w-none mt-2">
             {% if a.prose_format == 'markdown' %}
-            <div class="assessment-card-score-rationale-body md-content" data-markdown="{{ a.score_rationale | e }}"></div>
+            <div class="assessment-card-score-rationale-body md-content" data-markdown="{{ md_citations(a.score_rationale) | e }}"></div>
             {% else %}
-            <p class="assessment-card-score-rationale-body whitespace-pre-line">{{ a.score_rationale }}</p>
+            <p class="assessment-card-score-rationale-body whitespace-pre-line">{{ plain_citations(a.score_rationale) }}</p>
             {% endif %}
             </div>
-        </div>
-        {% endif %}
+            {%- else %}
+            <p class="mt-2 text-xs text-gray-600">The hub recorded no score rationale for this verdict. Rows written before migration 0048 were never asked for one, and none was backfilled.</p>
+            {%- endif %}
+        </details>
 
         <div class="mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
             {# The gating glyph row moved (VERBATIM) into the collapsed
                "Rubric scores &amp; gating" disclosure below — Task C2,
-               operator request 2026-09-14. What stays on the card FACE is
-               unchanged: flag count, panel badge, review status chip,
-               Assigned, Reviewed by, detail link. #}
+               operator request 2026-09-14. What stays in this row: flag
+               count, panel badge, review status chip, Assigned, Reviewed by.
+               The detail link left it on 2026-09-21 — it is now a button at
+               the foot of the pitch box (D7). #}
             {% if a.red_flags %}
                 <span class="text-amber-700 font-medium whitespace-nowrap">{{ a.red_flags | length }} flag{{ '' if a.red_flags | length == 1 else 's' }}</span>
             {% else %}<span class="text-gray-400">no flags</span>{% endif %}
@@ -443,6 +477,11 @@
             <span class="font-medium text-amber-700" title="This row's panel finding is not one this page knows how to read, so nothing can be said about it either way. Not a verification.">panel state unknown</span>
             {% endif %}
 
+            {# The chip is the only place a card may print the words
+               "Approved"/"Disapproved" (test_list_pages_show_reviewer_columns
+               row-scopes that). The control that used to set it was removed
+               2026-09-21; this renders history only, and nothing in the app
+               can now write a new status. #}
             {% if a.review_cols.status == 'approved' %}
                 <span class="px-2 py-0.5 rounded-full font-medium whitespace-nowrap bg-green-100 text-green-700">Approved</span>
             {% elif a.review_cols.status == 'disapproved' %}
@@ -454,7 +493,6 @@
 
             <span class="text-gray-500">Assigned: {{ a.review_cols.assigned_names | join(", ") if a.review_cols.assigned_names else "—" }}</span>
             <span class="text-gray-500">Reviewed by: {{ a.review_cols.reviewed_by_names | join(", ") if a.review_cols.reviewed_by_names else "—" }}</span>
-            <span class="ml-auto">{{ assessment_link(a) }}</span>
         </div>
 
         {# Per-dimension scores + the gating glyphs, one click down (Task C2).
@@ -516,8 +554,7 @@
 
         {# Quick scoring (Task C3, operator request 4): the narrow review write
            a triage reader actually wants from the queue — an overall rating, a
-           comment, a feedback mode, and the approve/disapprove/clear status —
-           without a trip to the detail page.
+           comment and a feedback mode — without a trip to the detail page.
 
            Deliberately NOT here:
              * `dim_*` fields. _parse_dimension_scores then returns `{}`, which
@@ -530,14 +567,12 @@
              * delete, assign and unassign — queue-side bulk management is not
                in scope, and assignment is staff-only whereas this card is
                visible to reviewers too.
-
-           The status control is BUTTONS, not a <select>: a card must never
-           print the words "Approved"/"Disapproved"
-           (test_list_pages_show_reviewer_columns row-scopes that), and those
-           are exactly the option strings a status select would carry. The
-           lowercase `value=` attributes are the router's own vocabulary. #}
+             * approve/disapprove/clear. Those three buttons were removed
+               2026-09-21 on operator request; the route survives with no
+               caller (see the ROUTE_ALLOWLIST entry in
+               tests/unit/test_reachability.py). #}
         {% set qs = 'qs-' ~ a.id ~ '-' %}
-        <details class="assessment-card-quickscore mt-3 border-t border-gray-100 pt-3">
+        <details class="assessment-card-quickscore mt-3 border-t border-gray-100 pt-3" open>
             <summary class="cursor-pointer text-sm font-medium text-indigo-700">Quick scoring</summary>
             {# Whitespace-controlled for the same measured reason as the scores
                block above: once per card, up to 500 cards. #}
@@ -545,10 +580,11 @@
             {%- if impersonation_banner %}
             <p class="mt-1 text-sm text-gray-600 max-w-[68ch]">Reviewing as <strong>{{ impersonation_banner.name }}</strong>; your own account is recorded as the person who entered it.</p>
             {%- endif %}
-            {# The four hidden inputs are contract C6: `surface` is the bare
-               `list_surface` token and the other three carry this page's own
-               filter state, so src/routers/reviews.py can send the writer back
-               to the list they were reading, at this card's anchor. #}
+            {# The five hidden inputs are contract C6: `surface` is the bare
+               `list_surface` token and the other four carry this page's own
+               filter state — run, sort, lab and review sub-tab — so
+               src/routers/reviews.py can send the writer back to the list they
+               were reading, at this card's anchor. #}
             <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
                 {{ qs_filters() }}
                 <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
@@ -560,19 +596,32 @@
                 <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
                 <p class="text-sm text-gray-600">Adds a new note; edit or remove one on the detail page.</p>
             </form>
-            <form method="post" action="/reviews/assessments/{{ a.id }}/status" class="mt-3 flex items-center gap-2">
-                {{ qs_filters() }}
-                <button type="submit" name="action" value="approved" class="text-sm font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
-                <button type="submit" name="action" value="disapproved" class="text-sm font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
-                <button type="submit" name="action" value="cleared" class="text-sm font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Clear</button>
-            </form>
         </details>
     </div>
 {% endfor %}
 </div>
 {% else %}
+{# Tab-aware (2026-09-21): "no assessments stored for this run" is false on
+   an empty sub-tab — the rows exist, they are on the other tab, and the run
+   menu on the same screen prints a count that contradicts it. #}
 <div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-500">
-    No assessments stored for {{ 'any run' if show_all_runs else 'this run' }} —
+    {# "No assessments AT ALL" is tested FIRST. It is the state of every fresh
+       run and every new deployment, and the reader lands on the Unreviewed
+       tab — so ordering the tab branches ahead of it made the commonest empty
+       page read "all 0 have review feedback. Nothing is owed here", which is
+       both false and reassuring. (2026-09-21 audit.) #}
+    {% if review_counts.all == 0 %}
+    No assessments stored for {{ 'any run' if show_all_runs else 'this run' }} &mdash;
     the run menu shows each run's stored count.
+    {% elif review == 'reviewed' %}
+    No <strong>reviewed</strong> assessments{{ '' if show_all_runs else ' in this run' }} &mdash;
+    {{ review_counts.unreviewed }} still await review on the Unreviewed tab.
+    {% elif review == 'unreviewed' %}
+    No <strong>unreviewed</strong> assessments{{ '' if show_all_runs else ' in this run' }} &mdash;
+    all {{ review_counts.reviewed }} have review feedback. Nothing is owed here.
+    {% else %}
+    No assessments stored for {{ 'any run' if show_all_runs else 'this run' }} &mdash;
+    the run menu shows each run's stored count.
+    {% endif %}
 </div>
 {% endif %}

@@ -647,9 +647,12 @@ async def test_list_pages_show_reviewer_columns(client, db_session, base, role):
     db_session.add(untouched)
     await db_session.flush()
 
+    # `&review=all`: the default tab is Unreviewed (2026-09-21) and this
+    # fixture carries feedback, so it lives on the Reviewed tab now.
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"{base}/assessments?run_id={run.id}&review=all",
+            headers=auth_headers(staff.id),
         )
     ).text
 
@@ -747,9 +750,12 @@ async def test_no_detail_prose_in_new_columns(client, db_session, admin):
     ))
     await db_session.flush()
 
+    # `&review=all`: this fixture carries feedback, so since 2026-09-21 it sits
+    # on the Reviewed tab rather than the default Unreviewed one.
     html = (
         await client.get(
-            f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/admin/assessments?run_id={run.id}&review=all",
+            headers=auth_headers(admin.id),
         )
     ).text
 
@@ -909,10 +915,12 @@ async def _seed_narrative_row(db_session, *, project: str, **overrides):
     return run, assessment
 
 
-async def test_quick_scoring_is_collapsed_and_labelled(client, db_session, admin):
-    """C3. Collapsed by DEFAULT: the card face is a triage surface, and a
-    permanently-expanded review form per card is what made the page
-    unreadable before the 2026-09-09 card list replaced the table."""
+async def test_quick_scoring_is_expanded_and_labelled(client, db_session, admin):
+    """OPEN by default. The 2026-09-09 card list made this disclosure closed on
+    the grounds that a permanently-expanded form per card is what made the old
+    table unreadable; the operator reversed that call on 2026-09-21 — the
+    review form is the point of the queue. Still a <details>, so a reader can
+    collapse it and the print handler still works on it."""
     run, _ = await _seed_narrative_row(db_session, project="Quickscore Co")
 
     html = (await client.get(
@@ -921,8 +929,8 @@ async def test_quick_scoring_is_collapsed_and_labelled(client, db_session, admin
 
     assert "assessment-card-quickscore" in html
     assert "Quick scoring" in html
-    assert " open" not in _details_open_tag(html, "assessment-card-quickscore"), (
-        "the quick-scoring disclosure must start closed"
+    assert " open" in _details_open_tag(html, "assessment-card-quickscore"), (
+        "the quick-scoring disclosure must start open"
     )
 
 
@@ -953,20 +961,23 @@ async def test_quick_scoring_posts_to_literal_review_paths_on_both_surfaces(
     )).text
 
     assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
-    assert f'action="/reviews/assessments/{assessment.id}/status"' in html
+    assert f'action="/reviews/assessments/{assessment.id}/status"' not in html
     assert 'method="post"' in html
-    # Contract C6: four hidden inputs, the same four on both forms.
+    # ONE form now (the status form was removed 2026-09-21 on operator
+    # request); the four hidden inputs appear once each, not twice.
     quickscore = _details_slice(html, "assessment-card-quickscore")
-    assert quickscore.count(f'name="surface" value="{surface}"') == 2
-    assert quickscore.count('name="run_id"') == 2
-    assert quickscore.count('name="sort"') == 2
-    assert quickscore.count('name="lab"') == 2
-    # The status control is BUTTONS with lowercase values — never a select
-    # whose option TEXT is "Approved"/"Disapproved", which
-    # test_list_pages_show_reviewer_columns row-scopes against.
-    assert 'name="action" value="approved"' in quickscore
-    assert 'name="action" value="disapproved"' in quickscore
-    assert 'name="action" value="cleared"' in quickscore
+    assert quickscore.count(f'name="surface" value="{surface}"') == 1
+    assert quickscore.count('name="run_id"') == 1
+    assert quickscore.count('name="sort"') == 1
+    assert quickscore.count('name="lab"') == 1
+    # The FIFTH input (2026-09-21). Counted inside the disclosure slice on
+    # purpose: the wrapper's own GET form emits a byte-identical
+    # `name="review"` input, so a page-wide assertion would pass with this
+    # one deleted and a reviewer scoring from the Reviewed tab would be
+    # silently returned to Unreviewed.
+    assert quickscore.count('name="review"') == 1
+    # No status control of any kind survives on the card.
+    assert 'name="action"' not in quickscore
     assert "Approved" not in quickscore and "Disapproved" not in quickscore
 
 
@@ -1168,7 +1179,10 @@ async def test_a_row_with_no_pitch_or_points_renders_neither_box(
         card = _row_slice(html, marker)
         assert "assessment-card-pitch" not in card, marker
         assert "assessment-card-points" not in card, marker
-        assert "assessment-card-score-rationale" not in card, marker
+        # The score-rationale box is UNCONDITIONAL as of 2026-09-21 (D9): it
+        # now carries the score itself, so a row that omitted it would show no
+        # score anywhere.
+        assert "assessment-card-score-rationale" in card, marker
 
 
 async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admin):
@@ -1198,9 +1212,28 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
     run-scoped and holds 6-20 rows, i.e. ~280 KB; the multi-megabyte figure is
     reachable only via "All Runs".
 
+    RE-MEASURED 2026-09-21, same fixture, after the queue change (score+band
+    folded into an unconditional collapsed box, quick review `open`, the
+    detail link moved into the pitch box, the citation rewrite, the review
+    tab strip):
+
+    | what | bytes | per card |
+    |---|---|---|
+    | 50 rows, every narrative field populated | **685,309** | 13.4 KiB |
+
+    That is 43,386 bytes BELOW the 2026-09-14 figure, not above it: the
+    top-right score block was deleted outright, and this fixture populates
+    `score_rationale` on every row, so making its box unconditional costs
+    nothing here. A run of rows with `score_rationale IS NULL` pays ~180
+    bytes each for the box's "no score rationale" line instead — still less
+    than the block that was removed.
+
     CEILING is the populated 50-row measurement plus ~20%. If a change pushes
     past it, raise it in the same commit to the newly MEASURED number and
-    record the measurement here — no speculative headroom.
+    record the measurement here — no speculative headroom. It is deliberately
+    NOT lowered to match a shrink: the ceiling exists to make the next
+    addition declare its cost, and re-baselining downward every time would
+    turn it into a tripwire that fires on noise.
     """
     CEILING = 875_000
 
@@ -1251,3 +1284,381 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
         f"{CEILING}-byte ceiling — re-measure and raise it deliberately, or "
         "move something off the card"
     )
+
+
+# --- cited-paper links (Task 2 / spec §7) -----------------------------------
+
+CITED_DOI = "https://doi.org/10.7554/eLife.94488"
+
+
+async def test_the_card_pitch_renders_a_doi_as_a_cited_paper_link(
+    client, db_session, admin
+):
+    """Spec §7. A markdown row's pitch reaches the browser as `data-markdown`,
+    so the assertion is on the MARKDOWN we hand the client, not on an anchor:
+    marked builds the anchor at render time."""
+    run, _ = await _seed_narrative_row(
+        db_session,
+        project="Cited Co",
+        prose_format="markdown",
+        elevator_pitch=f"Built on the lab's eLife 2025 paper ({CITED_DOI}), which reports.",
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Cited Co")
+
+    assert "cited paper" in card
+    assert f"&lt;{CITED_DOI}&gt;" in card, "destination must be angle-bracketed"
+    assert f">{CITED_DOI}<" not in card, "the raw URL must not be visible text"
+
+
+async def test_a_plain_text_card_pitch_renders_a_real_anchor(
+    client, db_session, admin
+):
+    """A `prose_format IS NULL` row never reaches marked, so the anchor has to
+    be built server-side."""
+    run, _ = await _seed_narrative_row(
+        db_session,
+        project="Plain Cited Co",
+        prose_format=None,
+        elevator_pitch=f"See {CITED_DOI} for the paper.",
+    )
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Plain Cited Co")
+
+    assert f'<a class="citation-link" href="{CITED_DOI}"' in card
+    assert ">cited paper</a>" in card
+    assert "target=" not in card.split("citation-link")[1][:200]
+
+
+async def test_the_manager_surface_renders_citation_links_too(client, db_session):
+    """Both routers own their own Jinja2Templates instance and their own
+    globals; registering the helpers on one leaves the other raising
+    UndefinedError. This is the test that catches a single registration."""
+    manager = await factories.make_user(
+        db_session, user_role=USER_ROLE_MANAGER, email="cite-mgr@example.org"
+    )
+    run, _ = await _seed_narrative_row(
+        db_session,
+        project="Manager Cited Co",
+        prose_format=None,
+        elevator_pitch=f"See {CITED_DOI} for the paper.",
+    )
+
+    resp = await client.get(
+        f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id)
+    )
+    assert resp.status_code == 200
+    assert ">cited paper</a>" in _row_slice(resp.text, "Manager Cited Co")
+
+
+# --- the detail control (Task 6 / spec §6) ----------------------------------
+
+
+async def test_the_detail_button_sits_in_the_pitch_box(client, db_session, admin):
+    """Spec §6/D7. One control per card, at the foot of "In one minute".
+
+    The fixture carries key points as well as a pitch so the slice below has a
+    right-hand box to stop at; with a pitch alone the grid renders one column
+    and there is no `assessment-card-points` marker to bound on.
+    """
+    run, _ = await _seed_narrative_row(
+        db_session, project="Pitch Button Co",
+        elevator_pitch="One minute of prose about the idea.",
+        key_points=["a point the reviewer can read"],
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Pitch Button Co")
+
+    assert card.count("assessment-open-link") == 1
+    pitch_box = card[card.index("assessment-card-pitch") :]
+    pitch_box = pitch_box[: pitch_box.index("assessment-card-points")]
+    assert "assessment-open-link" in pitch_box
+
+
+async def test_a_card_with_no_pitch_still_has_exactly_one_detail_button(
+    client, db_session, admin
+):
+    """12 of 22 production rows have no pitch, so the fallback is the common
+    case, not an edge one."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="No Pitch Button Co",
+        recommendation="pass", weighted_score=1.2, band="pass",
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "No Pitch Button Co")
+
+    assert card.count("assessment-open-link") == 1
+    assert "/admin/assessments/" in card
+
+
+# --- score and band, one click down (Task 7 / spec §8) ----------------------
+
+
+async def test_the_score_and_band_live_inside_the_collapsed_why_this_score_box(
+    client, db_session, admin
+):
+    """Spec §8/D8. The card face keeps the recommendation chip only."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Score Box Co", score_rationale="Because of the cohort.",
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Score Box Co")
+
+    assert " open" not in _details_open_tag(html, "assessment-card-score-rationale")
+    box = _details_slice(html, "assessment-card-score-rationale")
+    assert "3.05" in box
+    assert "band-label" in box
+    # Nothing outside the box carries the number or the band word.
+    face = card[: card.index("assessment-card-score-rationale")]
+    assert "3.05" not in face
+    assert "band-label" not in face
+    assert "conditional" in face, "the recommendation chip stays on the face"
+    # ...and the markup AFTER the box too: checking only what precedes it
+    # would miss a score re-added to the footer row or either disclosure.
+    outside = card.replace(_details_slice(html, "assessment-card-score-rationale"), "")
+    assert outside.count("3.05") == 0
+    assert outside.count("band-label") == 0
+
+
+async def test_a_row_with_no_score_rationale_still_shows_its_score_in_the_box(
+    client, db_session, admin
+):
+    """D9: 12 of 22 production rows are pre-0048 and have score_rationale NULL.
+    The box is unconditional so none of them loses its score."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="No Rationale Co", score_rationale=None,
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    box = _details_slice(html, "assessment-card-score-rationale")
+    assert "3.05" in box
+    assert "no score rationale" in box.lower()
+
+
+async def test_a_row_with_no_weighted_score_renders_the_em_dash_in_the_box(
+    client, db_session, admin
+):
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="No Score Co",
+        recommendation="pass",
+    ))
+    await db_session.flush()
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    box = _details_slice(html, "assessment-card-score-rationale")
+    assert "&mdash;" in box or "—" in box
+
+
+# --- the review sub-tabs (Task 8 / spec §4) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "role"),
+    [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)],
+)
+async def test_both_surfaces_offer_the_review_tabs(client, db_session, base, role):
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"tabs-{role}@example.org"
+    )
+    run, _ = await _seed_narrative_row(db_session, project="Tab Co")
+
+    html = (await client.get(
+        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+    )).text
+
+    assert f'href="{base}/assessments?' in html
+    assert "review=reviewed" in html and "review=unreviewed" in html and "review=all" in html
+    assert 'aria-current="page"' in html
+
+
+async def test_the_review_tab_survives_a_sort_change(client, db_session, admin):
+    """The run/sort/lab controls are ONE GET form with no hidden inputs, so a
+    param that is not a form field is dropped the moment a select changes."""
+    run, _ = await _seed_narrative_row(db_session, project="Sticky Tab Co")
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
+    )).text
+    assert '<input type="hidden" name="review" value="all">' in html
+
+
+async def test_the_empty_state_names_the_tab_not_the_run(client, db_session, admin):
+    """A run whose only row is reviewed, seen from the Unreviewed tab: "no
+    assessments stored for this run" is false, and the run menu on the same
+    screen says so."""
+    run, assessment = await _seed_narrative_row(db_session, project="All Reviewed Co")
+    reviewer = await factories.make_user(db_session, email="empty-state-rev@example.org")
+    db_session.add(AssessmentReview(
+        assessment_id=assessment.id, reviewer_user_id=reviewer.id,
+        reviewer_name="R", score=4, comment="ok", feedback_mode="log_only",
+    ))
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}&review=unreviewed",
+        headers=auth_headers(admin.id),
+    )).text
+    assert "No assessments stored for" not in html
+    # The NEW copy, not just the word "unreviewed" — the tab strip prints
+    # that on every render, so the old assertion could not fail.
+    assert "Nothing is owed here" in html
+
+
+async def test_the_admin_surface_forwards_the_review_keys(client, db_session, admin):
+    """admin_assessments allowlists every context key; a key added to the
+    service and not to that list renders as silently-falsy Undefined here and
+    nowhere else."""
+    run, _ = await _seed_narrative_row(db_session, project="Allowlist Co")
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "review=all" in html  # the All tab link renders its count
+    assert "(1)" in html or "(0)" in html
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 audit: acceptance criteria the first pass left unproven.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "role"), [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)]
+)
+async def test_each_review_tab_renders_only_its_own_rows(
+    client, db_session, base, role
+):
+    """Spec §4 acceptance 1, at the HTTP level and on BOTH surfaces. The
+    service test proves the SQL; this proves the parameter is declared on both
+    handlers and reaches the query — the `reviewed` branch had no surface
+    coverage at all."""
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"tabs-rows-{role}@example.org"
+    )
+    run, reviewed = await _seed_narrative_row(db_session, project="Has Feedback Co")
+    await _seed_narrative_row(db_session, project="Awaits Review Co", run=run)
+    author = await factories.make_user(
+        db_session, email=f"tab-author-{role}@example.org"
+    )
+    db_session.add(AssessmentReview(
+        assessment_id=reviewed.id, reviewer_user_id=author.id,
+        reviewer_name="Tab Author", score=4, comment="ok", feedback_mode="log_only",
+    ))
+    await db_session.flush()
+
+    async def _get(review: str) -> str:
+        return (await client.get(
+            f"{base}/assessments?run_id={run.id}&review={review}",
+            headers=auth_headers(staff.id),
+        )).text
+
+    reviewed_html = await _get("reviewed")
+    assert "Has Feedback Co" in reviewed_html
+    assert "Awaits Review Co" not in reviewed_html
+
+    unreviewed_html = await _get("unreviewed")
+    assert "Awaits Review Co" in unreviewed_html
+    assert "Has Feedback Co" not in unreviewed_html
+
+    all_html = await _get("all")
+    assert "Has Feedback Co" in all_html and "Awaits Review Co" in all_html
+
+
+async def test_a_run_with_no_assessments_at_all_says_so_on_the_default_tab(
+    client, db_session, admin
+):
+    """The state of every fresh run and every new deployment, seen on the tab
+    every reader lands on. Ordering the tab branches ahead of the
+    nothing-at-all branch made it read "all 0 have review feedback. Nothing is
+    owed here" — false, and reassuring about a run that has produced nothing.
+    """
+    run = await factories.make_simulation_run(db_session)
+    await db_session.flush()
+
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "No assessments stored for" in html
+    assert "Nothing is owed here" not in html
+
+
+async def test_the_card_pitch_renders_two_dois_as_two_links(
+    client, db_session, admin
+):
+    """The real production shape, proved through the template rather than
+    only in the helper's unit tests."""
+    run, _ = await _seed_narrative_row(
+        db_session,
+        project="Two Cites Co",
+        prose_format="markdown",
+        elevator_pitch=(
+            f"Built on the eLife 2025 paper ({CITED_DOI}), with modelling on "
+            "bioRxiv (https://doi.org/10.64898/2026.06.29.735215)."
+        ),
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Two Cites Co")
+    assert card.count("cited paper") == 2
+    assert f">{CITED_DOI}<" not in card
+
+
+@pytest.mark.parametrize(
+    ("base", "role"), [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)]
+)
+async def test_quick_scoring_is_expanded_on_both_surfaces(
+    client, db_session, base, role
+):
+    """The disclosure lives in the shared body, but only a both-surface
+    assertion proves both wrappers render it open."""
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"qs-open-{role}@example.org"
+    )
+    run, _ = await _seed_narrative_row(db_session, project="Open Both Co")
+
+    html = (await client.get(
+        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+    )).text
+    assert " open" in _details_open_tag(html, "assessment-card-quickscore")
+
+
+async def test_the_dimension_panel_names_the_tab_it_describes(
+    client, db_session, admin
+):
+    """`dimension_stats` and `band_counts` are built from the post-filter row
+    list, so one reviewer writing one comment moves a row out of the default
+    tab and the band line silently drops it. Unmarked, that reads as a data
+    change rather than a filter."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Panel Scope Co",
+        scores={"venture_potential": 3, "differentiation_unmet_need": 4},
+    )
+
+    default_tab = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    assert "(unreviewed only)" in default_tab
+
+    all_tab = (await client.get(
+        f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
+    )).text
+    assert " only)" not in all_tab

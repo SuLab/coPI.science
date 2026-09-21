@@ -1364,6 +1364,13 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
     ``route-to-incubation`` but the server-computed band is ``pass``. Both
     must render as their own literal, readable text, and neither may be
     presented as the other.
+
+    UPDATED 2026-09-21: the band label moved inside the collapsed "Why this
+    score" disclosure with the score (spec §8/D8, an accepted accessibility
+    regression the operator signed off). ``_band_label`` is a page-wide regex,
+    so this test kept passing on its own — which is exactly why the assertion
+    below was added: the band must still be TEXT, and it must be findable
+    where the page actually puts it now.
     """
     run = SimulationRun()
     db_session.add(run)
@@ -1386,6 +1393,10 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
     assert _band_label(html) == "decline"
     # band and recommendation must never be presented as each other.
     assert _band_label(html) != "route-to-incubation"
+    # The label is inside the collapsed disclosure, not on the card face.
+    assert "assessment-card-score-rationale" in html
+    box_at = html.index("assessment-card-score-rationale")
+    assert html.index('class="band-label') > box_at
 
 
 @pytest.mark.asyncio

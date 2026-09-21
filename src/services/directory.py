@@ -35,7 +35,11 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.assessment_detail import panel_state, unvetted_panel_filter
+from src.services.assessment_detail import (
+    has_review_filter,
+    panel_state,
+    unvetted_panel_filter,
+)
 from src.services.assessment_reviews import EMPTY_REVIEW_COLUMNS, review_columns_for
 from src.services.blackbird_rubric import (
     BANDING,
@@ -76,6 +80,14 @@ ASSESSMENT_SORT_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 ASSESSMENT_SORTS = tuple(value for value, _ in ASSESSMENT_SORT_OPTIONS)
 ASSESSMENT_SORT_DEFAULT = ASSESSMENT_SORTS[0]
+
+#: The review sub-tabs (spec 2026-09-21 §4). `unreviewed` is the default: this
+#: page is a work queue, and the tab a reader lands on should be the work.
+#: "Reviewed" means at least one `assessment_reviews` row (D4) — written
+#: feedback, not an assignment and not a status event. The predicate itself is
+#: `assessment_detail.has_review_filter()`.
+ASSESSMENT_REVIEW_FILTERS: tuple[str, ...] = ("unreviewed", "reviewed", "all")
+ASSESSMENT_REVIEW_DEFAULT = "unreviewed"
 
 # Triage order for `sort=recommendation`: the model's own verdict, most
 # actionable first. NOT alphabetical and NOT band order — `route-to-incubation`
@@ -343,6 +355,7 @@ async def list_assessments(
     *,
     sort: str | None = None,
     lab: str | None = None,
+    review: str | None = None,
 ) -> dict[str, Any]:
     """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
 
@@ -378,6 +391,15 @@ async def list_assessments(
     ``simulation_run_id`` is a run whose messages are gone), while the "All
     Runs" escape hatch and the per-run dropdown keep every row reachable.
     Mirrors the run-selector pattern already used by ``admin_discussions``.
+
+    ``review`` splits the queue into the reviewed and unreviewed sub-tabs and
+    narrows ``total_count``, the rendered rows and everything derived from them.
+    It deliberately does NOT narrow ``incomplete_panel_count``, the drop counts,
+    ``lab_options`` or ``assessment_counts_by_run`` — the first two are warnings
+    and the failure mode of a warning is under-warning, and the last two are the
+    controls' own option sets, which are computed pre-filter so a reader always
+    has a way back. Like ``sort`` and ``lab`` it is unvalidated query-string
+    input and falls back to ``ASSESSMENT_REVIEW_DEFAULT`` silently.
     """
     runs_result = await db.execute(
         select(SimulationRun).order_by(SimulationRun.started_at.desc())
@@ -404,6 +426,9 @@ async def list_assessments(
         selected_run_id = runs[0].id
 
     sort_key = sort if sort in ASSESSMENT_SORTS else ASSESSMENT_SORT_DEFAULT
+    review_key = (
+        review if review in ASSESSMENT_REVIEW_FILTERS else ASSESSMENT_REVIEW_DEFAULT
+    )
 
     query = select(OpportunityAssessment)
     if not show_all_runs and selected_run_id:
@@ -429,11 +454,40 @@ async def list_assessments(
     if lab_filter:
         query = query.where(OpportunityAssessment.subject_agent_id == lab_filter)
 
-    # Counts the current filter — run AND lab — so the "top N of TOTAL" note
-    # describes the table the reader is looking at.
+    # The run+lab scope, kept so the tab counts can be taken from it. `query`
+    # is about to be narrowed by the review filter; these counts must not be.
+    scope_query = query
+
+    # Applied BEFORE total_count and before the LIMIT, so the "top N of TOTAL"
+    # note, the five recommendation cards and dimension_stats all describe the
+    # tab the reader is on rather than the whole run.
+    if review_key == "reviewed":
+        query = query.where(has_review_filter())
+    elif review_key == "unreviewed":
+        query = query.where(~has_review_filter())
+
+    # Counts the current filter — run AND lab AND the review tab — so the
+    # "top N of TOTAL" note describes the table the reader is looking at.
     total_count = (
         await db.execute(select(func.count()).select_from(query.subquery()))
     ).scalar() or 0
+
+    # Both tabs' sizes in one place, so the strip never has to derive "All" by
+    # addition and cannot disagree with the rows below it. Scoped by run+lab —
+    # the same scope as `total_count` — but deliberately NOT by the tab itself.
+    reviewed_count = (await db.execute(
+        select(func.count()).select_from(
+            scope_query.where(has_review_filter()).subquery()
+        )
+    )).scalar() or 0
+    all_count = (await db.execute(
+        select(func.count()).select_from(scope_query.subquery())
+    )).scalar() or 0
+    review_counts = {
+        "reviewed": reviewed_count,
+        "unreviewed": all_count - reviewed_count,
+        "all": all_count,
+    }
 
     # Surfaced because Task 3 stops the floor discarding a gapped verdict.
     # Storing it is only safe if the page distinguishes it from a vetted one.
@@ -684,6 +738,10 @@ async def list_assessments(
         "sort_options": ASSESSMENT_SORT_OPTIONS,
         "lab_filter": lab_filter,
         "lab_options": lab_options,
+        # The review sub-tab actually APPLIED (after the silent fallback), and
+        # all three tab sizes under the same run+lab scope.
+        "review": review_key,
+        "review_counts": review_counts,
         # Keyed by subject_agent_id, same key space as lab_options — a
         # missing key means "no resolvable PI" (stale slug or unlinked
         # agent), not an error.
