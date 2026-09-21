@@ -62,7 +62,11 @@ async def test_container_is_migrated(engine):
         # 0049 opportunity_assessments.strengths/.risks (the hub's own
         #      strengths/risks bullets, sidecar items 11/12; app-only,
         #      never published to #assessments-summary)
-        assert v == "0049"
+        # 0050 opportunity_assessments.competitive_landscape/.evidence_maturity
+        #      (the hub's named competitor set with development stages, and its
+        #      per-axis statement of what is settled; sidecar items 13/14,
+        #      app-only, never published to #assessments-summary)
+        assert v == "0050"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

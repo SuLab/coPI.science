@@ -102,6 +102,24 @@ class OpportunityAssessment(Base):
     # `#assessments-summary`.
     strengths: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     risks: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Sidecar items 13/14 (scout_hub 1.7.0, migration 0050).
+    # `competitive_landscape` names the competing and adjacent programs WITH
+    # their development stages, or says plainly that a search found none;
+    # `evidence_maturity` states, per axis the verdict rests on (the biology,
+    # and the enabling chemistry/assay/platform), what IS settled and what is
+    # NOT. Both exist because the specialist panel already produced this
+    # material and the brief lost it to compression — see
+    # docs/specs/2026-09-21-review-driven-assessment-contract-design.md §1.1 F3.
+    # NULL means the row predates 0050 or the hub emitted a malformed value
+    # (`normalize_bullets` rejected it); `raw_verdict` keeps what was emitted
+    # either way. App-only, like `score_rationale`, `strengths` and `risks`:
+    # never published to `#assessments-summary`.
+    competitive_landscape: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    evidence_maturity: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     funnel_stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
     recommendation: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)
