@@ -229,23 +229,49 @@ of it may appear anywhere in `<slack_message>` above:
 
 6. **Headline.** One plain-language sentence of **at most 140 characters**,
    written for a Blackbird reviewer who is not a specialist in this field and
-   has never heard of this lab. It must make three things obvious: **the
-   method** — what the thing physically is, in words a scientifically literate
-   non-specialist reads without stopping; **what it is for** — the disease,
-   patient population, or decision it serves; and **why it is fundable**. No
-   colon-stacked noun phrases. No slash-separated alternatives. No parenthetical
-   lab or institution suffix — the page already shows the lab separately. At
-   most one abbreviation, spelled out on first use; a chain of gene symbols is
-   not a headline. This is NOT the project label; `company_or_project` already
-   carries that, and both are stored.
+   has never heard of this lab. Three things must be obvious, and the first two
+   are mandatory — a headline missing either is not a headline:
+
+   1. **The disease area.** The specific disease, condition or patient
+      population this serves, named in words a non-specialist recognises. A
+      biomarker panel's disease area is the disease it stratifies, not the
+      assay chemistry. If the work is a genuinely disease-agnostic platform,
+      name the disease of the FIRST application; "multiple indications" is not
+      a disease area.
+   2. **What the intervention is, and what it does.** What the thing physically
+      is — a pill, an antibody, a blood test, an implant, a screening platform
+      — and the action it performs that produces the benefit: blocks an enzyme,
+      identifies responders before treatment, kills cells carrying a
+      transporter. A modality noun on its own does not satisfy this; name the
+      action.
+   3. **Why it is fundable.** This may be carried implicitly by naming a
+      decision the funder acts on ("predicts which patients will respond"),
+      because all three elements rarely fit 140 characters otherwise.
+
+   No colon-stacked noun phrases. No slash-separated alternatives. No
+   parenthetical lab or institution suffix — the page already shows the lab
+   separately. At most one abbreviation, spelled out on first use; a chain of
+   gene symbols is not a headline. This is NOT the project label;
+   `company_or_project` already carries that, and both are stored.
 
        Write: "A blood test taken before treatment that predicts which
        liver-cancer patients will respond to immunotherapy."
+
+       Write: "An oral drug that blocks the enzyme making a brain metabolite
+       that builds up to toxic levels in children with Canavan disease."
 
        Not: "Pre-treatment plasma IL-17F/IL-21/IL-23/IL-8 signature for
        exceptional ICI response in HCC/biliary cancer — real association, but
        no fitted classifier and no demonstrated edge over published IL-8
        alone."
+
+       Not: "Low-coverage-WGS cfDNA fragmentome classifier proposed to identify
+       F2-F3 at-risk MASH in the FIB-4 indeterminate zone — the resmetirom
+       prescribing gate — on a published, running platform."
+
+   Both `Not:` examples are real headlines this prompt produced: each names a
+   method and a disease somewhere inside a noun stack, and neither says in
+   plain words what the thing does or who it is for.
 
    Record it in `headline`.
 7. **Key points.** Five labelled groups, in this order, each holding ONE or
