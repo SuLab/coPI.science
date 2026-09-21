@@ -496,3 +496,386 @@ async def test_a_five_bullet_strengths_list_still_stores_and_warns(engine, caplo
         assert "strengths carries 5 bullets" in warnings
     finally:
         await _delete_run(factory, run_id)
+
+
+async def test_persist_assessment_stores_landscape_and_evidence_maturity(engine):
+    """Sidecar items 13/14 (0050): valid bullet lists reach their columns."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            "company_or_project": "Short label",
+            "competitive_landscape": ["Program A is Phase I.", "Program B lapsed."],
+            "evidence_maturity": ["Biology: settled.", "Chemistry: unverified."],
+            "recommendation": "conditional",
+            "scores": {},
+        })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.competitive_landscape == ["Program A is Phase I.", "Program B lapsed."]
+        assert row.evidence_maturity == ["Biology: settled.", "Chemistry: unverified."]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(
+    engine, caplog
+):
+    """A20: a malformed narrative field costs the field, never the verdict.
+
+    The caplog assertions are what pin the SOFT-BOUND LOOP (step 3). Without
+    them the loop could be reverted to ("strengths", "risks") and every other
+    test here would still pass, because the column values come from step 4's
+    `normalize_bullets` kwargs, not from the loop.
+    """
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "competitive_landscape": "not a list",
+                "evidence_maturity": ["Biology: settled.", ""],
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.competitive_landscape is None
+        assert row.evidence_maturity is None
+        assert row.raw_verdict["competitive_landscape"] == "not a list"
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "competitive_landscape was DROPPED" in warnings
+        assert "evidence_maturity was DROPPED" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_five_bullet_evidence_maturity_still_stores_and_warns(engine, caplog):
+    """The out-of-range bullet count is a WARNING, never a drop (spec §8), and
+    this is the second test pinning the soft-bound loop's extension."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        five = ["one", "two", "three", "four", "five"]
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "evidence_maturity": five,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.evidence_maturity == five
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "evidence_maturity carries 5 bullets" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_120_character_headline_warns_against_the_110_bound(engine, caplog):
+    """The prose bound (scout_hub 1.7.0) and `_HEADLINE_SOFT_LIMIT` must not part
+    company: at 140 the alarm was silent for exactly the headlines the 110 bound
+    exists to catch."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "headline": "A" * 120,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "contract asks for <=110" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_an_overlong_landscape_bullet_still_stores_and_warns(engine, caplog):
+    """Spec §8's third case for the 0050 fields: the `_HUB_BULLET_CHARS` (200)
+    bound is a WARNING, never a drop (A4). Exercised for `strengths` already;
+    the extended loop must do the same for the two new fields."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    long_bullet = "x" * 260
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "competitive_landscape": [long_bullet, "Program B lapsed."],
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.competitive_landscape == [long_bullet, "Program B lapsed."]
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "competitive_landscape bullet is 260 chars" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_citation_outside_the_published_excerpt_warns(engine, caplog):
+    """scout_hub 1.7.0's citation budget is otherwise unalarmed.
+
+    Item 8 moved the provenance citation to sentence four and asks that
+    sentences 1-4 END within ~550 chars so it lands inside the 600 that
+    `#assessments-summary` publishes. A pitch that cites a source the
+    published excerpt will not carry must say so at write time: the Slack
+    post cannot be retracted, and staff would otherwise find out by reading
+    the channel.
+    """
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    # Citation pushed past the 600-char publish window: sentences 1-3 alone
+    # overrun the budget, so the clipper cuts before sentence four.
+    late = "A" * 580 + ". The work builds on https://doi.org/10.7554/eLife.94488. Tail."
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "elevator_pitch": late,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "does not carry" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_citation_inside_the_published_excerpt_is_silent(engine, caplog):
+    """The alarm's negative control: a compliant pitch must not warn, or the
+    warning becomes noise staff learn to ignore."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    early = (
+        "A" * 200 + ". " + "B" * 140
+        + ". The work builds on https://doi.org/10.7554/eLife.94488.\n\n"
+        + "C" * 300
+    )
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "elevator_pitch": early,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "does not carry" not in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_bare_doi_outside_the_excerpt_warns(engine, caplog):
+    """Item 8 permits "DOI or PubMed link", so a citation legally carries no
+    scheme. An alarm testing for `http` alone stays silent for exactly the
+    citation style most likely to be written without one."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    late = "A" * 580 + ". The work builds on doi:10.7554/eLife.94488. Tail."
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "elevator_pitch": late,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "does not carry" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_an_early_url_does_not_mask_a_dropped_later_citation(engine, caplog):
+    """The alarm compares citation SETS. A trial-registry URL in sentence one
+    survives the cut; the sentence-four DOI does not. Testing only "is any
+    citation left" would call that fine — and it is the exact shape the alarm
+    exists to catch."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    pitch = (
+        "Patients today enrol at https://clinicaltrials.gov/study/NCT01234567. "
+        + "A" * 520
+        + ". The work builds on https://doi.org/10.7554/eLife.94488. Tail."
+    )
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "elevator_pitch": pitch,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "does not carry" in warnings, (
+            "the surviving NCT URL must not mask the dropped eLife DOI"
+        )
+        assert "eLife.94488" in warnings, "the warning names what was lost"
+    finally:
+        await _delete_run(factory, run_id)

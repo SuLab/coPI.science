@@ -65,9 +65,10 @@ PROJECT_DISPLAY_CHARS = 120
 RECOMMENDATION_DISPLAY_CHARS = 30
 # This post's own display bound for the pitch, the same reasoning as
 # PROJECT_DISPLAY_CHARS above: `elevator_pitch` is an unbounded Text column and
-# a headline is not the place for a wall of model prose. Generous enough for the
-# 3-5 sentences the contract asks for; the full text is on the detail page the
-# permalink's reader can reach.
+# a headline is not the place for a wall of model prose. The prose contract
+# asks for four to six sentences (scout_hub 1.7.0) and requires sentences
+# 1-4 to END within ~550 characters, so the citation sentence completes inside this
+# window; see _clip_at_sentence below, which publishes only COMPLETE sentences.
 PITCH_DISPLAY_CHARS = 600
 
 
@@ -97,20 +98,23 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
       identical to what `_clip` returns for the same input. Every short pitch,
       and every pitch of exactly `PITCH_DISPLAY_CHARS`, renders exactly as it
       does today.
-    * Over the cap → cut after the LAST sentence terminator (`". "`, `"! "`,
-      `"? "`, or a terminator at the very end of the ``max_len`` window whose
-      NEXT character is whitespace) that leaves at least half the budget, and
+    * Over the cap → cut after the LAST sentence terminator — a `.`, `!` or
+      `?` followed by ANY whitespace character, which includes the newline of a
+      markdown paragraph break, or a terminator at the very end of the
+      ``max_len`` window whose NEXT character is whitespace — that leaves at
+      least half the budget, and
       append `" …"`. The marker is unconditional on a real truncation: the
       chosen boundary is the HIGHEST qualifying one, and the pitch contract
-      requires a citation in sentence two, so that boundary can be an
-      abbreviation ("et al. ", "e.g. ", "vs. ") rather than a sentence end. An
+      requires a citation sentence (sentence four under scout_hub >= 1.7.0),
+      so that boundary can be an abbreviation ("et al. ", "e.g. ", "vs. ")
+      rather than a sentence end. An
       abbreviation blocklist would be a guess; "there is more" is a fact. The
       marker is omitted only when the cut lands at the true end of the value.
     * Over the cap, no such boundary, but whitespace exists in the window →
       clip to ``max_len`` first, then back off to the last space and append
       `" …"`, so a truncation reads as one rather than as a sentence that
       stopped mid-word. The suffix is appended AFTER the `max_len` clip, so
-      the return may be `max_len + 2` characters.
+      the return may be `max_len + 1` characters.
     * Over the cap, no boundary, and no whitespace at all in the window →
       `value[:max_len]`, with NO suffix. Deliberate: reserving room for a
       suffix inside `max_len` here would cut the run of non-whitespace
@@ -125,13 +129,20 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
 
     window = value[:max_len]
     half_budget = max_len / 2
-    boundary_ends = []
-    for terminator in (". ", "! ", "? "):
-        idx = window.rfind(terminator)
-        if idx != -1:
-            # Cut right after the punctuation mark itself, not the trailing
-            # space, so the result reads as a complete sentence.
-            boundary_ends.append(idx + 1)
+    # Any WHITESPACE after the terminator, not just a space. The three-string
+    # `rfind` this replaced matched only ". ", "! " and "? ", so a sentence
+    # ending at a markdown paragraph break (".\n\n") was invisible to it — and
+    # `elevator_pitch` is contractually markdown with "short paragraphs
+    # separated by a blank line". That collided head-on with scout_hub 1.7.0,
+    # which moved the citation from sentence two to sentence four and bounds
+    # sentences 1-4 to end within ~550 so the citation lands inside this
+    # window: measured, a citation sentence ending at offset 545 followed by a
+    # blank line was dropped and the excerpt cut at 391. The budget is the
+    # whole mechanism protecting the public excerpt's provenance, so a
+    # terminator the scan cannot see silently defeats it.
+    # Cut right after the punctuation mark itself, not the trailing
+    # whitespace, so the result reads as a complete sentence.
+    boundary_ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", window)]
     # A terminator sitting at the very END of the window counts only when the
     # NEXT character is whitespace (or there is no next character). Without
     # that guard this candidate is always `max_len` — by construction the
@@ -150,10 +161,12 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
         # The ellipsis is unconditional on a real truncation, which REVERSES
         # this function's first draft ("a complete sentence needs no
         # ellipsis"). The draft assumed the chosen boundary is always a true
-        # sentence end; it is not. `rfind` takes the HIGHEST qualifying index,
-        # and the pitch contract now requires a citation in sentence two
-        # ("DOI or PubMed link"), which is precisely where "et al. ", "e.g. ",
-        # "i.e. " and "vs. " live — so the last candidate can be an
+        # sentence end; it is not. `max(candidates)` takes the HIGHEST qualifying
+        # index,
+        # and the pitch contract now requires a citation sentence (sentence
+        # four under scout_hub >= 1.7.0, "DOI or PubMed link"), which is
+        # precisely where "et al. ", "e.g. ", "i.e. " and "vs. " live — so
+        # the last candidate can be an
         # abbreviation, and a reader would have no way to tell the published
         # fragment from the whole pitch. An abbreviation blocklist would be a
         # guess; saying "there is more" is a fact. Omitted only when the cut

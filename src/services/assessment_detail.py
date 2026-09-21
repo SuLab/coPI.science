@@ -153,7 +153,9 @@ def normalize_key_points(value: object) -> list | dict | None:
 
 
 def normalize_bullets(value: object) -> list[str] | None:
-    """The hub's own ``strengths`` / ``risks`` sidecar lists (scout_hub >= 1.5.0).
+    """The hub's own bullet-list sidecar fields: ``strengths`` / ``risks``
+    (scout_hub >= 1.5.0) and ``competitive_landscape`` / ``evidence_maturity``
+    (scout_hub >= 1.7.0, migration 0050).
 
     A non-empty list whose every element is a non-empty ``str`` after
     ``.strip()`` is returned stripped. Anything else — a dict, a string, an
@@ -1314,10 +1316,14 @@ async def build_assessment_detail(
         "logs_scanned": logs_scanned,
         "log_scan_limit": LOG_SCAN_LIMIT,
         "admin_view": admin_view,
-        # The hub's own `strengths`/`risks` bullets (0049) are STAFF-only on
-        # the page, matching what the prompt promises the model: a reviewer
-        # account reaches the manager detail route but must not see model
-        # text the hub was told may cite unpublished results.
+        # The hub's own `strengths`/`risks` bullets (0049) — and, since
+        # scout_hub 1.7.0, `competitive_landscape`/`evidence_maturity` (0050)
+        # — are STAFF-only on the page, matching what the prompt promises the
+        # model: a reviewer account reaches the manager detail route but must
+        # not see model text the hub was told may cite unpublished results or
+        # Blackbird's own commercial diligence. All four are gated on this one
+        # key in `templates/admin/_assessment_detail_body.html`; a fifth such
+        # field belongs in the same place.
         "viewer_is_staff": viewer_is_staff,
         # Human-review card (Task 6). All three review tables are ordered
         # (created_at, id) — Postgres `now()` is transaction-start, so ties

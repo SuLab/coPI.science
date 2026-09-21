@@ -69,7 +69,9 @@ from src.services.assessment_detail import (
     normalize_key_points,
 )
 from src.services.assessment_headline import (
+    PITCH_DISPLAY_CHARS,
     PROJECT_DISPLAY_CHARS,
+    _clip_at_sentence,
     render_assessment_headline,
 )
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
@@ -4558,6 +4560,36 @@ class SimulationEngine:
                 "[%s] Assessment elevator_pitch is %d chars (contract asks for <=%d)",
                 agent_id, len(verdict["elevator_pitch"]), _PITCH_SOFT_LIMIT,
             )
+        # The scout_hub 1.7.0 citation budget's ONLY runtime alarm. Item 8 moved
+        # the provenance citation from sentence two to sentence four and asks
+        # that sentences 1-4 END within ~550 chars, so the citation completes
+        # inside the 600 that `#assessments-summary` publishes. Nothing else
+        # checks that: a 900-char pitch whose sentence four ends at 640 stores
+        # clean, warns nothing, and publishes a citation-free excerpt to a
+        # channel the post cannot be retracted from. Compare `_HEADLINE_SOFT_LIMIT`
+        # — the same class of write-path drift alarm, for the same reason.
+        # Cheap and total: reuse the real clipper rather than re-deriving the
+        # boundary, so this can never disagree with what actually posts.
+        _pitch = verdict.get("elevator_pitch")
+        if isinstance(_pitch, str) and _pitch:
+            # Compare citation SETS, not "is there any citation left". A pitch
+            # whose element 1 carries a trial registry URL that survives the
+            # cut would otherwise mask the sentence-four DOI that did not —
+            # which is the only case this alarm exists for.
+            _cited = set(_PITCH_CITATION_RE.findall(_pitch))
+            if _cited:
+                _excerpt = _clip_at_sentence(_pitch, PITCH_DISPLAY_CHARS) or ""
+                _lost = _cited - set(_PITCH_CITATION_RE.findall(_excerpt))
+                if _lost:
+                    logger.warning(
+                        "[%s] Assessment elevator_pitch cites %d source(s) the "
+                        "#assessments-summary excerpt (first %d chars, cut at a "
+                        "sentence boundary) does not carry: %s. Sentences 1-4 "
+                        "must END within ~550 chars; the published pitch will "
+                        "be missing this provenance.",
+                        agent_id, len(_lost), PITCH_DISPLAY_CHARS,
+                        ", ".join(sorted(_lost))[:200],
+                    )
         if isinstance(key_points, list) and not (
             _KEY_POINTS_MIN <= len(key_points) <= _KEY_POINTS_MAX
         ):
@@ -4613,11 +4645,14 @@ class SimulationEngine:
                     "[%s] Assessment key_points omits %d of %d groups: %s",
                     agent_id, len(absent), len(KEY_POINT_GROUPS), ", ".join(absent),
                 )
-        # Sidecar items 11/12 (0049): strengths/risks. Same soft-bound policy
-        # as key_points above — a shape violation is warned about, never a
-        # drop by itself. `normalize_bullets` is the only thing that drops the
+        # Sidecar items 11/12 (0049) and 13/14 (0050): strengths, risks,
+        # competitive_landscape, evidence_maturity. Same soft-bound policy as
+        # key_points above — a shape violation is warned about, never a drop
+        # by itself. `normalize_bullets` is the only thing that drops the
         # whole field, and only for a genuine type violation (A20).
-        for _field_name in ("strengths", "risks"):
+        for _field_name in (
+            "strengths", "risks", "competitive_landscape", "evidence_maturity",
+        ):
             _raw_bullets = verdict.get(_field_name)
             if isinstance(_raw_bullets, list):
                 if not (_HUB_BULLETS_MIN <= len(_raw_bullets) <= _HUB_BULLETS_MAX):
@@ -4690,6 +4725,14 @@ class SimulationEngine:
             # siblings above; raw_verdict keeps the original either way.
             strengths=normalize_bullets(verdict.get("strengths")),
             risks=normalize_bullets(verdict.get("risks")),
+            # Sidecar items 13/14 (0050): the competitor set with stages, and the
+            # per-axis statement of what is settled. Degrade to None on a wrong
+            # type like their narrative siblings above; raw_verdict keeps the
+            # original either way.
+            competitive_landscape=normalize_bullets(
+                verdict.get("competitive_landscape")
+            ),
+            evidence_maturity=normalize_bullets(verdict.get("evidence_maturity")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
             confidence=confidence,
@@ -9248,17 +9291,19 @@ _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 #: 6-7. SOFT: exceeding one logs a WARNING and stores the value as emitted.
 #: Enforcing them by dropping would trade a long headline for a lost verdict,
 #: and the row is the archive.
-_HEADLINE_SOFT_LIMIT = 140
+_HEADLINE_SOFT_LIMIT = 110
 #: `company_or_project` is the SHORT label, and it is the only project field the
 #: public #assessments-summary headline renders — where it is clipped to
 #: PROJECT_DISPLAY_CHARS (120, src/services/assessment_headline.py). A label
 #: over this bound is stored in full and warned about; one over 120 loses its
 #: tail in Slack.
 _PROJECT_SOFT_LIMIT = 70
-#: The pitch's own soft bound. Generous enough for the 3-4 sentences the
-#: contract asks for (it was 3-5 before the 2026-09-14 rewrite, which cut a
-#: sentence to pay for the new "where the work comes from" element);
-#: PITCH_DISPLAY_CHARS (600) is where the Slack copy is clipped.
+#: The pitch's own soft bound. Deliberately NOT re-derived when the contract went
+#: to four-to-six sentences (scout_hub 1.7.0) — at six sentences 900 is a
+#: tightening, not a generous fit, and that is the intent.
+#: PITCH_DISPLAY_CHARS (600, src/services/assessment_headline.py) is where the
+#: Slack copy is clipped, and 1.7.0 additionally asks that sentences 1-4 END
+#: within ~550 so the citation sentence completes inside that window.
 _PITCH_SOFT_LIMIT = 900
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
@@ -9267,10 +9312,23 @@ _KEY_POINTS_MAX = 5
 _KEY_POINT_GROUP_MIN = 1
 _KEY_POINT_GROUP_MAX = 2
 #: Sidecar items 11/12 (scout_hub >= 1.5.0): the hub's own strengths/risks
-#: bullets. SOFT bounds, same policy as the key_points groups above — a
+#: bullets — and, since 1.7.0, items 13/14 as well, `competitive_landscape`
+#: and `evidence_maturity`. All four share these bounds and are checked by the
+#: one loop in `_persist_assessment`.
+#: SOFT bounds, same policy as the key_points groups above — a
 #: contract violation is warned about and stored as emitted, never dropped
 #: for a count/length reason alone (only `normalize_bullets` itself drops the
 #: whole field, and only for a genuine shape violation).
+#: What counts as a CITATION in `elevator_pitch` for the drift alarm in
+#: `_persist_assessment`. Item 8 of phase4-thread-reply.md asks for the source
+#: "cited the way the lab's own public profile cites it (DOI or PubMed link)",
+#: and every one of these forms is legal under that wording — so testing for
+#: `http` alone would stay silent for a bare `doi:10.7554/...` or a `PMID`,
+#: which is precisely the citation most likely to be written without a scheme.
+_PITCH_CITATION_RE = re.compile(
+    r"https?://\S+|\bdoi:\s*\S+|\b10\.\d{4,9}/\S+|\bPMID:?\s*\d+",
+    re.I,
+)
 _HUB_BULLETS_MIN = 2
 _HUB_BULLETS_MAX = 4
 _HUB_BULLET_CHARS = 200
