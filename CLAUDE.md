@@ -1395,6 +1395,62 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > only its existing six fields — label, recommendation, band/score,
 > permalink and the clipped elevator pitch.
 
+> **The 2026-09-21 assessment-queue change ships NO migration, and both
+> images still have to be rebuilt.** Schema head stays at `0049`; there is no
+> migrate-before-serve ordering to observe. What it changes:
+>
+> * **scout_hub prompt set 1.5.0 → 1.6.0.** Sidecar item 6 now makes two
+>   things mandatory in a `headline` — the specific disease/condition/patient
+>   population, and what the intervention physically is *and does* — worded
+>   for any modality, because most of the corpus is diagnostics rather than
+>   drugs. No new sidecar key, so the `<assessment_json>` contract and
+>   `_persist_assessment` are untouched, and the 10 existing headlines are
+>   deliberately not regenerated. `prompts/` is bind-mounted, so this half
+>   reaches the hub without an image build.
+> * **The approve/disapprove/clear buttons are gone** from the queue card and
+>   the detail page's Human review section. `POST
+>   /reviews/assessments/{id}/status`, `set_review_status` and
+>   `assessment_review_events` all survive, deliberately caller-less, behind a
+>   `ROUTE_ALLOWLIST` entry in `tests/unit/test_reachability.py` — a new
+>   category on that list, since every other entry names a real external
+>   caller. The read-only Status line, Status history and the card's
+>   Approved/Disapproved chip still render whatever history the database
+>   holds, so a restored backup shows a chip no UI can now change.
+> * **The queue has reviewed/unreviewed sub-tabs**, `?review=`, defaulting to
+>   **unreviewed**. "Reviewed" means at least one `assessment_reviews` row —
+>   written feedback, NOT an assignment and NOT a status event, which is
+>   narrower than the card's own "Reviewed by" column
+>   (`review_columns_for` unions status-event actors). The filter narrows
+>   `total_count`, the five recommendation cards and `dimension_stats`; it
+>   deliberately does not narrow the dropped-verdict or unvetted-panel
+>   warnings, `lab_options`, or the run menu's per-run counts.
+> * **The card's weighted score and band label moved into a collapsed "Why
+>   this score" disclosure**, which now renders unconditionally so a pre-`0048`
+>   row still carries its score. This is an accepted accessibility regression:
+>   `band-label` exists because band-as-colour-alone was invisible to a
+>   colour-blind reader, and it is now one click down. Only the recommendation
+>   chip stays on the card face, so a recommendation/band disagreement is no
+>   longer visible at a glance.
+> * **URLs in assessment prose render as a blue underlined "cited paper"
+>   link** (`src/services/prose_citations.py`, registered as the Jinja globals
+>   `md_citations`/`plain_citations` on BOTH routers — each owns its own
+>   `Jinja2Templates`, so one registration would 500 the other surface). The
+>   anchor carries `href`, `title` and `class` and no `target`: DOMPurify
+>   3.1.6's default `ALLOWED_ATTR` has no `target`, so one would be stripped on
+>   the markdown path and survive on the plain one. `#assessments-summary` is
+>   untouched — `render_assessment_headline` still clips the RAW pitch, and
+>   moving that would move the 600-character sentence boundary.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> The agent rebuild is for the prompt-set bump's version stamp, not for a
+> parser change: image-without-prompt and prompt-without-image are both benign
+> here, since no sidecar key changed.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —
