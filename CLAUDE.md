@@ -1395,6 +1395,59 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > only its existing six fields — label, recommendation, band/score,
 > permalink and the clipped elevator pitch.
 
+> **Deploy order for `0050_assessment_landscape_and_evidence_maturity` — migrate
+> BEFORE the new code serves, and rebuild the AGENT image in the same deploy.**
+> `0050` is two additive nullable JSONB columns
+> (`opportunity_assessments.competitive_landscape` / `.evidence_maturity`, sidecar
+> items 13/14 of scout_hub prompt set 1.7.0), so *old code against the new schema*
+> is safe. The reverse breaks on FOUR read surfaces, not two, plus the write path.
+> READ: the new code maps both columns, so every `select(OpportunityAssessment)`
+> raises `UndefinedColumn` — both assessment list pages, both detail pages,
+> `src/services/review_bot.py` (on the **worker**, so every
+> `review_feedback_analysis` job fails) and `src/routers/reviews.py` (so feedback
+> submit/edit 500s out of the handler). WRITE: `_persist_assessment` names both in
+> the INSERT, and that write is best-effort, so **every verdict of a running
+> simulation is lost** to one ERROR line in a log nobody is tailing while the Slack
+> replies keep looking normal. Same shape as the `0043`/`0048`/`0049` boxes.
+>
+> ⚠️ **Before you touch the working tree at all, confirm `/admin/simulation` shows
+> no running engine.** `prompts/` is the host working tree and `Agent._load_prompt`
+> → `_load_file` does a `read_text()` **per use**, so checking out 1.7.0 reaches a
+> live agent immediately — before the build, before the migration. And
+> `prompt_set_stamp` is read once at run start, so a run in flight would
+> permanently record 1.6.0 for output produced under 1.7.0.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0050)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # supervisor returns IDLE
+>
+> **The agent rebuild is required, and the hazardous half of the pairing is
+> prompt-without-image.** `prompts/` is bind-mounted and `src/` is baked. This
+> deploy bumps the scout_hub prompt set to **1.7.0**, which cuts the headline bound
+> 140 → 110, reorders the elevator pitch to open on the problem, and adds the
+> `competitive_landscape` and `evidence_maturity` keys. Prompt-without-image writes
+> NULL into both columns forever — the old parser does not know the keys, so
+> `normalize_bullets` is never called on them and `_persist_assessment` never
+> assigns them; the hub's bullets survive only inside `raw_verdict`. It also leaves
+> `_HEADLINE_SOFT_LIMIT` at 140 while the prose says 110, so the drift alarm goes
+> quiet for exactly the headlines the change exists to catch.
+> Image-without-prompt is benign: an old sidecar emits neither key,
+> `verdict.get(...)` reads `None`, and `normalize_bullets(None)` is `None`.
+>
+> NULL on every pre-`0050` row and deliberately never backfilled: those verdicts
+> were never asked for either field, and generated ones would be indistinguishable
+> from bullets the hub actually wrote. Both are app-only —
+> `#assessments-summary` is untouched and still renders only its existing six
+> fields. The detail page's signals card is retitled **"Evidence summary"** (nav
+> entry "Evidence") because it now holds five sections, not two.
+>
+> Design and evidence:
+> `docs/specs/2026-09-21-review-driven-assessment-contract-design.md`.
+
 > **The 2026-09-21 assessment-queue change ships NO migration, and both
 > images still have to be rebuilt.** Schema head stays at `0049`; there is no
 > migrate-before-serve ordering to observe. What it changes:
