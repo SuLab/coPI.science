@@ -1679,7 +1679,23 @@ class TestPhase4OrdinalGuidance:
         assert "**Message count:** 12 of 12 max" in prompt_text
         assert len(captured["history"]) == 11
         assert "🧪 Panel" not in prompt_text
-        assert "blocking" not in prompt_text
+        # The note BODY, not just its marker — two independent probes, because a
+        # future format change could drop the marker and keep the content.
+        #
+        # This probe was the bare word "blocking" until scout_hub 1.7.0, when
+        # item 6 of phase4-thread-reply.md gained the worked example
+        # "Enzyme-blocking drug for prevention of toxic metabolite build up…".
+        # That put "blocking" in the prompt legitimately and made the bare probe
+        # fail on the prompt's own prose while the invariant it guards held
+        # perfectly. Keep any replacement tied to what `_seed_panel_notes`
+        # actually writes, not to a word a specialist signal happens to share
+        # with English.
+        # Two probes on tokens that appear ONLY in a seeded note and in no
+        # prompt file's prose, so neither depends on the note's formatting
+        # surviving intact: a leak that clipped or re-quoted the note would
+        # still carry one of them.
+        assert "⛔" not in prompt_text
+        assert "question 0" not in prompt_text
 
     @pytest.mark.asyncio
     async def test_panel_notes_do_not_delay_the_close_either(
