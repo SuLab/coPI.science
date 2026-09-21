@@ -504,7 +504,7 @@ starting a run is a separate, explicit operator action from `/admin/simulation`.
 | `tests/unit/test_assessment_headline_render.py` | a pitch shaped to the new plan (S1–S3 = 400, S4 = 210) — assert whether the citation survives `_clip_at_sentence(..., 600)`; this is the only executable check on §3.2's budget |
 | `tests/integration/test_assessment_detail_page.py` | both new section headings present on the staff path, absent on the reviewer path, mirroring `test_a_reviewer_never_sees_the_hubs_own_bullets` at `:2274` |
 | `tests/unit/test_pitch_contract.py` (new) | prompt-text assertions for the six-step order and the ~400-character budget |
-| `tests/unit/test_landscape_maturity_persist.py` (new, mirroring `tests/unit/test_normalize_bullets.py` and the `0049` persist cases) | both fields: normal store; wrong type → NULL + one warning naming the field; over-long bullet and out-of-range bullet count → warn but store |
+| `tests/integration/test_assessment_narrative_fields.py` (extend — this is where the `0049` persist cases live, using the module's `engine` fixture and an unbound `SimulationEngine._persist_assessment(stub, …)` call) | both fields: normal store; wrong type → NULL + one warning naming the field; over-long bullet and out-of-range bullet count → warn but store |
 | `tests/unit/test_doc_prompt_sync.py` | passes once `scripts/sync_prompt_set_docs.py` has run |
 
 Gate: `./scripts/ci.sh` — alembic single-head plus the upgrade→downgrade→upgrade
