@@ -62,8 +62,21 @@ def test_the_headline_item_carries_two_positive_examples():
     assert _item_six().count("Write:") == 2
 
 
-def test_the_headline_cap_is_unchanged():
-    assert "at most 140 characters" in _item_six()
+def test_the_headline_cap_is_110():
+    assert "at most 110 characters" in _item_six()
+
+
+def test_the_headline_item_bans_chained_relative_clauses():
+    item = _item_six_flat()
+    assert "one embedded relative clause" in item
+
+
+def test_the_rejected_headline_is_no_longer_an_example():
+    """The 1.6.0 Write: example a human reviewer rejected (126 chars, two
+    chained relative clauses). Item 6 must not hold it up as a model, and must
+    not quote it in the note explaining why it was replaced — a verbatim quote
+    would put the rejected string back inside _item_six()."""
+    assert "builds up to toxic levels in children" not in _item_six()
 
 
 def test_the_prompt_set_version_was_bumped():
@@ -73,4 +86,4 @@ def test_the_prompt_set_version_was_bumped():
     the run record. `role.toml` is not embedded in the synced doc, so nothing
     else pins it."""
     toml = (PROMPT.parent / "role.toml").read_text()
-    assert 'version = "1.6.0"' in toml
+    assert 'version = "1.7.0"' in toml

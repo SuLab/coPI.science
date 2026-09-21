@@ -281,7 +281,7 @@ def test_skeleton_carries_the_narrative_fields():
     skeleton = _skeleton()
     for key in (
         "headline", "key_points", "elevator_pitch", "score_rationale",
-        "strengths", "risks",
+        "strengths", "risks", "competitive_landscape", "evidence_maturity",
     ):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
@@ -313,10 +313,11 @@ def test_the_scout_hub_prompt_set_version_is_1_5_0_or_later():
 def test_phase4_bounds_the_headline_and_the_project_label():
     """The two length bounds are stated as numbers in the prompt and mirrored
     by ``_HEADLINE_SOFT_LIMIT`` / ``_PROJECT_SOFT_LIMIT`` on the write path, so
-    the prose and the drift alarms cannot part company."""
+    the prose and the drift alarms cannot part company. The headline bound went
+    140 -> 110 with scout_hub 1.7.0; `_HEADLINE_SOFT_LIMIT` moved with it."""
     body = _norm(_phase4_text())
-    assert "at most 140 characters" in body, (
-        "phase4-thread-reply.md no longer bounds the headline at 140 characters"
+    assert "at most 110 characters" in body, (
+        "phase4-thread-reply.md no longer bounds the headline at 110 characters"
     )
     assert "at most 70 characters" in body, (
         "phase4-thread-reply.md no longer bounds company_or_project at 70 characters"

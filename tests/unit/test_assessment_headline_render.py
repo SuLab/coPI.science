@@ -257,11 +257,12 @@ def test_a_pitch_of_exactly_the_cap_is_unchanged():
 
 def test_a_long_pitch_is_clipped_at_a_sentence_boundary_and_marked():
     """REVERSED from "...with_no_ellipsis" (2026-09-14 audit). The marker is
-    unconditional on a real truncation: `rfind` takes the HIGHEST qualifying
-    boundary and the pitch contract requires a citation in sentence two, so
-    that boundary can be an abbreviation ("et al. ", "e.g. ") rather than a
-    sentence end. A reader would have no way to tell the published fragment
-    from the whole pitch. See `_clip_at_sentence`."""
+    unconditional on a real truncation: the scan takes the HIGHEST qualifying
+    boundary and the pitch contract requires the citation sentence to END
+    within approximately the first 550 characters (sidecar item 8, scout_hub
+    1.7.0), so that boundary can be an abbreviation ("et al. ", "e.g. ")
+    rather than a sentence end. A reader would have no way to tell the
+    published fragment from the whole pitch. See `_clip_at_sentence`."""
     from src.services.assessment_headline import PITCH_DISPLAY_CHARS, _clip_at_sentence
 
     # A sentence terminator sits well past the half-budget mark (300 of 600),
@@ -346,3 +347,48 @@ def test_a_non_string_pitch_is_dropped_by_clip_at_sentence():
     assert _clip_at_sentence({"not": "a string"}, 600) is None
     assert _clip_at_sentence(None, 600) is None
     assert _clip_at_sentence("", 600) is None
+
+
+def test_a_late_citation_sentence_is_dropped_whole_not_clipped():
+    """Evidence for the 550-character budget: _clip_at_sentence cuts at the last
+    terminator INSIDE value[:600], so a citation sentence that starts before 600
+    but ends after it is removed entirely, not truncated."""
+    from src.services.assessment_headline import _clip_at_sentence
+
+    s1_3 = ("A. " * 4) + "B" * 388 + ". "   # ends at ~400
+    s4 = "The work builds on " + "c" * 190 + "."   # 210 chars, ends past 600
+    pitch = s1_3 + s4 + " Tail sentence."
+    out = _clip_at_sentence(pitch, 600)
+    assert "The work builds on" not in out, (
+        "a citation sentence ending past 600 must be dropped whole — this is why "
+        "the contract bounds where sentence 4 ENDS, not where it begins"
+    )
+
+
+def test_a_sentence_ending_at_a_paragraph_break_is_a_real_boundary():
+    """Regression, scout_hub 1.7.0: `elevator_pitch` is contractually markdown
+    with "short paragraphs separated by a blank line", and item 8 puts the
+    provenance citation in sentence FOUR, bounded to end within ~550 chars so
+    it lands inside the 600 that post publicly.
+
+    `_clip_at_sentence` used to scan for the literal pairs ". ", "! " and "? ",
+    so a sentence ending at a paragraph break (".\n\n") was invisible to it.
+    Measured against the shape the contract now asks for, a citation sentence
+    ending at offset 545 was dropped whole and the excerpt cut at 391 — the
+    550-char budget is the entire mechanism protecting the published
+    citation, and a terminator the scan cannot see silently defeats it.
+    """
+    from src.services.assessment_headline import _clip_at_sentence
+
+    elements_1_2 = "A" * 248 + ". "
+    element_3 = "B" * 138 + ". "
+    citation = "The work builds on https://doi.org/10.7554/eLife.94488" + "x" * 100 + "."
+    pitch = elements_1_2 + element_3 + citation + "\n\n" + "C" * 300
+    assert len(elements_1_2 + element_3 + citation) == 545, "the shape under test"
+
+    out = _clip_at_sentence(pitch, 600)
+    assert "The work builds on" in out, (
+        "a citation sentence ending at 545 must survive the 600-char window "
+        "even when a markdown paragraph break follows its full stop"
+    )
+    assert out.endswith(" …"), "still a real truncation, so still marked"

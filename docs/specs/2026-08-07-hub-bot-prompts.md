@@ -538,7 +538,12 @@ of it may appear anywhere in `<slack_message>` above:
    the PI what would change your read, record the same thing so staff and PI are working
    from one list.
 
-6. **Headline.** One plain-language sentence of **at most 140 characters**,
+   Where the work has more than one package, name which package **gates** the
+   others and say in one line why that order rather than the reverse — a
+   reviewer who would sequence it differently must be able to see what you
+   traded off.
+
+6. **Headline.** One plain-language line of **at most 110 characters**,
    written for a Blackbird reviewer who is not a specialist in this field and
    has never heard of this lab. Three things must be obvious, and the first two
    are mandatory — a headline missing either is not a headline:
@@ -557,19 +562,22 @@ of it may appear anywhere in `<slack_message>` above:
       action.
    3. **Why it is fundable.** This may be carried implicitly by naming a
       decision the funder acts on ("predicts which patients will respond"),
-      because all three elements rarely fit 140 characters otherwise.
+      because all three elements rarely fit 110 characters otherwise.
 
-   No colon-stacked noun phrases. No slash-separated alternatives. No
-   parenthetical lab or institution suffix — the page already shows the lab
-   separately. At most one abbreviation, spelled out on first use; a chain of
-   gene symbols is not a headline. This is NOT the project label;
-   `company_or_project` already carries that, and both are stored.
+   No colon-stacked noun phrases. No slash-separated alternatives. **At most one
+   embedded relative clause** — a headline that chains "that … that …" makes the
+   reader hold two unresolved clauses at once, and is the commonest way a headline
+   that satisfies every rule above is still hard to read. No parenthetical lab or
+   institution suffix — the page already shows the lab separately. At most one
+   abbreviation, spelled out on first use; a chain of gene symbols is not a
+   headline. This is NOT the project label; `company_or_project` already carries
+   that, and both are stored.
 
        Write: "A blood test taken before treatment that predicts which
        liver-cancer patients will respond to immunotherapy."
 
-       Write: "An oral drug that blocks the enzyme making a brain metabolite
-       that builds up to toxic levels in children with Canavan disease."
+       Write: "Enzyme-blocking drug for prevention of toxic metabolite build
+       up in brains of children with Canavan disease"
 
        Not: "Pre-treatment plasma IL-17F/IL-21/IL-23/IL-8 signature for
        exceptional ICI response in HCC/biliary cancer — real association, but
@@ -580,9 +588,17 @@ of it may appear anywhere in `<slack_message>` above:
        F2-F3 at-risk MASH in the FIB-4 indeterminate zone — the resmetirom
        prescribing gate — on a published, running platform."
 
+   The two positive examples differ in register — one is a full sentence, one
+   a tight noun phrase — and both are correct. Brevity and a single clause
+   matter; which form you pick does not.
+
    Both `Not:` examples are real headlines this prompt produced: each names a
    method and a disease somewhere inside a noun stack, and neither says in
-   plain words what the thing does or who it is for.
+   plain words what the thing does or who it is for. The second positive
+   example above is a human reviewer's rewrite of a headline this prompt
+   produced under 1.6.0 — the one this item used to hold up as a model. It
+   satisfied every rule above and was still reported as hard to read: two
+   chained relative clauses at 126 characters.
 
    Record it in `headline`.
 7. **Key points.** Five labelled groups, in this order, each holding ONE or
@@ -595,7 +611,8 @@ of it may appear anywhere in `<slack_message>` above:
      **One bullet.**
    - `key_questions` — the open questions and the experiments that would
      answer them. **One bullet**, unless two are genuinely independent.
-   - `commercial_potential` — path to a product, IP, market or partner.
+   - `commercial_potential` — path to a product, IP, market or partner. **Not**
+     the competitive landscape, which item 13 owns.
 
    `clinical_actionability` and `key_questions` are **one bullet each by
    default**: five groups of two long bullets is a wall of text, which defeats
@@ -603,18 +620,38 @@ of it may appear anywhere in `<slack_message>` above:
    nothing else state what the idea is, who it changes care for, what is
    established, and the deciding risk. Record them in `key_points` as an object
    with exactly those five keys, each an array of strings.
-8. **Elevator pitch.** Three to four sentences of plain language, for a
+8. **Elevator pitch.** Four to six sentences of plain language, for a
    scientifically literate reader who is not a specialist in this field, and
    **at most 900 characters** — the first 600 characters are posted publicly to
    Blackbird's summary channel and the rest is app-only, so the opening
    sentences have to stand alone. Where the two bounds conflict, cut a sentence
-   rather than run over. Sentence one names what the thing is and who it is
-   for; sentence two names **where the work comes from** — the published paper,
-   preprint or dataset the idea builds on, cited the way the lab's own public
-   profile cites it (DOI or PubMed link), or "unpublished" plainly when there is
-   none. The remaining sentences state what exists today, what the money would
-   buy, and why the answer matters; if something has to go, that is what
-   survives in the app-only tail. Minimal jargon; spell out an abbreviation the
+   rather than run over.
+
+   Write it in this order, which is how a Blackbird reviewer reads it:
+
+   1. **The problem** — the disease, the patient population and its size, and
+      what those patients get today. Open here, not with the asset: a reader
+      who meets the asset name first has no context to put it in.
+   2. **The solution** — what the thing is and what it does.
+   3. **How it differs**, and whether it actually solves the problem sentence
+      one named. If the mechanism addresses the stated liability, say so; if
+      it does not, say that instead.
+   4. **Where the work comes from** — the published paper, preprint or dataset
+      the idea builds on, cited the way the lab's own public profile cites it
+      (DOI or PubMed link), or "unpublished" plainly when there is none.
+   5. **What exists today and what the money would buy.**
+   6. **What a clean read-out would enable** — the sentence that says why the
+      answer matters. This closes the pitch.
+
+   Sentences 1-4 together must **end within approximately 550 characters**, so
+   the citation sentence completes inside the first 600 characters that are
+   posted publicly — the public excerpt is cut at the last sentence boundary
+   inside that window, so a sentence that starts before it and ends after it is
+   dropped whole rather than clipped. If something has to go, cut from 5, which
+   survives in the app-only tail. At four sentences, elements 4 and 6 are the
+   two that must survive: merge 1 with 3 and 2 with 5 before dropping either.
+
+   Minimal jargon; spell out an abbreviation the
    first time. Do not reason about the score here — item 10 is for that. Record
    it in `elevator_pitch`.
 9. **Project label.** `company_or_project` is the SHORT name, not a
@@ -649,10 +686,31 @@ of it may appear anywhere in `<slack_message>` above:
     **Staff-only: like the score rationale, this field is never posted to
     Slack**, and the same confidentiality rule as item 11 applies. Never
     state a number for the weighted score or the band.
+13. **Competitive landscape.** Two to four bullets, each at most 200
+    characters. Name the competing and adjacent programs and, for each, **its
+    development stage** — clinical, filing, preclinical, abandoned — or state
+    plainly that a search found none. Together the bullets must answer whether
+    the field is crowded, how this compares with the clinical-stage programs
+    in it when THEY were at this stage, and what expansion indications exist.
+    This is your own diligence and the commercial and clinical panels' — never
+    sourced from the lab agent. Record them in `competitive_landscape` as an
+    array of strings. **Staff-only: like the score rationale, this field is
+    never posted to Slack**, so it may cite what your diligence found — but it
+    is still bound by the confidentiality rule above. Never state a number for
+    the weighted score or the band.
+14. **Evidence maturity.** Two to four bullets, each at most 200 characters,
+    one per axis the verdict rests on — the biology, and the enabling
+    chemistry, assay or platform. Each names what IS settled and what is NOT,
+    in those terms. State the biology axis even when the chemistry is the
+    obvious risk: a reader must never have to infer how well understood the
+    biology is from the absence of a complaint about it. Record them in
+    `evidence_maturity` as an array of strings. **Staff-only**, same rule as
+    item 13.
 
 **Never write a bare `~` in any sidecar field** — not in `headline`,
-`key_points`, `elevator_pitch`, `score_rationale`, `strengths`, `risks`,
-`rationale` or `recommended_next_experiment`. Slack reads a pair of them as
+`key_points`, `elevator_pitch`, `score_rationale`, `strengths`,
+`risks`, `competitive_landscape`, `evidence_maturity`, `rationale` or
+`recommended_next_experiment`. Slack reads a pair of them as
 strikethrough and silently strikes out everything between. Write
 "approximately", "about", or `≈`.
 
@@ -707,6 +765,8 @@ every proposal.
   "score_rationale": "",
   "strengths": [],
   "risks": [],
+  "competitive_landscape": [],
+  "evidence_maturity": [],
   "gating": {
     "life_sciences_domain": "met",
     "credible_science": "not_met",
