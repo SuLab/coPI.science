@@ -58,6 +58,13 @@ from src.services.llm import _extract_json, get_anthropic_client
 from src.services.orcid import fetch_orcid_profile, fetch_orcid_works
 from src.services.profile_export import export_profile_to_markdown
 from src.services.pubmed import convert_dois_to_pmids, fetch_pubmed_records, normalize_doi
+from src.services.corpus import (
+    INSTITUTION_STOPWORDS,  # noqa: F401 — re-exported for callers/tests
+    _aff_match,
+    _author_first_name_matches,
+    _distinctive_aff_tokens,  # noqa: F401 — re-exported for callers/tests
+)
+from src.services.tenure_scope import scoped_publications_for_export
 
 PRIVATE_DIR = Path("profiles/private")
 
@@ -78,16 +85,12 @@ ORCID_STALE_AFTER_YEARS = 5      # ORCID whose newest work predates (this year -
 PUBMED_FETCH_CAP = 50            # max PMIDs to pull from a single ESearch
 FACULTY_PAGE_MAX_CHARS = 3000    # truncate scraped page text to this
 
-# Generic institution terms that don't disambiguate one university from another.
-# Distinctive matching strips these before substring-checking.
-INSTITUTION_STOPWORDS: frozenset[str] = frozenset({
-    "university", "universite", "universidad", "of", "the", "institute",
-    "institution", "research", "school", "department", "dept", "and", "for",
-    "center", "centre", "college", "laboratory", "lab", "labs", "medical",
-    "national", "technology", "technologies", "science", "sciences",
-    "biology", "biological", "chemistry", "chemical", "engineering",
-    "graduate", "program", "programs", "division", "faculty", "studies",
-})
+# Institution stopwords, distinctive-token extraction and affiliation
+# matching are NOT redefined here: they are imported from
+# ``src.services.corpus`` below. This script used to carry its own copies,
+# which is how the 2026-09-22 audit's D2/D12 defects survived a fix to the
+# service — the service was corrected and these were not, while this script
+# is what seeded 56 of the 73 production PIs and is still runnable.
 
 
 # ---------------------------------------------------------------------------
@@ -129,33 +132,6 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def _distinctive_aff_tokens(affiliation: str) -> list[str]:
-    """Return institution-distinctive tokens from an affiliation string.
-
-    Drops generic stopwords ("university", "institute", etc.). If everything
-    is generic (e.g. "UCSF"), falls back to all alpha tokens of length ≥3.
-    """
-    tokens = re.findall(r"[a-z]+", affiliation.lower())
-    distinctive = [t for t in tokens if t not in INSTITUTION_STOPWORDS and len(t) >= 4]
-    if distinctive:
-        return distinctive
-    return [t for t in tokens if len(t) >= 3]
-
-
-def _aff_match(input_aff: str, paper_aff: str) -> bool:
-    """True if any distinctive token from `input_aff` appears in `paper_aff`.
-
-    Asymmetric on purpose: paper affiliation strings are long (author address,
-    dept, city, state) and the input is just the institution name, so we want
-    "needle in haystack" recall, not symmetric overlap.
-    """
-    if not paper_aff:
-        return False
-    paper_lower = paper_aff.lower()
-    for tok in _distinctive_aff_tokens(input_aff):
-        if tok in paper_lower:
-            return True
-    return False
 
 
 def _slugify_agent_id(name: str) -> str:
@@ -286,45 +262,6 @@ def _author_affiliations_from_xml(xml_text: str, pmid: str) -> list[tuple[str, l
     return out
 
 
-def _author_first_name_matches(
-    fore_name: str | None,
-    initials: str | None,
-    expected_first: str,
-) -> bool:
-    """True if author's ForeName/Initials match the input first name.
-
-    Match priority (strict → permissive):
-      1. ForeName starts with input first name (e.g., "David R" matches "David")
-         — strong match
-      2. ForeName is initial-only (single letter or "DR" style) and matches first
-         initial — weaker accept (PubMed sometimes lacks ForeName)
-      3. Initials element starts with first initial — fallback
-
-    Crucially, when ForeName IS present but DOES NOT start with the input first
-    name, we REJECT. This stops "Liu D[Author]" from matching Daniel/Dan Liu
-    papers when we want David Liu.
-    """
-    if not expected_first:
-        return False
-    expected_first = expected_first.strip()
-    expected_initial = expected_first[0].lower() if expected_first else ""
-    fore = (fore_name or "").strip()
-    inits = (initials or "").strip()
-
-    if fore:
-        fore_lower = fore.lower()
-        # Long ForeName: must match the full input first name
-        if len(fore.replace(".", "").replace(" ", "")) > 1:
-            return fore_lower.startswith(expected_first.lower())
-        # Short ForeName (single letter): fall through to initial check
-        if fore_lower.startswith(expected_initial):
-            return True
-        return False
-    # No ForeName at all — fall back to Initials
-    if inits and inits[0].lower() == expected_initial:
-        return True
-    return False
-
 
 async def _disambiguate(
     pmids: list[str],
@@ -387,7 +324,14 @@ async def _disambiguate(
                 init_el = author.find("Initials")
                 fore = fore_el.text if fore_el is not None else None
                 inits = init_el.text if init_el is not None else None
-                if not _author_first_name_matches(fore, inits, first_name):
+                # The service's matcher returns (matched, bare_initial); a
+                # bare-initial-only match is too weak to seed a corpus with,
+                # so this script requires a real forename/initials match AND
+                # falls through to the affiliation leg below either way.
+                fn_matched, _bare = _author_first_name_matches(
+                    fore, inits, first_name
+                )
+                if not fn_matched:
                     continue
             affs = [
                 (a.text or "")
@@ -628,9 +572,8 @@ async def _persist(
     agent_id = agent.agent_id
     audit.agent_id = agent_id
 
-    # Refresh user with publications for export
-    pubs_result = await db.execute(select(Publication).where(Publication.user_id == user.id))
-    user_pubs = pubs_result.scalars().all()
+    # Refresh user with tenure-scoped publications for export
+    user_pubs = await scoped_publications_for_export(db, user.id, agent_id)
     export_profile_to_markdown(user, profile, agent_id, publications=user_pubs)
 
     # Private profile seed is intentionally NOT synthesized for generated

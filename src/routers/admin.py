@@ -248,6 +248,7 @@ async def admin_user_detail(
             target_user=detail["user"],
             profile=detail["profile"],
             publications=detail["publications"],
+            pub_scope=detail["pub_scope"],
             jobs=detail["jobs"],
             valid_user_roles=VALID_USER_ROLES,
         ),

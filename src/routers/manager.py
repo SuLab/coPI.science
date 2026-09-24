@@ -55,7 +55,6 @@ from src.models import (
     PiGrant,
     PiIndustryEvidence,
     PromptChangeSuggestion,
-    Publication,
     ResearcherProfile,
     User,
 )
@@ -84,6 +83,7 @@ from src.services.pi_onboarding import (
 )
 from src.services.profile_edit import apply_profile_edits
 from src.services.profile_export import export_profile_to_markdown
+from src.services.tenure_scope import scoped_publications_for_export
 from src.services.prose_citations import (
     markdown_with_citation_links,
     plain_with_citation_links,
@@ -245,6 +245,7 @@ async def manager_pi_detail(
             target_user=detail["user"],
             profile=detail["profile"],
             publications=detail["publications"],
+            pub_scope=detail["pub_scope"],
             jobs=detail["jobs"],
             grants=detail["grants"],
             industry_score=detail["industry_score"],
@@ -416,10 +417,8 @@ async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid
         )).scalar_one_or_none()
         if user is None or profile is None:
             return
-        publications = (await db.execute(
-            select(Publication).where(Publication.user_id == user_id)
-        )).scalars().all()
-        export_profile_to_markdown(user, profile, agent.agent_id, publications=list(publications))
+        publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
+        export_profile_to_markdown(user, profile, agent.agent_id, publications=publications)
     except Exception:
         logger.exception("Failed to re-export profile markdown for user %s after veto", user_id)
 

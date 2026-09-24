@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
-from src.models import Job, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
 from src.models.user import USER_ROLE_ADMIN
 from src.services.profile_edit import apply_profile_edits
+from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,21 @@ async def profile_view(
     )
     publications = pub_result.scalars().all()
 
+    # Tenure-scope the count/list (Task 13, D17): `current_user` (from
+    # `get_current_user`) does not eager-load `.agent`, so the legacy
+    # agent-keyed tenure fallback needs its own small lookup rather than a
+    # lazy load, which would raise outside a sync context.
+    agent_id = (
+        await db.execute(
+            select(AgentRegistry.agent_id).where(
+                AgentRegistry.user_id == current_user.id
+            )
+        )
+    ).scalar_one_or_none()
+    pub_scope = await scoped_publications_for(
+        db, current_user.id, agent_id, publications=publications
+    )
+
     return templates.TemplateResponse(
         request,
         "profile/view.html",
@@ -76,7 +92,8 @@ async def profile_view(
             request,
             current_user,
             profile=profile,
-            publications=publications,
+            publications=pub_scope.publications,
+            pub_scope=pub_scope,
             just_completed_onboarding=onboarding_complete,
         ),
     )

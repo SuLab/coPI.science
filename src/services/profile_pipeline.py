@@ -567,15 +567,14 @@ async def run_profile_pipeline(
     # The export list is tenure-filtered EXPLICITLY (JHU R2's export rule):
     # storage is full-career, and exporting the raw top-20 is exactly how
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
+    # tenure_start is already resolved above, so scope the rows already
+    # loaded here rather than re-querying it via scoped_publications_for_export.
     from src.services.profile_export import export_profile_to_markdown
+    from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
         select(Publication).where(Publication.user_id == user.id)
     )
-    user_pubs = pub_result.scalars().all()
-    if tenure_start is not None:
-        user_pubs = [
-            p for p in user_pubs if p.year and p.year >= tenure_start
-        ]
+    user_pubs = scope_for_export(pub_result.scalars().all(), tenure_start)
     exported_path = export_profile_to_markdown(
         user, profile, agent_id, publications=user_pubs
     )

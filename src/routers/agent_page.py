@@ -999,14 +999,11 @@ async def save_public_profile(
 
     await db.commit()
 
-    # Export to markdown for agent consumption (include publications)
+    # Export to markdown for agent consumption (tenure-scoped publications)
     pi_result = await db.execute(select(User).where(User.id == agent.user_id))
     pi_user = pi_result.scalar_one()
-    from src.models import Publication
-    pub_result = await db.execute(
-        select(Publication).where(Publication.user_id == agent.user_id)
-    )
-    user_pubs = list(pub_result.scalars().all())
+    from src.services.tenure_scope import scoped_publications_for_export
+    user_pubs = await scoped_publications_for_export(db, agent.user_id, agent.agent_id)
     exported_path = export_profile_to_markdown(
         pi_user, profile, agent.agent_id, publications=user_pubs
     )

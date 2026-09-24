@@ -204,13 +204,12 @@ async def save_profile(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
-    # Export to markdown for agent consumption (include publications)
-    from src.models import Publication
+    # Export to markdown for agent consumption (tenure-scoped publications)
     from src.services.profile_export import export_profile_to_markdown
-    pub_result = await db.execute(
-        select(Publication).where(Publication.user_id == current_user.id)
+    from src.services.tenure_scope import scoped_publications_for_export
+    user_pubs = await scoped_publications_for_export(
+        db, current_user.id, agent_id_for_export
     )
-    user_pubs = list(pub_result.scalars().all())
     exported_path = export_profile_to_markdown(
         current_user, profile, agent_id_for_export, publications=user_pubs
     )

@@ -48,6 +48,7 @@ from src.services.blackbird_rubric import (
     load_rubric,
 )
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
+from src.services.tenure_scope import scoped_counts, scoped_publications_for
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
 # the current run this is rarely close to binding — a single run's worth of
@@ -167,12 +168,13 @@ async def list_pi_directory(
     result = await db.execute(query)
     users = result.scalars().unique().all()
 
-    # Get publication counts
-    pub_counts_result = await db.execute(
-        select(Publication.user_id, func.count(Publication.id).label("count"))
-        .group_by(Publication.user_id)
-    )
-    pub_counts = {str(r.user_id): r.count for r in pub_counts_result}
+    # Publication counts, scoped to each PI's JHU tenure window (Task 13,
+    # D17). `user.agent` is already eager-loaded above, so the legacy
+    # agent-keyed tenure fallback (`scoped_counts`'s `agent_ids` argument) can
+    # be built with no extra query — omitting it would silently unscope the
+    # 62 PIs who only have a legacy entry.
+    agent_ids_by_user = {u.id: (u.agent.agent_id if u.agent else None) for u in users}
+    pub_scope_by_user = await scoped_counts(db, [u.id for u in users], agent_ids_by_user)
 
     # Latest industry-interest score per user (Postgres DISTINCT ON).
     industry_result = await db.execute(
@@ -185,7 +187,14 @@ async def list_pi_directory(
     user_data = []
     for user in users:
         profile = user.profile
-        pub_count = pub_counts.get(str(user.id), 0)
+        pub_scope = pub_scope_by_user.get(user.id)
+        # Meaning of `pub_count` changes here (Task 13): it is now the
+        # SCOPED (in-tenure) count, not the full-career count, so every
+        # existing template reference to it stays correct without a rename.
+        # `pub_scope` carries the split (tenure_start / before_tenure /
+        # undated_excluded / scoped) for the templates that need to explain
+        # the number rather than just print it.
+        pub_count = pub_scope.in_tenure if pub_scope else 0
 
         # Profile status
         if not profile:
@@ -223,6 +232,7 @@ async def list_pi_directory(
             "profile": profile,
             "profile_status": profile_status,
             "pub_count": pub_count,
+            "pub_scope": pub_scope,
             "agent_status": agent_status,
             "industry_score": industry_row.score if industry_row else None,
             "industry_reason": industry_row.reason if industry_row else None,
@@ -250,6 +260,19 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     )
     publications = pub_result.scalars().all()
 
+    # Tenure-scope the publication list (Task 13, D17) using the rows already
+    # loaded above, so this costs no second SELECT. Both detail routers
+    # forward an explicitly-named set of context keys rather than splatting
+    # this dict, so `pub_scope` is named there too — deliberately NOT stashed
+    # as an ad hoc attribute on `user`. Arbitrary
+    # attributes on a mapped instance survive neither an `expire`/`refresh`
+    # nor a reader who only knows the model, and the point of this change is
+    # that the tenure window stops being carried by convention.
+    agent_id = user.agent.agent_id if user.agent else None
+    pub_scope = await scoped_publications_for(
+        db, user_id, agent_id, publications=publications
+    )
+
     grants = (await db.execute(
         select(PiGrant).where(PiGrant.user_id == user_id)
         .order_by(PiGrant.vetoed_at.is_(None).desc(), PiGrant.last_fy.desc().nullslast())
@@ -267,7 +290,12 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     return {
         "user": user,
         "profile": user.profile,
-        "publications": publications,
+        # Now the IN-TENURE rows, not the full career (Task 13). The rows the
+        # window cuts are deliberately NOT returned: operator decision
+        # 2026-09-22 — pre-tenure papers are listed nowhere in the UI. Use
+        # `scripts/audit_tenure_scope.py` to see what a tenure year excludes.
+        "publications": pub_scope.publications,
+        "pub_scope": pub_scope,
         "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
         "grants": grants,
         "industry_score": industry_score,

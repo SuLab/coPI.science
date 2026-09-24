@@ -297,6 +297,28 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         logger.error("Failed to parse PubMed XML: %s", exc)
         raise PubMedParseError(f"PubMed response was not parseable XML: {exc}") from exc
 
+    # D13/item 7: `root.findall(".//PubmedArticle")` never matches a
+    # `PubmedBookArticle` (a book/chapter record's own top-level element), so
+    # a book PMID used to vanish silently — no record, no error, no count —
+    # and every "resolved N, stored M" arithmetic downstream absorbed the gap
+    # without a trace. Book records are NOT parsed here (their schema is
+    # different enough — BookDocument, not MedlineCitation/Article — that
+    # reusing this parser's xpaths would be guessing); instead they are
+    # counted and logged so a caller can see the omission rather than lose it.
+    book_articles = root.findall(".//PubmedBookArticle")
+    if book_articles:
+        book_pmids = [
+            (el.text if (el := book.find(".//PMID")) is not None else "?")
+            for book in book_articles
+        ]
+        logger.warning(
+            "_parse_pubmed_xml: %d PubmedBookArticle record(s) present and "
+            "NOT parsed (book/chapter PMIDs %s) — they are absent from the "
+            "returned list entirely, not merely skipped; do not treat "
+            "resolved-vs-stored count differences as accounting for them",
+            len(book_articles), book_pmids,
+        )
+
     for article in root.findall(".//PubmedArticle"):
         record: dict[str, Any] = {}
 

@@ -4,7 +4,8 @@ import logging
 import re
 from pathlib import Path
 
-from src.models import Publication, ResearcherProfile, User
+from src.models import ResearcherProfile, User
+from src.services.tenure_scope import TenureScopedPublications
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +16,26 @@ def export_profile_to_markdown(
     user: User,
     profile: ResearcherProfile,
     agent_id: str | None,
-    publications: list[Publication] | None = None,
+    publications: TenureScopedPublications | None = None,
 ) -> Path | None:
     """Export a database profile to profiles/public/{agent_id}.md.
 
+    ``publications`` must be a :class:`TenureScopedPublications`, obtained
+    from ``src.services.tenure_scope.scoped_publications_for_export`` (or
+    ``scope_for_export`` for callers that already hold the tenure year and
+    the rows). A bare list is refused rather than silently accepted: that is
+    exactly the shape six of eight call sites passed before the 2026-09-22
+    tenure-attribution audit, which is how pre-tenure publications reached
+    agent personas (audit H3).
+
     Returns the path written, or None if the user has no AgentRegistry entry.
     """
+    if publications is not None and not isinstance(publications, TenureScopedPublications):
+        raise TypeError(
+            "export_profile_to_markdown requires a TenureScopedPublications "
+            "(see src.services.tenure_scope.scoped_publications_for_export), "
+            f"not {type(publications).__name__}"
+        )
     if not agent_id:
         return None
 

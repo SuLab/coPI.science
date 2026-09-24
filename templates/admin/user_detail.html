@@ -119,10 +119,29 @@
     </div>
     {% endif %}
 
-    <!-- Publications -->
-    {% if publications %}
+    <!-- Publications (Task 13: scoped to the JHU tenure window, D17/D19/D20) -->
+    {% if publications or (pub_scope and pub_scope.excluded) %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <h2 class="font-semibold text-gray-800 mb-4">Publications ({{ publications | length }})</h2>
+        <h2 class="font-semibold text-gray-800 mb-1">
+            {% if pub_scope and pub_scope.scoped %}
+                Publications (JHU tenure, since {{ pub_scope.tenure_start }}) ({{ publications | length }})
+            {% else %}
+                Publications (full career — no JHU tenure start recorded) ({{ publications | length }})
+            {% endif %}
+        </h2>
+        {% if pub_scope and pub_scope.scoped %}
+        <p class="text-xs text-gray-500 mb-4">
+            {% if pub_scope.undated_excluded %}<span class="text-amber-600" title="Rows with no recorded year cannot be proven in-tenure, so they are excluded rather than counted either way">{{ pub_scope.undated_excluded }} undated (excluded)</span>{% endif %}
+        </p>
+        {% elif pub_scope %}
+        <p class="text-xs text-amber-600 mb-4">
+            No JHU tenure start recorded — showing the full career.
+            <a href="/manager/pis/{{ target_user.id }}" class="underline">Set it in Edit Profile</a>.
+        </p>
+        {% endif %}
+        {% if not publications %}
+        <p class="text-sm text-gray-500 mb-3">No publications fall inside the tenure window.</p>
+        {% endif %}
         <div class="space-y-3">
             {% for pub in publications %}
             <div class="border-b border-gray-100 pb-3 last:border-0 text-sm">

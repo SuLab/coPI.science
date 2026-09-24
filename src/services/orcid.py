@@ -132,20 +132,32 @@ async def fetch_orcid_works(orcid_id: str) -> list[dict[str, Any]]:
     works = []
     for grp in data.get("group", []):
         for summary in grp.get("work-summary", []):
+            # D11/item 6: ORCID emits ``"external-ids": null`` (and the same
+            # for "title"/"publication-date") for some work-summaries — 15 of
+            # 155 for 0000-0003-3474-019X. ``dict.get(k, {})`` only supplies
+            # its default when the key is ABSENT, not when it is present and
+            # None, so a chained `.get(k, {}).get(...)` raised AttributeError
+            # on those rows, escaped the try/except below (which wraps only
+            # the HTTP call), and turned into a CorpusStageError that killed
+            # the whole `generate_profile` job after 3 retries. `(X.get(k) or
+            # {})` treats absent and null identically, which is what every
+            # chain below now does.
+            title_block = summary.get("title") or {}
             work: dict[str, Any] = {
-                "title": summary.get("title", {}).get("title", {}).get("value", ""),
+                "title": (title_block.get("title") or {}).get("value", ""),
                 "year": None,
                 "pmid": None,
                 "doi": None,
                 "type": summary.get("type"),
             }
             # Publication year
-            pub_date = summary.get("publication-date", {})
-            if pub_date and pub_date.get("year"):
-                work["year"] = int(pub_date["year"]["value"])
+            pub_date = summary.get("publication-date") or {}
+            year_block = pub_date.get("year") or {}
+            if year_block.get("value"):
+                work["year"] = int(year_block["value"])
 
             # External IDs
-            ext_ids = summary.get("external-ids", {}).get("external-id", [])
+            ext_ids = (summary.get("external-ids") or {}).get("external-id") or []
             for eid in ext_ids:
                 id_type = eid.get("external-id-type", "").lower()
                 id_value = eid.get("external-id-value", "")

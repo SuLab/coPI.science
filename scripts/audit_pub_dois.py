@@ -46,6 +46,7 @@ from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.profile_export import export_profile_to_markdown
 from src.services.pubmed import fetch_authoritative_dois, reconcile_pub_doi
+from src.services.tenure_scope import scoped_publications_for_export
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("audit_pub_dois")
@@ -156,10 +157,10 @@ async def _run(orcids: list[str], agents: list[str], fix: bool) -> int:
                 agent = (await db.execute(
                     select(AgentRegistry).where(AgentRegistry.user_id == uid)
                 )).scalar_one_or_none()
-                user_pubs = (await db.execute(
-                    select(Publication).where(Publication.user_id == uid)
-                )).scalars().all()
                 if user and profile and agent:
+                    user_pubs = await scoped_publications_for_export(
+                        db, uid, agent.agent_id
+                    )
                     exported = export_profile_to_markdown(
                         user, profile, agent.agent_id, publications=user_pubs
                     )

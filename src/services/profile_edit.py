@@ -10,8 +10,8 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import Publication, ResearcherProfile, User
-from src.services.jhu_rules import get_tenure_start, set_tenure_start
+from src.models import ResearcherProfile, User
+from src.services.jhu_rules import set_tenure_start
 from src.services.validators import is_valid_email
 
 
@@ -90,20 +90,13 @@ async def apply_profile_edits(
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
     from src.services.profile_export import export_profile_to_markdown
-    pub_result = await db.execute(
-        select(Publication).where(Publication.user_id == target_user.id)
-    )
-    user_pubs = list(pub_result.scalars().all())
+    from src.services.tenure_scope import scoped_publications_for_export
     # JHU R2's export rule, applied at THIS export site too (audit H3):
     # storage is full-career, and an unfiltered top-20 is exactly how
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14.
-    tenure_start_year = await get_tenure_start(
-        db, target_user.id, agent_id=agent_id_for_export
+    user_pubs = await scoped_publications_for_export(
+        db, target_user.id, agent_id_for_export
     )
-    if tenure_start_year is not None:
-        user_pubs = [
-            p for p in user_pubs if p.year and p.year >= tenure_start_year
-        ]
     exported_path = export_profile_to_markdown(
         target_user, profile, agent_id_for_export, publications=user_pubs
     )

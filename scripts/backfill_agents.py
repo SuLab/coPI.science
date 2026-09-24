@@ -29,8 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
-from src.models import AgentRegistry, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, ResearcherProfile, User
 from src.services.profile_export import export_profile_to_markdown
+from src.services.tenure_scope import scoped_publications_for_export
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,8 +118,7 @@ async def _backfill_one(orcid: str, db: AsyncSession) -> str:
     ))
     await db.flush()
 
-    pubs_q = await db.execute(select(Publication).where(Publication.user_id == user.id))
-    pubs = pubs_q.scalars().all()
+    pubs = await scoped_publications_for_export(db, user.id, agent_id)
     exported = export_profile_to_markdown(user, profile, agent_id, publications=pubs)
     md_marker = exported.name if exported else "(no md written)"
     return f"created agent {agent_id} / {bot_name} ({user.name}) → {md_marker}"

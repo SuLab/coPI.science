@@ -53,6 +53,7 @@ from src.routers import profile as profile_router
 from src.routers import settings as settings_router
 from src.services import profile_export
 from src.services.email_notifications import _generate_unsubscribe_token
+from src.services.tenure_scope import scope_for_export
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -896,7 +897,7 @@ async def test_the_public_export_never_carries_the_private_profile(
         )
     ]
 
-    path = profile_export.export_profile_to_markdown(user, prof, "exportpi", publications=pubs)
+    path = profile_export.export_profile_to_markdown(user, prof, "exportpi", publications=scope_for_export(pubs, None))
     assert path == export_dirs.public / "exportpi.md"
     text = path.read_text(encoding="utf-8")
 
@@ -951,7 +952,7 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         pmid="31111111",
     )
     text = profile_export.export_profile_to_markdown(
-        user, prof, "doipi", publications=[mismatch]
+        user, prof, "doipi", publications=scope_for_export([mismatch], None)
     ).read_text(encoding="utf-8")
     assert "https://pubmed.ncbi.nlm.nih.gov/31111111/" in text
     assert "10.1126/science.aaa1234" not in text
@@ -966,7 +967,7 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         pmid="31111111",
     )
     text = profile_export.export_profile_to_markdown(
-        user, prof, "doipi", publications=[match]
+        user, prof, "doipi", publications=scope_for_export([match], None)
     ).read_text(encoding="utf-8")
     assert "https://doi.org/10.1126/science.aaa1234" in text
 
@@ -979,7 +980,7 @@ async def test_the_export_keeps_the_twenty_most_recent_publications(db_session):
         for year in range(1990, 2015)  # 25 of them
     ]
     text = profile_export.export_profile_to_markdown(
-        user, prof, "manypi", publications=pubs
+        user, prof, "manypi", publications=scope_for_export(pubs, None)
     ).read_text(encoding="utf-8")
 
     assert "Paper 2014" in text  # newest kept

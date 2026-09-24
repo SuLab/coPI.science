@@ -10,7 +10,7 @@ S1-only corpus that was defect D1/D2.
 
 import pytest
 
-from src.services import corpus
+from src.services import corpus, pubmed
 from src.services.corpus import (
     CorpusStageError,
     match_pi_author,
@@ -252,3 +252,116 @@ async def test_a_mapping_key_the_pool_never_held_is_skipped_not_a_crash(
     )
     assert result.kept == []
     assert "not a doi_pool key" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _aff_match (D12 fix — item 5's blocker)
+# ---------------------------------------------------------------------------
+
+
+def test_aff_match_requires_the_institution_phrase_adjacent_not_a_bare_token():
+    # The old implementation ORed each distinctive token independently and
+    # returned True for all three of these — verified live against
+    # production affiliation strings.
+    assert corpus._aff_match(
+        "Johns Hopkins University", "Robert Wood Johnson Medical School, NJ"
+    ) is False
+    assert corpus._aff_match(
+        "Johns Hopkins University", "Hopkins Marine Station, Stanford University"
+    ) is False
+    assert corpus._aff_match("Johns Hopkins University", "Johnson & Johnson") is False
+    # The legitimate case must still match.
+    assert corpus._aff_match(
+        "Johns Hopkins University",
+        "Johns Hopkins University School of Medicine, Baltimore, MD",
+    ) is True
+
+
+# ---------------------------------------------------------------------------
+# Item 5 — bare-initial corroboration on ANY stage combination, not just an
+# exact {"s4"}.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_bare_initial_match_needs_corroboration_off_s4_too(monkeypatch):
+    # D3's mirror-defect shape: an S2 (OpenAlex)-only bare-initial mislink —
+    # like the real Mugnier 38766182 case — used to sail straight through
+    # because the old gate only ever fired for rec_stages == {"s4"} exactly.
+    records = [
+        _rec(
+            1, year=2019,
+            authors=[_author("Green", "R", "R", affs=["Unrelated University"])],
+        ),
+    ]
+    _wire(
+        monkeypatch,
+        openalex_works=[{"pmid": "1", "doi": None, "year": 2019}],
+        records=records,
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert result.kept == []
+    assert any(f["pmid"] == "1" for f in result.flagged)
+
+
+async def test_a_bare_initial_match_is_kept_when_anchored_by_s1_or_s3(monkeypatch):
+    # An S1 (ORCID-curated) anchor is corroboration enough on its own, even
+    # with a non-matching affiliation on the record.
+    records = [
+        _rec(
+            1, year=2019,
+            authors=[_author("Green", "R", "R", affs=["Unrelated University"])],
+        ),
+    ]
+    _wire(monkeypatch, orcid_works=[{"pmid": "1"}], records=records)
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert [r["pmid"] for r in result.kept] == ["1"]
+
+
+async def test_a_bare_initial_match_is_kept_with_a_matching_affiliation(monkeypatch):
+    # No S1/S3 anchor at all, but the PI's own affiliation confirms identity.
+    records = [
+        _rec(
+            1, year=2019,
+            authors=[_author("Green", "R", "R", affs=["Johns Hopkins University"])],
+        ),
+    ]
+    _wire(
+        monkeypatch,
+        openalex_works=[{"pmid": "1", "doi": None, "year": 2019}],
+        records=records,
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert [r["pmid"] for r in result.kept] == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# Item 7 — PubmedBookArticle (D13): silently absent from the parsed result
+# must become a COUNTED, logged omission, not a downstream arithmetic gap.
+# ---------------------------------------------------------------------------
+
+_BOOK_ARTICLE_XML = """<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedBookArticle><BookDocument><PMID>29262124</PMID>
+<Book><BookTitle>GeneReviews</BookTitle></Book>
+<ArticleTitle>A Book Chapter</ArticleTitle>
+</BookDocument></PubmedBookArticle>
+<PubmedArticle><MedlineCitation><PMID>111</PMID><Article>
+<ArticleTitle>An ordinary journal article</ArticleTitle>
+</Article></MedlineCitation></PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+def test_a_book_article_is_counted_and_logged_not_silently_dropped(caplog):
+    records = pubmed._parse_pubmed_xml(_BOOK_ARTICLE_XML)
+    # The ordinary PubmedArticle is still parsed exactly as before.
+    assert [r["pmid"] for r in records] == ["111"]
+    # The book record produces no entry — but its omission is now visible.
+    assert "1 PubmedBookArticle" in caplog.text
+    assert "29262124" in caplog.text
