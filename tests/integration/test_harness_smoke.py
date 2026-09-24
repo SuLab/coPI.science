@@ -66,7 +66,9 @@ async def test_container_is_migrated(engine):
         #      (the hub's named competitor set with development stages, and its
         #      per-axis statement of what is settled; sidecar items 13/14,
         #      app-only, never published to #assessments-summary)
-        assert v == "0050"
+        # 0051 assessment_chat_turns / assessment_chat_usage (the assessment-detail
+        #      chat's private turns and its content-free usage ledger)
+        assert v == "0051"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

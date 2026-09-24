@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -17,6 +18,7 @@ from src.database import get_session_factory
 from src.routers import (
     admin,
     agent_page,
+    assessment_chat,
     auth,
     invite,
     manager,
@@ -26,6 +28,7 @@ from src.routers import (
     reviews,
 )
 from src.routers import settings as settings_router
+from src.services.assessment_chat import drain_live_tasks
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,6 +315,19 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """No startup work of its own. On shutdown, give assessment-chat answers still
+    streaming a chance to persist before the process exits (SB-11) — otherwise a
+    deploy or a restart mid-answer leaves that turn `streaming` until
+    `sweep_stale`'s STALE_AFTER_SECONDS window frees it. 8s is deliberately inside
+    the web container's default 10s `docker stop` grace period (this compose
+    service sets none of its own), so the process still exits on time either way;
+    anything still running past it is exactly what the sweep exists for."""
+    yield
+    await drain_live_tasks(timeout=8.0)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -335,7 +351,14 @@ def create_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=_lifespan,
     )
+
+    # One switch for the assessment chat, set once from the setting: the router
+    # answers 503 when it is off and the shared detail template shows no button.
+    # A state attribute rather than a Jinja global, because a global would have
+    # to be registered in both routers' template setup.
+    application.state.assessment_chat_enabled = settings.assessment_chat_enabled
 
     # Agent badge middleware (added first so it runs inside session middleware)
     application.add_middleware(AgentBadgeMiddleware)
@@ -389,6 +412,9 @@ def create_app() -> FastAPI:
     application.include_router(admin.router, prefix="/admin", tags=["admin"])
     application.include_router(manager.router, prefix="/manager", tags=["manager"])
     application.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
+    application.include_router(
+        assessment_chat.router, prefix="/assessment-chat", tags=["assessment-chat"]
+    )
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
 

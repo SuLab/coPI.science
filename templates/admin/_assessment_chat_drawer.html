@@ -1,0 +1,62 @@
+{# Assessment chat drawer (docs/specs/2026-09-24-assessment-chat-design.md §8.2).
+   Included by _assessment_detail_body.html only when the chat is enabled and the
+   session is not impersonating, so it never renders a control that would 403.
+
+   * NO <details> in here: the page's Expand/Collapse-all script opens every
+     <details> inside <main>, and this drawer lives inside <main>.
+   * NO <form>: without JavaScript a submit would GET the page with the question in
+     the URL. Every control is a type="button" that static/js/assessment_chat.js drives.
+   * The three URLs are JS string literals with the id in the path-parameter slot.
+     That is what credits the routes in tests/unit/test_reachability.py, and why the
+     script names no URL of its own. `a.id` is a server-generated UUID; any STRING
+     value added here later goes through `| tojson`.
+   * `ph-no-capture` keeps the drawer out of PostHog recordings if PostHog is ever
+     configured (POSTHOG_API_KEY is empty in production today).
+   * It shows the signed-in name so a swapped session is visible (spec §13 item 9).
+   Open/closed is the `hidden`/`flex` class pair, not the `hidden` attribute:
+   Tailwind's `flex` utility would override the attribute. Type sizes follow the
+   page's readability rule (test_the_detail_body_uses_readable_type_sizes): no
+   `text-xs` outside chips and no `text-gray-400`/`text-gray-500` anywhere in <main>. #}
+<aside id="assessment-chat" aria-labelledby="assessment-chat-title"
+       class="ph-no-capture print:hidden fixed inset-0 z-40 hidden flex-col bg-white shadow-2xl md:inset-y-0 md:left-auto md:right-0 md:w-[28rem] md:border-l md:border-gray-200">
+    <header class="flex items-start justify-between gap-3 border-b border-gray-200 px-4 py-3">
+        <div>
+            <h2 id="assessment-chat-title" class="text-base font-semibold text-gray-900">Ask about this assessment</h2>
+            <p class="text-sm text-gray-600">Signed in as {{ current_user.name }}</p>
+        </div>
+        <button type="button" data-chat-close class="rounded border border-gray-300 px-2 py-0.5 text-sm text-gray-700 hover:bg-gray-50">Close</button>
+    </header>
+    <p data-chat-verdict-notice hidden class="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+        This interview may still be running. If the hub replaces this verdict, this conversation is deleted with it.
+    </p>
+    <div data-chat-log class="flex-1 space-y-4 overflow-y-auto px-4 py-3"></div>
+    <div data-chat-starters hidden class="space-y-1 px-4 pb-2">
+        <p class="text-sm text-gray-600">Try one of these:</p>
+        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What is being proposed, in plain terms?</button>
+        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What were the hub's main concerns, and how did the lab's agent answer them?</button>
+        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What would Blackbird fund next, and what result would change the recommendation?</button>
+    </div>
+    <div class="space-y-2 border-t border-gray-200 px-4 py-3">
+        <label for="assessment-chat-question" class="sr-only">Your question</label>
+        <textarea id="assessment-chat-question" data-chat-input rows="3" class="w-full rounded border border-gray-300 px-2 py-1 text-sm" placeholder="Ask about the interview or the proposal. Enter sends; Shift+Enter starts a new line."></textarea>
+        <div class="flex items-center justify-between gap-2 text-sm text-gray-600">
+            <span data-chat-counter></span>
+            <span data-chat-usage></span>
+        </div>
+        <div class="flex items-center gap-2">
+            <button type="button" data-chat-send class="rounded bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">Ask</button>
+            <button type="button" data-chat-clear class="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">Clear conversation</button>
+        </div>
+        <p data-chat-error role="alert" hidden class="text-sm text-red-700"></p>
+        <p data-chat-live class="sr-only" aria-live="polite"></p>
+        <p class="text-sm text-gray-600">Saved for you; administrators with database access can read it.</p>
+    </div>
+</aside>
+<script>
+  window.ASSESSMENT_CHAT = {
+    historyUrl: "/assessment-chat/{{ a.id }}",
+    askUrl: "/assessment-chat/{{ a.id }}/messages",
+    clearUrl: "/assessment-chat/{{ a.id }}/clear"
+  };
+</script>
+<script src="/static/js/assessment_chat.js" defer></script>

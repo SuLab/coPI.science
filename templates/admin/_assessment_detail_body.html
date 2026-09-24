@@ -19,6 +19,12 @@
    here has none of the one-surface-only problem an `/admin/` or `/manager/`
    literal would.
 
+   SECOND EXCEPTION, recorded (assessment chat, 2026-09-24): the drawer partial
+   included at the end of this file names `/assessment-chat/...` paths in JS
+   string literals. That router is not split by surface either — the same three
+   routes serve admin, manager and reviewer, keyed on the signed-in user — so a
+   literal `/assessment-chat/` path has none of the one-surface-only problem.
+
    `admin_view` gates the two admin-only strands (plan decision 2): the hub's
    tool activity, and each specialist's verbatim opinion. Those values are
    already ABSENT from a manager render's context (the service omits them), so
@@ -30,6 +36,13 @@
    here. #}
 
 {% set a = assessment %}
+{# The assessment chat (docs/specs/2026-09-24-assessment-chat-design.md §8.1).
+   `request.app.state.assessment_chat_enabled` is set by create_app from the
+   setting — deliberately not a Jinja global, which would need both routers'
+   template setup. Every chat route 403s under impersonation, so the page then
+   offers text, never a control that would. #}
+{% set chat_enabled = request is defined and request.app is defined and request.app.state.assessment_chat_enabled is sameas true %}
+{% set chat_available = chat_enabled and not impersonation_banner %}
 {# FIVE values. The live vocabulary is `blocking`/`gap`/`adequate` (2026-08-28);
    `caution`/`clear` are what every consult stored before that date holds, and
    no row was rewritten — so both vocabularies render here, historical ones in
@@ -67,6 +80,12 @@
        (2026-09-15 audit M2): navigation and action must not look alike. #}
     <button type="button" data-details-toggle="open" class="ml-auto rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Expand all</button>
     <button type="button" data-details-toggle="close" class="rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Collapse all</button>
+    {# An action, styled as one (audit M2): it opens the drawer, it does not navigate. #}
+    {% if chat_available %}
+    <button type="button" data-chat-open aria-controls="assessment-chat" aria-expanded="false" class="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-700">Ask about this assessment</button>
+    {% elif chat_enabled %}
+    <span class="text-sm text-gray-600">Chat unavailable while impersonating</span>
+    {% endif %}
 </nav>
 
 <div id="brief" class="assessment-brief scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -508,7 +527,7 @@
 </div>
 {% endmacro %}
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+<div id="verdict" class="scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <div class="flex items-start justify-between gap-4 flex-wrap">
         <div>
             {# The project name + confidence chip used to live in an <h2>
@@ -729,7 +748,7 @@
 </div>
 </details>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+<div id="red-flags" class="scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-base font-semibold text-gray-900 mb-3">
         Red flags
         {% if a.red_flags %}<span class="text-amber-700">({{ a.red_flags | length }})</span>{% endif %}
@@ -1161,10 +1180,13 @@
         </div>
     {% else %}
         <div class="space-y-3">
+        {# Numbers the consult cards 1..n in timeline order: the same ordinal the chat
+           record's `consult-{k}` citation anchors use (src/services/assessment_chat_record.py). #}
+        {% set consult_ns = namespace(n=0) %}
         {% for entry in timeline %}
             {% if entry.kind == 'message' %}
                 {% set m = entry.message %}
-                <div class="rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
+                <div id="m-{{ m.key }}" class="scroll-mt-16 max-md:scroll-mt-28 rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
                     <div class="flex items-center gap-2 text-sm text-gray-600 mb-1">
                         <span class="font-semibold text-gray-700">
                             {% if m.agent_id %}{{ m.agent_id | capitalize }}Bot{% else %}{{ m.sender_name or "(unknown sender)" }}{% endif %}
@@ -1199,10 +1221,11 @@
                 </div>
             {% else %}
                 {% set c = entry.consult %}
+                {% set consult_ns.n = consult_ns.n + 1 %}
                 {# Panel card. Recorded consults only (specialist_consults);
                    the retro ones ride along as tool chips under the hub
                    message that made them. #}
-                <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
+                <div id="consult-{{ consult_ns.n }}" class="scroll-mt-16 max-md:scroll-mt-28 rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
                     <div class="flex items-center gap-2 text-sm mb-1">
                         <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
                         {% if c.reply_truncated %}
@@ -1353,3 +1376,5 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 });
 </script>
+
+{% if chat_available %}{% include "admin/_assessment_chat_drawer.html" %}{% endif %}

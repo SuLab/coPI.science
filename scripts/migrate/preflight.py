@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0050"
+DEFAULT_TARGET = "0051"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -120,6 +120,7 @@ DEFAULT_TARGET = "0050"
 #: must never be a BLOCK. 0047 joined for that same reason as DEFAULT_TARGET
 #: moved to 0048, and 0048 joins now as DEFAULT_TARGET moves to 0049.
 #: 0049 joins now as DEFAULT_TARGET moves to 0050.
+#: 0050 joins now as DEFAULT_TARGET moves to 0051.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -136,7 +137,7 @@ DEFAULT_TARGET = "0050"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
-    "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049",
+    "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -427,12 +428,28 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0050_assessment_landscape_and_evidence_maturity
     PlannedObject("0050", "column", "competitive_landscape", "opportunity_assessments"),
     PlannedObject("0050", "column", "evidence_maturity", "opportunity_assessments"),
+    # 0051_assessment_chat
+    PlannedObject("0051", "table", "assessment_chat_turns"),
+    PlannedObject("0051", "constraint", "ck_assessment_chat_turns_tier", "assessment_chat_turns"),
+    PlannedObject("0051", "constraint", "ck_assessment_chat_turns_status", "assessment_chat_turns"),
+    PlannedObject("0051", "index", "ix_assessment_chat_turns_conversation", "assessment_chat_turns"),
+    PlannedObject("0051", "index", "ix_assessment_chat_turns_user_id", "assessment_chat_turns"),
+    PlannedObject(
+        "0051", "index", "uq_assessment_chat_turns_one_streaming_per_user", "assessment_chat_turns",
+    ),
+    PlannedObject("0051", "table", "assessment_chat_usage"),
+    PlannedObject("0051", "constraint", "ck_assessment_chat_usage_tier", "assessment_chat_usage"),
+    PlannedObject("0051", "index", "ix_assessment_chat_usage_user_created", "assessment_chat_usage"),
+    PlannedObject("0051", "index", "ix_assessment_chat_usage_created", "assessment_chat_usage"),
+    PlannedObject("0051", "index", "ix_assessment_chat_usage_turn_id", "assessment_chat_usage"),
+    PlannedObject("0051", "index", "ix_assessment_chat_usage_assessment_id", "assessment_chat_usage"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
+    "0051",
 )
 
 

@@ -1,11 +1,12 @@
 """Application configuration from environment variables using Pydantic Settings."""
 
 import logging
+import math
 import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,10 @@ INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
 # ENVIRONMENT values treated as non-production (the insecure default secret is
 # tolerated with a warning). Anything else fails fast.
 _DEV_ENVIRONMENTS = {"development", "dev", "local", "test"}
+
+#: The `effort` levels claude-opus-5-5 accepts (Models API capabilities, measured
+#: 2026-09-24). `assessment_chat_effort` outside this set falls back to "medium".
+ASSESSMENT_CHAT_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 _MASK = "***REDACTED***"
 
@@ -322,6 +327,26 @@ class Settings(BaseSettings):
     llm_agent_model_sonnet: str = "claude-sonnet-5"
     llm_review_model: str = "claude-opus-5"  # review bot, worker-side
 
+    # Assessment chat (docs/specs/2026-09-24-assessment-chat-design.md §10.1). The
+    # chat model must support adaptive thinking, `effort` and citations, and must be
+    # priced in src/services/llm_pricing.py: an unpriced model would make the daily
+    # dollar ceilings blind, so the ask route refuses it (503 model_unpriced).
+    llm_assessment_chat_model: str = "claude-opus-5-5"
+    # Kill switch. `.env` is read when a container is CREATED, so changing it needs
+    # `$DC up -d --force-recreate blackbird-app`, not a restart.
+    assessment_chat_enabled: bool = True
+    # A Literal, not a str: an unknown value is replaced (with a WARNING) by
+    # `_known_chat_effort` below rather than refusing to start. Keep the Literal and
+    # ASSESSMENT_CHAT_EFFORTS identical (tests/unit/test_assessment_chat_settings.py).
+    assessment_chat_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Per rolling 24 h, counted from the content-free usage ledger — so neither
+    # Clear nor a restart resets them.
+    assessment_chat_daily_question_limit: int = 100  # per user
+    assessment_chat_daily_user_usd_limit: float = 20.0
+    assessment_chat_daily_total_usd_limit: float = 100.0
+    assessment_chat_max_question_chars: int = 4000
+    assessment_chat_max_turns: int = 50  # per (assessment, user, tier) conversation
+
     # Worker
     worker_poll_interval: int = 5  # seconds
 
@@ -517,6 +542,55 @@ class Settings(BaseSettings):
                     "%s must be a positive int, got %r — falling back to %r. "
                     "The LLM rate limiter would otherwise never let any agent "
                     "take a turn.",
+                    name.upper(), value, fallback,
+                )
+                setattr(self, name, fallback)
+        return self
+
+    @field_validator("assessment_chat_effort", mode="before")
+    @classmethod
+    def _known_chat_effort(cls, value: object) -> object:
+        """An effort level the model does not accept would 400 every request, so an
+        unknown value costs a WARNING and falls back to "medium" instead of refusing
+        to start — the warn-and-fall-back treatment of ``_guard_rate_limiter_settings``.
+        """
+        if value in ASSESSMENT_CHAT_EFFORTS:
+            return value
+        logger.warning(
+            "ASSESSMENT_CHAT_EFFORT must be one of %s, got %r — falling back to 'medium'.",
+            ", ".join(ASSESSMENT_CHAT_EFFORTS), value,
+        )
+        return "medium"
+
+    @model_validator(mode="after")
+    def _guard_assessment_chat_settings(self) -> "Settings":
+        """Fall back to the default for an assessment-chat limit that cannot work.
+
+        Same warn-and-fall-back treatment as ``_guard_rate_limiter_settings``: a typo'd
+        ``.env`` value should cost a WARNING, not the feature. A non-positive cap,
+        ceiling or size limit would refuse every question.
+
+        A non-finite value (``nan``/``inf``, which pydantic accepts for a float
+        field) is not warned-and-clamped like a non-positive one: ``nan`` makes
+        every comparison against it false, so it would slip past the ``<= 0``
+        check below and reach `decimal.Decimal` in the cost accounting, 500ing
+        every ask; ``inf`` would silently disable the ceiling it exists to
+        enforce. Both fail the whole startup instead.
+        """
+        for name in (
+            "assessment_chat_daily_question_limit",
+            "assessment_chat_daily_user_usd_limit",
+            "assessment_chat_daily_total_usd_limit",
+            "assessment_chat_max_question_chars",
+            "assessment_chat_max_turns",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name.upper()} must be a finite number, got {value!r}.")
+            if value <= 0:
+                fallback = type(self).model_fields[name].default
+                logger.warning(
+                    "%s must be positive, got %r — falling back to %r.",
                     name.upper(), value, fallback,
                 )
                 setattr(self, name, fallback)

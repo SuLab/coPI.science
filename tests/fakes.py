@@ -12,6 +12,13 @@ It also mirrors the one thing the real client REFUSES: a non-streaming request
 whose ``max_tokens`` implies more than 10 minutes of generation. See
 ``_MAX_NONSTREAMING_MAX_TOKENS``.
 
+FakeAsyncAnthropic mirrors the one slice of anthropic.AsyncAnthropic the assessment
+chat consumes (src/services/assessment_chat.py): ``client.beta.messages.stream(**kw)``
+as an async context manager whose stream yields the SDK's RAW events and, for the
+same deltas, its convenience events (``text``, ``citation``, ``signature``) —
+the chat must act on the raw ones only — and ``await stream.get_final_message()``.
+Install via ``tests.assessment_chat_support.use_fake_llm``.
+
 FakeSlackClient records the AgentSlackClient calls the simulation makes and
 hands back deterministic ts/channel ids, so agent-turn golden-master tests never
 touch the network.
@@ -21,7 +28,11 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
+
+import anthropic
+import httpx
 
 from src.agent.slack_client import markdown_to_mrkdwn
 
@@ -548,3 +559,264 @@ def slack_error(code: str, *, retry_after: int | None = None):
         resp.headers = {"Retry-After": str(retry_after)}
     resp.status_code = 429 if code == "ratelimited" else 400
     return SlackApiError(code, resp)
+
+
+# ---------------------------------------------------------------------------
+# Streaming fake for the assessment chat
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChatScript:
+    """One scripted answer for FakeAsyncAnthropic.
+
+    ``segments`` are the answer's text blocks, ``(text, [citation_dict, ...])``;
+    a citation dict holds ``content_block_location`` fields
+    (``tests.assessment_chat_support.citation`` builds one). ``fallback`` —
+    ``(from_model, to_model)`` — puts a fallback block first, as a pre-output
+    fallback does. ``iterations`` becomes ``usage.iterations`` (dicts of
+    ``type``/``model``/token fields). ``raise_on_open`` fails before any event;
+    ``raise_after_events`` + ``raise_exc`` fail mid-stream; ``pause_after_events``
+    stalls mid-stream — it sets ``paused`` when the stall starts and then waits for
+    ``release`` (or sleeps ``pause_seconds`` when there is none), so a test can act
+    while an answer is in flight. ``pause_before_citation`` pauses the same way, but
+    exactly once, immediately before the first ``content_block_delta`` whose
+    ``delta.type == "citations_delta"`` — for a demo that holds an answer after its
+    text and before its citation.
+    """
+
+    segments: list = field(default_factory=lambda: [("A short answer.", [])])
+    stop_reason: str = "end_turn"
+    model: str = "claude-opus-5-5"
+    input_tokens: int = 1200
+    output_tokens: int = 80
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 30000
+    iterations: list | None = None
+    stop_details: dict | None = None
+    thinking: bool = True
+    fallback: tuple | None = None
+    convenience_events: bool = True
+    chunk: int = 7
+    delay: float = 0.0
+    raise_on_open: BaseException | None = None
+    raise_after_events: int | None = None
+    raise_exc: BaseException | None = None
+    pause_after_events: int | None = None
+    pause_seconds: float = 0.0
+    paused: asyncio.Event | None = None
+    release: asyncio.Event | None = None
+    pause_before_citation: bool = False
+
+
+def _chat_usage(script: ChatScript, *, output_tokens: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=script.input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=script.cache_read_input_tokens,
+        cache_creation_input_tokens=script.cache_creation_input_tokens,
+        iterations=[SimpleNamespace(**it) for it in script.iterations] if script.iterations else None,
+    )
+
+
+def _chat_events_and_final(script: ChatScript) -> tuple[list, SimpleNamespace]:
+    """The raw (and, when asked, convenience) events of one answer, plus the final
+    message the SDK would accumulate from them."""
+    events: list = [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(model=script.model, usage=_chat_usage(script, output_tokens=1)),
+        )
+    ]
+    content: list = []
+    index = 0
+    if script.fallback:
+        from_model, to_model = script.fallback
+        block = SimpleNamespace(
+            type="fallback",
+            from_=SimpleNamespace(model=from_model),
+            to=SimpleNamespace(model=to_model),
+            trigger="refusal",
+        )
+        events.append(SimpleNamespace(type="content_block_start", index=index, content_block=block))
+        events.append(SimpleNamespace(type="content_block_stop", index=index))
+        content.append(block)
+        index += 1
+    if script.thinking:
+        events.append(
+            SimpleNamespace(
+                type="content_block_start",
+                index=index,
+                content_block=SimpleNamespace(type="thinking", thinking="", signature=""),
+            )
+        )
+        events.append(
+            SimpleNamespace(
+                type="content_block_delta",
+                index=index,
+                delta=SimpleNamespace(type="signature_delta", signature="SIG"),
+            )
+        )
+        if script.convenience_events:
+            events.append(SimpleNamespace(type="signature", signature="SIG"))
+        events.append(SimpleNamespace(type="content_block_stop", index=index))
+        content.append(SimpleNamespace(type="thinking", thinking="", signature="SIG"))
+        index += 1
+    step = max(1, script.chunk)
+    for text, cites in script.segments:
+        events.append(
+            SimpleNamespace(
+                type="content_block_start",
+                index=index,
+                content_block=SimpleNamespace(type="text", text="", citations=None),
+            )
+        )
+        so_far = ""
+        for start in range(0, len(text), step):
+            piece = text[start : start + step]
+            so_far += piece
+            events.append(
+                SimpleNamespace(
+                    type="content_block_delta",
+                    index=index,
+                    delta=SimpleNamespace(type="text_delta", text=piece),
+                )
+            )
+            if script.convenience_events:
+                events.append(SimpleNamespace(type="text", text=piece, snapshot=so_far))
+        citation_objects = [SimpleNamespace(**c) for c in cites]
+        for c in citation_objects:
+            events.append(
+                SimpleNamespace(
+                    type="content_block_delta",
+                    index=index,
+                    delta=SimpleNamespace(type="citations_delta", citation=c),
+                )
+            )
+            if script.convenience_events:
+                events.append(
+                    SimpleNamespace(type="citation", citation=c, snapshot=list(citation_objects))
+                )
+        events.append(SimpleNamespace(type="content_block_stop", index=index))
+        content.append(SimpleNamespace(type="text", text=text, citations=citation_objects or None))
+        index += 1
+    stop_details = SimpleNamespace(**script.stop_details) if script.stop_details else None
+    events.append(
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason=script.stop_reason, stop_details=stop_details),
+            usage=SimpleNamespace(
+                output_tokens=script.output_tokens,
+                input_tokens=None,
+                cache_read_input_tokens=None,
+                cache_creation_input_tokens=None,
+                iterations=None,
+            ),
+        )
+    )
+    events.append(SimpleNamespace(type="message_stop"))
+    final = SimpleNamespace(
+        model=script.model,
+        stop_reason=script.stop_reason,
+        stop_details=stop_details,
+        content=content,
+        usage=_chat_usage(script, output_tokens=script.output_tokens),
+    )
+    return events, final
+
+
+class _FakeChatStream:
+    def __init__(self, script: ChatScript) -> None:
+        self._script = script
+        self._events, self._final = _chat_events_and_final(script)
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        script = self._script
+        if script.delay:
+            await asyncio.sleep(script.delay)
+        citation_paused = False
+        for i, event in enumerate(self._events):
+            if script.raise_after_events is not None and i == script.raise_after_events:
+                raise script.raise_exc or RuntimeError("scripted mid-stream failure")
+            if script.pause_after_events is not None and i == script.pause_after_events:
+                if script.paused is not None:
+                    script.paused.set()
+                if script.release is not None:
+                    await script.release.wait()
+                else:
+                    await asyncio.sleep(script.pause_seconds)
+            if (
+                script.pause_before_citation
+                and not citation_paused
+                and getattr(event, "type", None) == "content_block_delta"
+                and getattr(getattr(event, "delta", None), "type", None) == "citations_delta"
+            ):
+                citation_paused = True
+                if script.paused is not None:
+                    script.paused.set()
+                if script.release is not None:
+                    await script.release.wait()
+                else:
+                    await asyncio.sleep(script.pause_seconds)
+            yield event
+
+    async def get_final_message(self) -> SimpleNamespace:
+        return self._final
+
+
+class _FakeChatStreamManager:
+    def __init__(self, parent: "FakeAsyncAnthropic", kwargs: dict) -> None:
+        self._parent = parent
+        self._kwargs = kwargs
+
+    async def __aenter__(self) -> _FakeChatStream:
+        script = self._parent._next(self._kwargs)
+        if script.raise_on_open is not None:
+            raise script.raise_on_open
+        return _FakeChatStream(script)
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+
+class _FakeBetaMessages:
+    def __init__(self, parent: "FakeAsyncAnthropic") -> None:
+        self._parent = parent
+
+    def stream(self, **kwargs) -> _FakeChatStreamManager:
+        return _FakeChatStreamManager(self._parent, kwargs)
+
+
+class FakeAsyncAnthropic:
+    """See the module docstring. Scripts are consumed in order; the last one is
+    reused once the others are gone, and with none at all every call gets a default
+    ``ChatScript()``. Every call's kwargs are appended to ``calls``."""
+
+    def __init__(self, scripts: list[ChatScript] | None = None) -> None:
+        self._scripts = list(scripts or [])
+        self.calls: list[dict] = []
+        self.beta = SimpleNamespace(messages=_FakeBetaMessages(self))
+
+    def _next(self, kwargs: dict) -> ChatScript:
+        self.calls.append(kwargs)
+        if not self._scripts:
+            return ChatScript()
+        return self._scripts.pop(0) if len(self._scripts) > 1 else self._scripts[0]
+
+
+_API_URL = "https://api.anthropic.com/v1/messages"
+
+
+def api_status_error(cls: type, status: int) -> Exception:
+    """An ``anthropic.APIStatusError`` (sub)class instance shaped the way the SDK
+    raises one: a real ``httpx.Response`` carrying a ``request-id`` header."""
+    request = httpx.Request("POST", _API_URL)
+    response = httpx.Response(status, request=request, headers={"request-id": "req_scripted"})
+    return cls(f"scripted HTTP {status}", response=response, body=None)
+
+
+def connection_error() -> Exception:
+    return anthropic.APIConnectionError(request=httpx.Request("POST", _API_URL))

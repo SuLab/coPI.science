@@ -16,6 +16,7 @@ from src.models.agent_activity import (
     ThreadDecision,
 )
 from src.models.agent_registry import AgentRegistry, ProposalReview
+from src.models.assessment_chat import AssessmentChatTurn, AssessmentChatUsage
 from src.models.cohort import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
@@ -118,4 +119,6 @@ __all__ = [
     "PiGrant",
     "PiIndustryEvidence",
     "PiIndustryScore",
+    "AssessmentChatTurn",
+    "AssessmentChatUsage",
 ]

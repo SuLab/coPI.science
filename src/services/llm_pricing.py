@@ -1,8 +1,10 @@
-"""Versioned Anthropic price table + cost math for llm_call_logs rows.
+"""Versioned Anthropic price table + cost math for llm_call_logs rows and for the
+assessment chat's usage ledger (assessment_chat_usage).
 
 Prices are $/MTok from platform.claude.com/docs/en/about-claude/pricing.
 The simulation uses the 5-MINUTE cache TTL exclusively (src/services/llm.py
-:147-148 — deliberate), so cache_creation tokens bill at the 1.25x write rate.
+:147-148 — deliberate), so cache_creation tokens bill at the 1.25x write rate; the
+assessment chat uses the same 5-minute TTL.
 No batch/fast-mode/inference_geo modifiers apply (none are used in src/ —
 verified 2026-08-30). Unknown models are None-priced: the caller renders
 "unpriced" and surfaces the model name; a silent $0 is the one forbidden
@@ -14,7 +16,7 @@ takes plain token counts and has no flag parameter.
 from dataclasses import dataclass
 from decimal import Decimal
 
-AS_OF = "2026-08-29"
+AS_OF = "2026-09-24"
 
 @dataclass(frozen=True)
 class ModelPrice:
@@ -26,6 +28,10 @@ class ModelPrice:
 PRICES: dict[str, ModelPrice] = {
     "claude-opus-5":      ModelPrice(Decimal("5"), Decimal("25"), Decimal("6.25"), Decimal("0.50")),
     "claude-opus-4-6":    ModelPrice(Decimal("5"), Decimal("25"), Decimal("6.25"), Decimal("0.50")),
+    # Pricing page, fetched 2026-09-24. claude-opus-5-5 is the assessment chat's model;
+    # claude-opus-4-8 is one of its server-side fallback targets.
+    "claude-opus-5-5":    ModelPrice(Decimal("4"), Decimal("20"), Decimal("5"), Decimal("0.20")),
+    "claude-opus-4-8":    ModelPrice(Decimal("5"), Decimal("25"), Decimal("6.25"), Decimal("0.50")),
     "claude-sonnet-5":    ModelPrice(Decimal("2"), Decimal("10"), Decimal("2.50"), Decimal("0.20")),
     "claude-sonnet-4-6":  ModelPrice(Decimal("3"), Decimal("15"), Decimal("3.75"), Decimal("0.30")),
     "claude-haiku-4-5":   ModelPrice(Decimal("1"), Decimal("5"),  Decimal("1.25"), Decimal("0.10")),
