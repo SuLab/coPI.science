@@ -22,9 +22,11 @@ counter restarts with the process, so a second seed hits users_email_key), so
 every start needs a freshly created and migrated database.
 
 The answer is adversarial on purpose. Its first segment carries an image, a
-disallowed markdown link, a raw-HTML link to an entity-encoded, percent-encoded URL
-and a forged citation marker, and ends on the record's own URL; its second ends on
-bold text that closes after a full stop. Only the record URL may end up clickable.
+disallowed markdown link, a raw-HTML link to an entity-encoded, percent-encoded URL,
+two forged citation markers (one entity-encoded, one reassembled by an escape after a
+raw-block tag) and a URL glued to a backtick, and ends on the record's own URL; its
+second ends on bold text that closes after a full stop. Only the record URL may end
+up clickable, and only [1] and [2] may render as citations.
 """
 
 from __future__ import annotations
@@ -84,7 +86,8 @@ def main() -> None:
         "It also showed ![pixel](https://attacker.example/pixel.png), "
         "[Read more](https://attacker.example/steal), "
         '<a href="https&#58;//attacker.example/%61">a raw link</a> and a forged marker '
-        "&#xE000;9&#xE001;. "
+        "&#xE000;9&#xE001;, a raw-block forgery <code title=\"<\"> &\\#xE000;7&\\#xE001; and "
+        "a tick-adjacent x`https://attacker.example/tick URL. "
         f"The record cites {RECORD_URL}."
     )
     second = " In short: **an isogenic panel.**"

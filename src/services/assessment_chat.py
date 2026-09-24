@@ -85,6 +85,14 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _SPEND_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"assessment_chat_spend").digest()[:8], "big", signed=True
 )
+#: RSEC-3: how long an ask will poll for the spend lock before giving up. Every
+#: refusal that does not need the lock is checked first (§the reordering in
+#: `prepare_turn`), so only the two dollar-ceiling reads and the row insert ever
+#: wait on it — but a stuck holder must still degrade to one 503 rather than
+#: pinning a pooled connection open indefinitely, since the pool (5 + 10 overflow)
+#: is shared with the whole web tier.
+SPEND_LOCK_WAIT_SECONDS = 5.0
+_SPEND_LOCK_POLL_SECONDS = 0.05
 #: Read per question: `prompts/` is bind-mounted into blackbird-app, so an edit
 #: applies to the next question. There is no in-code copy to drift.
 PROMPT_PATH = Path("prompts/assessment-chat.md")
@@ -484,30 +492,25 @@ def _new_rows(
     return turn, usage
 
 
-async def prepare_turn(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, question_raw: object
-) -> PreparedTurn:
-    """§6.2 steps 2-10, cheapest first; the router has already refused impersonation,
-    a disabled chat, an unknown assessment and a non-JSON body. Raises ChatError for
-    every refusal and commits on success."""
+async def _has_streaming_turn(db: AsyncSession, *, user_id: uuid.UUID) -> bool:
+    """True while this user (any assessment, any tier) already has a `streaming`
+    turn — the same predicate ONE_STREAMING_INDEX enforces at insert time."""
+    return bool(
+        await db.scalar(
+            select(func.count(AssessmentChatTurn.id)).where(
+                AssessmentChatTurn.user_id == user_id,
+                AssessmentChatTurn.status == CHAT_STATUS_STREAMING,
+            )
+        )
+    )
+
+
+async def _refuse_over_caps(
+    db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID, tier: str
+) -> list[AssessmentChatTurn]:
+    """Raise for a full conversation (409) or a used-up daily question count (429);
+    otherwise return the conversation, oldest first."""
     settings = get_settings()
-    question = validate_question(question_raw, max_chars=settings.assessment_chat_max_question_chars)
-    model = settings.llm_assessment_chat_model
-    if model not in PRICES:
-        raise ChatError(503, "model_unpriced")
-    system_prompt, prompt_sha = load_system_prompt()
-    # Serialize every ask's check-then-insert against the two dollar ceilings
-    # (SB-9/PA1-14): without this, two concurrent requests can both read the $100
-    # global total as under the ceiling before either has committed its own spend,
-    # so the ceiling overshoots by more than one question. Taken BEFORE the sweep so
-    # no ask ever holds a swept row while it waits for the lock: otherwise an ask
-    # already holding the lock could wait, through the one-in-flight index, on a
-    # row this one swept, and the two would deadlock. Held for the rest of this
-    # transaction and released at its commit or rollback.
-    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SPEND_LOCK_KEY})
-    await sweep_stale(db)
-    user_id = user.id
-    tier = tier_for(user)
     turns = await _conversation(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
     if len(turns) >= settings.assessment_chat_max_turns:
         raise ChatError(409, "conversation_full")
@@ -515,10 +518,62 @@ async def prepare_turn(
     if used >= settings.assessment_chat_daily_question_limit:
         resets_at = (oldest + _WINDOW).isoformat() if oldest is not None else None
         raise ChatError(429, "daily_limit", resets_at=resets_at)
-    if await spend_24h(db, user_id=user_id) >= Decimal(str(settings.assessment_chat_daily_user_usd_limit)):
-        raise ChatError(429, "daily_spend_limit")
-    if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
-        raise ChatError(429, "global_spend_limit")
+    return turns
+
+
+async def _take_spend_lock(db: AsyncSession) -> None:
+    """Take `_SPEND_LOCK_KEY`'s advisory lock with a BOUNDED wait (RSEC-3): poll
+    `pg_try_advisory_xact_lock` every `_SPEND_LOCK_POLL_SECONDS` until
+    `SPEND_LOCK_WAIT_SECONDS` has elapsed, then raise `ChatError(503, "busy")` rather
+    than queue forever. `pg_advisory_xact_lock`'s own unbounded wait is exactly the
+    hazard this replaces: an ask stuck on it pins a pooled connection open, and the
+    pool is shared with the whole web tier."""
+    deadline = time.monotonic() + SPEND_LOCK_WAIT_SECONDS
+    while True:
+        got = await db.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _SPEND_LOCK_KEY})
+        if got:
+            return
+        if time.monotonic() >= deadline:
+            raise ChatError(503, "busy")
+        await asyncio.sleep(_SPEND_LOCK_POLL_SECONDS)
+
+
+async def prepare_turn(
+    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, question_raw: object
+) -> PreparedTurn:
+    """§6.2 steps 2-10, cheapest first; the router has already refused impersonation,
+    a disabled chat, an unknown assessment and a non-JSON body. Raises ChatError for
+    every refusal and commits on success.
+
+    RSEC-3: every earlier release of this function serialized EVERY ask — refusals
+    included — behind one unbounded advisory lock, held across the record build. A
+    reviewer firing many concurrent asks could queue everyone else behind it, and
+    each queued request pins a pooled connection open. Now only the two
+    dollar-ceiling reads and the row insert run under the lock, and the lock itself
+    has a bounded wait (`_take_spend_lock`): every cheaper refusal — the sweep, a
+    repeat click, a full conversation, the daily question count, an unknown
+    assessment — is checked first, unlocked, so it can never queue on the lock at
+    all."""
+    settings = get_settings()
+    question = validate_question(question_raw, max_chars=settings.assessment_chat_max_question_chars)
+    model = settings.llm_assessment_chat_model
+    if model not in PRICES:
+        raise ChatError(503, "model_unpriced")
+    system_prompt, prompt_sha = load_system_prompt()
+    # Committed on its own, before anything takes the lock: an ask that took the
+    # lock first could otherwise wait, through the one-in-flight partial unique
+    # index, on a row THIS sweep is trying to update, and the two would deadlock.
+    await sweep_stale(db)
+    await db.commit()
+    user_id = user.id
+    # A repeat click while an answer is still streaming is refused here, unlocked,
+    # so it never queues on the lock at all. ONE_STREAMING_INDEX at insert time
+    # (below) remains the actual authority — a turn can still start between this
+    # check and the insert — this is only a cheap head start on the common case.
+    if await _has_streaming_turn(db, user_id=user_id):
+        raise ChatError(409, "answer_in_progress")
+    tier = tier_for(user)
+    turns = await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
     loaded = await load_chat_record(db, assessment_id, tier=tier)
     if loaded is None:
         raise ChatError(404, "not_found")
@@ -529,6 +584,23 @@ async def prepare_turn(
         system_prompt=system_prompt,
         messages=build_messages(record, replay_window(turns), question),
     )
+    # Serialize every ask's check-then-insert against the two dollar ceilings
+    # (SB-9/PA1-14): without this, two concurrent requests can both read the $100
+    # global total as under the ceiling before either has committed its own spend,
+    # so the ceiling overshoots by more than one question. Everything above this
+    # line is unlocked; from here this ask holds the lock until its own commit below
+    # releases it — a ChatError raised past this point still ends this function's
+    # transaction, through the request session's own commit or rollback once the
+    # router returns, which releases the lock the same way.
+    await _take_spend_lock(db)
+    # The per-user caps were read unlocked above, as a cheap head start; another ask
+    # of this user's may have committed its turn since, so both are read again here,
+    # under the lock, before anything is inserted (R2SEC-3).
+    await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    if await spend_24h(db, user_id=user_id) >= Decimal(str(settings.assessment_chat_daily_user_usd_limit)):
+        raise ChatError(429, "daily_spend_limit")
+    if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
+        raise ChatError(429, "global_spend_limit")
     created_at = datetime.now(UTC)
     turn, usage = _new_rows(
         assessment_id=assessment_id,
@@ -654,7 +726,13 @@ async def _answer(prepared: PreparedTurn, emit: Emit, snapshot: UsageSnapshot) -
         )
     except anthropic.APIConnectionError:
         return failure_outcome(error_code="upstream_error", requested_model=model, snapshot=snapshot)
-    return outcome_from_final(final, record=prepared.record, requested_model=model)
+    # RS-1: the regex-based link rewrite inside outcome_from_final can run long on a
+    # pathological answer; off the event loop so a slow rewrite can never block every
+    # other request this single uvicorn worker is serving. Thread-safe because it
+    # only reads `prepared.record` and logs — it writes nothing shared.
+    return await asyncio.to_thread(
+        outcome_from_final, final, record=prepared.record, requested_model=model
+    )
 
 
 def _log_completion(

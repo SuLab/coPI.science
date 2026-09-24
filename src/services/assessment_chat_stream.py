@@ -36,6 +36,13 @@ Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 #: character reference (``&#57344;``, ``&#xE000;``), which a browser or the drawer's
 #: own sanitizer would otherwise decode into one (SEC-2). Built with chr() so that no
 #: escape sequence has to survive an editor.
+#:
+#: Stripping runs more than once (RSEC-2/RSEC-4/RS-4): `rewrite_links` can itself
+#: assemble a reference — an empty link destination collapses ``[&#xE0](  )00;`` down
+#: to its label, which reforms ``&#xE000;`` — so `outcome_from_final` strips each
+#: segment before AND after rewriting it, and strips the joined answer both before and
+#: after its own second `rewrite_links` pass, to catch a reference split across two
+#: segments that no single segment's own strip could see.
 _PRIVATE_USE_RE = re.compile(f"[{chr(0xE000)}-{chr(0xF8FF)}]")
 #: A numeric character reference — decimal or hex, semicolon optional, leading zeros
 #: allowed — checked against the private-use range and stripped only when it decodes
@@ -50,6 +57,12 @@ _NUMERIC_REF_RE = re.compile(
 #: Constructs a URL has to be judged inside of. Code is left exactly as it is: marked
 #: renders a code span or a fence as code, never as a link. Everything else that can
 #: become a link survives only when its URL is, token for token, in the record (D20).
+#: Every alternative's scan is bounded (R2SEC-1): a label or alt stops at the next
+#: `[`, an autolink at the next `<`, a comment at the next `<!--`, and a fence is a
+#: block that opens and closes at the start of a line, as marked's does — so an
+#: answer of 40 000 `[` (measured: 14 s per pass before) or `<!--` costs one pass,
+#: not its square. `re` holds the GIL for a whole search, so running this in a
+#: worker thread does not protect the event loop; the bounds do.
 #: The "code" alternative matches ANY backtick-delimited span, not just a single
 #: backtick: it has to recognize the multi-backtick spans `_code()` itself emits, or a
 #: second `rewrite_links` pass would re-scan and mangle its own output (SB-2). "html"
@@ -59,15 +72,27 @@ _NUMERIC_REF_RE = re.compile(
 #: punctuation character is literal to marked (CommonMark), so ``\[`` never opens a
 #: link and ``\``` never opens a code span — reading them otherwise would make the
 #: second pass disagree with the first about what the text contains.
+#:
+#: "fence" and "code" match a MAXIMAL backtick run at both the opener and the closer
+#: (RS-1): a greedy opener paired with a *lazy* backreference is quadratic — a line of
+#: strictly shrinking backtick runs made it cost roughly 1e9 regex steps, synchronously
+#: — and marked itself only ever pairs maximal runs of equal length, so this is not a
+#: behaviour change, only a performance one. The opener's lookbehind,
+#: ``(?<!(?<!\\)`)``, reads as "not preceded by a backtick that is itself unescaped":
+#: marked's own tokenizer consumes a ``\``` escape first and starts looking for a code
+#: span fresh at the next position, so a backtick directly after one must still be
+#: allowed to open (``\``https://x` `` is an escaped stray backtick followed by a real
+#: one-backtick span). The closer stays a plain ``(?<!`)...(?!`)``: backslash escapes
+#: are not read inside an already-open code span.
 _MD_SPAN_RE = re.compile(
     r"(?P<escape>\\[!-/:-@\[-`{-~])"
-    r"|(?P<fence>(?P<ticks>`{3,})[\s\S]*?(?P=ticks))"
-    r"|(?P<code>(?P<cticks>`+)[^\n]*?(?P=cticks))"
+    r"|(?P<fence>^[ ]{0,3}(?P<ticks>`{3,})(?!`)[\s\S]*?^[ ]{0,3}(?P=ticks)`*[ \t]*$)"
+    r"|(?P<code>(?<!(?<!\\)`)(?P<cticks>`+)(?!`)[^\n]*?(?<!`)(?P=cticks)(?!`))"
     r"|(?P<refdef>^[ ]{0,3}(?:>[ ]?)*[ ]{0,3}(?:[-*+][ ]+|\d{1,9}[.)][ ]+)?\[[^\]\n]+\]:[^\n]*)"
-    r"|(?P<image>!\[(?P<alt>[^\]\n]*)\]\((?P<idest>(?:[^()\n]|\([^()\n]*\))*)\))"
-    r"|(?P<link>\[(?P<ltext>[^\]\n]*)\]\((?P<ldest>(?:[^()\n]|\([^()\n]*\))*)\))"
-    r"|(?P<auto><(?P<adest>[A-Za-z][A-Za-z0-9+.-]*:[^>\s]*)>)"
-    r"|(?P<html><!--[\s\S]*?-->|</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?>)",
+    r"|(?P<image>!\[(?P<alt>[^\[\]\n]*)\]\((?P<idest>(?:[^()\n]|\([^()\n]*\))*)\))"
+    r"|(?P<link>\[(?P<ltext>[^\[\]\n]*)\]\((?P<ldest>(?:[^()\n]|\([^()\n]*\))*)\))"
+    r"|(?P<auto><(?P<adest>[A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>)"
+    r"|(?P<html><!--(?:(?!<!--)[\s\S])*?-->|</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?>)",
     re.MULTILINE,
 )
 #: A markdown link destination: optional angle brackets, then an optional title.
@@ -79,13 +104,19 @@ _LINK_DEST_RE = re.compile(r"""^\s*<?([^<>\s]*)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*$
 #: `normalize_url_token`, and stays https/http-only and case-sensitive — it is a
 #: different regex, not reused here.
 _ANSWER_URL_RE = re.compile(r'(?:https?|ftp)://[^\s<>"`\\]+', re.IGNORECASE)
-#: GFM autolinks a bare `www.` host as well as a scheme.
-_WWW_RE = re.compile(r"(?<![\w/.@-])www\.[^\s<>`]+")
+#: GFM autolinks a bare `www.` host as well as a scheme, case-insensitively and with
+#: no preceding-character requirement at all (RS-6) — a leading `_ANSWER_URL_RE` match
+#: already consumes any `www.` that follows a scheme, so this only ever sees the
+#: leftover plain text and a lookbehind here was never load-bearing.
+#: The tail stops at a backslash too: `_escape_backtick` runs first, and a tail that
+#: swallowed its backslash would orphan the escaped backtick after the code span.
+_WWW_RE = re.compile(r"www\.[^\s<>`\\]+", re.IGNORECASE)
 #: GFM also autolinks a bare e-mail address (as `mailto:`); the lookbehind keeps this
-#: from firing mid-word or inside a URL's own path.
+#: from firing mid-word or inside a URL's own path. Domain labels may contain `_`
+#: (RS-6) — GFM's own extended-email autolink does, even though it is not valid DNS.
 _EMAIL_RE = re.compile(
-    r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
-    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
+    r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
+    r"(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?)+"
 )
 _BACKTICKS_RE = re.compile(r"`+")
 
@@ -95,17 +126,24 @@ def _strip_ref_if_private_use(match: re.Match) -> str:
     return "" if 0xE000 <= value <= 0xF8FF else match.group()
 
 
+#: Passes of the reference fixpoint before `strip_private_use` gives up on nesting.
+_STRIP_PASSES = 8
+
+
 def strip_private_use(text: str) -> str:
     """Remove every private-use code point, literal or numerically referenced
     (SEC-2: ``&#57344;``/``&#xE000;`` decode into one in a browser)."""
     # Literal code points first, then references until nothing changes: removing
     # either can join what surrounded it into a new reference (``&#&#xE000;57344;``).
     text = _PRIVATE_USE_RE.sub("", text)
-    while True:
+    for _ in range(_STRIP_PASSES):
         stripped = _NUMERIC_REF_RE.sub(_strip_ref_if_private_use, text)
         if stripped == text:
             return text
         text = stripped
+    # Still changing after the cap: references nested that deep are adversarial, so
+    # none survives — the text can only get shorter, and no reference can be rebuilt.
+    return text.replace("&#", "")
 
 
 def display_cited_text(raw: object, label: str | None) -> str:
@@ -266,21 +304,44 @@ def _keep(found: list[str], url: str) -> None:
 
 
 def _escape_bang(text: str) -> str:
-    """``![`` reads as an image opener to marked wherever it lands, even in text
-    this module only meant as a label or trailing punctuation; escape it so a
-    rewritten answer can never accidentally form an image (SB-4)."""
-    return text.replace("![", "!\\[")
+    """Escape every square bracket in plain text — one that did not open a link or
+    an image this module parsed — so nothing rewritten can pair into one later
+    (SB-4): ``![`` can no longer open an image, and leftovers such as ``[`` …
+    ``](<url>)`` cannot join into a link on the second pass, which would also break
+    idempotence. A stray bracket renders the same escaped or not."""
+    return text.replace("[", "\\[").replace("]", "\\]")
+
+
+def _unescaping(prefix: str) -> str:
+    """The backslash that keeps a code span emitted right after ``prefix`` opening, or
+    "" (R2SEC-4): an odd run of backslashes at the end of ``prefix`` would escape the
+    span's opening backtick, so the span never opens and its URL stays live."""
+    trailing = len(prefix) - len(prefix.rstrip("\\"))
+    return "\\" if trailing % 2 else ""
+
+
+def _escape_backtick(text: str) -> str:
+    """A literal backtick in a plain-text chunk is escaped so it can never pair with
+    a code span this module emits next to it (RS-2). Padding with a space instead
+    does not work: an odd number of literal backticks before the span still lets
+    marked pair the outermost stray one with the span's own opener, so the URL stays
+    live. An escaped backtick is inert to marked (CommonMark) and the ``escape``
+    alternative of ``_MD_SPAN_RE`` passes it through unchanged on a later pass, so a
+    span this module emits only ever pairs with itself."""
+    return text.replace("`", "\\`")
 
 
 def _neutralize_plain(text: str) -> str:
     """A plain-text chunk between two URL matches: bare ``www.`` hosts and e-mail
-    addresses (both autolinked by GFM) are coded, and ``![`` is escaped (PA1-9,
-    SB-4). Never applied to text this module already generated — a code span or a
-    ``<url>`` autolink must never be re-scanned, which is what keeps a second
-    ``rewrite_links`` pass idempotent (SB-2)."""
+    addresses (both autolinked by GFM) are coded, square brackets are escaped (PA1-9, SB-4),
+    and every literal backtick is escaped (RS-2). Never applied to text this module
+    already generated — a code span, a ``<url>`` autolink or an escape must never be
+    re-scanned, which is what keeps a second ``rewrite_links`` pass idempotent
+    (SB-2)."""
     text = _escape_bang(text)
-    text = _WWW_RE.sub(lambda m: _code(m.group()), text)
-    return _EMAIL_RE.sub(lambda m: _code(m.group()), text)
+    text = _escape_backtick(text)
+    text = _WWW_RE.sub(lambda m: _unescaping(m.string[: m.start()]) + _code(m.group()), text)
+    return _EMAIL_RE.sub(lambda m: _unescaping(m.string[: m.start()]) + _code(m.group()), text)
 
 
 def _peel_emphasis(token: str, allowed: frozenset[str]) -> str:
@@ -320,7 +381,7 @@ def _rewrite_bare(
             out.append(f"<{chosen}>" if bracket else chosen)
             _keep(found, chosen)
         elif token:
-            out.append(_code(token))
+            out.append(_unescaping(out[-1]) + _code(token))
         out.append(_escape_bang(raw[len(chosen) :]))
         pos = match.end()
     out.append(_neutralize_plain(text[pos:]))
@@ -393,7 +454,13 @@ def _rewrite(text: str, allowed: frozenset[str], found: list[str], *, bracket: b
             else:
                 out.append(_code(dest))
         else:
-            out.append(_code(match.group()))
+            # "html" is the only remaining branch, and its comment alternative is the
+            # only one that can span multiple lines. `_code()` fences it as a single
+            # backtick run, which the "code" alternative of `_MD_SPAN_RE` can only
+            # recognize again on a later pass if the content has no newline in it
+            # (RS-3) — a multi-line span left as-is also splits the paragraph in
+            # marked, exposing a bare URL inside the comment as a live autolink.
+            out.append(_code(match.group().replace("\n", " ")))
         pos = match.end()
     out.append(_rewrite_bare(text[pos:], allowed, found, bracket=bracket))
     return "".join(out)
@@ -495,16 +562,23 @@ def outcome_from_final(final: Any, *, record: ChatRecord, requested_model: str) 
         segments.append(Segment(text=strip_private_use(getattr(block, "text", "") or ""), cites=cites))
     allowed_links: list[str] = []
     for segment in segments:
-        segment.text, kept = rewrite_links(segment.text, record.url_tokens)
+        rewritten, kept = rewrite_links(segment.text, record.url_tokens)
+        # rewrite_links can itself assemble a private-use reference (an emptied link
+        # destination can splice two halves of one back together), so strip again
+        # after rewriting, not just before (RSEC-2/RSEC-4).
+        segment.text = strip_private_use(rewritten)
         for url in kept:
             _keep(allowed_links, url)
     joined = "".join(segment.text for segment in segments)
-    # A construct (a link, a URL) can be split across the citation boundary the API
-    # drew between two text blocks, invisible to each segment's own rewrite. Run the
-    # joined text back through rewrite_links; if that changes anything, joining made
-    # something no single segment showed, and the only fail-closed answer is to
-    # collapse to one segment so nothing can straddle a boundary again (SB-2).
-    rejoined, rejoined_kept = rewrite_links(joined, record.url_tokens)
+    # A construct (a link, a URL, a private-use reference) can be split across the
+    # citation boundary the API drew between two text blocks, invisible to each
+    # segment's own strip-then-rewrite-then-strip. Run the same three steps on the
+    # joined text; if that changes anything, joining made something no single segment
+    # showed, and the only fail-closed answer is to collapse to one segment so
+    # nothing can straddle a boundary again (SB-2/RS-4).
+    prejoined = strip_private_use(joined)
+    rejoined, rejoined_kept = rewrite_links(prejoined, record.url_tokens)
+    rejoined = strip_private_use(rejoined)
     answer_text = joined
     if rejoined != joined:
         logger.warning(

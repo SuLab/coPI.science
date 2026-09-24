@@ -116,6 +116,28 @@ def test_the_chat_script_carries_the_b1_and_sec_fixes():
     assert "if (state.open) {" in open_drawer
 
 
+def test_the_chat_script_accepts_only_its_own_citation_markers():
+    js = JS.read_text(encoding="utf-8")
+    # RSEC-1/RSEC-2: a real marker carries a per-page random nonce the model never
+    # sees; anything else private-use in the rendered text is dropped.
+    assert "window.crypto.getRandomValues(" in js
+    assert "MARK_OPEN + MARK_NONCE + String(n) + MARK_CLOSE" in js
+    place = js.split("function placeCitations(root, turnKey)", 1)[1].split("\n  }\n", 1)[0]
+    assert "markerNumber(part)" in place
+    assert "PRIVATE_USE_ALL" in place
+    # RSEC-1: the private marked instance never enters marked's raw-block state.
+    assert "inRawBlock: false" in js
+    # R2SEC-2: no attribute but href survives sanitizing, so a marker cannot hide
+    # in a title tooltip.
+    assert 'ALLOWED_ATTR: ["href"],' in js
+    # RSEC-3: the lock's bounded wait has a message.
+    assert "busy:" in js
+    # RS-5/RS-7: a stale failure paints nothing; a terminal refusal stops polling.
+    load = js.split("async function loadHistory()", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (stale()) {" in load
+    assert "TERMINAL_CODES[code]" in load
+
+
 def test_the_chat_script_names_no_route():
     """URLs come from window.ASSESSMENT_CHAT only; a path literal here would be a
     second, unchecked copy of the routes."""

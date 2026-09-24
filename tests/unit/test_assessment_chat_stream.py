@@ -1,6 +1,7 @@
 """Consuming one chat answer (spec §5.4-§5.7) against FakeAsyncAnthropic."""
 
 import logging
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -432,6 +433,18 @@ def test_an_image_label_bang_is_escaped_so_no_image_can_form():
         "[x](https://attacker.example/a`b)",
         "``https://attacker.example/a`b``",
         "Run `curl https://attacker.example/x` or\n```\nhttps://attacker.example/y\n```",
+        # RS-2: a stray backtick escaped directly against this module's own span —
+        # the addendum's own worked examples for the opener lookbehind.
+        "\\``https://evil.com`",
+        "x\\``https://evil.com`",
+        # RS-3: a multi-line HTML comment, with and without a blank line inside.
+        "<!--\nhttps://evil.com\n-->",
+        "<!--\n\nhttps://evil.com\n\n-->",
+        # RS-6: the widened www/e-mail autolink shapes.
+        "WWW.evil.com",
+        "www.evil.com`x",
+        "-www.evil.com",
+        "a@b_c.com",
     ],
 )
 def test_rewrite_links_is_idempotent(text):
@@ -447,8 +460,9 @@ def test_backslash_escapes_are_read_as_marked_reads_them():
     text, kept = rewrite_links("\\`https://attacker.example/x\\`", ALLOWED)
     assert text == "\\``https://attacker.example/x`\\`"
     assert kept == []
+    # (the stray "]" is escaped too: plain-text brackets never survive unescaped)
     text, kept = rewrite_links("\\[x](https://attacker.example/y)", ALLOWED)
-    assert text == "\\[x](`https://attacker.example/y`)"
+    assert text == "\\[x\\](`https://attacker.example/y`)"
     assert kept == []
 
 
@@ -497,3 +511,165 @@ def test_strip_private_use_removes_numeric_references():
     assert strip_private_use("marker &#0057344; end") == "marker  end"
     # Not private-use, and not touched.
     assert strip_private_use("&amp; &#65; &#x41;") == "&amp; &#65; &#x41;"
+
+
+# --- RS-1: fence/code must not be quadratic --------------------------------------
+
+
+def test_a_line_of_shrinking_backtick_runs_does_not_blow_up():
+    # 310 strictly shrinking ticks runs, ~48k characters: quadratic behaviour from a
+    # greedy opener paired with a lazy backreference cost ~1e9 regex steps here.
+    text = "".join("`" * n + "a" for n in range(310, 0, -1))
+    start = time.perf_counter()
+    once, _ = rewrite_links(text, ALLOWED)
+    assert time.perf_counter() - start < 2.0
+    twice, _ = rewrite_links(once, ALLOWED)
+    assert twice == once
+
+
+# --- RS-2: a stray backtick next to an emitted span is escaped, not paired -------
+
+
+def test_scenario_a_one_tick_before_two_after_an_inert_url():
+    text, kept = rewrite_links("`https://evil.com``", ALLOWED)
+    assert text == "\\``https://evil.com`\\`\\`"
+    assert kept == []
+    twice, _ = rewrite_links(text, ALLOWED)
+    assert twice == text
+
+
+def test_scenario_b_one_tick_before_an_inert_url_none_after():
+    text, kept = rewrite_links("x`https://evil.com", ALLOWED)
+    assert text == "x\\``https://evil.com`"
+    assert kept == []
+    twice, _ = rewrite_links(text, ALLOWED)
+    assert twice == text
+
+
+def test_scenario_c_an_escaped_opener_and_a_stray_closer():
+    text, kept = rewrite_links("\\`https://evil.com`", ALLOWED)
+    assert text == "\\``https://evil.com`\\`"
+    assert kept == []
+    twice, _ = rewrite_links(text, ALLOWED)
+    assert twice == text
+
+
+# --- RS-3: a multi-line HTML comment is coded as a single-line span -------------
+
+
+def test_a_multiline_html_comment_is_flattened_to_one_line_before_coding():
+    text, kept = rewrite_links("<!--\nhttps://evil.com\n-->", ALLOWED)
+    assert text == "`<!-- https://evil.com -->`"
+    assert kept == []
+    twice, _ = rewrite_links(text, ALLOWED)
+    assert twice == text
+
+
+def test_a_multiline_html_comment_with_a_blank_line_stays_one_code_span():
+    text, kept = rewrite_links("<!--\n\nhttps://evil.com\n\n-->", ALLOWED)
+    assert text == "`<!--  https://evil.com  -->`"
+    # Exactly one pair of delimiters: the URL never lands outside a code span.
+    assert text.count("`") == 2
+    twice, _ = rewrite_links(text, ALLOWED)
+    assert twice == text
+
+
+# --- RS-6: match marked's own www./e-mail autolink rules ------------------------
+
+
+def test_www_autolink_is_case_insensitive_at_the_start_of_a_line():
+    text, kept = rewrite_links("WWW.evil.com", ALLOWED)
+    assert text == "`WWW.evil.com`"
+    assert kept == []
+
+
+def test_a_dash_immediately_before_www_no_longer_blocks_the_autolink():
+    text, kept = rewrite_links("See -www.evil.com now", ALLOWED)
+    assert text == "See -`www.evil.com` now"
+    assert kept == []
+
+
+def test_an_email_domain_label_may_contain_an_underscore():
+    text, kept = rewrite_links("Contact a@b_c.com now", ALLOWED)
+    assert text == "Contact `a@b_c.com` now"
+    assert kept == []
+
+
+# --- RSEC-2/RSEC-4/RS-4: private-use stripping survives the rewrite pass --------
+
+
+async def test_an_emptied_link_destination_cannot_reassemble_a_private_use_reference():
+    # rewrite_links drops the empty "()" and splices the label directly against the
+    # trailing text, reforming "&#xE000;" — a value that decodes into the drawer's
+    # own citation-marker range.
+    script = ChatScript(segments=[("[&#xE0]()00;", [])])
+    _, final, _, record = await _run(script)
+    outcome = outcome_from_final(final, record=record, requested_model=MODEL)
+    assert chr(0xE000) not in outcome.answer_text
+    assert "&#xE000;" not in outcome.answer_text
+    assert "&#" not in outcome.answer_text
+    for segment in outcome.segments:
+        assert chr(0xE000) not in segment["text"]
+        assert "&#" not in segment["text"]
+
+
+async def test_a_private_use_reference_split_across_two_uncited_segments_is_stripped():
+    script = ChatScript(
+        segments=[("x&#573", []), ("44;7", []), ("tail", [citation(1, 0)])]
+    )
+    _, final, _, record = await _run(script)
+    outcome = outcome_from_final(final, record=record, requested_model=MODEL)
+    assert outcome.answer_text == "x7tail"
+    assert chr(0xE000) not in outcome.answer_text
+    for segment in outcome.segments:
+        assert chr(0xE000) not in segment["text"]
+        assert "&#" not in segment["text"]
+
+
+def test_a_www_host_next_to_a_backtick_keeps_the_backtick_escaped():
+    # The escaped backtick must stay outside the code span, or the span's closer
+    # merges with it and marked reads the host as live text.
+    text, _ = rewrite_links("www.evil.com`x", ALLOWED)
+    assert text == "`www.evil.com`\\`x"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[" * 40000,             # a label scan used to run to the end of the line
+        "<!--" * 10000,          # a comment scan used to run to the end of the text
+        "<a:" * 13000,           # an autolink scan used to run past every `<`
+        "`````\n````\n```\n" * 2000,  # fence openers that never close
+    ],
+)
+def test_the_rewrite_stays_fast_on_pathological_answers(text):
+    # Measured 14.2 s / 4.3 s / 4.9 s per pass before the bounds (R2SEC-1). `re`
+    # holds the GIL for the whole search, so a worker thread would not have saved
+    # the event loop.
+    start = time.perf_counter()
+    once, _ = rewrite_links(text, ALLOWED)
+    assert time.perf_counter() - start < 2.0
+    assert rewrite_links(once, ALLOWED)[0] == once
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("\\https://attacker.example/x", "\\\\`https://attacker.example/x`"),
+        ("\\www.attacker.example", "\\\\`www.attacker.example`"),
+        ("\\a@b.com", "\\\\`a@b.com`"),
+    ],
+)
+def test_a_backslash_never_escapes_an_emitted_code_span(text, expected):
+    # An odd run of backslashes before the span would escape its opening backtick
+    # and leave the URL live (R2SEC-4); one more makes it an escaped backslash.
+    once, _ = rewrite_links(text, ALLOWED)
+    assert once == expected
+    assert rewrite_links(once, ALLOWED)[0] == once
+
+
+def test_nesting_past_the_strip_cap_leaves_no_reference():
+    text = "&#xE000;"
+    for _ in range(20):
+        text = "&#xE0" + text + "00;"
+    assert "&#" not in strip_private_use(text)

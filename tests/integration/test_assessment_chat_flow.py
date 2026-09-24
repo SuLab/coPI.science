@@ -284,6 +284,30 @@ async def test_an_unpriced_model_is_refused_before_any_call_or_row(
 # --- limits -----------------------------------------------------------------
 
 
+async def test_a_question_committed_while_waiting_for_the_lock_is_counted(
+    client, db_session, install_llm, monkeypatch
+):
+    # Another ask of this user's commits between the unlocked head-start check and
+    # the lock (R2SEC-3): the count read under the lock must see it.
+    fake = install_llm()
+    aid, user_id, headers, _ = await _setup(db_session)
+    db_session.add_all(
+        [_ledger_row(user_id, age=timedelta(hours=23 - i * 0.2), usage=[]) for i in range(99)]
+    )
+    await db_session.flush()
+    take = chat._take_spend_lock
+
+    async def racing_take(db):
+        db.add(_ledger_row(user_id, age=timedelta(seconds=1), usage=[]))
+        await db.flush()
+        await take(db)
+
+    monkeypatch.setattr(chat, "_take_spend_lock", racing_take)
+    resp = await client.post(ask_url(aid), json={"question": "q"}, headers=headers)
+    assert (resp.status_code, resp.json()["error"]) == (429, "daily_limit")
+    assert fake.calls == []
+
+
 async def test_the_101st_question_is_refused_even_after_clear(client, db_session, install_llm):
     fake = install_llm()
     aid, user_id, headers, _ = await _setup(db_session)
@@ -345,6 +369,28 @@ async def test_a_second_question_while_one_is_in_flight_is_409(client, db_sessio
     script.release.set()
     assert parse_sse((await first).text)[-1][0] == "done"
     assert len(fake.calls) == 1
+
+
+async def test_the_in_flight_refusal_is_the_early_check_and_never_takes_the_lock(
+    client, db_session, install_llm, monkeypatch
+):
+    # RSEC-3: a repeat click is refused before the spend lock is ever taken, so it
+    # can never queue behind another ask holding it.
+    script = _paused()
+    fake = install_llm(script, ChatScript())
+    aid, _, headers, _ = await _setup(db_session)
+    first = asyncio.create_task(client.post(ask_url(aid), json={"question": "Q1"}, headers=headers))
+    await asyncio.wait_for(script.paused.wait(), 10)
+
+    async def _must_not_be_called(db):
+        raise AssertionError("a repeat click must be refused before the lock is taken")
+
+    monkeypatch.setattr(chat, "_take_spend_lock", _must_not_be_called)
+    second = await client.post(ask_url(aid), json={"question": "Q2"}, headers=headers)
+    assert (second.status_code, second.json()) == (409, {"error": "answer_in_progress"})
+    script.release.set()
+    assert parse_sse((await first).text)[-1][0] == "done"
+    assert len(fake.calls) == 1  # the second ask never reached the model either
 
 
 @pytest.mark.parametrize("route", ["history", "ask", "clear"])
@@ -418,6 +464,24 @@ async def test_an_answer_that_outlives_the_sweep_is_dropped_but_its_usage_is_kep
     assert (turn.status, turn.answer_text) == ("interrupted", "")
     [row] = await _ledger(db_session, user_id)
     assert (row.status, row.input_tokens) == ("complete", 1200)
+
+
+async def test_a_stuck_lock_holder_degrades_the_asker_to_busy(
+    client, db_session, engine, install_llm, monkeypatch
+):
+    # RSEC-3: the lock's wait is bounded. The holder must be a SEPARATE connection —
+    # Postgres advisory locks are re-entrant only within one session, so taking the
+    # lock again on db_session's own connection would just succeed at once rather
+    # than reproduce a stuck holder.
+    monkeypatch.setattr(chat, "SPEND_LOCK_WAIT_SECONDS", 0.2)
+    fake = install_llm()
+    aid, _, headers, _ = await _setup(db_session)
+    async with engine.connect() as holder:
+        await holder.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": chat._SPEND_LOCK_KEY})
+        resp = await client.post(ask_url(aid), json={"question": "q"}, headers=headers)
+        assert (resp.status_code, resp.json()) == (503, {"error": "busy"})
+        await holder.rollback()  # releases the advisory lock
+    assert fake.calls == []
 
 
 async def test_a_full_conversation_is_409(client, db_session, install_llm, monkeypatch):

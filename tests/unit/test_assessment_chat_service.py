@@ -190,3 +190,30 @@ def test_chat_error_carries_its_extras():
     assert (err.status, err.code, err.extra) == (
         429, "daily_limit", {"resets_at": "2026-09-25T10:00:00+00:00"},
     )
+
+
+class _FakeLockDB:
+    """A db stand-in whose `scalar` always answers the same way (RSEC-3)."""
+
+    def __init__(self, granted: bool) -> None:
+        self._granted = granted
+        self.calls = 0
+
+    async def scalar(self, *args, **kwargs):
+        self.calls += 1
+        return self._granted
+
+
+async def test_take_spend_lock_gives_up_after_the_bound(monkeypatch):
+    monkeypatch.setattr(chat, "SPEND_LOCK_WAIT_SECONDS", 0.2)
+    db = _FakeLockDB(granted=False)
+    with pytest.raises(chat.ChatError) as caught:
+        await chat._take_spend_lock(db)
+    assert (caught.value.status, caught.value.code) == (503, "busy")
+    assert db.calls > 1  # it polled more than once before giving up
+
+
+async def test_take_spend_lock_returns_at_once_when_granted():
+    db = _FakeLockDB(granted=True)
+    await chat._take_spend_lock(db)
+    assert db.calls == 1

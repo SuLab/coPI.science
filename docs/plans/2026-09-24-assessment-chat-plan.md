@@ -8053,3 +8053,47 @@ finding:
 - SW-13: JS and Python `trim` differ. The only effect is harmless.
 - A cited segment ending in a blank line puts its marker in its own paragraph. Moving the
   marker would risk breaking fences and tables.
+
+**Second fix round (after re-auditing the first).**
+
+- RSEC-1, RSEC-2 and RS-4: citation markers could still be forged.
+  - Route 1: after a `<code>`, `<pre>`, `<kbd>` or `<script>` tag, marked 12 emits the text that follows unescaped. That lets `&\#xE000;` decode after all. This was reproduced in a real browser.
+  - Route 2: a numeric reference split across two uncited segments.
+  - Fixes in the drawer:
+    - Its markers carry a random per-page nonce.
+    - Any other private-use character is dropped from the rendered text.
+    - Its private marked instance never enters the raw-block state.
+  - Fix on the server: stripping now runs both before and after `rewrite_links`, per segment and on the joined text.
+- RSEC-3: the ceiling lock serialized every ask. Asks now take it in a new order:
+  1. The stale sweep commits on its own.
+  2. The in-flight check, the conversation and daily limits, and the record build all run unlocked.
+  3. The lock is taken with a bounded wait (`pg_try_advisory_xact_lock`, up to 5 s, then 503 `busy`). It covers only the two dollar checks and the insert.
+- RS-1: the backtick alternatives were quadratic. They now match maximal runs at both ends, and `outcome_from_final` runs in a worker thread.
+- RS-2: a stray literal backtick in plain text could merge with an emitted code span. It is now escaped, so each span pairs only with itself.
+- RS-3: a multi-line HTML comment is now coded as one line.
+- RS-6: `www.` matching is case-insensitive with no lookbehind, and `_` is allowed in e-mail domains.
+- RS-5 and RS-7 (drawer):
+  - A stale history failure no longer paints over a live answer.
+  - A refusal that would only repeat stops the poll.
+  - A malformed JSON body is handled.
+
+**Third pass (after a security review of the second).**
+
+- **R2SEC-1:** three regex alternatives were still quadratic. Per pass, measured before and after:
+
+  | Input | Before | After |
+  |---|---|---|
+  | 40 000 `[` | 14.2 s | 0.013 s |
+  | `<!--` × 10 000 | 4.3 s | 0.010 s |
+  | `<a:` × 13 000 | 4.9 s | 0.011 s |
+
+  `re` holds the GIL for a whole search, so moving the work to a worker thread would not have protected the event loop. The fixes:
+  - Every alternative's scan is now bounded: labels stop at the next `[`, autolinks at the next `<`, comments at the next `<!--`.
+  - Fences are line-anchored blocks, as marked's are.
+  - The reference-strip fixpoint is capped at 8 passes on both layers. Past the cap, no reference survives.
+- **R2SEC-2:** `title` is no longer an allowed attribute. A title spanning a citation boundary could carry a marker, nonce included, into a tooltip.
+- **R2SEC-3:** the conversation length and the daily question count are now also re-read under the spend lock. Before, a concurrent ask of the same user's could slip one question past either cap.
+- **R2SEC-4:** fixed three places where a neutralized link could still come out wrong:
+  - a code span emitted after an odd run of backslashes gets one more backslash, so its opening backtick is never escaped;
+  - stray square brackets in plain text are escaped, so leftover `[`…`](<url>)` fragments cannot re-form a link on the second pass;
+  - fences must start a line.

@@ -830,23 +830,27 @@ and get short, cited, streamed answers from `claude-opus-5-5`
   history (`HISTORY_REPLAY_MAX_CHARS`); a 240 s deadline (`DEADLINE_SECONDS`);
   `streaming` rows older than 300 s swept to `interrupted` by the next chat request of
   any user (`STALE_AFTER_SECONDS`); and `max_tokens` 12 000, a literal in
-  `build_request` for the non-streaming scan. One answer in flight per user (a partial
-  unique index); every ask takes a transaction-scoped advisory lock before its checks,
-  so concurrent asks cannot all pass the $100 ceiling together.
+  `build_request` for the non-streaming scan. One answer in flight per user (refused
+  before anything else, and enforced by a partial unique index). Only the two dollar
+  checks and the insert run under a transaction-scoped advisory lock, so concurrent
+  asks cannot all pass the $100 ceiling together; an ask that cannot take it within
+  5 s (`SPEND_LOCK_WAIT_SECONDS`) is refused 503 `busy`.
 - **Links (D20).** A link in an answer is clickable only if its URL is, token for token,
   one the record quotes. The server stores such a bare URL as a `<…>` autolink and turns
   every other URL, e-mail address, raw HTML tag and reference definition into inline
   code; the drawer keeps an `<a>` only when its href EXACTLY equals an allowed URL or
   marked's own encoding of it (nothing is decoded), renders raw HTML as text, and
-  strips forged citation markers (literal or `&#…;`) before adding its own. A link that
+  marks citations with a random per-page nonce the model never sees, so no text it
+  writes can forge one. A link that
   spans a citation boundary makes the server merge that answer's citations into one
   segment (one WARNING, `a link spanned a citation boundary`).
 - **Refusals**, in order, all JSON `{"error": code}` with `no-store`: an impersonated
   session (403 `impersonating`), a role other than admin/manager/reviewer (403
   `forbidden`), the kill switch (503 `disabled`), an unknown or malformed id (404
-  `not_found`), a POST that is not JSON (415). On shutdown the web process waits up to 8 s for answers still being
-  written (`drain_live_tasks`, via `create_app`'s lifespan); anything longer is swept
-  to `interrupted` later.
+  `not_found`), a POST that is not JSON (415); then the ask's own checks (the limits
+  above, and 503 `busy` for the ceiling lock). On shutdown the web process waits up to
+  8 s for answers still being written (`drain_live_tasks`, via `create_app`'s
+  lifespan); anything longer is swept to `interrupted` later.
 - **Streaming through org1's nginx.** Answers are SSE with `X-Accel-Buffering: no` and
   a `: ping` every 15 s, because the blackbird vhost buffers proxied responses and ends
   a read after 120 s of silence (`/home/ubuntu/copi-python/nginx/nginx.conf`, org1's

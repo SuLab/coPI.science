@@ -20,13 +20,21 @@
     return;
   }
 
-  // Citation markers: two private-use code points. The server strips that whole
-  // range from model text (spec §5.5), so the model cannot forge one — and
-  // markdownFor strips it again client-side (SEC-2), because the range the
-  // server scrubs is the finalized-answer path only; a streamed frame is raw.
+  // Citation markers: two private-use code points around a per-page random nonce
+  // and the citation number (RSEC-1/RSEC-2). The server strips private-use code
+  // points and references to them from model text (spec §5.5), and markdownFor
+  // strips them again, but neither can see every way marked may reassemble one
+  // (an escape after a raw-block tag, a reference split across two segments).
+  // The model never sees the nonce, so no text it writes can produce a marker
+  // placeCitations accepts; any other private-use character left in the rendered
+  // text is removed there.
   const MARK_OPEN = String.fromCharCode(0xE000);
   const MARK_CLOSE = String.fromCharCode(0xE001);
-  const MARK_SPLIT = new RegExp("(" + MARK_OPEN + "\\d+" + MARK_CLOSE + ")");
+  const MARK_NONCE = makeNonce();
+  const MARK_SPLIT = new RegExp("(" + MARK_OPEN + MARK_NONCE + "\\d+" + MARK_CLOSE + ")");
+  const PRIVATE_USE_CLASS = "[" + MARK_OPEN + "-" + String.fromCharCode(0xF8FF) + "]";
+  const PRIVATE_USE_ANY = new RegExp(PRIVATE_USE_CLASS);
+  const PRIVATE_USE_ALL = new RegExp(PRIVATE_USE_CLASS, "g");
   // A thin space between a segment's text and its citation markers (B1). Without
   // it, marked's GFM autolink swallows the markers onto a bare URL's href, and
   // inside "**bold**" text the closing "**" no longer closes, leaving literal
@@ -40,7 +48,10 @@
 
   const PURIFY = {
     ALLOWED_TAGS: ["p", "br", "strong", "em", "b", "i", "code", "pre", "blockquote", "ul", "ol", "li", "a", "h1", "h2", "h3", "h4", "hr", "table", "thead", "tbody", "tr", "th", "td"],
-    ALLOWED_ATTR: ["href", "title"],
+    // No `title` (R2SEC-2): a link title spanning a citation boundary would carry a
+    // citation marker — nonce included — into a tooltip, where placeCitations
+    // (which walks text nodes only) never sees it.
+    ALLOWED_ATTR: ["href"],
     ALLOWED_URI_REGEXP: /^https:/i,
     ALLOW_DATA_ATTR: false,
     ALLOW_ARIA_ATTR: false
@@ -68,6 +79,7 @@
     timeout: "The answer took too long and was stopped.",
     empty_answer: "The model returned no answer. Try rephrasing.",
     storage_error: "The answer could not be saved. Try again.",
+    busy: "The chat is busy. Try again in a moment.",
     session_ended: "Your session has ended — reload the page.",
     network: "The connection was lost. Reopen the chat to see whether the answer was saved.",
     unknown: "Something went wrong. Try again."
@@ -95,6 +107,23 @@
   // (and only them — an already-inert element is left alone).
   let inertedSiblings = [];
   let mobileModalActive = false;
+
+  function makeNonce() {
+    const bytes = new Uint8Array(8);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes).map(function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+  }
+
+  // The citation number of a real marker (one carrying this page's nonce), or null.
+  function markerNumber(part) {
+    if (part.length <= MARK_NONCE.length + 2 || part.charAt(0) !== MARK_OPEN
+        || part.charAt(part.length - 1) !== MARK_CLOSE
+        || part.slice(1, 1 + MARK_NONCE.length) !== MARK_NONCE) {
+      return null;
+    }
+    const inner = part.slice(1 + MARK_NONCE.length, -1);
+    return /^\d+$/.test(inner) ? inner : null;
+  }
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -170,8 +199,10 @@
       }
     });
     // Repeat until nothing changes: removing one reference can join its
-    // neighbours into another ("&#&#xE000;57344;" becomes "&#57344;").
-    for (;;) {
+    // neighbours into another ("&#&#xE000;57344;" becomes "&#57344;"). Capped
+    // as on the server: nesting deeper than that is adversarial, and then no
+    // reference survives at all.
+    for (let pass = 0; pass < 8; pass++) {
       const next = out.replace(NCR_RE, function (match, dec, hex) {
         const value = dec !== undefined ? parseInt(dec, 10) : parseInt(hex, 16);
         return value >= PRIV_LO && value <= PRIV_HI ? "" : match;
@@ -181,6 +212,7 @@
       }
       out = next;
     }
+    return out.split("&#").join("");
   }
 
   function hostOf(href) {
@@ -198,7 +230,7 @@
       if (!cites.length) {
         return text;
       }
-      const marks = cites.map(function (n) { return MARK_OPEN + String(n) + MARK_CLOSE; }).join("");
+      const marks = cites.map(function (n) { return MARK_OPEN + MARK_NONCE + String(n) + MARK_CLOSE; }).join("");
       const gap = /\s$/.test(text) ? "" : MARK_GAP;
       return text + gap + marks;
     }).join("");
@@ -206,11 +238,16 @@
 
   function textFallback(markdown) {
     // Drop a MARK_GAP immediately before a marker first, so the fallback does
-    // not double-space where markdownFor added one.
+    // not double-space where markdownFor added one; real markers become " [n]"
+    // and any other private-use character is removed.
     return markdown
       .split(MARK_GAP + MARK_OPEN).join(MARK_OPEN)
-      .split(MARK_OPEN).join(" [")
-      .split(MARK_CLOSE).join("]");
+      .split(MARK_SPLIT)
+      .map(function (part) {
+        const n = markerNumber(part);
+        return n !== null ? " [" + n + "]" : part.replace(PRIVATE_USE_ALL, "");
+      })
+      .join("");
   }
 
   // SEC-1b: a private marked instance, built once, whose "raw HTML" renderer
@@ -228,6 +265,20 @@
     }
     const instance = new window.marked.Marked();
     instance.use({
+      tokenizer: {
+        // marked's own `tag` tokenizer switches the lexer into a raw-block state
+        // after <code>, <pre>, <kbd> or <script>, in which later text is emitted
+        // UNESCAPED, so an escaped entity decodes after all (RSEC-1, reproduced
+        // with marked 12.0.2). Raw HTML is rendered as text below, so that state
+        // is never wanted: same match, never entering it.
+        tag: function (src) {
+          const cap = this.rules.inline.tag.exec(src);
+          if (cap) {
+            return { type: "html", raw: cap[0], inLink: false, inRawBlock: false, block: false, text: cap[0] };
+          }
+          return undefined;
+        }
+      },
       renderer: {
         html: function (html) {
           return String(html)
@@ -300,7 +351,7 @@
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     while (walker.nextNode()) {
-      if (walker.currentNode.nodeValue.indexOf(MARK_OPEN) !== -1) {
+      if (PRIVATE_USE_ANY.test(walker.currentNode.nodeValue)) {
         nodes.push(walker.currentNode);
       }
     }
@@ -317,10 +368,8 @@
       const fragment = document.createDocumentFragment();
       const deferred = [];
       node.nodeValue.split(MARK_SPLIT).forEach(function (part) {
-        const inner = part.length > 2 && part.charAt(0) === MARK_OPEN && part.charAt(part.length - 1) === MARK_CLOSE
-          ? part.slice(1, -1)
-          : null;
-        if (inner !== null && /^\d+$/.test(inner)) {
+        const inner = markerNumber(part);
+        if (inner !== null) {
           const sup = el("sup");
           const link = el("a", "text-indigo-700", "[" + inner + "]");
           link.setAttribute("href", "#chat-src-" + turnKey + "-" + inner);
@@ -331,7 +380,11 @@
             fragment.appendChild(sup);
           }
         } else if (part) {
-          fragment.appendChild(document.createTextNode(part));
+          // Anything private-use that is not a real marker was forged: drop it.
+          const clean = part.replace(PRIVATE_USE_ALL, "");
+          if (clean) {
+            fragment.appendChild(document.createTextNode(clean));
+          }
         }
       });
       node.replaceWith(fragment);
@@ -465,6 +518,8 @@
     return (resp.headers.get("content-type") || "").indexOf("application/json") === 0;
   }
 
+  const TERMINAL_CODES = { session_ended: true, not_found: true, disabled: true, forbidden: true, impersonating: true };
+
   function schedulePoll() {
     if (state.poll) {
       window.clearTimeout(state.poll);
@@ -480,31 +535,44 @@
   // response (its historySeq token no longer current, or an ask() is busy).
   async function loadHistory() {
     const token = ++state.historySeq;
+    function stale() {
+      return token !== state.historySeq || state.busy;
+    }
+    // RS-5: a stale failure must not paint an error over a live answer. RS-7: a
+    // refusal that would only repeat (signed out, gone, switched off, not
+    // allowed) stops polling; anything transient keeps it going.
+    function fail(code) {
+      if (stale()) {
+        return false;
+      }
+      showError(code);
+      if (!TERMINAL_CODES[code]) {
+        schedulePoll();
+      }
+      return false;
+    }
     let resp;
     try {
       resp = await fetch(cfg.historyUrl, { credentials: "same-origin", headers: { Accept: "application/json" } });
     } catch (e) {
-      showError("network");
-      schedulePoll();
-      return false;
+      return fail("network");
     }
     if (resp.redirected) {
-      showError("session_ended");
-      schedulePoll();
-      return false;
+      return fail("session_ended");
     }
     if (!isJson(resp)) {
-      showError("unknown");
-      schedulePoll();
-      return false;
+      return fail("unknown");
     }
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      return fail("unknown");
+    }
     if (!resp.ok) {
-      showError(data.error);
-      schedulePoll();
-      return false;
+      return fail(data.error || "unknown");
     }
-    if (token !== state.historySeq || state.busy) {
+    if (stale()) {
       return false;
     }
     state.turns = data.turns || [];
@@ -754,7 +822,13 @@
       showError("unknown");
       return;
     }
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      showError("unknown");
+      return;
+    }
     if (!resp.ok) {
       showError(data.error);
       return;
