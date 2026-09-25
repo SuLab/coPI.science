@@ -3,11 +3,10 @@
 > ## ⚠️ STOP — this runbook predates the two-stack host. Read this before running any command in it.
 >
 > It was written when this repo was the only deployment on its host, and it is kept for
-> the 0023 history. **This host now runs TWO production stacks**, and several commands
-> below are actively dangerous as written:
+> the 0023 history. **This host now runs TWO production stacks**, and a command copied
+> from an older copy of this file, or from any other runbook, can hit the other one:
 >
-> * Every bare **`agent-run`** in this file refers to the *unprefixed* container, which on
->   this host belongs to the OTHER deployment (compose project `copi-python`, serving
+> * A bare **`agent-run`** is the *unprefixed* container, which on this host belongs to the OTHER deployment (compose project `copi-python`, serving
 >   copi.science). `docker stop agent-run` / `docker rm agent-run` **stops that
 >   deployment's live simulation.** This repo's container is **`blackbird-agent-run`**.
 > * Every bare **`docker compose`** resolves to `docker-compose.yml`, a *different* (dev)
@@ -15,8 +14,11 @@
 >   **`blackbird-app`**, not `app`.
 > * Never pass `--remove-orphans` — it has killed the other stack's nginx and certbot.
 >
-> Substitute those throughout, or use `scripts/migrate/run_migration.sh`, which has been
-> corrected. Current head is 0028, well past this document's target.
+> The commands below are prod-correct as of 2026-09-25; the 0023 narrative is history.
+> `scripts/migrate/run_migration.sh` now runs every in-image step in a one-off container
+> off the image you just built (`docker compose -f docker-compose.prod.yml run --rm
+> --no-deps … blackbird-app …`), never an exec into the running, old container, and takes
+> its default target from that image's `preflight.DEFAULT_TARGET`.
 
 **Audience: an operator or agent who has not done any of the analysis behind this.**
 You do not need to understand the branch to run this. You do need to follow the order,
@@ -54,8 +56,10 @@ explains *why* each step is where it is, which is what you need when a step fail
    resolves from the host to **195.35.25.84 — a public IP** via a LAN search domain. A DSN
    copied out of this runbook and run on the *host* therefore points at a stranger's
    server, not your database. Inside the container `postgres` is the compose service and is
-   correct. Always pass `--database-url` or export `DATABASE_URL`;
-   `run_migration.sh` refuses to run without one and does the `docker compose exec` for you.
+   correct. `run_migration.sh` reads the web service's own `DATABASE_URL` inside the
+   container and prints it with the password masked; a `DATABASE_URL` exported in the host
+   shell is ignored, and `--database-url` is the only override. It does the
+   `docker compose run --rm` for you.
 5. **Alembic's own output is not evidence.** "Running upgrade 0018 -> 0019" is printed
    before the transaction commits. A bad `env.py` once made all 18 migrations log success
    and then silently roll the entire chain back, leaving no `alembic_version` row at all.
@@ -105,7 +109,7 @@ They work at 0018 and at 0023, so you can also run them afterwards to compare.
 Open a psql shell in the container (no `-T` — you want a terminal):
 
 ```bash
-docker compose exec postgres psql -U copi -d copi
+docker compose -f docker-compose.prod.yml exec postgres psql -U copi -d copi
 ```
 
 ```sql
@@ -146,8 +150,8 @@ the unique constraint's, then two more). Ask the container about its
 own data directory rather than guessing the volume name on the host:
 
 ```bash
-docker compose exec -T postgres df -h /var/lib/postgresql/data
-docker compose exec -T postgres psql -U copi -d copi \
+docker compose -f docker-compose.prod.yml exec -T postgres df -h /var/lib/postgresql/data
+docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d copi \
   -c "select pg_size_pretty(pg_database_size(current_database()))"
 ```
 
@@ -204,15 +208,18 @@ Verified behaviour with a real blocker holding `AccessShareLock`: the migration 
 after ~12 s with `LockNotAvailableError`, the transaction rolled back cleanly, and
 `alembic_version` was still `0018`. **A lock timeout costs you nothing but the attempt.**
 
-If you hit it: stop the writers and re-run.
+If you hit it: stop the writers and re-run. Stop the run from `/admin/simulation` first
+(Stop drains and flushes in-process), then:
 
 ```bash
-docker stop -t 30 agent-run        # SIGTERM; -t 30 lets an in-flight LLM call finish
+docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent
 ```
 
-Do **not** use `docker rm -f` / `kill -9` on `agent-run`: SIGKILL skips the shutdown flush
-and permanently loses the in-flight turn's messages. The DB, not Slack, is the durable
-store.
+If an emergency CLI run is live (CLAUDE.md's `docker compose run` path), stop its
+container the same way, with `docker stop -t 420` and the name CLAUDE.md gives it.
+`-t 420` is the grace period CLAUDE.md sizes for the longest uninterruptible turn. Do
+**not** use `docker rm -f` / `kill -9` on the agent: SIGKILL skips the shutdown flush and
+permanently loses the in-flight turn's messages. The DB, not Slack, is the durable store.
 
 It is an environment variable, not a flag. Raise it only if you have a specific reason:
 
@@ -241,16 +248,15 @@ coexist with the constraint.
 ### Fixing them
 
 ```bash
-DSN=postgresql+asyncpg://copi:copi@postgres:5432/copi
-
 # Dry run. Runs in a READ ONLY transaction — it cannot write. Verified inert by
-# checksumming the table before and after.
-docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" app \
+# checksumming the table before and after. The one-off container uses the web
+# service's own DATABASE_URL.
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app \
   python scripts/migrate/remediate_duplicates.py
 
 # Apply. Takes SHARE ROW EXCLUSIVE on agent_messages, re-checks inside the same
 # transaction, and rolls back if any group would remain.
-docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" app \
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app \
   python scripts/migrate/remediate_duplicates.py --apply
 ```
 
@@ -277,8 +283,11 @@ run, all resolvable · `3` operational failure · `64` usage error. (`64`, not a
 
 ### 6a. Rehearse. This writes nothing.
 
+Build first (`docker compose -f docker-compose.prod.yml build blackbird-app worker`), and
+leave the old containers serving: the script runs its checks in one-off containers off
+the new image, so the running ones are never touched.
+
 ```bash
-export DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi
 ./scripts/migrate/run_migration.sh
 ```
 
@@ -355,20 +364,30 @@ both; neither blocks.
 
 Seven steps, in this order and for these reasons:
 
-1. **Container runs current code.** The `Dockerfile` does `pip install .`, baking a copy of
-   `src/` into site-packages. For `python scripts/X.py`, CPython sets `sys.path[0]` to the
-   script's directory, so `/app` is *not* on the path and `import src` resolves to the
-   baked — possibly days-old — copy. Every step passes `PYTHONPATH=/app`; this step proves
-   it worked by asserting `src.__file__ == /app/src/__init__.py` and that `Cohort` imports.
-2. **Resolve the DSN and print it** (password masked). Refuses to run without one.
+1. **The image is the one you just built.** `src/` and `alembic/` are baked into the
+   image, so every in-image step runs in a one-off container off it
+   (`docker compose -f docker-compose.prod.yml run --rm --no-deps`, with host `backups/`
+   mounted at `/app/backups`). The image's `/app/.build_info.json` commit must equal the
+   host `git rev-parse HEAD`, or the script BLOCKs and prints the build command; a
+   different dirty-file count only warns (the uncommitted `docker-compose.prod.yml` makes
+   it 1). Without `--target`, the target is the image's `preflight.DEFAULT_TARGET`, and
+   the image must carry that revision's file.
+2. **Resolve the DSN and print it** (password masked), read inside the container from the
+   web service's own `DATABASE_URL`, or from `--database-url`. Refuses a DSN with no
+   database name.
 3. **Backup**, before preflight, so a *blocked* preflight still leaves you with a dump.
-   Dumps `-Fc` inside the container, verifies the archive is readable with `pg_restore -l`
-   there, then copies it to the host and re-checks the size. A dump whose table of contents
-   cannot be read is a file, not a backup.
+   Dumps `-Fc` inside the postgres container, verifies the archive is readable with
+   `pg_restore -l` there, then copies it to the host backup directory and re-checks the
+   size. A dump whose table of contents cannot be read is a file, not a backup. Preflight
+   checks it at its `/app/backups/…` path.
 4. **Preflight.** Exit 1 stops here.
 5. **`alembic upgrade`** — one command, so the whole chain is one transaction.
-6. **Read `alembic_version` back out of the database.** See rule 5 in §0.
-7. **Postflight.**
+6. **Read `alembic_version` back out of the database.** See rule 5 in §0. An empty or
+   missing stamp is a silent rollback; a stamp unchanged from before the upgrade means
+   alembic applied nothing (a target at or behind the stamp is a no-op that exits 0).
+7. **Postflight.** If the web tier, worker or agent is still running, growth is tolerated
+   (`--allow-row-growth`, with a WARN); loss and missing tables still fail. On a FAIL the
+   script prints the restore commands for the dump it just took.
 
 If you have a verified backup the script cannot see (managed snapshots, base backup + WAL):
 
@@ -394,7 +413,7 @@ on its own — the other 12 check the schema:
  4. Every column 0019/0020/0023 adds exists, with the right type and nullability
  5. Every index 0019/0020/0021/0022 creates exists, on the right columns
  6. Constraints 0019/0022 add exist with the right definition
- 7. pi_dm_direction_enum has exactly the expected values
+ 7. Enum types created up to the target have exactly the expected values
  8. No invalid indexes (pg_index.indisvalid / indisready / indislive)
  9. No unintended NULLs in the columns the migrations declare NOT NULL
 10. No foreign-key orphans, and every FK is convalidated
@@ -436,9 +455,11 @@ Step 8 recovers what Slack still has.
 
 ### Step 8 — repair the Slack mirror mapping
 
+Only needed when the chain created `agent_messages.content` (a start at or below 0018).
+
 ```bash
-docker compose exec -T -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py          # report
-docker compose exec -T -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py --apply  # write
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_slack_ts.py          # report
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_slack_ts.py --apply  # write
 ```
 
 This asks Slack which timestamps actually exist and writes only confirmed ones. Rows Slack
@@ -455,8 +476,10 @@ archived). Re-run once the cause is fixed. Do not read exit 2 as "done".
 
 ### Step 9 — deploy the application code, then restart
 
+The images were built before step 4, so this only recreates the services on them:
+
 ```bash
-docker compose up -d --build app worker
+docker compose -f docker-compose.prod.yml up -d blackbird-app worker
 ```
 
 **Order matters, and only one order is safe.** The new code requires columns that only
@@ -473,8 +496,11 @@ costs you one marker.
 
 ### Step 10 — start the simulation last
 
+Bring the supervisor back only when `/admin/simulation` shows no live run. It returns
+IDLE; runs start from `/admin/simulation` only.
+
 ```bash
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
+docker compose -f docker-compose.prod.yml --profile agent up -d agent
 ```
 
 Last, because it is the heaviest writer to `agent_messages`. Starting it before app+worker
@@ -535,20 +561,22 @@ partial state to repair.
 1. Read which checks failed. Checks 3–7 name the exact missing object.
 2. Confirm the revision independently:
    ```bash
-   docker compose exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'
+   docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'
    ```
-3. If you need to get back to where you started, restore the dump:
+3. If you need to get back to where you started, restore the dump. `run_migration.sh`
+   prints these same commands with the dump it took filled in. Stop the run from
+   `/admin/simulation` first (Stop drains and flushes in-process), then:
    ```bash
-   docker stop -t 30 agent-run || true
-   docker compose stop app worker
+   docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent
+   docker compose -f docker-compose.prod.yml stop blackbird-app worker
 
-   docker compose cp backups/copi_pre0023_<timestamp>.dump postgres:/tmp/restore.dump
-   docker compose exec -T postgres psql -U copi -d postgres \
+   docker compose -f docker-compose.prod.yml cp backups/copi_pre<target>_<timestamp>.dump postgres:/tmp/restore.dump
+   docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d postgres \
      -c 'ALTER DATABASE copi RENAME TO copi_failed_migration'
-   docker compose exec -T postgres psql -U copi -d postgres -c 'CREATE DATABASE copi'
-   docker compose exec -T postgres pg_restore -U copi -d copi --exit-on-error /tmp/restore.dump
+   docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d postgres -c 'CREATE DATABASE copi'
+   docker compose -f docker-compose.prod.yml exec -T postgres pg_restore -U copi -d copi --exit-on-error /tmp/restore.dump
 
-   docker compose exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'
+   docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'
    ```
    Rename rather than drop: keep the failed database until you have confirmed the restore
    is good. `--exit-on-error` is not optional — without it `pg_restore` reports success
@@ -568,11 +596,13 @@ partial state to repair.
 | Duplicates | `scripts/migrate/remediate_duplicates.py` — `0` clean · `1` remain · `2` found (dry run) · `3` operational · `64` usage |
 | Slack mapping | `scripts/backfill_slack_ts.py` — `0` all verified · `2` some UNVERIFIED |
 | Lock wait | `ALEMBIC_LOCK_TIMEOUT_MS`, default `10000` ms |
-| Backup dir | `MIGRATE_BACKUP_DIR`, default `backups/` (gitignored) |
-| Services | `MIGRATE_SERVICE` (default `app`), `MIGRATE_PG_SERVICE` (default `postgres`) |
+| Backup dir | `MIGRATE_BACKUP_DIR`, default `backups/` (gitignored), mounted at `/app/backups` |
+| Services | `MIGRATE_SERVICE` (default `blackbird-app`), `MIGRATE_PG_SERVICE` (default `postgres`) |
+| Compose file | `COMPOSE_FILE`, default `docker-compose.prod.yml` |
 
 Every Python tool here takes `--database-url` and defaults to `$DATABASE_URL`; all are
-dry-run unless given `--apply`; all must be run with `PYTHONPATH=/app` inside the container.
+dry-run unless given `--apply`; all run inside a one-off container off the built image
+(`docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app …`).
 
 ---
 
