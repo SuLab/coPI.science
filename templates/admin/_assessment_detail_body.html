@@ -1170,15 +1170,17 @@
     </p>
 
     {% if not messages_available %}
-        {# Not an error. `--fresh` wiped agent_messages until 2026-08-22 (it
-           deletes nothing now) and never wiped opportunity_assessments, so a
-           verdict legitimately outlives its own transcript; the verdict above
-           is the durable record. #}
+        {# Not an error. A verdict can outlive its transcript: its slack_ts was
+           never recorded, its messages were never flushed, or `--fresh` wiped
+           agent_messages (true only until 2026-08-22; it deletes nothing now,
+           and never touched opportunity_assessments). The verdict above is the
+           durable record. #}
         <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
             Interview messages unavailable. The thread this verdict came from is not in
-            <span class="font-mono">agent_messages</span> — a <code>--fresh</code> run
-            wipes messages and channels but never assessments, so an older verdict
-            outlives its transcript. Everything above is unaffected.
+            <span class="font-mono">agent_messages</span> — its Slack timestamp was never
+            recorded, its messages were never flushed (e.g. a SIGKILL mid-turn), or it
+            predates 2026-08-22, when a <code>--fresh</code> run still deleted messages.
+            Everything above is unaffected.
         </div>
     {% else %}
         <div class="space-y-3">
@@ -1315,7 +1317,8 @@
                 Unplaced turns ({{ unplaced_turns | length }})
             </h3>
             <p class="text-sm text-gray-600 mb-2">
-                Tool activity from this thread's time window whose reply text could not
+                Tool activity from this thread (or, for calls logged before thread
+                attribution, this thread's time window) whose reply text could not
                 be matched to a message above — not dropped, just unattributed.
             </p>
             {% for turn in unplaced_turns %}
@@ -1326,8 +1329,8 @@
 
         {% if admin_view and logs_scanned >= log_scan_limit %}
         <p class="text-sm text-amber-700 mt-3">
-            Tool activity is capped at the {{ log_scan_limit }} most recent hub calls in
-            this thread's time window; older calls in the window are not shown.
+            Tool activity is capped at the {{ log_scan_limit }} most recent hub calls for
+            this thread; older calls in its time window are not shown.
         </p>
         {% endif %}
     {% endif %}

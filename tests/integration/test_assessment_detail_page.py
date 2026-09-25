@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -653,6 +653,8 @@ async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session,
     )
     assert resp.status_code == 200
     assert "Interview messages unavailable" in resp.text
+    # `--fresh` deletes nothing since 2026-08-22; the page must not say it does.
+    assert "wipes messages" not in resp.text
     assert "Detail Page Fixture Co" in resp.text
     assert RATIONALE_MARKER in resp.text
 
@@ -1205,15 +1207,17 @@ async def test_an_unknown_panel_state_never_renders_green(
 # `retro_consult_count` counts THIS interview's consults
 #
 # The retro count exists for pre-`specialist_consults` rows: no durable consult
-# rows, so the page recovers them from the hub's own tool log. But
+# rows, so the page recovers them from the hub's own tool log.
 # `_load_tool_turns` selects log rows by (run, phase, agent, CHANNEL, time
-# window) — not by thread, which the log table cannot express. Several
-# interviews share a channel, so the scan legitimately pulls in other threads'
-# turns; `correlate_turns_to_messages` then fails to place them and returns
-# them as `unplaced`. Summing chips over ALL scanned turns therefore counted
-# other interviews' consults as this one's. Measured on production run
-# 60c53424: the kevrekidis assessment reported 11 against 7 real consults, with
-# 4 unplaced turns making up the difference exactly.
+# window) and excludes rows whose `llm_call_logs.thread_ts` names a different
+# thread. Rows logged before 0042 have a NULL `thread_ts` and are still admitted
+# on the window alone, and several interviews share a channel, so for those
+# rows the scan can pull in other threads' turns; `correlate_turns_to_messages`
+# then fails to place them and returns them as `unplaced`. Summing chips over
+# ALL scanned turns therefore counted other interviews' consults as this one's.
+# Measured on production run 60c53424: the kevrekidis assessment reported 11
+# against 7 real consults, with 4 unplaced turns making up the difference
+# exactly. The two tests after it pin the `thread_ts` filter itself.
 # ---------------------------------------------------------------------------
 
 
@@ -1274,6 +1278,116 @@ async def test_retro_consult_count_excludes_turns_from_other_interviews(
     assert ctx["retro_consult_count"] == 1, (
         "only consults on turns placed in THIS interview count"
     )
+
+
+def _tool_turn_log(assessment, *, tool_id, marker, response_text, thread_ts,
+                   created_at):
+    """One hub `thread_reply` log row with a single tool call, in `_seed`'s
+    run/agent/channel, so only `thread_ts` and `created_at` decide whether the
+    detail page's scan admits it."""
+    return LlmCallLog(
+        simulation_run_id=assessment.simulation_run_id,
+        agent_id=HUB,
+        phase="thread_reply",
+        channel=CHANNEL,
+        thread_ts=thread_ts,
+        model="claude-opus-test",
+        system_prompt="sys",
+        messages_json=[
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": tool_id, "name": "search_prior_art",
+                "input": {"query": marker},
+            }]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": tool_id,
+                "content": f"RESULT-{marker}",
+            }]},
+        ],
+        response_text=response_text,
+        created_at=created_at,
+    )
+
+
+async def _thread_id_of(db_session, assessment) -> str:
+    from src.services.interview_transcript import load_interview_thread
+
+    thread_id, _ = await load_interview_thread(db_session, assessment)
+    assert thread_id is not None
+    return thread_id
+
+
+def _placed_queries(ctx) -> list[str]:
+    """One string per turn placed on a message, holding its chips' text."""
+    return [
+        repr(turn["chips"])
+        for entry in ctx["timeline"]
+        if entry["kind"] == "message"
+        for turn in entry["tool_turns"]
+    ]
+
+
+async def test_a_turn_stamped_with_another_thread_is_not_shown(db_session):
+    """A row stamped with a DIFFERENT thread's `thread_ts` is another
+    interview's turn, even inside this thread's channel and time window: it is
+    neither scanned nor listed as unplaced. `_seed`'s own row (NULL
+    `thread_ts`, the pre-0042 shape) and a row stamped with THIS thread are the
+    two that are scanned."""
+    from src.services.assessment_detail import build_assessment_detail
+
+    _, assessment = await _seed(db_session, with_consult=False)
+    thread_id = await _thread_id_of(db_session, assessment)
+    foreign_marker = "TOOL-QUERY-FOREIGN-THREAD-MUST-NOT-SHOW"
+    now = datetime.now(UTC)
+    db_session.add(_tool_turn_log(
+        assessment, tool_id="toolu_own_stamped", marker="TOOL-QUERY-OWN-STAMPED",
+        response_text="<slack_message>\n" + REPLY_TEXT + "\n</slack_message>",
+        thread_ts=thread_id, created_at=now,
+    ))
+    db_session.add(_tool_turn_log(
+        assessment, tool_id="toolu_foreign", marker=foreign_marker,
+        response_text="<slack_message>A reply on a different thread.</slack_message>",
+        thread_ts="1111111111.000001", created_at=now,
+    ))
+    await db_session.flush()
+
+    ctx = await build_assessment_detail(db_session, assessment.id, admin_view=True)
+
+    assert ctx["unplaced_turns"] == [], "the foreign-thread turn is not unplaced"
+    assert all(foreign_marker not in text for text in _placed_queries(ctx))
+    assert ctx["logs_scanned"] == 2, "the foreign-thread row is not scanned at all"
+
+
+async def test_other_threads_cannot_crowd_this_thread_out_of_the_scan_cap(
+    db_session, monkeypatch
+):
+    """The `thread_ts` filter runs before `LOG_SCAN_LIMIT`, so newer turns from
+    other interviews in the same channel cannot push this thread's own turn out
+    of the newest-N scan."""
+    from src.services import assessment_detail as assessment_detail_module
+    from src.services.assessment_detail import build_assessment_detail
+
+    monkeypatch.setattr(assessment_detail_module, "LOG_SCAN_LIMIT", 2)
+
+    _, assessment = await _seed(db_session, with_consult=False)
+    now = datetime.now(UTC)
+    for i in range(2):
+        db_session.add(_tool_turn_log(
+            assessment, tool_id=f"toolu_crowd_{i}", marker=f"TOOL-QUERY-CROWD-{i}",
+            response_text=f"<slack_message>Another thread's reply {i}.</slack_message>",
+            thread_ts=f"222222222{i}.000001",
+            # Newer than `_seed`'s own turn (server-default now()), still inside
+            # the padded window.
+            created_at=now + timedelta(seconds=10 + 10 * i),
+        ))
+    await db_session.flush()
+
+    ctx = await build_assessment_detail(db_session, assessment.id, admin_view=True)
+
+    assert any(TOOL_QUERY_MARKER in text for text in _placed_queries(ctx)), (
+        "the page's own turn must still be scanned and placed"
+    )
+    assert ctx["unplaced_turns"] == []
+    assert ctx["logs_scanned"] == 1
 
 
 # ---------------------------------------------------------------------------

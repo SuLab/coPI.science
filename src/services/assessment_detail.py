@@ -1267,7 +1267,9 @@ async def build_assessment_detail(
     matched: dict[str, list[dict[str, Any]]] = {}
     logs_scanned = 0
     if admin_view and message_views:
-        turns, logs_scanned = await _load_tool_turns(db, assessment, message_views)
+        turns, logs_scanned = await _load_tool_turns(
+            db, assessment, message_views, thread_id=thread_id,
+        )
         matched, unplaced = correlate_turns_to_messages(turns, message_views)
 
     timeline: list[dict[str, Any]] = []
@@ -1290,16 +1292,17 @@ async def build_assessment_detail(
     timeline.sort(key=lambda entry: entry["at"])
 
     # Counted over PLACED turns only, not over every scanned turn.
-    # `_load_tool_turns` selects log rows by (run, phase, agent, channel, time
-    # window) — it does not filter on `llm_call_logs.thread_ts` (added in 0042,
-    # NULL on older rows) — and several interviews share a channel, so the scan
-    # legitimately returns other threads' turns and `correlate_turns_to_messages`
-    # hands them back as `unplaced`. Summing over `turns` therefore attributed other interviews'
-    # consults to this one: production run 60c53424's kevrekidis assessment
-    # reported 11 against 7 real consults, the difference being its 4 unplaced
-    # turns exactly. The unplaced turns are still SHOWN, under their own heading
-    # — they are evidence of what the hub did — they are just not counted as
-    # this interview's panel.
+    # `_load_tool_turns` excludes rows stamped with another thread's
+    # `llm_call_logs.thread_ts`, but rows logged before 0042 carry a NULL
+    # `thread_ts` and are admitted on the (run, phase, agent, channel, time
+    # window) heuristic alone. Several interviews share a channel, so those
+    # rows can still be other threads' turns, which `correlate_turns_to_messages`
+    # hands back as `unplaced`. Summing over `turns` would attribute other
+    # interviews' consults to this one: production run 60c53424's kevrekidis
+    # assessment reported 11 against 7 real consults under the heuristic alone,
+    # the difference being its 4 unplaced turns exactly. Unplaced turns are
+    # still SHOWN, under their own heading — they are evidence of what the hub
+    # did — they are just not counted as this interview's panel.
     retro_consult_count = sum(
         1
         for placed in matched.values()
@@ -1635,8 +1638,19 @@ async def _load_tool_turns(
     db: AsyncSession,
     assessment: OpportunityAssessment,
     message_views: list[dict[str, Any]],
+    *,
+    thread_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """The hub's logged tool conversations for this thread's time span.
+
+    Rows are selected by (run, phase, agent, channel, time window). When
+    ``thread_id`` is given, a row stamped with a DIFFERENT
+    ``llm_call_logs.thread_ts`` is excluded as well, before the
+    ``LOG_SCAN_LIMIT`` cap applies, so other interviews in the same channel can
+    neither appear as unplaced turns nor crowd this thread's own turns out of
+    the scan. Rows with a NULL ``thread_ts`` (logged before 0042, never
+    backfilled) stay admitted on the time-window heuristic alone. The returned
+    count is the number of rows scanned under that filter.
 
     ``system_prompt`` is deliberately NOT selected: it is the largest column in
     the table, it is already readable on the LLM-calls page, and nothing here
@@ -1664,9 +1678,12 @@ async def _load_tool_turns(
             LlmCallLog.created_at
             <= datetime.fromtimestamp(last + LOG_WINDOW_PAD_SECONDS, UTC),
         )
-        .order_by(LlmCallLog.created_at.desc())
-        .limit(LOG_SCAN_LIMIT)
     )
+    if thread_id is not None:
+        query = query.where(
+            or_(LlmCallLog.thread_ts == thread_id, LlmCallLog.thread_ts.is_(None))
+        )
+    query = query.order_by(LlmCallLog.created_at.desc()).limit(LOG_SCAN_LIMIT)
     # Newest LOG_SCAN_LIMIT rows, not earliest: dropping the newest turns would
     # lose the concluding turn's consults, the most load-bearing ones, while the
     # banner tells the admin these are the "most recent" scanned turns. Fetch
