@@ -56,14 +56,16 @@ docker compose run -d --name app-8003 -p 8003:8000 \
 # 3. seed, and note the printed user ids
 docker exec -i app-8002 python -m tests.e2e.seed
 
-# 4. run. Container-to-container hostnames, because pytest runs inside `app`.
-docker compose exec -T \
-  -e E2E_BASE_URL=http://app-8002:8000 \
-  -e E2E_ISOLATION_BASE_URL=http://app-8003:8000 \
-  -e E2E_ADMIN_USER_ID=<admin_user_id> \
-  -e E2E_SIGNUP_USER_ID=<signup_user_id> \
-  -e E2E_ONBOARDING_USER_ID=<onboarding_user_id> \
-  app python -m pytest tests/e2e/test_browser_flows.py -q
+# 4. run, on the HOST against .venv-test: the `app` image installs `.` without
+#    the [dev] extra (Dockerfile), so there is no pytest inside the container.
+#    Steps 1-2 publish ports 8002 and 8003, hence the localhost URLs.
+E2E_BASE_URL=http://localhost:8002 \
+E2E_ISOLATION_BASE_URL=http://localhost:8003 \
+E2E_ADMIN_USER_ID=<admin_user_id> \
+E2E_SIGNUP_USER_ID=<signup_user_id> \
+E2E_ONBOARDING_USER_ID=<onboarding_user_id> \
+.venv-test/bin/python -m pytest tests/e2e/test_browser_flows.py -q
+# -> 8 passed, 1 xfailed   (the xfail is the ORCID pin below)
 ```
 
 Steps 1 and 2 are `docker compose run`, which *creates* a container, so on any
@@ -73,21 +75,12 @@ bindings, and `.:/app` is a mount, so the right move is to reuse them —
 `docker start app-8002 app-8003` — and, since neither runs `--reload`,
 `docker restart app-8002 app-8003` after any `src/` change you want under test.
 
-Or run step 4 from the **host** against `.venv-test` — the same interpreter
-`scripts/ci.sh` uses, so a green tier here is green under the gate. Both app
-instances publish host ports, so the URLs are `localhost:` rather than the
-container hostnames; everything else is identical, and the forged cookie works
-because `src.config` reads the same `.env` `SECRET_KEY` the containers do:
-
-```bash
-E2E_BASE_URL=http://localhost:8002 \
-E2E_ISOLATION_BASE_URL=http://localhost:8003 \
-E2E_ADMIN_USER_ID=<admin_user_id> \
-E2E_SIGNUP_USER_ID=<signup_user_id> \
-E2E_ONBOARDING_USER_ID=<onboarding_user_id> \
-.venv-test/bin/python -m pytest tests/e2e/test_browser_flows.py -q
-# -> 8 passed, 1 xfailed   (the xfail is the ORCID pin below)
-```
+Step 4 runs on the **host** because only `.venv-test` has pytest; it is also the
+interpreter `scripts/ci.sh` uses, so a green tier here is green under the gate.
+The test module reads only the `E2E_*` variables and talks HTTP, so it needs no
+database URL. The forged cookie works because `src.config` reads the same `.env`
+`SECRET_KEY` the containers do. Steps 0-3 need no dev extras and stay in the
+containers.
 
 Nothing in that command needs a browser: the pytest tier is httpx replays. The
 **driven** half — replaying `FLOWS` in a real browser for the screenshots in
@@ -204,11 +197,11 @@ process, so it belongs with Task 13, not here.
 
 ### Onboarding
 
-The onboarding *routes* are fully drivable with a session: start → review →
-private profile → complete, with `users.onboarding_complete` flipping only on
-the final POST.
+The onboarding *routes* are fully drivable with a session: `GET /onboarding`
+(spinner, then the review form) → `POST /onboarding/save-profile`, which flips
+`users.onboarding_complete`.
 
-It stops on its own at **Step 3 of 4, "Building Your Profile"**. `/onboarding`
+It stops on its own at **Step 3 of 3, "Building Your Profile"**. `/onboarding`
 auto-enqueues a `generate_profile` job and shows that spinner while
 `job_status` is `none`/`pending`/`processing`. Advancing needs the worker to run
 `run_profile_pipeline`, which fetches the user's ORCID record — so without

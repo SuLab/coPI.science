@@ -15,6 +15,7 @@ by default on a freshly constructed engine (it only becomes True inside
 """
 import asyncio
 import time
+import uuid
 
 import pytest
 
@@ -850,12 +851,19 @@ async def test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lo
     holds it), concurrently with `_phase5_new_post`, which takes ONLY an
     agent lock and never a thread lock.
 
-    Engineered contention: `_update_agent_memory` (awaited twice inside
-    `_close_thread`, once per agent) is slowed down so the close call is
-    still holding BOTH agent locks — "blackbird" and "wang" — when the
-    concurrent `_phase5_new_post(wang)` call attempts to acquire "wang" and
-    is forced to genuinely block on it. If thread-lock-then-agent-lock
-    nesting could deadlock against an agent-lock-only caller, this hangs;
+    Engineered contention: the only await left inside `_close_thread`'s
+    agent-lock span is the `ThreadDecision` commit, which runs only when
+    both `session_factory` and `simulation_run_id` are set. (`d1162d1` moved
+    the working-memory updates out of that span: they are queued onto
+    `_pending_memory_events` without an await, so slowing the memory
+    update no longer holds anything.) A gated fake session
+    parks that commit until the test releases it, so the close is provably
+    holding BOTH agent locks — "blackbird" and "wang" — when the concurrent
+    `_phase5_new_post(wang)` call attempts to acquire "wang", and the test
+    asserts that it is genuinely blocked there. If the decision write ever
+    leaves the lock span, the `.locked()` assert fails loudly rather than the
+    test passing without contention. If thread-lock-then-agent-lock nesting
+    could deadlock against an agent-lock-only caller, this hangs;
     `asyncio.wait_for` turns that into a test failure instead.
     """
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
@@ -873,10 +881,24 @@ async def test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lo
 
     eng = SimulationEngine(agents=[hub, wang], slack_clients={})
 
-    async def _slow_memory_update(agent, event, *a, **kw):
-        await asyncio.sleep(0.05)
+    entered, release, added = asyncio.Event(), asyncio.Event(), []
 
-    monkeypatch.setattr(eng, "_update_agent_memory", _slow_memory_update)
+    class _GatedSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def add(self, obj):
+            added.append(obj)
+
+        async def commit(self):
+            entered.set()
+            await release.wait()
+
+    eng.session_factory = lambda: _GatedSession()
+    eng.simulation_run_id = uuid.uuid4()
     # Force _phase5_new_post to return (inside its own agent-lock span, right
     # after the rate-limit check) without ever reaching a real LLM call —
     # this test is about lock nesting, not Phase 5's own behaviour.
@@ -889,16 +911,19 @@ async def test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lo
             await eng._close_thread(hub, thread, "no_proposal")
 
     close_task = asyncio.ensure_future(_close_under_thread_lock())
-    # Let the close task run up to its first genuine suspension point (inside
-    # the mocked _update_agent_memory) — by then it holds BOTH agent locks.
-    await asyncio.sleep(0.001)
-
+    await asyncio.wait_for(entered.wait(), 1.0)  # close now holds both agent locks
     phase5_task = asyncio.ensure_future(eng._phase5_new_post(wang))
-    # Let phase5 register as a genuine waiter on wang's agent lock.
-    await asyncio.sleep(0.001)
-
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert eng._agent_locks.get("wang").locked()
+    assert not phase5_task.done()
+    # Blocked at acquire_all: the stamp is the first statement inside the lock.
+    assert wang.state.last_phase5_action_time == 0.0
+    release.set()
     await asyncio.wait_for(asyncio.gather(close_task, phase5_task), timeout=2.0)
 
-    # Sanity: the close actually ran (not a false pass from both tasks no-op
-    # returning without ever contending for anything).
+    # Sanity: the close actually ran and wrote its decision, and phase 5 got
+    # the lock once the close released it.
     assert thread.status == "closed"
+    assert len(added) == 1
+    assert wang.state.last_phase5_action_time > 0.0

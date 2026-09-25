@@ -878,14 +878,11 @@ def test_backfill_with_no_profile_directories_is_a_clean_no_op(db, runner, monke
 # ===========================================================================
 
 
-def test_cli_writes_to_the_test_database_not_the_configured_one(db, runner, orcid_stub, pg_url):
-    """The tests above would all pass against the wrong database. Prove the CLI's own
-    `_get_db()` resolved to the test DSN by reading the row back through the test
-    engine, and prove the ambient config really was pointing somewhere else."""
-    from src import config
-
-    assert config.get_settings().database_url == pg_url
-
+def test_cli_writes_to_the_test_database_not_the_configured_one(db, runner, orcid_stub):
+    """The tests above would all pass against the wrong database. Prove that a row the
+    CLI's own `_get_db()` committed can be read back through the test engine, i.e. that
+    the CLI wrote to the test database. The guard against the ambient dev DSN is
+    `cli_points_at_test_db`'s `/copi` refusal, not this test."""
     orcid = _orcid(f"resolve-{uuid.uuid4().hex[:6]}")
     orcid_stub.set(orcid, name="Resolution Probe")
     _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", orcid, "--no-pipeline"]))

@@ -585,13 +585,16 @@ async def test_inactive_agent_is_labelled_not_unrestricted(
 
 
 async def test_pi_facing_thread_view_is_never_cohort_filtered(
-    client, db_session, admin, roster
+    client, db_session, admin, roster, monkeypatch
 ):
     """A cohort must never change what a human can read (v2 §6.2).
 
-    Two agents in different cohorts exchange messages; the admin discussion view
-    must still show both.
+    Two agents in different cohorts exchange messages; with cohort isolation ON,
+    the admin discussion view for that run must still list both threads and both
+    posters.
     """
+    # Isolation on, so a view that honoured the cohort gate would drop a thread.
+    monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", True)
     run = await factories.make_simulation_run(db_session)
     await _cohort(db_session, "alpha", admin, members=["su"])
     await _cohort(db_session, "beta", admin, members=["cravatt"])
@@ -604,8 +607,12 @@ async def test_pi_facing_thread_view_is_never_cohort_filtered(
         channel_name="general", message_ts="100.2",
     )
     await db_session.flush()
-    r = await client.get("/admin/discussions", headers=_auth(admin.id))
+    # Name the run: without run_id the page shows the newest run, which need not
+    # be this one.
+    r = await client.get(f"/admin/discussions?run_id={run.id}", headers=_auth(admin.id))
     assert r.status_code == 200
+    assert "Showing 2 threads" in r.text
+    assert "SuBot" in r.text and "CravattBot" in r.text
 
 
 # --- §11: what takes effect immediately and what needs a restart ------------

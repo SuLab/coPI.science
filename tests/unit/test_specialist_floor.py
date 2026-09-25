@@ -87,10 +87,15 @@ def test_consults_for_an_unknown_thread_read_as_empty():
 @pytest.mark.parametrize(
     "recommendation,consulted,expected_missing",
     [
-        # pass never needs a panel; route-to-incubation does, but an empty
-        # consulted set is the fail-open case (see below), so it yields no gap
-        ("pass", set(), set()),
-        ("route-to-incubation", set(), set()),
+        # Both rows are armed (one irrelevant "budget" consult — see the
+        # advance rows below for why an empty set would fail open instead):
+        # pass is exempt (PANEL_EXEMPT_RECOMMENDATIONS, src/agent/specialists.py),
+        # and route-to-incubation owes the always-required scientific + talent pair.
+        pytest.param("pass", {"budget"}, set(), id="pass-armed-exempt"),
+        pytest.param(
+            "route-to-incubation", {"budget"}, {"scientific", "talent"},
+            id="route-to-incubation-armed-owes-pair",
+        ),
         # advance always needs scientific + talent. "budget" (never a member
         # of the default-required set) stands in for "consulted is empty"
         # here: an EMPTY consulted set on thread "t1" is indistinguishable

@@ -32,8 +32,10 @@ programme, which the model does not recall but the fetched abstracts supply.
 Rule L3: each assertion message names which of provider-down / rate-limited /
 schema-changed / our-code-broken it observed.
 
-Cost: 8 real Anthropic calls for the whole file — 3 for T4.1 (public synthesis, private
-seed, and the name-only control), 3 for T4.2, 0 for T4.3, 2 for T4.4, 0 for T4.5. T4.5
+Cost: 4 real Anthropic calls for the whole file — 2 for T4.1 (public synthesis and the
+name-only control), 2 for T4.2 (one synthesis per run), 0 for T4.3, 0 for T4.4 (the corpus
+stage fails before synthesis), 0 for T4.5. A validation retry adds one call to whichever
+run it fires in; T4.1 and T4.2 assert it did not. T4.5
 makes two further Anthropic *requests* that spend no tokens: they are deliberately
 unauthenticated, which is how the GM #2 failure path is reproduced against the real API
 rather than against a fake that raises RuntimeError.
@@ -61,6 +63,7 @@ from sqlalchemy import select
 from src.models import ProfileRevision, Publication, ResearcherProfile
 from src.services import orcid as orcid_service
 from src.services import profile_pipeline, pubmed
+from src.services.corpus import CorpusStageError
 from tests import factories
 
 pytestmark = [
@@ -81,7 +84,9 @@ pytestmark = [
 # Why not Josiah Carberry (0000-0002-1825-0097), the record T1 uses: that persona has no
 # works at all, so `pubs_for_synthesis` is empty and the synthesis path — the entire
 # point of T4 — never runs. Carberry can only prove the pipeline survives an empty
-# corpus, which is what T4.4 covers by other means.
+# corpus, which the mocked GM
+# `test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evidence_lost`
+# covers.
 #
 # Why this record is a defensible choice (Rule L2 — permanence, and nothing pinned):
 #
@@ -191,7 +196,7 @@ class PipelineProbe:
     Every wrapper delegates to the real function, so the pipeline under test is the real
     pipeline making real calls; only the arguments and the call count are recorded. This
     is how the LLM-call count (which GM #1 and GM #4 pin) and the synthesis context
-    (T4.3, T4.4) are observed from the outside.
+    (T4.1, and T4.4's check that none was built) are observed from the outside.
 
     ``private_calls`` is retained (permanently 0) rather than removed: the
     private-instructions removal cycle deleted step 9b
@@ -317,7 +322,7 @@ def profile_prose(profile: ResearcherProfile) -> str:
 
 
 # Observations shared between tests. Each live pipeline run costs real money and real
-# time, so T4.4 and T4.5 read what T4.1/T4.2 already measured rather than re-running.
+# time, so T4.5 reads what T4.1/T4.2 already measured rather than re-running.
 # Every consumer states loudly when the producer did not run, so a `-k` selection can
 # never turn a missing comparison into a silent pass.
 _OBSERVED: dict[str, dict] = {}
@@ -442,7 +447,7 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
         "pre-0023 defect back again"
     )
     # Grounded, and the row can prove it: this is the assertion that separates a real
-    # profile from the one T4.4 produces with PubMed unreachable.
+    # profile from an ungrounded one.
     assert (profile.evidence_pub_count or 0) > 0, (
         f"evidence_pub_count is {profile.evidence_pub_count!r} after a live run over a "
         f"real corpus ({profile.evidence_pmid_count!r} PMIDs in hand). Either no abstract "
@@ -854,26 +859,26 @@ def _ncbi_hosts() -> set[str]:
     }
 
 
-async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_thinner_one(
+async def test_t44_pubmed_unreachable_fails_the_run_and_stores_nothing(
     db_session, tmp_path, monkeypatch, api_budget
 ):
-    """T4.4 — degradation. NCBI unreachable; ORCID and Anthropic still live.
+    """T4.4 — NCBI unreachable; ORCID and Anthropic still live.
 
     respx is used *inside* the live tier: every host `src/services/pubmed.py` talks to
-    raises ConnectError, and everything else — ORCID, api.anthropic.com — passes through
-    to the real network. That is the honest simulation of "PubMed is down" and it is the
-    reason this test is here rather than in the contract tier.
+    raises ConnectError, and everything else — ORCID, OpenAlex, api.anthropic.com —
+    passes through to the real network. That is the honest simulation of "PubMed is
+    down" and it is the reason this test is here rather than in the contract tier.
 
-    Requirement: onboarding must not fail. Control: the degraded profile must be
-    measurably thinner, otherwise "it still produced a profile" is satisfied by a
-    pipeline that never used PubMed in the first place.
+    Requirement (audit M5; CLAUDE.md "A corpus-stage failure FAILS the job"): a PubMed
+    outage fails the run rather than storing a thin, ungrounded profile.
+    `search_pmids` raises on a transport failure and `resolve_corpus` wraps it in
+    `CorpusStageError`, so the job retries instead. The mocked counterpart is GM
+    `test_profile_pipeline_pubmed_outage_raises_instead_of_fabricating`.
 
-    The thinness assertions are deliberately the deterministic ones — publication rows,
-    the abstract hash, and the size and structure of the synthesis context, which IS the
-    profile's entire evidence base. Word counts of model prose are not evidence of
-    anything.
+    Controls: the pipeline must actually have tried NCBI, and the raised error's cause
+    must be the simulated outage — not a live ORCID or OpenAlex failure that would raise
+    the same `CorpusStageError` for a different reason (Rule L3).
     """
-    baseline = require_observation("single_run", "T4.1")
     user, _agent = await seed_pi(db_session, tmp_path, monkeypatch)
     probe = PipelineProbe().install(monkeypatch)
 
@@ -887,9 +892,10 @@ async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_th
                 side_effect=httpx.ConnectError(f"simulated {host} outage (T4.4)")
             )
         blocked = [r for r in router.routes]
-        router.route().pass_through()   # ORCID and Anthropic reach the real network
+        router.route().pass_through()   # ORCID, OpenAlex and Anthropic reach the real network
 
-        profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+        with pytest.raises(CorpusStageError) as exc_info:
+            await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
         ncbi_attempts = sum(r.call_count for r in blocked)
 
@@ -898,151 +904,29 @@ async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_th
     assert ncbi_attempts > 0, (
         f"the pipeline made no request to any of {sorted(hosts)}, so the simulated outage "
         "blocked nothing. Either the URLs moved or PubMed is no longer on this path — "
-        "either way the 'degraded' profile below is just a normal profile"
+        "either way the CorpusStageError above did not come from the simulated outage"
+    )
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, httpx.ConnectError) and "(T4.4)" in str(cause), (
+        f"the corpus stage failed, but not on the simulated NCBI outage: {exc_info.value!r} "
+        f"(cause {cause!r}). A live ORCID or OpenAlex failure (provider down or "
+        "rate-limited) raised first, so this run did not test the PubMed outage"
     )
 
-    # --- onboarding still completes ----------------------------------------------------
-    rows = await profile_rows(db_session, user.id)
-    assert len(rows) == 1, (
-        f"{len(rows)} profile rows with PubMed down; a PubMed outage must not stop a PI "
-        "being onboarded"
+    # --- nothing was stored --------------------------------------------------------------
+    assert await profile_rows(db_session, user.id) == [], (
+        "a ResearcherProfile row exists after the corpus stage raised — the pipeline "
+        "stored a profile from a corpus it knows is incomplete"
     )
-    assert profile.research_summary and profile.research_summary.strip(), (
-        "with PubMed unreachable the pipeline produced no summary at all. Steps 4 and 5 "
-        "are individually try/excepted precisely so a PubMed outage degrades rather than "
-        "aborts; if this fails, one of those handlers stopped catching"
+    assert await publications(db_session, user.id) == [], (
+        "Publication rows were stored while every NCBI host was unreachable — those rows "
+        "came from somewhere other than PubMed"
     )
-    assert profile.profile_version == 1
-    await db_session.refresh(user)
-    assert user.name and user.name.strip(), (
-        "ORCID data did not land either — the pass-through route is broken and this test "
-        "simulated a total outage, not a PubMed one"
+    assert probe.public_calls == 0 and probe.contexts == [], (
+        f"{probe.public_calls} synthesis calls and {len(probe.contexts)} synthesis "
+        "contexts after the corpus stage raised — synthesis ran on an incomplete corpus "
+        "and spent tokens on a profile that should never have been written"
     )
-
-    # --- the control: measurably thinner -------------------------------------------------
-    degraded_pubs = await publications(db_session, user.id)
-    assert degraded_pubs == [], (
-        f"{len(degraded_pubs)} Publication rows were stored while every NCBI host was "
-        "unreachable — those rows came from somewhere other than PubMed"
-    )
-    assert baseline["pub_count"] > 0, (
-        "the T4.1 baseline stored no publications either, so 'thinner' is not measurable"
-    )
-    assert profile.raw_abstracts_hash == hashlib.sha256(b"").hexdigest(), (
-        "the abstract hash is not the hash of an empty corpus, so the pipeline thinks it "
-        f"synthesized from abstracts it never fetched: {profile.raw_abstracts_hash}"
-    )
-    assert profile.raw_abstracts_hash != baseline["raw_abstracts_hash"]
-
-    degraded_context = probe.contexts[0]
-    full_context = baseline["context"]
-    assert "## Publications" not in degraded_context, (
-        "the degraded synthesis context still has a Publications section"
-    )
-    assert "## Publications" in full_context, (
-        "the T4.1 baseline context had no Publications section either — the comparison "
-        "below is meaningless"
-    )
-    assert len(degraded_context) < 0.2 * len(full_context), (
-        f"the degraded context is {len(degraded_context)} chars against the baseline's "
-        f"{len(full_context)} — not measurably thinner, so PubMed was contributing almost "
-        "nothing to the prompt even when it was up"
-    )
-
-    # The sharpest statement of the degradation, and the reason this is worth a test:
-    # with PubMed down the prompt contains none of the researcher's own subject matter,
-    # because ORCID *works* only enter the context via their PubMed records. Whatever the
-    # model then writes is not grounded in anything the pipeline fetched.
-    corpus = baseline["corpus"]
-    assert not mentioned(degraded_context, corpus), (
-        "the degraded context still contains the corpus vocabulary "
-        f"{mentioned(degraded_context, corpus)}, so ORCID works are reaching the prompt "
-        "by some path and the claim below would be wrong"
-    )
-    assert mentioned(full_context, corpus), (
-        "the baseline context contains none of the corpus vocabulary — the derivation is "
-        "broken, not the pipeline"
-    )
-
-    # Still true, and still worth asserting: the profile synthesized from a name and a
-    # department passes the same validator as the one synthesized from a dozen abstracts.
-    # _validate_profile only measures SHAPE — a 150-250 word summary, three techniques, a
-    # disease area — and a fluent model satisfies all three from prior knowledge. No
-    # amount of tightening the validator finds this case, which is why the discriminator
-    # below is a count of evidence and not a quality score.
-    assert profile_pipeline._validate_profile(as_synthesized(profile)) is True, (
-        "the evidence-free profile now FAILS _validate_profile. That is an improvement, "
-        "not a regression, but it changes the pipeline's behaviour under a PubMed outage "
-        "(step 8 would retry, then store the draft marked unvalidated) and this test "
-        "needs updating"
-    )
-    assert profile.synthesis_validated is True, (
-        f"synthesis_validated is {profile.synthesis_validated!r}; the assertion above says "
-        "the stored fields pass the validator, so the recorded verdict disagrees with the "
-        "validator applied to the same row"
-    )
-
-    # What USED to be the finding here: the fabricated profile was stored with the same
-    # profile_version 1 and no marker of any kind, so nothing downstream — the agent
-    # prompt builder, the public profile page, the monthly refresh — could tell it from a
-    # profile grounded in a dozen abstracts. Migration 0023 closed that. The row now
-    # carries what the synthesis was actually founded on, and this is the live proof of
-    # it: ORCID gave the pipeline identifiers, PubMed gave it nothing, so the profile is
-    # ungrounded AND says which of the two ungrounded cases it is.
-    assert profile.evidence_pub_count == 0, (
-        f"evidence_pub_count is {profile.evidence_pub_count!r} while every NCBI host was "
-        "unreachable. No abstract can have reached the prompt, so a non-zero count means "
-        "step 9 is recording something other than what it synthesized from"
-    )
-    assert (profile.evidence_pmid_count or 0) > 0, (
-        f"evidence_pmid_count is {profile.evidence_pmid_count!r}. ORCID is up in this test "
-        "and this record carries PMIDs directly (7 of 12 as of 2026-07-30), so zero means "
-        "the ORCID leg failed too and this is a total outage, not a PubMed one — and the "
-        "state below would then be 'lost' for the wrong reason"
-    )
-    assert profile.evidence_state == "evidence_lost", (
-        f"the fabricated profile reports evidence_state {profile.evidence_state!r}. "
-        "'no_evidence_available' would be a false negative — it is the answer reserved "
-        "for a researcher who genuinely has nothing indexed, and it tells an operator "
-        "NOT to regenerate, which is exactly wrong after an outage"
-    )
-    # The comparison that makes the discriminator meaningful: the grounded baseline and
-    # this run are the same profile_version, so version cannot separate them and the
-    # evidence counts must.
-    assert profile.profile_version == baseline["profile_version"], (
-        "the degraded and grounded runs no longer share a profile_version, so the claim "
-        "that they are indistinguishable without the evidence counts is out of date"
-    )
-    assert baseline["evidence_state"] == "grounded" != profile.evidence_state, (
-        f"the grounded baseline reports evidence_state {baseline['evidence_state']!r} and "
-        f"this ungrounded run reports {profile.evidence_state!r} — the column does not "
-        "separate the two cases it exists to separate"
-    )
-
-    # Thinness at the level of the profile text, not just its evidence base. The degraded
-    # summary is NOT empty of the researcher's subject matter — the model recognises the
-    # name — so the measurable claim is a strict subset, not an absence. Measured
-    # 2026-07-30: the degraded summary reached 2 of the 7 corpus terms (chromatin,
-    # remodeling) against 7 of 7 for the grounded run. If this ever came out equal, the
-    # PubMed leg would be contributing nothing the model did not already know.
-    degraded_hits = set(mentioned(profile.research_summary, corpus))
-    baseline_hits = set(baseline["summary_hits"])
-    assert degraded_hits < baseline_hits, (
-        f"the degraded summary covers {sorted(degraded_hits)} of the corpus vocabulary "
-        f"and the grounded one covers {sorted(baseline_hits)} — not a strict subset, so "
-        "losing PubMed entirely cost the profile nothing measurable and the pipeline's "
-        "whole PubMed leg is decorative for this researcher"
-    )
-
-    _OBSERVED["degraded"] = {
-        "context_len": len(degraded_context),
-        "baseline_context_len": len(full_context),
-        "summary": profile.research_summary,
-        "summary_hits": mentioned(profile.research_summary, corpus),
-        "baseline_summary_hits": baseline["summary_hits"],
-        "validated": profile_pipeline._validate_profile(as_synthesized(profile)),
-        "ncbi_attempts": ncbi_attempts,
-    }
 
 
 # =========================================================================== T4.5

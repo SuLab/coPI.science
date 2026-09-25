@@ -20,7 +20,7 @@ from src.agent.simulation import SimulationEngine
 from src.agent.specialists import DEFAULTED_TALLY_LABEL
 from src.agent.state import ThreadState
 from src.agent.tools import _execute_consult_specialist, execute_tool
-from tests.fakes import FakeAnthropic, FakeSlackClient
+from tests.fakes import FakeAnthropic, FakeSlackClient, text_response
 
 _OPINION = """VERDICT SIGNAL: proceed
 CONFIDENCE: moderate
@@ -529,6 +529,34 @@ async def test_the_hub_reads_the_opinion_before_it_reads_the_label(monkeypatch):
         "the label must come after the body"
     )
     assert "read: parsed" in out
+
+
+@pytest.mark.asyncio
+async def test_a_consults_own_truncation_retry_is_booked(monkeypatch):
+    """A consult whose first reply stops at `max_tokens` is retried inside
+    `generate_agent_response`, and that retry is a second billed call.
+    `_execute_consult_specialist` books the first call itself, before issuing
+    it, and books the retry by passing `on_retry=on_api_call`; drop that
+    argument and the rate limiter undercounts every truncated consult.
+    """
+    fake = FakeAnthropic([
+        text_response('{"verdict_signal": "adequate", "concerns": [', stop_reason="max_tokens"),
+        '{"verdict_signal": "adequate", "confidence": "high"}',
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+    billed, consulted = [], []
+
+    await _execute_consult_specialist(
+        "chemistry", "q", "c", agent_id="blackbird",
+        on_consult=lambda d, s: consulted.append(d),
+        on_api_call=lambda: billed.append(1),
+    )
+
+    assert len(fake.calls) == 2, "control: the truncation retry never ran"
+    assert len(billed) == 2, (
+        f"{len(billed)} calls booked for a consult plus its own truncation retry"
+    )
+    assert consulted == ["chemistry"]
 
 
 @pytest.mark.asyncio

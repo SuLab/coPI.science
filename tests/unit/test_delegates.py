@@ -28,18 +28,11 @@ class TestDelegateInvitation:
         assert inv.accepted_by_user_id is None
 
     def test_default_status(self):
-        """Status 'pending' round-trips when set explicitly. The default itself
-        (model default="pending", migration 0007 server_default) applies only at
-        INSERT, which this test never does, so it is not exercised here."""
-        inv = DelegateInvitation(
-            agent_registry_id=uuid.uuid4(),
-            invited_by_user_id=uuid.uuid4(),
-            email="test@example.com",
-            token=secrets.token_urlsafe(48),
-            status="pending",
-            expires_at=datetime.now(UTC) + timedelta(days=30),
-        )
-        assert inv.status == "pending"
+        """The ORM insert default for status is 'pending', read off the column.
+        Migration 0007's server_default is a separate, database-side default
+        and is not exercised here."""
+        col = DelegateInvitation.__table__.c.status
+        assert col.default is not None and col.default.arg == "pending"
 
     def test_repr(self):
         inv = DelegateInvitation(

@@ -507,7 +507,7 @@ def test_onboarding_goes_as_far_as_the_orcid_dependency(as_user):
     r = as_user(user_id).get("/onboarding")
     assert r.status_code == 200, "/onboarding is not reachable with a session"
     if "Building Your Profile" in r.text:
-        assert "Step 3 of 4" in r.text
+        assert "Step 3 of 3" in r.text
         return
     # Otherwise the fixture was walked to completion by a previous run, and
     # /onboarding 302s to /profile. Both outcomes are correct; which one we saw

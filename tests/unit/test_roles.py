@@ -313,51 +313,81 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
     # etc.) have no equivalent here and are not re-pinned.
 
 
-def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
-    """F5: the bot is a member of every lab's cohort, so a :mag: Opportunity
-    Assessment (a top-level post) is a workspace-wide broadcast, not a private
-    note. The visible `<slack_message>` must therefore read as a courtesy
-    summary and never carry the gating statuses, the red-flag list, or the
-    advance/conditional/pass/route-to-incubation recommendation — those belong
-    only in the staff-only `<assessment_json>` sidecar, which must still
-    require all of them so staff lose nothing.
+def test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar():
+    """The CONCLUDE reply states the verdict inline — gating status, the
+    recommendation (a `pass` stated as "decline"), the red flags and a
+    confidence label — while the dimension scores, the band, the weighted score
+    and `raw_verdict` stay sidecar-only. That is the contract
+    `thread_guidance._SCOUT_HUB[CONCLUDE]` and `phase4-thread-reply.md` state,
+    and the one `tests/unit/test_claude_md_disclosure_sync.py` holds CLAUDE.md
+    to.
+
+    Renders the LIVE ordinal-12 prompt rather than slicing the template file,
+    so the phase guidance and instructions actually substituted into it are
+    what is checked.
     """
-    from pathlib import Path
+    from src.agent import thread_guidance
+    from src.agent.agent import Agent
+    from src.agent.state import ThreadState
 
-    # Lived in the now-deleted phase5-new-post.md override; Option A
-    # relocated the same content, unchanged, into phase4-thread-reply.md's
-    # CONCLUDE-adjacent "Concluding with an Opportunity Assessment" section.
-    body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
-        encoding="utf-8"
+    a = Agent("blackbird", "BlackbirdBot", "Blackbird Labs", role="scout_hub")
+    # message_count is the count already in the thread: 11 prior makes this
+    # reply ordinal 12, which is CONCLUDE.
+    t = ThreadState(thread_id="t1", channel="general", other_agent_id="wang", message_count=11)
+    _, m = a.build_phase4_prompt(
+        thread=t,
+        thread_history=[{"sender": "WangBot", "content": "pitch"}],
+        other_agent_name="WangBot",
+        other_agent_lab="Wang",
     )
+    norm = " ".join(m[0]["content"].split())
 
-    # Anchors bounding the visible-body instructions and the sidecar
-    # instructions. If any of these move, the slice below would silently
-    # cover the wrong text, so pin their relative order.
-    visible_start = body.index("### Concluding with an Opportunity Assessment: the sidecar")
-    sidecar_start = body.index("**Emit the sidecar as bare JSON")
-    assert visible_start < sidecar_start
+    # 1. The `{thread_phase}` substitution: the CONCLUDE ordinal rendered.
+    assert thread_guidance.CONCLUDE in norm
 
-    visible_instructions = body[visible_start:sidecar_start]
-    sidecar_instructions = body[sidecar_start:]
+    sidecar_start = norm.index("**Emit the sidecar as bare JSON")
+    visible = norm[:sidecar_start]
+    sidecar_instructions = norm[sidecar_start:]
 
-    # The PI-facing instructions must not ask for (or even name) the internal
-    # verdict machinery.
-    for forbidden in (
-        "Gating criteria", "Red flags", "route-to-incubation",
-        "not_met", "not met",
+    # 2. Everything before the sidecar instructions asks for the inline verdict.
+    for required in (
+        "not met", "red flags", "advance", "route-to-incubation",
+        "confidence label", "decline",
     ):
-        assert forbidden not in visible_instructions, (
-            f"{forbidden!r} leaked into the visible-body instructions — this "
-            "would surface the internal rubric in a workspace-wide post"
-        )
-    for forbidden_word in ("advance", "conditional", "pass"):
-        assert forbidden_word not in visible_instructions.lower(), (
-            f"{forbidden_word!r} leaked into the visible-body instructions"
+        assert required in visible.lower(), (
+            f"{required!r} missing from the instructions for the visible reply — "
+            "the inline verdict would be incomplete"
         )
 
-    # The sidecar instructions must still require every one of them — staff
-    # must lose nothing.
+    # 3. The E7 contradiction (the verdict barred from `<slack_message>`
+    # outright) must not come back.
+    assert "none of it may appear" not in norm.lower()
+
+    # 4. Exactly one sentence names what also reaches `<slack_message>`, and it
+    # admits the verdict and nothing score-shaped.
+    admits = [s for s in norm.split(". ") if "also appears in `<slack_message>`" in s]
+    assert len(admits) == 1, admits
+    admitted = admits[0].lower()
+    for required in ("gating", "recommendation", "red flags", "confidence"):
+        assert required in admitted, f"{required!r} not admitted inline: {admits[0]!r}"
+    for forbidden in ("weighted", "band", "dimension", "score", "raw_verdict"):
+        assert forbidden not in admitted, f"{forbidden!r} admitted inline: {admits[0]!r}"
+
+    # 5. The scores are named as staying out of the visible reply.
+    assert "not the dimension scores" in norm
+
+    # 6. Both CONCLUDE guidance strings rendered, and neither asks for a score.
+    for text in thread_guidance._SCOUT_HUB[thread_guidance.CONCLUDE]:
+        text_norm = " ".join(text.split())
+        assert text_norm in norm
+        for forbidden in ("weighted", "band", "dimension score"):
+            assert forbidden not in text_norm.lower(), (
+                f"{forbidden!r} in the CONCLUDE guidance — the inline verdict "
+                "must not carry scores"
+            )
+
+    # 7. The sidecar instructions still require every part of the verdict —
+    # staff must lose nothing.
     for required in (
         "Gating criteria", "Red flags", "route-to-incubation",
         "not_met",
