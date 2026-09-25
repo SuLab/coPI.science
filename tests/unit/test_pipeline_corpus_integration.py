@@ -15,6 +15,8 @@ Pins the audited behaviors end to end against a real database:
   herself wrote at Hopkins, else a loud ``tenure_unknown`` progress flag; when
   the ORCID profile fetch itself failed, a paper-derived year scopes that run
   but is not persisted (D8);
+* the paper tier reads ``CorpusResult.ranked`` (pre-cap), so an earliest
+  Hopkins paper outside the newest 50 still dates tenure;
 * the ``corpus_flagged`` progress text names each flag's actual reason.
 """
 
@@ -58,6 +60,11 @@ def _rec(pmid, year, title, *, hopkins_pi=False, stages=("s1",)):
         ),
         "stages": list(stages),
     }
+
+
+def _uncapped(kept, flagged=None):
+    """A CorpusResult whose pre-cap ``ranked`` list equals ``kept`` (no cap hit)."""
+    return CorpusResult(kept=list(kept), flagged=list(flagged or []), ranked=list(kept))
 
 
 @pytest.fixture
@@ -174,14 +181,11 @@ async def test_paper_tier_dates_tenure_when_orcid_has_no_hopkins_employment(
     db_session, wired
 ):
     user, agent, job = await _make_pi(db_session)
-    wired.corpus = CorpusResult(
-        kept=[
-            _rec(1, 2005, "Elsewhere paper"),
-            _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
-            _rec(3, 2021, "Later Hopkins paper", hopkins_pi=True),
-        ],
-        flagged=[],
-    )
+    wired.corpus = _uncapped([
+        _rec(1, 2005, "Elsewhere paper"),
+        _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
+        _rec(3, 2021, "Later Hopkins paper", hopkins_pi=True),
+    ])
 
     await run_profile_pipeline(user.id, db_session, job)
 
@@ -190,14 +194,31 @@ async def test_paper_tier_dates_tenure_when_orcid_has_no_hopkins_employment(
     assert "Elsewhere paper" not in context
 
 
+async def test_paper_tier_reads_the_uncapped_list_not_the_capped_one(
+    db_session, wired
+):
+    # 60 gated records, newest first; the ONLY paper the PI wrote at Hopkins
+    # is the oldest, so it sits outside the newest 50 (``kept``). Deriving
+    # from ``kept`` would find no Hopkins paper at all; the tenure start must
+    # come from the pre-cap ``ranked`` list.
+    user, agent, job = await _make_pi(db_session)
+    ranked = [
+        _rec(100 + i, 2024 - i, f"Paper {i}", hopkins_pi=(i == 59))
+        for i in range(60)
+    ]
+    assert ranked[-1]["year"] == 1965
+    wired.corpus = CorpusResult(kept=ranked[:50], flagged=[], ranked=ranked)
+
+    await run_profile_pipeline(user.id, db_session, job)
+
+    assert await get_tenure_start(db_session, user.id) == 1965
+
+
 async def test_no_derivable_tenure_flags_loudly_and_stays_full_career(
     db_session, wired
 ):
     user, agent, job = await _make_pi(db_session)
-    wired.corpus = CorpusResult(
-        kept=[_rec(1, 2005, "Old paper"), _rec(2, 2020, "New paper")],
-        flagged=[],
-    )
+    wired.corpus = _uncapped([_rec(1, 2005, "Old paper"), _rec(2, 2020, "New paper")])
 
     await run_profile_pipeline(user.id, db_session, job)
 
@@ -237,13 +258,10 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
         raise ConnectionError("simulated ORCID outage")
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", orcid_profile_down)
-    wired.corpus = CorpusResult(
-        kept=[
-            _rec(1, 2005, "Elsewhere paper"),
-            _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
-        ],
-        flagged=[],
-    )
+    wired.corpus = _uncapped([
+        _rec(1, 2005, "Elsewhere paper"),
+        _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
+    ])
 
     await run_profile_pipeline(user.id, db_session, job)
 

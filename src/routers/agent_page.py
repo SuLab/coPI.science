@@ -428,6 +428,29 @@ async def request_agent(
 # Proposal review
 # --------------------------------------------------------------------------
 
+# The one IntegrityError the two proposal routes answer as a redirect: a second
+# review/reopen for the same (decision, agent) losing the race to the first.
+_REVIEW_UNIQUE_CONSTRAINT = "uq_proposal_reviews_decision_agent"
+
+
+def _is_lost_review_race(exc: IntegrityError) -> bool:
+    """True only when ``exc`` is a violation of ``uq_proposal_reviews_decision_agent``.
+
+    Under the asyncpg dialect, ``exc.orig`` is SQLAlchemy's DBAPI adapter
+    exception, raised ``from`` the asyncpg exception, which carries the
+    server-reported ``constraint_name``. The message text is the fallback for a
+    driver error that carries no name. Any other integrity failure (an FK
+    violation, an ``agent_messages`` collision) is not a lost race and must not
+    be answered as success.
+    """
+    orig = exc.orig
+    for candidate in (getattr(orig, "__cause__", None), orig):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return name == _REVIEW_UNIQUE_CONSTRAINT
+    return _REVIEW_UNIQUE_CONSTRAINT in str(orig)
+
+
 
 @router.post("/{agent_id}/proposals/{thread_decision_id}/review")
 async def review_proposal(
@@ -511,7 +534,14 @@ async def review_proposal(
         await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
 
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
+        if not _is_lost_review_race(exc):
+            raise
+        logger.warning(
+            "Lost the race on %s for decision %s, agent %s: another review or "
+            "reopen committed first; this request's rating was discarded",
+            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent.agent_id,
+        )
         # Lost the race on uq_proposal_reviews_decision_agent (double-click,
         # two tabs): a review for this decision+agent now exists. The
         # rollback also discards THIS request's record_engagement /
@@ -545,9 +575,10 @@ async def reopen_proposal(
     token no longer changes what happens here) and the engine-side consumers
     that would have treated the posted text as authoritative
     (``has_pi_directive``/``pi_priority``/``pi_context`` are gone from
-    ``src/agent/state.py``; the guidance can never set a bot's pending state or
-    reactive priority (``MessageLog.has_new_reply_from_other`` filters human
-    rows unconditionally), and it can never activate a new thread either
+    ``src/agent/state.py``; the guidance can never set a bot's pending state
+    (``MessageLog.has_new_reply_from_other`` filters human rows
+    unconditionally; the scheduler has no reactive-priority tier for it to
+    reach), and it can never activate a new thread either
     (``SimulationEngine._phase3_activate_threads`` filters human rows before
     acting on them) — see ``src/agent/message_log.py`` /
     ``src/agent/simulation.py``). This route
@@ -634,7 +665,6 @@ async def reopen_proposal(
             content=f"PI guidance from {current_user.name}: {guidance}",
             sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
         )
-    logger.info("Reopen guidance for %s written to DB inbox", td.thread_id)
 
     # Added unconditionally: the guard above already returned if a review
     # exists, so on a concurrent reopen this insert is what collides on
@@ -661,12 +691,25 @@ async def reopen_proposal(
         await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
 
         await db.commit()
-    except IntegrityError:
-        # Concurrent reopen (double-click, two tabs) lost the race: the
-        # winner's rating=0 review and guidance are already committed, so
-        # this request's duplicate inbox row is discarded with the rollback.
+    except IntegrityError as exc:
+        if not _is_lost_review_race(exc):
+            raise
+        # Lost the race to another review or reopen by this agent (double-click,
+        # two tabs, or a rating submitted at the same moment): the winner's row
+        # is committed, and the rollback discards this request's inbox row and
+        # therefore the PI's guidance. The WARNING is the only record of that.
+        logger.warning(
+            "Lost the race on %s for decision %s, agent %s: another review or "
+            "reopen committed first; this request's reopen guidance was discarded",
+            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent.agent_id,
+        )
         await db.rollback()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+    # Logged only once the commit has landed, so it never reports guidance a
+    # rollback discarded.
+    if run_id:
+        logger.info("Reopen guidance for %s written to DB inbox", td.thread_id)
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 

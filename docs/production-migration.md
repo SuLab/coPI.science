@@ -58,8 +58,12 @@ explains *why* each step is where it is, which is what you need when a step fail
    server, not your database. Inside the container `postgres` is the compose service and is
    correct. `run_migration.sh` reads the web service's own `DATABASE_URL` inside the
    container and prints it with the password masked; a `DATABASE_URL` exported in the host
-   shell is ignored, and `--database-url` is the only override. It does the
-   `docker compose run --rm` for you.
+   shell is ignored. The override is `MIGRATE_DATABASE_URL` in the environment (preferred)
+   or `--database-url`. The script exports it as `DATABASE_URL` and hands it to each
+   container by name (`-e DATABASE_URL`), so it is never on a docker command line — but
+   `--database-url` itself leaves the password in the script's own argv, visible to `ps`
+   and `/proc` for the whole run, which is why the environment variable is preferred.
+   It does the `docker compose run --rm` for you.
 5. **Alembic's own output is not evidence.** "Running upgrade 0018 -> 0019" is printed
    before the transaction commits. A bad `env.py` once made all 18 migrations log success
    and then silently roll the entire chain back, leaving no `alembic_version` row at all.
@@ -373,21 +377,30 @@ Seven steps, in this order and for these reasons:
    it 1). Without `--target`, the target is the image's `preflight.DEFAULT_TARGET`, and
    the image must carry that revision's file.
 2. **Resolve the DSN and print it** (password masked), read inside the container from the
-   web service's own `DATABASE_URL`, or from `--database-url`. Refuses a DSN with no
-   database name.
+   web service's own `DATABASE_URL`, or from `MIGRATE_DATABASE_URL` / `--database-url`.
+   Refuses a DSN with no database name. The dump in step 3 is always taken from the
+   `postgres` service (`MIGRATE_PG_SERVICE`), so when a supplied DSN's host is anything
+   else, `--apply` refuses (exit 64) unless you pass `--backup-verified-elsewhere` for
+   that server; a rehearsal only warns.
 3. **Backup**, before preflight, so a *blocked* preflight still leaves you with a dump.
    Dumps `-Fc` inside the postgres container, verifies the archive is readable with
    `pg_restore -l` there, then copies it to the host backup directory and re-checks the
    size. A dump whose table of contents cannot be read is a file, not a backup. Preflight
-   checks it at its `/app/backups/…` path.
+   checks it at its `/app/backups/…` path. If the copy out of the container fails, the
+   script exits 3 and names the `postgres:/tmp/copi_migrate_<pid>.dump` it left behind.
 4. **Preflight.** Exit 1 stops here.
 5. **`alembic upgrade`** — one command, so the whole chain is one transaction.
 6. **Read `alembic_version` back out of the database.** See rule 5 in §0. An empty or
    missing stamp is a silent rollback; a stamp unchanged from before the upgrade means
    alembic applied nothing (a target at or behind the stamp is a no-op that exits 0).
-7. **Postflight.** If the web tier, worker or agent is still running, growth is tolerated
+7. **Postflight.** If the web tier, worker or agent is running or restarting, or an
+   emergency `blackbird-agent-run` one-off is running, growth is tolerated
    (`--allow-row-growth`, with a WARN); loss and missing tables still fail. On a FAIL the
-   script prints the restore commands for the dump it just took.
+   script names the failing checks and prints the restore commands for the dump it just
+   took. It prints no restore commands when it took no dump (`--backup-verified-elsewhere`):
+   it tells you to restore from the backup you asserted, and echoes your reason. When the
+   only failing check is the row-count comparison, it says so and does **not** advise a
+   restore (see §9, "If postflight fails").
 
 If you have a verified backup the script cannot see (managed snapshots, base backup + WAL):
 
@@ -499,6 +512,19 @@ costs you one marker.
 Bring the supervisor back only when `/admin/simulation` shows no live run. It returns
 IDLE; runs start from `/admin/simulation` only.
 
+> ⚠️ **Only if the agent service runs the supervisor.** The *committed*
+> `docker-compose.prod.yml` runs `python -m src.agent.main` for the agent service, which
+> **resumes the latest simulation run** the moment the container starts; only the host's
+> uncommitted edit runs `src.agent.supervisor`. Check first:
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml --profile agent config | grep src.agent.supervisor
+> ```
+>
+> No output means **do not run the command below** — it would start a simulation. Restore
+> the host's agent-service edit first. `run_migration.sh` makes the same check and prints a
+> warning instead of the command when it fails.
+
 ```bash
 docker compose -f docker-compose.prod.yml --profile agent up -d agent
 ```
@@ -558,13 +584,24 @@ so either it all committed or none of it did. Postflight failing after a committ
 means the schema is not what 0023 should produce, which is a bug to investigate, not a
 partial state to repair.
 
-1. Read which checks failed. Checks 3–7 name the exact missing object.
+1. Read which checks failed. Checks 3–7 name the exact missing object; the script also
+   lists the failing check titles.
+
+   **If the only failing check is "Row counts match the preflight snapshot", do NOT restore
+   on that alone.** Every schema check passed; the counts differ from the snapshot, which
+   usually means a writer was live that the script did not see (growth) or deleted rows
+   during the window (loss). A restore would throw away every write made since the dump.
+   Investigate the tables it names, then re-run postflight. `run_migration.sh` says this
+   instead of printing restore commands.
 2. Confirm the revision independently:
    ```bash
    docker compose -f docker-compose.prod.yml exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'
    ```
 3. If you need to get back to where you started, restore the dump. `run_migration.sh`
-   prints these same commands with the dump it took filled in. Stop the run from
+   prints these same commands with the dump it took filled in. If you ran it with
+   `--backup-verified-elsewhere`, it took **no** dump and prints no such commands: restore
+   from the backup you asserted, with that backup's own procedure — a `pg_restore` of a
+   `/tmp/restore.dump` that was never copied in leaves you on an empty database. Stop the run from
    `/admin/simulation` first (Stop drains and flushes in-process), then:
    ```bash
    docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent
@@ -600,7 +637,10 @@ partial state to repair.
 | Services | `MIGRATE_SERVICE` (default `blackbird-app`), `MIGRATE_PG_SERVICE` (default `postgres`) |
 | Compose file | `COMPOSE_FILE`, default `docker-compose.prod.yml` |
 
-Every Python tool here takes `--database-url` and defaults to `$DATABASE_URL`; all are
+`run_migration.sh` takes its DSN from `MIGRATE_DATABASE_URL` (preferred) or
+`--database-url`, and otherwise from the web service's own `DATABASE_URL`, read in the
+container; a host-shell `DATABASE_URL` is ignored. Every Python tool here takes
+`--database-url` and defaults to `$DATABASE_URL`; all are
 dry-run unless given `--apply`; all run inside a one-off container off the built image
 (`docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app …`).
 

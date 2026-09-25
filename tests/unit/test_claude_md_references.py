@@ -26,8 +26,10 @@ REPO_PREFIXES = ("src", "scripts", "tests", "templates", "prompts", "alembic", "
 # untracked or removed; a stale entry fails `test_allowlist_entries_are_needed`.
 ALLOWLIST: dict[str, str] = {}
 
+# An optional leading `./` is consumed, so `./scripts/ci.sh` is checked as
+# `scripts/ci.sh`; any other `.` or `/` before the prefix means a longer path.
 _PATH_TOKEN = re.compile(
-    r"(?<![\w./~$-])((?:" + "|".join(REPO_PREFIXES) + r")/"
+    r"(?<![\w./~$-])(?:\./)?((?:" + "|".join(REPO_PREFIXES) + r")/"
     r"(?:[^\s`'\"(),;<>{}]|\{[^{}\s`]*\})*)"
 )
 # A top-level file cited with a line number, e.g. `Dockerfile:41`.
@@ -182,6 +184,8 @@ def test_the_scanner_flags_planted_bad_references():
     assert _missing("a wrapped `docker compose run\n> python scripts/nope.sh`", ROOT) == [
         "scripts/nope.sh"
     ]
+    assert _missing("run `./scripts/nope.sh`", ROOT) == ["scripts/nope.sh"]
+    assert _missing("run `./scripts/ci.sh`", ROOT) == []
     [flagged] = _out_of_range("`src/main.py:999999`", ROOT)
     assert flagged.startswith("src/main.py:999999 ")
     [flagged] = _out_of_range("`Dockerfile:1-999999`", ROOT)

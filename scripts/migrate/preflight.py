@@ -53,6 +53,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -930,8 +931,10 @@ def compare_row_counts(
     construction, so their absence there is not a finding, but they must come out of
     the migration empty: rows in one mean a writer was live, and fail unless
     ``allow_growth``. A table appearing that the chain does not create is always a
-    finding. ``expected_new`` is consulted only for tables missing from ``before``, so
-    it can never mask the loss or disappearance of a table that was snapshotted.
+    finding, and so is a table in ``expected_new`` that is absent afterwards: the chain
+    was supposed to create it. ``expected_new`` is consulted only for tables missing from
+    ``before``, so it can never mask the loss or disappearance of a table that was
+    snapshotted.
 
     ``expected_dropped`` names the tables the pending revisions DROP
     (``tables_dropped_between``, i.e. 0026's grantbot_posted_foas). Such a table being
@@ -941,7 +944,9 @@ def compare_row_counts(
     problems: list[str] = []
     expected_new = frozenset(expected_new)
     expected_dropped = frozenset(expected_dropped)
-    for table in sorted(set(before) | set(after)):
+    # expected_new is in the loop so a table the chain should have created, but which is
+    # absent from BOTH counts, is still visited: iterating before | after alone passed it.
+    for table in sorted(set(before) | set(after) | expected_new):
         b = before.get(table)
         a = after.get(table)
         if table in expected_dropped:
@@ -953,7 +958,12 @@ def compare_row_counts(
             continue
         if b is None:
             if table in expected_new:
-                if a and not allow_growth:
+                if a is None:
+                    problems.append(
+                        f"{table}: this migration creates the table, but it is MISSING "
+                        "after the upgrade"
+                    )
+                elif a and not allow_growth:
                     problems.append(
                         f"{table}: created by this migration but holds {a:,} rows; the "
                         "migration inserts nothing into a table it creates, so a writer "
@@ -983,6 +993,25 @@ def normalize_async_url(url: str) -> str:
         if url.startswith(prefix):
             return "postgresql+asyncpg://" + url[len(prefix) :]
     return url
+
+
+def database_identity(url: str) -> dict[str, str | int | None]:
+    """Host, port and database name of a DSN, for tying a snapshot to one database.
+
+    The user and password are deliberately left out: a rotated password is the same
+    database. A missing port reads as Postgres's default 5432, so ``host`` and
+    ``host:5432`` compare equal. Works on a ``redact_url`` result too.
+    """
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return {
+        "host": parts.hostname,
+        "port": port if port is not None else 5432,
+        "database": parts.path.lstrip("/") or None,
+    }
 
 
 def redact_url(url: str) -> str:
@@ -2113,11 +2142,17 @@ def check_backup(args, live_rows: int):
 
 
 def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None):
-    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive."""
+    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive.
+
+    ``database_identity`` and ``target`` let postflight refuse a snapshot taken against a
+    different database (a rehearsal on a scratch DSN, say) or for a different upgrade.
+    """
+    database_url = report.extra.get("database_url", "")
     payload = {
         "kind": "preflight-snapshot",
         "generated_at": time.time(),
-        "database_url": redact_url(report.extra.get("database_url", "")),
+        "database_url": redact_url(database_url),
+        "database_identity": database_identity(database_url),
         "current_revision": rev,
         "target": args.target,
         "row_counts": counts,

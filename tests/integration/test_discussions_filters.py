@@ -1,7 +1,7 @@
 """The discussions view under a channel or status filter.
 
 Real Postgres, through ``build_discussions_view`` and the admin route. Pins two
-rules: the status counts (the summary cards and "Total root posts") are
+rules: the status counts (the summary cards and "Total threads") are
 run-wide and never move with a filter, and a thread with several
 ``thread_decisions`` rows is listed, counted and exported once, under its LAST
 decision, whether or not it has a root post.
@@ -147,3 +147,47 @@ async def test_export_under_a_status_filter_excludes_the_mislisted_thread(
     assert "A-LAST" not in r.text
     assert "D-LAST" in r.text
     assert "D-FIRST" not in r.text
+
+
+async def _admin_page(client, db_session, run, query: str) -> str:
+    admin = await factories.make_user(
+        db_session, user_role=USER_ROLE_ADMIN, email="admin@example.org"
+    )
+    await db_session.flush()
+    r = await client.get(
+        f"/admin/discussions?run_id={run.id}{query}", headers=_auth(admin.id)
+    )
+    assert r.status_code == 200
+    return r.text
+
+
+async def test_the_footer_total_counts_the_orphan_as_a_thread(
+    client, db_session, run
+):
+    # Three root posts (A, B, C) plus one orphan decision (D): the footer is
+    # the sum of the run-wide counts, so it says 4 and calls them threads.
+    text = await _admin_page(client, db_session, run, "")
+    assert "Total threads: 4" in text
+    assert "Total root posts" not in text
+    assert "(filtered)" not in text
+
+
+async def test_an_agent_filter_alone_marks_the_list_filtered(
+    client, db_session, run
+):
+    # A and B have cravatt replies and D's decision names cravatt as agent_b,
+    # so the list is A, B, D; C (su's root, no reply, no decision) drops out.
+    view = await build_discussions_view(
+        db_session,
+        run_id=str(run.id),
+        channel_filter=None,
+        status_filter=None,
+        agent_filter=["cravatt"],
+    )
+    assert sorted(t["message_ts"] for t in view["threads"]) == ["A", "B", "D"]
+    assert view["counts"] == RUN_WIDE_COUNTS
+
+    text = await _admin_page(client, db_session, run, "&agent_filter=cravatt")
+    assert "Showing 3 threads" in text
+    assert "(filtered)" in text
+    assert "Total threads: 4" in text

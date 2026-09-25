@@ -11,7 +11,9 @@ What follows --target and what does not:
     enum check expects only the types created at or before --target, and the row-count
     comparison derives the tables legitimately created or dropped from the snapshot's
     own ``current_revision`` to --target (preflight's ``tables_created_between`` /
-    ``tables_dropped_between``).
+    ``tables_dropped_between``), so a table any revision in that span creates must exist
+    afterwards. The snapshot must name the same database (host, port, name) as this run
+    or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_*) describe the
     0019-0023 chain only (VERIFIED_REVISIONS), whatever the target.
 
@@ -582,13 +584,22 @@ async def check_index_validity(conn):
     return (title, PASS, "every index in public is valid, ready and live.", [], {})
 
 
-async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool, target: str):
+async def check_row_counts(
+    conn, snapshot_path: str | None, allow_growth: bool, target: str, database_url: str
+):
     """Compare live counts with the preflight snapshot over the snapshot's revision span.
 
     The tables legitimately absent before (created) or after (dropped) are derived from
     the snapshot's ``current_revision`` to ``target``, so a snapshot without that field
     cannot be compared and FAILs. ``allow_growth`` tolerates growth, including rows in a
     newly created table; loss and a missing table always fail.
+
+    The snapshot must be of this run's database: its recorded host, port and database
+    name (``database_identity``, else parsed from its redacted ``database_url``) must
+    equal those of ``database_url``, or the check FAILs before comparing anything. A
+    snapshot ``target`` that differs from ``target`` only WARNs: the comparison is still
+    derived over ``current_revision..target``, but the preflight checks that produced
+    the snapshot vetted a different span.
     """
     title = "Row counts match the preflight snapshot"
     counts = await _pf.snapshot_row_counts(conn)
@@ -618,6 +629,36 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool, 
                 ["Re-take the snapshot with this tree's preflight (it records the stamped "
                  "revision) before migrating."],
                 {"row_counts": counts})
+    live_identity = _pf.database_identity(database_url)
+    snap_identity = payload.get("database_identity")
+    if not snap_identity and payload.get("database_url"):
+        snap_identity = _pf.database_identity(payload["database_url"])
+    if not snap_identity:
+        return (title, FAIL,
+                f"snapshot {snapshot_path} records no database identity, so it cannot be "
+                "shown to be a snapshot of this database.",
+                ["Re-take the snapshot with this tree's preflight against the database "
+                 "you are migrating."],
+                {"row_counts": counts})
+    snap_identity = {k: snap_identity.get(k) for k in ("host", "port", "database")}
+    if snap_identity != live_identity:
+        return (title, FAIL,
+                f"snapshot {snapshot_path} was taken against {_describe(snap_identity)}, "
+                f"but this run is connected to {_describe(live_identity)}. Comparing "
+                "them would be comparing two different databases.",
+                ["Pass the snapshot preflight wrote for THIS database (a rehearsal "
+                 "against a scratch DSN writes its own), or re-run preflight here before "
+                 "migrating."],
+                {"row_counts": counts, "snapshot_identity": snap_identity,
+                 "live_identity": live_identity})
+    snap_target = payload.get("target")
+    target_note = None
+    if snap_target != target:
+        target_note = (
+            f"snapshot target is {snap_target!r} but --target is {target!r}: the row "
+            f"counts were compared over {before_rev}..{target}, but the preflight that "
+            "wrote this snapshot vetted a different upgrade."
+        )
     before = {k: int(v) for k, v in (payload.get("row_counts") or {}).items()}
     created = _pf.tables_created_between(before_rev, target)
     dropped = _pf.tables_dropped_between(before_rev, target)
@@ -635,23 +676,41 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool, 
         "expected_new": sorted(created),
         "expected_dropped": sorted(dropped),
         "problems": problems,
+        "snapshot_target": snap_target,
     }
+    target_remediation = (
+        [f"Re-run preflight with --target {target} before migrating, so its checks "
+         "cover the upgrade that actually ran."]
+        if target_note else []
+    )
     if ok:
-        return (title, PASS,
-                f"{len(before)} tables, {sum(before.values()):,} rows, compared over "
-                f"{before_rev}..{target}: no loss"
-                + (", growth tolerated" if allow_growth else ", no growth")
-                + (f", {len(created)} table(s) created empty" if created else "")
-                + (f", {len(dropped)} table(s) dropped as planned" if dropped else "")
-                + ".", [], data)
+        detail = (
+            f"{len(before)} tables, {sum(before.values()):,} rows, compared over "
+            f"{before_rev}..{target}: no loss"
+            + (", growth tolerated" if allow_growth else ", no growth")
+            + (f", {len(created)} table(s) created empty" if created else "")
+            + (f", {len(dropped)} table(s) dropped as planned" if dropped else "")
+            + "."
+        )
+        if target_note:
+            return (title, WARN, detail + " " + target_note, target_remediation, data)
+        return (title, PASS, detail, [], data)
+    lines = [f"{len(problems)} row-count problem(s):"] + [f"  {x}" for x in problems]
+    if target_note:
+        lines.append(target_note)
     return (title, FAIL,
-            "\n".join([f"{len(problems)} row-count problem(s):"] + [f"  {x}" for x in problems]),
+            "\n".join(lines),
             ["Row loss is not something a migration in this chain can cause, so treat it as "
              "either the wrong snapshot file or a concurrent writer/deleter. Compare against "
              "the backup before doing anything else.",
              "Growth alone (not loss) can be accepted with --allow-row-growth, but only if "
-             "you know a writer was live."],
+             "you know a writer was live."] + target_remediation,
             data)
+
+
+def _describe(identity: dict) -> str:
+    """host:port/database, for naming a database in a report line without credentials."""
+    return f"{identity.get('host')}:{identity.get('port')}/{identity.get('database')}"
 
 
 async def check_orm_can_query(conn_url: str):
@@ -802,7 +861,9 @@ async def run_postflight(args) -> Report:
         )
         await report.add_guarded(
             "Row counts match the preflight snapshot",
-            lambda: check_row_counts(conn, args.snapshot, args.allow_row_growth, args.target),
+            lambda: check_row_counts(
+                conn, args.snapshot, args.allow_row_growth, args.target, url
+            ),
         )
     finally:
         await conn.close()

@@ -893,6 +893,14 @@ P12b.
   - These are still answers, not failures: an idconv `status=="error"`,
     `len(id_list) != 1`, and a DOI mismatch.
 - `fetch_abstract` is untouched.
+- **Amended in the audit-fix round (§9):** strict mode re-raises only a *transient* failure
+  (transport error, 429, 5xx). A permanent per-item failure (another 4xx, an unparseable
+  record) is no longer a stage failure:
+  - a batch falls back to one-PMID fetches, and PMIDs that still fail are dropped with a
+    WARNING;
+  - a DOI counts as no match, with a WARNING.
+
+  Otherwise one persistently bad DOI would dead-letter every regeneration of that PI.
 
 `src/services/corpus.py`:
 - `:485` becomes `convert_dois_to_pmids(list(doi_pool), strict=True)`.
@@ -1120,7 +1128,7 @@ messages were never flushed (e.g. a SIGKILL mid-turn), or it predates 2026-08-22
   `GET /admin/discussions?…&status_filter=no_proposal&export=true`, "A-FIRST" is absent from
   the export.
 
-**Acceptance.** The cards and "Total root posts" are identical under any filter. The list and
+**Acceptance.** The cards and the footer total (relabelled "Total threads" in the audit-fix round, §9) are identical under any filter. The list and
 the export show each thread once, under its last decision.
 
 **Deploy.** Rebuild the app image.
@@ -2381,19 +2389,30 @@ stage failure. Also D8's rule. The script runs only on an image that carries P6.
   - if the changes exceed `--max-changes` (default 10), abort before any write and print the
     table. The 2026-09-22 plan named six suspects, so far more than that means something is
     wrong;
-  - before the first write, save every candidate row's current key and value to
-    `/app/backups/tenure_starts_<UTC stamp>.json`;
-  - `set_tenure_start(user_id, year, source, db=db)` for each change;
+  - refuse to start unless the backup directory is a mount point (override:
+    `--allow-unmounted-backup-dir`), since a `run --rm` container without `-v` would
+    delete the backup on exit;
+  - before the first write, save every candidate row's key, its current value (`old`) and
+    the value this run will write (`written`) to `/app/backups/tenure_starts_<UTC stamp>.json`
+    (mode 0600);
+  - write each change as a conditional update that matches the value read at the start, so a
+    manual edit made during the run's network calls survives and is reported
+    `changed_since_read`;
   - for each changed PI, add one
     `Job(type="generate_profile", user_id=uid, payload={"user_id": str(uid), "orcid": orcid})`,
     the payload shape at `admin.py:1413-1415`;
-    - skip it if a `generate_profile` job is already pending or processing, the same
-      dedupe as `enqueue_enrichment_jobs` (`grant_enrichment.py:33-45`);
+    - skip it if a `generate_profile` job is already **pending**. A `processing` job has
+      already read the old year, so a new pending job is queued behind it;
     - the profile pipeline queues `enrich_grants` and `industry_evidence` itself
       (`profile_pipeline.py:548-549`), so the script does not queue them too, which would
       run them twice;
   - one commit, then print the counts.
-- **`--restore <backup.json>`:** re-apply every saved value. This is the rollback.
+- **`--restore <backup.json>`:** the rollback.
+  - The whole file is validated first: format marker, `jhu_tenure_start:<uuid>` keys, and
+    tenure-JSON values.
+  - `old` is restored only where the user still exists and the row still equals `written`.
+    It never inserts, so a purged key stays purged.
+  - Restore does not re-queue profiles.
 - **`--orcid` (repeatable):** scope the run.
 - **Cost.** Live ORCID/OpenAlex/PubMed traffic per candidate, and no LLM in the script. Each
   queued profile regeneration costs about one synthesis LLM call on the worker (the live
@@ -2491,7 +2510,7 @@ running a CI job.
    | harness-target guard (I7a/I7b) | restore M12b's old target, or M4's or S1's single-line anchor | FAIL |
    | citation guard (§8.4) | cite `v2 §9.5` or `v2 §9 req. 5` anywhere in a scanned root | FAIL |
    | cohort view test (I24b) | R1 (M21): `root_posts = []` | FAIL |
-   | vacuity-tier sensitivity | revert the I23 route row, then apply M15 in `vac_i23_route` | SURVIVED |
+   | vacuity-tier sensitivity | revert the I23 route row to `pytest.param("route-to-incubation", set(), set(), id="route-to-incubation-armed-owes-pair")` (the id must stay, or the tier's node disappears), then apply M15 in `vac_i23_route` | SURVIVED |
    | race test (I29) | R2 (M20): lost race returns 500 | FAIL |
    | consult-retry booking test (C2) | R3 (M17): drop `on_retry=on_api_call` | FAIL |
    | postflight row counts (I3) | E10: the 0050→0051 inputs | PASS (was FAIL) |
@@ -2578,7 +2597,10 @@ only.
    session's uncommitted work.
    - Then `git status --porcelain --untracked-files=no` must list exactly
      ` M docker-compose.prod.yml` (D5 keeps it uncommitted) and nothing else, because the
-     build bakes the working tree. If another session has other uncommitted tracked
+     build bakes the working tree.
+   - Also, `git status --porcelain --untracked-files=all -- src templates static prompts alembic scripts pyproject.toml alembic.ini`
+     must print nothing. The builder's `git clean -ffdx` silently drops untracked files,
+     so an un-added template, prompt or revision would be missing from the image. If another session has other uncommitted tracked
      changes, stop and coordinate, since they would ship too. Never stash or check out
      their work.
    - `prompts/profile-synthesis.md` and `prompts/daily_audit.md` take effect on landing,
@@ -2695,4 +2717,54 @@ checks each of these.
   `CorpusStageError`.
 - **P13:** register statuses are its own judgement: C2/S1 stays open until §7, and H4 and
   M6 are fixed.
+
+**Audit-fix round (2026-09-25, after the §6 audit).** Eight Opus reviewers found nothing
+critical. They reported:
+- 5 plan audits of 21 packages: 152 of 169 items verified complete. The rest were minor
+  gaps, plus two major ones: the Dockerfile pip layer copied from the build context, and
+  P16's write was unconditional;
+- 2 semantic reviews: 15 findings, 3 of them medium;
+- 1 security review: 8 findings, 2 of them medium.
+
+After deduplication, every confirmed finding was fixed:
+- **Image:** every final-stage COPY is `--from=source`.
+- **Proposal routes:** only a `uq_proposal_reviews_decision_agent` violation is a lost
+  race. Anything else re-raises, and a lost race logs a WARNING.
+- **Discussions:** the footer is relabelled "Total threads", and "(filtered)" also covers
+  the agent filter.
+- **Corpus:** tenure comes from `CorpusResult.ranked`, the pre-cap list. Strict mode fails
+  only on transient errors.
+- **P16:**
+  - writes are conditional;
+  - the dedupe is pending-only;
+  - the backup is 0600 on a required mount and records both old and written values;
+  - restore is validated;
+  - an empty name is filled from ORCID.
+- **Migration:**
+  - `run_migration.sh` gives restore advice only when it has a dump and the schema failed;
+  - it detects writers more fully;
+  - the DSN is passed by name, and a dump from a foreign host is refused;
+  - the agent-start line is guarded;
+  - `compare_row_counts` fails on a missing expected table;
+  - postflight checks the snapshot's database identity.
+- **Slack:**
+  - the backfill and PI deletion use `is_valid_token`, and revoke only bot tokens;
+  - su's `groups:read` is named everywhere;
+  - `scopes_for` refuses a contradictory omit/add pair.
+- **Mutation harness:**
+  - a kill must name a FAILED test;
+  - override directories are owner-checked, non-symlink and 0700;
+  - INT/TERM cleanup;
+  - the `copi` database refusal parses the URL.
+- **Guards:**
+  - the P15 scan seeds only the two framework entry points;
+  - the operator-command guard catches dev-service `run`/`up` and `:-app` defaults;
+  - the CLAUDE.md guard checks `./scripts/…` paths;
+  - the banner test pins the OFF sentence.
+- **Docs:**
+  - the register is redacted, with a do-not-push note, and H4 is back to open;
+  - CLAUDE.md's runbook step 4 points to the guarded path;
+  - CLAUDE.md warns that untracked files are dropped from images;
+  - the spec, scope and D12 wording is corrected;
+  - the P16 text above is updated.
 

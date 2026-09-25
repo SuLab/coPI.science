@@ -68,6 +68,7 @@ import pytest
 import slack_sdk
 from itsdangerous import TimestampSigner
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
@@ -617,15 +618,18 @@ async def _non_proposal_decision(db_session, lab) -> ThreadDecision:
 async def test_review_of_a_non_proposal_decision_is_404(client, db_session, lab):
     """Only a proposal can be rated: a 'timeout' decision is refused and files nothing."""
     td = await _non_proposal_decision(db_session, lab)
+    # Captured before the request: expire_all() below expires `td`, and reading
+    # an expired attribute lazy-loads synchronously (MissingGreenlet).
+    td_id = td.id
     r = await client.post(
-        f"/agent/alpha/proposals/{td.id}/review",
+        f"/agent/alpha/proposals/{td_id}/review",
         data={"rating": "3", "comment": ""}, headers=_auth(lab.pi_a_id),
     )
     assert r.status_code == 404, r.status_code
     db_session.expire_all()
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
-            ProposalReview.thread_decision_id == td.id
+            ProposalReview.thread_decision_id == td_id
         )
     )) == 0, "a review of a non-proposal decision still wrote a row"
 
@@ -634,19 +638,21 @@ async def test_reopen_of_a_non_proposal_decision_is_404(client, db_session, lab)
     """Only a proposal can be reopened: a 'timeout' decision is refused, and neither a
     review row nor an inbox message is written."""
     td = await _non_proposal_decision(db_session, lab)
+    # Captured before the request, for the reason given in the review variant.
+    td_id, td_thread_id = td.id, td.thread_id
     r = await client.post(
-        f"/agent/alpha/proposals/{td.id}/reopen",
+        f"/agent/alpha/proposals/{td_id}/reopen",
         data={"guidance": "Refine it."}, headers=_auth(lab.pi_a_id),
     )
     assert r.status_code == 404, r.status_code
     db_session.expire_all()
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
-            ProposalReview.thread_decision_id == td.id
+            ProposalReview.thread_decision_id == td_id
         )
     )) == 0, "a reopen of a non-proposal decision still wrote a review row"
     assert (await db_session.scalar(select(func.count(AgentMessage.id)).where(
-        AgentMessage.thread_ts == td.thread_id,
+        AgentMessage.thread_ts == td_thread_id,
         AgentMessage.agent_id.is_(None),
     ))) == 0, "a reopen of a non-proposal decision still wrote guidance"
 
@@ -1055,6 +1061,46 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
             ProposalReview.thread_decision_id == proposal.id
         )
     )) == 1, "the replayed reopen filed a second ProposalReview"
+
+
+async def test_a_reopen_integrity_error_on_another_constraint_is_not_a_redirect(
+    client, db_session, lab, proposal, monkeypatch,
+):
+    """Only a violation of uq_proposal_reviews_decision_agent is a lost race. Any
+    other IntegrityError inside reopen's try (an FK violation, an agent_messages
+    collision) must propagate as an error, not be answered with the success 302.
+
+    The error is forced from ``mark_notification_responded``, which runs inside
+    the route's try, so the assertion reaches the route's own except clause.
+    """
+    from src.services import email_notifications as en
+
+    proposal_id = proposal.id
+
+    async def _raise_other_constraint(*args, **kwargs):
+        raise IntegrityError(
+            "INSERT INTO agent_messages ...", {},
+            Exception('duplicate key value violates unique constraint "agent_messages_pkey"'),
+        )
+
+    monkeypatch.setattr(en, "mark_notification_responded", _raise_other_constraint)
+
+    response = None
+    try:
+        response = await client.post(
+            f"/agent/alpha/proposals/{proposal_id}/reopen",
+            data={"guidance": "Refine the readout."}, headers=_auth(lab.pi_a_id),
+        )
+    except IntegrityError as exc:
+        assert "agent_messages_pkey" in str(exc)
+    else:
+        assert response.status_code == 500, (
+            f"a non-review IntegrityError was answered {response.status_code}, "
+            "not surfaced as an error"
+        )
+    finally:
+        # The route did not reach rollback; discard its pending writes here.
+        await db_session.rollback()
 
 
 async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(

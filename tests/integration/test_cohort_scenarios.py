@@ -605,7 +605,8 @@ async def test_grandfathered_thread_survives_a_mid_run_split(scenario_db):
     things must hold, and the third is the one a marked-but-stalled thread would fail:
 
     1. the engine marks the thread grandfathered on the recompute;
-    2. it loses reactive priority (asserted deterministically in the live suite);
+    2. the flag is reporting-only (``cohort_topology_snapshot``): it changes no
+       scheduling, since the two-lane scheduler has no reactive tier (D12);
     3. a **real model** still writes into it, so the conversation can conclude.
     """
     factory, run_id = scenario_db

@@ -280,6 +280,6 @@
 
 <div class="mt-4 text-sm text-gray-400">
     Showing {{ threads | length }} thread{{ 's' if threads | length != 1 }}
-    {% if channel_filter or status_filter %}(filtered){% endif %}
-    &bull; Total root posts: {{ counts.values() | sum }}
+    {% if channel_filter or status_filter or agent_filter %}(filtered){% endif %}
+    &bull; Total threads: {{ counts.values() | sum }}
 </div>

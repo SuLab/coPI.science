@@ -201,7 +201,9 @@ async def run_profile_pipeline(
                 f"JHU tenure start {tenure_start} (ORCID employment).",
             )
     if tenure_start is None:
-        tenure_start = derive_start_from_papers(corpus_result.kept)
+        # The UNCAPPED list: the earliest Hopkins-affiliated paper of a PI
+        # with more than the cap's worth of papers lies outside ``kept``.
+        tenure_start = derive_start_from_papers(corpus_result.ranked)
         if tenure_start is not None and step1_failed:
             logger.warning(
                 "JHU tenure start %s for %s derived from papers while the "

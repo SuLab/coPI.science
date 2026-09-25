@@ -32,12 +32,20 @@
 # does nothing, and an operator must not be able to turn the check off without
 # stating a reason that ends up in the log.
 #
-# --database-url is the only way to point it at a database other than the service's
-# own DATABASE_URL. A DATABASE_URL exported in the host shell is IGNORED: the service's
-# DSN is read inside the container and only its redacted form reaches this shell.
+# MIGRATE_DATABASE_URL (preferred) or --database-url is the only way to point it at a
+# database other than the service's own DATABASE_URL. A DATABASE_URL exported in the
+# host shell is IGNORED: the service's DSN is read inside the container and only its
+# redacted form reaches this shell. A DSN you supply is exported as DATABASE_URL into
+# this script's environment and passed to each container BY NAME (`-e DATABASE_URL`),
+# so it never appears on a docker argv. --database-url itself still puts the value in
+# THIS script's argv (visible to `ps` and /proc for the whole run); prefer
+#   MIGRATE_DATABASE_URL='postgresql+asyncpg://…' ./scripts/migrate/run_migration.sh
+# The dump is always taken from MIGRATE_PG_SERVICE, so --apply against a DSN whose
+# host is anything else is refused unless --backup-verified-elsewhere is given.
 #
 # ENVIRONMENT
 #   COMPOSE_FILE              compose file (default docker-compose.prod.yml)
+#   MIGRATE_DATABASE_URL      target DSN (default: the service's own DATABASE_URL)
 #   MIGRATE_SERVICE           service whose image runs the python steps (default blackbird-app)
 #   MIGRATE_PG_SERVICE        postgres service (default postgres)
 #   MIGRATE_BACKUP_DIR        host backup directory, mounted at /app/backups (default backups)
@@ -82,8 +90,9 @@ BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
 BACKUP_MOUNT=/app/backups
 SNAP_CTR="$BACKUP_MOUNT/preflight_snapshot.json"
 LOCK_TIMEOUT_MS="${ALEMBIC_LOCK_TIMEOUT_MS:-10000}"   # alembic/env.py's own default
-DSN=""              # only --database-url sets this; a host DATABASE_URL is ignored
-DSN_ENV=()          # (-e DATABASE_URL=...) only when --database-url was given
+DSN="${MIGRATE_DATABASE_URL:-}"   # or --database-url; a host DATABASE_URL is ignored
+DSN_SRC="MIGRATE_DATABASE_URL"
+DSN_ENV=()          # (-e DATABASE_URL), by name, only when a DSN was supplied
 RUN_ENV=()          # per-call container environment for run_img
 BACKUP_VERIFIED_REASON=""
 EXTRA_PREFLIGHT=()
@@ -95,7 +104,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
     --target) TARGET="${2:?--target needs a revision}"; shift 2 ;;
-    --database-url) DSN="${2:?--database-url needs a DSN}"; shift 2 ;;
+    --database-url)
+      CLI_DSN="${2:?--database-url needs a DSN}"; shift 2
+      if [ -n "$DSN" ] && [ "$DSN" != "$CLI_DSN" ]; then
+        die_usage "MIGRATE_DATABASE_URL and --database-url name different DSNs. Pass one."
+      fi
+      DSN="$CLI_DSN"; DSN_SRC="--database-url" ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift 2 ;;
     --backup-verified-elsewhere)
       BACKUP_VERIFIED_REASON="${2:?--backup-verified-elsewhere needs a reason}"; shift 2 ;;
@@ -114,8 +128,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# By name only: `-e DATABASE_URL=<dsn>` would put the password on docker's argv, where
+# `ps` and /proc/<pid>/cmdline show it to every user on the host.
 if [ -n "$DSN" ]; then
-  DSN_ENV=(-e "DATABASE_URL=$DSN")
+  export DATABASE_URL="$DSN"
+  DSN_ENV=(-e DATABASE_URL)
+else
+  unset DATABASE_URL   # a host-shell value must not reach docker compose at all
 fi
 
 # The host backup directory is bind-mounted into every one-off container, so the dump
@@ -125,7 +144,8 @@ mkdir -p "$BACKUP_DIR"
 BACKUP_DIR_ABS="$(cd "$BACKUP_DIR" && pwd)"
 
 ERR_FILE="$(mktemp)"
-trap 'rm -f "$ERR_FILE"' EXIT
+POST_OUT="$(mktemp)"   # postflight report, parsed to tell a row-count FAIL from a schema one
+trap 'rm -f "$ERR_FILE" "$POST_OUT"' EXIT
 
 # Run a command in a one-off container off the service's BUILT image.
 # `-e` options must precede the service name: an environment prefix on the host
@@ -240,28 +260,44 @@ echo "=============================================================="
 # alembic.ini defaults sqlalchemy.url to a localhost DSN, and on this host the bare
 # hostname `postgres` resolves from the host to a PUBLIC IP through a LAN search
 # domain, so a DSN is only meaningful inside the compose network. The service's own
-# DATABASE_URL is therefore parsed INSIDE the container, and only the database name
-# and the password-redacted URL come back to this shell.
+# DATABASE_URL is therefore parsed INSIDE the container, and only the database name,
+# the password-redacted URL and the host come back to this shell.
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 2: target database ---"
-if ! DSN_INFO="$(run_img python -c 'import os; from sqlalchemy.engine import make_url as m; u = m(os.environ["DATABASE_URL"]); print(u.database or ""); print(u.render_as_string(hide_password=True))' \
-                 2>"$ERR_FILE" | tr -d '\r' | tail -n 2)"; then
+if ! DSN_INFO="$(run_img python -c 'import os; from sqlalchemy.engine import make_url as m; u = m(os.environ["DATABASE_URL"]); print(u.database or ""); print(u.render_as_string(hide_password=True)); print(u.host or "")' \
+                 2>"$ERR_FILE" | tr -d '\r' | tail -n 3)"; then
   echo "BLOCKED: could not read DATABASE_URL inside the $SVC container." >&2
   show_err
   exit "$EX_BLOCKED"
 fi
 DBNAME="$(printf '%s\n' "$DSN_INFO" | sed -n 1p)"
 DSN_SHOWN="$(printf '%s\n' "$DSN_INFO" | sed -n 2p)"
+DSN_HOST="$(printf '%s\n' "$DSN_INFO" | sed -n 3p)"
 if [ -z "$DBNAME" ]; then
   echo "BLOCKED: the DSN names no database ('${DSN_SHOWN:-<nothing>}')." >&2
   echo "  Refusing to let a default choose the target. Pass --database-url." >&2
   exit "$EX_USAGE"
 fi
 if [ -n "$DSN" ]; then
-  echo "    target: $DSN_SHOWN   (from --database-url)"
+  echo "    target: $DSN_SHOWN   (from $DSN_SRC)"
 else
   echo "    target: $DSN_SHOWN   (the $SVC service's own DATABASE_URL)"
+fi
+# Step 3's pg_dump always dumps $DBNAME on the $PG_SVC service, whatever host the DSN
+# names. Against any other server that dump is of the WRONG database, and preflight's
+# backup check would pass on it.
+if [ -n "$DSN" ] && [ "$DSN_HOST" != "$PG_SVC" ] && [ -z "$BACKUP_VERIFIED_REASON" ]; then
+  if [ "$APPLY" -eq 1 ]; then
+    echo "BLOCKED: the DSN's host is '${DSN_HOST:-<none>}', not the $PG_SVC service." >&2
+    echo "  This script can only dump $PG_SVC, so its backup would be of a different server." >&2
+    echo "  Back that server up yourself, then re-run with" >&2
+    echo "    --backup-verified-elsewhere \"<what you took, and when you tested its restore>\"" >&2
+    exit "$EX_USAGE"
+  fi
+  echo "    WARN  the DSN's host is '${DSN_HOST:-<none>}', not $PG_SVC: --apply will refuse"
+  echo "          without --backup-verified-elsewhere, because the dump would be of $PG_SVC."
+  SCRIPT_WARN=1
 fi
 
 # --------------------------------------------------------------------------
@@ -302,7 +338,16 @@ else
     exit "$EX_OPERATIONAL"
   fi
   TOC_N=$("${DC[@]}" exec -T "$PG_SVC" pg_restore -l "$CTMP" 2>/dev/null | grep -c '^[0-9]' || true)
-  "${DC[@]}" cp "$PG_SVC:$CTMP" "$BACKUP_FILE" >/dev/null
+  # Wrapped: a bare failing `cp` under `set -e` would exit 1 (BLOCKED) with no message.
+  # The in-container dump is deliberately left in place — it is the only good copy.
+  if ! "${DC[@]}" cp "$PG_SVC:$CTMP" "$BACKUP_FILE" >/dev/null; then
+    echo "BLOCKED: copying the dump out of the $PG_SVC container failed. Nothing was migrated." >&2
+    echo "  The verified dump is still inside the container at $PG_SVC:$CTMP." >&2
+    echo "  Copy it out by hand, or remove it:" >&2
+    echo "    ${DC[*]} cp $PG_SVC:$CTMP $BACKUP_FILE" >&2
+    echo "    ${DC[*]} exec -T $PG_SVC rm -f $CTMP" >&2
+    exit "$EX_OPERATIONAL"
+  fi
   "${DC[@]}" exec -T "$PG_SVC" rm -f "$CTMP" >/dev/null 2>&1 || true
   SZ=$(stat -c%s "$BACKUP_FILE" 2>/dev/null || echo 0)
   if [ "$SZ" -lt 1024 ]; then
@@ -424,12 +469,16 @@ fi
 #
 # Migrate-before-serve keeps the old web tier and worker serving through the
 # migration, so their inserts grow tables between the snapshot and now. With a live
-# writer, growth is tolerated; loss and a missing table still FAIL.
+# writer, growth is tolerated; loss and a missing table still FAIL. A service stuck in
+# `restarting` counts as live (it writes between crashes), and so does an emergency
+# CLI one-off, which is not a compose service and is only visible to `docker ps` under
+# its exact name. Never match the unprefixed `agent-run`: that is org1's container.
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 7: postflight ---"
 POST_ARGS=()
-if ! RUNNING="$("${DC[@]}" --profile agent ps --status running --services 2>"$ERR_FILE")"; then
+if ! RUNNING="$("${DC[@]}" --profile agent ps --status running --status restarting --services 2>"$ERR_FILE")" \
+   || ! ONE_OFF="$(docker ps --filter 'name=^blackbird-agent-run$' --filter status=running --format '{{.Names}}' 2>"$ERR_FILE")"; then
   echo "BLOCKED: could not list running services. The migration IS committed ($STAMP)." >&2
   show_err
   echo "  Run postflight yourself before deploying code:" >&2
@@ -437,36 +486,68 @@ if ! RUNNING="$("${DC[@]}" --profile agent ps --status running --services 2>"$ER
   echo "      python scripts/migrate/postflight.py --target $TARGET --snapshot $SNAP_CTR" >&2
   exit "$EX_BLOCKED"
 fi
-WRITERS="$(printf '%s\n' "$RUNNING" | tr -d '\r' | grep -Ex "$SVC|worker|agent" | paste -sd' ' - || true)"
+WRITERS="$( { printf '%s\n' "$RUNNING" | tr -d '\r' | grep -Ex "$SVC|worker|agent" | sort -u
+              printf '%s\n' "$ONE_OFF" | tr -d '\r' | grep -x 'blackbird-agent-run'; } \
+            | paste -sd' ' - || true)"
 if [ -n "$WRITERS" ]; then
   POST_ARGS+=(--allow-row-growth)
   echo "    WARN  row growth tolerated: live writers: $WRITERS"
 fi
+# tee, so the operator still sees the report; with pipefail the status is postflight's.
 set +e
 run_img python scripts/migrate/postflight.py --target "$TARGET" --snapshot "$SNAP_CTR" \
-  ${POST_ARGS[@]+"${POST_ARGS[@]}"}
+  ${POST_ARGS[@]+"${POST_ARGS[@]}"} | tee "$POST_OUT"
 POST=$?
 set -e
-if [ "$POST" -eq 1 ]; then
+# Failing checks, from Report.render_text() (scripts/migrate/preflight.py, shared by
+# postflight): one `NN. [STATUS] title` line per check, and FAIL is the BLOCK token.
+ROW_COUNT_TITLE="Row counts match the preflight snapshot"
+FAILED_CHECKS="$(tr -d '\r' < "$POST_OUT" \
+                 | sed -n 's/^ *[0-9][0-9]*\. \[BLOCK *\] //p' || true)"
+if [ "$POST" -eq 1 ] && [ "$FAILED_CHECKS" = "$ROW_COUNT_TITLE" ]; then
+  # A restore here would throw away every write made since the dump — on a schema
+  # that postflight has just verified in every other respect.
+  echo "BLOCKED: postflight FAILED on row counts only; every schema check passed." >&2
+  echo "  Row counts differ from the preflight snapshot. Investigate before deploying code:" >&2
+  echo "  read the \"$ROW_COUNT_TITLE\" item above for the tables that moved." >&2
+  echo "  Do NOT restore the dump on this alone: a restore loses every write made since it" >&2
+  echo "  was taken. Loss usually means a writer deleted rows during the window; growth" >&2
+  echo "  means a writer this script did not see was live. The migration IS committed ($STAMP)." >&2
+  echo "  Once explained, re-run postflight:" >&2
+  echo "    ${DC[*]} run --rm --no-deps -T -v \"$BACKUP_DIR_ABS:$BACKUP_MOUNT\" $SVC \\" >&2
+  echo "      python scripts/migrate/postflight.py --target $TARGET --snapshot $SNAP_CTR ${POST_ARGS[*]-}" >&2
+  exit "$EX_BLOCKED"
+elif [ "$POST" -eq 1 ]; then
   echo "BLOCKED: postflight FAILED — the schema does not match $TARGET." >&2
+  if [ -n "$FAILED_CHECKS" ]; then
+    printf '%s\n' "$FAILED_CHECKS" | sed 's/^/    FAILED: /' >&2
+  else
+    echo "  (the failing checks could not be read from its output; see the report above)" >&2
+  fi
   echo "  Do NOT deploy application code. The chain committed as one transaction, so this" >&2
   echo "  is a schema to investigate, not a partial state to repair. To go back to $PRE_STAMP," >&2
-  echo "  restore the dump. Stop the run from /admin/simulation (Stop drains and flushes" >&2
+  echo "  restore a backup. Stop the run from /admin/simulation (Stop drains and flushes" >&2
   echo "  in-process), then:" >&2
   echo "    ${DC[*]} --profile agent stop -t 420 agent" >&2
   echo "    ${DC[*]} stop $SVC worker" >&2
   if [ -n "$BACKUP_FILE" ]; then
     echo "    ${DC[*]} cp $BACKUP_FILE $PG_SVC:/tmp/restore.dump" >&2
+    echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d postgres -c 'ALTER DATABASE $DBNAME RENAME TO ${DBNAME}_failed_migration'" >&2
+    echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d postgres -c 'CREATE DATABASE $DBNAME'" >&2
+    echo "    ${DC[*]} exec -T $PG_SVC pg_restore -U copi -d $DBNAME --exit-on-error /tmp/restore.dump" >&2
+    echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d $DBNAME -c 'select * from alembic_version'" >&2
+    echo "  Rename rather than drop: keep the failed database until the restore is confirmed." >&2
+    echo "  --exit-on-error is not optional: without it pg_restore reports success after a" >&2
+    echo "  partial restore. The revision should read $PRE_STAMP again." >&2
   else
-    echo "    # no dump was taken by this run; restore from: $BACKUP_VERIFIED_REASON" >&2
+    # No dump means no recipe: pasting a pg_restore of a file that was never written
+    # would leave the operator on an empty, freshly created database.
+    echo "  NO DUMP WAS TAKEN BY THIS RUN, so there is nothing here to restore from." >&2
+    echo "  Restore from the backup you asserted with --backup-verified-elsewhere:" >&2
+    echo "    $BACKUP_VERIFIED_REASON" >&2
+    echo "  using that backup's own restore procedure. Keep the failed database until the" >&2
+    echo "  restore is confirmed; the revision should read $PRE_STAMP again." >&2
   fi
-  echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d postgres -c 'ALTER DATABASE $DBNAME RENAME TO ${DBNAME}_failed_migration'" >&2
-  echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d postgres -c 'CREATE DATABASE $DBNAME'" >&2
-  echo "    ${DC[*]} exec -T $PG_SVC pg_restore -U copi -d $DBNAME --exit-on-error /tmp/restore.dump" >&2
-  echo "    ${DC[*]} exec -T $PG_SVC psql -U copi -d $DBNAME -c 'select * from alembic_version'" >&2
-  echo "  Rename rather than drop: keep the failed database until the restore is confirmed." >&2
-  echo "  --exit-on-error is not optional: without it pg_restore reports success after a" >&2
-  echo "  partial restore. The revision should read $PRE_STAMP again." >&2
   exit "$EX_BLOCKED"
 elif [ "$POST" -ne 0 ]; then
   echo "BLOCKED: postflight did not complete (exit $POST). The migration IS committed ($STAMP)." >&2
@@ -476,6 +557,21 @@ elif [ "$POST" -ne 0 ]; then
   exit "$EX_BLOCKED"
 fi
 echo "    PASS  postflight verified"
+
+# The committed docker-compose.prod.yml runs `src.agent.main` for the agent service,
+# which RESUMES the latest simulation run on start; only the host's uncommitted edit
+# runs `src.agent.supervisor`, which comes back IDLE. So `up -d agent` is printed only
+# when the resolved compose config says the supervisor is what it would start.
+AGENT_IS_SUPERVISOR=0
+if AGENT_CFG="$("${DC[@]}" --profile agent config 2>/dev/null)" \
+   && printf '%s\n' "$AGENT_CFG" | tr -d '\r' | awk '
+        /^[^ ]/          { in_agent = 0; in_cmd = 0; next }
+        /^  [^ ]/        { in_agent = ($0 ~ /^  agent:[[:space:]]*$/); in_cmd = 0; next }
+        !in_agent        { next }
+        /^    [^ -]/     { in_cmd = ($0 ~ /^    command:/) }
+        in_cmd           { print }' | grep -q 'src\.agent\.supervisor'; then
+  AGENT_IS_SUPERVISOR=1
+fi
 
 echo
 echo "=============================================================="
@@ -490,6 +586,15 @@ echo "        ${DC[*]} run --rm --no-deps -T $SVC python scripts/backfill_slack_
 echo "      Read its output. Exit 2 means rows were UNVERIFIED, not absent."
 echo "   9. Serve the new code on the migrated schema:"
 echo "        ${DC[*]} up -d $SVC worker"
-echo "  10. Bring the agent supervisor back, only when /admin/simulation shows no live run:"
-echo "        ${DC[*]} --profile agent up -d agent   # supervisor returns IDLE; start a run from /admin/simulation only when intended (NOT agent-run, which is org1's)"
+if [ "$AGENT_IS_SUPERVISOR" -eq 1 ]; then
+  echo "  10. Bring the agent supervisor back, only when /admin/simulation shows no live run:"
+  echo "        ${DC[*]} --profile agent up -d agent   # supervisor returns IDLE; start a run from /admin/simulation only when intended (NOT agent-run, which is org1's)"
+else
+  echo "  10. !!! DO NOT RUN \`${DC[*]} --profile agent up -d agent\` !!!"
+  echo "      $COMPOSE_FILE's agent service does not run src.agent.supervisor (or its"
+  echo "      config could not be read), so that command would START A SIMULATION RUN,"
+  echo "      resuming the latest one. Restore the host's agent-service edit (command"
+  echo "      src.agent.supervisor) first, and confirm with:"
+  echo "        ${DC[*]} --profile agent config | grep src.agent.supervisor"
+fi
 echo "=============================================================="

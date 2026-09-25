@@ -133,7 +133,8 @@ class MessageLog:
     row stays visible through a general-purpose per-agent READ
     (``get_new_top_level_posts``/``get_replies_to_agent_posts``/
     ``get_tags_for_agent`` — history/observability is kept), but must never drive
-    BOT BEHAVIOR — pending state, reactive priority, or thread activation.
+    BOT BEHAVIOR — pending state or thread activation. (A third effect,
+    reactive priority, is gone: the two-lane scheduler has no reactive tier.)
     ``has_new_reply_from_other`` is the one method whose entire job IS driving bot
     behavior (it feeds ``_pending_reply_pairs``'s pending-reply trigger, and
     has no other caller), so it alone filters out human rows unconditionally,
@@ -601,9 +602,8 @@ class MessageLog:
         the ``allowed_sender_ids=None`` (fully open) case, which bypasses
         ``_entry_allowed`` entirely and would otherwise let a human row through
         unconditionally. There is no PI-bot interaction surface left for a
-        human reply to set ``has_pending_reply``, grant reactive priority, or
-        (via ``_reply_to_thread``'s message-count recompute) shift a thread's
-        ordinal (2026-08-12 removal cycle). This closes the loop
+        human reply to set ``has_pending_reply`` or (via ``_reply_to_thread``'s
+        message-count recompute) shift a thread's ordinal (2026-08-12 removal cycle). This closes the loop
         ``post_agent_message``/``reopen_proposal`` (via
         ``src/services/pi_inbox.py::record_pi_message``) used to feed.
         """

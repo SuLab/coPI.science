@@ -243,3 +243,36 @@ async def test_token_kept_when_revocation_fails(db_session, monkeypatch, tmp_pat
     assert refreshed.slack_bot_token == "xoxb-live"
     # The agent is still suspended — the state that actually stops activity.
     assert refreshed.status == "suspended"
+
+
+async def test_a_non_bot_token_is_never_revoked(db_session, monkeypatch, tmp_path):
+    """auth.revoke kills whatever it is handed: an ``xoxp-`` value stored by
+    mistake would revoke a HUMAN's user token, so it is skipped and reported."""
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", tmp_path / "pub")
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", tmp_path / "mem")
+    calls = []
+
+    async def _fake_revoke(token):
+        calls.append(token)
+        return True
+
+    monkeypatch.setattr(
+        "src.services.user_deletion.revoke_token_async", _fake_revoke
+    )
+    user = await factories.make_user(db_session)
+    agent = await factories.make_agent(
+        db_session, user=user, status="active", slack_bot_token="xoxp-human-secret"
+    )
+    agent_pk = agent.id
+
+    report = await delete_user_account(db_session, user)
+
+    assert calls == []
+    assert report.slack_token_revoked is None
+    assert any("not a bot token" in e for e in report.errors)
+    # Redacted to its prefix: the secret never reaches the report.
+    assert not any("human-secret" in e for e in report.errors)
+    refreshed = await db_session.get(AgentRegistry, agent_pk)
+    await db_session.refresh(refreshed)
+    assert refreshed.slack_bot_token == "xoxp-human-secret"
+    assert refreshed.status == "suspended"

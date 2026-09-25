@@ -10,9 +10,9 @@ without needing Docker:
    paths: the builder stage counts dirty files with `git status
    --untracked-files=no`, where an excluded tracked path would look deleted.
 2. The Dockerfile's `source` stage runs `git clean -ffdx`, writes
-   `.build_info.json` and deletes `.git` in one RUN. The final stage copies
-   only from `source`, plus `pyproject.toml` and `src/` for the pip layer, so
-   no untracked file the deny-list misses can reach the image.
+   `.build_info.json` and deletes `.git` in one RUN. Every final-stage COPY,
+   the pip layer's `pyproject.toml` and `src/` included, takes from `source`,
+   so no untracked file the deny-list misses can reach the image.
 """
 import fnmatch
 import shlex
@@ -36,10 +36,6 @@ MUST_KEEP = (
     ".git", "src", "templates", "static", "prompts", "scripts", "alembic",
     "alembic.ini", "pyproject.toml",
 )
-
-# The only sources a final-stage COPY may take from the build context: the
-# pip layer's inputs, which are tracked files.
-PIP_LAYER_SOURCES = {"pyproject.toml", "src/"}
 
 
 def _patterns() -> tuple[list[str], list[str]]:
@@ -171,13 +167,15 @@ def test_final_stage_never_copies_the_build_context():
         words = shlex.split(args)
         flags = [w for w in words if w.startswith("--")]
         paths = [w for w in words if not w.startswith("--")]
-        if "--from=source" in flags:
-            continue
-        assert not flags and len(paths) == 2 and paths[0] in PIP_LAYER_SOURCES, (
+        # Every final-stage COPY, the pip layer included, must take from the cleaned
+        # `source` stage: a context COPY skips `git clean`, so an untracked file under
+        # src/ would reach /app/src and site-packages (audit 2026-09-25).
+        assert "--from=source" in flags, (
             f"final-stage `COPY {args}` takes from the build context. Only "
-            f"{sorted(PIP_LAYER_SOURCES)} (the pip layer) or `--from=source` may: "
-            "anything else can bake untracked checkout files into the image."
+            "`COPY --from=source …` may: anything else can bake untracked checkout "
+            "files into the image."
         )
+        assert len(paths) == 2, f"final-stage `COPY {args}`: expected one source, one dest"
 
     source = [body for name, body in stages if name == "source"]
     assert len(source) == 1, "there must be exactly one stage named `source`"

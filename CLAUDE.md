@@ -75,7 +75,7 @@ container, no manual database, no env var needed. This is exactly what
 
 Running pytest **inside the container** (`docker compose -f
 docker-compose.prod.yml exec blackbird-app python -m pytest ...`) does not
-currently work: the image installs with `pip install --no-cache-dir .` (`Dockerfile:41`), with no `[dev]` extra, so
+currently work: the image installs with `pip install --no-cache-dir .` (`Dockerfile:43`), with no `[dev]` extra, so
 pytest is not installed there (verified: `exec blackbird-app python -c "import
 pytest"` → `ModuleNotFoundError`). Restoring that path would need the image (or
 a test-targeted variant of it) to install `.[dev]` instead.
@@ -336,6 +336,9 @@ $DC build blackbird-app worker
 $DC --profile agent build agent
 
 # 4. Apply migrations — NOTHING ELSE DOES. See the warning below.
+#    Prefer the guarded path, `./scripts/migrate/run_migration.sh` (rehearse it
+#    without --apply first; see the box below). The two commands here are the
+#    unguarded alternative: no dump, no preflight, no postflight.
 #    From a ONE-OFF container off the image you just built, not `exec`: a new
 #    revision only exists in the new image, so `exec` into the old running
 #    container cannot see it.
@@ -408,7 +411,11 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 > `.env`, `backups/`, `data/`, `logs/`, `profiles/` and `.venv-test` out of the
 > build context, and the builder stage's `git clean -ffdx` drops any other
 > untracked file, so services get their environment from compose's `env_file:`,
-> never from a baked `.env`. Never add a tracked path or `.git` to
+> never from a baked `.env`. The flip side: a NEW template, prompt, script or
+> alembic revision that is still untracked is silently left out of the image, so
+> `git add` it before building. Before `$DC build`, `git status --porcelain
+> --untracked-files=all -- src templates static prompts alembic scripts
+> pyproject.toml alembic.ini` must print nothing. Never add a tracked path or `.git` to
 > `.dockerignore`: the builder needs `.git` to write `.build_info.json`, and an
 > excluded tracked path would count as dirty in every image
 > (`tests/unit/test_docker_build_context.py`).
@@ -787,7 +794,10 @@ profile snapshots), the agent's `pi_dm_messages`, the
 `profiles/public/{agent_id}.md` and `profiles/memory/{agent_id}` artifacts,
 and revokes the Slack bot token (post-commit, best-effort — a failed
 revocation is logged loudly and leaves the token in the DB column for manual
-revocation; the agent is suspended either way). The agent ROW is kept: it is
+revocation; the agent is suspended either way). Only a value that passes
+`is_valid_token` (an `xoxb-` bot token) is ever sent to `auth.revoke`: anything
+else in the column is reported for manual review and left alone, so a user token
+pasted there by mistake is never revoked. The agent ROW is kept: it is
 the record behind old messages and assessments, and its `agent_id` slug stays
 reserved. Deliberately retained: `agent_messages`, `llm_call_logs`,
 assessments, and everything already posted to Slack — both confirmation pages

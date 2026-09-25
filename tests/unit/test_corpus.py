@@ -214,6 +214,9 @@ async def test_rank_is_year_desc_pmid_desc_and_the_cap_is_applied_last(monkeypat
         "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University", cap=2
     )
     assert [r["pmid"] for r in result.kept] == ["9", "3"]
+    # ``ranked`` is the same order before the cap; ``kept`` is its prefix.
+    assert [r["pmid"] for r in result.ranked] == ["9", "3", "5"]
+    assert result.kept == result.ranked[:2]
 
 
 async def test_a_duplicate_title_collapses_to_the_journal_version(monkeypatch):

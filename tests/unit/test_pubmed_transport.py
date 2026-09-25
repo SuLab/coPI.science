@@ -198,7 +198,7 @@ async def test_the_batch_path_still_survives_one_bad_response(monkeypatch):
     Two chunks (the batch size is 100): the first comes back unparseable, the
     second is fine. The good records must still arrive and nothing may
     propagate. The profile corpus does NOT take this path — it passes
-    ``strict=True`` (next test), because a silently thinned corpus is a wrong
+    ``strict=True`` (next tests), because a silently thinned corpus is a wrong
     profile.
     """
     calls = {"n": 0}
@@ -215,23 +215,97 @@ async def test_the_batch_path_still_survives_one_bad_response(monkeypatch):
     assert [r["pmid"] for r in records] == ["41130592"]
 
 
-async def test_strict_batch_path_raises_on_one_bad_response(monkeypatch):
-    """``strict=True`` is the corpus path: the same one-bad-batch input must
-    raise the parse error rather than return the surviving batch."""
+def _record_xml(pmid: str) -> str:
+    return _ONE_RECORD_XML.replace("41130592", pmid)
+
+
+async def test_strict_batch_path_raises_on_a_transient_failure(monkeypatch):
+    """``strict=True`` is the corpus path: a batch that fails TRANSIENTLY (here
+    a 503, retried to ``_ncbi_get``'s budget) must raise rather than return the
+    surviving batch — the job retry is the recovery."""
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(200, text="<not-xml")
+        if calls["n"] <= 3:
+            return httpx.Response(503, text="Service Unavailable")
         return httpx.Response(200, text=_ONE_RECORD_XML)
 
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
-    with pytest.raises(pubmed.PubMedParseError):
+    with pytest.raises(httpx.HTTPStatusError):
         await pubmed.fetch_pubmed_records(
             [str(i) for i in range(150)], strict=True
         )
-    assert calls["n"] == 1, "strict stops at the first failed batch"
+    assert calls["n"] == 3, "strict stops at the first failed batch"
+
+
+async def test_strict_batch_path_falls_back_per_pmid_on_a_permanent_failure(
+    monkeypatch, caplog
+):
+    """A PERMANENT batch failure (an unparseable body) would repeat on every
+    job retry, so strict mode re-fetches that batch's PMIDs one at a time: the
+    good records survive, and the one PMID that still fails permanently is
+    dropped with a WARNING naming it."""
+    singles = []
+
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," in ids:
+            return httpx.Response(200, text="<not-xml")
+        singles.append(ids)
+        if ids == "22":
+            return httpx.Response(200, text="<not-xml")
+        return httpx.Response(200, text=_record_xml(ids))
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    records = await pubmed.fetch_pubmed_records(["11", "22", "33"], strict=True)
+    assert singles == ["11", "22", "33"]
+    assert [r["pmid"] for r in records] == ["11", "33"]
+    assert "PMID 22 failed permanently" in caplog.text
+    assert "PMID 11 " not in caplog.text and "PMID 33 " not in caplog.text
+
+
+async def test_strict_per_pmid_fallback_still_raises_on_a_transient_failure(
+    monkeypatch,
+):
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," in ids:
+            return httpx.Response(404, text="Not Found")
+        if ids == "22":
+            raise httpx.ConnectError("no route to host")
+        return httpx.Response(200, text=_record_xml(ids))
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(httpx.ConnectError):
+        await pubmed.fetch_pubmed_records(["11", "22", "33"], strict=True)
+
+
+@pytest.mark.parametrize(
+    ("exc", "transient"),
+    [
+        (httpx.ConnectError("x"), True),
+        (httpx.ReadTimeout("x"), True),
+        (httpx.RemoteProtocolError("x"), True),
+        (httpx.UnsupportedProtocol("x"), True),  # any TransportError
+        (httpx.HTTPStatusError(
+            "x", request=httpx.Request("GET", "https://e.x"),
+            response=httpx.Response(429)), True),
+        (httpx.HTTPStatusError(
+            "x", request=httpx.Request("GET", "https://e.x"),
+            response=httpx.Response(504)), True),
+        (httpx.HTTPStatusError(
+            "x", request=httpx.Request("GET", "https://e.x"),
+            response=httpx.Response(400)), False),
+        (httpx.HTTPStatusError(
+            "x", request=httpx.Request("GET", "https://e.x"),
+            response=httpx.Response(404)), False),
+        (pubmed.PubMedParseError("x"), False),
+        (ValueError("x"), False),
+    ],
+)
+def test_is_transient_splits_retryable_from_per_item_failures(exc, transient):
+    assert pubmed._is_transient(exc) is transient
 
 
 def test_a_parse_failure_is_its_own_exception_not_an_empty_result():

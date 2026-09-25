@@ -1,4 +1,4 @@
-"""Cohort interaction gate + reactive-priority scheduler.
+"""Cohort interaction gate + two-lane scheduler (no reactive-priority tier).
 
 Implements the test plan in specs/cohort-system-v2.md §15. Organised by spec
 section so a failure names the rule it broke:

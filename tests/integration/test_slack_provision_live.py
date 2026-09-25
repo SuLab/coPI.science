@@ -61,11 +61,12 @@ def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
     an older, larger manifest, so they may hold more; the check is a subset, not an
     equality.
 
-    su must also hold `groups:write`, which `BOT_SCOPES` no longer requests: the live
-    tier's private-channel helpers (tests/slack_live_support.py) create and invite as
-    su, and su was installed with that scope for them. A reinstalled su needs it added
-    back (`--add-scope su:groups:write`) or every private-channel live test fails at
-    setup with missing_scope.
+    su must also hold `groups:write` and `groups:read`, which `BOT_SCOPES` no longer
+    requests: the live tier's private-channel helpers (tests/slack_live_support.py)
+    create and invite as su, its listing test lists private channels as su, and su was
+    installed with both scopes for them. A reinstalled su needs both added back
+    (`--add-scope su:groups:write --add-scope su:groups:read`) or the private-channel
+    live tests fail with missing_scope.
     """
     from src.services.slack_provisioning import BOT_SCOPES
 
@@ -85,3 +86,4 @@ def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
         assert not missing, f"{aid} lacks scopes BOT_SCOPES requests: {missing}"
     su = granted["su"]
     assert "groups:write" in su, f"su was expected to have groups:write: {sorted(su)}"
+    assert "groups:read" in su, f"su was expected to have groups:read: {sorted(su)}"

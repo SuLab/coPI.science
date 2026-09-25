@@ -46,6 +46,7 @@ from src.models import (
     User,
 )
 from src.services.jhu_rules import TENURE_KEY_PREFIX
+from src.services.slack_tokens import is_valid_token
 from src.services.slack_web import revoke_token_async
 
 logger = logging.getLogger(__name__)
@@ -185,9 +186,28 @@ async def delete_user_account(
             report.errors.append(str(exc))
             logger.error("Deletion teardown: %s", exc)
 
-    if token:
+    stored = (token or "").strip()
+    if stored.startswith("xoxb-placeholder"):
+        pass  # the recognised no-op seed value: nothing live to revoke
+    elif stored and not is_valid_token(stored):
+        # Only a bot token is ours to revoke. auth.revoke kills whatever token
+        # it is handed, so an ``xoxp-`` value mistakenly stored here would
+        # revoke a HUMAN's user token while the real bot token stays live.
+        redacted = f"{stored[:5]}…"
+        report.errors.append(
+            f"slack revoke skipped: stored value {redacted!r} is not a bot token; "
+            "left in the DB column for manual review"
+        )
+        logger.error(
+            "Deletion teardown: agent %s stores %r, which is not a bot token; "
+            "NOT revoked and left in place — find and revoke the real bot token "
+            "manually (auth.revoke) or rotate the app",
+            report.agent_id,
+            redacted,
+        )
+    elif stored:
         try:
-            report.slack_token_revoked = await revoke_token_async(token)
+            report.slack_token_revoked = await revoke_token_async(stored)
         except Exception as exc:  # SlackApiError or transport failure
             report.slack_token_revoked = False
             report.errors.append(f"slack revoke: {exc}")

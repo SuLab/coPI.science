@@ -838,13 +838,16 @@ def test_a_table_that_disappeared_fails():
     assert "now MISSING" in problems[0]
 
 
+_COHORT_TABLES = {"cohorts": 0, "cohort_memberships": 0, "cohort_audit_events": 0}
+
+
 def test_tables_the_chain_creates_are_not_flagged_as_unexpected():
     """0020 creates pi_dm_messages and 0022 creates three cohort tables, so they are
     absent from a 0019 snapshot by construction. Flagging them would be a false failure
     on every single successful migration."""
     ok, problems = pf.compare_row_counts(
         {"users": 3},
-        {"users": 3, "pi_dm_messages": 0, "cohorts": 0},
+        {"users": 3, "pi_dm_messages": 0, **_COHORT_TABLES},
         expected_new=pf.tables_created_between("0019", "0023"),
     )
     assert ok and problems == []
@@ -853,10 +856,11 @@ def test_tables_the_chain_creates_are_not_flagged_as_unexpected():
 def test_a_table_the_chain_does_not_create_is_still_flagged():
     ok, problems = pf.compare_row_counts(
         {"users": 3},
-        {"users": 3, "mystery": 9},
+        {"users": 3, "mystery": 9, "pi_dm_messages": 0, **_COHORT_TABLES},
         expected_new=pf.tables_created_between("0019", "0023"),
     )
     assert not ok
+    assert len(problems) == 1
     assert "did not exist before" in problems[0]
 
 
@@ -878,6 +882,30 @@ def test_a_correct_0050_to_0051_upgrade_compares_clean():
         expected_new=pf.tables_created_between("0050", "0051"),
     )
     assert result == (True, [])
+
+
+def test_a_created_table_missing_after_the_upgrade_fails():
+    """A table the span creates, absent from BOTH counts, used to never be visited."""
+    ok, problems = pf.compare_row_counts(
+        {"users": 3},
+        {"users": 3, "assessment_chat_turns": 0},
+        expected_new=pf.tables_created_between("0050", "0051"),
+    )
+    assert not ok
+    assert problems == [
+        "assessment_chat_usage: this migration creates the table, but it is MISSING "
+        "after the upgrade"
+    ]
+
+
+def test_a_created_table_missing_fails_even_with_allow_row_growth():
+    ok, _ = pf.compare_row_counts(
+        {"users": 3},
+        {"users": 3},
+        allow_growth=True,
+        expected_new=pf.tables_created_between("0050", "0051"),
+    )
+    assert not ok
 
 
 def test_a_new_table_with_rows_is_flagged():
@@ -1330,10 +1358,25 @@ async def test_check_enums_passes_below_0042(monkeypatch):
     assert "sim_command_enum" in detail
 
 
-def _write_snapshot(path, row_counts, current_revision="0050"):
+_LIVE_URL = "postgresql+asyncpg://copi:s3cret@postgres:5432/copi"
+
+
+def _write_snapshot(
+    path,
+    row_counts,
+    current_revision="0050",
+    target="0051",
+    database_url="postgresql+asyncpg://copi:***@postgres:5432/copi",
+):
     import json
 
-    payload = {"kind": "preflight-snapshot", "row_counts": row_counts}
+    payload = {
+        "kind": "preflight-snapshot",
+        "row_counts": row_counts,
+        "target": target,
+        "database_url": database_url,
+        "database_identity": pf.database_identity(database_url),
+    }
     if current_revision is not None:
         payload["current_revision"] = current_revision
     path.write_text(json.dumps(payload))
@@ -1352,15 +1395,141 @@ async def test_row_count_check_passes_a_correct_0050_to_0051_upgrade(monkeypatch
         monkeypatch, {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0}
     )
     snap = _write_snapshot(tmp_path / "snap.json", {"users": 3})
-    _title, status, _detail, _rem, data = await po.check_row_counts(None, snap, False, "0051")
+    _title, status, _detail, _rem, data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
     assert status == po.PASS, data["problems"]
     assert data["expected_new"] == ["assessment_chat_turns", "assessment_chat_usage"]
+
+
+async def test_row_count_check_fails_when_a_created_table_is_missing(monkeypatch, tmp_path):
+    _stub_live_counts(monkeypatch, {"users": 3, "assessment_chat_turns": 0})
+    snap = _write_snapshot(tmp_path / "snap.json", {"users": 3})
+    _title, status, detail, _rem, data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
+    assert status == po.FAIL
+    assert data["problems"] == [
+        "assessment_chat_usage: this migration creates the table, but it is MISSING "
+        "after the upgrade"
+    ]
+    assert "assessment_chat_usage" in detail
+
+
+async def test_row_count_check_fails_on_a_snapshot_of_a_different_database(
+    monkeypatch, tmp_path
+):
+    """A rehearsal snapshot against a scratch DSN must not be compared with production."""
+    _stub_live_counts(
+        monkeypatch, {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0}
+    )
+    for other in (
+        "postgresql+asyncpg://copi:***@postgres:5432/copi_x1",  # other database name
+        "postgresql+asyncpg://copi:***@scratch-host:5432/copi",  # other host
+    ):
+        snap = _write_snapshot(tmp_path / "snap.json", {"users": 3}, database_url=other)
+        _title, status, detail, _rem, data = await po.check_row_counts(
+            None, snap, False, "0051", _LIVE_URL
+        )
+        assert status == po.FAIL, other
+        assert "different databases" in detail
+        assert "s3cret" not in detail
+        assert data["snapshot_identity"] != data["live_identity"]
+
+
+async def test_row_count_check_ignores_the_password_and_a_default_port(monkeypatch, tmp_path):
+    _stub_live_counts(
+        monkeypatch, {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0}
+    )
+    snap = _write_snapshot(
+        tmp_path / "snap.json",
+        {"users": 3},
+        database_url="postgresql+asyncpg://copi:***@postgres/copi",
+    )
+    _title, status, _detail, _rem, data = await po.check_row_counts(
+        None, snap, False, "0051", "postgresql+asyncpg://copi:rotated@postgres:5432/copi"
+    )
+    assert status == po.PASS, data
+
+
+async def test_row_count_check_falls_back_to_the_recorded_url_for_identity(
+    monkeypatch, tmp_path
+):
+    import json
+
+    _stub_live_counts(monkeypatch, {"users": 3})
+    path = tmp_path / "snap.json"
+    snap = _write_snapshot(
+        path, {"users": 3}, database_url="postgresql+asyncpg://copi:***@elsewhere:5432/copi"
+    )
+    payload = json.loads(path.read_text())
+    del payload["database_identity"]
+    path.write_text(json.dumps(payload))
+    _title, status, detail, _rem, _data = await po.check_row_counts(
+        None, snap, False, "0050", _LIVE_URL
+    )
+    assert status == po.FAIL
+    assert "elsewhere" in detail
+
+
+async def test_row_count_check_fails_when_the_snapshot_names_no_database(
+    monkeypatch, tmp_path
+):
+    import json
+
+    _stub_live_counts(monkeypatch, {"users": 3})
+    path = tmp_path / "snap.json"
+    snap = _write_snapshot(path, {"users": 3})
+    payload = json.loads(path.read_text())
+    del payload["database_identity"]
+    del payload["database_url"]
+    path.write_text(json.dumps(payload))
+    _title, status, detail, _rem, _data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
+    assert status == po.FAIL
+    assert "no database identity" in detail
+
+
+async def test_row_count_check_warns_when_the_snapshot_target_differs(monkeypatch, tmp_path):
+    _stub_live_counts(
+        monkeypatch, {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0}
+    )
+    snap = _write_snapshot(tmp_path / "snap.json", {"users": 3}, target="0050")
+    _title, status, detail, rem, data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
+    assert status == po.WARN
+    assert "snapshot target is '0050' but --target is '0051'" in detail
+    assert any("--target 0051" in r for r in rem)
+    assert data["snapshot_target"] == "0050"
+
+
+async def test_a_target_mismatch_does_not_soften_a_row_count_failure(monkeypatch, tmp_path):
+    _stub_live_counts(monkeypatch, {"users": 2, "assessment_chat_turns": 0})
+    snap = _write_snapshot(tmp_path / "snap.json", {"users": 3}, target="0050")
+    _title, status, detail, _rem, _data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
+    assert status == po.FAIL
+    assert "LOST" in detail and "snapshot target" in detail
+
+
+def test_database_identity_keeps_host_port_and_name_but_not_credentials():
+    assert pf.database_identity("postgresql+asyncpg://copi:s3cret@Postgres:6543/copi_a3") == {
+        "host": "postgres",
+        "port": 6543,
+        "database": "copi_a3",
+    }
+    assert pf.database_identity("postgresql+asyncpg://copi:***@postgres/copi")["port"] == 5432
 
 
 async def test_row_count_check_fails_without_a_snapshot_revision(monkeypatch, tmp_path):
     _stub_live_counts(monkeypatch, {"users": 3})
     snap = _write_snapshot(tmp_path / "snap.json", {"users": 3}, current_revision=None)
-    _title, status, detail, _rem, _data = await po.check_row_counts(None, snap, False, "0051")
+    _title, status, detail, _rem, _data = await po.check_row_counts(
+        None, snap, False, "0051", _LIVE_URL
+    )
     assert status == po.FAIL
     assert "current_revision" in detail
 
@@ -1495,15 +1664,19 @@ def test_write_snapshot_round_trips_through_compare_row_counts(tmp_path):
             self.snapshot = str(path)
 
     counts = {"users": 3, "agent_messages": 18}
-    status, detail, _ = pf.write_snapshot(
-        _Args(tmp_path / "snap.json"), pf.Report("preflight"), counts, "0018"
-    )
+    report = pf.Report("preflight")
+    # run_preflight stores the REDACTED url here; the identity must survive that.
+    report.extra["database_url"] = pf.redact_url("postgresql+asyncpg://u:pw@h/copi")
+    status, detail, _ = pf.write_snapshot(_Args(tmp_path / "snap.json"), report, counts, "0018")
     assert status == pf.PASS
     assert "18" in detail or "21" in detail
     payload = json.loads((tmp_path / "snap.json").read_text())
     assert payload["kind"] == "preflight-snapshot"
     assert payload["current_revision"] == "0018"
     assert payload["row_counts"] == counts
+    assert payload["target"] == "0023"
+    assert payload["database_identity"] == {"host": "h", "port": 5432, "database": "copi"}
+    assert "pw" not in payload["database_url"]
     ok, problems = pf.compare_row_counts(payload["row_counts"], counts)
     assert ok and problems == []
 

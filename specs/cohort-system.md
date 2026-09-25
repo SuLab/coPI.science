@@ -14,9 +14,11 @@ gate preflight, topology snapshots, audit events, or reactive scheduling.
 Some comments in the tree cite it as `.notes/cohort-system-v2.md §N`, the path it
 was written at before it was promoted. **Read those as `specs/cohort-system-v2.md
 §N`** — the section numbering is identical. Every `v2 §N` / `cohort-system-v2 §N`
-citation in the tracked tree resolves to a numbered heading;
-`tests/unit/test_cohort_spec_citations.py` enforces it. Cite a numbered requirement
-as `§N req. M`.
+citation in `src/`, `tests/`, `templates/`, `scripts/`, `alembic/`, `specs/` and the
+top-level `docs/*.md` resolves to a numbered heading;
+`tests/unit/test_cohort_spec_citations.py` enforces it. The dated records under
+`docs/audits/`, `docs/plans/` and `docs/specs/` are not scanned: they quote old
+citations verbatim. Cite a numbered requirement as `§N req. M`.
 
 `.notes/` stays ignored, so the tracked copy under `specs/` is the only one that
 ships. If you edit the spec, edit this one.

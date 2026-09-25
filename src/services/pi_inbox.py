@@ -59,8 +59,8 @@ async def record_pi_message(
     general-purpose GATED reads (``get_new_top_level_posts``/
     ``get_replies_to_agent_posts``/``get_tags_for_agent``,
     ``src/agent/message_log.py``), but never actionable: it can never set a
-    bot's ``has_pending_reply`` or grant reactive priority
-    (``has_new_reply_from_other`` filters ``is_bot=False`` unconditionally),
+    bot's ``has_pending_reply`` (``has_new_reply_from_other`` filters
+    ``is_bot=False`` unconditionally),
     and it can never activate a new thread either
     (``SimulationEngine._phase3_activate_threads`` filters ``is_bot`` before
     acting on any entry). Human-PI-to-bot interaction is retired outright

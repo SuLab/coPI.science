@@ -80,6 +80,7 @@ ALLOWLIST: dict[str, str] = {
         "request; create_app registers the class with add_middleware, never the method."
     ),
     # Genuinely dead code the 2026-09-25 integration scan found (plan §5 step 2).
+    # These are NOT roots: code reachable only from them must still be reported.
     "src.agent.channels:is_seeded_channel": (
         "No caller anywhere, tests included (git grep, 2026-09-25). "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
@@ -409,9 +410,21 @@ def _describe(result: ScanResult, key: str) -> str:
     return f"{key}  ({d.path}:{d.lineno})" if d else f"{key}  (no longer defined)"
 
 
+# The allowlisted entry points the framework calls by itself. Only these seed the
+# fixpoint as live roots, so their callees count as live. The dead-code entries in
+# ALLOWLIST are deliberately not roots: seeding them would hide whatever only they
+# reach.
+ENTRY_POINTS: frozenset[str] = frozenset(
+    {
+        "src.main:OriginGuardMiddleware.dispatch",
+        "src.main:AgentBadgeMiddleware.dispatch",
+    }
+)
+
+
 @functools.cache
 def _repo_scan() -> ScanResult:
-    return scan(REPO_ROOT, roots=frozenset(ALLOWLIST))
+    return scan(REPO_ROOT, roots=ENTRY_POINTS)
 
 
 def test_src_has_no_unlisted_dead_definitions():
@@ -435,6 +448,10 @@ def test_allowlist_has_no_stale_entries():
 
 def test_every_allowlist_entry_has_a_reason():
     assert [k for k, reason in ALLOWLIST.items() if not reason.strip()] == []
+
+
+def test_every_entry_point_is_allowlisted():
+    assert ENTRY_POINTS <= ALLOWLIST.keys(), sorted(ENTRY_POINTS - ALLOWLIST.keys())
 
 
 # --- Control cases: the scanner against synthetic trees -------------------------------

@@ -163,6 +163,17 @@ def scopes_for(
     return scopes
 
 
+def scope_conflicts(omit: dict[str, set[str]], add: dict[str, set[str]]) -> list[str]:
+    """``AGENT_ID:SCOPE`` pairs named by both ``--omit-scope`` and ``--add-scope``.
+
+    ``scopes_for`` would let the add win silently, and a manifest is fixed once the
+    app exists, so a contradictory pair is refused rather than resolved.
+    """
+    return sorted(
+        f"{aid}:{scope}" for aid in omit.keys() & add.keys() for scope in omit[aid] & add[aid]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slack API helpers
 # ---------------------------------------------------------------------------
@@ -365,6 +376,13 @@ def main():
 
     omit = _parse_scope_specs("--omit-scope", args.omit_scope)
     add = _parse_scope_specs("--add-scope", args.add_scope)
+    conflicts = scope_conflicts(omit, add)
+    if conflicts:
+        console.print(
+            "[red]--omit-scope and --add-scope both name: "
+            f"{', '.join(conflicts)}. Pick one; the manifest cannot be changed later.[/red]"
+        )
+        raise SystemExit(2)
 
     if args.only:
         only = {a.lower() for a in args.only}

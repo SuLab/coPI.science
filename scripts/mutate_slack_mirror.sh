@@ -24,8 +24,10 @@
 #   MUT_TIMEOUT          seconds per pytest run before it is killed and scored ERROR
 #                        (default: 900)
 #   MUTMIRROR_COPY_DIR   where the mutated tree lives (default: a fresh mktemp dir); must
-#                        be absent or empty, and outside the repository
-#   MUTMIRROR_LOGDIR     where per-mutant pytest logs are kept (default: a mktemp dir)
+#                        be absent or empty, outside the repository, not a symlink and
+#                        owned by you; it is forced to 0700
+#   MUTMIRROR_LOGDIR     where per-mutant pytest logs are kept (default: a mktemp dir);
+#                        same symlink/owner checks, forced to 0700
 #   MUTMIRROR_KEEP_COPY  set to 1 to leave the mutated tree behind for inspection
 #
 # ---------------------------------------------------------------------------------------
@@ -47,7 +49,9 @@
 #   6. per-mutant output is kept and a kill NAMES the test that killed it. Discarding
 #      output made a mutant that "killed" because the workspace was unreachable
 #      indistinguishable from a real kill. For the same reason a run that hangs past
-#      MUT_TIMEOUT, or a pytest exit other than 0 or 1, is an ERROR, never a kill.
+#      MUT_TIMEOUT, a pytest exit other than 0 or 1, or an exit 1 whose log has no
+#      `FAILED ` summary line (a setup ERROR, a failed `cd` or log redirect) is an ERROR,
+#      never a kill.
 #
 # S4 is the inert control and MUST SURVIVE — a tier without one scores 100% precisely when
 # it is broken. mutate_system.sh once printed "killed 6/6" beside "inert controls: 0/4
@@ -63,18 +67,53 @@ ROOT=$(pwd -P)
 PY="${MUT_PYTHON:-$PWD/.venv-test/bin/python}"
 [ -x "$PY" ] || { echo "ERROR: $PY missing — create .venv-test ON THE HOST (CLAUDE.md); the images have no pytest" >&2; exit 1; }
 case "$PY" in /*) ;; *) PY="$ROOT/$PY" ;; esac  # pytest runs from the copy, not from here
-LOGDIR="${MUTMIRROR_LOGDIR:-$(mktemp -d)}"
 MUT_TIMEOUT="${MUT_TIMEOUT:-900}"
-mkdir -p "$LOGDIR" || { echo "ERROR: cannot create log dir $LOGDIR" >&2; exit 1; }
+
+# An operator-supplied directory is accepted only if it is a real directory (not a
+# symlink, checked before anything resolves it) owned by the current user, and is then
+# forced to 0700: `mkdir -p -m 0700` sets no mode on a directory that already exists, so
+# a pre-made 0755 copy directory would otherwise hold a world-readable copy of `.env`.
+# $1 = the variable's name (for messages), $2 = its path, $3 = "empty" to also require
+# that the directory be absent or empty.
+secure_override_dir() {
+  local d="$2"
+  while [ "$d" != "/" ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+  if [ -L "$d" ]; then
+    echo "ERROR: $1=$2 is a symlink; refusing it." >&2; return 1
+  fi
+  if [ "${3:-}" = "empty" ] && [ -e "$d" ] && [ -n "$(ls -A -- "$d" 2>/dev/null)" ]; then
+    echo "ERROR: $1=$2 exists and is not empty; refusing to reuse it." >&2; return 1
+  fi
+  mkdir -p -m 0700 -- "$d" || { echo "ERROR: cannot create $1=$2" >&2; return 1; }
+  if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then
+    echo "ERROR: $1=$2 is not a directory owned by $(id -un); refusing it." >&2; return 1
+  fi
+  chmod 0700 -- "$d" || { echo "ERROR: cannot chmod 0700 $1=$2" >&2; return 1; }
+}
+
+# The log dir is created, not assumed: an absent one makes every `>"$log"` redirect fail
+# (see S4 in the header). A failed redirect no longer scores a kill regardless: a kill
+# needs a FAILED line in the log.
+if [ -n "${MUTMIRROR_LOGDIR:-}" ]; then
+  LOGDIR="$MUTMIRROR_LOGDIR"
+  secure_override_dir MUTMIRROR_LOGDIR "$LOGDIR" || exit 1
+else
+  LOGDIR=$(mktemp -d) || { echo "ERROR: mktemp failed for the log dir" >&2; exit 1; }
+fi
 
 # Deliberately NOT the live database: the live tiers commit. Unset or empty means
 # conftest's own throwaway Postgres (tests/conftest.py treats an empty value as unset).
-case "${TEST_DATABASE_URL:-}" in
-  */copi|*/copi\?*)
+# The database name is parsed rather than pattern-matched, so `.../copi/`, `.../copi#x`
+# and `.../copi?x` are all caught.
+if [ -n "${TEST_DATABASE_URL:-}" ]; then
+  dbname=$("$PY" -c 'import sys; from urllib.parse import unquote, urlsplit; print(unquote(urlsplit(sys.argv[1]).path.strip("/").split("/")[0]))' "$TEST_DATABASE_URL") \
+    || { echo "ERROR: cannot parse TEST_DATABASE_URL" >&2; exit 1; }
+  if [ "$dbname" = "copi" ]; then
     echo "ERROR: TEST_DATABASE_URL points at the live 'copi' database. These suites" >&2
     echo "commit. Use a throwaway database." >&2
-    exit 1 ;;
-esac
+    exit 1
+  fi
+fi
 
 TESTS="tests/integration/test_slack_mirror_live.py tests/integration/test_slack_lifecycle_live.py"
 
@@ -120,11 +159,7 @@ copy_is_safe() {
 
 if [ -n "${MUTMIRROR_COPY_DIR:-}" ]; then
   COPY="$MUTMIRROR_COPY_DIR"
-  if [ -e "$COPY" ] && [ -n "$(ls -A -- "$COPY" 2>/dev/null)" ]; then
-    echo "ERROR: MUTMIRROR_COPY_DIR=$COPY exists and is not empty; refusing to reuse it." >&2
-    exit 1
-  fi
-  mkdir -p -m 0700 -- "$COPY" || { echo "ERROR: cannot create $COPY" >&2; exit 1; }
+  secure_override_dir MUTMIRROR_COPY_DIR "$COPY" empty || exit 1
 else
   COPY=$(mktemp -d "${TMPDIR:-/tmp}/mutmirror.XXXXXX") || { echo "ERROR: mktemp failed" >&2; exit 1; }
 fi
@@ -132,19 +167,29 @@ fi
 COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
 copy_is_safe || exit 1
 
+# INT and TERM are trapped too, so an interrupted run still removes the copy (which holds
+# `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal; the
+# `cleaned` flag makes a second call a no-op either way.
+cleaned=0
 cleanup() {
+  [ "$cleaned" -eq 1 ] && return 0
+  cleaned=1
   if [ "${MUTMIRROR_KEEP_COPY:-0}" = "1" ]; then
     echo "(left the mutated tree at ${COPY} — MUTMIRROR_KEEP_COPY=1)"
   elif copy_is_safe; then
     rm -rf -- "$COPY"
   fi
 }
-trap cleanup EXIT INT TERM
+on_signal() { cleanup; trap - EXIT; exit "$1"; }
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 echo "building a throwaway copy of the tree at ${COPY} (the repo is never written to)"
 copy_is_safe || exit 1
 # backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
-# Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT.
+# Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT,
+# INT or TERM.
 if ! tar -C "$ROOT" \
       --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
       --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \
@@ -162,11 +207,13 @@ if [ "$prov" != "$COPY/src/__init__.py" ]; then
 fi
 echo "provenance OK: pytest will import $prov"
 
+# -rfE: the summary lists `FAILED <node>` for failed tests (the kill evidence) and
+# `ERROR <node>` for setup/collection errors (diagnostics only, never a kill).
 run_selection() {  # $1 = log file; prints nothing, returns pytest's (or timeout's) exit
   local envargs=()
   [ -n "${TEST_DATABASE_URL:-}" ] && envargs+=("TEST_DATABASE_URL=$TEST_DATABASE_URL")
   (cd "$COPY" && env ${envargs[@]+"${envargs[@]}"} timeout -k 30 "$MUT_TIMEOUT" \
-     sh -c "exec \"$PY\" -m pytest $TESTS -q -m live_slack -p no:cacheprovider") > "$1" 2>&1
+     sh -c "exec \"$PY\" -m pytest $TESTS -q -rfE -m live_slack -p no:cacheprovider") > "$1" 2>&1
 }
 
 echo; echo "=== baseline (unmutated copy) ==="
@@ -221,14 +268,21 @@ PY
         echo "SURVIVED  $label   [$(grep -oE '[0-9]+ passed' "$log" | tail -1)]"; fail=1
       fi ;;
     1)
-      if [ "$inert" -eq 1 ]; then
+      # Exit 1 is a kill only if a test FAILED. It also comes from a setup or fixture
+      # ERROR (testcontainers/Docker, an unreachable workspace), a failed `cd`, or a
+      # failed `>"$log"` redirect — none of which names a failing test.
+      killers=$(grep -oE "^FAILED [^ ]+" "$log" 2>/dev/null | sed 's/^FAILED //' | head -3 | tr '\n' ' ')
+      if [ -z "$killers" ]; then
+        echo "ERROR   $label — pytest exit 1 with no FAILED line (setup/collection ERROR," >&2
+        echo "        failed cd, or failed log redirect) names no failing test; see $log" >&2
+        fail=1
+      elif [ "$inert" -eq 1 ]; then
         echo "KILLED AN INERT MUTANT  $label — the tier is flaky or broken, not sensitive" >&2
         grep -E "^FAILED|^ERROR" "$log" | head -3 >&2
         fail=1
       else
-        killers=$(grep -oE "^FAILED [^ ]+" "$log" | sed 's/^FAILED //' | head -3 | tr '\n' ' ')
         echo "killed    $label"
-        echo "          by: ${killers:-no FAILED line — inspect $log}"
+        echo "          by: $killers"
         killed=$((killed+1))
       fi ;;
     124|137)

@@ -3,6 +3,7 @@ key. Pre-fix, the loser's commit raises IntegrityError out of the handler
 (a 500 in production). The sessions are separate on purpose — one session
 would serialize the race away."""
 import asyncio
+import logging
 
 import pytest
 from sqlalchemy import func, select
@@ -47,6 +48,18 @@ class _ExistenceCheckGate:
                 await self._condition.wait_for(lambda: self._arrived >= self._parties)
 
 
+def _lost_race_warnings(caplog, decision_id, agent_id) -> list[str]:
+    """The route's lost-race WARNINGs that name this decision and agent."""
+    return [
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "src.routers.agent_page"
+        and rec.levelno == logging.WARNING
+        and "Lost the race on uq_proposal_reviews_decision_agent" in rec.getMessage()
+        and str(decision_id) in rec.getMessage()
+        and agent_id in rec.getMessage()
+    ]
+
+
 def _is_review_existence_check(statement) -> bool:
     """True only for the `select(ProposalReview).where(...)` existence check —
     the sole Select along either route's call path whose only selected entity
@@ -63,7 +76,7 @@ def _is_review_existence_check(statement) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_proposal_reviews_do_not_500(engine):
+async def test_concurrent_proposal_reviews_do_not_500(engine, caplog):
     """Same race, on review_proposal's uq_proposal_reviews_decision_agent.
 
     Two tabs / a double-click submit the same agent's review for the same
@@ -71,7 +84,9 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
     of the handler; post-fix it rolls back and redirects to the dashboard
     like the winner, so both responses are that redirect and exactly one
     review row exists. Asserting both responses is what catches a loser that
-    returns anything else without raising (RCA mutation R2).
+    returns anything else without raising (RCA mutation R2). The loser also
+    logs exactly one WARNING naming the decision and agent, since its rating
+    is discarded.
 
     The two racers are pinned on `_ExistenceCheckGate` (see its docstring) so
     both are guaranteed to pass the pre-insert existence check before either
@@ -109,6 +124,7 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
         run_id, agent_pk, pi_id = run.id, agent.id, pi.id
 
     gate = _ExistenceCheckGate(parties=2)
+    caplog.set_level(logging.WARNING, logger="src.routers.agent_page")
 
     async def submit():
         async with factory() as db:
@@ -145,6 +161,9 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
                 )
             )).scalar_one()
         assert count == 1
+        warnings = _lost_race_warnings(caplog, decision_id, agent_id)
+        assert len(warnings) == 1, warnings
+        assert "rating was discarded" in warnings[0]
     finally:
         # This test's writes are real commits, not the rolled-back
         # `db_session` other integration tests get — tests/integration/
@@ -167,13 +186,15 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_reopens_do_not_500(engine):
+async def test_concurrent_reopens_do_not_500(engine, caplog):
     """Same race, on reopen_proposal: a double-click submits the same agent's
     reopen twice at once. Both pass the pre-insert existence check (pinned by
     `_ExistenceCheckGate`), both write guidance to the inbox and add a rating=0
     review, and the loser's commit collides on uq_proposal_reviews_decision_agent.
     Its rollback must take its inbox row with it, so exactly one review and one
-    PI inbox message survive, and both racers get the dashboard redirect.
+    PI inbox message survive, and both racers get the dashboard redirect. The
+    discarded guidance is recorded by exactly one WARNING naming the decision
+    and agent.
     """
     from src.routers.agent_page import reopen_proposal
 
@@ -198,6 +219,7 @@ async def test_concurrent_reopens_do_not_500(engine):
         run_id, agent_pk, pi_id = run.id, agent.id, pi.id
 
     gate = _ExistenceCheckGate(parties=2)
+    caplog.set_level(logging.WARNING, logger="src.routers.agent_page")
 
     async def submit():
         async with factory() as db:
@@ -242,6 +264,9 @@ async def test_concurrent_reopens_do_not_500(engine):
             )).scalar_one()
         assert reviews == 1
         assert inbox == 1, f"the losing reopen's guidance survived: {inbox} inbox rows"
+        warnings = _lost_race_warnings(caplog, decision_id, agent_id)
+        assert len(warnings) == 1, warnings
+        assert "reopen guidance was discarded" in warnings[0]
     finally:
         # As above, plus the surviving inbox row: AgentMessage cascades from
         # the SimulationRun delete.

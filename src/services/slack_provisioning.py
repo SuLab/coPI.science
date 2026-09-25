@@ -96,9 +96,10 @@ def create_app(
     consent screen offers Allow or Cancel, not a per-scope choice, and an
     already-installed app keeps the grant it was installed with. The live Slack
     tier depends on that: its private-channel helpers create and invite as ``su``,
-    which needs ``groups:write`` on top of ``BOT_SCOPES`` and so has to be created
-    from a widened manifest (``scripts/provision_slack_bots.py --add-scope
-    su:groups:write``; see
+    and its listing test lists private channels as ``su``, which needs
+    ``groups:write`` and ``groups:read`` on top of ``BOT_SCOPES`` and so has to be
+    created from a widened manifest (``scripts/provision_slack_bots.py --add-scope
+    su:groups:write --add-scope su:groups:read``; see
     ``test_slack_provision_live.py::test_the_granted_scopes_are_the_scopes_we_asked_for``).
     """
     scopes = list(BOT_SCOPES) if scopes is None else list(scopes)

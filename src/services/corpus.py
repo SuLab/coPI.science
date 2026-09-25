@@ -396,6 +396,12 @@ class CorpusResult:
     # pmid -> the ORCID-curated DOI, so the pipeline's reconcile_pub_doi gate
     # can keep preferring the curated form as its candidate.
     orcid_dois: dict[str, str] = field(default_factory=dict)
+    # Every identity-gated, deduped record BEFORE the cap, in the same
+    # newest-first order as ``kept`` (``kept == ranked[:cap]``; the dicts are
+    # the same objects). Tenure derivation reads this, not ``kept``: a PI's
+    # earliest Hopkins-affiliated paper can sit outside the newest ``cap``.
+    # Defaults to empty so constructors that predate the field still work.
+    ranked: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_title(title: str) -> str:
@@ -639,4 +645,5 @@ async def resolve_corpus(
         stage_counts=stage_counts,
         dropped=dropped,
         orcid_dois=orcid_dois,
+        ranked=ranked,
     )

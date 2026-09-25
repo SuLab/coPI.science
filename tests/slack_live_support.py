@@ -6,8 +6,9 @@ private channel to test what production DOES do with one (polling through a memb
 bot, the not-invited error, the listing exclusion), so these helpers make it through
 the client's own `_api`, which keeps its rate-limit retry.
 
-Both need `groups:write` on the calling bot. That scope is no longer in `BOT_SCOPES`;
-`su` was installed with it for this purpose, and
+Both need `groups:write` on the calling bot, and the live tier's private-channel
+listing needs `groups:read`. Neither scope is in `BOT_SCOPES` any more; `su` was
+installed with both for this purpose, and
 `test_slack_provision_live.py::test_the_granted_scopes_are_the_scopes_we_asked_for`
 checks that it still holds it. Call them as `su`.
 

@@ -299,19 +299,20 @@ a bug — emit `None` instead.
 The shipped implementation moved the gate from the phases to the `MessageLog`
 read boundary. **Keep that** — it is one choke point instead of three, and all
 three current call sites pass the gate correctly. But the coverage is incomplete:
-of 11 read methods on `MessageLog`, 3 are gated.
+of 11 read methods on `MessageLog`, 3 were gated when this section was written
+(one of the 11, `get_last_bot_sender_in_channel`, has since been removed, D11).
 
 | Method | v2 requirement |
 |---|---|
 | `get_new_top_level_posts` | **Gated** (done) |
 | `get_replies_to_agent_posts` | **Gated** (done) |
 | `get_tags_for_agent` | **Gated** (done) |
-| `has_new_reply_from_other` | Ungated by design in the reply lane: `_pending_reply_pairs` passes `allowed_sender_ids=None` (`simulation.py:1672-1675`). `_owes_reply` was removed (D12). See §8 |
+| `has_new_reply_from_other` | Ungated by design in the reply lane: `_pending_reply_pairs` passes `allowed_sender_ids=None` (`SimulationEngine._pending_reply_pairs`, `simulation.py`). `_owes_reply` was removed (D12). See §8 |
 | `get_thread_history` | Ungated **by design** — once a thread is open, its full history is context. Document it |
 | `get_thread_allowed_agents` | Ungated by design — thread participation, not cohort |
 | `get_agent_top_level_posts` | Ungated by design — an agent's own posts |
 | `get_thread_message_count` | Ungated by design — bookkeeping |
-| `get_last_bot_sender_in_channel` | Ungated by design — anti-monologue check |
+| `get_last_bot_sender_in_channel` | Removed (D11, 2026-09-25). Was: ungated by design — anti-monologue check |
 | `load_entry`, `latest_timestamp` | Ungated by design — bookkeeping |
 
 Any new read method must declare its classification in its docstring. Add a test
@@ -351,7 +352,7 @@ explicit classification or someone will "helpfully" gate the wrong one:
 | Path | Classification |
 |---|---|
 | `_poll_inbound_from_db` (`simulation.py:2209`) | **Ingestion — must never be gated.** See below |
-| `_hydrate_thread_from_db` (`:3012`) | Ingestion — never gated |
+| `_hydrate_thread_from_db` | Removed (D11, 2026-09-25). Was: ingestion — never gated |
 | `_rebuild_state_from_db` (`:2901`) | Ingestion — never gated |
 | `_rebuild_agent_state` (`:3302`) | **Gate-blind state construction** — see §8 |
 | `_poll_pi_dms_from_db` (`:2452`) → `PIHandler.handle_dm` | Never gated: humans only, and it bypasses `MessageLog` entirely |

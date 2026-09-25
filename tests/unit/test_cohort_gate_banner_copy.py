@@ -43,3 +43,15 @@ def test_banner_says_recreate_not_restart(isolation_enabled):
     html = _render(isolation_enabled)
     assert "--force-recreate" in html
     assert "/admin/simulation" in html
+
+
+def test_the_isolation_off_notice_itself_says_recreate():
+    """The OFF notice is its own sentence, outside the shared settings list, so the
+    two parametrized checks above would still pass if only it went back to "restart".
+    """
+    html = _render(False)
+    start = html.index("Cohort isolation is OFF")
+    notice = html[start : html.index("</div>", start)]
+    assert "<em>recreating</em>" in notice
+    assert "/admin/simulation" in notice
+    assert "a restart keeps the old environment" in notice

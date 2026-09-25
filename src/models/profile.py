@@ -109,11 +109,12 @@ class ResearcherProfile(Base):
 
           grounded              at least one abstract reached the prompt
           evidence_lost         identifiers were resolved but no abstract
-                                survived, or — on a row written before a corpus
-                                stage failure began failing the job — a
-                                PubMed/NCBI outage or rate-limit lost them, or the
-                                ORCID works lookup itself failed so the
-                                identifier count is unknown.
+                                survived, or — on a row written before the
+                                strict corpus path shipped (2026-09-25) — a
+                                PubMed/NCBI outage or rate-limit lost them, or —
+                                on a row written before a corpus stage failure
+                                began failing the job — the ORCID works lookup
+                                itself failed so the identifier count is unknown.
                                 Ungrounded and worth regenerating.
           no_evidence_available nothing to fetch in the first place (a genuinely
                                 publication-less or non-PubMed-indexed
@@ -124,9 +125,14 @@ class ResearcherProfile(Base):
         Limit of what two counts can tell you: they describe what the synthesis
         HAD, not every reason it had that. The corpus path calls
         `convert_dois_to_pmids` and `fetch_pubmed_records` with `strict=True`, so
-        an NCBI failure there raises `CorpusStageError` and fails the job rather
-        than storing a thinner profile; only ingest callers keep the swallowing
-        default. One case is still understated on rows written before the strict
+        a TRANSIENT NCBI failure there (a transport error, a 429 or a 5xx) raises
+        `CorpusStageError` and fails the job rather than storing a thinner
+        profile; only ingest callers keep the swallowing default. A PERMANENT
+        per-item failure (another 4xx, or an unreadable body) does not fail the
+        job, since it would fail identically on every retry: that one PMID is
+        dropped, or that one DOI reads as unmapped, with a WARNING naming it — so
+        on any row such a loss is invisible in these counts, which never saw the
+        item. One case is still understated on rows written before the strict
         corpus path shipped (2026-09-25) — `convert_dois_to_pmids` failing (it
         then swallowed its own errors) for a researcher whose ORCID/OpenAlex works
         carry only DOIs, with no PubMed search hit, left zero identifiers in hand

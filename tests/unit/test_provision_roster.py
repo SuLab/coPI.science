@@ -89,3 +89,10 @@ def test_scopes_for_extends_only_the_named_agent():
     assert psb.scopes_for("su", {}, {"su": {"chat:write"}}, base=base) == base
     # The base list itself is never mutated.
     assert base == ["channels:read", "chat:write", "users:read"]
+
+
+def test_a_scope_both_omitted_and_added_is_a_conflict():
+    omit = {"su": {"chat:write", "users:read"}, "wiseman": {"groups:write"}}
+    add = {"su": {"chat:write", "groups:write"}, "cravatt": {"groups:write"}}
+    assert psb.scope_conflicts(omit, add) == ["su:chat:write"]
+    assert psb.scope_conflicts({}, add) == []

@@ -396,11 +396,7 @@ Each of the 12 agents has its own Slack app with distinct identity (name, avatar
   "features": {
     "bot_user": {
       "display_name": "BOT_NAME",
-      "always_online": true
-    },
-    "app_home": {
-      "messages_tab_enabled": true,
-      "messages_tab_read_only_enabled": false
+      "always_online": false
     }
   },
   "oauth_config": {
@@ -412,12 +408,6 @@ Each of the 12 agents has its own Slack app with distinct identity (name, avatar
         "channels:read",
         "chat:write",
         "groups:history",
-        "groups:write",
-        "im:history",
-        "im:read",
-        "im:write",
-        "im:write.topic",
-        "mpim:history",
         "users:read",
         "users:read.email"
       ]
@@ -434,23 +424,19 @@ Each of the 12 agents has its own Slack app with distinct identity (name, avatar
 ```
 
 Notes on the manifest (kept out of the JSON because Slack's validator rejects comments):
+- The bot scopes are exactly `BOT_SCOPES` in `src/services/slack_provisioning.py` (eight, as of 2026-09-25, D13), and `create_app` there is the authoritative manifest; if this template and that list disagree, the code wins. `tests/unit/test_slack_provisioning.py`'s `METHOD_SCOPES` maps each Slack method the code calls to the scope it needs.
 - `channels:read` is required for `conversations.list` (used for seeded-channel discovery on startup). Without it, the bot silently fails to find any channels.
-- `groups:history` and `groups:write` cover collab_private channels (read/post/invite). `groups:read` is intentionally omitted — private-channel discovery is DB-driven (`_sync_private_channels_from_db`), not via `conversations.list(types=private_channel)`.
+- `groups:history` covers history and replies in collab_private channels, which the engine still polls (`_sync_private_channels_from_db`). It is the only `groups:*` scope requested. `groups:read` is omitted because private-channel discovery is DB-driven, not via `conversations.list(types=private_channel)`.
+- **Historical scopes (no longer requested for new installs, 2026-09-25, D13):** `groups:write`, `groups:read`, `im:history`, `im:read`, `im:write`, `im:write.topic` and `mpim:history`. An installed app keeps the grant it was installed with, so bots installed before that date still hold them until they are reinstalled (D17). The exception is the live Slack test tier's `su` bot: its private-channel helpers create, invite and list as `su`, so it needs `groups:write` and `groups:read` on top of `BOT_SCOPES`, added at creation with `scripts/provision_slack_bots.py --add-scope su:groups:write --add-scope su:groups:read`.
 - Bots must never `conversations_join` a private channel they weren't invited to — the auto-join retry in `slack_client.py` must gate on channel visibility.
 - No `event_subscriptions` block — the agent polls; Slack's validator rejects non-empty `bot_events` without a `request_url` when Socket Mode is off.
-- `app_home.messages_tab_enabled` enables the Messages tab on the bot's App Home, allowing PIs to DM the bot directly from Slack. Required for PI interaction.
+- No `app_home` block. The Messages tab and the `im:*` scopes existed for PI-to-bot DMs, which were retired in the 2026-08-12 removal cycle; `create_app` sets neither.
 
 **Setup per bot (~2 min each):**
 1. api.slack.com/apps → "Create New App" → "From an app manifest" → paste manifest → Create
 2. Install App → Install to Workspace → copy `xoxb-...`
-3. Verify the Messages tab is visible: click the bot name in Slack → "Messages" tab should appear
 
-**For existing apps**, add DM support manually:
-1. Go to api.slack.com/apps → select app → **App Home**
-2. Scroll to **Show Tabs** → enable **Messages Tab**
-3. Check "Allow users to send Slash commands and messages from the messages tab"
-4. Go to **OAuth & Permissions** → verify `im:history`, `im:read`, `im:write` scopes are present
-5. **Reinstall the app** to the workspace to pick up new scopes
+**Historical:** an earlier version of this section told operators to add DM support to existing apps (Messages Tab plus `im:history`, `im:read` and `im:write`) and reinstall. Do not follow it: PI-to-bot DMs are retired and those scopes are no longer requested (D13). A reinstall now narrows a bot to `BOT_SCOPES` (D17).
 
 ## LLM Prompt Files
 

@@ -22,9 +22,11 @@ RUN git config --global --add safe.directory /app \
     && python scripts/write_build_info.py \
     && rm -rf .git
 
-# Stage 2: the runtime image. It never copies the build context directly:
-# only pyproject.toml and src/ for the pip layer, then the cleaned tree from
-# `source` (pinned by tests/unit/test_docker_build_context.py).
+# Stage 2: the runtime image. Every COPY takes from the cleaned `source` stage,
+# never from the build context, so an untracked file under src/ cannot reach
+# /app or site-packages either (pinned by tests/unit/test_docker_build_context.py).
+# The pip layer re-runs whenever the source stage changes; that is the price of
+# installing only tracked code.
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -36,8 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml .
-COPY src/ src/
+COPY --from=source /app/pyproject.toml ./
+COPY --from=source /app/src/ src/
 RUN pip install --no-cache-dir .
 
 # Copy the cleaned source tree, .build_info.json included

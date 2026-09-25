@@ -11,7 +11,11 @@ rules:
 
 * a ``docker compose`` COMMAND (the words followed, after global options only, by a
   subcommand) names ``-f docker-compose.prod.yml`` before the subcommand;
-* nothing ``exec``s into, or copies to, the dev service ``app``;
+* no compose command names the dev service ``app`` as a token after its subcommand
+  (``exec``, ``run``, ``up``, ``build``, ``logs``, ``stop``, ``restart``, ...), whatever
+  ``-f`` it carries, and nothing copies to ``app:/app``;
+* no shell default makes ``app`` the fallback for a compose-service variable
+  (``SVC="${MIGRATE_SERVICE:-app}"``, the recorded ``run_migration.sh`` defect);
 * ``blackbird-agent-run`` is stopped, inspected or named only on a line that says
   "emergency";
 * no ``&& docker compose`` chain: a failed first step must not be hidden in one line an
@@ -42,15 +46,30 @@ _GLOBAL_OPT = rf"(?:{_VALUE_OPTS}(?:=|\s+)\S+|{_FLAG_OPTS})"
 
 # ``docker-compose`` (v1) is matched too; ``docker-compose.yml`` is not, since a
 # filename is followed by ``.`` rather than whitespace.
+# ``rest`` is the command's own text, as in test_compose_service_references.py: it
+# stops at a backtick, an HTML tag, a shell comment or a shell operator, so what
+# follows the command on the line is not read as its arguments.
 COMPOSE_COMMAND = re.compile(
     rf"\bdocker[ -]compose\s+(?P<opts>(?:{_GLOBAL_OPT}\s+)*)(?P<sub>{_SUBCOMMANDS})(?![\w-])"
+    r"(?P<rest>[^`<#;|&\n]*)"
 )
 PROD_FILE = re.compile(r"(?:-f|--file)(?:=|\s+)[\"']?(?:\./)?docker-compose\.prod\.yml[\"']?(?!\S)")
 
 # The dev service as a delimited token. ``\bapp`` would also match ``blackbird-app``
-# (``\b`` sits between ``-`` and ``a``) and the ``/app/...`` container paths.
+# (``\b`` sits between ``-`` and ``a``), the ``/app/...`` container paths and
+# ``src.main:app``. The sibling guard uses the same token.
+DEV_APP = re.compile(r"(?<![\w/.:-])app(?![\w/:-])")
+# Kept for ``$DC exec app``/``"${DC[@]}" exec app`` forms, which COMPOSE_COMMAND does
+# not see because the literal ``docker compose`` is elsewhere.
 EXEC_DEV_APP = re.compile(r"\bexec(?: -T)?(?: -e \S+)* (?<![\w/.:-])app(?![\w/:-])")
 COPY_DEV_APP = re.compile(r"(?<![\w-])app:/app")
+# A shell default of ``app`` for a variable that names a compose service: either the
+# assigned name or the defaulted parameter contains SERVICE or SVC.
+_APP_DEFAULT = r""":-["']?app["']?(?:\}|")"""
+SERVICE_DEFAULT_APP = re.compile(
+    rf"\b\w*(?:SERVICE|SVC)\w*=\S*?\$\{{\w*{_APP_DEFAULT}"
+    rf"|\$\{{\w*(?:SERVICE|SVC)\w*{_APP_DEFAULT}"
+)
 
 AGENT_RUN_CONTAINER = re.compile(
     r"\bdocker (?:stop|rm|start|restart|kill|logs|inspect|exec)\b[^\n]*\bblackbird-agent-run\b"
@@ -95,10 +114,14 @@ def violations(line: str) -> list[str]:
     for m in COMPOSE_COMMAND.finditer(line):
         if not PROD_FILE.search(m.group("opts")):
             found.append(f"`docker compose {m.group('sub')}` without -f docker-compose.prod.yml")
-    if EXEC_DEV_APP.search(line):
+    if any(DEV_APP.search(m.group("rest")) for m in COMPOSE_COMMAND.finditer(line)):
+        found.append("compose command targets the dev service `app`")
+    elif EXEC_DEV_APP.search(line):
         found.append("exec into the dev service `app`")
     if COPY_DEV_APP.search(line):
         found.append("copy to the dev service `app`")
+    if SERVICE_DEFAULT_APP.search(line):
+        found.append("compose service variable defaults to the dev service `app`")
     if AGENT_RUN_CONTAINER.search(line) and "emergency" not in line.lower():
         found.append("blackbird-agent-run outside an emergency-path line")
     if AND_CHAIN.search(line):
@@ -148,6 +171,17 @@ FLAGGED = [
     "docker stop -t 420 blackbird-agent-run",
     "docker logs blackbird-agent-run > run.log",
     "docker compose -f docker-compose.prod.yml --profile agent run -d --name blackbird-agent-run agent",
+    "docker compose -f docker-compose.prod.yml run --rm app alembic upgrade head",
+    "docker compose -f docker-compose.prod.yml up -d app worker",
+    "docker compose -f docker-compose.prod.yml build app",
+    "docker compose -f docker-compose.prod.yml logs --tail 50 app",
+    "docker compose -f docker-compose.prod.yml restart app",
+    'docker compose -f docker-compose.prod.yml run --rm -v "$PWD/data:/app/data" app python x',
+    'SVC="${MIGRATE_SERVICE:-app}"',
+    "SVC=${MIGRATE_SERVICE:-app}",
+    'WEB_SERVICE="${1:-app}"',
+    'SVC="${MIGRATE_SERVICE:-"app"}"',
+    '  "${DC[@]}" exec -T app python x',
 ]
 
 LEGAL = [
@@ -166,6 +200,14 @@ LEGAL = [
     "# the CLI run's container is blackbird-agent-run, never the unprefixed one",
     '  if ! "${DC[@]}" exec -T "$PG_SVC" pg_dump -U copi -Fc -f "$CTMP" "$DBNAME"; then',
     "docker compose -f docker-compose.prod.yml build blackbird-app worker",
+    "docker compose -f docker-compose.prod.yml run --rm blackbird-app alembic upgrade head",
+    "docker compose -f docker-compose.prod.yml up -d blackbird-app worker",
+    "docker compose -f docker-compose.prod.yml logs --tail 50 blackbird-app",
+    "docker compose -f docker-compose.prod.yml run --rm blackbird-app uvicorn src.main:app",
+    "docker compose -f docker-compose.prod.yml run --rm -e PYTHONPATH=/app blackbird-app python x",
+    'SVC="${MIGRATE_SERVICE:-blackbird-app}"',
+    'PG_SVC="${MIGRATE_PG_SERVICE:-postgres}"',
+    'DIR="${APP_DIR:-app}"',
 ]
 
 
@@ -194,6 +236,24 @@ def test_the_exemption_is_not_stale():
     for (rel, line), _reason in EXEMPT.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert line in (raw.strip() for raw in text.splitlines()), f"stale exemption: {rel}: {line}"
+
+
+def test_the_scanner_flags_planted_dev_service_forms(tmp_path):
+    planted = tmp_path / "scripts" / "planted.sh"
+    planted.parent.mkdir(parents=True)
+    planted.write_text(
+        "#!/bin/bash\n"
+        "docker compose -f docker-compose.prod.yml run --rm app alembic upgrade head\n"
+        'SVC="${MIGRATE_SERVICE:-app}"\n'
+        "docker compose -f docker-compose.prod.yml run --rm blackbird-app alembic upgrade head\n"
+        'SVC="${MIGRATE_SERVICE:-blackbird-app}"\n'
+        'docker compose -f docker-compose.prod.yml run --rm -v "$PWD/data:/app/data" blackbird-app x\n'
+        "docker compose -f docker-compose.prod.yml run --rm blackbird-app uvicorn src.main:app\n",
+        encoding="utf-8",
+    )
+    failures, commands = scan(tmp_path)
+    assert commands == 4
+    assert [f.split(": ")[0] for f in failures] == ["scripts/planted.sh:2", "scripts/planted.sh:3"]
 
 
 def test_the_scanner_flags_a_planted_bare_command(tmp_path):

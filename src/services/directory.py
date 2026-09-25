@@ -962,8 +962,10 @@ async def build_discussions_view(
 
     # Count by status over the whole run, before any filter: the summary cards
     # link to `?run_id=...&status_filter=...` with no channel or agent filter,
-    # so each card's number must be what its link lists, and "Total root
-    # posts" (the sum) is the same under every filter.
+    # so each card's number must be what its link lists, and "Total threads"
+    # (the sum) is the same under every filter. It counts threads, not root
+    # posts: an orphaned decision (no root post) is listed, carded and
+    # exported as a thread, so it is counted as one too.
     counts: dict[str, int] = {}
     for t in threads:
         s = t["status"]

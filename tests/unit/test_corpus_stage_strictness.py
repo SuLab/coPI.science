@@ -7,6 +7,12 @@ corpus: ``resolve_corpus``'s ``_stage`` wrapper can only raise
 DOI lookup used to thin the corpus — and the tenure start and synthesis built
 on it — silently. The corpus path now passes ``strict=True``.
 
+Strict means strict about TRANSIENT failures only (transport, 429, 5xx),
+which a job retry can recover. A PERMANENT per-item failure (another 4xx, an
+unreadable body) would repeat on every retry, so it costs that item alone —
+re-raising it would leave the job, and every later regeneration of the PI,
+``dead``.
+
 The two pubmed functions run for real here, over an ``httpx.MockTransport``;
 only the non-NCBI stages (ORCID works, OpenAlex, the PubMed searches) are
 faked. A fake of the pubmed functions themselves could not show that the real
@@ -78,23 +84,50 @@ async def _resolve():
     return await resolve_corpus(_ORCID, "Rachel Green", "Johns Hopkins University")
 
 
-async def test_one_failed_efetch_batch_raises_corpus_stage_error(monkeypatch):
+_EMPTY_SET = '<?xml version="1.0"?><PubmedArticleSet></PubmedArticleSet>'
+
+
+async def test_a_transiently_failed_efetch_batch_raises_corpus_stage_error(monkeypatch):
     _wire(monkeypatch, orcid_works=[{"pmid": str(i)} for i in range(1, 151)])
     calls = {"efetch": 0}
 
     def handler(request):
         assert _route(request) == "efetch"
         calls["efetch"] += 1
-        if calls["efetch"] == 1:
-            return httpx.Response(200, text="<not-xml")
-        return httpx.Response(
-            200, text='<?xml version="1.0"?><PubmedArticleSet></PubmedArticleSet>'
-        )
+        if "," in request.url.params["id"] and calls["efetch"] <= 3:
+            return httpx.Response(503, text="Service Unavailable")
+        return httpx.Response(200, text=_EMPTY_SET)
 
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
     with pytest.raises(CorpusStageError, match="efetch") as ei:
         await _resolve()
-    assert isinstance(ei.value.__cause__, pubmed.PubMedParseError)
+    assert calls["efetch"] == 3, "the 503 is retried to the budget, then raises"
+    assert isinstance(ei.value.__cause__, httpx.HTTPStatusError)
+
+
+async def test_a_permanently_failed_efetch_batch_does_not_fail_the_corpus(
+    monkeypatch, caplog
+):
+    # An unparseable batch body would come back unparseable on every job
+    # retry, so it must not raise: the batch is re-fetched PMID by PMID and
+    # only the PMID that still fails is lost.
+    _wire(monkeypatch, orcid_works=[{"pmid": str(i)} for i in range(1, 4)])
+    singles = []
+
+    def handler(request):
+        assert _route(request) == "efetch"
+        ids = request.url.params["id"]
+        if "," in ids:
+            return httpx.Response(200, text="<not-xml")
+        singles.append(ids)
+        if ids == "2":
+            return httpx.Response(400, text="Bad Request")
+        return httpx.Response(200, text=_EMPTY_SET)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    await _resolve()
+    assert sorted(singles) == ["1", "2", "3"]
+    assert "PMID 2 failed permanently" in caplog.text
 
 
 async def test_an_idconv_failure_raises_corpus_stage_error(monkeypatch):
@@ -147,6 +180,51 @@ async def test_a_failed_doi_roundtrip_efetch_raises(monkeypatch):
         await _resolve()
     assert calls["efetch"] == 3
     assert isinstance(ei.value.__cause__, httpx.RemoteProtocolError)
+
+
+async def test_a_permanently_failed_doi_esearch_is_no_match_not_a_failure(
+    monkeypatch, caplog
+):
+    # A 400 is not retried by _ncbi_get and would repeat on every job retry:
+    # it reads as "no PMID for this DOI", with a WARNING naming the DOI.
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+    calls = {"esearch": 0}
+
+    def handler(request):
+        route = _route(request)
+        if route == "idconv":
+            return httpx.Response(200, json=_EMPTY_IDCONV)
+        assert route == "esearch"
+        calls["esearch"] += 1
+        return httpx.Response(400, text="Bad Request")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    result = await _resolve()
+    assert result.kept == []
+    assert calls["esearch"] == 1
+    assert f"ESearch DOI lookup for {_DOI} failed permanently" in caplog.text
+
+
+async def test_a_permanently_failed_idconv_batch_falls_through_to_esearch(
+    monkeypatch, caplog
+):
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+    seen = []
+
+    def handler(request):
+        route = _route(request)
+        seen.append(route)
+        if route == "idconv":
+            return httpx.Response(400, text="Bad Request")
+        assert route == "esearch"
+        return httpx.Response(200, json=_EMPTY_ESEARCH)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    result = await _resolve()
+    assert result.kept == []
+    assert seen == ["idconv", "esearch"]
+    assert "ID converter batch failed permanently" in caplog.text
+    assert _DOI in caplog.text
 
 
 async def test_a_doi_answered_as_absent_is_not_a_failure(monkeypatch):

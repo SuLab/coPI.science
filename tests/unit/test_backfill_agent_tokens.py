@@ -43,6 +43,34 @@ def test_a_placeholder_is_never_imported():
     # A placeholder env key falls through to the legacy map, not into the result.
     assert bat.env_token_for("newpi", {}, environ) == ""
     assert bat.env_token_for("newpi", {"newpi": "xoxb-legacy"}, environ) == "xoxb-legacy"
-    # A placeholder in the legacy map is returned as-is, and ``_valid`` rejects it.
-    tok = bat.env_token_for("su", {"su": "xoxb-placeholder"}, {})
-    assert not bat._valid(tok)
+    # A placeholder in the legacy map is not returned either.
+    assert bat.env_token_for("su", {"su": "xoxb-placeholder"}, {}) == ""
+
+
+def test_a_non_bot_per_agent_value_falls_back_to_a_valid_legacy_token():
+    legacy = {"su": "xoxb-legacy"}
+    for bad in ("xoxp-a-user-token", "xoxe.xoxp-config", "REPLACE_ME", "   "):
+        environ = {"SLACK_BOT_TOKEN_SU": bad}
+        assert bat.env_token_for("su", legacy, environ) == "xoxb-legacy"
+        assert bat.env_token_for("su", {}, environ) == ""
+    # A non-bot legacy value is not returned either.
+    assert bat.env_token_for("su", {"su": "xoxp-user"}, {}) == ""
+
+
+def test_env_values_are_stripped():
+    environ = {"SLACK_BOT_TOKEN_SU": "  xoxb-env\n"}
+    assert bat.env_token_for("su", {}, environ) == "xoxb-env"
+
+
+def test_an_invalid_db_value_is_replaced():
+    for bad in ("xoxp-a-user-token", "REPLACE_ME", "xoxb-placeholder-su"):
+        assert bat.classify(bad, "xoxb-env") == "replacing_invalid"
+        # Still reported as needing a token when there is nothing valid to write.
+        assert bat.classify(bad, "") == "no_env"
+
+
+def test_classify_fills_blank_and_keeps_valid():
+    assert bat.classify(None, "xoxb-env") == "fill"
+    assert bat.classify("  ", "xoxb-env") == "fill"
+    assert bat.classify("xoxb-current", "xoxb-env") == "present"
+    assert bat.classify(None, "") == "no_env"

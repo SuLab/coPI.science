@@ -17,31 +17,51 @@ recorded (``src/services/profile_pipeline.py``, the tenure block):
 1. fetch the ORCID profile; on failure skip the PI, no write (D8 — without
    employments, "no Hopkins employment" is not an answer);
 2. ``derive_employment_start`` — a year here wins, source ``orcid_employment``;
-3. otherwise ``resolve_corpus`` with the pipeline's arguments, then
-   ``derive_start_from_papers`` over ``kept``, source
-   ``earliest_hopkins_paper``; a ``CorpusStageError`` (or any other corpus
-   failure) skips the PI, no write;
+3. otherwise ``resolve_corpus`` with the pipeline's arguments (an empty
+   ``users.name``/``users.institution`` filled from ORCID, as the pipeline
+   does), then ``derive_start_from_papers`` over ``ranked`` — the whole
+   identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
+   50 can miss the earliest Hopkins paper — source ``earliest_hopkins_paper``;
+   any corpus exception skips the PI, no write;
 4. no year at all: reported, left as it is. Nothing is ever deleted.
 
 A row is CHANGED only when the re-derived year differs from the stored one; a
 row whose year agrees is left untouched even if the source would differ.
 
-Modes:
-    python scripts/rederive_tenure_starts.py                    # preview, writes nothing
-    python scripts/rederive_tenure_starts.py --apply            # write changes + queue profiles
-    python scripts/rederive_tenure_starts.py --orcid 0000-...   # scope (repeatable)
-    python scripts/rederive_tenure_starts.py --restore /app/backups/tenure_starts_<stamp>.json
+Usage (production: the app image, with host ``backups/`` mounted so the backup
+outlives the ``run --rm`` container):
 
-``--apply`` aborts before any write when the changes exceed ``--max-changes``
-(default 10). Otherwise it first saves every candidate row's key and raw value
-to ``<backup-dir>/tenure_starts_<UTC stamp>.json``, then upserts each change,
-queues one ``generate_profile`` job per changed PI (unless one is already
-pending or processing), and commits once. The profile pipeline queues
+    DC="docker compose -f docker-compose.prod.yml"
+    $DC run --rm --no-deps -T -v "$PWD/backups:/app/backups" blackbird-app \
+        python scripts/rederive_tenure_starts.py                  # preview, writes nothing
+    $DC run --rm --no-deps -T -v "$PWD/backups:/app/backups" blackbird-app \
+        python scripts/rederive_tenure_starts.py --apply          # write changes + queue profiles
+    $DC run --rm --no-deps -T -v "$PWD/backups:/app/backups" blackbird-app \
+        python scripts/rederive_tenure_starts.py --restore /app/backups/tenure_starts_<stamp>.json
+
+    --orcid 0000-...   scope the run (repeatable)
+
+``--apply`` refuses to start unless ``--backup-dir`` is a mount point
+(``--allow-unmounted-backup-dir`` overrides), and aborts before any write when
+the changes exceed ``--max-changes`` (default 10). Otherwise it first writes
+``<backup-dir>/tenure_starts_<UTC stamp>.json`` (mode 0600), holding for every
+candidate row its ``old`` raw value and the ``written`` value it is about to
+store (``null`` for a row it leaves alone). Each write is then CONDITIONAL on
+the row still holding exactly the value read at the start: the network calls
+take minutes, and a manager's manual edit made meanwhile must win — such a row
+is skipped and reported ``changed_since_read``. For each row written it queues
+one ``generate_profile`` job unless one is already PENDING; a PROCESSING job
+has already read the old year, so a new pending job is queued behind it and
+reported. Everything commits once. The profile pipeline queues
 ``enrich_grants`` and ``industry_evidence`` itself, so this script does not.
 
-``--restore`` re-applies every saved raw value (``derived_at`` included). It
-does not re-queue profiles: a profile regenerated under the re-derived year
-keeps that scope until its next regeneration.
+``--restore`` puts a row's ``old`` value back only if the row still holds the
+``written`` value and its user still exists; any other row is skipped and
+reported (it was edited since, or its PI was deleted — a deleted PI's key is
+never resurrected). It accepts only the backup format this script writes, and
+validates every key and value before writing anything. It does NOT re-queue
+profiles: a profile regenerated under the re-derived year keeps that scope
+until its next regeneration.
 
 Network: live ORCID/OpenAlex/PubMed per candidate; no LLM call here. Each
 queued profile costs about one synthesis LLM call on the worker.
@@ -53,6 +73,8 @@ import argparse
 import asyncio
 import inspect
 import json
+import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -61,8 +83,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
+from sqlalchemy import exists, select, update  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
 from src.models import AppSetting, Job, User  # noqa: E402
@@ -72,7 +93,6 @@ from src.services.jhu_rules import (  # noqa: E402
     TENURE_KEY_PREFIX,
     derive_employment_start,
     derive_start_from_papers,
-    set_tenure_start,
 )
 from src.services.orcid import fetch_orcid_profile  # noqa: E402
 from src.services.profile_pipeline import CORPUS_CAP  # noqa: E402
@@ -81,6 +101,12 @@ PAPER_SOURCE = "earliest_hopkins_paper"
 EMPLOYMENT_SOURCE = "orcid_employment"
 DEFAULT_BACKUP_DIR = Path("/app/backups")
 DEFAULT_MAX_CHANGES = 10
+# Marks a backup as this script's own; ``--restore`` accepts nothing else.
+BACKUP_FORMAT = "rederive_tenure_starts/2"
+_KEY_RE = re.compile(
+    "^" + re.escape(TENURE_KEY_PREFIX)
+    + r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 @dataclass
@@ -176,12 +202,13 @@ async def rederive(candidate: Candidate) -> Outcome:
         outcome.new_year, outcome.new_source = year, EMPLOYMENT_SOURCE
         return outcome
 
-    # The pipeline fills an empty users.institution from the ORCID profile
-    # before it resolves the corpus; pass the same value it would.
+    # The pipeline fills an empty users.name / users.institution from the
+    # ORCID profile before it resolves the corpus; pass the values it would.
+    name = candidate.name or orcid_profile.get("name")
     institution = candidate.institution or orcid_profile.get("institution")
     try:
         corpus = await resolve_corpus(
-            candidate.orcid, candidate.name, institution, cap=CORPUS_CAP
+            candidate.orcid, name, institution, cap=CORPUS_CAP
         )
     except CorpusStageError as exc:
         outcome.skip_reason = f"corpus_stage_failed: {exc}"
@@ -190,7 +217,9 @@ async def rederive(candidate: Candidate) -> Outcome:
         outcome.skip_reason = f"corpus_error: {type(exc).__name__}: {exc}"
         return outcome
 
-    year = derive_start_from_papers(corpus.kept)
+    # ``ranked``, not ``kept``: the cap keeps the newest CORPUS_CAP records,
+    # which can exclude the earliest Hopkins paper of a prolific PI.
+    year = derive_start_from_papers(corpus.ranked)
     if year is None:
         outcome.skip_reason = "no_rederived_year (row left as it is)"
         return outcome
@@ -207,28 +236,71 @@ def _line(o: Outcome) -> str:
     return head + f"{o.new_year} ({o.new_source}) {tag}"
 
 
-def _write_backup(candidates: list[Candidate], backup_dir: Path) -> Path:
+def _tenure_value(year: int, source: str) -> str:
+    """The raw value ``set_tenure_start`` would store (same JSON shape)."""
+    return json.dumps(
+        {
+            "year": int(year),
+            "source": source,
+            "derived_at": datetime.now(UTC).isoformat(),
+        }
+    )
+
+
+def _write_backup(
+    candidates: list[Candidate], written: dict[str, str], backup_dir: Path
+) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = backup_dir / f"tenure_starts_{stamp}.json"
     doc = {
+        "format": BACKUP_FORMAT,
         "created_at": datetime.now(UTC).isoformat(),
-        "rows": [{"key": c.key, "value": c.raw_value} for c in candidates],
+        "rows": [
+            {"key": c.key, "old": c.raw_value, "written": written.get(c.key)}
+            for c in candidates
+        ],
     }
-    # "x": never overwrite an earlier backup.
-    with path.open("x", encoding="utf-8") as fh:
+    # O_EXCL: never overwrite an earlier backup. 0600: the file names PIs.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=2)
         fh.flush()
+        os.fsync(fh.fileno())
     return path
 
 
-async def _has_open_profile_job(db, user_id: uuid.UUID) -> bool:
+async def _swap_value(db, key: str, expected: str, new: str) -> bool:
+    """Set ``key`` to ``new`` only if it still holds exactly ``expected``."""
+    result = await db.execute(
+        update(AppSetting)
+        .where(AppSetting.key == key, AppSetting.value == expected)
+        .values(value=new)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+async def _has_pending_profile_job(db, user_id: uuid.UUID) -> bool:
     found = await db.execute(
         select(Job.id)
         .where(
             Job.user_id == user_id,
             Job.type == "generate_profile",
-            Job.status.in_(("pending", "processing")),
+            Job.status == "pending",
+        )
+        .limit(1)
+    )
+    return found.scalars().first() is not None
+
+
+async def _has_processing_profile_job(db, user_id: uuid.UUID) -> bool:
+    found = await db.execute(
+        select(Job.id)
+        .where(
+            Job.user_id == user_id,
+            Job.type == "generate_profile",
+            Job.status == "processing",
         )
         .limit(1)
     )
@@ -242,8 +314,17 @@ async def run(
     apply: bool,
     max_changes: int = DEFAULT_MAX_CHANGES,
     backup_dir: Path = DEFAULT_BACKUP_DIR,
+    allow_unmounted_backup_dir: bool = False,
 ) -> int:
     """Preview (default) or apply. Returns the process exit code."""
+    if apply and not allow_unmounted_backup_dir and not os.path.ismount(backup_dir):
+        print(
+            f"ABORT: backup dir {backup_dir} is not a mount point, so the backup "
+            "would die with the container. Mount host backups/ there "
+            '(-v "$PWD/backups:/app/backups") or pass '
+            "--allow-unmounted-backup-dir. Nothing read or written."
+        )
+        return 2
     candidates, orphans = await load_candidates(db, orcids)
     outcomes = [await rederive(c) for c in candidates]
     for o in outcomes:
@@ -269,15 +350,31 @@ async def run(
         print("Nothing to change; no backup written.")
         return 0
 
-    backup = _write_backup(candidates, backup_dir)
+    # Fix the exact values before the backup, so the backup records what is
+    # written and ``--restore`` can tell a row this run wrote from a later edit.
+    written = {
+        o.candidate.key: _tenure_value(o.new_year, o.new_source) for o in changes
+    }
+    backup = _write_backup(candidates, written, backup_dir)
     print(f"Backup: {backup}")
-    queued = already_open = 0
+    rewritten = queued = already_pending = behind_processing = 0
     for o in changes:
         c = o.candidate
-        await set_tenure_start(c.user_id, o.new_year, o.new_source, db=db)
-        if await _has_open_profile_job(db, c.user_id):
-            already_open += 1
+        if not await _swap_value(db, c.key, c.raw_value, written[c.key]):
+            print(f"{c.user_id}  {c.name}  {c.orcid}  SKIP changed_since_read (row left as it is)")
             continue
+        rewritten += 1
+        if await _has_pending_profile_job(db, c.user_id):
+            already_pending += 1
+            continue
+        # A processing job read the old year before this write; its output is
+        # stale, so queue a fresh one behind it rather than counting it.
+        if await _has_processing_profile_job(db, c.user_id):
+            behind_processing += 1
+            print(
+                f"{c.user_id}  {c.name}  {c.orcid}  NOTE a generate_profile job is "
+                "processing on the old year; queued a new one behind it"
+            )
         db.add(
             Job(
                 type="generate_profile",
@@ -288,28 +385,81 @@ async def run(
         queued += 1
     await db.commit()
     print(
-        f"Applied: rewritten={len(changes)} profile_jobs_queued={queued} "
-        f"profile_jobs_already_open={already_open}"
+        f"Applied: rewritten={rewritten} "
+        f"changed_since_read={len(changes) - rewritten} "
+        f"profile_jobs_queued={queued} "
+        f"profile_jobs_queued_behind_processing={behind_processing} "
+        f"profile_jobs_already_pending={already_pending}"
     )
     return 0
 
 
+def _is_tenure_value(raw: object) -> bool:
+    if not isinstance(raw, str):
+        return False
+    try:
+        entry = json.loads(raw)
+    except ValueError:
+        return False
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get("year"), int)
+        and not isinstance(entry.get("year"), bool)
+        and isinstance(entry.get("source"), str)
+    )
+
+
+def _validate_backup(doc: object) -> str | None:
+    """Why ``doc`` is not a backup this script wrote, or None if it is."""
+    if not isinstance(doc, dict) or doc.get("format") != BACKUP_FORMAT:
+        return f"not a {BACKUP_FORMAT} backup"
+    rows = doc.get("rows")
+    if not isinstance(rows, list):
+        return "no rows list"
+    for n, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return f"row {n} is not an object"
+        if not isinstance(row.get("key"), str) or not _KEY_RE.match(row["key"]):
+            return f"row {n}: {row.get('key')!r} is not a per-user tenure key"
+        if not _is_tenure_value(row.get("old")):
+            return f"row {n}: old value is not tenure JSON"
+        if row.get("written") is not None and not _is_tenure_value(row["written"]):
+            return f"row {n}: written value is not tenure JSON"
+    return None
+
+
 async def restore(db, path: Path) -> int:
-    """Re-apply every raw value saved in a backup file. Returns the exit code."""
+    """Undo one ``--apply`` from its backup file. Returns the exit code.
+
+    Validates the whole file before any write, then restores a row's ``old``
+    value only where the row still holds the ``written`` value and its user
+    still exists. It never inserts, so a purged key stays purged.
+    """
     doc = json.loads(path.read_text(encoding="utf-8"))
-    rows = doc["rows"]
-    for row in rows:
-        if not row["key"].startswith(TENURE_KEY_PREFIX):
-            print(f"ABORT: {row['key']!r} is not a per-user tenure key; nothing written.")
-            return 2
-    for row in rows:
-        stmt = pg_insert(AppSetting).values(key=row["key"], value=row["value"])
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[AppSetting.key], set_={"value": row["value"]}
-        )
-        await db.execute(stmt)
+    problem = _validate_backup(doc)
+    if problem is not None:
+        print(f"ABORT: {path}: {problem}; nothing written.")
+        return 2
+    restored = skipped = 0
+    for row in doc["rows"]:
+        key, old, written = row["key"], row["old"], row["written"]
+        if written is None:
+            continue  # --apply left this row alone; nothing to undo
+        uid = uuid.UUID(key[len(TENURE_KEY_PREFIX):])
+        user_exists = (
+            await db.execute(select(exists().where(User.id == uid)))
+        ).scalar()
+        if not user_exists:
+            print(f"{key}  SKIP user_deleted (not resurrected)")
+            skipped += 1
+            continue
+        if not await _swap_value(db, key, written, old):
+            print(f"{key}  SKIP changed_since_apply (row left as it is)")
+            skipped += 1
+            continue
+        restored += 1
     await db.commit()
-    print(f"Restored {len(rows)} tenure rows from {path}.")
+    print(f"Restored {restored} tenure rows from {path}; skipped {skipped}.")
     return 0
 
 
@@ -332,6 +482,7 @@ async def _main(args: argparse.Namespace) -> int:
             apply=args.apply,
             max_changes=args.max_changes,
             backup_dir=args.backup_dir,
+            allow_unmounted_backup_dir=args.allow_unmounted_backup_dir,
         )
 
 
@@ -341,10 +492,15 @@ def main() -> None:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="Write changes and queue profiles")
-    mode.add_argument("--restore", type=Path, default=None, help="Re-apply a backup file")
+    mode.add_argument("--restore", type=Path, default=None, help="Undo an --apply from its backup file")
     parser.add_argument("--orcid", action="append", default=[], help="Scope to this ORCID (repeatable)")
     parser.add_argument("--max-changes", type=int, default=DEFAULT_MAX_CHANGES)
     parser.add_argument("--backup-dir", type=Path, default=DEFAULT_BACKUP_DIR)
+    parser.add_argument(
+        "--allow-unmounted-backup-dir",
+        action="store_true",
+        help="Permit --apply when --backup-dir is not a mount point",
+    )
     args = parser.parse_args()
     if args.restore is None:
         _require_strict_corpus()

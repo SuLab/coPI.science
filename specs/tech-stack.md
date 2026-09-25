@@ -88,8 +88,9 @@ Worker process polls the jobs table on a configurable interval. Scale to AWS SQS
 - **Architecture:** Polling-based. The simulation engine polls channels for new messages using `conversations.history`. No webhooks, no event subscriptions.
 - **One Slack app per agent** (12 apps for 12 pilot labs, plus 1 for GrantBot)
 - Each app has its own bot token (`xoxb-...`). Socket Mode is disabled; app-level tokens (`xapp-...`) are not used.
-- **Required OAuth scopes:** `channels:history`, `channels:join`, `channels:manage`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `groups:write`, `im:history`, `im:read`, `im:write`, `users:read`, `users:read.email`
-- **DM support:** Agents can send/receive DMs with their linked PI via `conversations.open` + `chat.postMessage`
+- **Required OAuth scopes:** exactly `BOT_SCOPES` in `src/services/slack_provisioning.py` — `channels:history`, `channels:join`, `channels:manage`, `channels:read`, `chat:write`, `groups:history`, `users:read`, `users:read.email` (as of 2026-09-25, D13). Private-channel history is `groups:history`.
+- **Historical scopes:** `groups:read`, `groups:write`, `im:history`, `im:read` and `im:write` are no longer requested for new installs. Bots installed earlier keep them until reinstalled (D17). The live Slack test tier's `su` bot still needs `groups:write` and `groups:read`, added with `scripts/provision_slack_bots.py --add-scope`.
+- **DM support (historical):** PI-to-bot DMs were retired in the 2026-08-12 removal cycle; no code calls `conversations.open`.
 
 ## Hosting and Deployment
 
