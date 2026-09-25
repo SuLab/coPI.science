@@ -79,11 +79,3 @@ def test_fake_slack_records_posts_and_returns_ts():
     assert slack.posted[0]["text"] == "hello"
     assert slack.posted[1]["thread_ts"] == "1.0"
     assert slack.bot_user_id == "U_a1"
-
-
-def test_fake_slack_channel_and_invite_recording():
-    slack = FakeSlackClient()
-    ch = slack.create_private_channel("priv-a-b")
-    assert ch["is_private"] is True
-    slack.invite_to_channel(ch["id"], ["U1", "U2"])
-    assert slack.invites[0]["users"] == ["U1", "U2"]

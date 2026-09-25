@@ -10,8 +10,7 @@ implementations exist:
   nothing (the engine mints a local canonical id via ``mint_ts``); inbound
   polls return nothing (human/PI input arrives through the DB inbox instead).
 
-This lets the whole 5-phase loop, PI polling and private-channel flows run with
-Slack fully off. See specs/local-db-conversations.md.
+This lets the whole 5-phase loop and PI polling run with Slack fully off. See specs/local-db-conversations.md.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ class Transport(Protocol):
     def is_connected(self) -> bool: ...
     @property
     def bot_user_id(self) -> str | None: ...
-    def resolve_user_name(self, user_id: str) -> str: ...
     def is_bot_user(self, user_id: str) -> bool: ...
 
     # Outbound
@@ -54,11 +52,7 @@ class Transport(Protocol):
     # that never splits may omit the key; ``SimulationEngine._mirrored_messages``
     # falls back to treating the response as a single message.
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None: ...
-    def send_dm(self, user_id: str, text: str) -> dict | None: ...
-    def open_dm_channel(self, user_id: str) -> str | None: ...
     def create_channel(self, name: str) -> dict | None: ...
-    def create_private_channel(self, name: str) -> dict | None: ...
-    def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool: ...
     def join_channel(self, channel_id: str) -> None: ...
     # Must be complete or raise: a backend that returns a *subset* of the workspace
     # as if it were the whole makes the engine re-create channels that already
@@ -66,9 +60,7 @@ class Transport(Protocol):
     # can tolerate a partial answer catch it and read ``.partial``.
     # ``exclude_archived`` defaults to False because callers ask this question to
     # find out whether a *name* is taken, and an archived channel still owns its name.
-    def list_channels(
-        self, include_private: bool = False, *, exclude_archived: bool = False,
-    ) -> dict[str, str]: ...
+    def list_channels(self, *, exclude_archived: bool = False) -> dict[str, str]: ...
     def get_channel_id(self, channel_name: str) -> str | None: ...
     # Channel name→id cache. The engine seeds this so post_message can resolve a
     # channel passed by name (see _ensure_seeded_channels / private-channel sync).
@@ -83,12 +75,10 @@ class Transport(Protocol):
     # reply to itself and ``MessageLog.get_new_top_level_posts`` drops it, so the post
     # never surfaces to any reader of that method (e.g. the hub's Phase 3
     # auto-activation scan). ``AgentSlackClient`` applies this in
-    # ``normalize_inbound_message`` — one place, for all four inbound methods.
+    # ``normalize_inbound_message`` — one place, for all three inbound methods.
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]: ...
-    def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list[dict[str, Any]]: ...
     def get_full_channel_history(self, channel_id: str) -> list[dict[str, Any]]: ...
     def get_all_thread_replies(self, channel_id: str, thread_ts: str) -> list[dict[str, Any]]: ...
-    def poll_dm_messages(self, user_id: str, oldest: str = "0", limit: int = 20) -> list[dict[str, Any]]: ...
 
 
 class NullTransport:
@@ -98,7 +88,7 @@ class NullTransport:
     ``if client and client.is_connected`` branches take the no-op path, and the
     Slack pollers (which filter on connected clients) simply find nothing.
     Outbound posts return None so ``_post_message`` mints a local canonical id;
-    channel-create calls return ``local:`` ids so DB-native channels still work.
+    ``create_channel`` returns a ``local:`` id so DB-native channels still work.
     """
 
     def __init__(self, agent_id: str):
@@ -119,9 +109,6 @@ class NullTransport:
     def bot_user_id(self) -> str | None:
         return None
 
-    def resolve_user_name(self, user_id: str) -> str:
-        return user_id
-
     def is_bot_user(self, user_id: str) -> bool:
         return False
 
@@ -129,27 +116,13 @@ class NullTransport:
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None:
         return None
 
-    def send_dm(self, user_id: str, text: str) -> dict | None:
-        return None
-
-    def open_dm_channel(self, user_id: str) -> str | None:
-        return None
-
     def create_channel(self, name: str) -> dict | None:
         return {"id": f"local:{name}", "name": name}
-
-    def create_private_channel(self, name: str) -> dict | None:
-        return {"id": f"local:{name}", "name": name, "is_private": True}
-
-    def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool:
-        return True
 
     def join_channel(self, channel_id: str) -> None:
         return None
 
-    def list_channels(
-        self, include_private: bool = False, *, exclude_archived: bool = False,
-    ) -> dict[str, str]:
+    def list_channels(self, *, exclude_archived: bool = False) -> dict[str, str]:
         # Always complete by construction: the cache *is* the workspace here.
         return dict(self._channel_name_to_id)
 
@@ -163,14 +136,8 @@ class NullTransport:
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]:
         return []
 
-    def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list[dict[str, Any]]:
-        return []
-
     def get_full_channel_history(self, channel_id: str) -> list[dict[str, Any]]:
         return []
 
     def get_all_thread_replies(self, channel_id: str, thread_ts: str) -> list[dict[str, Any]]:
-        return []
-
-    def poll_dm_messages(self, user_id: str, oldest: str = "0", limit: int = 20) -> list[dict[str, Any]]:
         return []

@@ -568,12 +568,13 @@ def test_exclude_archived_defaults_to_false_because_an_archived_channel_owns_its
     assert kw["exclude_archived"] is False
     assert kw["types"] == "public_channel"
 
-    # Control: the parameter is not inert, and include_private widens the types.
+    # Control: the parameter is not inert. The listing stays public-only either
+    # way: private channels come from the DB, never from Slack (D13).
     fake2 = SequencedWebClient(sequences={"conversations_list": [_page("channels", [])]})
-    _client(fake2).list_channels(include_private=True, exclude_archived=True)
+    _client(fake2).list_channels(exclude_archived=True)
     kw2 = fake2.calls_to("conversations_list")[0]
     assert kw2["exclude_archived"] is True
-    assert kw2["types"] == "public_channel,private_channel"
+    assert kw2["types"] == "public_channel"
 
 
 def test_resolving_a_channel_name_survives_an_incomplete_listing():
@@ -706,12 +707,11 @@ def test_a_channel_read_never_reports_a_root_as_a_reply_to_itself(read):
 
 
 @pytest.mark.parametrize("read,args", [
-    ("get_thread_replies", ("C_GENERAL", "1.0")),
     ("get_all_thread_replies", ("C_GENERAL", "1.0")),
 ])
 def test_a_thread_read_never_reports_the_parent_as_a_reply_to_itself(read, args):
     """conversations.replies returns the parent first, and it carries the same
-    self-referential `thread_ts`. The rule has to hold for all four inbound reads or it
+    self-referential `thread_ts`. The rule has to hold for all three inbound reads or it
     is back to being a property of the call site."""
     fake = SequencedWebClient(sequences={"conversations_replies": [
         _page("messages", [dict(_ROOT), dict(_REPLY)]),
@@ -722,8 +722,8 @@ def test_a_thread_read_never_reports_the_parent_as_a_reply_to_itself(read, args)
 
 
 def test_workspace_bookkeeping_is_dropped_from_every_inbound_read():
-    """`channel_join` and friends are not conversation. Filtering them in two of the
-    four reads (which is what the code did) leaks them into the thread paths."""
+    """`channel_join` and friends are not conversation. Filtering them in only some of
+    the inbound reads (which is what the code once did) leaks them into the thread paths."""
     fake = SequencedWebClient(sequences={"conversations_replies": [
         _page("messages", [dict(_ROOT), {"ts": "2.5", "subtype": "channel_join"}, dict(_REPLY)]),
     ]})
@@ -966,16 +966,6 @@ def test_name_taken_on_an_invisible_channel_still_reports_failure():
         },
     )
     assert _client(fake).create_channel("seeded") is None
-
-
-def test_a_private_channel_create_is_also_retried_on_a_429():
-    fake = SequencedWebClient(sequences={"conversations_create": [
-        slack_error("ratelimited", retry_after=1),
-        {"ok": True, "channel": {"id": "G_NEW", "name": "priv-a-b-x"}},
-    ]})
-    out = _client(fake).create_private_channel("priv-a-b")
-    assert out["id"] == "G_NEW"
-    assert len(fake.calls_to("conversations_create")) == 2
 
 
 def test_an_unconnected_client_raises_rather_than_calling_a_missing_endpoint():

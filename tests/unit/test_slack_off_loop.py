@@ -53,18 +53,18 @@ def test_message_log_append_is_documented_loop_only():
 
 # ---------------------------------------------------------------------------
 # Cache-lock races. Task 1 moved post_message/poll_channel_messages/etc into
-# asyncio.to_thread, which is what makes the two tests below possible at all:
+# asyncio.to_thread, which is what makes the test below possible at all:
 # before that, "concurrent" asyncio callers of a synchronous method never
-# actually overlapped in execution, so AgentSlackClient._channel_name_to_id and
-# ._dm_channels were check-then-act dicts that happened to be safe by
-# accident. The reply lane's bounded concurrency (up to reply_lane_max_in_flight
-# at once, simulation.py's _dispatch_reply_lane) can now run several of one agent's
+# actually overlapped in execution, so AgentSlackClient._channel_name_to_id
+# was a check-then-act dict that happened to be safe by accident. The reply
+# lane's bounded concurrency (up to reply_lane_max_in_flight at once,
+# simulation.py's _dispatch_reply_lane) can now run several of one agent's
 # posts on different OS threads at once, so a cache miss on the same
-# not-yet-cached channel/user from two threads is a real race.
+# not-yet-cached channel from two threads is a real race.
 #
-# Both tests drive several asyncio.to_thread callers at once against a fake
+# The test drives several asyncio.to_thread callers at once against a fake
 # WebClient whose lookup sleeps briefly (widening the race window well past
-# anything the GIL would close on its own) and assert the underlying fetch
+# anything the GIL would close on its own) and asserts the underlying fetch
 # happens exactly once. That is the invariant the lock actually buys here:
 # _cache_lock is held across the whole check-then-refresh-then-return, so a
 # second caller blocked on the lock finds the first caller's result already
@@ -75,14 +75,13 @@ def test_message_log_append_is_documented_loop_only():
 
 
 class _SlowListingClient:
-    """Fake slack_sdk WebClient. conversations_list/conversations_open sleep,
-    widening the race window, and count how many times each was really called."""
+    """Fake slack_sdk WebClient. conversations_list sleeps, widening the race
+    window, and counts how many times it was really called."""
 
     def __init__(self, channels=None, delay: float = 0.05):
         self._channels = channels or [{"name": "general", "id": "C_GENERAL"}]
         self._delay = delay
         self.list_calls = 0
-        self.open_calls = 0
         self._lock = threading.Lock()
 
     def conversations_list(self, **kwargs):
@@ -90,12 +89,6 @@ class _SlowListingClient:
             self.list_calls += 1
         time.sleep(self._delay)
         return _SlackResponse({"channels": self._channels, "response_metadata": {}})
-
-    def conversations_open(self, **kwargs):
-        with self._lock:
-            self.open_calls += 1
-        time.sleep(self._delay)
-        return _SlackResponse({"channel": {"id": "D1"}})
 
 
 def _fake_client(webclient):
@@ -128,29 +121,6 @@ async def test_concurrent_channel_lookups_on_a_cache_miss_fetch_only_once():
     )
 
 
-@pytest.mark.asyncio
-async def test_concurrent_dm_channel_opens_for_the_same_user_fetch_only_once():
-    """Same shape as above for AgentSlackClient._dm_channels/open_dm_channel.
-
-    Not reachable concurrently via any current engine call site (send_dm/
-    open_dm_channel have no engine caller in src/), but the
-    reviewer flagged it as the identical check-then-act shape, so it gets the
-    same guard and the same test.
-    """
-    web = _SlowListingClient()
-    client = _fake_client(web)
-
-    results = await asyncio.gather(
-        *(asyncio.to_thread(client.open_dm_channel, "U1") for _ in range(5))
-    )
-
-    assert results == ["D1"] * 5
-    assert web.open_calls == 1, (
-        f"conversations_open was called {web.open_calls} times for 5 concurrent "
-        "opens for the same user_id — the lock did not dedupe the fetch"
-    )
-
-
 # A "does the dict ever look torn" test was considered instead (racing several
 # large concurrent dict.update()/dict[key]=value calls against a reader
 # polling len()) and deliberately NOT written: an empirical check
@@ -161,4 +131,4 @@ async def test_concurrent_dm_channel_opens_for_the_same_user_fetch_only_once():
 # level GIL-release checkpoint. A test asserting "no torn state" on the dict
 # itself would pass identically whether or not _cache_lock exists, which is
 # exactly the "test that would pass either way" this file was told not to
-# write. The dedupe tests above are the invariant _cache_lock actually changes.
+# write. The dedupe test above is the invariant _cache_lock actually changes.

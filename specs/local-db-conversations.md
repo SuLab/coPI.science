@@ -121,17 +121,20 @@ subscriptions must survive a restart independent of re-derivation.
 `src/agent/transport.py` defines a `Transport` `Protocol` covering the exact
 method set the engine calls on `AgentSlackClient`:
 
-- outbound: `post_message`, `send_dm`, `create_channel`, `create_private_channel`,
-  `invite_to_channel`, `join_channel`, `list_channels`, `open_dm_channel`
-- inbound: `poll_channel_messages`, `get_thread_replies`, `get_all_thread_replies`,
-  `get_full_channel_history`, `poll_dm_messages`
-- identity: `connect`, `is_connected`, `bot_user_id`, `resolve_user_name`,
-  `is_bot_user`
+- outbound: `post_message`, `create_channel`, `join_channel`, `list_channels`,
+  `get_channel_id`, `cache_channel_ids`
+- inbound: `poll_channel_messages`, `get_all_thread_replies`,
+  `get_full_channel_history`
+- identity: `connect`, `is_connected`, `bot_user_id`, `is_bot_user`
 
 `SlackTransport` is today's `AgentSlackClient` conformed. `NullTransport` reports
 `is_connected=False` / `bot_user_id=None` (so existing
-`if client and client.is_connected` branches take the no-op path), returns a
-minted-id dict from outbound calls, and `[]` from inbound calls.
+`if client and client.is_connected` branches take the no-op path), returns `None`
+from `post_message` (the engine then mints a local canonical id), a `local:<name>`
+id from `create_channel`, and `[]` from inbound calls.
+`tests/unit/test_transport.py` fails if a member of the Protocol has no caller in
+`src/` outside the two transport modules, or if `NullTransport` defines a public
+member the Protocol does not declare.
 
 `slack_enabled` (config + CLI) auto-detects from the presence of ≥1 valid token
 with an explicit override; `--mock`/no-token ⇒ Slack-off.

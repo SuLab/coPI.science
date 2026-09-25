@@ -364,7 +364,6 @@ class FakeSlackClient:
         # every post the agent made across every channel.
         self.posted_messages: dict[str, list[str]] = {}
         self.created_channels: list[dict] = []
-        self.invites: list[dict] = []
         self.joined_channels: set[str] = set()
         self._existing_channels: dict = existing_channels or {}  # name -> id for list_channels
         # channel_id -> raw Slack message dicts that ALREADY exist on the
@@ -400,9 +399,6 @@ class FakeSlackClient:
         self.posted_messages.setdefault(channel, []).append(rec["text"])
         return {"ts": ts, "channel": channel}
 
-    def send_dm(self, user_id: str, text: str) -> dict:
-        return self.post_message(f"D_{user_id}", text)
-
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list:
         # Honours `oldest` the way Slack does, so a test can prove that a cursor
         # left at "0" re-fetches history a cursor advanced past it would skip.
@@ -410,9 +406,6 @@ class FakeSlackClient:
             m for m in self.channel_history.get(channel_id, [])
             if str(m.get("ts", "0")) > oldest
         ][:limit]
-
-    def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list:
-        return []
 
     def get_full_channel_history(self, channel_id: str, *_a, **_kw) -> list:
         return list(self.channel_history.get(channel_id, []))
@@ -443,7 +436,8 @@ class FakeSlackClient:
 
     def join_channel(self, channel_id: str) -> None:
         # For test tracking, extract the channel name from the ID.
-        # FakeSlackClient creates IDs as "C_name" or "G_name", and real IDs pass through.
+        # FakeSlackClient creates IDs as "C_name"; a "G_name" private id is stripped
+        # the same way, and real IDs pass through.
         ch_name = channel_id
         if channel_id.startswith(("C_", "G_")):
             ch_name = channel_id[2:]  # Strip the "C_" or "G_" prefix
@@ -452,24 +446,12 @@ class FakeSlackClient:
     async def ajoin_channel(self, channel_id: str) -> None:
         return self.join_channel(channel_id)
 
-    async def aconnect(self) -> bool:
-        return self.connect()
-
     def create_channel(self, name: str) -> dict:
         ch = {"id": f"C_{name}", "name": name}
         self.created_channels.append(ch)
         return ch
 
-    def create_private_channel(self, name: str) -> dict:
-        ch = {"id": f"G_{name}", "name": name, "is_private": True}
-        self.created_channels.append(ch)
-        return ch
-
-    def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool:
-        self.invites.append({"channel": channel_id, "users": list(user_ids)})
-        return True
-
-    def list_channels(self, include_private: bool = False) -> dict:
+    def list_channels(self, *, exclude_archived: bool = False) -> dict:
         return dict(self._existing_channels)
 
     def get_channel_id(self, channel_name: str) -> str | None:

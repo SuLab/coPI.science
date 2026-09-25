@@ -1,6 +1,6 @@
 """Tests for the message transport abstraction (Slack-off mode).
 
-The second class covers the *outbound* half of the declared contract: `post_message`
+`TestPostResultContract` covers the *outbound* half of the declared contract: `post_message`
 reports one record per message the backend really created, and the engine writes one
 `agent_messages` row per record. Both halves are needed and neither is observable from
 inside our own database with `NullTransport`, which never splits — so a mirror that
@@ -8,7 +8,9 @@ recorded one row for a post the backend turned into five looked identical here (
 and only showed up as messages in Slack with no row.
 """
 
+import ast
 import asyncio
+from pathlib import Path
 
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport, Transport
@@ -30,25 +32,17 @@ class TestNullTransport:
         t = NullTransport("su")
         # No Slack ts — the engine mints a local canonical id instead.
         assert t.post_message("general", "hi") is None
-        assert t.send_dm("U1", "hi") is None
-        assert t.open_dm_channel("U1") is None
 
-    def test_channel_creates_use_local_ids(self):
+    def test_channel_create_uses_a_local_id(self):
         t = NullTransport("su")
         assert t.create_channel("general") == {"id": "local:general", "name": "general"}
-        priv = t.create_private_channel("priv-a-b")
-        assert priv["id"] == "local:priv-a-b"
-        assert priv["is_private"] is True
-        assert t.invite_to_channel("local:x", ["U1", "U2"]) is True
         assert t.join_channel("local:x") is None
 
     def test_inbound_polls_return_empty(self):
         t = NullTransport("su")
         assert t.poll_channel_messages("local:general") == []
-        assert t.get_thread_replies("local:general", "1.0") == []
         assert t.get_full_channel_history("local:general") == []
         assert t.get_all_thread_replies("local:general", "1.0") == []
-        assert t.poll_dm_messages("U1") == []
 
     def test_slack_client_conforms_to_protocol(self):
         # The real client must structurally satisfy the same Protocol.
@@ -67,6 +61,61 @@ class TestNullTransport:
         assert not hasattr(NullTransport("su"), "set_visibility_lookup")
         from src.agent.slack_client import AgentSlackClient
         assert not hasattr(AgentSlackClient, "set_visibility_lookup")
+
+
+_REPO = Path(__file__).resolve().parents[2]
+_TRANSPORT_MODULES = {"src/agent/transport.py", "src/agent/slack_client.py"}
+
+
+def _class_body(name: str) -> list[ast.stmt]:
+    tree = ast.parse((_REPO / "src/agent/transport.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node.body
+    raise AssertionError(f"class {name} not found in src/agent/transport.py")
+
+
+def _members(name: str) -> set[str]:
+    """Methods, properties and annotated attributes declared in the class body."""
+    out: set[str] = set()
+    for stmt in _class_body(name):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(stmt.name)
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            out.add(stmt.target.id)
+    return out
+
+
+class TestProtocolHasNoDeadMembers:
+    """Every Protocol member is kept in step with `NullTransport`, `AgentSlackClient`
+    and the fakes, so an uncalled member is maintained in four places for nothing."""
+
+    def test_every_transport_member_has_an_engine_caller(self):
+        """A caller is any `x.<member>` (or its `a<member>` async twin) in `src/`
+        outside the two modules that define the transport. Attribute access is
+        matched by name only, so this is a floor: it proves the name is used, not
+        that it is used on a transport."""
+        used: set[str] = set()
+        for path in (_REPO / "src").rglob("*.py"):
+            if path.relative_to(_REPO).as_posix() in _TRANSPORT_MODULES:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Attribute):
+                    used.add(node.attr)
+        members = _members("Transport")
+        assert members, "parsed no Transport members; the guard would pass vacuously"
+        uncalled = sorted(n for n in members if n not in used and "a" + n not in used)
+        assert not uncalled, (
+            f"Transport members with no caller in src/: {uncalled}. Delete each from "
+            "Transport, NullTransport, AgentSlackClient and tests/fakes.py, or add the "
+            "caller."
+        )
+
+    def test_null_transport_defines_only_protocol_members(self):
+        public = {n for n in _members("NullTransport") if not n.startswith("_")}
+        assert public, "parsed no NullTransport members; the guard would pass vacuously"
+        extra = sorted(public - _members("Transport"))
+        assert not extra, f"NullTransport defines members the Protocol lacks: {extra}"
 
 
 class TestChannelCacheContract:

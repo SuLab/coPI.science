@@ -8,7 +8,7 @@ chat.postMessage for posting.
 and inbound response normalisation are therefore properties of the *client*, not
 of each call site. That shape exists because the alternative was measured: this
 file grew a correct paginator in ``get_full_channel_history`` and never
-retrofitted ``list_channels``; grew a retry in ``create_private_channel`` and
+retrofitted ``list_channels``; grew a retry in its private-channel create and
 never retrofitted ``create_channel``; and normalised ``thread_ts == ts`` in the
 engine's Slack reconcile but not in its live poller. Four defects, one structural
 absence. ``_api`` takes the endpoint's method *name* rather than a bound
@@ -20,7 +20,6 @@ the source level.
 import asyncio
 import logging
 import re
-import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -187,11 +186,6 @@ def markdown_to_mrkdwn(text: str) -> str:
 
 MAX_RETRIES = 3
 
-# How many times to attempt private-channel creation. Attempt 0 uses a plain
-# timestamp suffix; later attempts add random entropy to survive the (extremely
-# rare) case of two channels minted in the same second. See create_private_channel.
-_MAX_PRIVATE_CHANNEL_ATTEMPTS = 3
-
 # Slack's largest accepted page for every cursor-paginated endpoint we call.
 SLACK_PAGE_LIMIT = 200
 
@@ -350,18 +344,17 @@ class AgentSlackClient:
         self._client: WebClient | None = None
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
-        self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
         self._user_is_bot_cache: dict[str, bool] = {}
-        # Guards both caches above. Before the transport moved off the event
+        # Guards the channel cache (``_channel_name_to_id``). Before the transport moved off the event
         # loop (2026-08-14), "concurrent" asyncio callers of a
         # synchronous method never actually overlapped in execution, so the
-        # check-then-act reads/writes on these two dicts were safe by
+        # check-then-act reads/writes on that dict were safe by
         # accident. Now that post_message/poll_channel_messages etc. run
         # inside asyncio.to_thread, the reply lane's bounded-concurrency replies
         # (up to reply_lane_max_in_flight at once, simulation.py's
         # _dispatch_reply_lane) can genuinely run several of this SAME
-        # client's calls on different OS threads at once, so the two caches
-        # need a real lock, not just a comment. Reentrant (RLock) because
+        # client's calls on different OS threads at once, so the cache
+        # needs a real lock, not just a comment. Reentrant (RLock) because
         # _resolve_channel_id/get_channel_id hold it across the refresh call
         # below, and that refresh (_refresh_channel_cache -> list_channels)
         # re-enters the same lock on the same thread to record what it found.
@@ -556,7 +549,7 @@ class AgentSlackClient:
     def _conversation_messages(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Drop workspace bookkeeping, normalise what's left, order it oldest-first.
 
-        Ordering belongs here — one place, all four inbound reads — because Slack's page
+        Ordering belongs here — one place, all three inbound reads — because Slack's page
         order is not one rule. conversations.history pages *backwards* in time when no
         ``oldest`` is given, and *forwards* from ``oldest`` when one is. Measured against
         the live workspace: five messages, ``oldest`` set to the first and ``limit=2``,
@@ -634,45 +627,6 @@ class AgentSlackClient:
             logger.error("[%s] Failed to poll channel %s: %s", self.agent_id, channel_id, exc)
             return []
 
-    def get_thread_replies(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        oldest: str = "0",
-    ) -> list[dict[str, Any]]:
-        """
-        Fetch replies in a thread newer than `oldest`.
-        Returns list of raw Slack message dicts, oldest first.
-        """
-        if not self._client:
-            return []
-        # Same rationale as poll_channel_messages: the rotated poll client may
-        # not be a channel member, and conversations.replies also requires it.
-        # Skipped for private channels, which require explicit invite.
-        self._try_autojoin(channel_id)
-        try:
-            # First message is always the parent — callers that only want replies
-            # filter on ts themselves.
-            return self._conversation_messages(self._paginate(
-                "conversations_replies", "messages",
-                channel=channel_id, ts=thread_ts, oldest=oldest, inclusive=False,
-            ))
-        except SlackListingIncomplete as exc:
-            logger.error(
-                "[%s] Thread %s in %s is INCOMPLETE (%s) — returning the partial "
-                "history; the caller re-polls from its own cursor",
-                self.agent_id, thread_ts, channel_id, exc.reason,
-            )
-            return self._conversation_messages(exc.partial)
-        except SlackApiError as exc:
-            err = exc.response.get("error")
-            if err == "thread_not_found":
-                raise ThreadNotFound(channel_id, thread_ts, err) from exc
-            if err == "channel_not_found" and self._is_private_channel(channel_id):
-                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, "channel_not_found") from exc
-            logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
-            return []
-
     def get_full_channel_history(
         self,
         channel_id: str,
@@ -736,17 +690,6 @@ class AgentSlackClient:
     # ------------------------------------------------------------------
     # User resolution
     # ------------------------------------------------------------------
-
-    def resolve_user_name(self, user_id: str) -> str:
-        """Resolve a Slack user ID to display name."""
-        if not user_id or not self._client:
-            return user_id or "unknown"
-        try:
-            info = self._api("users_info", user=user_id)
-            user = info.get("user", {})
-            return user.get("display_name") or user.get("real_name") or user_id
-        except SlackApiError:
-            return user_id
 
     def is_bot_user(self, user_id: str) -> bool:
         """Check if a user ID corresponds to a bot.
@@ -929,61 +872,6 @@ class AgentSlackClient:
         return {**posted[0], "posted_messages": posted}
 
     # ------------------------------------------------------------------
-    # Direct messages
-    # ------------------------------------------------------------------
-
-    def open_dm_channel(self, user_id: str) -> str | None:
-        """Open a DM channel with a user. Returns the DM channel ID, cached.
-
-        The whole check-then-act — cache read, the ``conversations.open``
-        call, and the cache write — is held under one lock, not split into
-        smaller pieces, so two callers racing on the same not-yet-cached
-        ``user_id`` cannot both reach Slack: the second blocks, then finds the
-        first's result already cached and returns it instead of opening a
-        second (redundant, if harmless) DM channel. Not reachable
-        concurrently today — its only callers, ``send_dm`` and
-        ``poll_dm_messages``, have no caller in ``src/`` — but it
-        has the identical check-then-act shape as ``_channel_name_to_id``
-        below, so it gets the same guard rather than leaving a second
-        instance of the same bug for whenever a caller does appear.
-        """
-        with self._cache_lock:
-            if user_id in self._dm_channels:
-                return self._dm_channels[user_id]
-            if not self._client:
-                return None
-            try:
-                result = self._api("conversations_open", users=user_id)
-                ch_id = result["channel"]["id"]
-                self._dm_channels[user_id] = ch_id
-                return ch_id
-            except SlackApiError as exc:
-                logger.error("[%s] Failed to open DM with %s: %s", self.agent_id, user_id, exc)
-                return None
-
-    def send_dm(self, user_id: str, text: str) -> dict | None:
-        """Send a DM to a user. Returns message result or None."""
-        dm_channel = self.open_dm_channel(user_id)
-        if not dm_channel:
-            logger.warning("[%s] Cannot send DM — no channel for %s", self.agent_id, user_id)
-            return None
-        return self.post_message(dm_channel, text)
-
-    def poll_dm_messages(
-        self,
-        user_id: str,
-        oldest: str = "0",
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        """Poll for new DM messages from a specific user."""
-        dm_channel = self.open_dm_channel(user_id)
-        if not dm_channel:
-            return []
-        messages = self.poll_channel_messages(dm_channel, oldest=oldest, limit=limit)
-        # Filter to only messages from the target user (not from the bot)
-        return [m for m in messages if m.get("user") == user_id]
-
-    # ------------------------------------------------------------------
     # Channel operations
     # ------------------------------------------------------------------
 
@@ -1031,90 +919,6 @@ class AgentSlackClient:
             self._channel_name_to_id[ch["name"]] = ch["id"]
         return ch
 
-    def create_private_channel(self, name: str) -> dict | None:
-        """Create a new Slack private channel (is_private=true).
-
-        Returns the channel dict on success or None on failure. The creating
-        bot is automatically a member; additional members must be added via
-        invite_to_channel. See specs/privacy-and-channel-visibility.md for
-        the full migration flow.
-        """
-        # The reopen slug (priv-{a}-{b}-{origin}) is deterministic per agent
-        # pair + origin channel, so a second proposal between the same pair in
-        # the same channel produces an identical base name that Slack rejects
-        # with 'name_taken'. Append a UTC creation timestamp so each refinement
-        # gets a unique channel in one shot (no probe-and-increment loop) and
-        # records when it was opened. The endpoint's idempotency guard already
-        # blocks re-reopening the *same* proposal; the only residual collision
-        # — two *different* proposals for the same pair/channel reopened within
-        # the same second — is handled by retrying with random entropy.
-        # (Slack caps names at 80 chars, so the base is truncated to fit.)
-        ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        for attempt in range(_MAX_PRIVATE_CHANNEL_ATTEMPTS):
-            suffix = f"-{ts}" if attempt == 0 else f"-{ts}-{secrets.token_hex(2)}"
-            candidate = f"{name[: 80 - len(suffix)].rstrip('-')}{suffix}"
-            if not self._client:
-                logger.info("[%s] MOCK create private channel: #%s", self.agent_id, candidate)
-                return {"id": f"local:{candidate}", "name": candidate, "is_private": True}
-            try:
-                result = self._api(
-                    "conversations_create", name=candidate, is_private=True,
-                )
-                ch = result["channel"]
-                with self._cache_lock:  # see _cache_lock's docstring at __init__
-                    self._channel_name_to_id[ch["name"]] = ch["id"]
-                return ch
-            except SlackApiError as exc:
-                err = exc.response.get("error")
-                if err == "name_taken" and attempt < _MAX_PRIVATE_CHANNEL_ATTEMPTS - 1:
-                    logger.info(
-                        "[%s] Private channel '%s' name_taken — retrying with entropy",
-                        self.agent_id, candidate,
-                    )
-                    continue
-                logger.error(
-                    "[%s] Failed to create private channel %s: %s",
-                    self.agent_id, candidate, err,
-                )
-                return None
-        return None
-
-    def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool:
-        """Invite one or more Slack user IDs (bots or humans) to a channel.
-
-        Returns True on success. Tolerates per-user errors ('already_in_channel',
-        'cant_invite_self') and logs them without failing the whole call — the
-        invite is considered successful as long as every user ends up as a member.
-        """
-        if not user_ids:
-            return True
-        if not self._client:
-            logger.info(
-                "[%s] MOCK invite to %s: %s",
-                self.agent_id, channel_id, ", ".join(user_ids),
-            )
-            return True
-        # Slack accepts a comma-separated list, but per-user errors abort the
-        # call — invite one at a time so tolerable errors don't block others.
-        all_ok = True
-        for uid in user_ids:
-            try:
-                self._api("conversations_invite", channel=channel_id, users=uid)
-            except SlackApiError as exc:
-                err = exc.response.get("error")
-                if err in ("already_in_channel", "cant_invite_self"):
-                    logger.debug(
-                        "[%s] Invite %s -> %s: tolerable (%s)",
-                        self.agent_id, uid, channel_id, err,
-                    )
-                    continue
-                logger.error(
-                    "[%s] Invite %s -> %s failed: %s",
-                    self.agent_id, uid, channel_id, err,
-                )
-                all_ok = False
-        return all_ok
-
     def join_channel(self, channel_id: str) -> None:
         """Join a Slack channel by ID.
 
@@ -1136,11 +940,10 @@ class AgentSlackClient:
 
     def list_channels(
         self,
-        include_private: bool = False,
         *,
         exclude_archived: bool = False,
     ) -> dict[str, str]:
-        """List channels. Returns {name: id} dict.
+        """List public channels. Returns {name: id} dict.
 
         Fully paginated. Raises ``SlackListingIncomplete`` (after caching what it
         did see) rather than returning a subset that looks complete: a subset is
@@ -1155,21 +958,19 @@ class AgentSlackClient:
         them would reintroduce exactly the defect above by a different route.
         Callers that want only channels they can post in pass True.
 
-        Default returns only public channels (original behavior, required for
-        the seeded-channel bootstrap). Passing ``include_private=True`` adds
-        collab_private channels this bot is a member of — but note that with
-        private channels included, Slack's conversations.list behaves
-        differently and may omit public channels the bot is not a member of.
-        Prefer DB-driven discovery via ``_sync_private_channels_from_db``
-        instead of using this flag.
+        Public channels only (``types="public_channel"``), which is what the
+        seeded-channel bootstrap needs. Private channels are discovered from the
+        DB (``_sync_private_channels_from_db``), never listed from Slack, so the
+        bot needs no ``groups:read`` scope (D13, 2026-09-25:
+        https://docs.slack.dev/reference/scopes/groups.read lists only
+        conversations.list/info/members/open and users.conversations).
         """
         if not self._client:
             return {}
-        types = "public_channel,private_channel" if include_private else "public_channel"
         try:
             channels = self._paginate(
                 "conversations_list", "channels",
-                types=types, exclude_archived=exclude_archived,
+                types="public_channel", exclude_archived=exclude_archived,
             )
         except SlackListingIncomplete as exc:
             # Caching the partial answer is purely additive — a name->id pair we
@@ -1286,9 +1087,6 @@ class AgentSlackClient:
 
     async def ajoin_channel(self, *args, **kwargs) -> None:
         return await asyncio.to_thread(self.join_channel, *args, **kwargs)
-
-    async def aconnect(self) -> bool:
-        return await asyncio.to_thread(self.connect)
 
     async def aget_permalink(self, *args, **kwargs) -> str | None:
         return await asyncio.to_thread(self.get_permalink, *args, **kwargs)
