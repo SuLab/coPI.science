@@ -918,12 +918,6 @@ async def build_discussions_view(
             "decision": decision,
         })
 
-    # Apply filters
-    if channel_filter:
-        threads = [t for t in threads if t["channel_name"] == channel_filter]
-    if status_filter:
-        threads = [t for t in threads if t["status"] == status_filter]
-
     # Get proposal reviews
     from src.models import ProposalReview as PR
     reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
@@ -942,10 +936,13 @@ async def build_discussions_view(
         else:
             t["reviews"] = []
 
-    # Add orphaned decisions (thread_decisions with no matching root post in agent_messages)
+    # Add orphaned decisions (thread_decisions with no matching root post in
+    # agent_messages). Iterating decision_map, not all_decisions, gives each
+    # orphan its LAST decision, the same rule the root-post loop applies; a
+    # thread with several decisions appears once, under its final outcome.
     known_thread_ids = {t["message_ts"] for t in threads}
-    for td in all_decisions:
-        if td.thread_id not in known_thread_ids:
+    for thread_id, td in decision_map.items():
+        if thread_id not in known_thread_ids:
             other_agents = replier_map.get(td.thread_id, set())
             poster_id = td.agent_a
             replier = td.agent_b if td.agent_a == poster_id else td.agent_a
@@ -963,7 +960,10 @@ async def build_discussions_view(
             known_thread_ids.add(td.thread_id)
             available_channels.add(td.channel)
 
-    # Count by status (before filtering)
+    # Count by status over the whole run, before any filter: the summary cards
+    # link to `?run_id=...&status_filter=...` with no channel or agent filter,
+    # so each card's number must be what its link lists, and "Total root
+    # posts" (the sum) is the same under every filter.
     counts: dict[str, int] = {}
     for t in threads:
         s = t["status"]
