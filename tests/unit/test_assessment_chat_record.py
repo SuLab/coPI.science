@@ -21,7 +21,6 @@ from src.services.assessment_chat_record import (
     quoted_lines,
     tier_for,
 )
-from src.services.blackbird_rubric import RUBRIC_VERSION
 from tests.assessment_chat_support import RECORD_URL_IN_PITCH, synthetic_detail
 
 
@@ -229,12 +228,16 @@ def test_panel_says_no_consults_only_when_the_transcript_is_available_and_empty(
     ]
 
 
+# "the current rubric is 3.4.0" is the SYNTHETIC detail's own current version
+# (`"rubric_version": "3.4.0"` in tests/assessment_chat_support.py), not the
+# live document's — the record reads it from `detail["rubric_version"]`, so
+# this case is independent of rubric bumps.
 _RUBRIC_STAMP_CASES = [
     ("live", "3.4.0", "the revision that scored this row: the current rubric document]"),
     (
         "archived",
         "3.2.0",
-        f"an archived revision from the revision registry; the current rubric is {RUBRIC_VERSION}",
+        "an archived revision from the revision registry; the current rubric is 3.4.0",
     ),
     ("unknown", "9.9.9", "matches no entry in the revision registry"),
     ("unstamped", None, "none: this verdict predates rubric stamping"),

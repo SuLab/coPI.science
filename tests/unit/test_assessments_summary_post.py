@@ -507,6 +507,11 @@ async def test_the_owed_headline_rescue_path_carries_the_elevator_pitch(
         company_or_project="CRISPR Platform",
         recommendation="pass",
         scores={},
+        # NULL, as `_persist_assessment` stores them for an empty `scores`
+        # map; the rescue path forwards the stored pair as the headline's
+        # band/score override.
+        weighted_score=None,
+        band=None,
         elevator_pitch=PITCH_TEXT,
     )
     eng.session_factory = lambda: _FakeOwedSessionCM(row)
