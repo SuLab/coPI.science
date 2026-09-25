@@ -178,7 +178,7 @@ def test_rehearsal_uses_the_prod_stack_and_one_off_containers(run_script):
     run = run_script()
     assert run.rc == 0, run.output
     assert run.calls
-    for call, argv in zip(run.calls, run.argvs):
+    for call, argv in zip(run.calls, run.argvs, strict=True):
         assert call.startswith(_PROD), call
         assert not _execs_web_service(argv), call
     pre = run.one_call("preflight.py --target")
@@ -278,7 +278,7 @@ def test_apply_path_never_execs_into_the_web_service(run_script):
     assert run.rc == 0, run.output
     assert run.calls_with("alembic upgrade 0051")
     assert run.calls_with("postflight.py")
-    for call, argv in zip(run.calls, run.argvs):
+    for call, argv in zip(run.calls, run.argvs, strict=True):
         assert _is_prod_call(argv), call
         assert not _execs_web_service(argv), call
         if "exec" in argv:
