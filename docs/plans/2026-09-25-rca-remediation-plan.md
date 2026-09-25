@@ -68,7 +68,7 @@ draft's recommended default; the plan below is written against these answers.
 | D10 | I13 duplicate proposal review. | **302 to the dashboard** for both a sequential duplicate and a lost race. | P9, P11b |
 | D11 | I15 dead code. | **Delete**, with its tests, fakes and docs. | P11a–e |
 | D12 | The "grandfathered thread loses reactive priority" rule. | **Retire it.** `grandfathered` becomes reporting-only, and the spec and banner say so. | P2, P11c, P11d |
-| D13 ★ | Slack scope `groups:read` (and the unverified `chat.getPermalink`, `auth.revoke` and `im:write` needs). | **Check Slack's docs, then decide**, before fan-out (§4 step 0). If no method the code calls needs `groups:read`, P11b drops it and P11a removes the unused `include_private` parameter. Otherwise it is kept, with the method cited. | §4 step 0, P11a, P11b |
+| D13 ★ | Slack scope `groups:read` (and the unverified `chat.getPermalink`, `auth.revoke` and `im:write` needs). | **Check Slack's docs, then decide**, before fan-out (§4 step 0). If no method the code calls needs `groups:read`, P11b drops it and P11a removes the unused `include_private` parameter. Otherwise it is kept, with the method cited. **Outcome (docs check, 2026-09-25):** `groups:read` is needed only by `conversations.list`/`info`/`members`/`open` and `users.conversations` on private channels (https://docs.slack.dev/reference/scopes/groups.read), and no live code lists private channels. So it was dropped, with `include_private`, leaving `BOT_SCOPES` at 8. `chat.getPermalink` and `auth.revoke` need no scope. `chat.postMessage` to a user ID needs only `chat:write`. | §4 step 0, P11a, P11b |
 | D14 ★ | `scripts/spike_private_channels.py`, a spike for a removed feature. It calls `slack_sdk` directly and has no importer. | **Delete it** (P5). | P5 |
 | D15 | Dead-code guard scope. | **All of `src/`**, with a reason required per allowlist entry. Narrow to `src/agent` + `src/services` if there are more than ~30 genuine false positives. | P15 |
 | D16 ★ | `prompts/daily_audit.md`, which hard-codes org1's `/home/ubuntu/copi-python` ×6. The host's only daily-audit cron is org1's own, which uses org1's copy. | **Delete it** (P13). | P13 |
@@ -2656,3 +2656,43 @@ Each item is also a row in `docs/audits/open-findings.md` (P13), with its owner.
   P13 re-verifies them into the register, and each one still open is a follow-up.
 - **SSH.** The host key mismatch on the NAT64 IPv6 path (RCA §10). Verify it out of band
   and keep SSH on IPv4.
+
+## 9. Execution record (2026-09-25)
+
+**Implementation.** All 21 packages were implemented in parallel in a local clone of
+`blackbird` @ `9e53735`. Each package was written by an Opus 5.5 `bulk-implementer`,
+at most 12 at a time. There was no build and no test before integration.
+
+**Reconciliation edits by the main session, before integration:**
+- **D13:** removed `include_private` from `Transport`, `NullTransport`,
+  `AgentSlackClient.list_channels` and the fake. The contract test now pins public-only
+  listing.
+- **`specs/agent-system.md:171`:** the spike script is marked removed.
+- **`specs/cohort-system-v2.md`:**
+  - a §10 "superseded" note: `e541706` replaced the two-tier scheduler, and D12 retired
+    the priority rule;
+  - the `:25` row;
+  - the harness sentence at `:1040`, which is M7 retired.
+- **`docs/production-migration.md`:** postflight check 7's new title.
+- **`scripts/provision_slack_bots.py`:** the `--add-scope` help names both
+  `su:groups:write` and `su:groups:read`. The live tier's private-channel listing needs
+  `groups:read`, which `BOT_SCOPES` no longer requests.
+- **`tests/integration/test_profile_pipeline_live.py`:** a stale T4.4 failure message.
+- **`scripts/mutate_system.sh`:** the `vac_i23_*` tiers select P12a's explicit
+  parametrization IDs (`[pass-armed-exempt]`, `[route-to-incubation-armed-owes-pair]`),
+  quoted inside the select string.
+
+**Deviations the implementers reported, beyond the letter of the plan.** The §6 audit
+checks each of these.
+- **P9:** removed `reopen_proposal`'s second existing-review check. Under a race it let a
+  second PI inbox row commit without error, which the plan's rollback claim relied on not
+  happening.
+- **P8:** the discussions page's agent list is now built from the whole run, like the
+  counts.
+- **P12b:** only pytest exit 1 is scored as a kill. 124 and 137 are TIMEOUT, and any other
+  code is ERROR.
+- **P16:** any exception from `resolve_corpus` skips the PI with no write, not only
+  `CorpusStageError`.
+- **P13:** register statuses are its own judgement: C2/S1 stays open until §7, and H4 and
+  M6 are fixed.
+

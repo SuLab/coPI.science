@@ -168,7 +168,7 @@ The bot posting path in `src/agent/slack_client.py` retries `conversations_join`
 - If `agent_channels.visibility = 'public'` and the bot gets `not_in_channel`, retry via `conversations_join` as today.
 - If `agent_channels.visibility = 'collab_private'`, **do not** attempt `conversations_join` — raise a clear `BotNotInvitedToPrivateChannel` exception. This should only ever fire if there's an invite-path bug, since any private channel a bot is asked to post in should have been one the bot was invited to at creation time.
 
-**Spike finding (2026-04-20):** an uninvited bot's attempt to post to or join a private channel returns `channel_not_found`, not `not_in_channel` — Slack hides private channels from non-members entirely. So an additional safety net: if a post fails with `channel_not_found` AND the channel exists in our DB as `collab_private`, treat it as `BotNotInvitedToPrivateChannel` rather than as a missing-channel error. Validated by `scripts/spike_private_channels.py`.
+**Spike finding (2026-04-20):** an uninvited bot's attempt to post to or join a private channel returns `channel_not_found`, not `not_in_channel` — Slack hides private channels from non-members entirely. So an additional safety net: if a post fails with `channel_not_found` AND the channel exists in our DB as `collab_private`, treat it as `BotNotInvitedToPrivateChannel` rather than as a missing-channel error. Validated by a one-off spike, `scripts/spike_private_channels.py`, which was removed on 2026-09-25 with the feature it probed (it survives in git history).
 
 ### Channel Lifecycle
 
