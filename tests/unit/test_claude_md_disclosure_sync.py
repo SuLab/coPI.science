@@ -23,6 +23,11 @@ It deliberately does **not** constrain the `#assessments-summary` paragraph in
 the same bullet. That paragraph's D12 field list is accurate about that channel
 and makes no claim about what a PI or another lab sees — which is exactly the
 distinction 5d67e92 lost.
+
+The same false invariant once lived inside the prompt itself. Until scout_hub
+1.7.1, the preamble to `phase4-thread-reply.md`'s sidecar field list banned the
+whole list from the visible reply, including gating, red flags and the
+recommendation. The last test below pins the correction.
 """
 import re
 from pathlib import Path
@@ -31,6 +36,7 @@ from src.agent import thread_guidance
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_MD = ROOT / "CLAUDE.md"
+PHASE4 = ROOT / "prompts" / "roles" / "scout_hub" / "phase4-thread-reply.md"
 
 # The visibility claim this module guards, verbatim. It is the phrase 5d67e92
 # corrupted, and its disappearance is itself a failure below: a test that only
@@ -147,4 +153,35 @@ def test_claude_md_records_that_the_verdict_is_stated_inline():
     assert "unpublished" in bullet, (
         "CLAUDE.md's assessment bullet no longer records that the protected class in the "
         "VISIBLE half is the PI's unpublished disclosures (phase4-thread-reply.md)"
+    )
+
+
+def _sidecar_preamble() -> str:
+    """phase4-thread-reply.md's paragraph introducing the sidecar field list, from
+    its bare-JSON instruction up to item 1."""
+    body = _norm(PHASE4.read_text(encoding="utf-8"))
+    start = body.index("**Emit the sidecar as bare JSON")
+    return body[start : body.index("1. **Gating criteria.**", start)]
+
+
+def test_the_sidecar_preamble_admits_the_inline_verdict():
+    """The prompt may not ban from the visible reply what CONCLUDE requires in it.
+
+    The old preamble said "none of it may appear anywhere in `<slack_message>`"
+    over a list that opens with gating, red flags and the recommendation, so on the
+    CONCLUDE turn the hub was told both to state its verdict inline and never to. The
+    one sentence admitting fields into the visible reply must name every inline field.
+    """
+    preamble = _sidecar_preamble()
+    assert "none of it may appear" not in preamble.lower(), (
+        "the sidecar preamble bans its whole field list from <slack_message> again"
+    )
+    admits = [s for s in preamble.split(". ") if "also appears in `<slack_message>`" in s]
+    assert len(admits) == 1, (
+        "the sidecar preamble no longer says which fields the visible reply carries"
+    )
+    missing = [field for field in INLINE_FIELDS if field not in admits[0].lower()]
+    assert not missing, (
+        f"the sidecar preamble's visible-reply sentence no longer admits {missing}, "
+        "which thread_guidance._SCOUT_HUB[CONCLUDE] requires inline"
     )

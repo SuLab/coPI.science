@@ -480,8 +480,12 @@ start your reply with ⏸️ instead, and emit no sidecar at all.
 
 **Emit the sidecar as bare JSON with no code fence** (a fenced block would be mistaken for
 your action JSON). It is for Blackbird staff only — stripped before anything is posted to
-Slack, so the PI never sees it — and everything below must be captured here in full; none
-of it may appear anywhere in `<slack_message>` above:
+Slack, so the PI never sees it. Only your inline verdict also appears in `<slack_message>`
+above: the gating status, the recommendation (a `pass` stated as **decline**), the red
+flags, the confidence label, and the deciding experiments put to the PI on their
+scientific merits, as described above. Copy no other field below into it — not the
+dimension scores, not any field marked staff-only, and not the full detail behind the
+verdict. Everything below must be captured here in full:
 
 1. **Gating criteria.** All three, each as **met** / **not met** / **unconfirmed** — the
    same three states the `<assessment_json>` skeleton below encodes as `"met"` /
