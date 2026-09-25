@@ -665,6 +665,14 @@ Then, per PI, `--apply` required, `--orcid`/`--only` scoping, mirroring
 - **Remove**: rows failing the *fixed* strict re-check; rows whose
   `pub_types` hit `EXCLUDED_TYPES`; the later member of each duplicate-title
   group (higher year, then higher PMID — `resolve_corpus`'s own rule).
+
+  **Erratum (2026-09-25).** The line above has the direction reversed. The
+  executed script (`find_duplicate_title_removals` in
+  `scripts/repair_pi_corpus.py`) follows `resolve_corpus`'s real rule: it KEEPS
+  the later member of each duplicate-title group (higher year, then higher
+  PMID) and removes every other member. The separate duplicate-PMID pass
+  (`partition_duplicate_pmids`) keeps the first row in load order, which is
+  `created_at`, then `id`.
 - **Add**: the resolver's kept set up to the cap, ranked year-DESC/PMID-DESC.
 - **Never** auto-drop a human-verified row; print every removal with its
   evidence (author list, pub types).

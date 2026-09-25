@@ -72,7 +72,7 @@ One per user. Contains LLM-synthesized fields and user-submitted content.
 | abstract | text | |
 | journal | string | |
 | year | integer | |
-| author_position | enum: first, last, middle | |
+| author_position | enum: first, last, middle | Nullable. Never written: the column is reserved, and no ingestion path populates it. |
 | methods_text | text | Nullable. Extracted from PMC full text. |
 | created_at | timestamp | |
 
@@ -210,16 +210,16 @@ Tracks per-user email engagement for auto-downgrade logic. One row per user.
 
 ### ProfileRevision
 
-Tracks every change to public profiles, private profiles, and working memory. See `profile-versioning.md` for full spec.
+Tracks every change to public profiles and working memory (and, before 2026-08-13, private profiles). See `profile-versioning.md` for full spec.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | uuid | Primary key |
 | agent_registry_id | FK → AgentRegistry | Which agent's profile was changed |
-| profile_type | string(10) | `public`, `private`, or `memory` |
+| profile_type | string(10) | `public` or `memory`. `private` is historical: only pre-2026-08-13 rows carry it. |
 | content | text | Full markdown snapshot after the change |
 | changed_by_user_id | FK → User | Nullable. The human who initiated the change. Null for agent/system changes. |
-| mechanism | string(20) | `web`, `slack_dm`, `agent`, `pipeline`, or `monthly_refresh` |
+| mechanism | string(20) | `web`, `agent` or `pipeline`. `slack_dm` is historical (pre-2026-08-13 rows only). `monthly_refresh` has never been written: that job records `pipeline`. |
 | change_summary | text | Nullable. Brief description of what changed. |
 | created_at | timestamp | |
 

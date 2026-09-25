@@ -73,9 +73,9 @@ container, no manual database, no env var needed. This is exactly what
 > is now the ONLY enforcement in the process. Do not remove it on the grounds
 > that the SDK checks too; it does not.
 
-Running pytest **inside the container** (`docker compose exec blackbird-app
-python -m pytest ...`) does not currently work: the image installs with
-`pip install --no-cache-dir .` (`Dockerfile:14`), with no `[dev]` extra, so
+Running pytest **inside the container** (`docker compose -f
+docker-compose.prod.yml exec blackbird-app python -m pytest ...`) does not
+currently work: the image installs with `pip install --no-cache-dir .` (`Dockerfile:41`), with no `[dev]` extra, so
 pytest is not installed there (verified: `exec blackbird-app python -c "import
 pytest"` → `ModuleNotFoundError`). Restoring that path would need the image (or
 a test-targeted variant of it) to install `.[dev]` instead.
@@ -157,6 +157,9 @@ the dev database.
 > `git show HEAD:docker-compose.prod.yml`. The agent service's
 > `command`/`restart`/`container_name`/`stop_grace_period` lines are the same
 > kind of exception — working-tree only, absent from the committed file.
+> Keeping the file uncommitted was a deliberate decision on 2026-09-25 (D5 of
+> `docs/plans/2026-09-25-rca-remediation-plan.md`), recorded as open in
+> `docs/audits/open-findings.md`.
 
 The simulation runs in a one-off container named `blackbird-agent-run`:
 
@@ -216,9 +219,10 @@ announced. The body is `prompts/run_start_announcement.md` (bind-mounted:
 editable without a rebuild; the sentinel first line is prepended by code and
 is NOT editable), carrying start time, planned duration, the image's git
 commit/branch/dirty count (`.build_info.json`, baked by the Dockerfile —
-`dirty state unknown` in the announcement means `.build_info.json` was
-missing and the `.git` fallback served (rebuild to restore the dirty count);
-a pre-feature agent image never announces at all), the hub/PI prompt-set versions
+`dirty state unknown` or an unknown commit in the announcement means an image
+built before the two-stage Dockerfile: images no longer carry `.git`, and the
+builder stage fails the build if `.build_info.json` cannot be written
+(rebuild); a pre-feature agent image never announces at all), the hub/PI prompt-set versions
 (`version` keys in the two `prompts/roles/*/role.toml`, which must be bumped
 on any prompt-set edit) and the rubric version. Both Slack-ingest paths drop
 sentinel-prefixed messages, so markers never enter `agent_messages` — do not
@@ -229,7 +233,8 @@ was announced is recorded under `run_start_announcement` in
 
 > ⚠️ **As of 2026-08-22 every one of those numbers counts REAL API CALLS, where
 > it used to count turns — and none of them has been re-tuned.**
-> `Agent.record_api_call` booked six sites but never the extra TOOL ROUNDS
+> `Agent.record_api_call` booked six unreserved sites (besides the two reserved
+> turns) but never the extra TOOL ROUNDS
 > inside `generate_with_tools`, so a turn that used three rounds before its
 > terminating text call made four billed calls and was metered as one. 78.6% of
 > stored `thread_reply` rows are 2+ calls. `_on_llm_call` now books the
@@ -373,10 +378,15 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 > ```
 >
 > `scripts/migrate/run_migration.sh` is the guarded path for a populated
-> database (preflight → apply → postflight), but it shells out to a bare
-> `docker compose` and defaults `SVC=app`, neither of which matches this stack.
-> Override both: `COMPOSE_FILE=docker-compose.prod.yml
-> MIGRATE_SERVICE=blackbird-app ./scripts/migrate/run_migration.sh --apply`.
+> database: dump → preflight → apply → read-back → postflight. Every in-image
+> step runs in a one-off container off the image you just built (`run --rm
+> --no-deps`, never `exec`), and it refuses an image whose `.build_info.json`
+> names a commit other than the host's HEAD. Its default target is the image's
+> own `preflight.DEFAULT_TARGET`, and it mounts the host `backups/` at
+> `/app/backups` for the dump. Use it as step 4 in place of `alembic upgrade
+> head`: rehearse first with `./scripts/migrate/run_migration.sh` (no
+> `--apply`; writes nothing), then run it again with `--apply`. Its defaults
+> are `docker-compose.prod.yml` and `blackbird-app`.
 
 > ### ⚠️ The agent image does NOT mount `src/`. Rebuild it, or you deploy stale code.
 >
@@ -393,6 +403,15 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 >
 > After any `src/` change, always run `$DC --profile agent build agent` before
 > starting a new run, and check the startup banner matches what you expect.
+>
+> What the image does carry is the tracked tree only: `.dockerignore` keeps
+> `.env`, `backups/`, `data/`, `logs/`, `profiles/` and `.venv-test` out of the
+> build context, and the builder stage's `git clean -ffdx` drops any other
+> untracked file, so services get their environment from compose's `env_file:`,
+> never from a baked `.env`. Never add a tracked path or `.git` to
+> `.dockerignore`: the builder needs `.git` to write `.build_info.json`, and an
+> excluded tracked path would count as dirty in every image
+> (`tests/unit/test_docker_build_context.py`).
 
 **Note:** The agent container loads Python modules only at startup, so **code**
 changes require rebuilding the image (above) and restarting the container. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
@@ -553,14 +572,22 @@ rotating pair is persisted in the `app_settings` KV table) and a public `base_ur
 roster from the container, then run the script on the host:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/export_agent_roster.py   # writes data/agent_roster.json
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T -v "$PWD/data:/app/data" blackbird-app python scripts/export_agent_roster.py   # writes host data/agent_roster.json
 python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
 ```
 
-The host script writes tokens to `.env`; import them into the DB column with:
+The web service has no `./data` mount, so the one-off binds one. The host script
+refuses a roster older than 1 h unless given `--allow-stale-roster`: re-export
+rather than provision from a stale roster.
+
+The host script writes tokens to `.env` as `SLACK_BOT_TOKEN_<AGENT_ID>`; import
+them into the DB column with a one-off container, not `exec` (a long-running
+container's environment dates from its creation, so it cannot see keys added
+since). Preview first, then import:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/backfill_agent_tokens.py
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py --dry-run
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py
 ```
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
@@ -962,7 +989,8 @@ review call at 10 s. A reply that is not valid JSON keeps its declared
 `target` via a leading-key regex (`_LEADING_TARGET_RE`,
 `src/services/review_bot.py`) rather than defaulting to `out_of_scope`, and
 logs one WARNING naming the recovered target — measured at 3 of 12 live
-`claude-opus-5` replies in the 2026-09-02 evaluation. The worker's boot sweep
+`claude-opus-5` replies in the 2026-09-03 evaluation (reported in the
+2026-09-02 audit). The worker's boot sweep
 assumes a SINGLE worker instance: `older_than_seconds=0` at boot requeues
 every `processing` row regardless of age, with no way to tell a genuinely
 abandoned row from one a concurrently running second worker is still
@@ -1054,24 +1082,6 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > (`$DC --profile agent build agent`). Production was at `0035` and this branch
 > was `0036` when this was written, so this box applied to the next deploy, not to
 > some hypothetical one.
-
-> **Deploy order for `0037_recommended_next_experiment` — migrate BEFORE the new
-> code serves.** `0037` is one additive nullable Text column
-> (`opportunity_assessments.recommended_next_experiment`, sidecar item 10 of
-> rubric v2.1.0 — the single experiment Blackbird should fund next), so *old
-> code against the new schema* is safe. The reverse is not: the new code **maps
-> the column**, so against a pre-`0037` database every
-> `select(OpportunityAssessment)` — both assessment list pages, both detail
-> pages — raises `UndefinedColumn`, and on the engine side `_persist_assessment`
-> names it in the INSERT, so every verdict write fails too. Build, migrate from
-> a one-off container, then start — same ordering as `0028`/`0030`/`0036`. NULL
-> on every pre-`0037` row, deliberately never backfilled: old verdicts were
-> never asked to name one, and `raw_verdict` keeps what they did emit. The same
-> 2026-08-24 change set RENAMED the third gating key
-> (`fto_achievable` → `translational_potential`, rubric v2.1.0): needs no DDL —
-> `gating` is JSONB and old rows keep their `fto_achievable` key, unrewritten —
-> but the agent image must be rebuilt or the running hub keeps emitting the old
-> contract while the rubric banner claims 2.1.0.
 >
 > Four things to expect afterwards, none of them a regression:
 >
@@ -1102,6 +1112,24 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >    exactly as they do today. The alternative retroactively invalidates history
 >    on no evidence.
 
+> **Deploy order for `0037_recommended_next_experiment` — migrate BEFORE the new
+> code serves.** `0037` is one additive nullable Text column
+> (`opportunity_assessments.recommended_next_experiment`, sidecar item 10 of
+> rubric v2.1.0 — the single experiment Blackbird should fund next), so *old
+> code against the new schema* is safe. The reverse is not: the new code **maps
+> the column**, so against a pre-`0037` database every
+> `select(OpportunityAssessment)` — both assessment list pages, both detail
+> pages — raises `UndefinedColumn`, and on the engine side `_persist_assessment`
+> names it in the INSERT, so every verdict write fails too. Build, migrate from
+> a one-off container, then start — same ordering as `0028`/`0030`/`0036`. NULL
+> on every pre-`0037` row, deliberately never backfilled: old verdicts were
+> never asked to name one, and `raw_verdict` keeps what they did emit. The same
+> 2026-08-24 change set RENAMED the third gating key
+> (`fto_achievable` → `translational_potential`, rubric v2.1.0): needs no DDL —
+> `gating` is JSONB and old rows keep their `fto_achievable` key, unrewritten —
+> but the agent image must be rebuilt or the running hub keeps emitting the old
+> contract while the rubric banner claims 2.1.0.
+
 > **Deploy order for `0038_specialist_consult_read_state_and_stamp` — migrate
 > BEFORE the new code serves.** `0038` is four additive nullable columns on
 > `specialist_consults` (`read_state`, `established`, `rubric_version`,
@@ -1115,7 +1143,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > `src/services/thread_panel.py` select an explicit column list that named
 > none of the four when this box was written; it now names `read_state`, so that
 > page raises against a pre-`0038` database too, and the migration's own
-> docstring, which says it is unaffected, predates that change.) Build,
+> docstring now says so too.) Build,
 > migrate from a one-off container, then start — same ordering as
 > `0028`/`0030`/`0036`/`0037`:
 >

@@ -62,10 +62,10 @@ For each publication, extract and store as a Publication entity:
 - Abstract
 - Journal
 - Year
-- Author position (first, last, middle) — determined from the author list in the PubMed record
+- Author position (first, last, middle) (not populated; column reserved)
 - Article type (research article, review, editorial, etc.)
 
-Store all publications. For profile synthesis, use the most recent 25-30 research articles (not reviews/editorials/commentaries), prioritizing last-author papers.
+Store all publications. For profile synthesis, use the most recent 25-30 research articles (not reviews/editorials/commentaries).
 
 ### Step 5: Deep Mining (Default On)
 
@@ -110,8 +110,8 @@ Grant Titles:
 - [grant title 2]
 - ...
 
-Publications (most recent 25-30 research articles, last-author prioritized):
-- [title] ([journal], [year]) [last author / first author]
+Publications (most recent 25-30 research articles):
+- [title] ([journal], [year])
   Abstract: [abstract text]
 - ...
 
