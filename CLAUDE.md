@@ -1,5 +1,11 @@
 # CLAUDE.md
 
+> ⚠️ **`origin` (`SuLab/coPI.science`) is public — do not push `blackbird` blind.**
+> `docs/audits/` and `docs/plans/2026-09-25-rca-remediation-plan.md` describe open
+> weaknesses of the live host, tracked in `docs/audits/open-findings.md`. Until its
+> C2 row (pre-fix images still on the host, removed by decision D1) and the SSH
+> host-key row are closed, scrub those records before any push.
+
 ## Testing
 
 Run `./scripts/ci.sh` before committing — alembic sanity (single head, no

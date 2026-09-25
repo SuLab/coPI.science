@@ -220,3 +220,61 @@ async def test_fetch_orcid_works_swallows_timeout_returns_empty():
     route = respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.TimeoutException("t"))
     assert await orcid.fetch_orcid_works(OID) == []
     assert route.called
+
+
+# ---- strict mode (the profile corpus path) ----
+# resolve_corpus calls fetch_orcid_works(strict=True): a swallowed failure there
+# thinned the corpus silently, and a paper-derived tenure start could be stored
+# from the thinner one. Strict raises on everything except ORCID's own answers.
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+@respx.mock
+async def test_strict_fetch_orcid_works_raises_on_a_transient_status(status):
+    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(status))
+    with pytest.raises(httpx.HTTPStatusError):
+        await orcid.fetch_orcid_works(OID, strict=True)
+    assert route.called
+
+
+@respx.mock
+async def test_strict_fetch_orcid_works_raises_on_timeout():
+    route = respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.TimeoutException("t"))
+    with pytest.raises(httpx.TimeoutException):
+        await orcid.fetch_orcid_works(OID, strict=True)
+    assert route.called
+
+
+@respx.mock
+async def test_strict_fetch_orcid_works_raises_on_a_transport_error():
+    route = respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.ConnectError("x"))
+    with pytest.raises(httpx.ConnectError):
+        await orcid.fetch_orcid_works(OID, strict=True)
+    assert route.called
+
+
+@respx.mock
+async def test_strict_fetch_orcid_works_raises_on_an_unreadable_body():
+    route = respx.get(f"{BASE}/{OID}/works").mock(
+        return_value=httpx.Response(200, content=b"not json")
+    )
+    with pytest.raises(json.JSONDecodeError):
+        await orcid.fetch_orcid_works(OID, strict=True)
+    assert route.called
+
+
+@respx.mock
+async def test_strict_fetch_orcid_works_reads_a_404_as_no_works():
+    """A 404 is ORCID saying there is no such record: an answer, not a failure."""
+    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(404))
+    assert await orcid.fetch_orcid_works(OID, strict=True) == []
+    assert route.called
+
+
+@respx.mock
+async def test_strict_fetch_orcid_works_reads_an_empty_works_list_as_no_works():
+    route = respx.get(f"{BASE}/{OID}/works").mock(
+        return_value=httpx.Response(200, json={"group": []})
+    )
+    assert await orcid.fetch_orcid_works(OID, strict=True) == []
+    assert route.called

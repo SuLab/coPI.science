@@ -7,11 +7,18 @@ corpus: ``resolve_corpus``'s ``_stage`` wrapper can only raise
 DOI lookup used to thin the corpus — and the tenure start and synthesis built
 on it — silently. The corpus path now passes ``strict=True``.
 
-Strict means strict about TRANSIENT failures only (transport, 429, 5xx),
-which a job retry can recover. A PERMANENT per-item failure (another 4xx, an
-unreadable body) would repeat on every retry, so it costs that item alone —
-re-raising it would leave the job, and every later regeneration of the PI,
-``dead``.
+Strict re-raises everything except a PERMANENT per-item failure (a 4xx other
+than 429, an unreadable body): transient failures (transport, 429, 5xx), which
+a job retry can recover, and anything else, which is most likely a bug of
+ours. A per-item failure would repeat on every retry, so it costs that item
+alone — re-raising it would leave the job, and every later regeneration of the
+PI, ``dead`` — but the item is reported in ``CorpusResult.permanently_dropped``
+so no tenure start is persisted from the incomplete corpus. The same 4xx on
+``_SYSTEMIC_4XX_RUN`` requests in a row is NCBI refusing us, not bad items,
+and raises.
+
+``fetch_orcid_works`` swallows its failures by default too; the corpus passes
+it ``strict=True`` as well (its own contract tests pin that mode).
 
 The two pubmed functions run for real here, over an ``httpx.MockTransport``;
 only the non-NCBI stages (ORCID works, OpenAlex, the PubMed searches) are
@@ -51,7 +58,8 @@ def _client_factory(handler):
 
 
 def _wire(monkeypatch, *, orcid_works):
-    async def fake_orcid_works(orcid):
+    async def fake_orcid_works(orcid, *, strict=False):
+        assert strict is True
         return list(orcid_works)
 
     async def fake_openalex(orcid):
@@ -125,9 +133,70 @@ async def test_a_permanently_failed_efetch_batch_does_not_fail_the_corpus(
         return httpx.Response(200, text=_EMPTY_SET)
 
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
-    await _resolve()
+    result = await _resolve()
     assert sorted(singles) == ["1", "2", "3"]
     assert "PMID 2 failed permanently" in caplog.text
+    # Returned normally, but the corpus is known incomplete.
+    assert result.permanently_dropped == ["2"]
+
+
+async def test_every_efetch_refused_with_the_same_4xx_fails_the_corpus(monkeypatch):
+    # A 403 on every request is NCBI refusing US (a revoked key, a blocked
+    # tool id), not 150 bad PMIDs: dropping them all would let the job succeed
+    # on an empty corpus.
+    _wire(monkeypatch, orcid_works=[{"pmid": str(i)} for i in range(1, 151)])
+    singles = []
+
+    def handler(request):
+        assert _route(request) == "efetch"
+        if "," not in request.url.params["id"]:
+            singles.append(request.url.params["id"])
+        return httpx.Response(403, text="Forbidden")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="efetch") as ei:
+        await _resolve()
+    assert isinstance(ei.value.__cause__, httpx.HTTPStatusError)
+    assert ei.value.__cause__.response.status_code == 403
+    assert singles == ["1", "2", "3"], "stops at the third identical single 4xx"
+
+
+async def test_a_bug_in_the_parser_fails_the_corpus_not_one_pmid(monkeypatch):
+    # An AttributeError is a bug of ours, not evidence about a record: strict
+    # must surface it rather than drop every PMID it touches.
+    _wire(monkeypatch, orcid_works=[{"pmid": "1"}, {"pmid": "2"}])
+
+    def handler(request):
+        return httpx.Response(200, text=_EMPTY_SET)
+
+    def broken_parser(xml_text):
+        raise AttributeError("'NoneType' object has no attribute 'text'")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    monkeypatch.setattr(pubmed, "_parse_pubmed_xml", broken_parser)
+    with pytest.raises(CorpusStageError, match="efetch") as ei:
+        await _resolve()
+    assert isinstance(ei.value.__cause__, AttributeError)
+
+
+async def test_three_consecutive_identical_doi_4xx_fail_the_corpus(monkeypatch):
+    dois = [f"10.1234/doi.{i}" for i in range(5)]
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": d} for d in dois])
+    calls = {"esearch": 0}
+
+    def handler(request):
+        route = _route(request)
+        if route == "idconv":
+            return httpx.Response(200, json=_EMPTY_IDCONV)
+        assert route == "esearch"
+        calls["esearch"] += 1
+        return httpx.Response(403, text="Forbidden")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="doi_resolution") as ei:
+        await _resolve()
+    assert isinstance(ei.value.__cause__, httpx.HTTPStatusError)
+    assert calls["esearch"] == 3
 
 
 async def test_an_idconv_failure_raises_corpus_stage_error(monkeypatch):
@@ -203,6 +272,7 @@ async def test_a_permanently_failed_doi_esearch_is_no_match_not_a_failure(
     assert result.kept == []
     assert calls["esearch"] == 1
     assert f"ESearch DOI lookup for {_DOI} failed permanently" in caplog.text
+    assert result.permanently_dropped == [_DOI]
 
 
 async def test_a_permanently_failed_idconv_batch_falls_through_to_esearch(
@@ -248,9 +318,14 @@ async def test_a_doi_answered_as_absent_is_not_a_failure(monkeypatch):
     result = await _resolve()
     assert result.kept == []
     assert seen == ["idconv", "esearch"], "both lookups must actually have run"
+    assert result.permanently_dropped == [], "an answer is not a drop"
 
 
-_STRICT_REQUIRED = {"convert_dois_to_pmids", "fetch_pubmed_records"}
+_STRICT_REQUIRED = {
+    "convert_dois_to_pmids",
+    "fetch_orcid_works",
+    "fetch_pubmed_records",
+}
 
 
 def _callee(node: ast.Call) -> str | None:
@@ -267,7 +342,7 @@ def _passes_strict_true(node: ast.Call) -> bool:
 
 
 def test_every_corpus_stage_call_is_strict():
-    """A new ``_stage`` over either swallowing function without ``strict=True``
+    """A new ``_stage`` over any swallowing function without ``strict=True``
     would reintroduce the silent thinning, and no fake-driven test would see
     it: the fakes answer whatever they are asked."""
     tree = ast.parse(inspect.getsource(resolve_corpus))
@@ -280,8 +355,11 @@ def test_every_corpus_stage_call_is_strict():
         if isinstance(inner, ast.Call) and _callee(inner) in _STRICT_REQUIRED
     ]
     assert {_callee(c) for c in wrapped} == _STRICT_REQUIRED, (
-        "resolve_corpus no longer stages both NCBI lookups — this guard has "
-        "gone vacuous; re-point it"
+        "resolve_corpus no longer stages all three swallowing lookups — this "
+        "guard has gone vacuous; re-point it"
+    )
+    assert len(wrapped) == len(_STRICT_REQUIRED), (
+        "each swallowing lookup is expected at exactly one _stage call site"
     )
     for call in wrapped:
         assert _passes_strict_true(call), (

@@ -402,6 +402,13 @@ class CorpusResult:
     # earliest Hopkins-affiliated paper can sit outside the newest ``cap``.
     # Defaults to empty so constructors that predate the field still work.
     ranked: list[dict[str, Any]] = field(default_factory=list)
+    # PMIDs and DOIs the strict NCBI lookups dropped as a permanent per-item
+    # failure (a 4xx, an unreadable body) — records a job retry would not
+    # recover, so the corpus returned normally but is known INCOMPLETE. Any
+    # of them could be the PI's earliest Hopkins paper, so a paper-derived
+    # tenure start from this corpus must not be persisted (profile_pipeline,
+    # scripts/rederive_tenure_starts.py). Empty means nothing was dropped.
+    permanently_dropped: list[str] = field(default_factory=list)
 
 
 def _normalize_title(title: str) -> str:
@@ -422,7 +429,16 @@ async def resolve_corpus(
     *,
     cap: int = DEFAULT_CAP,
 ) -> CorpusResult:
-    """Resolve, gate, dedupe, rank and cap a PI's publication corpus."""
+    """Resolve, gate, dedupe, rank and cap a PI's publication corpus.
+
+    Every retrieval stage runs inside ``_stage``, so any failure it raises
+    becomes ``CorpusStageError`` and no corpus is built. The three lookups
+    that swallow failures by default run with ``strict=True``:
+    ``fetch_orcid_works`` then raises on anything but a 404; the two NCBI
+    lookups raise on a transient failure or a bug, while a permanent per-item
+    failure drops only that PMID/DOI and is reported in
+    ``CorpusResult.permanently_dropped`` rather than hidden.
+    """
 
     stages: dict[str, set[str]] = {}
     doi_pool: dict[str, str] = {}  # doi -> first stage that proposed it
@@ -440,11 +456,14 @@ async def resolve_corpus(
             ) from exc
 
     stage_counts: dict[str, int] = {}
+    permanently_dropped: list[str] = []
 
     orcid_dois: dict[str, str] = {}
     orcid_doi_only: dict[str, str] = {}  # doi -> "" until resolved to a pmid
 
-    orcid_works = await _stage("s1_orcid_works", fetch_orcid_works(orcid))
+    orcid_works = await _stage(
+        "s1_orcid_works", fetch_orcid_works(orcid, strict=True)
+    )
     for w in orcid_works:
         if w.get("pmid"):
             _add(w["pmid"], "s1")
@@ -488,7 +507,11 @@ async def resolve_corpus(
 
     if doi_pool:
         mapping = await _stage(
-            "doi_resolution", convert_dois_to_pmids(list(doi_pool), strict=True)
+            "doi_resolution",
+            convert_dois_to_pmids(
+                list(doi_pool), strict=True,
+                permanently_dropped=permanently_dropped,
+            ),
         )
         for doi, pmid in mapping.items():
             stage = doi_pool.get(doi)
@@ -509,7 +532,13 @@ async def resolve_corpus(
                 orcid_dois[str(pmid)] = doi
 
     records = (
-        await _stage("efetch", fetch_pubmed_records(list(stages), strict=True))
+        await _stage(
+            "efetch",
+            fetch_pubmed_records(
+                list(stages), strict=True,
+                permanently_dropped=permanently_dropped,
+            ),
+        )
         if stages
         else []
     )
@@ -636,8 +665,10 @@ async def resolve_corpus(
     kept = ranked[:cap]  # the cap is applied LAST
 
     logger.info(
-        "resolve_corpus(%s): stages=%s kept=%d flagged=%d dropped=%s",
+        "resolve_corpus(%s): stages=%s kept=%d flagged=%d dropped=%s "
+        "permanently_dropped=%d",
         orcid, stage_counts, len(kept), len(flagged), dropped,
+        len(permanently_dropped),
     )
     return CorpusResult(
         kept=kept,
@@ -646,4 +677,5 @@ async def resolve_corpus(
         dropped=dropped,
         orcid_dois=orcid_dois,
         ranked=ranked,
+        permanently_dropped=permanently_dropped,
     )

@@ -571,3 +571,106 @@ async def test_no_rederived_year_is_reported_not_deleted(db_session, fakes, tmp_
     assert await _raw(db_session, user) == before
     assert await _profile_jobs(db_session, user) == 0
     assert "SKIP no_rederived_year" in capsys.readouterr().out
+
+
+async def test_an_incomplete_corpus_skips_the_pi_with_no_write(
+    db_session, fakes, tmp_path, capsys
+):
+    # resolve_corpus returned normally but dropped a PMID permanently (its
+    # single re-fetch came back 400). That PMID could be the earliest Hopkins
+    # paper, so the 2009 re-derived from what survived must not be written.
+    user = await _pi(db_session, 2018)
+    corpus = _corpus(_paper(2009))
+    corpus.permanently_dropped = ["31000000"]
+    fakes.corpora[user.orcid] = corpus
+    before = await _raw(db_session, user)
+
+    code = await _apply(db_session, [user.orcid], tmp_path)
+
+    assert code == 0
+    assert await _raw(db_session, user) == before
+    assert await _profile_jobs(db_session, user) == 0
+    assert list(tmp_path.iterdir()) == []
+    out = capsys.readouterr().out
+    assert "SKIP incomplete_corpus: 1 records permanently unavailable (31000000)" in out
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        json.dumps({"year": "2015", "source": "earliest_hopkins_paper"}),
+        json.dumps({"year": True, "source": "earliest_hopkins_paper"}),
+    ],
+    ids=["string-year", "bool-year"],
+)
+async def test_a_row_restore_could_not_accept_is_reported_not_a_candidate(
+    db_session, fakes, tmp_path, capsys, value
+):
+    # `int("2015")` used to make this a candidate; its `old` value then made
+    # restore's validator refuse the WHOLE backup, the good rows included.
+    odd = await _pi(db_session, 2018)
+    await db_session.execute(
+        update(AppSetting).where(AppSetting.key == _key(odd)).values(value=value)
+    )
+    good = await _pi(db_session, 2018)
+    fakes.corpora[odd.orcid] = _corpus(_paper(2009))
+    fakes.corpora[good.orcid] = _corpus(_paper(2009))
+
+    code = await _apply(db_session, [odd.orcid, good.orcid], tmp_path)
+
+    assert code == 0
+    assert await _raw(db_session, odd) == value
+    assert await _profile_jobs(db_session, odd) == 0
+    assert odd.orcid not in fakes.orcid_calls
+    out = capsys.readouterr().out
+    assert f"{_key(odd)}  SKIP unparseable_value" in out
+    (backup,) = tmp_path.glob("tenure_starts_*.json")
+    doc = json.loads(backup.read_text())
+    assert {row["key"] for row in doc["rows"]} == {_key(good)}
+    # The backup this run wrote is one its own --restore accepts.
+    assert rt._validate_backup(doc) is None
+    assert await rt.restore(db_session, backup) == 0
+    assert (await _stored(db_session, good))["year"] == 2018
+
+
+async def test_a_later_year_is_marked_suspect_in_the_preview(
+    db_session, fakes, tmp_path, capsys
+):
+    user = await _pi(db_session, 2012)
+    fakes.corpora[user.orcid] = _corpus(_paper(2015))
+
+    await rt.run(db_session, orcids=[user.orcid], apply=False, backup_dir=tmp_path)
+
+    out = capsys.readouterr().out
+    assert f"{user.orcid}  2012 -> 2015 (earliest_hopkins_paper) CHANGE LATER (suspect)" in out
+
+
+async def test_a_later_year_is_skipped_under_apply_by_default(
+    db_session, fakes, tmp_path, capsys
+):
+    # Thinning can only make a stored year too LATE; a later re-derived year
+    # narrows the window and hides in-tenure papers, so it is not applied
+    # without an explicit --allow-later.
+    user = await _pi(db_session, 2012)
+    fakes.corpora[user.orcid] = _corpus(_paper(2015))
+    before = await _raw(db_session, user)
+
+    code = await _apply(db_session, [user.orcid], tmp_path)
+
+    assert code == 0
+    assert await _raw(db_session, user) == before
+    assert await _profile_jobs(db_session, user) == 0
+    assert list(tmp_path.iterdir()) == []
+    assert "SKIP later_than_stored" in capsys.readouterr().out
+
+
+async def test_a_later_year_is_applied_with_allow_later(db_session, fakes, tmp_path):
+    user = await _pi(db_session, 2012)
+    fakes.corpora[user.orcid] = _corpus(_paper(2015))
+
+    code = await _apply(db_session, [user.orcid], tmp_path, allow_later=True)
+
+    assert code == 0
+    stored = await _stored(db_session, user)
+    assert (stored["year"], stored["source"]) == (2015, "earliest_hopkins_paper")
+    assert await _profile_jobs(db_session, user) == 1

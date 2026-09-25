@@ -9,7 +9,12 @@ prefers a stored year on every later run, so those rows never self-correct.
 Candidates: every per-user ``jhu_tenure_start:{user_id}`` row whose ``source``
 is ``earliest_hopkins_paper``. Rows with any other source (``manual``,
 ``curated-2026-08-13``, ``orcid_employment``) and the legacy agent-id map are
-never read as candidates and never rewritten.
+never read as candidates and never rewritten. A paper-sourced row that
+``--restore`` could not accept back from the backup — a year that is not a
+JSON integer (``"2015"``, ``true``), or a key that is not
+``jhu_tenure_start:<lowercase UUID>`` — is not a candidate either: it is
+reported ``unparseable_value`` / ``unparseable_key`` and left as it is, since
+one such row in the backup would make ``--restore`` refuse the whole file.
 
 Re-derivation mirrors the profile pipeline's order for a PI with nothing
 recorded (``src/services/profile_pipeline.py``, the tenure block):
@@ -22,11 +27,21 @@ recorded (``src/services/profile_pipeline.py``, the tenure block):
    does), then ``derive_start_from_papers`` over ``ranked`` — the whole
    identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
    50 can miss the earliest Hopkins paper — source ``earliest_hopkins_paper``;
-   any corpus exception skips the PI, no write;
+   any corpus exception skips the PI, no write, and so does a corpus that
+   returned with ``permanently_dropped`` records (reason ``incomplete_corpus``:
+   any of them could be the earliest Hopkins paper, which is the very error
+   this script corrects);
 4. no year at all: reported, left as it is. Nothing is ever deleted.
 
 A row is CHANGED only when the re-derived year differs from the stored one; a
 row whose year agrees is left untouched even if the source would differ.
+
+Direction matters. The thinning this script corrects dropped papers, which
+can only make a stored year too LATE, so the expected change is to an earlier
+year. A LATER re-derived year would narrow the tenure window and hide
+in-tenure papers; the preview marks it ``LATER (suspect)``, and ``--apply``
+skips it (reason ``later_than_stored``, no write) unless ``--allow-later`` is
+given. An earlier year applies as before.
 
 Usage (production: the app image, with host ``backups/`` mounted so the backup
 outlives the ``run --rm`` container):
@@ -40,6 +55,7 @@ outlives the ``run --rm`` container):
         python scripts/rederive_tenure_starts.py --restore /app/backups/tenure_starts_<stamp>.json
 
     --orcid 0000-...   scope the run (repeatable)
+    --allow-later      let --apply write a re-derived year LATER than the stored one
 
 ``--apply`` refuses to start unless ``--backup-dir`` is a mount point
 (``--allow-unmounted-backup-dir`` overrides), and aborts before any write when
@@ -87,7 +103,7 @@ from sqlalchemy import exists, select, update  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
 from src.models import AppSetting, Job, User  # noqa: E402
-from src.services import pubmed  # noqa: E402
+from src.services import orcid, pubmed  # noqa: E402
 from src.services.corpus import CorpusStageError, resolve_corpus  # noqa: E402
 from src.services.jhu_rules import (  # noqa: E402
     TENURE_KEY_PREFIX,
@@ -135,16 +151,29 @@ class Outcome:
             and self.new_year != self.candidate.stored_year
         )
 
+    @property
+    def later(self) -> bool:
+        """A change that moves the start LATER — narrowing the tenure window,
+        the opposite of what re-deriving from a complete corpus corrects."""
+        return self.changed and self.new_year > self.candidate.stored_year
+
 
 async def load_candidates(
     db, orcids: list[str]
-) -> tuple[list[Candidate], list[str]]:
+) -> tuple[list[Candidate], list[str], list[tuple[str, str]]]:
     """Every ``earliest_hopkins_paper`` per-user row, optionally scoped by ORCID.
 
-    Returns ``(candidates, orphan_keys)``: an orphan is a paper-sourced key
-    with no matching user, which cannot be re-derived and is only reported
-    (and only when the run is unscoped). An unreadable value or a key whose
-    suffix is not a UUID has no knowable source and is not a candidate.
+    Returns ``(candidates, orphan_keys, unparseable)``. An orphan is a
+    paper-sourced key with no matching user, which cannot be re-derived and is
+    only reported (and only when the run is unscoped). ``unparseable`` lists
+    ``(key, reason)`` for a paper-sourced row the backup could not carry
+    through ``--restore``: its key and value must pass the same checks
+    ``_validate_backup`` applies (``_KEY_RE``; ``_is_tenure_value`` — an int
+    year that is not a bool), or one such row would make ``--restore`` refuse
+    the whole file. It is reported under the same scoping as an orphan (a
+    key whose UUID names a user outside ``orcids`` is not reported). A value
+    that is not JSON or names no source has no knowable source and is not
+    considered at all.
     """
     rows = (
         await db.execute(
@@ -154,21 +183,35 @@ async def load_candidates(
         )
     ).all()
     parsed: dict[uuid.UUID, tuple[str, str, int]] = {}
+    bad: dict[uuid.UUID | None, list[tuple[str, str]]] = {}
     for key, value in rows:
         try:
             entry = json.loads(value)
             if entry.get("source") != PAPER_SOURCE:
                 continue
-            uid = uuid.UUID(key[len(TENURE_KEY_PREFIX):])
-            parsed[uid] = (key, value, int(entry["year"]))
-        except (ValueError, KeyError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError):
             continue
-    if not parsed:
-        return [], []
-    stmt = select(User).where(User.id.in_(list(parsed)))
-    if orcids:
-        stmt = stmt.where(User.orcid.in_(orcids))
-    users = (await db.execute(stmt.order_by(User.name, User.id))).scalars().all()
+        try:
+            uid: uuid.UUID | None = uuid.UUID(key[len(TENURE_KEY_PREFIX):])
+        except ValueError:
+            uid = None
+        if uid is None or not _KEY_RE.match(key):
+            bad.setdefault(uid, []).append((key, "unparseable_key"))
+            continue
+        if not _is_tenure_value(value):
+            bad.setdefault(uid, []).append((key, "unparseable_value"))
+            continue
+        parsed[uid] = (key, value, entry["year"])
+    wanted = [u for u in (*parsed, *bad) if u is not None]
+    users = []
+    if wanted:
+        stmt = select(User).where(User.id.in_(wanted))
+        if orcids:
+            stmt = stmt.where(User.orcid.in_(orcids))
+        users = (
+            await db.execute(stmt.order_by(User.name, User.id))
+        ).scalars().all()
+    in_scope = {u.id for u in users}
     candidates = [
         Candidate(
             key=parsed[u.id][0],
@@ -180,12 +223,18 @@ async def load_candidates(
             stored_year=parsed[u.id][2],
         )
         for u in users
+        if u.id in parsed
     ]
-    found = {c.user_id for c in candidates}
     orphans = [] if orcids else [
-        parsed[uid][0] for uid in parsed if uid not in found
+        parsed[uid][0] for uid in parsed if uid not in in_scope
     ]
-    return candidates, orphans
+    unparseable = [
+        item
+        for uid, items in bad.items()
+        if not orcids or uid in in_scope
+        for item in items
+    ]
+    return candidates, orphans, unparseable
 
 
 async def rederive(candidate: Candidate) -> Outcome:
@@ -217,6 +266,16 @@ async def rederive(candidate: Candidate) -> Outcome:
         outcome.skip_reason = f"corpus_error: {type(exc).__name__}: {exc}"
         return outcome
 
+    if corpus.permanently_dropped:
+        # Returned normally, but missing records a retry would not recover;
+        # any of them could be the earliest Hopkins paper.
+        sample = ", ".join(corpus.permanently_dropped[:5])
+        outcome.skip_reason = (
+            f"incomplete_corpus: {len(corpus.permanently_dropped)} records "
+            f"permanently unavailable ({sample}) (row left as it is)"
+        )
+        return outcome
+
     # ``ranked``, not ``kept``: the cap keeps the newest CORPUS_CAP records,
     # which can exclude the earliest Hopkins paper of a prolific PI.
     year = derive_start_from_papers(corpus.ranked)
@@ -232,7 +291,10 @@ def _line(o: Outcome) -> str:
     head = f"{c.user_id}  {c.name}  {c.orcid}  {c.stored_year} -> "
     if o.skip_reason is not None:
         return head + f"SKIP {o.skip_reason}"
-    tag = "CHANGE" if o.changed else "same"
+    if o.later:
+        tag = "CHANGE LATER (suspect)"
+    else:
+        tag = "CHANGE" if o.changed else "same"
     return head + f"{o.new_year} ({o.new_source}) {tag}"
 
 
@@ -315,8 +377,13 @@ async def run(
     max_changes: int = DEFAULT_MAX_CHANGES,
     backup_dir: Path = DEFAULT_BACKUP_DIR,
     allow_unmounted_backup_dir: bool = False,
+    allow_later: bool = False,
 ) -> int:
-    """Preview (default) or apply. Returns the process exit code."""
+    """Preview (default) or apply. Returns the process exit code.
+
+    Under ``apply`` a change to a LATER year is skipped (``later_than_stored``)
+    unless ``allow_later``; the preview only marks it ``LATER (suspect)``.
+    """
     if apply and not allow_unmounted_backup_dir and not os.path.ismount(backup_dir):
         print(
             f"ABORT: backup dir {backup_dir} is not a mount point, so the backup "
@@ -325,12 +392,21 @@ async def run(
             "--allow-unmounted-backup-dir. Nothing read or written."
         )
         return 2
-    candidates, orphans = await load_candidates(db, orcids)
+    candidates, orphans, unparseable = await load_candidates(db, orcids)
     outcomes = [await rederive(c) for c in candidates]
+    if apply and not allow_later:
+        for o in outcomes:
+            if o.later:
+                o.skip_reason = (
+                    f"later_than_stored: re-derived {o.new_year} "
+                    "(row left as it is; --allow-later to apply)"
+                )
     for o in outcomes:
         print(_line(o))
     for key in orphans:
         print(f"{key}  SKIP no_user (row left as it is)")
+    for key, reason in unparseable:
+        print(f"{key}  SKIP {reason} (row left as it is)")
     changes = [o for o in outcomes if o.changed]
     skipped = sum(1 for o in outcomes if o.skip_reason is not None)
     print(
@@ -467,9 +543,18 @@ def _require_strict_corpus() -> None:
     """Refuse to run on an image without the strict corpus path: re-deriving
     through the swallowing one would reproduce the thinning this script exists
     to correct."""
-    for fn in (pubmed.fetch_pubmed_records, pubmed.convert_dois_to_pmids):
-        if "strict" not in inspect.signature(fn).parameters:
-            sys.exit(f"{fn.__name__} has no strict mode; this image predates it.")
+    needs = (
+        (pubmed.fetch_pubmed_records, ("strict", "permanently_dropped")),
+        (pubmed.convert_dois_to_pmids, ("strict", "permanently_dropped")),
+        (orcid.fetch_orcid_works, ("strict",)),
+    )
+    for fn, params in needs:
+        missing = [p for p in params if p not in inspect.signature(fn).parameters]
+        if missing:
+            sys.exit(
+                f"{fn.__name__} lacks {', '.join(missing)}; this image predates "
+                "the strict corpus path."
+            )
 
 
 async def _main(args: argparse.Namespace) -> int:
@@ -483,6 +568,7 @@ async def _main(args: argparse.Namespace) -> int:
             max_changes=args.max_changes,
             backup_dir=args.backup_dir,
             allow_unmounted_backup_dir=args.allow_unmounted_backup_dir,
+            allow_later=args.allow_later,
         )
 
 
@@ -496,6 +582,11 @@ def main() -> None:
     parser.add_argument("--orcid", action="append", default=[], help="Scope to this ORCID (repeatable)")
     parser.add_argument("--max-changes", type=int, default=DEFAULT_MAX_CHANGES)
     parser.add_argument("--backup-dir", type=Path, default=DEFAULT_BACKUP_DIR)
+    parser.add_argument(
+        "--allow-later",
+        action="store_true",
+        help="Permit --apply to write a re-derived year later than the stored one",
+    )
     parser.add_argument(
         "--allow-unmounted-backup-dir",
         action="store_true",

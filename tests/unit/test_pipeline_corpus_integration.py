@@ -14,7 +14,9 @@ Pins the audited behaviors end to end against a real database:
 * tenure derivation: ORCID employment year first, else earliest paper the PI
   herself wrote at Hopkins, else a loud ``tenure_unknown`` progress flag; when
   the ORCID profile fetch itself failed, a paper-derived year scopes that run
-  but is not persisted (D8);
+  but is not persisted (D8), and the same holds when the corpus came back
+  with ``permanently_dropped`` records, any of which could be the earliest
+  Hopkins paper;
 * the paper tier reads ``CorpusResult.ranked`` (pre-cap), so an earliest
   Hopkins paper outside the newest 50 still dates tenure;
 * the ``corpus_flagged`` progress text names each flag's actual reason.
@@ -25,10 +27,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from src.models import Job, Publication
+from src.models import AppSetting, Job, Publication
 from src.services import profile_export, profile_pipeline
 from src.services.corpus import CorpusResult, CorpusStageError
-from src.services.jhu_rules import get_tenure_start, set_tenure_start
+from src.services.jhu_rules import TENURE_KEY_PREFIX, get_tenure_start, set_tenure_start
 from src.services.profile_pipeline import run_profile_pipeline
 from tests import factories
 
@@ -277,6 +279,63 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
         and "not recorded" in d
         for d in details
     ), details
+
+
+async def test_an_incomplete_corpus_persists_no_paper_derived_tenure_start(
+    db_session, wired
+):
+    # PMID 1 held the PI's earliest Hopkins paper (2009), but its single
+    # re-fetch came back 400, so resolve_corpus dropped it and returned
+    # normally with it in ``permanently_dropped``. The surviving corpus dates
+    # tenure 2015 — too late. Storing that would pin the wrong year forever:
+    # get_tenure_start prefers a stored year on every later run.
+    user, agent, job = await _make_pi(db_session)
+    result = _uncapped([
+        _rec(2, 2015, "Later Hopkins paper", hopkins_pi=True),
+        _rec(3, 2021, "Latest Hopkins paper", hopkins_pi=True),
+    ])
+    result.permanently_dropped = ["1"]
+    wired.corpus = result
+
+    await run_profile_pipeline(user.id, db_session, job)
+
+    assert await get_tenure_start(db_session, user.id) is None
+    row = (
+        await db_session.execute(
+            select(AppSetting).where(
+                AppSetting.key == f"{TENURE_KEY_PREFIX}{user.id}"
+            )
+        )
+    ).scalar_one_or_none()
+    assert row is None, "no app_settings row may be written from an incomplete corpus"
+    details = [p["detail"] for p in job.payload.get("progress", [])]
+    assert any(
+        "JHU tenure start 2015 used for this run only" in d
+        and "corpus incomplete: 1 records could not be fetched" in d
+        and "not recorded" in d
+        for d in details
+    ), details
+    # The year still scopes THIS run.
+    assert "Later Hopkins paper" in wired.contexts[0]
+
+
+async def test_an_incomplete_corpus_still_records_an_orcid_employment_start(
+    db_session, wired
+):
+    # Positive control: the drop only blocks the PAPER tier. An employment
+    # year does not depend on the corpus, so it is still recorded.
+    user, agent, job = await _make_pi(db_session)
+    wired.profile["employments"] = [
+        {"organization": "Johns Hopkins University", "start_year": 2012,
+         "current": True},
+    ]
+    result = _uncapped([_rec(2, 2015, "Hopkins paper", hopkins_pi=True)])
+    result.permanently_dropped = ["1"]
+    wired.corpus = result
+
+    await run_profile_pipeline(user.id, db_session, job)
+
+    assert await get_tenure_start(db_session, user.id) == 2012
 
 
 async def test_flag_progress_names_the_actual_reasons(db_session, wired):

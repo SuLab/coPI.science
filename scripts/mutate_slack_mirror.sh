@@ -106,9 +106,12 @@ fi
 # The database name is parsed rather than pattern-matched, so `.../copi/`, `.../copi#x`
 # and `.../copi?x` are all caught.
 if [ -n "${TEST_DATABASE_URL:-}" ]; then
-  dbname=$("$PY" -c 'import sys; from urllib.parse import unquote, urlsplit; print(unquote(urlsplit(sys.argv[1]).path.strip("/").split("/")[0]))' "$TEST_DATABASE_URL") \
+  # Every database name the URL could select: the path's first segment, and any
+  # `database=`/`dbname=` query parameter the driver might honour. The DSN reaches
+  # Python through the environment, never argv, so `ps` does not show it.
+  dbnames=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" "$PY" -c 'import os; from urllib.parse import parse_qs, unquote, urlsplit; u = urlsplit(os.environ["TEST_DATABASE_URL"]); q = parse_qs(u.query); print("\n".join([unquote(u.path.strip("/").split("/")[0])] + [v for k in ("database", "dbname") for v in q.get(k, [])]))') \
     || { echo "ERROR: cannot parse TEST_DATABASE_URL" >&2; exit 1; }
-  if [ "$dbname" = "copi" ]; then
+  if printf '%s\n' "$dbnames" | grep -qx copi; then
     echo "ERROR: TEST_DATABASE_URL points at the live 'copi' database. These suites" >&2
     echo "commit. Use a throwaway database." >&2
     exit 1
@@ -184,6 +187,7 @@ on_signal() { cleanup; trap - EXIT; exit "$1"; }
 trap cleanup EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
 
 echo "building a throwaway copy of the tree at ${COPY} (the repo is never written to)"
 copy_is_safe || exit 1
@@ -211,7 +215,8 @@ echo "provenance OK: pytest will import $prov"
 # `ERROR <node>` for setup/collection errors (diagnostics only, never a kill).
 run_selection() {  # $1 = log file; prints nothing, returns pytest's (or timeout's) exit
   local envargs=()
-  [ -n "${TEST_DATABASE_URL:-}" ] && envargs+=("TEST_DATABASE_URL=$TEST_DATABASE_URL")
+  # Inherited through the environment, never passed on `env`'s argv, where `ps` shows it.
+  [ -z "${TEST_DATABASE_URL:-}" ] || export TEST_DATABASE_URL
   (cd "$COPY" && env ${envargs[@]+"${envargs[@]}"} timeout -k 30 "$MUT_TIMEOUT" \
      sh -c "exec \"$PY\" -m pytest $TESTS -q -rfE -m live_slack -p no:cacheprovider") > "$1" 2>&1
 }

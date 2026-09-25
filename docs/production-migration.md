@@ -507,7 +507,7 @@ the root row is missing. (PR19's own deploy-order warning claims replies stop be
 mirrored. That claim is wrong; this is what actually breaks.) Keep the gap short and this
 costs you one marker.
 
-### Step 10 — start the simulation last
+### Step 10 — bring the agent supervisor back last (it never starts a run)
 
 Bring the supervisor back only when `/admin/simulation` shows no live run. It returns
 IDLE; runs start from `/admin/simulation` only.
@@ -518,10 +518,12 @@ IDLE; runs start from `/admin/simulation` only.
 > uncommitted edit runs `src.agent.supervisor`. Check first:
 >
 > ```bash
-> docker compose -f docker-compose.prod.yml --profile agent config | grep src.agent.supervisor
+> docker compose -f docker-compose.prod.yml --profile agent config --format json \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["agent"].get("command"))'
 > ```
 >
-> No output means **do not run the command below** — it would start a simulation. Restore
+> Unless that prints a command containing `src.agent.supervisor`, **do not run the
+> command below** — it would start a simulation. Restore
 > the host's agent-service edit first. `run_migration.sh` makes the same check and prints a
 > warning instead of the command when it fails.
 

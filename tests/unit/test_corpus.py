@@ -102,8 +102,9 @@ _PI = _author("Green", "Rachel", "R", affs=["Johns Hopkins University, Baltimore
 
 
 def _wire(monkeypatch, *, orcid_works=(), openalex_works=(), s3=(), s4=(),
-          records=(), doi_map=None):
-    async def fake_orcid_works(orcid):
+          records=(), doi_map=None, dropped_pmids=(), dropped_dois=()):
+    async def fake_orcid_works(orcid, *, strict=False):
+        assert strict is True
         return list(orcid_works)
 
     async def fake_openalex(orcid):
@@ -114,16 +115,22 @@ def _wire(monkeypatch, *, orcid_works=(), openalex_works=(), s3=(), s4=(),
             return list(s3)
         return list(s4)
 
-    # Both take the real keyword-only ``strict`` and demand it be True: a fake
-    # without it would raise TypeError, _stage would wrap that as a
-    # CorpusStageError, and a stage-failure test would pass for the wrong reason.
-    async def fake_fetch(pmids, *, strict=False):
+    # Both take the real keyword-only ``strict`` and ``permanently_dropped``
+    # and demand strict be True: a fake without them would raise TypeError,
+    # _stage would wrap that as a CorpusStageError, and a stage-failure test
+    # would pass for the wrong reason. ``dropped_*`` simulate the permanent
+    # per-item drops the real functions report through the out-list.
+    async def fake_fetch(pmids, *, strict=False, permanently_dropped=None):
         assert strict is True
+        assert isinstance(permanently_dropped, list)
+        permanently_dropped.extend(dropped_pmids)
         by_pmid = {r["pmid"]: r for r in records}
         return [by_pmid[p] for p in pmids if p in by_pmid]
 
-    async def fake_dois(dois, *, strict=False):
+    async def fake_dois(dois, *, strict=False, permanently_dropped=None):
         assert strict is True
+        assert isinstance(permanently_dropped, list)
+        permanently_dropped.extend(dropped_dois)
         return dict(doi_map or {})
 
     monkeypatch.setattr(corpus, "fetch_orcid_works", fake_orcid_works)
@@ -217,6 +224,28 @@ async def test_rank_is_year_desc_pmid_desc_and_the_cap_is_applied_last(monkeypat
     # ``ranked`` is the same order before the cap; ``kept`` is its prefix.
     assert [r["pmid"] for r in result.ranked] == ["9", "3", "5"]
     assert result.kept == result.ranked[:2]
+    # Nothing was dropped, so the corpus is complete.
+    assert result.permanently_dropped == []
+
+
+async def test_permanent_drops_from_both_lookups_are_reported_on_the_result(
+    monkeypatch,
+):
+    # A permanently dropped PMID or DOI leaves the corpus INCOMPLETE without
+    # failing it; the result must say so, or a tenure start derived from it
+    # would be persisted as if the corpus were whole.
+    _wire(
+        monkeypatch,
+        orcid_works=[{"pmid": "1"}, {"pmid": None, "doi": "10.1/x"}],
+        records=[_rec(1, authors=[_PI])],
+        dropped_pmids=["7"],
+        dropped_dois=["10.1/x"],
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert [r["pmid"] for r in result.kept] == ["1"]
+    assert result.permanently_dropped == ["10.1/x", "7"]
 
 
 async def test_a_duplicate_title_collapses_to_the_journal_version(monkeypatch):

@@ -1,6 +1,7 @@
 """PubMed and PMC fetching service with rate limiting."""
 
 import asyncio
+import json
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -195,62 +196,99 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
                 return resp
 
 
-def _is_transient(exc: BaseException) -> bool:
-    """Whether a failed NCBI request may succeed if the whole job is retried.
-
-    Transient: any transport failure (``_RETRYABLE_TRANSPORT``, or any other
-    ``httpx.TransportError``), or an ``httpx.HTTPStatusError`` whose status is
-    429 or >= 500. By the time one reaches a caller, ``_ncbi_get`` has already
-    spent its own retries on it; the next attempt of the job is the next
-    chance.
-
-    Everything else is PERMANENT for the item that caused it: another 4xx
-    (which ``_ncbi_get`` does not retry), a ``PubMedParseError`` or JSON
-    ``ValueError`` from one unreadable body, or any other exception. It fails
-    identically on every retry, so re-raising it in strict mode would turn one
-    lost item into a ``dead`` job — and a dead job for every later
-    regeneration of the same PI.
-
-    Deliberately broader than ``_RETRYABLE_TRANSPORT``: a malformed request of
-    ours (``LocalProtocolError``, ``UnsupportedProtocol``) is not worth
-    retrying inside ``_ncbi_get``, but it is also not evidence about one
-    record, so strict callers surface it rather than drop the item.
-    """
-    if isinstance(exc, (_RETRYABLE_TRANSPORT, httpx.TransportError)):
-        return True
+def _per_item_4xx(exc: BaseException) -> int | None:
+    """The status of an ``httpx.HTTPStatusError`` that is a 4xx other than
+    429, else None."""
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        return code == 429 or code >= 500
-    return False
+        if 400 <= code < 500 and code != 429:
+            return code
+    return None
+
+
+def _is_per_item_failure(exc: BaseException) -> bool:
+    """Whether a failed NCBI request is a PERMANENT problem with one item.
+
+    Only three kinds qualify, each a statement NCBI made about the request it
+    was given, which a retry of the job would get back identically:
+
+    * an ``httpx.HTTPStatusError`` with a 4xx other than 429 (``_ncbi_get``
+      does not retry these);
+    * a ``PubMedParseError`` — a body that arrived and is not XML/JSON;
+    * a ``json.JSONDecodeError`` (or the ``UnicodeDecodeError`` ``json.loads``
+      raises on undecodable bytes) from ``resp.json()`` on one body.
+
+    Everything else is NOT per-item, and strict callers re-raise it: a
+    transport failure, 429 or 5xx (transient — the job retry is the recovery),
+    and any other exception, which is most likely a bug of ours
+    (``AttributeError`` from a non-dict ``resp.json()``, ``KeyError``,
+    ``TypeError``) or a malformed request of ours (``LocalProtocolError``,
+    ``UnsupportedProtocol``). Dropping an item for one of those would thin the
+    corpus silently while the job reports success. A bare ``ValueError`` is
+    deliberately excluded for the same reason: only the decode subclasses are
+    evidence about a body.
+
+    A 4xx that is SYSTEMIC (NCBI refusing every request — a revoked API key, a
+    blocked tool id) also fails per request, so callers additionally stop at
+    ``_SYSTEMIC_4XX_RUN`` identical 4xx in a row (see there).
+    """
+    if _per_item_4xx(exc) is not None:
+        return True
+    return isinstance(exc, (PubMedParseError, json.JSONDecodeError, UnicodeDecodeError))
+
+
+# How many identical per-item 4xx statuses in a row a strict caller accepts
+# before treating the status as systemic and re-raising. Three: one bad record
+# is common, two in a row happen, and three consecutive identical statuses are
+# far likelier to be NCBI refusing US (every request 403) than three bad items.
+# ``fetch_pubmed_records`` checks the FIRST three single-PMID re-fetches of a
+# fallback (they follow a batch that already failed, so they are the cheapest
+# evidence available); ``convert_dois_to_pmids`` checks consecutive per-DOI
+# lookups. A fallback over fewer than three PMIDs cannot reach the threshold,
+# and its drops are reported through ``permanently_dropped`` instead.
+_SYSTEMIC_4XX_RUN = 3
 
 
 async def fetch_pubmed_records(
-    pmids: list[str], *, strict: bool = False
+    pmids: list[str],
+    *,
+    strict: bool = False,
+    permanently_dropped: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Batch fetch PubMed records for a list of PMIDs.
     Returns list of dicts with: pmid, doi, pmcid, title, abstract, journal, year,
     pub_types, authors, author_count, coi_statement.
 
-    ``strict`` decides what one failed batch (transport error, HTTP error, or an
-    unparseable body — ``PubMedParseError``) costs:
+    ``strict`` decides what one failed batch costs:
 
     * ``strict=False`` (the default, for ingest callers such as
-      ``industry_evidence`` and the repair/sparse-data scripts): the failure is
+      ``industry_evidence`` and the repair/sparse-data scripts): any failure is
       logged and that batch's 100 PMIDs are lost, no more — the job of those
       callers is to keep a long ingest going.
-    * ``strict=True`` (``resolve_corpus``) splits on ``_is_transient``:
+    * ``strict=True`` (``resolve_corpus``) splits on ``_is_per_item_failure``:
 
-      - a TRANSIENT failure (transport error, 429, 5xx) re-raises. A profile
-        corpus silently missing a batch is thinner than the PI's real record,
-        and the tenure start and synthesis built on it would be wrong with
-        nothing to show for it; the job retry is the recovery.
-      - a PERMANENT failure (another 4xx, an unparseable body, anything else)
-        would repeat on every retry, so the batch's PMIDs are re-fetched one at
-        a time instead. A PMID whose own fetch also fails permanently is
-        dropped with one WARNING naming it; a transient failure during that
-        fallback re-raises. A one-PMID batch skips the re-fetch (it would be
-        the same request) and is dropped with the same WARNING.
+      - anything that is NOT a per-item failure re-raises: a transient failure
+        (transport error, 429, 5xx), whose recovery is the job retry, and any
+        other exception (a bug of ours). A profile corpus silently missing a
+        batch is thinner than the PI's real record, and the tenure start and
+        synthesis built on it would be wrong with nothing to show for it.
+      - a per-item failure (a 4xx other than 429, an unparseable body) would
+        repeat on every retry, so the batch's PMIDs are re-fetched one at a
+        time instead. A PMID whose own fetch also fails per-item is dropped
+        with one WARNING naming it; any other failure during that fallback
+        re-raises, and so does the fallback's ``_SYSTEMIC_4XX_RUN``-th
+        single fetch when the first ``_SYSTEMIC_4XX_RUN`` all failed with the
+        same 4xx status (systemic, not per-item). A one-PMID batch skips the
+        re-fetch (it would be the same request) and is dropped with the same
+        WARNING.
+
+    ``permanently_dropped``, when given, receives every PMID strict mode
+    dropped, in order, so the caller can tell a complete result from one that
+    is missing records a retry would not recover (``resolve_corpus`` exposes
+    it as ``CorpusResult.permanently_dropped``; a tenure start is never
+    persisted from such a corpus). Non-strict mode records nothing there: it
+    loses whole batches for any reason, transient included.
 
     ``fetch_abstract`` deliberately does NOT come through here (see its
     docstring): a single-record lookup needs exactly the information the
@@ -270,32 +308,53 @@ async def fetch_pubmed_records(
             if not strict:
                 logger.error("Failed to fetch PubMed batch %s: %s", batch[:3], exc)
                 continue
-            if _is_transient(exc):
+            if not _is_per_item_failure(exc):
                 raise
             if len(batch) == 1:
-                _warn_dropped_pmid(batch[0], exc)
+                _drop_pmid(batch[0], exc, permanently_dropped)
                 continue
             logger.warning(
                 "PubMed batch %s... (%d PMIDs) failed permanently (%s: %s); "
                 "re-fetching its PMIDs one at a time",
                 batch[:3], len(batch), type(exc).__name__, exc,
             )
-            for pmid in batch:
+            # Statuses of the fallback's leading single fetches, while every
+            # one of them has failed with a per-item 4xx.
+            leading_4xx: list[int] = []
+            for n, pmid in enumerate(batch):
                 try:
                     results.extend(await _fetch_pubmed_batch([pmid]))
                 except Exception as one_exc:
-                    if _is_transient(one_exc):
+                    if not _is_per_item_failure(one_exc):
                         raise
-                    _warn_dropped_pmid(pmid, one_exc)
+                    code = _per_item_4xx(one_exc)
+                    if code is not None and len(leading_4xx) == n:
+                        leading_4xx.append(code)
+                        if (
+                            len(leading_4xx) == _SYSTEMIC_4XX_RUN
+                            and len(set(leading_4xx)) == 1
+                        ):
+                            logger.error(
+                                "PubMed EFetch: the first %d single-PMID "
+                                "re-fetches all failed HTTP %d; treating it "
+                                "as systemic, not per-record",
+                                _SYSTEMIC_4XX_RUN, code,
+                            )
+                            raise
+                    _drop_pmid(pmid, one_exc, permanently_dropped)
     return results
 
 
-def _warn_dropped_pmid(pmid: str, exc: BaseException) -> None:
+def _drop_pmid(
+    pmid: str, exc: BaseException, permanently_dropped: list[str] | None
+) -> None:
     logger.warning(
         "PubMed EFetch for PMID %s failed permanently (%s: %s); dropping that "
         "record — a retry would fail the same way",
         pmid, type(exc).__name__, exc,
     )
+    if permanently_dropped is not None:
+        permanently_dropped.append(pmid)
 
 
 async def fetch_authoritative_dois(pmids: list[str]) -> dict[str, str]:
@@ -526,7 +585,10 @@ async def search_pmids(
 
 
 async def convert_dois_to_pmids(
-    dois: list[str], *, strict: bool = False
+    dois: list[str],
+    *,
+    strict: bool = False,
+    permanently_dropped: list[str] | None = None,
 ) -> dict[str, str]:
     """
     Convert DOIs to PMIDs. First tries NCBI ID converter (batch, but PMC-only),
@@ -539,15 +601,23 @@ async def convert_dois_to_pmids(
     hit, or a round-trip DOI mismatch. A FAILED request (idconv batch, per-DOI
     ESearch, or the round-trip EFetch) is logged and swallowed by default, which
     makes it indistinguishable from an answer. With ``strict=True``
-    (``resolve_corpus``) the failure is split by ``_is_transient``:
+    (``resolve_corpus``) the failure is split by ``_is_per_item_failure``:
 
-    * TRANSIENT (transport error, 429, 5xx): re-raises, so the job retries.
-    * PERMANENT (another 4xx, an unreadable body, anything else): it would
-      repeat on every retry, so it is treated as an answer, with a WARNING
-      naming the DOI(s). A failed idconv batch leaves its DOIs to the ESearch
-      phase; a failed per-DOI ESearch counts as "no PMID for this DOI"; a
-      round-trip EFetch that fails permanently yields no record, so the hit
-      fails verification and is a miss.
+    * NOT per-item (transport error, 429, 5xx, or any exception other than a
+      4xx/unreadable body — most likely a bug of ours): re-raises, so the job
+      retries or fails visibly.
+    * PER-ITEM (a 4xx other than 429, an unreadable body): it would repeat on
+      every retry, so it is treated as a miss, with a WARNING naming the
+      DOI(s). A failed idconv batch leaves its DOIs to the ESearch phase. A
+      per-DOI lookup that fails per-item — its ESearch or its round-trip
+      EFetch — counts as "no PMID for this DOI" and the DOI is appended to
+      ``permanently_dropped`` when that list is given; but
+      ``_SYSTEMIC_4XX_RUN`` consecutive per-DOI lookups failing with the same
+      4xx status re-raise, because that is NCBI refusing every request, not
+      that many bad DOIs.
+
+    ``permanently_dropped`` is populated in strict mode only; a DOI answered
+    as unmapped (above) is an answer and is never recorded there.
     """
     if not dois:
         return {}
@@ -593,7 +663,7 @@ async def convert_dois_to_pmids(
             if not strict:
                 logger.warning("Failed batch DOI→PMID via ID converter: %s", exc)
                 continue
-            if _is_transient(exc):
+            if not _is_per_item_failure(exc):
                 raise
             logger.warning(
                 "ID converter batch failed permanently (%s: %s); its DOIs "
@@ -605,6 +675,9 @@ async def convert_dois_to_pmids(
     remaining = [d for d in dois if d not in mapping]
     if remaining:
         logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
+        # Consecutive per-DOI lookups that failed with a per-item 4xx, and
+        # the status of the latest; any other outcome resets the run.
+        run_4xx, last_4xx = 0, None
         for doi in remaining:
             try:
                 params = {
@@ -625,36 +698,62 @@ async def convert_dois_to_pmids(
                             "ESearch for DOI %s returned %d PMIDs; treating "
                             "as a miss (D4b)", doi, len(id_list),
                         )
-                    continue
-                pmid = id_list[0]
-                # Round-trip verify: the PMID's authoritative DOI must equal
-                # the queried DOI, or the single hit is still the wrong paper.
-                records = await fetch_pubmed_records([pmid], strict=strict)
-                authoritative = normalize_doi(records[0].get("doi")) if records else None
-                queried = normalize_doi(doi)
-                if (
-                    authoritative
-                    and queried
-                    and authoritative.lower() == queried.lower()
-                ):
-                    mapping[doi] = pmid
                 else:
-                    logger.warning(
-                        "ESearch hit for DOI %s (PMID %s) failed round-trip "
-                        "verification (authoritative DOI %r); treating as a "
-                        "miss (D4b)", doi, pmid, authoritative,
+                    pmid = id_list[0]
+                    # Round-trip verify: the PMID's authoritative DOI must
+                    # equal the queried DOI, or the single hit is still the
+                    # wrong paper. Strict fetches the one record directly, so
+                    # a failure reaches the classification below with its
+                    # status intact (through fetch_pubmed_records a one-PMID
+                    # batch would be dropped inside it and read here as a
+                    # verification miss).
+                    if strict:
+                        records = await _fetch_pubmed_batch([pmid])
+                    else:
+                        records = await fetch_pubmed_records([pmid])
+                    authoritative = (
+                        normalize_doi(records[0].get("doi")) if records else None
                     )
+                    queried = normalize_doi(doi)
+                    if (
+                        authoritative
+                        and queried
+                        and authoritative.lower() == queried.lower()
+                    ):
+                        mapping[doi] = pmid
+                    else:
+                        logger.warning(
+                            "ESearch hit for DOI %s (PMID %s) failed round-trip "
+                            "verification (authoritative DOI %r); treating as a "
+                            "miss (D4b)", doi, pmid, authoritative,
+                        )
             except Exception as exc:
                 if not strict:
                     logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
                     continue
-                if _is_transient(exc):
+                if not _is_per_item_failure(exc):
+                    raise
+                code = _per_item_4xx(exc)
+                if code is not None and code == last_4xx:
+                    run_4xx += 1
+                else:
+                    run_4xx, last_4xx = (1, code) if code is not None else (0, None)
+                if run_4xx >= _SYSTEMIC_4XX_RUN:
+                    logger.error(
+                        "DOI lookup: %d consecutive DOIs failed HTTP %d; "
+                        "treating it as systemic, not per-DOI",
+                        run_4xx, code,
+                    )
                     raise
                 logger.warning(
                     "ESearch DOI lookup for %s failed permanently (%s: %s); "
                     "treating it as no PMID for this DOI",
                     doi, type(exc).__name__, exc,
                 )
+                if permanently_dropped is not None:
+                    permanently_dropped.append(doi)
+                continue
+            run_4xx, last_4xx = 0, None
 
     return mapping
 

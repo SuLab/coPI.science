@@ -181,10 +181,15 @@ async def run_profile_pipeline(
     # persisted with provenance, on the job session, and only from a COMPLETE
     # corpus AND a successful step 1: resolve_corpus raises on any stage
     # failure before this point runs, and a failed job's writes never commit
-    # (process_job rolls back before its failure bookkeeping). When step 1
-    # failed, ORCID employment was never consulted, so a paper-derived year is
-    # used for this run's filtering but NOT stored — get_tenure_start prefers a
-    # stored year on every later run, so it would outlive ORCID's recovery (D8).
+    # (process_job rolls back before its failure bookkeeping). Two cases
+    # return normally without that guarantee, and in both a paper-derived year
+    # is used for this run's filtering but NOT stored — get_tenure_start
+    # prefers a stored year on every later run, so a wrong one never
+    # self-corrects:
+    # * step 1 failed, so ORCID employment was never consulted and would
+    #   outlive ORCID's recovery (D8);
+    # * the corpus has ``permanently_dropped`` records (a per-item 4xx or an
+    #   unreadable body), any of which could be the earliest Hopkins paper.
     tenure_start = await get_tenure_start(
         db, user_id, agent_id=agent_reg.agent_id if agent_reg else None
     )
@@ -204,16 +209,25 @@ async def run_profile_pipeline(
         # The UNCAPPED list: the earliest Hopkins-affiliated paper of a PI
         # with more than the cap's worth of papers lies outside ``kept``.
         tenure_start = derive_start_from_papers(corpus_result.ranked)
-        if tenure_start is not None and step1_failed:
+        if step1_failed:
+            unrecorded_because = "ORCID profile unavailable"
+        elif corpus_result.permanently_dropped:
+            unrecorded_because = (
+                f"corpus incomplete: {len(corpus_result.permanently_dropped)} "
+                "records could not be fetched"
+            )
+        else:
+            unrecorded_because = None
+        if tenure_start is not None and unrecorded_because is not None:
             logger.warning(
-                "JHU tenure start %s for %s derived from papers while the "
-                "ORCID profile was unavailable; using it for this run only, "
-                "not recording it", tenure_start, orcid_id,
+                "JHU tenure start %s for %s derived from papers (%s); using it "
+                "for this run only, not recording it",
+                tenure_start, orcid_id, unrecorded_because,
             )
             update_progress(
                 "tenure_derived",
                 f"JHU tenure start {tenure_start} used for this run only "
-                "(ORCID profile unavailable; not recorded).",
+                f"({unrecorded_because}; not recorded).",
             )
         elif tenure_start is not None:
             await set_tenure_start(

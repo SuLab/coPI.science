@@ -17,6 +17,7 @@ only on retry *logic* and on what the model is told.
 """
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -258,11 +259,75 @@ async def test_strict_batch_path_falls_back_per_pmid_on_a_permanent_failure(
         return httpx.Response(200, text=_record_xml(ids))
 
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
-    records = await pubmed.fetch_pubmed_records(["11", "22", "33"], strict=True)
+    dropped: list[str] = []
+    records = await pubmed.fetch_pubmed_records(
+        ["11", "22", "33"], strict=True, permanently_dropped=dropped
+    )
     assert singles == ["11", "22", "33"]
     assert [r["pmid"] for r in records] == ["11", "33"]
     assert "PMID 22 failed permanently" in caplog.text
     assert "PMID 11 " not in caplog.text and "PMID 33 " not in caplog.text
+    assert dropped == ["22"], "the caller must be able to see the corpus is incomplete"
+
+
+async def test_strict_raises_when_every_efetch_is_refused_with_the_same_4xx(
+    monkeypatch,
+):
+    """A 403 on every request is systemic (NCBI refusing us), not one bad
+    record per PMID: the fallback raises at its third identical single 4xx
+    instead of dropping the whole batch and returning an empty corpus."""
+    singles = []
+
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," not in ids:
+            singles.append(ids)
+        return httpx.Response(403, text="Forbidden")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        await pubmed.fetch_pubmed_records(
+            [str(i) for i in range(1, 11)], strict=True
+        )
+    assert ei.value.response.status_code == 403
+    assert singles == ["1", "2", "3"]
+
+
+async def test_strict_fallback_with_mixed_leading_4xx_is_not_systemic(monkeypatch):
+    # Three leading single failures with DIFFERENT statuses are three bad
+    # records, not a refusal: they are dropped and the rest are kept.
+    statuses = {"1": 400, "2": 404, "3": 400}
+
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," in ids:
+            return httpx.Response(400, text="Bad Request")
+        if ids in statuses:
+            return httpx.Response(statuses[ids], text="nope")
+        return httpx.Response(200, text=_record_xml(ids))
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    dropped: list[str] = []
+    records = await pubmed.fetch_pubmed_records(
+        ["1", "2", "3", "4"], strict=True, permanently_dropped=dropped
+    )
+    assert [r["pmid"] for r in records] == ["4"]
+    assert dropped == ["1", "2", "3"]
+
+
+async def test_strict_raises_on_a_bug_in_the_parser(monkeypatch):
+    """An AttributeError is a bug of ours, not a per-record problem."""
+
+    def handler(request):
+        return httpx.Response(200, text=_ONE_RECORD_XML)
+
+    def broken_parser(xml_text):
+        raise AttributeError("'NoneType' object has no attribute 'text'")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    monkeypatch.setattr(pubmed, "_parse_pubmed_xml", broken_parser)
+    with pytest.raises(AttributeError):
+        await pubmed.fetch_pubmed_records(["11", "22"], strict=True)
 
 
 async def test_strict_per_pmid_fallback_still_raises_on_a_transient_failure(
@@ -281,31 +346,126 @@ async def test_strict_per_pmid_fallback_still_raises_on_a_transient_failure(
         await pubmed.fetch_pubmed_records(["11", "22", "33"], strict=True)
 
 
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError(
+        "x", request=httpx.Request("GET", "https://e.x"),
+        response=httpx.Response(code),
+    )
+
+
+def _json_decode_error() -> json.JSONDecodeError:
+    try:
+        json.loads("not json")
+    except json.JSONDecodeError as exc:
+        return exc
+    raise AssertionError("unreachable")
+
+
 @pytest.mark.parametrize(
-    ("exc", "transient"),
+    ("exc", "per_item"),
     [
-        (httpx.ConnectError("x"), True),
-        (httpx.ReadTimeout("x"), True),
-        (httpx.RemoteProtocolError("x"), True),
-        (httpx.UnsupportedProtocol("x"), True),  # any TransportError
-        (httpx.HTTPStatusError(
-            "x", request=httpx.Request("GET", "https://e.x"),
-            response=httpx.Response(429)), True),
-        (httpx.HTTPStatusError(
-            "x", request=httpx.Request("GET", "https://e.x"),
-            response=httpx.Response(504)), True),
-        (httpx.HTTPStatusError(
-            "x", request=httpx.Request("GET", "https://e.x"),
-            response=httpx.Response(400)), False),
-        (httpx.HTTPStatusError(
-            "x", request=httpx.Request("GET", "https://e.x"),
-            response=httpx.Response(404)), False),
-        (pubmed.PubMedParseError("x"), False),
-        (ValueError("x"), False),
+        # Per-item: NCBI's own statement about one request, repeated on retry.
+        (_status_error(400), True),
+        (_status_error(403), True),
+        (_status_error(404), True),
+        (pubmed.PubMedParseError("x"), True),
+        (_json_decode_error(), True),
+        # Transient: the job retry is the recovery.
+        (httpx.ConnectError("x"), False),
+        (httpx.ReadTimeout("x"), False),
+        (httpx.RemoteProtocolError("x"), False),
+        (_status_error(429), False),
+        (_status_error(504), False),
+        # Ours: a malformed request or a bug must surface, not drop an item.
+        (httpx.UnsupportedProtocol("x"), False),
+        (AttributeError("x"), False),
+        (TypeError("x"), False),
+        (KeyError("x"), False),
+        (ValueError("x"), False),  # only the JSON-decode subclass qualifies
     ],
 )
-def test_is_transient_splits_retryable_from_per_item_failures(exc, transient):
-    assert pubmed._is_transient(exc) is transient
+def test_only_a_4xx_or_an_unreadable_body_is_a_per_item_failure(exc, per_item):
+    assert pubmed._is_per_item_failure(exc) is per_item
+
+
+def _doi_router(esearch):
+    """idconv maps nothing; ESearch answers via ``esearch(request)``."""
+
+    def handler(request):
+        if "idconv" in request.url.path:
+            return httpx.Response(200, json={"records": []})
+        assert request.url.path.endswith("esearch.fcgi")
+        return esearch(request)
+
+    return handler
+
+
+async def test_strict_doi_lookup_raises_on_three_consecutive_identical_4xx(monkeypatch):
+    calls = []
+
+    def esearch(request):
+        calls.append(request.url.params["term"])
+        return httpx.Response(403, text="Forbidden")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(_doi_router(esearch)))
+    dois = [f"10.1/d{i}" for i in range(6)]
+    with pytest.raises(httpx.HTTPStatusError):
+        await pubmed.convert_dois_to_pmids(dois, strict=True)
+    assert len(calls) == 3
+
+
+async def test_strict_doi_lookup_run_resets_on_a_completed_lookup(monkeypatch, caplog):
+    # 403, 403, answered, 403, 403: never three IN A ROW, so each failure is
+    # a per-DOI miss, reported through the out-list; the answered DOI is not.
+    answers = {
+        "10.1/d0": 403, "10.1/d1": 403, "10.1/d2": None,
+        "10.1/d3": 403, "10.1/d4": 403,
+    }
+
+    def esearch(request):
+        doi = request.url.params["term"].removesuffix("[doi]")
+        if answers[doi] is None:
+            return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+        return httpx.Response(answers[doi], text="Forbidden")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(_doi_router(esearch)))
+    dropped: list[str] = []
+    mapping = await pubmed.convert_dois_to_pmids(
+        list(answers), strict=True, permanently_dropped=dropped
+    )
+    assert mapping == {}
+    assert dropped == ["10.1/d0", "10.1/d1", "10.1/d3", "10.1/d4"]
+
+
+async def test_strict_doi_lookup_raises_on_a_non_dict_json_body(monkeypatch):
+    # ``resp.json()`` returning a list makes ``data.get`` an AttributeError:
+    # a contract break (or a bug of ours), not "no PMID for this DOI".
+    def esearch(request):
+        return httpx.Response(200, json=["unexpected"])
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(_doi_router(esearch)))
+    with pytest.raises(AttributeError):
+        await pubmed.convert_dois_to_pmids(["10.1/d0"], strict=True)
+
+
+async def test_strict_doi_roundtrip_4xx_is_a_reported_miss(monkeypatch):
+    # The ESearch hit's round-trip EFetch returns 400: the DOI is a miss, and
+    # recorded as dropped (its status reaches the classifier directly).
+    def handler(request):
+        path = request.url.path
+        if "idconv" in path:
+            return httpx.Response(200, json={"records": []})
+        if path.endswith("esearch.fcgi"):
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["31000000"]}})
+        return httpx.Response(400, text="Bad Request")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    dropped: list[str] = []
+    mapping = await pubmed.convert_dois_to_pmids(
+        ["10.1/d0"], strict=True, permanently_dropped=dropped
+    )
+    assert mapping == {}
+    assert dropped == ["10.1/d0"]
 
 
 def test_a_parse_failure_is_its_own_exception_not_an_empty_result():

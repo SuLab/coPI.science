@@ -95,7 +95,7 @@ def _install_fakes(monkeypatch):
         "collective": None, "affiliations": ["Analytical Engine Institute"],
     }]
 
-    async def fake_fetch_orcid_works(orcid_id):
+    async def fake_fetch_orcid_works(orcid_id, *, strict=False):
         # Both works carry a PMID, so the DOI->PMID resolution branch is skipped.
         return [
             {"pmid": "1001", "doi": "10.1000/aaa", "title": "On the Analytical Engine", "year": 1843},
@@ -108,11 +108,11 @@ def _install_fakes(monkeypatch):
     async def fake_search_pmids(term, retmax=200):
         return []  # S3/S4 find nothing new
 
-    async def fake_convert_dois_to_pmids(dois, *, strict=False):
+    async def fake_convert_dois_to_pmids(dois, *, strict=False, permanently_dropped=None):
         assert strict, "resolve_corpus must call the strict DOI resolver"
         return {}
 
-    async def fake_fetch_pubmed_records(pmids, *, strict=False):
+    async def fake_fetch_pubmed_records(pmids, *, strict=False, permanently_dropped=None):
         assert strict, "resolve_corpus must call the strict EFetch path"
         # Authoritative DOIs match the ORCID-assigned DOIs -> reconcile returns "ok".
         # Authors are present so the REAL resolve_corpus keeps both records.
@@ -289,7 +289,7 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     async def fake_fetch_orcid_grants(orcid_id):
         return []
 
-    async def fake_fetch_orcid_works(orcid_id):
+    async def fake_fetch_orcid_works(orcid_id, *, strict=False):
         # ORCID lists a DOI that points at the WRONG paper for this PMID.
         return [{"pmid": "2001", "doi": "10.1000/orcid-wrong", "title": "T", "year": 1843}]
 
@@ -299,11 +299,11 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     async def fake_search_pmids(term, retmax=200):
         return []
 
-    async def fake_convert_dois_to_pmids(dois, *, strict=False):
+    async def fake_convert_dois_to_pmids(dois, *, strict=False, permanently_dropped=None):
         assert strict, "resolve_corpus must call the strict DOI resolver"
         return {}
 
-    async def fake_fetch_pubmed_records(pmids, *, strict=False):
+    async def fake_fetch_pubmed_records(pmids, *, strict=False, permanently_dropped=None):
         assert strict, "resolve_corpus must call the strict EFetch path"
         # PubMed's record for the SAME PMID carries the authoritative DOI.
         return [
@@ -635,7 +635,7 @@ async def test_profile_pipeline_pubmed_outage_raises_instead_of_fabricating(
     """
     _install_fakes(monkeypatch)
 
-    async def pubmed_is_down(pmids, *, strict=False):
+    async def pubmed_is_down(pmids, *, strict=False, permanently_dropped=None):
         raise ConnectionError("simulated PubMed outage")
 
     monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)
@@ -681,7 +681,7 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
     """
     _install_fakes(monkeypatch)
 
-    async def no_works(orcid_id):
+    async def no_works(orcid_id, *, strict=False):
         return []
 
     monkeypatch.setattr(corpus_module, "fetch_orcid_works", no_works)
@@ -724,7 +724,7 @@ async def test_profile_pipeline_orcid_works_failure_raises(
     the honest answer is now a failed job the operator can see and retry."""
     _install_fakes(monkeypatch)
 
-    async def orcid_works_down(orcid_id):
+    async def orcid_works_down(orcid_id, *, strict=False):
         raise ConnectionError("simulated ORCID outage")
 
     monkeypatch.setattr(corpus_module, "fetch_orcid_works", orcid_works_down)
@@ -762,7 +762,7 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
     first_version = first.profile_version
     first_generated_at = first.profile_generated_at
 
-    async def pubmed_is_down(pmids, *, strict=False):
+    async def pubmed_is_down(pmids, *, strict=False, permanently_dropped=None):
         raise ConnectionError("simulated PubMed outage")
 
     monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)

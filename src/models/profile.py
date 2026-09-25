@@ -124,19 +124,25 @@ class ResearcherProfile(Base):
 
         Limit of what two counts can tell you: they describe what the synthesis
         HAD, not every reason it had that. The corpus path calls
-        `convert_dois_to_pmids` and `fetch_pubmed_records` with `strict=True`, so
-        a TRANSIENT NCBI failure there (a transport error, a 429 or a 5xx) raises
-        `CorpusStageError` and fails the job rather than storing a thinner
-        profile; only ingest callers keep the swallowing default. A PERMANENT
-        per-item failure (another 4xx, or an unreadable body) does not fail the
-        job, since it would fail identically on every retry: that one PMID is
-        dropped, or that one DOI reads as unmapped, with a WARNING naming it — so
-        on any row such a loss is invisible in these counts, which never saw the
-        item. One case is still understated on rows written before the strict
-        corpus path shipped (2026-09-25) — `convert_dois_to_pmids` failing (it
-        then swallowed its own errors) for a researcher whose ORCID/OpenAlex works
-        carry only DOIs, with no PubMed search hit, left zero identifiers in hand
-        and reads as no_evidence_available.
+        `fetch_orcid_works`, `convert_dois_to_pmids` and `fetch_pubmed_records`
+        with `strict=True`, so a failure that is not a per-item one — a
+        transport error, a 429 or a 5xx, or an unexpected exception (for the
+        ORCID works lookup, anything but a 404) — raises `CorpusStageError`
+        and fails the job rather than storing a thinner profile; only ingest
+        callers keep the swallowing default. A PERMANENT per-item NCBI failure
+        (a 4xx other than 429, or an unreadable body) does not fail the job,
+        since it would fail identically on every retry: that one PMID is
+        dropped, or that one DOI reads as unmapped, with a WARNING naming it,
+        unless the same 4xx repeats three times running, which reads as NCBI
+        refusing every request and fails the job. A dropped item is listed in
+        `CorpusResult.permanently_dropped`, and a paper-derived tenure start is
+        then used for that run only and not stored — but it is invisible in
+        these counts, which never saw the item. One case is still understated
+        on rows written before the strict corpus path shipped (2026-09-25) —
+        `convert_dois_to_pmids` failing (it then swallowed its own errors) for
+        a researcher whose ORCID/OpenAlex works carry only DOIs, with no PubMed
+        search hit, left zero identifiers in hand and reads as
+        no_evidence_available.
         """
         if self.evidence_pub_count is None:
             return "unknown"

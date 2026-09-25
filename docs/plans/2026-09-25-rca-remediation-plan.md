@@ -901,6 +901,14 @@ P12b.
   - a DOI counts as no match, with a WARNING.
 
   Otherwise one persistently bad DOI would dead-letter every regeneration of that PI.
+- **Amended again in the re-audit round (§9):** the split is now `_is_per_item_failure`
+  (`src/services/pubmed.py`), which is narrower than "not transient". Only a 4xx other than
+  429, a `PubMedParseError`, or a JSON/Unicode decode error is per-item. Any other exception
+  re-raises, because it is most likely a bug of ours. Three consecutive identical 4xx
+  (`_SYSTEMIC_4XX_RUN`) re-raise as systemic. Every dropped PMID/DOI is appended to
+  `CorpusResult.permanently_dropped`. `fetch_orcid_works` gained `strict`, and
+  `resolve_corpus` uses it: only a 404 or an empty list reads as no works. A paper-derived
+  tenure start from a corpus with drops is used for that run only and not stored.
 
 `src/services/corpus.py`:
 - `:485` becomes `convert_dois_to_pmids(list(doi_pool), strict=True)`.
@@ -2378,8 +2386,10 @@ stage failure. Also D8's rule. The script runs only on an image that carries P6.
    year is the new value, with source `orcid_employment`. C1b rows get their employment
    year this way.
 3. Otherwise run `resolve_corpus(...)` exactly as the pipeline does, then
-   `derive_start_from_papers(kept)` (`jhu_rules.py:87`), with source
-   `earliest_hopkins_paper`. Any `CorpusStageError` skips the PI with no write.
+   `derive_start_from_papers(ranked)` (`jhu_rules.py:87`; `ranked` is the pre-cap list, as
+   amended in §9), with source `earliest_hopkins_paper`. Any exception from
+   `resolve_corpus` skips the PI with no write, and so does a corpus with
+   `permanently_dropped` records (`incomplete_corpus`, §9 re-audit round).
 4. If it derives no year, report the row and leave it. Nothing is ever deleted.
 
 **Modes.**
@@ -2768,3 +2778,31 @@ After deduplication, every confirmed finding was fixed:
   - the spec, scope and D12 wording is corrected;
   - the P16 text above is updated.
 
+**Re-audit round (2026-09-25, after the audit-fix round).** A focused re-audit of the fixed
+areas found one high regression and several smaller gaps. All were fixed:
+- **Proposal routes:** the lost-race WARNING read `agent.agent_id` after the failed flush,
+  which raised `PendingRollbackError` under concurrency. It now logs the path parameter.
+  Any other `IntegrityError` rolls back, logs the constraint name at ERROR, and returns a
+  bare 500.
+- **`run_migration.sh`:**
+  - a DSN whose query string names a host or port is refused;
+  - a postflight that exits 1 without naming a failed check gets its own message, which
+    says not to restore;
+  - the row-count-only message is labelled as such.
+- **Corpus strictness:** see the second P6 amendment above. `rederive_tenure_starts.py`
+  also changed:
+  - it skips a PI whose corpus has drops (`incomplete_corpus`);
+  - `--apply` skips a change to a LATER year (`later_than_stored`) unless `--allow-later`;
+  - it reports paper-sourced rows that `--restore` could not read back
+    (`unparseable_key`/`unparseable_value`);
+  - its image-vintage guard requires `permanently_dropped` and ORCID `strict`.
+- **Mutation harness:**
+  - the `copi` refusal also reads `database=`/`dbname=` query parameters;
+  - the DSN and the API key reach the test run through the environment, never `env`'s
+    argv;
+  - HUP gets the same cleanup as INT and TERM.
+- **Docs:**
+  - `docs/production-migration.md` step 10 checks the agent command by parsing compose's
+    JSON;
+  - CLAUDE.md opens with a do-not-push warning;
+  - the register gains `R-admin-token-form` and `R-enrichment-fixwave`.

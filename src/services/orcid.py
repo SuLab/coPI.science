@@ -116,8 +116,24 @@ async def fetch_orcid_grants(orcid_id: str) -> list[str]:
     return titles
 
 
-async def fetch_orcid_works(orcid_id: str) -> list[dict[str, Any]]:
-    """Return list of works (publications) from ORCID, with PMIDs/DOIs."""
+async def fetch_orcid_works(
+    orcid_id: str, *, strict: bool = False
+) -> list[dict[str, Any]]:
+    """Return list of works (publications) from ORCID, with PMIDs/DOIs.
+
+    ``strict`` decides what a failed request means:
+
+    * ``strict=False`` (the default, for ingest scripts): any failure is logged
+      and reads as ``[]`` — indistinguishable from a PI with no works.
+    * ``strict=True`` (``resolve_corpus``): only a 404 (ORCID has no such
+      record) reads as ``[]``, as does an empty works list; every other
+      failure — a transport error or timeout, a 429, a 5xx, any other status,
+      an unreadable body — RAISES. Swallowing it would thin the corpus, and a
+      paper-derived tenure start could then be stored from the thinner one;
+      the job retry is the recovery. Statuses other than 404 raise too rather
+      than being guessed per-record: this is ONE request for the whole list,
+      so there is no other item to keep.
+    """
     url = f"{ORCID_API_BASE}/{orcid_id}/works"
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
@@ -126,8 +142,16 @@ async def fetch_orcid_works(orcid_id: str) -> list[dict[str, Any]]:
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.warning("Failed to fetch ORCID works for %s: %s", orcid_id, exc)
-            return []
+            if not strict:
+                logger.warning("Failed to fetch ORCID works for %s: %s", orcid_id, exc)
+                return []
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 404
+            ):
+                logger.warning("ORCID has no works record for %s (404)", orcid_id)
+                return []
+            raise
 
     works = []
     for grp in data.get("group", []):
