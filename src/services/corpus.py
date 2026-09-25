@@ -35,6 +35,7 @@ from src.services.openalex import fetch_works_by_orcid
 from src.services.orcid import fetch_orcid_works
 from src.services.patents import _to_ascii
 from src.services.pubmed import (
+    _doi_fold,
     convert_dois_to_pmids,
     fetch_pubmed_records,
     search_pmids,
@@ -542,6 +543,14 @@ async def resolve_corpus(
         if stages
         else []
     )
+    # A DOI whose lookup failed per-item is not missing if its paper arrived
+    # anyway, through another stage's PMID: EFetch returned a record carrying
+    # that DOI. Only a DOI with no such record leaves the corpus incomplete.
+    fetched_dois = {_doi_fold(r["doi"]) for r in records if r.get("doi")}
+    permanently_dropped[:] = [
+        item for item in permanently_dropped
+        if item not in doi_pool or _doi_fold(item) not in fetched_dois
+    ]
 
     kept: list[dict[str, Any]] = []
     flagged: list[dict[str, Any]] = []

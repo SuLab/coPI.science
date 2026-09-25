@@ -133,8 +133,9 @@ class ResearcherProfile(Base):
         (a 4xx other than 429, or an unreadable body) does not fail the job,
         since it would fail identically on every retry: that one PMID is
         dropped, or that one DOI reads as unmapped, with a WARNING naming it,
-        unless the same 4xx repeats three times running, which reads as NCBI
-        refusing every request and fails the job. A dropped item is listed in
+        unless the same failure (the same 4xx, or the same unreadable body)
+        repeats three times running, which reads as NCBI refusing every
+        request or serving an outage page, and fails the job. A dropped item is listed in
         `CorpusResult.permanently_dropped`, and a paper-derived tenure start is
         then used for that run only and not stored — but it is invisible in
         these counts, which never saw the item. One case is still understated

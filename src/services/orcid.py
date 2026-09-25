@@ -116,6 +116,13 @@ async def fetch_orcid_grants(orcid_id: str) -> list[str]:
     return titles
 
 
+# Statuses the public API returns about the state of a RECORD, which a retry
+# would get back identically. 301 and 409 (locked) are documented in ORCID's
+# api_errors.md; 409 for a deactivated record was measured on 2026-09-25
+# (error-code 9044); 410 is HTTP's own "gone".
+_RECORD_STATE_STATUSES = frozenset({301, 404, 409, 410})
+
+
 async def fetch_orcid_works(
     orcid_id: str, *, strict: bool = False
 ) -> list[dict[str, Any]]:
@@ -125,14 +132,16 @@ async def fetch_orcid_works(
 
     * ``strict=False`` (the default, for ingest scripts): any failure is logged
       and reads as ``[]`` — indistinguishable from a PI with no works.
-    * ``strict=True`` (``resolve_corpus``): only a 404 (ORCID has no such
-      record) reads as ``[]``, as does an empty works list; every other
-      failure — a transport error or timeout, a 429, a 5xx, any other status,
-      an unreadable body — RAISES. Swallowing it would thin the corpus, and a
-      paper-derived tenure start could then be stored from the thinner one;
-      the job retry is the recovery. Statuses other than 404 raise too rather
-      than being guessed per-record: this is ONE request for the whole list,
-      so there is no other item to keep.
+    * ``strict=True`` (``resolve_corpus``): a status that is ORCID's answer
+      about the RECORD reads as ``[]``, as does an empty works list —
+      ``_RECORD_STATE_STATUSES``: 404 (no such record), 409 (deactivated or
+      locked), 410 (gone) and 301 (deprecated into another iD; not followed).
+      Each repeats on every retry, so raising would dead-letter every
+      regeneration of that PI. Every other failure — a transport error or
+      timeout, a 429, a 5xx, any other status, an unreadable body — RAISES.
+      Swallowing it would thin the corpus, and a paper-derived tenure start
+      could then be stored from the thinner one; the job retry is the
+      recovery.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/works"
     headers = {"Accept": "application/json"}
@@ -147,9 +156,13 @@ async def fetch_orcid_works(
                 return []
             if (
                 isinstance(exc, httpx.HTTPStatusError)
-                and exc.response.status_code == 404
+                and exc.response.status_code in _RECORD_STATE_STATUSES
             ):
-                logger.warning("ORCID has no works record for %s (404)", orcid_id)
+                logger.warning(
+                    "ORCID answered %d for %s's works (record not readable); "
+                    "reading it as no works",
+                    exc.response.status_code, orcid_id,
+                )
                 return []
             raise
 

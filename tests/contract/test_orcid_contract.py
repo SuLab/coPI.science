@@ -263,11 +263,23 @@ async def test_strict_fetch_orcid_works_raises_on_an_unreadable_body():
     assert route.called
 
 
+@pytest.mark.parametrize("status", [301, 404, 409, 410])
 @respx.mock
-async def test_strict_fetch_orcid_works_reads_a_404_as_no_works():
-    """A 404 is ORCID saying there is no such record: an answer, not a failure."""
-    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(404))
+async def test_strict_fetch_orcid_works_reads_a_record_state_as_no_works(status):
+    """404 (no such record), 409 (deactivated or locked), 410 (gone) and 301
+    (deprecated into another iD) are ORCID's answers about the record. Each
+    repeats on every retry, so raising would dead-letter the PI's profile."""
+    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(status))
     assert await orcid.fetch_orcid_works(OID, strict=True) == []
+    assert route.called
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+@respx.mock
+async def test_strict_fetch_orcid_works_raises_on_another_4xx(status):
+    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(status))
+    with pytest.raises(httpx.HTTPStatusError):
+        await orcid.fetch_orcid_works(OID, strict=True)
     assert route.called
 
 

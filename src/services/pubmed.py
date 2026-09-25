@@ -228,25 +228,43 @@ def _is_per_item_failure(exc: BaseException) -> bool:
     deliberately excluded for the same reason: only the decode subclasses are
     evidence about a body.
 
-    A 4xx that is SYSTEMIC (NCBI refusing every request — a revoked API key, a
-    blocked tool id) also fails per request, so callers additionally stop at
-    ``_SYSTEMIC_4XX_RUN`` identical 4xx in a row (see there).
+    A failure that is SYSTEMIC also arrives one request at a time: NCBI
+    refusing every request (a revoked API key, a blocked tool id — every
+    request 403), or an outage page served with 200 to every request (every
+    body unparseable). So callers additionally stop at ``_SYSTEMIC_RUN``
+    identical per-item failures in a row (see there and
+    ``_failure_signature``).
     """
     if _per_item_4xx(exc) is not None:
         return True
     return isinstance(exc, (PubMedParseError, json.JSONDecodeError, UnicodeDecodeError))
 
 
-# How many identical per-item 4xx statuses in a row a strict caller accepts
-# before treating the status as systemic and re-raising. Three: one bad record
-# is common, two in a row happen, and three consecutive identical statuses are
-# far likelier to be NCBI refusing US (every request 403) than three bad items.
+def _failure_signature(exc: BaseException) -> tuple[str, int | str]:
+    """What makes two per-item failures "the same" for ``_SYSTEMIC_RUN``: the
+    status of a 4xx, or the exception type of an unreadable body. Call only on
+    an exception ``_is_per_item_failure`` accepted."""
+    code = _per_item_4xx(exc)
+    if code is not None:
+        return ("HTTP", code)
+    return ("body", type(exc).__name__)
+
+
+def _describe(sig: tuple[str, int | str]) -> str:
+    return f"HTTP {sig[1]}" if sig[0] == "HTTP" else f"with an unreadable body ({sig[1]})"
+
+
+# How many identical per-item failures in a row a strict caller accepts before
+# treating them as systemic and re-raising. Three: one bad record is common,
+# two in a row happen, and three consecutive identical failures (the same 4xx
+# status, or the same unreadable-body error) are far likelier to be NCBI
+# refusing US, or serving an outage page, than three bad items.
 # ``fetch_pubmed_records`` checks the FIRST three single-PMID re-fetches of a
 # fallback (they follow a batch that already failed, so they are the cheapest
 # evidence available); ``convert_dois_to_pmids`` checks consecutive per-DOI
 # lookups. A fallback over fewer than three PMIDs cannot reach the threshold,
 # and its drops are reported through ``permanently_dropped`` instead.
-_SYSTEMIC_4XX_RUN = 3
+_SYSTEMIC_RUN = 3
 
 
 async def fetch_pubmed_records(
@@ -277,9 +295,10 @@ async def fetch_pubmed_records(
         repeat on every retry, so the batch's PMIDs are re-fetched one at a
         time instead. A PMID whose own fetch also fails per-item is dropped
         with one WARNING naming it; any other failure during that fallback
-        re-raises, and so does the fallback's ``_SYSTEMIC_4XX_RUN``-th
-        single fetch when the first ``_SYSTEMIC_4XX_RUN`` all failed with the
-        same 4xx status (systemic, not per-item). A one-PMID batch skips the
+        re-raises, and so does the fallback's ``_SYSTEMIC_RUN``-th single
+        fetch when the first ``_SYSTEMIC_RUN`` all failed the same way (the
+        same 4xx status, or the same unreadable-body error): systemic, not
+        per-item. A one-PMID batch skips the
         re-fetch (it would be the same request) and is dropped with the same
         WARNING.
 
@@ -318,27 +337,26 @@ async def fetch_pubmed_records(
                 "re-fetching its PMIDs one at a time",
                 batch[:3], len(batch), type(exc).__name__, exc,
             )
-            # Statuses of the fallback's leading single fetches, while every
-            # one of them has failed with a per-item 4xx.
-            leading_4xx: list[int] = []
+            # Signatures of the fallback's leading single fetches, while every
+            # one of them has failed per-item.
+            leading: list[tuple[str, int | str]] = []
             for n, pmid in enumerate(batch):
                 try:
                     results.extend(await _fetch_pubmed_batch([pmid]))
                 except Exception as one_exc:
                     if not _is_per_item_failure(one_exc):
                         raise
-                    code = _per_item_4xx(one_exc)
-                    if code is not None and len(leading_4xx) == n:
-                        leading_4xx.append(code)
+                    if len(leading) == n:
+                        leading.append(_failure_signature(one_exc))
                         if (
-                            len(leading_4xx) == _SYSTEMIC_4XX_RUN
-                            and len(set(leading_4xx)) == 1
+                            len(leading) == _SYSTEMIC_RUN
+                            and len(set(leading)) == 1
                         ):
                             logger.error(
                                 "PubMed EFetch: the first %d single-PMID "
-                                "re-fetches all failed HTTP %d; treating it "
-                                "as systemic, not per-record",
-                                _SYSTEMIC_4XX_RUN, code,
+                                "re-fetches all failed %s; treating it as "
+                                "systemic, not per-record",
+                                _SYSTEMIC_RUN, _describe(leading[0]),
                             )
                             raise
                     _drop_pmid(pmid, one_exc, permanently_dropped)
@@ -611,10 +629,10 @@ async def convert_dois_to_pmids(
       DOI(s). A failed idconv batch leaves its DOIs to the ESearch phase. A
       per-DOI lookup that fails per-item — its ESearch or its round-trip
       EFetch — counts as "no PMID for this DOI" and the DOI is appended to
-      ``permanently_dropped`` when that list is given; but
-      ``_SYSTEMIC_4XX_RUN`` consecutive per-DOI lookups failing with the same
-      4xx status re-raise, because that is NCBI refusing every request, not
-      that many bad DOIs.
+      ``permanently_dropped`` when that list is given; but ``_SYSTEMIC_RUN``
+      consecutive per-DOI lookups failing the same way (the same 4xx status,
+      or the same unreadable-body error) re-raise, because that is NCBI
+      refusing or failing every request, not that many bad DOIs.
 
     ``permanently_dropped`` is populated in strict mode only; a DOI answered
     as unmapped (above) is an answer and is never recorded there.
@@ -675,9 +693,9 @@ async def convert_dois_to_pmids(
     remaining = [d for d in dois if d not in mapping]
     if remaining:
         logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
-        # Consecutive per-DOI lookups that failed with a per-item 4xx, and
-        # the status of the latest; any other outcome resets the run.
-        run_4xx, last_4xx = 0, None
+        # Consecutive per-DOI lookups that failed per-item the same way, and
+        # that failure's signature; any other outcome resets the run.
+        run, last_sig = 0, None
         for doi in remaining:
             try:
                 params = {
@@ -733,16 +751,13 @@ async def convert_dois_to_pmids(
                     continue
                 if not _is_per_item_failure(exc):
                     raise
-                code = _per_item_4xx(exc)
-                if code is not None and code == last_4xx:
-                    run_4xx += 1
-                else:
-                    run_4xx, last_4xx = (1, code) if code is not None else (0, None)
-                if run_4xx >= _SYSTEMIC_4XX_RUN:
+                sig = _failure_signature(exc)
+                run, last_sig = (run + 1, sig) if sig == last_sig else (1, sig)
+                if run >= _SYSTEMIC_RUN:
                     logger.error(
-                        "DOI lookup: %d consecutive DOIs failed HTTP %d; "
-                        "treating it as systemic, not per-DOI",
-                        run_4xx, code,
+                        "DOI lookup: %d consecutive DOIs failed %s; treating "
+                        "it as systemic, not per-DOI",
+                        run, _describe(sig),
                     )
                     raise
                 logger.warning(
@@ -753,7 +768,7 @@ async def convert_dois_to_pmids(
                 if permanently_dropped is not None:
                     permanently_dropped.append(doi)
                 continue
-            run_4xx, last_4xx = 0, None
+            run, last_sig = 0, None
 
     return mapping
 

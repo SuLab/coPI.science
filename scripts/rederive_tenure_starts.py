@@ -37,11 +37,13 @@ A row is CHANGED only when the re-derived year differs from the stored one; a
 row whose year agrees is left untouched even if the source would differ.
 
 Direction matters. The thinning this script corrects dropped papers, which
-can only make a stored year too LATE, so the expected change is to an earlier
-year. A LATER re-derived year would narrow the tenure window and hide
-in-tenure papers; the preview marks it ``LATER (suspect)``, and ``--apply``
-skips it (reason ``later_than_stored``, no write) unless ``--allow-later`` is
-given. An earlier year applies as before.
+can only make a stored year too LATE, so the expected paper-derived change is
+to an earlier year. A LATER paper-derived year would narrow the tenure window
+and hide in-tenure papers; the preview marks it ``LATER (suspect)``, and
+``--apply`` skips it (reason ``later_than_stored``, no write) unless
+``--allow-later`` is given. An earlier year, and an ORCID-employment year in
+either direction (the pipeline prefers employment over papers), apply as
+before.
 
 Usage (production: the app image, with host ``backups/`` mounted so the backup
 outlives the ``run --rm`` container):
@@ -153,9 +155,15 @@ class Outcome:
 
     @property
     def later(self) -> bool:
-        """A change that moves the start LATER — narrowing the tenure window,
-        the opposite of what re-deriving from a complete corpus corrects."""
-        return self.changed and self.new_year > self.candidate.stored_year
+        """A paper-derived change that moves the start LATER — narrowing the
+        tenure window, the opposite of what re-deriving from a complete corpus
+        corrects. An ORCID-employment year is not suspect in either direction:
+        the pipeline prefers it over any paper year."""
+        return (
+            self.changed
+            and self.new_source == PAPER_SOURCE
+            and self.new_year > self.candidate.stored_year
+        )
 
 
 async def load_candidates(

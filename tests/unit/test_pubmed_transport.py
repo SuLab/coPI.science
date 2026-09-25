@@ -315,6 +315,46 @@ async def test_strict_fallback_with_mixed_leading_4xx_is_not_systemic(monkeypatc
     assert dropped == ["1", "2", "3"]
 
 
+async def test_strict_raises_when_every_efetch_body_is_unreadable(monkeypatch):
+    """An outage page served with 200 to every request is systemic too: the
+    fallback raises at its third identical unreadable body instead of dropping
+    every PMID and returning an empty corpus as a success."""
+    singles = []
+
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," not in ids:
+            singles.append(ids)
+        return httpx.Response(200, text="<not-xml")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(pubmed.PubMedParseError):
+        await pubmed.fetch_pubmed_records(
+            [str(i) for i in range(1, 11)], strict=True
+        )
+    assert singles == ["1", "2", "3"]
+
+
+async def test_strict_fallback_mixing_a_4xx_and_bad_bodies_is_not_systemic(monkeypatch):
+    # 403, unreadable, 403: three per-item failures, but not the SAME one, so
+    # each is a dropped record and the fallback carries on.
+    def handler(request):
+        ids = request.url.params["id"]
+        if "," in ids or ids == "2":
+            return httpx.Response(200, text="<not-xml")
+        if ids in ("1", "3"):
+            return httpx.Response(403, text="Forbidden")
+        return httpx.Response(200, text=_record_xml(ids))
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    dropped: list[str] = []
+    records = await pubmed.fetch_pubmed_records(
+        ["1", "2", "3", "4"], strict=True, permanently_dropped=dropped
+    )
+    assert [r["pmid"] for r in records] == ["4"]
+    assert dropped == ["1", "2", "3"]
+
+
 async def test_strict_raises_on_a_bug_in_the_parser(monkeypatch):
     """An AttributeError is a bug of ours, not a per-record problem."""
 
@@ -410,6 +450,22 @@ async def test_strict_doi_lookup_raises_on_three_consecutive_identical_4xx(monke
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(_doi_router(esearch)))
     dois = [f"10.1/d{i}" for i in range(6)]
     with pytest.raises(httpx.HTTPStatusError):
+        await pubmed.convert_dois_to_pmids(dois, strict=True)
+    assert len(calls) == 3
+
+
+async def test_strict_doi_lookup_raises_on_three_consecutive_unreadable_bodies(
+    monkeypatch,
+):
+    calls = []
+
+    def esearch(request):
+        calls.append(request.url.params["term"])
+        return httpx.Response(200, text="<html>outage</html>")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(_doi_router(esearch)))
+    dois = [f"10.1/d{i}" for i in range(6)]
+    with pytest.raises(json.JSONDecodeError):
         await pubmed.convert_dois_to_pmids(dois, strict=True)
     assert len(calls) == 3
 

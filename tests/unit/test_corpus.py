@@ -248,6 +248,26 @@ async def test_permanent_drops_from_both_lookups_are_reported_on_the_result(
     assert result.permanently_dropped == ["10.1/x", "7"]
 
 
+async def test_a_dropped_doi_whose_paper_arrived_anyway_is_not_reported(monkeypatch):
+    # The DOI-only ORCID work's lookup failed per-item, but another stage
+    # supplied its PMID and EFetch returned a record carrying that DOI (in
+    # another case): the paper is in the corpus, so the corpus is complete.
+    paper = _rec(1, authors=[_PI])
+    paper["doi"] = "10.1/X"
+    _wire(
+        monkeypatch,
+        orcid_works=[{"pmid": None, "doi": "10.1/x"}],
+        s3=["1"],
+        records=[paper],
+        dropped_dois=["10.1/x"],
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert [r["pmid"] for r in result.kept] == ["1"]
+    assert result.permanently_dropped == []
+
+
 async def test_a_duplicate_title_collapses_to_the_journal_version(monkeypatch):
     records = [
         _rec(100, year=2020, title="Same Result!", authors=[_PI]),

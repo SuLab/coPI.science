@@ -904,10 +904,12 @@ P12b.
 - **Amended again in the re-audit round (§9):** the split is now `_is_per_item_failure`
   (`src/services/pubmed.py`), which is narrower than "not transient". Only a 4xx other than
   429, a `PubMedParseError`, or a JSON/Unicode decode error is per-item. Any other exception
-  re-raises, because it is most likely a bug of ours. Three consecutive identical 4xx
-  (`_SYSTEMIC_4XX_RUN`) re-raise as systemic. Every dropped PMID/DOI is appended to
-  `CorpusResult.permanently_dropped`. `fetch_orcid_works` gained `strict`, and
-  `resolve_corpus` uses it: only a 404 or an empty list reads as no works. A paper-derived
+  re-raises, because it is most likely a bug of ours. Three consecutive identical per-item
+  failures (`_SYSTEMIC_RUN`: the same 4xx, or the same unreadable body) re-raise as
+  systemic. Every dropped PMID/DOI is appended to `CorpusResult.permanently_dropped`,
+  except a DOI whose paper EFetch returned through another stage. `fetch_orcid_works`
+  gained `strict`, and `resolve_corpus` uses it: an empty list and the record-state
+  statuses 301/404/409/410 read as no works; anything else raises. A paper-derived
   tenure start from a corpus with drops is used for that run only and not stored.
 
 `src/services/corpus.py`:
@@ -2806,3 +2808,16 @@ areas found one high regression and several smaller gaps. All were fixed:
     JSON;
   - CLAUDE.md opens with a do-not-push warning;
   - the register gains `R-admin-token-form` and `R-enrichment-fixwave`.
+
+**Re-audit round 3 (2026-09-25).** A semantic review of round 2 found four gaps, all fixed:
+- **Medium:** strict `fetch_orcid_works` raised on ORCID's record-state answers — 301
+  (deprecated), 409 (locked; deactivated measured 409 with error-code 9044) and 410. Each
+  repeats on every retry, so they dead-lettered the PI. They now read as no works.
+- **Medium:** the systemic rule counted only 4xx, so an outage page served with 200 to every
+  request dropped the whole corpus and the job still succeeded. Three identical unreadable
+  bodies now re-raise too (`_failure_signature`).
+- **Low:** `--allow-later` also held back a later ORCID-employment year, which the pipeline
+  prefers over any paper year. The guard now applies to paper-derived years only.
+- **Low:** a DOI whose lookup failed but whose paper arrived through another stage marked
+  the corpus incomplete forever. It is no longer counted.
+

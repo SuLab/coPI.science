@@ -664,6 +664,22 @@ async def test_a_later_year_is_skipped_under_apply_by_default(
     assert "SKIP later_than_stored" in capsys.readouterr().out
 
 
+async def test_a_later_employment_year_is_applied_without_allow_later(
+    db_session, fakes, tmp_path
+):
+    # The guard is about thinned papers. ORCID employment outranks any paper
+    # year in the pipeline, so a later employment start is applied as it is.
+    user = await _pi(db_session, 2005)
+    fakes.profiles[user.orcid] = {"orcid": user.orcid, "employments": [_HOPKINS_EMPLOYMENT]}
+
+    code = await _apply(db_session, [user.orcid], tmp_path)
+
+    assert code == 0
+    stored = await _stored(db_session, user)
+    assert (stored["year"], stored["source"]) == (2011, "orcid_employment")
+    assert await _profile_jobs(db_session, user) == 1
+
+
 async def test_a_later_year_is_applied_with_allow_later(db_session, fakes, tmp_path):
     user = await _pi(db_session, 2012)
     fakes.corpora[user.orcid] = _corpus(_paper(2015))

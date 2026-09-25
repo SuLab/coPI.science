@@ -13,9 +13,10 @@ a job retry can recover, and anything else, which is most likely a bug of
 ours. A per-item failure would repeat on every retry, so it costs that item
 alone — re-raising it would leave the job, and every later regeneration of the
 PI, ``dead`` — but the item is reported in ``CorpusResult.permanently_dropped``
-so no tenure start is persisted from the incomplete corpus. The same 4xx on
-``_SYSTEMIC_4XX_RUN`` requests in a row is NCBI refusing us, not bad items,
-and raises.
+so no tenure start is persisted from the incomplete corpus. The same per-item
+failure (the same 4xx, or the same unreadable body) on ``_SYSTEMIC_RUN``
+requests in a row is NCBI refusing us or serving an outage page, not bad
+items, and raises.
 
 ``fetch_orcid_works`` swallows its failures by default too; the corpus passes
 it ``strict=True`` as well (its own contract tests pin that mode).
