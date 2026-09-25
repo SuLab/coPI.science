@@ -160,7 +160,7 @@ async def test_a_threaded_reply_carries_the_parent_mapping(slack_engine):
     assert reply.slack_thread_ts == root.slack_ts, (
         f"reply points at {reply.slack_thread_ts}, root is at {root.slack_ts}"
     )
-    live = eng.slack_clients["su"].get_thread_replies(cid, root.slack_ts)
+    live = eng.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
     assert "thread reply" in [m.get("text") for m in live], (
         "the reply is not in the Slack thread"
     )
@@ -195,7 +195,7 @@ async def test_a_db_origin_root_never_produces_a_phantom_slack_thread(slack_engi
     # empty list: it proves no phantom thread exists rather than merely that it is
     # empty. (If the mirror had posted, this would return the reply instead.)
     with pytest.raises(ThreadNotFound):
-        eng.slack_clients["su"].get_thread_replies(cid, canonical)
+        eng.slack_clients["su"].get_all_thread_replies(cid, canonical)
     # And the message is still durable in the DB — the mirror is skipped, not the write.
     assert "reply to a db-origin root" in [
         r.content for r in await _rows(factory, run_id)
@@ -213,7 +213,7 @@ async def test_a_db_origin_root_never_produces_a_phantom_slack_thread(slack_engi
                             thread_ts=root.message_ts)
     time.sleep(POST_GAP)
     await eng._flush_persisted()
-    live = eng.slack_clients["su"].get_thread_replies(cid, root.slack_ts)
+    live = eng.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
     assert "real threaded reply" in [m.get("text") for m in live], (
         "control leg failed: the mirror is not threading at all"
     )

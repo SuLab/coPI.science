@@ -28,6 +28,7 @@ from src.models import (
     SimulationRun,
 )
 from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from tests.slack_live_support import create_private_channel, invite
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -193,6 +194,9 @@ async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack
     """§8 calls the resumed run the normal path, because the DB rebuild reconstructs
     threads gate-blind before the first recompute. This is the only test that exercises
     that with Slack present.
+
+    Grandfathering is reporting-only (D12): the reply lane still owes the thread its
+    reply after the partner leaves the cohort, and that reply must reach Slack.
     """
     from src.agent.state import ThreadState
 
@@ -214,18 +218,22 @@ async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack
     su.state.active_threads[root.message_ts] = ThreadState(
         thread_id=root.message_ts, channel=name, other_agent_id="cravatt",
         message_count=2)
-    assert eng._owes_reply(su) is True, "precondition: the thread owes a reply in-cohort"
+    assert any(
+        t.thread_id == root.message_ts for a, t in eng._pending_reply_pairs() if a is su
+    ), "precondition: the thread owes a reply in-cohort"
 
     await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
     await eng._recompute_allowed_sender_ids()
     assert su.state.active_threads[root.message_ts].grandfathered is True
-    assert eng._owes_reply(su) is False, "a grandfathered thread must lose priority"
+    assert any(
+        t.thread_id == root.message_ts for a, t in eng._pending_reply_pairs() if a is su
+    ), "a grandfathered thread still owes its reply (D12)"
 
-    # It may still conclude — and the reply must reach the real Slack thread.
+    # And the reply must reach the real Slack thread.
     await eng._post_message("su", name, "wrapping up", thread_ts=root.message_ts)
     time.sleep(POST_GAP)
     await eng._flush_persisted()
-    replies = eng.slack_clients["su"].get_thread_replies(cid, root.slack_ts)
+    replies = eng.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
     assert "wrapping up" in [m.get("text") for m in replies], (
         "the grandfathered thread's concluding reply never reached Slack"
     )
@@ -243,7 +251,7 @@ async def test_a_private_channel_is_polled_only_by_a_member_bot(cohort_engine, s
     eng, factory, run_id, name, cid = cohort_engine
     su, wiseman = slack_clients["su"], slack_clients["wiseman"]
 
-    priv = su.create_private_channel(f"t-priv-poll-{uuid.uuid4().hex[:6]}")
+    priv = create_private_channel(su, f"t-priv-poll-{uuid.uuid4().hex[:6]}")
     assert priv and priv.get("id"), priv
     pname, pcid = priv["name"], priv["id"]
     try:
@@ -280,7 +288,7 @@ async def test_a_private_channel_is_polled_only_by_a_member_bot(cohort_engine, s
         assert eng._client_for_channel(pcid, wiseman) is None
 
         # Control: invite wiseman and it can read it too.
-        assert su.invite_to_channel(pcid, [wiseman.bot_user_id]) is True
+        invite(su, pcid, [wiseman.bot_user_id])
         assert "members only" in [
             m.get("text") for m in wiseman.poll_channel_messages(pcid, oldest="0")
         ]
@@ -303,17 +311,17 @@ async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, sla
     assert eng.agents["cravatt"].allowed_sender_ids == {"cravatt"}
 
     su, cravatt = slack_clients["su"], slack_clients["cravatt"]
-    priv = su.create_private_channel(f"t-priv-exempt-{uuid.uuid4().hex[:6]}")
+    priv = create_private_channel(su, f"t-priv-exempt-{uuid.uuid4().hex[:6]}")
     assert priv and priv.get("id"), priv
     pname, pcid = priv["name"], priv["id"]
     try:
-        assert su.invite_to_channel(pcid, [cravatt.bot_user_id]) is True
+        invite(su, pcid, [cravatt.bot_user_id])
         eng._channel_id_map[pname] = pcid
         eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
-        # cravatt posts to this channel by NAME below, and only su's client learned the
-        # id from create_private_channel. Without the shared cache, cravatt's
-        # _resolve_channel_id falls back to list_channels() — which never returns private
-        # channels at all in its default mode — and the raw name is handed to
+        # cravatt posts to this channel by NAME below, and create_private_channel caches
+        # the id in no client. Without the shared cache, cravatt's
+        # _resolve_channel_id falls back to list_channels() — which lists public channels
+        # only — and the raw name is handed to
         # chat.postMessage. The engine shares the map for exactly this reason in
         # production (_sync_private_channels_from_db / cache_channel_ids).
         for c in slack_clients.values():

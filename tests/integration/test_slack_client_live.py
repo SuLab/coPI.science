@@ -17,6 +17,7 @@ import uuid
 import pytest
 
 from src.agent.slack_client import BotNotInvitedToPrivateChannel, ThreadNotFound
+from tests.slack_live_support import create_private_channel, invite
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -42,18 +43,6 @@ def test_connect_and_identity(slack_client_su, slack_pi_user_id):
     # Control: a human is not a bot. Without it, an is_bot_user that returned True
     # unconditionally would pass.
     assert slack_client_su.is_bot_user(slack_pi_user_id) is False
-
-
-def test_resolve_user_name_returns_a_name_not_the_raw_id(slack_client_su, slack_pi_user_id):
-    """A fallback to the raw id is what you get when users:read is missing, and it is
-    silent — the PI's messages would render as U0123ABC in every prompt."""
-    name = slack_client_su.resolve_user_name(slack_pi_user_id)
-    assert name and name != slack_pi_user_id, f"fell back to the raw id: {name!r}"
-
-
-def test_an_unknown_user_id_does_not_raise(slack_client_su):
-    """Degrade, don't crash: an unresolvable id must not take down a turn."""
-    assert slack_client_su.resolve_user_name("U000NOTREAL") is not None
 
 
 # --- channel lifecycle --------------------------------------------------------------
@@ -208,10 +197,9 @@ def test_post_thread_and_history_round_trip(slack_client_su, slack_probe_channel
         f"the reply appeared at top level — it was not threaded. history={texts}"
     )
 
-    replies = slack_client_su.get_thread_replies(cid, root["ts"])
+    replies = slack_client_su.get_all_thread_replies(cid, root["ts"])
     assert "reply from the probe" in [m.get("text") for m in replies]
     assert len(slack_client_su.get_full_channel_history(cid)) >= 1
-    assert len(slack_client_su.get_all_thread_replies(cid, root["ts"])) >= 1
 
 
 def test_poll_cursor_excludes_already_seen_messages(slack_client_su, slack_probe_channel):
@@ -377,91 +365,24 @@ def test_a_code_fence_spanning_a_split_is_closed_and_reopened(
         assert f"row_{i} = measure(sample_{i})" in joined
 
 
-# --- DMs -----------------------------------------------------------------------------
-
-
-def test_dm_send_lands_in_slack_but_is_not_polled_back(slack_client_su, slack_pi_user_id):
-    """`poll_dm_messages` filters to messages FROM the target user, excluding the bot's
-    own. That filter is load-bearing: a caller that replies to whatever the poll returns
-    (as `handle_dm` did, before it was removed) would answer itself forever if the bot
-    saw its own DM.
-
-    Both halves. The bot's message must really be in the DM channel (read back
-    unfiltered, Rule S1) and must be absent from the filtered poll.
-    """
-    dm = slack_client_su.open_dm_channel(slack_pi_user_id)
-    assert dm and dm.startswith("D"), dm
-    marker = f"probe DM {uuid.uuid4().hex[:8]}"
-    sent = slack_client_su.send_dm(slack_pi_user_id, marker)
-    time.sleep(POST_GAP)
-    assert sent and sent.get("ts")
-
-    raw = slack_client_su.poll_channel_messages(dm, oldest="0")
-    assert marker in [m.get("text") for m in raw], (
-        "the DM never reached Slack at all"
-    )
-    filtered = slack_client_su.poll_dm_messages(slack_pi_user_id, oldest="0")
-    assert marker not in [m.get("text") for m in filtered], (
-        "poll_dm_messages returned the bot's own message — handle_dm would reply to "
-        "itself in a loop"
-    )
-    assert all(m.get("user") == slack_pi_user_id for m in filtered), (
-        f"poll_dm_messages returned a message from someone else: {filtered}"
-    )
-
-
-def test_open_dm_channel_is_cached(slack_client_su, slack_pi_user_id):
-    a = slack_client_su.open_dm_channel(slack_pi_user_id)
-    b = slack_client_su.open_dm_channel(slack_pi_user_id)
-    assert a == b and slack_client_su._dm_channels[slack_pi_user_id] == a
-
-
-# --- private channels, and the groups:write finding ------------------------------------
+# --- private channels -------------------------------------------------------------------
 
 
 @pytest.fixture
 def private_channel(slack_clients):
-    """A private channel created by su, archived on teardown."""
+    """A private channel created by su, archived on teardown.
+
+    Needs `groups:write` on su, which `BOT_SCOPES` no longer asks for; su was
+    installed with it (see tests/slack_live_support.py).
+    """
     su = slack_clients["su"]
-    requested = f"t-priv-{uuid.uuid4().hex[:8]}"
-    data = su.create_private_channel(requested)
-    assert data and data.get("id"), (
-        f"could not create private #{requested}: {data} — if this is missing_scope, su "
-        "was installed without groups:write"
-    )
-    # create_private_channel appends a UTC timestamp for collision avoidance, so the
-    # assigned name is not the requested one. Hand back what Slack actually made.
-    assert data["name"].startswith(requested), data["name"]
+    data = create_private_channel(su, f"t-priv-{uuid.uuid4().hex[:8]}")
+    assert data and data.get("id"), data
     yield data["name"], data["id"]
     try:
         su._call_with_retry(su._client.conversations_archive, channel=data["id"])
     except Exception as exc:
         print(f"WARNING: could not archive #{data['name']}: {exc}")
-
-
-def test_private_channel_creation_needs_groups_write(slack_clients):
-    """The live A/B behind the BOT_SCOPES finding.
-
-    wiseman was installed with exactly the BOT_SCOPES list as it shipped before this
-    work; su was installed with groups:write added. Same code, same call, different
-    grant — so a failure here is the scope and nothing else.
-
-    This is why the fix is a scope-coverage test rather than a one-line edit: a bot
-    provisioned from the old manifest connects, posts and polls perfectly, and only
-    fails the one call that PI pairing depended on.
-    """
-    su, wiseman = slack_clients["su"], slack_clients["wiseman"]
-
-    ok = su.create_private_channel(f"t-priv-ab-{uuid.uuid4().hex[:6]}")
-    assert ok and ok.get("id"), f"su (with groups:write) could not create: {ok}"
-    try:
-        bad = wiseman.create_private_channel(f"t-priv-ab-{uuid.uuid4().hex[:6]}")
-        assert bad is None or not bad.get("id"), (
-            "wiseman has no groups:write yet created a private channel — the A/B is "
-            f"broken, re-check the install scopes. got {bad}"
-        )
-    finally:
-        su._call_with_retry(su._client.conversations_archive, channel=ok["id"])
 
 
 def test_private_channel_invite_and_membership(slack_clients, private_channel):
@@ -472,7 +393,7 @@ def test_private_channel_invite_and_membership(slack_clients, private_channel):
 
     # Before the invite, cravatt cannot read it.
     assert cravatt.poll_channel_messages(cid, oldest="0") == []
-    assert su.invite_to_channel(cid, [cravatt.bot_user_id]) is True
+    invite(su, cid, [cravatt.bot_user_id])
     _post(su, cid, "after the invite")
     assert "after the invite" in [
         m.get("text") for m in cravatt.poll_channel_messages(cid, oldest="0")
@@ -482,10 +403,9 @@ def test_private_channel_invite_and_membership(slack_clients, private_channel):
 def test_private_channels_are_excluded_from_the_public_listing(
     slack_clients, private_channel, slack_list_all_channels
 ):
-    """Note the name: create_private_channel appends a UTC timestamp to whatever it is
-    given, because the reopen slug is deterministic per agent-pair + origin channel and
-    Slack rejects a duplicate with name_taken. The fixture returns the name Slack
-    actually assigned, not the one requested.
+    """The private listing asks conversations.list for `private_channel`, which is what
+    `groups:read` covers. `BOT_SCOPES` no longer requests that scope; su holds it from
+    its original install, and a reinstalled su would need it added back for this test.
 
     Both halves go through the fully paginated listing. Asking `list_channels()` (one
     200-item page of 323) made the positive half a coin flip AND the negative half

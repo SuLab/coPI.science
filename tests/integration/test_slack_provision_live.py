@@ -57,10 +57,18 @@ def test_lookup_team_id_agrees_with_auth_test(slack_bot_tokens):
 def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
     """Slack's x-oauth-scopes header reports what the install actually granted.
 
-    su and cravatt were installed with groups:write; wiseman deliberately was not — it
-    carries exactly the BOT_SCOPES list as it shipped before this work. That asymmetry
-    is the live A/B behind test_private_channel_creation_needs_groups_write.
+    Every probe bot must hold every scope in `BOT_SCOPES`. They were installed from
+    an older, larger manifest, so they may hold more; the check is a subset, not an
+    equality.
+
+    su must also hold `groups:write`, which `BOT_SCOPES` no longer requests: the live
+    tier's private-channel helpers (tests/slack_live_support.py) create and invite as
+    su, and su was installed with that scope for them. A reinstalled su needs it added
+    back (`--add-scope su:groups:write`) or every private-channel live test fails at
+    setup with missing_scope.
     """
+    from src.services.slack_provisioning import BOT_SCOPES
+
     def _scopes(tok):
         # Every Slack response carries the token's granted scopes in this header.
         # apps.permissions.scopes is the documented endpoint but returns
@@ -71,10 +79,9 @@ def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
         assert raw, "Slack did not report the granted scopes"
         return {s.strip() for s in raw.split(",") if s.strip()}
 
-    su = _scopes(slack_bot_tokens_all["su"])
-    wiseman = _scopes(slack_bot_tokens_all["wiseman"])
+    granted = {aid: _scopes(tok) for aid, tok in slack_bot_tokens_all.items()}
+    for aid, scopes in granted.items():
+        missing = sorted(set(BOT_SCOPES) - scopes)
+        assert not missing, f"{aid} lacks scopes BOT_SCOPES requests: {missing}"
+    su = granted["su"]
     assert "groups:write" in su, f"su was expected to have groups:write: {sorted(su)}"
-    assert "groups:write" not in wiseman, (
-        "wiseman is the control for the missing-scope finding and must NOT have "
-        f"groups:write: {sorted(wiseman)}"
-    )

@@ -143,7 +143,7 @@ async def test_a_restart_restores_the_slack_mapping(lifecycle):
                              thread_ts=root.message_ts)
     time.sleep(POST_GAP)
     await eng2._flush_persisted()
-    live = eng2.slack_clients["su"].get_thread_replies(cid, root.slack_ts)
+    live = eng2.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
     assert "reply after restart" in [m.get("text") for m in live]
 
 
@@ -429,28 +429,3 @@ async def test_posting_to_an_archived_channel_does_not_crash(lifecycle, slack_cl
     rows = [r for r in await _rows(factory, run_id) if r.content == "into the archive"]
     assert rows, "the message was lost rather than kept in the DB"
     assert rows[0].slack_ts is None
-
-
-async def test_invite_tolerates_self_and_repeat_but_reports_a_real_failure(slack_clients):
-    """`cant_invite_self` and `already_in_channel` are successes by the documented
-    contract — "the invite is considered successful as long as every user ends up as a
-    member" — and the private-channel migration relied on that (before it was removed),
-    since it invited both bots and one of them created the channel.
-
-    Control: a genuinely bad user id must still return False, or the tolerance would be
-    indistinguishable from a method that always returns True.
-    """
-    su = slack_clients["su"]
-    ch = su.create_private_channel(f"t-selfinvite-{uuid.uuid4().hex[:6]}")
-    assert ch and ch.get("id")
-    try:
-        assert su.invite_to_channel(ch["id"], [su.bot_user_id]) is True
-        cravatt_id = slack_clients["cravatt"].bot_user_id
-        assert su.invite_to_channel(ch["id"], [cravatt_id]) is True
-        assert su.invite_to_channel(ch["id"], [cravatt_id]) is True, "already_in_channel"
-        assert su.invite_to_channel(ch["id"], []) is True, "an empty list is a no-op"
-        assert su.invite_to_channel(ch["id"], ["U000NOTREAL"]) is False, (
-            "a genuine invite failure must be reported"
-        )
-    finally:
-        su._call_with_retry(su._client.conversations_archive, channel=ch["id"])
