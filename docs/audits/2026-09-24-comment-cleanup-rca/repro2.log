@@ -1,0 +1,205 @@
+
+######## R0 baselines
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500
+..                                                                       [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 1 warning in 9.85s
+=> exit 0
+
+######## R1 I24b: root_posts = [] (discussions view lists nothing) -> expect PASS if vacuous
+847:    root_posts = []
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 8.31s
+=> exit 0
+
+######## R2 I29: lost-race branch returns a 500 Response -> expect PASS if response unasserted
+516:        return Response(status_code=500)
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 6.92s
+=> exit 0
+
+######## R3 M2: consult's own truncation retry not booked (drop on_retry=on_api_call) -> which tests fail?
+726:            on_retry=on_api_call,
+726:            # on_retry removed (mutation)
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider -x --no-header tests/unit tests/integration/test_specialist_consult_capture.py
+........................................................................ [  2%]
+........................................................................ [  4%]
+........................................................................ [  7%]
+........................................................................ [  9%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+..........s....s........................................................ [ 27%]
+........................................................................ [ 29%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 36%]
+........................................................................ [ 39%]
+........................................................................ [ 41%]
+........................................................................ [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 66%]
+........................................................................ [ 68%]
+........................................................................ [ 71%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+........................................................................ [ 83%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 96%]
+.........................s.............................................. [ 98%]
+..........................................                               [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+tests/unit/test_assessments_summary_channel.py::test_assessments_summary_channel_is_not_a_seeded_channel
+  tests/unit/test_assessments_summary_channel.py:14: PytestWarning: The test <Function test_assessments_summary_channel_is_not_a_seeded_channel> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_assessments_summary_channel_is_not_a_seeded_channel():
+
+tests/unit/test_assessments_summary_channel.py::test_assessments_summary_channel_is_not_a_discovery_keyword_channel
+  tests/unit/test_assessments_summary_channel.py:18: PytestWarning: The test <Function test_assessments_summary_channel_is_not_a_discovery_keyword_channel> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_assessments_summary_channel_is_not_a_discovery_keyword_channel():
+
+tests/unit/test_proposal_limit.py::test_not_drained_before_cap_reached
+  tests/unit/test_proposal_limit.py:94: PytestWarning: The test <Function test_not_drained_before_cap_reached> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_not_drained_before_cap_reached():
+
+tests/unit/test_proposal_limit.py::test_not_drained_while_interviews_open
+  tests/unit/test_proposal_limit.py:100: PytestWarning: The test <Function test_not_drained_while_interviews_open> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_not_drained_while_interviews_open(monkeypatch):
+
+tests/unit/test_proposal_limit.py::test_drains_after_settle_window_once_cap_reached_and_no_open
+  tests/unit/test_proposal_limit.py:110: PytestWarning: The test <Function test_drains_after_settle_window_once_cap_reached_and_no_open> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_drains_after_settle_window_once_cap_reached_and_no_open(monkeypatch):
+
+tests/unit/test_proposal_limit.py::test_engine_accepts_and_stores_max_proposals
+  tests/unit/test_proposal_limit.py:119: PytestWarning: The test <Function test_engine_accepts_and_stores_max_proposals> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_engine_accepts_and_stores_max_proposals():
+
+tests/unit/test_proposal_limit.py::test_run_main_loop_gates_on_proposal_target_drained
+  tests/unit/test_proposal_limit.py:124: PytestWarning: The test <Function test_run_main_loop_gates_on_proposal_target_drained> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_run_main_loop_gates_on_proposal_target_drained():
+
+tests/unit/test_proposal_limit.py::test_max_runtime_and_proposal_cap_are_independent_stop_conditions
+  tests/unit/test_proposal_limit.py:196: PytestWarning: The test <Function test_max_runtime_and_proposal_cap_are_independent_stop_conditions> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_max_runtime_and_proposal_cap_are_independent_stop_conditions():
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2919 passed, 3 skipped, 9 warnings in 90.69s (0:01:30)
+=> exit 0
+
+######## R4 I37: ruff counts
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m ruff check src/routers/admin.py --select B008 --output-format=concise --quiet
+src/routers/admin.py:203:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:204:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:233:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:234:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:263:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:264:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:300:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:301:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:364:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:365:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:404:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:405:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:431:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:432:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:464:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:465:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:617:31: B008 Do not perform function call `Query` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:619:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:620:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:755:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:756:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:835:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:836:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:925:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:926:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1074:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1075:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1131:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1132:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1152:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1153:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1181:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1182:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1237:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1238:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1259:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1260:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1289:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1290:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1333:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1349:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1350:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1395:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1396:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1427:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1428:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1447:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1448:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1492:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1493:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1586:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1587:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1639:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1640:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1676:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1677:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1720:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1721:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1880:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1881:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1952:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1953:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1998:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:1999:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:2050:24: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+src/routers/admin.py:2051:26: B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable
+=> exit 1
+admin.py B008 count: 66
+src B008 count: 134
+src total findings (ci ratchet, ceiling 231): 215
+
+######## R5 I36: is a new static/js file ignored?
+$ git check-ignore -v static/js/new_asset.js
+.gitignore:46:static/	static/js/new_asset.js
+=> exit 0
+
+######## final clone status
+(empty = clean)

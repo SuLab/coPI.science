@@ -1,0 +1,586 @@
+
+######## E0 baselines (unmodified)
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller tests/unit/test_lock_registry.py::test_eviction_never_splits_mutual_exclusion_for_a_late_arrival tests/unit/test_roles.py::test_visible_body_hides_the_verdict_the_sidecar_still_carries
+...                                                                      [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 1 warning in 2.82s
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_specialist_floor.py -k test_floor_arithmetic and (route or pass) -v
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/cc-rca
+configfile: pyproject.toml
+plugins: syrupy-5.5.3, cov-7.1.0, anyio-4.14.2, asyncio-1.4.0, Faker-40.36.0, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 42 items / 40 deselected / 2 selected
+
+tests/unit/test_specialist_floor.py ..                                   [100%]
+
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================= 2 passed, 40 deselected, 1 warning in 1.53s ==================
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_specialist_floor.py::test_route_to_incubation_owes_a_panel
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 1.36s
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_post_types.py tests/unit/test_post_type_enforcement.py
+...................................................................      [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+67 passed, 1 warning in 1.60s
+=> exit 0
+
+######## E1 I20-A: slow mock replaced by raise (line 877 only) -> expect PASS if never reached
+        raise AssertionError("I20: _update_agent_memory reached")
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 1.34s
+=> exit 0
+
+######## E2 I20-B: any contended acquire deadlocks -> node expect PASS, control expect FAIL
+        try:
+            for key in ordered:
+                lock = self.get(key)
+                if lock.locked(): await asyncio.Event().wait()
+                await lock.acquire()
+                acquired.append(lock)
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 1.84s
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_lock_registry.py::test_eviction_never_splits_mutual_exclusion_for_a_late_arrival
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_eviction_never_splits_mutual_exclusion_for_a_late_arrival ________
+
+    async def waiter():
+        await holder_has_it.wait()
+        waiter_parked.set()
+>       async with reg.acquire_all("k"):
+
+tests/unit/test_lock_registry.py:108: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/contextlib.py:210: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+src/agent/locks.py:63: in acquire_all
+    if lock.locked(): await asyncio.Event().wait()
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <asyncio.locks.Event object at 0x733d73e4d430 [unset]>
+
+    async def wait(self):
+        """Block until the internal flag is true.
+    
+        If the internal flag is true on entry, return True
+        immediately.  Otherwise, block until another coroutine calls
+        set() to set the flag to true, then return True.
+        """
+        if self._value:
+            return True
+    
+        fut = self._get_loop().create_future()
+        self._waiters.append(fut)
+        try:
+>           await fut
+E           asyncio.exceptions.CancelledError
+
+/usr/lib/python3.12/asyncio/locks.py:212: CancelledError
+
+The above exception was the direct cause of the following exception:
+
+    @pytest.mark.asyncio
+    async def test_eviction_never_splits_mutual_exclusion_for_a_late_arrival():
+        """The same property, but with the arrival ORDER that actually reproduces
+        the evict-when-unlocked bug.
+    
+        ``test_eviction_never_splits_mutual_exclusion`` above starts all three
+        tasks at once, so T2 and T3 both park on the *same* Lock object before
+        anyone releases; the old object goes on serialising them even if the
+        registry drops its reference, and a naive sweep passes that test.
+        (Verified empirically against a naive `if not lock.locked(): pop(key)`
+        variant kept outside this repo: it passes the three-at-once construction
+        5/5 runs.)
+    
+        The bug needs a task that calls ``acquire_all`` AFTER the eviction while
+        an earlier waiter is still parked on the evicted object:
+    
+            T1 holds "k";  T2 arrives and parks on L1
+            T1 releases    -> L1 reports unlocked (T2's wakeup is only *scheduled*)
+            naive sweep    -> L1 dropped from the registry
+            T2 wakes       -> enters the critical section holding L1
+            T3 arrives     -> registry has no "k", so it mints L2 and walks
+                              straight in.  Two tasks, one key.
+    
+        Refcounting closes it: T2's intent is registered synchronously before its
+        first await, so T1's exit cannot take the refcount to zero and L1 survives
+        for T3 to contend on.
+        """
+        reg = LockRegistry()
+        inside = 0
+        max_inside = 0
+        holder_has_it = asyncio.Event()
+        waiter_parked = asyncio.Event()
+        let_holder_go = asyncio.Event()
+        holder_left = asyncio.Event()
+    
+        async def critical_section():
+            nonlocal inside, max_inside
+            inside += 1
+            max_inside = max(max_inside, inside)
+            await asyncio.sleep(0.02)
+            inside -= 1
+    
+        async def holder():
+            async with reg.acquire_all("k"):
+                holder_has_it.set()
+                await let_holder_go.wait()
+                await critical_section()
+            # Runs the instant the context manager's finally completes, i.e. after
+            # release() and after any eviction the registry chooses to do.
+            holder_left.set()
+    
+        async def waiter():
+            await holder_has_it.wait()
+            waiter_parked.set()
+            async with reg.acquire_all("k"):
+                await critical_section()
+    
+        async def late_arrival():
+            # Enters only once the holder has released AND evicted, which is the
+            # window where a naive registry has already forgotten the key while
+            # the waiter above is still queued on the old Lock object.
+            await holder_left.wait()
+            async with reg.acquire_all("k"):
+                await critical_section()
+    
+        tasks = [
+            asyncio.create_task(holder()),
+            asyncio.create_task(waiter()),
+            asyncio.create_task(late_arrival()),
+        ]
+        await waiter_parked.wait()
+        await asyncio.sleep(0.01)  # let the waiter genuinely park on the lock
+        let_holder_go.set()
+>       await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+
+tests/unit/test_lock_registry.py:127: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/tasks.py:519: in wait_for
+    async with timeouts.timeout(timeout):
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Timeout [expired]>
+exc_type = <class 'asyncio.exceptions.CancelledError'>
+exc_val = CancelledError(), exc_tb = <traceback object at 0x733d73e8ee00>
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> Optional[bool]:
+        assert self._state in (_State.ENTERED, _State.EXPIRING)
+    
+        if self._timeout_handler is not None:
+            self._timeout_handler.cancel()
+            self._timeout_handler = None
+    
+        if self._state is _State.EXPIRING:
+            self._state = _State.EXPIRED
+    
+            if self._task.uncancel() <= self._cancelling and exc_type is exceptions.CancelledError:
+                # Since there are no new cancel requests, we're
+                # handling this.
+>               raise TimeoutError from exc_val
+E               TimeoutError
+
+/usr/lib/python3.12/asyncio/timeouts.py:115: TimeoutError
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_lock_registry.py::test_eviction_never_splits_mutual_exclusion_for_a_late_arrival
+1 failed, 1 warning in 5.37s
+=> exit 1
+
+######## E3 I23-A: route-to-incubation exempt again -> route row expect PASS, control expect FAIL
+PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset({"pass", "route-to-incubation"})
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_specialist_floor.py -k test_floor_arithmetic and route -v
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/cc-rca
+configfile: pyproject.toml
+plugins: syrupy-5.5.3, cov-7.1.0, anyio-4.14.2, asyncio-1.4.0, Faker-40.36.0, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 42 items / 41 deselected / 1 selected
+
+tests/unit/test_specialist_floor.py .                                    [100%]
+
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================= 1 passed, 41 deselected, 1 warning in 1.87s ==================
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_specialist_floor.py::test_route_to_incubation_owes_a_panel
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_route_to_incubation_owes_a_panel _____________________
+
+    def test_route_to_incubation_owes_a_panel():
+        """Blackbird's own positive outcome is held to the floor like any other."""
+        eng = _engine(_hub())
+        eng._specialist_consults = {"gill": {"scientific"}}   # armed, one domain done
+        verdict = {"recommendation": "route-to-incubation", "subject_agent_id": "gill"}
+    
+>       assert eng._specialist_floor_gap(verdict), (
+            "route-to-incubation must owe the panel it used to be exempt from"
+        )
+E       AssertionError: route-to-incubation must owe the panel it used to be exempt from
+E       assert set()
+E        +  where set() = _specialist_floor_gap({'recommendation': 'route-to-incubation', 'subject_agent_id': 'gill'})
+E        +    where _specialist_floor_gap = <src.agent.simulation.SimulationEngine object at 0x79d421073620>._specialist_floor_gap
+
+tests/unit/test_specialist_floor.py:428: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  src.config:config.py:512 Using the insecure default SECRET_KEY (ENVIRONMENT=development). Acceptable for local development only.
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_specialist_floor.py::test_route_to_incubation_owes_a_panel
+1 failed, 1 warning in 1.86s
+=> exit 1
+
+######## E4 I23-B: floor always armed -> route row expect FAIL, pass row expect PASS
+6163:        armed = True
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_specialist_floor.py -k test_floor_arithmetic and (route or pass) -v
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/cc-rca
+configfile: pyproject.toml
+plugins: syrupy-5.5.3, cov-7.1.0, anyio-4.14.2, asyncio-1.4.0, Faker-40.36.0, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 42 items / 40 deselected / 2 selected
+
+tests/unit/test_specialist_floor.py .F                                   [100%]
+
+=================================== FAILURES ===================================
+___ test_floor_arithmetic[route-to-incubation-consulted1-expected_missing1] ____
+
+recommendation = 'route-to-incubation', consulted = set()
+expected_missing = set()
+
+    @pytest.mark.parametrize(
+        "recommendation,consulted,expected_missing",
+        [
+            # pass and route-to-incubation never need a panel
+            ("pass", set(), set()),
+            ("route-to-incubation", set(), set()),
+            # advance always needs scientific + talent. "budget" (never a member
+            # of the default-required set) stands in for "consulted is empty"
+            # here: an EMPTY consulted set on thread "t1" is indistinguishable
+            # from a thread the map never saw at all, which is the fail-open case
+            # pinned separately by test_the_floor_fails_open_for_a_thread_we_never_saw
+            # — it would swallow this row's arithmetic instead of exercising it.
+            # Recording one irrelevant domain marks the thread as "seen" (per
+            # test_fail_open_applies_only_to_a_thread_with_NO_consults) without
+            # satisfying scientific/talent.
+            ("advance", {"budget"}, {"scientific", "talent"}),
+            ("advance", {"scientific"}, {"talent"}),
+            ("advance", {"scientific", "talent"}, set()),
+            # conditional is held to the same bar as advance
+            ("conditional", {"budget"}, {"scientific", "talent"}),
+            ("conditional", {"scientific", "talent"}, set()),
+        ],
+    )
+    def test_floor_arithmetic(recommendation, consulted, expected_missing):
+        eng = _engine(_hub())
+        for d in consulted:
+            eng._record_consult("gill", d)
+        missing = eng._specialist_floor_gap({"recommendation": recommendation, "subject_agent_id": "gill"})
+>       assert missing == expected_missing
+E       AssertionError: assert {'scientific', 'talent'} == set()
+E         
+E         Extra items in the left set:
+E         'talent'
+E         'scientific'
+E         Use -v to get more diff
+
+tests/unit/test_specialist_floor.py:115: AssertionError
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-consulted1-expected_missing1]
+============ 1 failed, 1 passed, 40 deselected, 1 warning in 1.39s =============
+=> exit 1
+
+######## E5 I21-B1: inline-verdict instruction added OUTSIDE the checked slice (line 128) -> expect PASS
+concrete screening judgement. When concluding, state which gating criteria are met or not met, the red flags, and your recommendation (advance / conditional / pass) in the visible reply.
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_roles.py::test_visible_body_hides_the_verdict_the_sidecar_still_carries
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 0.09s
+=> exit 0
+
+######## E6 I21-B2: same sentence INSIDE the slice (end of line 142) -> expect FAIL
+post — this reply is the assessment, in full. When concluding, state which gating criteria are met or not met, the red flags, and your recommendation (advance / conditional / pass) in the visible reply.
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_roles.py::test_visible_body_hides_the_verdict_the_sidecar_still_carries
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_visible_body_hides_the_verdict_the_sidecar_still_carries _________
+
+    def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
+        """F5: the bot is a member of every lab's cohort, so a :mag: Opportunity
+        Assessment (a top-level post) is a workspace-wide broadcast, not a private
+        note. The visible `<slack_message>` must therefore read as a courtesy
+        summary and never carry the gating statuses, the red-flag list, or the
+        advance/conditional/pass/route-to-incubation recommendation — those belong
+        only in the staff-only `<assessment_json>` sidecar, which must still
+        require all of them so staff lose nothing.
+        """
+        from pathlib import Path
+    
+        # Lived in the now-deleted phase5-new-post.md override; Option A
+        # relocated the same content, unchanged, into phase4-thread-reply.md's
+        # CONCLUDE-adjacent "Concluding with an Opportunity Assessment" section.
+        body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
+            encoding="utf-8"
+        )
+    
+        # Anchors bounding the visible-body instructions and the sidecar
+        # instructions. If any of these move, the slice below would silently
+        # cover the wrong text, so pin their relative order.
+        visible_start = body.index("### Concluding with an Opportunity Assessment: the sidecar")
+        sidecar_start = body.index("**Emit the sidecar as bare JSON")
+        assert visible_start < sidecar_start
+    
+        visible_instructions = body[visible_start:sidecar_start]
+        sidecar_instructions = body[sidecar_start:]
+    
+        # The PI-facing instructions must not ask for (or even name) the internal
+        # verdict machinery.
+        for forbidden in (
+            "Gating criteria", "Red flags", "route-to-incubation",
+            "not_met", "not met",
+        ):
+>           assert forbidden not in visible_instructions, (
+                f"{forbidden!r} leaked into the visible-body instructions — this "
+                "would surface the internal rubric in a workspace-wide post"
+            )
+E           AssertionError: 'not met' leaked into the visible-body instructions — this would surface the internal rubric in a workspace-wide post
+E           assert 'not met' not in '### Conclud... at all.\n\n'
+E             
+E             'not met' is contained here:
+E               re met or not met, the red flags, and your recommendation (advance / conditional / pass) in the visible reply.
+E             ?           +++++++
+E               
+E               This thread is visible to every lab in the workspace, the same exposure a standalone post
+E               would have had, so confidentiality binds the visible half of this reply exactly as it...
+E             
+E             ...Full output truncated (24 lines hidden), use '-vv' to show
+
+tests/unit/test_roles.py:352: AssertionError
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_roles.py::test_visible_body_hides_the_verdict_the_sidecar_still_carries
+1 failed, 1 warning in 0.14s
+=> exit 1
+
+######## E7 I21-A: rendered CONCLUDE prompt asks for the inline verdict (before the sidecar section)
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -c from src.agent.agent import Agent; from src.agent.state import ThreadState
+a=Agent("blackbird","BlackbirdBot","Blackbird Labs",role="scout_hub")
+t=ThreadState(thread_id="t1",channel="general",other_agent_id="wang",message_count=11)
+_,m=a.build_phase4_prompt(thread=t,thread_history=[{"sender":"WangBot","content":"pitch"}],other_agent_name="WangBot",other_agent_lab="Wang")
+c=m[0]["content"]; pre=c[:c.index("### Concluding with an Opportunity Assessment: the sidecar")]
+print({w:(w in pre) for w in ("not met","red flags","advance","route-to-incubation","confidence label")})
+print("contradiction present:", "none of it may appear anywhere in" in c)
+{'not met': True, 'red flags': True, 'advance': True, 'route-to-incubation': True, 'confidence label': True}
+contradiction present: False
+=> exit 0
+
+######## E8 I12: alias emptied -> expect only test_the_retired_idea_name_still_resolves to fail
+LEGACY_POST_TYPE_ALIASES: dict[str, str] = {}
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_post_types.py tests/unit/test_post_type_enforcement.py
+..F................................................................      [100%]
+=================================== FAILURES ===================================
+__________________ test_the_retired_idea_name_still_resolves ___________________
+
+    def test_the_retired_idea_name_still_resolves():
+        """Retired in the vocabulary, still accepted on input — the alias table
+        itself does not care whether its destination is still canonical."""
+>       assert resolve_post_type_name("idea") == "idea_crosslab"
+E       AssertionError: assert 'idea' == 'idea_crosslab'
+E         
+E         - idea_crosslab
+E         + idea
+
+tests/unit/test_post_types.py:76: AssertionError
+=============================== warnings summary ===============================
+tests/conftest.py:23
+  /home/ubuntu/cc-rca/tests/conftest.py:23: DeprecationWarning: testcontainers.postgres is deprecated, use testcontainers.community.postgres instead
+    from testcontainers.postgres import PostgresContainer
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_post_types.py::test_the_retired_idea_name_still_resolves
+1 failed, 66 passed, 1 warning in 1.49s
+=> exit 1
+
+######## E9 I2/I4 sizing threshold + E10 I3 compare_row_counts
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -c 
+import importlib.util, sys
+from pathlib import Path
+def load(n,f):
+    s=importlib.util.spec_from_file_location(n, Path("scripts/migrate")/f); m=importlib.util.module_from_spec(s); sys.modules[n]=m; s.loader.exec_module(m); return m
+pf=load("copi_migrate_preflight","preflight.py"); po=load("copi_migrate_postflight","postflight.py")
+for r in (410_416, 410_417):
+    print(r, pf.estimate_lock_window_ms(r), pf.sizing_status(r, pf.estimate_lock_window_ms(r)[1]))
+print("POST_0019_STARTS", pf.POST_0019_STARTS, "DEFAULT_TARGET", pf.DEFAULT_TARGET)
+print("CHAIN_CREATED_TABLES", sorted(po.CHAIN_CREATED_TABLES))
+print(pf.compare_row_counts({"users":3},{"users":3,"assessment_chat_turns":0,"assessment_chat_usage":0},expected_new=po.CHAIN_CREATED_TABLES))
+
+410416 (3333.328, 9999.984) ('PASS', 'worst-case lock window 10.0s.')
+410417 (3333.3360000000002, 10000.008000000002) ('WARN', 'worst-case lock window 10.0s exceeds 10s — schedule a window, do not migrate hot.')
+POST_0019_STARTS ('0020', '0021') DEFAULT_TARGET 0051
+CHAIN_CREATED_TABLES ['cohort_audit_events', 'cohort_memberships', 'cohorts', 'pi_dm_messages']
+(False, ['assessment_chat_turns: table did not exist before the migration, now 0 rows', 'assessment_chat_usage: table did not exist before the migration, now 0 rows'])
+=> exit 0
+
+######## E11 I1: alembic upgrade 0027 from 0050 on a throwaway postgres
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m alembic upgrade 0050
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001, Initial schema
+INFO  [alembic.runtime.migration] Running upgrade 0001 -> 0002, Add llm_call_logs table
+INFO  [alembic.runtime.migration] Running upgrade 0002 -> 0003, Add thread_decisions table, thread_ts and flexible phase to agent_messages, channel to llm_call_logs
+INFO  [alembic.runtime.migration] Running upgrade 0003 -> 0004, Add agents registry and proposal_reviews tables
+INFO  [alembic.runtime.migration] Running upgrade 0004 -> 0005, Add private_profile_md and private_profile_seed columns
+INFO  [alembic.runtime.migration] Running upgrade 0005 -> 0006, Add delegate_slack_ids column to agents
+INFO  [alembic.runtime.migration] Running upgrade 0006 -> 0007, Add web delegate tables and proposal review audit column
+INFO  [alembic.runtime.migration] Running upgrade 0007 -> 0008, Add email notification tables and columns
+INFO  [alembic.runtime.migration] Running upgrade 0008 -> 0009, Add profile_revisions table
+INFO  [alembic.runtime.migration] Running upgrade 0009 -> 0010, Access gate + waitlist
+INFO  [alembic.runtime.migration] Running upgrade 0010 -> 0011, Channel visibility + private channel members
+INFO  [alembic.runtime.migration] Running upgrade 0011 -> 0012, Grantbot posted FOAs table (replaces data/grantbot_posted.json)
+INFO  [alembic.runtime.migration] Running upgrade 0012 -> 0013, Drop agent_registry.slack_app_token (Socket Mode never used)
+INFO  [alembic.runtime.migration] Running upgrade 0013 -> 0014, Add last_login_at to users
+INFO  [alembic.runtime.migration] Running upgrade 0014 -> 0015, Add proposal_votes (public no-login votes on graph proposals)
+INFO  [alembic.runtime.migration] Running upgrade 0015 -> 0016, Add notification categories: email_notification_preferences + category column
+INFO  [alembic.runtime.migration] Running upgrade 0016 -> 0017, Add app_settings (KV) + slack_app_provisions tables for self-service provisioning
+INFO  [alembic.runtime.migration] Running upgrade 0017 -> 0018, Add email hint column to access_allowlist (fallback for private ORCID emails)
+INFO  [alembic.runtime.migration] Running upgrade 0018 -> 0019, Add conversation-content columns to agent_messages (DB becomes primary store)
+INFO  [alembic.runtime.migration] Running upgrade 0019 -> 0020, Add pi_dm_messages table (durable PI<->bot direct messages)
+INFO  [alembic.runtime.migration] Running upgrade 0020 -> 0021, Index the DB inbox pollers' created_at cursor
+INFO  [alembic.runtime.migration] Running upgrade 0021 -> 0022, Add cohorts, cohort_memberships and cohort_audit_events
+INFO  [alembic.runtime.migration] Running upgrade 0022 -> 0023, Add synthesis-provenance columns to researcher_profiles
+INFO  [alembic.runtime.migration] Running upgrade 0023 -> 0024, Add role column to agents (per-role agent customization)
+INFO  [alembic.runtime.migration] Running upgrade 0024 -> 0025, Add opportunity_assessments (BlackbirdBot screening verdicts)
+INFO  [alembic.runtime.migration] Running upgrade 0025 -> 0026, Drop grantbot_posted_foas (GrantBot/FOA surface retired)
+INFO  [alembic.runtime.migration] Running upgrade 0026 -> 0027, Add assessment_drops (make a lost verdict visible)
+INFO  [alembic.runtime.migration] Running upgrade 0027 -> 0028, Add users.user_role (PI / manager / admin account types)
+INFO  [alembic.runtime.migration] Running upgrade 0028 -> 0029, Add opportunity_assessments.panel_incomplete / .missing_domains
+INFO  [alembic.runtime.migration] Running upgrade 0029 -> 0030, Add specialist_consults; stamp assessments with the rubric document version
+INFO  [alembic.runtime.migration] Running upgrade 0030 -> 0031, Normalize opportunity_assessments.missing_domains JSONB 'null' to SQL NULL
+INFO  [alembic.runtime.migration] Running upgrade 0031 -> 0032, Add llm_call_logs.call_stats — the per-API-call breakdown of a logged turn
+INFO  [alembic.runtime.migration] Running upgrade 0032 -> 0033, Badge composites on thread_decisions + the 18 unindexed ondelete-FK targets
+INFO  [alembic.runtime.migration] Running upgrade 0033 -> 0034, Add agents.muted_at / agents.muted_by — mute is a purpose-built control
+over the existing 'inactive' status, not a new status value (design decision
+D2/D3). Both nullable and additive.
+INFO  [alembic.runtime.migration] Running upgrade 0034 -> 0035, Add assessment_drops.raw_verdict, llm_call_logs.wall_ms, thread_decisions.closed_by_role.
+INFO  [alembic.runtime.migration] Running upgrade 0035 -> 0036, Panel-owed truth, interview thread_id, truncated consults, cached-token columns, and two data repairs.
+INFO  [alembic.runtime.migration] Running upgrade 0036 -> 0037, opportunity_assessments.recommended_next_experiment — sidecar item 10 as a column.
+INFO  [alembic.runtime.migration] Running upgrade 0037 -> 0038, specialist_consults: read_state, established, and the first rubric stamp.
+INFO  [alembic.runtime.migration] Running upgrade 0038 -> 0039, reviewer role, review tables, review job type
+INFO  [alembic.runtime.migration] Running upgrade 0039 -> 0040, opportunity_assessments.prose_format — write-time stamp gating markdown rendering.
+INFO  [alembic.runtime.migration] Running upgrade 0040 -> 0041, assessment summary_posted_at — the durable record that a headline posted
+INFO  [alembic.runtime.migration] Running upgrade 0041 -> 0042, simulation control plane: commands, process status, admin audit,
+llm_call_logs.thread_ts
+INFO  [alembic.runtime.migration] Running upgrade 0042 -> 0043, assessment narrative fields + per-dimension human review scores
+INFO  [alembic.runtime.migration] Running upgrade 0043 -> 0044, review rows record who physically entered them when impersonating
+INFO  [alembic.runtime.migration] Running upgrade 0044 -> 0045, llm_call_logs gain thread_phase and message_ordinal
+INFO  [alembic.runtime.migration] Running upgrade 0045 -> 0046, slack_app_provisions records who started the install
+INFO  [alembic.runtime.migration] Running upgrade 0046 -> 0047, pi_grants, pi_industry_evidence, pi_industry_scores + two job types
+INFO  [alembic.runtime.migration] Running upgrade 0047 -> 0048, opportunity_assessments.score_rationale — sidecar item 10 as a column.
+INFO  [alembic.runtime.migration] Running upgrade 0048 -> 0049, opportunity_assessments.strengths / .risks — sidecar items 11/12 as columns.
+INFO  [alembic.runtime.migration] Running upgrade 0049 -> 0050, opportunity_assessments.competitive_landscape / .evidence_maturity — sidecar items 13/14.
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m alembic current
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+0050
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m alembic upgrade 0027
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+=> exit 0
+$ /home/ubuntu/blackbird-copi-science/.venv-test/bin/python -m alembic current
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+0050
+=> exit 0
+container removed
+
+######## E12 I7a: M12b target string present in pubmed.py?
+$ grep -c -F     """Make a rate-limited, identified GET request to NCBI.""" src/services/pubmed.py
+0
+=> exit 1
+
+######## final clone status
+(empty = clean)
