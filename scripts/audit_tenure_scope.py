@@ -45,8 +45,10 @@ DEFAULT_PROFILES_DIR = Path("profiles/public")
 
 # The export renders each publication line as (profile_export.py):
 #   "- Title. *Journal*. (YYYY). https://..."
-# so the year is the LAST parenthesized 4-digit group before the link, and it
-# only ever appears once per bullet.
+# so the year is the LAST parenthesized 4-digit group before the link. It is
+# not the only one: a journal name can carry its own, as in "*Journal of
+# acquired immune deficiency syndromes (1999)*. (2023)." (margolick,
+# 2026-09-25), which the first match misread as a pre-tenure 1999 paper.
 _YEAR_RE = re.compile(r"\((\d{4})\)")
 _RECENT_PUBLICATIONS_HEADING = "## Recent Publications"
 
@@ -74,9 +76,10 @@ def parse_persona_publication_years(markdown_text: str) -> list[int]:
         stripped = line.strip()
         if not stripped.startswith("- "):
             continue
-        match = _YEAR_RE.search(stripped)
-        if match:
-            years.append(int(match.group(1)))
+        before_link = stripped.split(" http", 1)[0]
+        found = _YEAR_RE.findall(before_link)
+        if found:
+            years.append(int(found[-1]))
     return years
 
 

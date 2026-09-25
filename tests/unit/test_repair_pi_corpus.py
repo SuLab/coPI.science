@@ -389,6 +389,17 @@ def test_parse_persona_publication_years_reads_only_the_recent_publications_sect
     assert parse_persona_publication_years(markdown) == [2022, 2019]
 
 
+def test_parse_persona_publication_years_reads_the_year_not_a_year_in_the_journal():
+    # A journal name can carry its own parenthesized year; the publication
+    # year is the last one before the link (margolick, 2026-09-25).
+    markdown = """## Recent Publications
+
+- Sleep and Hypertension. *Journal of acquired immune deficiency syndromes (1999)*. (2023). https://doi.org/10.1097/QAI.0000000000003276
+- A SICI DOI. *J*. (2001). https://doi.org/10.1002/(SICI)1097-0215(2000)80:1
+"""
+    assert parse_persona_publication_years(markdown) == [2023, 2001]
+
+
 def test_parse_persona_publication_years_returns_empty_when_section_absent():
     assert parse_persona_publication_years("# Lab\n\nNo publications here.\n") == []
 
