@@ -138,6 +138,22 @@ def test_the_chat_script_accepts_only_its_own_citation_markers():
     assert "TERMINAL_CODES[code]" in load
 
 
+def test_the_sources_list_is_collapsed_and_quotes_no_record_text():
+    js = JS.read_text(encoding="utf-8")
+    sources = js.split("function renderSources(container, turn, turnKey)", 1)[1]
+    sources = sources.split("\n  }\n", 1)[0]
+    # An entry is its number, its label and "Show in page"; the cited passage is not shown.
+    assert "cited_text" not in js
+    # A button disclosure, never <details>: the page's Expand/Collapse-all script
+    # toggles every <details> in the document, the drawer's included.
+    assert '"details"' not in js
+    assert 'setAttribute("aria-controls"' in sources
+    assert "showSources(toggle, list, openSources.has(turnKey))" in sources
+    # A citation marker opens its turn's list before jumping to the entry.
+    place = js.split("function placeCitations(root, turnKey)", 1)[1].split("\n  }\n", 1)[0]
+    assert "revealSources(turnKey)" in place
+
+
 def test_the_chat_script_names_no_route():
     """URLs come from window.ASSESSMENT_CHAT only; a path literal here would be a
     second, unchecked copy of the routes."""

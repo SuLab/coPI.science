@@ -373,6 +373,8 @@
           const sup = el("sup");
           const link = el("a", "text-indigo-700", "[" + inner + "]");
           link.setAttribute("href", "#chat-src-" + turnKey + "-" + inner);
+          // The entry may be in a collapsed Sources list: open it before the jump.
+          link.addEventListener("click", function () { revealSources(turnKey); });
           sup.appendChild(link);
           if (outer) {
             deferred.push(sup);
@@ -421,31 +423,66 @@
     }
   }
 
+  // Turns whose Sources list is open. The log is rebuilt on every streamed frame
+  // and every history load, so the state lives here, keyed by turn, not in the DOM.
+  const openSources = new Set();
+
+  function showSources(toggle, list, open) {
+    list.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.firstChild.textContent = open ? "▾" : "▸";
+  }
+
+  function revealSources(turnKey) {
+    openSources.add(turnKey);
+    const toggle = document.getElementById("chat-sources-toggle-" + turnKey);
+    const list = document.getElementById("chat-sources-" + turnKey);
+    if (toggle && list) {
+      showSources(toggle, list, true);
+    }
+  }
+
   function renderSources(container, turn, turnKey) {
     const cites = turn.citations || [];
     if (!cites.length) {
       return;
     }
     const box = el("div", "mt-2 border-t border-gray-100 pt-2");
-    box.appendChild(el("div", "text-sm font-semibold uppercase tracking-wide text-gray-600", "Sources"));
+    // Collapsed by default, behind a button rather than <details>: the page's
+    // Expand/Collapse-all script toggles every <details> in the document.
+    const toggle = el("button", "flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-gray-600 hover:text-gray-900");
+    toggle.type = "button";
+    toggle.id = "chat-sources-toggle-" + turnKey;
+    toggle.setAttribute("aria-controls", "chat-sources-" + turnKey);
+    const caret = el("span");
+    caret.setAttribute("aria-hidden", "true");
+    toggle.appendChild(caret);
+    toggle.appendChild(document.createTextNode("Sources (" + cites.length + ")"));
     const list = el("ol", "mt-1 space-y-2 text-sm");
+    list.id = "chat-sources-" + turnKey;
     cites.forEach(function (c) {
-      const item = el("li", "rounded border border-gray-200 p-2");
+      const item = el("li", "flex items-start justify-between gap-2 rounded border border-gray-200 p-2");
       item.id = "chat-src-" + turnKey + "-" + c.n;
-      const head = el("div", "flex items-start justify-between gap-2");
-      head.appendChild(el("span", "font-medium text-gray-800", "[" + c.n + "] " + (c.label || "the record")));
+      item.appendChild(el("span", "font-medium text-gray-800", "[" + c.n + "] " + (c.label || "the record")));
       if (c.anchor) {
         const button = el("button", "shrink-0 text-indigo-700 hover:underline", "Show in page");
         button.type = "button";
         button.addEventListener("click", function () { showInPage(c.anchor); });
-        head.appendChild(button);
-      }
-      item.appendChild(head);
-      if (c.cited_text) {
-        item.appendChild(el("p", "mt-1 line-clamp-4 whitespace-pre-line text-gray-600", c.cited_text));
+        item.appendChild(button);
       }
       list.appendChild(item);
     });
+    toggle.addEventListener("click", function () {
+      const open = list.hidden;
+      if (open) {
+        openSources.add(turnKey);
+      } else {
+        openSources.delete(turnKey);
+      }
+      showSources(toggle, list, open);
+    });
+    showSources(toggle, list, openSources.has(turnKey));
+    box.appendChild(toggle);
     box.appendChild(list);
     container.appendChild(box);
   }

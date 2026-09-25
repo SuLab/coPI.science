@@ -935,8 +935,8 @@ same value; a test renders both detail pages.
   `a.id` is a server-generated UUID, so autoescape leaves it intact; this is also what
   credits the routes in the reachability gate (F7). Any string value added later goes
   through `| tojson`. Limits come from the GET response, not the template.
-- Body: turns — each question as text, each answer rendered (§8.3) with a numbered
-  **Sources** list — and a marker where the replay window begins. Three static starter
+- Body: turns — each question as text, each answer rendered (§8.3) with a collapsed,
+  numbered **Sources** list — and a marker where the replay window begins. Three static starter
   questions when empty ("What is being proposed, in plain terms?", "What were the hub's
   main concerns, and how did the lab's agent answer them?", "What would Blackbird fund
   next, and what result would change the recommendation?") fill the textarea without
@@ -976,11 +976,17 @@ same value; a test renders both detail pages.
   link text. Any other `<a>` — including one DOMPurify left without an `href` because it
   was not `https:` — becomes plain text followed by its URL in parentheses, or by nothing
   when it has none.
-- **Sources.** Each entry shows the number, the label and `cited_text` (clamped,
-  `textContent`, `> ` prefixes removed) and a "Show in page" button: open `#timeline` if
-  the anchor is inside it, `scrollIntoView` the element from `getElementById(anchor)`
-  (never a selector built from data), highlight it for 2.5 s, and close the drawer below
-  `md`.
+- **Sources.** Collapsed by default behind a "Sources (N)" button with `aria-expanded`
+  and `aria-controls`. It is not `<details>` (§8.2). Which turns' lists are open
+  survives the re-renders of streaming and history reloads. A click on a citation
+  marker opens its turn's list before jumping to the entry. Each entry shows the number,
+  the label and a "Show in page" button. `cited_text` is stored and sent, but not shown.
+  The button:
+  - opens `#timeline` if the anchor is inside it;
+  - calls `scrollIntoView` on the element from `getElementById(anchor)` (never a
+    selector built from data);
+  - highlights it for 2.5 s;
+  - closes the drawer below `md`.
 - **States**, each from a fixed string table keyed by status or error code:
   "Thinking…", streaming, refused ("The model declined to answer this (category:
   {category}). Try rephrasing."), answered by another model ("Answered by
@@ -1008,7 +1014,7 @@ same value; a test renders both detail pages.
 | S9 | Exfiltration through a model-written link or image (the injected instruction can come from a review comment, a lab agent or a Slack post) | no remote-loading tags; links inert while streaming; afterwards clickable only if the exact URL is in that tier's record, enforced server-side and client-side (D20) | unit test of the rewrite; browser check (§11.4) |
 | S10 | Forged speaker ("Vogelstein (PI)", "BlackbirdBot") | labels built from `agent_id`; NULL-`agent_id` rows shown as an unverified display name; all record text quoted with `> `; the prompt forbids "the PI said" | record-builder and prompt-contract tests |
 | S11 | Other prompt injection | no tools, so the worst outcome is a wrong or misleading answer, checkable through citations | prompt-contract test; manual eval (§13) |
-| S12 | XSS | only DOMPurify output reaches `innerHTML`; questions, labels and `cited_text` via `textContent`; anchors via `getElementById`; config holds only UUIDs | crafted-answer check (§11.4) |
+| S12 | XSS | only DOMPurify output reaches `innerHTML`; questions and labels via `textContent` (`cited_text` is not rendered); anchors via `getElementById`; config holds only UUIDs | crafted-answer check (§11.4) |
 | S13 | Cost abuse | 100 questions and $20 per user, $100 in total, per rolling 24 h from the ledger (survives Clear, restarts and deletions); one answer in flight; 4 000-character questions; 150 000-character history window; 50 turns; 240 s deadline; `max_tokens` 12 000 | cap, ceiling and window tests |
 | S14 | Content in logs | app logs carry ids, tier, status, models, tokens, latency; every chat route catches `SQLAlchemyError` at its boundary and the producer catches its own, logging the exception class only; NUL rejected before the DB | log-capture tests with a forced DB error at the step-10 INSERT and at persistence |
 | S15 | Reviewers pasting bot text into the reviews the review bot learns from | the bot declines to write reviews or propose scores (D13); chat content never feeds the review bot or any prompt | prompt-contract test |
