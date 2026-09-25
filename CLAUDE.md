@@ -67,9 +67,9 @@ container, no manual database, no env var needed. This is exactly what
 > is_given(timeout) and self._client.timeout == DEFAULT_TIMEOUT`, and
 > `_client_for_key` now constructs its client with
 > `anthropic.Timeout(CLIENT_READ_TIMEOUT_SECONDS, connect=5.0)`
-> (`src/services/llm.py:41`, `:121`) — so that condition is permanently false
+> (`src/services/llm.py:41`, `:145`) — so that condition is permanently false
 > and the SDK will happily send a request the API rejects. `_acreate`'s own
-> check, which raises `NonStreamingMaxTokensError` (`:207`, raised at `:373`),
+> check, which raises `NonStreamingMaxTokensError` (`:216`, raised at `:382`),
 > is now the ONLY enforcement in the process. Do not remove it on the grounds
 > that the SDK checks too; it does not.
 
@@ -84,8 +84,8 @@ If that path is ever restored, `TEST_DATABASE_URL` becomes required again: the
 web container has no Docker socket, so without it every test that needs a
 database errors out (469 of them when that was measured on 2026-08-04 — treat
 it as a floor, not a current count: the 2026-08-22 correctness branch alone
-added 17 test files, many DB-backed, and the suite is now 183 `test_*.py`
-files):
+added 17 test files, many DB-backed, and the suite is now 287 `test_*.py`
+files, as of 2026-09-24):
 
 ```bash
 docker compose -f docker-compose.prod.yml exec -T \
@@ -181,7 +181,7 @@ with it. Measured 2026-08-22, before the fix: `llm_call_logs` held 10 runs and
 8b64a0e0's 1,354 messages were gone, 57 of 64 assessments carried a `slack_ts`
 that resolved to no message, and the assessment detail page's interview
 timeline was empty for 90% of the corpus. `_open_fresh_run`
-(`src/agent/main.py:99`) now only mints a new `SimulationRun` row: **the new
+(`src/agent/main.py:114`) now only mints a new `SimulationRun` row: **the new
 `simulation_run_id` IS the isolation**, every startup and main-loop read is
 already run-scoped (true since 2026-08-28 — `thread_decisions`/`proposal_reviews`
 were the unscoped exceptions until then, which fed prior runs' interview
@@ -235,14 +235,14 @@ was announced is recorded under `run_start_announcement` in
 > stored `thread_reply` rows are 2+ calls. `_on_llm_call` now books the
 > unbooked `kind == "round"` entries live, and the restart rebuild moved with it
 > (`COALESCE(jsonb_array_length(call_stats), 1)`, steps 4 and 4b of
-> `_rebuild_agent_state`, `simulation.py:6569`) — otherwise every restart would
+> `_rebuild_agent_state`, `simulation.py:8143`) — otherwise every restart would
 > silently loosen the throttle by the calls-to-turns ratio. The COALESCE is
 > load-bearing, not tidiness: 4,650 of 5,771 stored rows have `call_stats IS
 > NULL` (the column arrived in `0032`) and NULL propagates through SUM.
 >
 > The practical effect: `llm_calls_per_load_per_window` is still **8**
-> (`src/config.py:412`) and `hub_llm_calls_per_window` still **600**
-> (`src/config.py:418`), but each now buys roughly 2-3x FEWER effective turns
+> (`src/config.py:452`) and `hub_llm_calls_per_window` still **600**
+> (`src/config.py:458`), but each now buys roughly 2-3x FEWER effective turns
 > for any agent whose turns use tool rounds — which is the hub, on essentially
 > every `thread_reply`. Expect the hub to be throttled sooner and to take fewer
 > turns per window than the pre-2026-08-22 calibration notes in `config.py`
@@ -277,7 +277,7 @@ DC="docker compose -f docker-compose.prod.yml"
 #    still exceed that.
 #
 #    How many real API calls a turn can be, corrected 2026-08-22: the loop is
-#    `range(max_tool_rounds + 1)` (src/services/llm.py:1346), so the setting
+#    `range(max_tool_rounds + 1)` (src/services/llm.py:1360), so the setting
 #    UNDER-counts by one. A turn is 1..8 billed calls at the default
 #    `max_tool_rounds=5` — up to max_tool_rounds + 1 tool-capable calls, then a
 #    terminating or forced-final call, then at most one max_tokens retry. The
@@ -394,7 +394,7 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 > After any `src/` change, always run `$DC --profile agent build agent` before
 > starting a new run, and check the startup banner matches what you expect.
 
-**Note:** The agent-run container loads Python modules only at startup, so **code**
+**Note:** The agent container loads Python modules only at startup, so **code**
 changes require rebuilding the image (above) and restarting the container. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
 
 **`.env` changes need a container *recreate*, not a restart.** `env_file` is
@@ -478,7 +478,7 @@ once the supervisor has checked in even once in an environment, a later
 
 **The `AgentRegistry` table is the single source of truth for the agent roster.**
 There is no longer a `PILOT_LABS` list and no per-agent `config.py` token fields to
-edit. A running `agent-run` re-syncs the roster from the DB every ~30s
+edit. A running simulation engine re-syncs the roster from the DB every ~30s
 (`_sync_roster_from_db`), so flipping an agent to `status='active'` (with a token on
 its row) makes it go live **without a restart**.
 
@@ -568,7 +568,7 @@ authoritative.)
 
 ## The Origin guard (every non-GET request, added 2026-08-22)
 
-`OriginGuardMiddleware` (`src/main.py:107`) refuses any request whose method is
+`OriginGuardMiddleware` (`src/main.py:120`) refuses any request whose method is
 not GET/HEAD/OPTIONS unless it proves it came from our own origin. It is added
 LAST in `create_app` and is therefore the OUTERMOST middleware — a forged POST
 is refused before the session is even opened — and that position is pinned
@@ -585,11 +585,11 @@ Three operator consequences, in order of how much they will cost you:
 1. ⚠️ **A wrong or missing `BASE_URL` fails the site CLOSED, site-wide.** The
    expected origin is `normalized_origin(settings.base_url)`, and when that is
    `None` the guard sets `allowed = False` unconditionally rather than comparing
-   equal to everything (`src/main.py:163-166`). Every login POST, every form,
+   equal to everything (`src/main.py:176-179`). Every login POST, every form,
    every admin action 403s with `Cross-site request refused.` while GETs keep
    rendering normally — so the site looks up. Production is
    `BASE_URL=https://blackbird.copi.science` (`.env:31`); the *default* is
-   `http://localhost:8000` (`src/config.py:135`), which is a perfectly valid
+   `http://localhost:8000` (`src/config.py:140`), which is a perfectly valid
    origin and will therefore silently refuse everything in production. Ports are
    normalised (`https://host:443` == `https://host`) and a trailing slash is
    tolerated, so those are not the failure mode; a scheme/host mismatch is.
@@ -617,8 +617,8 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0042`+ — `0031`
-through `0041` are all taken now: `0038` went to
+defaulted. Dropping it is deferred to a separate later migration (`0052`+ — `0031`
+through `0051` are all taken now: `0038` went to
 `specialist_consults`'s `read_state`/`established`/rubric stamp instead, `0039`
 to the reviewer-role/review-tables migration instead, `0040` went to
 `prose_format`, and `0041` to `summary_posted_at`, see the
@@ -686,8 +686,9 @@ doc's §8.
   *impersonated* user, with the real admin recorded in the new
   `recorded_by_user_id` second signature (`assessment_reviews` and
   `assessment_review_events`, migration `0044`; NULL means the named user acted
-  in person). The three non-review actions on that router —
-  reviewer assign, unassign, and prompt-suggestion status — still refuse an
+  in person). The four non-review actions on that router —
+  reviewer assign, unassign, prompt-suggestion generate, and prompt-suggestion
+  status — still refuse an
   impersonated session outright (`_refuse_impersonation`,
   `src/routers/reviews.py`).
 - **Admin** — everything, including `/admin/*` and impersonation.
@@ -703,10 +704,10 @@ the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 
 guard locks admins out of their own account — `/profile` bounces an admin whose
 onboarding is incomplete to `/onboarding`, and only `POST /onboarding/save-profile` can
 ever clear that flag. The **five** PI-write POSTs — `/onboarding/save-profile`
-(`src/routers/onboarding.py:139`), `/onboarding/retry` (`:255`), `/profile/save`
-(`src/routers/profile.py:113`), `/profile/refresh` (`:141`) and `/agent/request`
-(`src/routers/agent_page.py:414`) — are gated on **`get_pi_user`** in
-`src/dependencies.py:177`, which 403s a manager and lets an admin through. A
+(`src/routers/onboarding.py:134`), `/onboarding/retry` (`:256`), `/profile/save`
+(`src/routers/profile.py:130`), `/profile/refresh` (`:168`) and `/agent/request`
+(`src/routers/agent_page.py:387`) — are gated on **`get_pi_user`** in
+`src/dependencies.py:182`, which 403s a manager and lets an admin through. A
 read-only redirect is not enough there: `save-profile` writes
 `onboarding_complete` and creates the profile, which is the whole gate on
 `/agent/request` — so an ungated pair is a manager with a lab bot.
@@ -728,7 +729,7 @@ New managers are provisioned in two steps: they sign in with ORCID (landing on
 `/access-pending`), an admin approves them at `/admin/access-requests`, then sets their
 role. Between approval and role-setting the account behaves as a PI.
 
-**Revoking access now ends the session immediately** (`src/dependencies.py:72`,
+**Revoking access now ends the session immediately** (`src/dependencies.py:104`,
 fixed 2026-08-22 as E1.2). Sessions are unkeyed signed cookies with a 30-day
 `max_age` and no server-side store, so `users.access_status` is the only
 revocation signal there is — and nothing read it after login, so
@@ -890,7 +891,7 @@ hub reads and the score the code computes cannot drift apart. The `<assessment_j
 skeleton stays in `prompts/roles/scout_hub/phase4-thread-reply.md` (it is the
 authoritative contract for the sidecar's shape);
 `tests/unit/test_rubric_prompt_sync.py` is the drift alarm between the two, plus
-`specialists.py`'s `maps_to_dimension`. The per-phase behaviour otherwise lives in
+`specialists.py`'s `maps_to_dimensions`. The per-phase behaviour otherwise lives in
 `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`.
 
 **The review bot is a separate consumer of `prompts/`, not part of BlackbirdBot's
@@ -1026,16 +1027,16 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > `.cache_creation_input_tokens`**, so against a pre-`0036` database:
 >
 > * `/admin/assessments` and `/manager/assessments` raise `UndefinedColumn` —
->   both the `select(OpportunityAssessment)` at `src/services/directory.py:288`
+>   both the `select(OpportunityAssessment)` at `src/services/directory.py:461`
 >   and the unvetted-panel banner COUNT, which names `panel_owed` through
 >   `unvetted_panel_filter()`;
 > * both assessment DETAIL pages raise — `select(OpportunityAssessment)` at
->   `src/services/assessment_detail.py:503` and `select(SpecialistConsult)` at
->   `:731`;
+>   `src/services/assessment_detail.py:1086` and `select(SpecialistConsult)` at
+>   `:1488`;
 > * `/admin/activity/{run_id}/llm-calls` raises — `select(LlmCallLog)` at
->   `src/routers/admin.py:379`;
-> * on the engine side the LLM-log writer (`simulation.py:6987`) and the consult
->   writer (`:4293`) name the new columns in their INSERTs, so every
+>   `src/routers/admin.py:487`;
+> * on the engine side the LLM-log writer (`simulation.py:8365`) and the consult
+>   writer (`:5567`) name the new columns in their INSERTs, so every
 >   `llm_call_logs` flush and every `specialist_consults` row fails — the flush
 >   path will say LOST with a row count, which is the loud half; the consult
 >   write is best-effort and is the silent half.
@@ -1051,7 +1052,8 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >
 > The agent image bakes `src/` in too and must be rebuilt separately
 > (`$DC --profile agent build agent`). Production was at `0035` and this branch
-> is `0036`, so this box applies to the next deploy, not to some hypothetical one.
+> was `0036` when this was written, so this box applied to the next deploy, not to
+> some hypothetical one.
 
 > **Deploy order for `0037_recommended_next_experiment` — migrate BEFORE the new
 > code serves.** `0037` is one additive nullable Text column
@@ -1108,11 +1110,12 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > database `select(SpecialistConsult)` at `src/services/assessment_detail.py`
 > — read by both assessment detail pages, admin's and manager's — raises
 > `UndefinedColumn`, and on the engine side `_record_specialist_consult`'s
-> INSERT (`src/agent/simulation.py:4366`) names all four, so every
+> INSERT (`src/agent/simulation.py:5567`) names all four, so every
 > `specialist_consults` write fails too. (The discussions panel cards at
-> `src/services/thread_panel.py` select an explicit column list that names
-> none of the four, so that page is unaffected either way — the migration's
-> own docstring originally overclaimed this and has been corrected.) Build,
+> `src/services/thread_panel.py` select an explicit column list that named
+> none of the four when this box was written; it now names `read_state`, so that
+> page raises against a pre-`0038` database too, and the migration's own
+> docstring, which says it is unaffected, predates that change.) Build,
 > migrate from a one-off container, then start — same ordering as
 > `0028`/`0030`/`0036`/`0037`:
 >
@@ -1123,8 +1126,8 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >     $DC up -d blackbird-app worker
 >
 > The agent image bakes `src/` in too and must be rebuilt separately
-> (`$DC --profile agent build agent`). Production is stamped `0037`, so this
-> box applies to the next deploy, not to some hypothetical one.
+> (`$DC --profile agent build agent`). Production was stamped `0037` when this
+> was written, so this box applied to the next deploy, not to some hypothetical one.
 >
 > **`established` IS written, as of the 2026-08-28 persona-contract change.**
 > This box previously said it was "knowingly unwritten"; that stopped being
@@ -1257,7 +1260,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > nobody is tailing while the Slack replies keep looking completely normal.
 > That is the silent half, and it is the same shape as the 2026-08-06 near-miss
 > this file already records. `submit_feedback` and `edit_feedback`
-> (`src/services/assessment_reviews.py:196-208`, `:257-259`) unconditionally
+> (`src/services/assessment_reviews.py:338-347`, `:405-407`) unconditionally
 > assign `dimension_scores`/`rubric_version`/`rubric_content_hash` on every
 > human review submission and edit too, so those ALSO fail against a
 > pre-`0043` database — but LOUDLY, not silently: neither call site is wrapped
@@ -1285,13 +1288,13 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > wrote. Every read path degrades — `headline` falls back to
 > `company_or_project`, absent bullets and pitch render nothing, and the
 > `#assessments-summary` headline omits the pitch segment entirely. Expect the
-> new card list and the new detail brief to look, for the 12 rows currently on
+> new card list and the new detail brief to look, for the 12 rows then on
 > record, almost exactly like the pages they replaced; the narrative half
 > arrives with the first interview a rebuilt agent concludes.
 >
-> Production is stamped `0042`, so this box applies to the next deploy — as
-> does the combined `0044`/`0045`/`0046` box immediately below it, which ships
-> in the same deploy.
+> Production was stamped `0042` when this was written, so this box applied to the
+> next deploy — as does the combined `0044`/`0045`/`0046` box immediately below
+> it, which ships in the same deploy.
 
 > **Deploy order for `0044` + `0045` + `0046` — migrate BEFORE the new code
 > serves.** These three land together (2026-09-10, the seven-feature branch) and
@@ -1665,7 +1668,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > `opportunity_assessments` rows are the cross-version comparison corpus —
 > each is stamped (`rubric_version`, `rubric_content_hash`) and the read
 > paths render it against that revision via `prompts/rubric/revisions.toml`
-> + `src/services/rubric_revisions.py`. Three standing rules:
+> + `src/services/rubric_revisions.py`. Four standing rules:
 >
 > 1. **A rubric regime change is "stamp and keep", never a purge.** The one
 >    purge on record (2026-08-27, rubric v3) deleted all 82 pre-3.2.0 rows;
@@ -1697,7 +1700,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
-(`_sidecar_refusal`, `src/agent/simulation.py:3765`): emitting one IS the hub
+(`_sidecar_refusal`, `src/agent/simulation.py:4872`): emitting one IS the hub
 saying "this is my verdict", so `_capture_hub_assessment` stores it whether or
 not the reply ends the interview. The only refusal left is a re-capture —
 `duplicate_thread_verdict`, for a turn already stored, for anything after a
@@ -1844,8 +1847,9 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   old `value[:600]` cut every published headline mid-word (`...picked by univ`,
   `...(as oppose`, `...built on a handfu`). `_clip_at_sentence`
   (`src/services/assessment_headline.py`) now cuts after the last sentence
-  terminator leaving at least half the budget, falls back to the last space with
-  a `" ..."` marker, and returns a short pitch byte-identically unchanged.
+  terminator leaving at least half the budget, falls back to the last space, marks
+  either cut with a `" …"` suffix, and returns a short pitch byte-identically
+  unchanged.
   **`score_rationale` (sidecar item 10, migration `0048`) is deliberately NOT
   published here** — it reasons about the score, which is exactly the widening
   D12 bounds; it is app-only, on both assessment surfaces. Band/score
@@ -1858,7 +1862,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   simulation, only human staff who join the channel directly. The post fires synchronously
   right after `_persist_assessment` returns HELD inside `_capture_hub_assessment` — but
   only for a verdict that is **TERMINAL and not already announced** for that interview
-  (`announce = terminal and not already_announced`, `simulation.py:3236`). That
+  (`announce = terminal and not already_announced`, `simulation.py:3639`). That
   condition is not the same as "held", and the difference arrived with provisional
   storage: since a non-terminal sidecar is now STORED rather than refused, one interview
   can hold several verdicts in turn, and a headline is a public Slack post that cannot be
@@ -1894,7 +1898,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   `opportunity_assessments` and neither is derived from the other.
   A fourth write-time fact joined them in `0036`: **`panel_owed`**, the specialist
   floor's own answer to "was a panel owed here", computed once by `panel_is_owed` in
-  `_persist_assessment` (`simulation.py:3631`) and **replayed** by the read path rather
+  `_persist_assessment` (`simulation.py:4528`) and **replayed** by the read path rather
   than recomputed. That is the point of the column. `assessment_detail.panel_state`
   used to ask `panel_is_owed(recommendation, band)` at RENDER time, which answers a
   different question — "would a panel be owed under TODAY's rules" — so every widening
