@@ -109,46 +109,123 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
-#: F3. scout_hub >= 1.3.0 emits `key_points` as named groups rather
-#: than one flat 3-5 bullet list; since scout_hub 1.4.0 there are FIVE of them
-#: (`clinical_actionability` and `key_questions` joined the original three).
-#: The (key, label) order here is also the render order on both assessment
-#: surfaces. Registered as a Jinja global (see the
-#: `templates = Jinja2Templates(...)` site) rather than threaded through every
-#: context dict, per the admin assessments handler's no-new-context-key rule.
+#: scout_hub >= 1.8.0 (the 2026-09-22 Blackbird review): six named groups, in
+#: the reviewer's own labels. The (key, label) order is the render order on
+#: both assessment surfaces and in the assessment-chat record, all of which
+#: render through `key_point_sections` below.
 KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
+    ("indication_audience", "Indication / Audience"),
+    ("lab_background", "Lab Background"),
+    ("proposal", "Proposal"),
+    ("clinical_actionability", "Clinical Actionability"),
+    ("key_questions", "Key Questions/Experiment"),
+    ("commercial_opportunity", "Commercial Opportunity"),
+)
+
+#: scout_hub 1.3.0-1.7.1 (1.3.0 carried the first, second and last). Kept for
+#: two reasons only: a stored verdict renders under the labels and order it was
+#: written with (design D2), and a sidecar from a stale prompt still stores
+#: rather than losing the field to `raw_verdict`.
+LEGACY_KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
     ("significance", "Significance"),
     ("innovation", "Innovation"),
     ("clinical_actionability", "Clinical actionability"),
     ("key_questions", "Key questions / experiments"),
     ("commercial_potential", "Commercial potential"),
 )
-_KEY_POINT_KEYS = frozenset(k for k, _ in KEY_POINT_GROUPS)
+
+_CURRENT_KEY_POINT_KEYS = frozenset(k for k, _ in KEY_POINT_GROUPS)
+_LEGACY_KEY_POINT_KEYS = frozenset(k for k, _ in LEGACY_KEY_POINT_GROUPS)
+_LEGACY_ONLY_KEY_POINT_KEYS = _LEGACY_KEY_POINT_KEYS - _CURRENT_KEY_POINT_KEYS
+_CURRENT_ONLY_KEY_POINT_KEYS = _CURRENT_KEY_POINT_KEYS - _LEGACY_KEY_POINT_KEYS
+
+#: Write-time acceptance: the UNION. A rename that accepted only the current
+#: keys would drop `key_points` in both skew directions — a 1.8.0 prompt on an
+#: old image, and a stale prompt on this one.
+KEY_POINT_ACCEPTED_KEYS: frozenset[str] = _CURRENT_KEY_POINT_KEYS | _LEGACY_KEY_POINT_KEYS
+
+
+def key_point_shape(value: object) -> str | None:
+    """``"flat"`` (<= 1.2.0 list), ``"legacy"`` (a legacy-only key and no
+    current-only key), ``"current"``, ``"mixed"`` (both), or None for anything
+    that is not a list or a non-empty dict.
+
+    A dict holding only the keys both sets share (`clinical_actionability`,
+    `key_questions`) classifies as ``"current"``; no stored row has that shape
+    (measured 2026-09-25), and the two sets label those groups alike.
+    """
+    if isinstance(value, list):
+        return "flat"
+    if not isinstance(value, dict) or not value:
+        return None
+    keys = set(value)
+    legacy = bool(keys & _LEGACY_ONLY_KEY_POINT_KEYS)
+    current = bool(keys & _CURRENT_ONLY_KEY_POINT_KEYS)
+    if legacy and current:
+        return "mixed"
+    return "legacy" if legacy else "current"
+
+
+def _clean_bullets(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [x.strip() for x in value if isinstance(x, str) and x.strip()]
+
+
+def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
+    """The renderable key-point sections of a stored value, in display order.
+
+    A grouped value yields ``(label, bullets)`` pairs: a legacy-shaped row uses
+    `LEGACY_KEY_POINT_GROUPS`; every other row uses `KEY_POINT_GROUPS` followed
+    by any legacy-only group it also carries, so nothing stored is hidden. A
+    flat list yields one ``(None, bullets)`` pair. Only non-empty groups are
+    returned — blank bullets dropped, unknown keys and non-list values ignored —
+    so "is there anything to show" is the truthiness of the result. Both
+    assessment templates and the chat record render from this, which is what
+    keeps the page and the record identical.
+    """
+    shape = key_point_shape(value)
+    if shape == "flat":
+        bullets = _clean_bullets(value)
+        return [(None, bullets)] if bullets else []
+    if shape is None:
+        return []
+    if shape == "legacy":
+        groups = LEGACY_KEY_POINT_GROUPS
+    else:
+        groups = KEY_POINT_GROUPS + tuple(
+            (key, label) for key, label in LEGACY_KEY_POINT_GROUPS
+            if key in _LEGACY_ONLY_KEY_POINT_KEYS
+        )
+    sections: list[tuple[str | None, list[str]]] = []
+    for key, label in groups:
+        bullets = _clean_bullets(value.get(key))
+        if bullets:
+            sections.append((label, bullets))
+    return sections
 
 
 def normalize_key_points(value: object) -> list | dict | None:
-    """Accept the legacy flat list (rows written under scout_hub <= 1.2.0), the
-    three-group object (1.3.0) or the five-group object (1.4.0). Anything else
-    is None: a malformed narrative field never costs the verdict (A20);
-    raw_verdict keeps it.
+    """Write-time shape check for the sidecar's ``key_points``.
 
-    A SUBSET of the known group keys is accepted, not exact set equality.
-    Equality meant one omitted group stored `key_points = NULL` and lost the
-    WHOLE field to `raw_verdict` — the strictest possible reaction to the
-    mildest possible defect, and a worse outcome than storing the partial
-    object, which both surfaces already render correctly because they iterate
-    `KEY_POINT_GROUPS` and `.get` each group rather than assuming all five are
-    present. An UNKNOWN key is still rejected outright: that is real shape
-    drift, not an omission, and `_persist_assessment`'s warning path plus
-    `test_skeleton_carries_the_narrative_fields` are what catch it. An empty
-    dict is rejected too — it carries nothing to render.
+    Accepts the flat list (<= 1.2.0) and any grouped object whose keys are a
+    non-empty SUBSET of `KEY_POINT_ACCEPTED_KEYS` — current, legacy or both —
+    with every value a list of strings. Blank bullets are stripped. Anything
+    else is None: a malformed narrative field never costs the verdict (A20),
+    and `raw_verdict` keeps the original.
+
+    A subset, not exact set equality: equality meant one omitted group stored
+    `key_points = NULL` and lost the WHOLE field, the strictest possible
+    reaction to the mildest possible defect. An UNKNOWN key is still rejected
+    outright — that is real shape drift, and `_persist_assessment` logs it. An
+    empty dict is rejected too; it carries nothing to render.
     """
     if isinstance(value, list) and all(isinstance(x, str) for x in value):
-        return value
-    if isinstance(value, dict) and value and set(value) <= _KEY_POINT_KEYS and all(
+        return [x.strip() for x in value if x.strip()]
+    if isinstance(value, dict) and value and set(value) <= KEY_POINT_ACCEPTED_KEYS and all(
         isinstance(v, list) and all(isinstance(x, str) for x in v) for v in value.values()
     ):
-        return value
+        return {k: [x.strip() for x in v if x.strip()] for k, v in value.items()}
     return None
 
 

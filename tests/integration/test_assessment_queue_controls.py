@@ -1144,6 +1144,25 @@ async def test_the_list_page_renders_the_pitch_and_key_points_side_by_side(
     assert "POINTS-MARKER" in html
 
 
+async def test_the_card_renders_the_six_groups_in_order(client, db_session, admin):
+    run, _ = await _seed_narrative_row(
+        db_session, project="Six Groups Co",
+        elevator_pitch="PITCH-MARKER: one tube of blood, two-week answer.",
+        key_points={
+            "commercial_opportunity": ["C-MARK"], "lab_background": ["L-MARK"],
+            "indication_audience": ["I-MARK"], "proposal": ["P-MARK"],
+            "key_questions": ["Q-MARK"], "clinical_actionability": ["A-MARK"],
+        },
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    block = html[html.index("assessment-card-points"):]
+    marks = ["I-MARK", "L-MARK", "P-MARK", "A-MARK", "Q-MARK", "C-MARK"]
+    assert [block.index(m) for m in marks] == sorted(block.index(m) for m in marks)
+    assert "Indication / Audience" in block and "Commercial Opportunity" in block
+
+
 async def test_a_row_with_no_pitch_or_points_renders_neither_box(
     client, db_session, admin
 ):
@@ -1227,6 +1246,10 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
     bytes each for the box's "no score rationale" line instead — still less
     than the block that was removed.
 
+    FIXTURE CHANGED 2026-09-25 (scout_hub 1.8.0): the key points are now the
+    six current groups at 1/2/2/2/1/2 bullets of 225 characters each, not five
+    groups x 2 short bullets, so both tables above predate this fixture.
+
     CEILING is the populated 50-row measurement plus ~20%. If a change pushes
     past it, raise it in the same commit to the newly MEASURED number and
     record the measurement here — no speculative headroom. It is deliberately
@@ -1242,13 +1265,13 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
         "of blood, inside the two-week decision window an oncologist has. "
     ) * 4
     why = "Scored on the retrospective cohort's strength and the IP position's weakness. " * 4
-    points = {
-        key: [f"{key} point one for triage", f"{key} point two for triage"]
-        for key in (
-            "significance", "innovation", "clinical_actionability",
-            "key_questions", "commercial_potential",
-        )
+    counts = {
+        "indication_audience": 1, "lab_background": 2, "proposal": 2,
+        "clinical_actionability": 2, "key_questions": 1, "commercial_opportunity": 2,
     }
+    bullet = ("A complete claim of realistic length for triage, naming the disease, "
+              "the population, the asset and the evidence it rests on. ") * 2
+    points = {key: [bullet[:225]] * n for key, n in counts.items()}
     for i in range(50):
         db_session.add(OpportunityAssessment(
             simulation_run_id=run.id, agent_id="blackbird",

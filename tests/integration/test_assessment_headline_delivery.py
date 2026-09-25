@@ -616,3 +616,39 @@ async def test_a_superseded_verdict_carries_its_headline_stamp_forward(
         ], "the retirement of the superseded row is recorded"
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_an_owed_headline_uses_the_rows_stored_band_not_a_live_recompute(
+    engine, monkeypatch,
+):
+    """Rubric 3.5.0 changed the weights: a verdict stored under 3.4.0 that still
+    owes its headline must be announced with the band it was GIVEN. The live
+    recomputation is sabotaged here so a regression cannot pass by accident."""
+    import src.services.assessment_headline as headline_module
+
+    monkeypatch.setattr(headline_module, "_rubric_weighted_score", lambda _s: 1.0)
+    monkeypatch.setattr(headline_module, "_rubric_band", lambda _s: "pass")
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, _agent = _hub(factory, run_id)
+    _wire_summary_channel(sim)
+    client = sim.slack_clients["blackbird"]
+    async with factory() as db:
+        db.add(OpportunityAssessment(
+            simulation_run_id=run_id, agent_id="blackbird",
+            channel_name="single-cell-omics", thread_id="owed-stored-band",
+            recommendation="advance", weighted_score=3.4, band="advance",
+            scores={"differentiation_unmet_need": 3, "scientific_credibility": 3,
+                    "translational_path": 3, "fundable_experiment": 5,
+                    "venture_potential": 3, "team_executability": 4},
+        ))
+        await db.commit()
+    try:
+        assert await sim._announce_owed_headline("owed-stored-band", trigger="test")
+        [posted] = _headlines(client)
+        assert "band: advance, score: 3.4" in posted["text"]
+        assert "band: pass" not in posted["text"]
+    finally:
+        await _delete_run(factory, run_id)

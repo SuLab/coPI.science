@@ -25,15 +25,15 @@ from src.services.blackbird_rubric import (
     render_rubric_markdown,
 )
 
-# The exact weights of the 2026-08-27 consolidation, in display order. Literal
+# The exact weights of the 2026-09-25 3.5.0 document, in display order. Literal
 # on purpose: this test must fail when the document changes.
 EXPECTED_WEIGHTS = {
     "differentiation_unmet_need": 25,
-    "scientific_credibility": 20,
-    "translational_path": 15,
+    "scientific_credibility": 25,
+    "translational_path": 25,
     "fundable_experiment": 15,
-    "venture_potential": 15,
-    "team_executability": 10,
+    "venture_potential": 5,
+    "team_executability": 5,
 }
 
 # The evidence lists (BBL's Target Rubric, folded into the dimension each item
@@ -62,7 +62,7 @@ EXPECTED_EVIDENCE = {
 # document fails loudly here instead of silently testing nothing.
 _TEAM_BLOCK = """[[dimension]]
 key = "team_executability"
-weight = 10
+weight = 5
 title = "Team & executability"
 anchors = "PI credibility and lab capability to execute the de-risking plan in 12–24 months; complementary expertise identified, not necessarily hired."
 specialist = "talent"
@@ -103,11 +103,11 @@ def test_characterization_evidence_lists_are_pinned():
     assert evidence == EXPECTED_EVIDENCE
 
 
-def test_characterization_science_block_is_35_points():
-    # The two scientific dimensions carry 35% — the stake the scoring preamble
+def test_characterization_science_block_is_50_points():
+    # The two scientific dimensions carry 50% — the stake the scoring preamble
     # states in prose (test_rubric_prompt_sync recomputes the prose claim).
     science = ("scientific_credibility", "translational_path")
-    assert sum(RUBRIC_WEIGHTS[k] for k in science) == 35
+    assert sum(RUBRIC_WEIGHTS[k] for k in science) == 50
 
 
 def test_version_and_content_hash_are_exported():
@@ -122,8 +122,10 @@ def test_version_and_content_hash_are_exported():
     # weighted_score, the milestones array, pass_note, vocabulary_note.)
     # "3.4.0" only renames pass_label ('pass (decline)' -> 'decline'), display
     # only — the stored recommendation/band vocabulary is unchanged.
+    # "3.5.0" applies the 2026-09-22 review: weights 25/25/25/15/5/5 and the
+    # tightened fundable-experiment anchor.
     # Pinned, not derived.
-    assert RUBRIC_VERSION == rubric.version == "3.4.0"
+    assert RUBRIC_VERSION == rubric.version == "3.5.0"
     assert RUBRIC_CONTENT_HASH == rubric.content_hash
     assert len(RUBRIC_CONTENT_HASH) == 12
     assert all(c in "0123456789abcdef" for c in RUBRIC_CONTENT_HASH)
@@ -231,7 +233,7 @@ def test_rejects_inverted_band_lines(tmp_path):
 
 
 def test_rejects_missing_version(tmp_path):
-    path = _mutated_copy(tmp_path, 'version = "3.4.0"', 'version = ""')
+    path = _mutated_copy(tmp_path, 'version = "3.5.0"', 'version = ""')
     with pytest.raises(RubricError, match=r"\[meta\].version"):
         parse_rubric(path)
 
@@ -261,7 +263,7 @@ def test_rejects_version_longer_than_the_column_width(tmp_path):
     # fail loudly here, never truncate silently at the write site -- silent
     # truncation would let two distinct long versions stamp identically and
     # destroy pre/post-calibration comparability.
-    path = _mutated_copy(tmp_path, 'version = "3.4.0"', 'version = "3.4.0-twenty-one-chars"')
+    path = _mutated_copy(tmp_path, 'version = "3.5.0"', 'version = "3.5.0-twenty-one-chars"')
     with pytest.raises(RubricError, match=r"\[meta\].version.*20 char.*rubric_version"):
         parse_rubric(path)
 

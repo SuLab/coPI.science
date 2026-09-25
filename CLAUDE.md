@@ -1663,6 +1663,51 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > image (the `rollback-pre-0051` tags from the first step); the two tables are harmless
 > to old code. `alembic downgrade 0050` drops both tables AND every chat in them.
 
+> **The 2026-09-25 reviewer change ships NO migration — rubric 3.5.0 and
+> scout_hub 1.8.0 together, and all three images rebuild.** Design:
+> `docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md`.
+>
+> * **Rubric 3.4.0 → 3.5.0.** Weights 25/25/25/15/5/5 (science block 50), the
+>   fundable-experiment anchor tightened to a $100K–$300K / 6–12-month
+>   decisive result, `[stage_bar.budget]` re-derived. Thresholds unchanged.
+>   Stored scores/bands are never rescored; the outgoing 3.4.0 entry is in
+>   `prompts/rubric/revisions.toml`. The web tier and the agent SUPERVISOR
+>   parse the document once at import — the supervisor at container boot — so
+>   both must restart.
+> * **scout_hub 1.7.1 → 1.8.0.** `key_points` is six groups (Indication /
+>   Audience, Lab Background, Proposal, Clinical Actionability, Key
+>   Questions/Experiment, Commercial Opportunity). Rows stored under the old
+>   five (or three) keep their own labels; writes accept old and new keys.
+>   **The hazardous half is prompt-without-image:** an old image rejects the
+>   six new keys and stores `key_points` NULL. `prompts/` is live from the
+>   moment the tree lands, so no run may start between landing and `up -d
+>   agent`.
+> * **Two behaviour fixes ride along.** An owed `#assessments-summary`
+>   headline (`_announce_owed_headline`) now prints the row's STORED band and
+>   score instead of recomputing them from the live weights, and
+>   `scripts/backfill_dropped_verdicts.py` refuses a run whose rubric stamp
+>   weighs the dimensions differently from the live document
+>   (`--allow-rubric-drift` overrides) — it scores with the live weights.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-3.5.0
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent        # ONLY when /admin/simulation shows no live run
+>
+> Start the next run FRESH: a resume only warns about the rubric change and
+> would mix 3.4.0- and 3.5.0-scored verdicts in one run.
+>
+> Rollback: the `rollback-pre-3.5.0` images plus a revert commit — and that
+> revert must APPEND a 3.5.0 entry to `prompts/rubric/revisions.toml`
+> (sha256[:12] of the 3.5.0 file), or every row and review stamped 3.5.0
+> renders "matches no entry". Old images render only `clinical_actionability`
+> and `key_questions` of a six-group row; the other four groups stay in the
+> column, hidden until the new code is back.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —

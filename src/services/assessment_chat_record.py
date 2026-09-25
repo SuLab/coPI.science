@@ -45,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import OpportunityAssessment
 from src.models.assessment_chat import CHAT_TIER_REVIEWER, CHAT_TIER_STAFF
-from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
+from src.services.assessment_detail import build_assessment_detail, key_point_sections
 from src.services.prose_citations import (
     _URL_RE,
     _is_linkable,
@@ -328,13 +328,12 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
         doc.add("Hub's confidence label", [str(a.confidence).strip("[]")], anchor="brief")
     if a.elevator_pitch:
         doc.add("In one minute — the hub's elevator pitch", [a.elevator_pitch], anchor="brief")
-    if isinstance(a.key_points, dict):
-        for key, group_label in KEY_POINT_GROUPS:
-            for point in _items(a.key_points.get(key)):
+    for group_label, points in key_point_sections(a.key_points):
+        for point in points:
+            if group_label is None:
+                doc.add("Key point", [point], anchor="brief")
+            else:
                 doc.add(f"Key point — {_label_safe(group_label)}", [point], anchor="brief")
-    else:
-        for point in _items(a.key_points):
-            doc.add("Key point", [point], anchor="brief")
     if a.score_rationale:
         doc.add(
             "Why this score — the hub's own explanation",

@@ -355,4 +355,5 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     assert "PARITY-EST-THREE" in record_text and "> and 1 more" in record_text
     assert 'display name "PARITY-HUMAN-POSTER" (unverified)' in record_text
     assert "PARITY-OTHER-AGENT-REPLY" in record_text
+    assert "PARITY-KP-SIGNIFICANCE" in record_text and "PARITY-KP-QUESTIONS" in record_text
     assert RECORD_URL in record.url_tokens

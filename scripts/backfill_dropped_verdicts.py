@@ -67,6 +67,10 @@ written below):
             --rubric-version 2.0.0 --rubric-hash e3ef75f84c48
     # widen the llm_call_logs lookback if a row comes back unrecoverable:
     ... python scripts/backfill_dropped_verdicts.py --run <uuid> --max-lookback-seconds 300
+    # recovered rows are scored with the LIVE weights, so a run whose stamp
+    # weighs the dimensions differently (or matches no known revision) is
+    # refused; override only if a live-weight score is really wanted:
+    ... python scripts/backfill_dropped_verdicts.py --run <uuid> --allow-rubric-drift
 """
 
 from __future__ import annotations
@@ -91,8 +95,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from src.agent.simulation import _bounded_str, _normalize_gating, _str_or_none
 from src.config import get_settings
 from src.models import AssessmentDrop, LlmCallLog, OpportunityAssessment
+from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
+from src.services.rubric_revisions import resolve_revision
 
 # NOT configured here (fix round 1, FIX 7): `logging.basicConfig` used to run
 # at import time, which fired on every test collection too. Configured only
@@ -362,6 +368,41 @@ def _derive_rubric_stamp(
     return next(iter(pairs))
 
 
+def _refuse_stamp_drift(
+    rubric_version: str | None,
+    rubric_hash: str | None,
+    *,
+    allow_rubric_drift: bool = False,
+) -> str | None:
+    """None when rows stamped (rubric_version, rubric_hash) may be scored with
+    the LIVE weights; otherwise the reason to refuse.
+
+    `_score_and_band` always scores with the live document, so a stamp whose
+    revision weighs the dimensions differently (rubric 3.5.0 changed them)
+    would store a score that revision never produced. An unstamped run
+    resolves to the live view and behaves exactly as before this guard.
+    `--allow-rubric-drift` overrides.
+    """
+    if allow_rubric_drift:
+        return None
+    view, _provenance = resolve_revision(rubric_version, rubric_hash)
+    if view is None:
+        return (
+            f"refusing: rubric stamp {rubric_version!r}/{rubric_hash!r} matches no "
+            "revision in prompts/rubric/revisions.toml; pass --allow-rubric-drift "
+            "to score with the live weights anyway"
+        )
+    stamped = {d.key: d.weight for d in view.dimensions}
+    live = dict(RUBRIC_WEIGHTS)
+    if stamped != live:
+        return (
+            f"refusing: rubric {view.version} weighs the dimensions {stamped} but "
+            f"the live document weighs them {live}; recovered rows would carry a "
+            "score their stamp never produced. Pass --allow-rubric-drift to override"
+        )
+    return None
+
+
 def _build_assessment_row(
     verdict: dict,
     drop: AssessmentDrop,
@@ -506,6 +547,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="How far back the llm_call_logs fallback may walk for a "
              "matching sidecar before giving up (default: %(default)s).",
     )
+    ap.add_argument(
+        "--allow-rubric-drift",
+        action="store_true",
+        help=(
+            "score recovered verdicts with the live weights even when the run's "
+            "rubric stamp weighs the dimensions differently"
+        ),
+    )
     return ap
 
 
@@ -555,6 +604,12 @@ async def main() -> int:
             "rubric stamp for this run: version=%r hash=%r",
             rubric_version, rubric_hash,
         )
+        refusal = _refuse_stamp_drift(
+            rubric_version, rubric_hash, allow_rubric_drift=args.allow_rubric_drift,
+        )
+        if refusal is not None:
+            logger.error("%s", refusal)
+            return 1
 
         for drop in drops:
             if _existing_assessment_for(existing, run_id, drop) is not None:

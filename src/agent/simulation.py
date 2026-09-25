@@ -64,7 +64,9 @@ from src.models import (
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.assessment_detail import (
-    KEY_POINT_GROUPS,
+    KEY_POINT_ACCEPTED_KEYS,
+    LEGACY_KEY_POINT_GROUPS,
+    key_point_shape,
     normalize_bullets,
     normalize_key_points,
 )
@@ -3735,6 +3737,7 @@ class SimulationEngine:
 
     async def _post_assessment_summary(
         self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
+        *, score: float | None = None, band: str | None = None,
     ) -> bool:
         """Post a headline-only summary of a concluded interview to the
         assessments-summary channel (design D12/D13/D14/D16). Returns True when
@@ -3751,6 +3754,10 @@ class SimulationEngine:
         Rendering itself is delegated to `render_assessment_headline`
         (`src/services/assessment_headline.py`) so the engine and
         `scripts/backfill_assessment_headlines.py` cannot render differently.
+
+        ``score``/``band``: the STORED values, passed only by
+        `_announce_owed_headline`; never read from ``verdict`` — a sidecar dict
+        can carry a model-written ``weighted_score``.
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
@@ -3831,6 +3838,8 @@ class SimulationEngine:
                 recommendation=verdict.get("recommendation"),
                 scores=verdict.get("scores"),
                 permalink=permalink,
+                score=score,
+                band=band,
                 elevator_pitch=verdict.get("elevator_pitch"),
             )
             posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
@@ -4255,8 +4264,11 @@ class SimulationEngine:
             "scores": row.scores or {},
             "elevator_pitch": row.elevator_pitch,
         }
+        # Stored score/band, not a live recomputation: a weights change since
+        # the row was written must not re-band a public headline.
         posted = await self._post_assessment_summary(
             agent, thread, verdict, row.slack_ts,
+            score=row.weighted_score, band=row.band,
         )
         if not posted:
             return False
@@ -4610,16 +4622,9 @@ class SimulationEngine:
         elif isinstance(key_points, dict):
             # The whole field is about to be DROPPED (stored NULL, kept only in
             # `raw_verdict`) for any dict `normalize_key_points` rejects: an
-            # unknown/renamed group key, or a value that is not a list of
-            # strings. The per-group check below sees neither — with all five
-            # known keys present plus a sixth, `absent` is empty and every
-            # `isinstance(group, list)` passes. That silence is exactly the
-            # prompt-newer-than-image skew the 0048 deploy note describes, so
-            # it gets its own WARNING naming what was wrong.
+            # unknown group key, or a value that is not a list of strings.
             if normalize_key_points(key_points) is None:
-                unknown = sorted(
-                    set(key_points) - {k for k, _ in KEY_POINT_GROUPS}
-                )
+                unknown = sorted(set(key_points) - KEY_POINT_ACCEPTED_KEYS)
                 logger.warning(
                     "[%s] Assessment key_points was DROPPED (stored NULL; the "
                     "value survives only in raw_verdict): %s. Keys present: %s",
@@ -4628,33 +4633,50 @@ class SimulationEngine:
                     else "a group value is not a list of strings",
                     sorted(key_points),
                 )
-            for group_key, _label in KEY_POINT_GROUPS:
-                group = key_points.get(group_key)
-                if isinstance(group, list) and not (
-                    _KEY_POINT_GROUP_MIN <= len(group) <= _KEY_POINT_GROUP_MAX
-                ):
-                    logger.warning(
-                        "[%s] Assessment key_points.%s carries %d bullets "
-                        "(contract asks for %d-%d)",
-                        agent_id, group_key, len(group),
-                        _KEY_POINT_GROUP_MIN, _KEY_POINT_GROUP_MAX,
-                    )
-            # An ABSENT group is `None`, so it fails the isinstance above and
-            # the bullet-count check cannot see it. `normalize_key_points`
-            # accepts a partial object on purpose — a subset of known keys
-            # stores, because NULLing the whole field over one missing group is
-            # the strictest possible reaction to the mildest possible defect —
-            # so without this warning the relaxation would trade a loud failure
-            # for total silence. Names the missing keys; stores either way.
-            absent = [
-                group_key for group_key, _label in KEY_POINT_GROUPS
-                if group_key not in key_points
-            ]
-            if absent:
+            shape = key_point_shape(key_points)
+            legacy_only = sorted(
+                set(key_points)
+                & ({k for k, _ in LEGACY_KEY_POINT_GROUPS} - set(_KEY_POINT_GROUP_BULLETS))
+            )
+            if shape in ("legacy", "mixed"):
+                # A stale prompt (scout_hub < 1.8.0) on this image: stored and
+                # rendered under the legacy labels, never dropped — but the
+                # per-group checks below describe the CURRENT contract, so a
+                # legacy object gets this one warning instead of "omits 4 of 6".
                 logger.warning(
-                    "[%s] Assessment key_points omits %d of %d groups: %s",
-                    agent_id, len(absent), len(KEY_POINT_GROUPS), ", ".join(absent),
+                    "[%s] Assessment key_points uses pre-1.8.0 group name(s) %s; "
+                    "stored and rendered under the legacy labels. Is "
+                    "prompts/roles/scout_hub at 1.8.0 on this host?",
+                    agent_id, legacy_only,
                 )
+            if shape in ("current", "mixed"):
+                for group_key, expected in _KEY_POINT_GROUP_BULLETS.items():
+                    group = key_points.get(group_key)
+                    if isinstance(group, list) and len(group) != expected:
+                        logger.warning(
+                            "[%s] Assessment key_points.%s carries %d bullets "
+                            "(contract asks for %d)",
+                            agent_id, group_key, len(group), expected,
+                        )
+                    if isinstance(group, list):
+                        for bullet in group:
+                            if isinstance(bullet, str) and len(bullet) > _KEY_POINT_BULLET_CHARS:
+                                logger.warning(
+                                    "[%s] Assessment key_points.%s has a %d-char "
+                                    "bullet (contract asks for at most %d)",
+                                    agent_id, group_key, len(bullet),
+                                    _KEY_POINT_BULLET_CHARS,
+                                )
+                # An ABSENT group is `None` and fails the isinstance above, so
+                # the count check cannot see it; a partial object still stores
+                # (normalize accepts a subset), so name the omission here.
+                absent = [k for k in _KEY_POINT_GROUP_BULLETS if k not in key_points]
+                if absent:
+                    logger.warning(
+                        "[%s] Assessment key_points omits %d of %d groups: %s",
+                        agent_id, len(absent), len(_KEY_POINT_GROUP_BULLETS),
+                        ", ".join(absent),
+                    )
         # Sidecar items 11/12 (0049) and 13/14 (0050): strengths, risks,
         # competitive_landscape, evidence_maturity. Same soft-bound policy as
         # key_points above — a shape violation is warned about, never a drop
@@ -9321,10 +9343,19 @@ _PROJECT_SOFT_LIMIT = 70
 _PITCH_SOFT_LIMIT = 900
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
-# Task 7 / F3: the grouped (>= 1.3.0) key_points shape bounds each of the
-# named groups individually rather than the flat 3-5 total above.
-_KEY_POINT_GROUP_MIN = 1
-_KEY_POINT_GROUP_MAX = 2
+# scout_hub >= 1.8.0: the exact bullet count each current group carries
+# (prompt item 7), and the per-bullet bound. Warnings only (design D12) — a
+# shape violation is never a drop. Keys and order are pinned to
+# KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py.
+_KEY_POINT_GROUP_BULLETS = {
+    "indication_audience": 1,
+    "lab_background": 2,
+    "proposal": 2,
+    "clinical_actionability": 2,
+    "key_questions": 1,
+    "commercial_opportunity": 2,
+}
+_KEY_POINT_BULLET_CHARS = 300
 #: What counts as a CITATION in `elevator_pitch` for the drift alarm in
 #: `_persist_assessment`. Item 8 of phase4-thread-reply.md asks for the source
 #: "cited the way the lab's own public profile cites it (DOI or PubMed link)",

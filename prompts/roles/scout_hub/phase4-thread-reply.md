@@ -257,6 +257,12 @@ verdict. Everything below must be captured here in full:
       decision the funder acts on ("predicts which patients will respond"),
       because all three elements rarely fit 110 characters otherwise.
 
+   Name the modality, and the delivery route where it matters, accurately. A
+   plain noun — "oral drug", "blood test", "cell therapy" — is right when it is
+   accurate; use the field's own term when the plain word would be vague or
+   wrong: "intrathecal oligonucleotide", not "injected RNA drug". The
+   110-character bound and the abbreviation rule still apply.
+
    No colon-stacked noun phrases. No slash-separated alternatives. **At most one
    embedded relative clause** — a headline that chains "that … that …" makes the
    reader hold two unresolved clauses at once, and is the commonest way a headline
@@ -294,25 +300,42 @@ verdict. Everything below must be captured here in full:
    chained relative clauses at 126 characters.
 
    Record it in `headline`.
-7. **Key points.** Five labelled groups, in this order, each holding ONE or
-   TWO bullets of at most 160 characters, each a complete claim rather than a
-   topic:
-   - `significance` — why the problem matters and for whom.
-   - `innovation` — what is genuinely new versus the state of the art.
-   - `clinical_actionability` — in brief: who would be treated, tested or
-     triaged differently if this worked, and at what point in their care.
-     **One bullet.**
-   - `key_questions` — the open questions and the experiments that would
-     answer them. **One bullet**, unless two are genuinely independent.
-   - `commercial_potential` — path to a product, IP, market or partner. **Not**
-     the competitive landscape, which item 13 owns.
+7. **Key points.** Six labelled groups, in this order, each holding EXACTLY
+   the number of bullets shown; each bullet is a complete claim of at most
+   300 characters, not a topic:
+   - `indication_audience` — **one bullet**: the disease or condition and the
+     patient population, its rough size (an order-of-magnitude US prevalence
+     or incidence is enough), what drives it biologically, and what those
+     patients get today.
+   - `lab_background` — **two bullets**: first, who the PI is and the lab's
+     established work that this idea builds on; second, the lab's wider
+     platform or track record — the same approach in other diseases, prior
+     programmes or spin-outs, and any existing IP or option rights worth
+     checking early. State only what the PI's public profile, their
+     publications or the lab in this interview established; leave out
+     anything not on that record rather than supplying it from general
+     knowledge.
+   - `proposal` — **two bullets**: "The asset: …" — what it is, how it works
+     and why it differs from what exists; then "The work: …" — what the grant
+     would buy.
+   - `clinical_actionability` — **two bullets**: what patients get today and
+     the clinical-stage alternatives, each with its stage, and how this
+     differs from them; then the route, endpoint or regulatory precedent that
+     would make it actionable.
+   - `key_questions` — **one bullet**: the single deciding question, phrased
+     as a question, naming the experiment that answers it.
+   - `commercial_opportunity` — **two bullets**: the closest deal comparable
+     or funding signal (who, how much, when); then the realistic commercial
+     shape — licence, platform partnership or spin-out — with the competitive
+     position and any IP or novelty caveat.
 
-   `clinical_actionability` and `key_questions` are **one bullet each by
-   default**: five groups of two long bullets is a wall of text, which defeats
-   the point of the groups. Together the five must let a reviewer who reads
-   nothing else state what the idea is, who it changes care for, what is
-   established, and the deciding risk. Record them in `key_points` as an object
-   with exactly those five keys, each an array of strings.
+   Competing programmes may be named in `clinical_actionability` and
+   `commercial_opportunity`; item 13 remains the fuller, staff-only
+   competitive landscape. Together the six must let a reviewer who reads
+   nothing else say who this is for, who is behind it, what it is, how it
+   would change care, what decides it, and why it is worth building. Record
+   them in `key_points` as an object with exactly those six keys, each an
+   array of strings.
 8. **Elevator pitch.** Four to six sentences of plain language, for a
    scientifically literate reader who is not a specialist in this field, and
    **at most 900 characters** — the first 600 characters are posted publicly to
@@ -400,6 +423,15 @@ verdict. Everything below must be captured here in full:
     `evidence_maturity` as an array of strings. **Staff-only**, same rule as
     item 13.
 
+**Never assert an evidence ceiling you have not checked.** In any sidecar
+field, do not write "in vitro only", "no animal data" or any other limit on
+the evidence unless the profile, a paper you retrieved or the lab itself
+confirms it; where you could not check, say that instead.
+
+**Date what can go stale.** A trial readout, a deal, a regulatory status or
+a programme's stage is true as of a date: write it with one ("as of 2025"),
+and never present a recent event you have no source for as current.
+
 **Never write a bare `~` in any sidecar field** — not in `headline`,
 `key_points`, `elevator_pitch`, `score_rationale`, `strengths`,
 `risks`, `competitive_landscape`, `evidence_maturity`, `rationale` or
@@ -453,7 +485,7 @@ every proposal.
   "company_or_project": "",
   "subject_agent_id": "",
   "headline": "",
-  "key_points": {"significance": [], "innovation": [], "clinical_actionability": [], "key_questions": [], "commercial_potential": []},
+  "key_points": {"indication_audience": [], "lab_background": [], "proposal": [], "clinical_actionability": [], "key_questions": [], "commercial_opportunity": []},
   "elevator_pitch": "",
   "score_rationale": "",
   "strengths": [],

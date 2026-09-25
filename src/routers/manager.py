@@ -62,7 +62,7 @@ from src.models import (
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_mute import set_agent_mute_state
-from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
+from src.services.assessment_detail import build_assessment_detail, key_point_sections
 from src.services.assessment_reviews import (
     MAX_ANALYSES_PER_PRESS,
     count_pending_analysis_candidates,
@@ -99,7 +99,7 @@ templates = Jinja2Templates(directory="templates")
 # See src/routers/admin.py's identical registration: both routers include the
 # same `_assessments_body.html`/`_assessment_detail_body.html` partials, and
 # each `Jinja2Templates` instance keeps its own globals.
-templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
+templates.env.globals["key_point_sections"] = key_point_sections
 
 # Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). See the
 # identical registration in src/routers/admin.py for why it is a global and

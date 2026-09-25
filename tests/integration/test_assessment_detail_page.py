@@ -2015,10 +2015,11 @@ async def test_a_pre_0048_row_renders_no_score_rationale_block(
 
 
 async def test_the_five_key_point_groups_render_in_order(client, db_session, admin):
-    """B3. The grouped branch loops `key_point_groups`, so the two groups added
-    by the five-group contract (C1) must appear with no markup change — in the
-    document's order, not the object's insertion order. Seeded out of order on
-    purpose."""
+    """B3. Pins the LEGACY five-group rendering (scout_hub 1.4.0-1.7.x rows):
+    a row stored under the five legacy keys keeps its legacy labels, in the
+    legacy document's order, not the object's insertion order. Seeded out of
+    order on purpose. The current six groups are pinned by
+    test_the_six_key_point_groups_render_in_order."""
     _, assessment = await _seed(db_session)
     assessment.key_points = {
         "commercial_potential": ["Comm point"],
@@ -2054,6 +2055,52 @@ async def test_the_five_key_point_groups_render_in_order(client, db_session, adm
         "Question point", "Comm point",
     ):
         assert point in block, point
+
+
+async def test_the_six_key_point_groups_render_in_order(client, db_session, admin):
+    """scout_hub 1.8.0: the reviewer's six groups, in order, under their labels —
+    seeded out of order on purpose."""
+    _, assessment = await _seed(db_session)
+    assessment.key_points = {
+        "commercial_opportunity": ["Comm point"],
+        "key_questions": ["Question point"],
+        "proposal": ["Proposal point"],
+        "indication_audience": ["Indication point"],
+        "clinical_actionability": ["Actionability point"],
+        "lab_background": ["Lab point"],
+    }
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    block = body[
+        body.index("assessment-brief-keypoints") : body.index("assessment-signals")
+    ]
+    labels = (
+        "Indication / Audience", "Lab Background", "Proposal",
+        "Clinical Actionability", "Key Questions/Experiment", "Commercial Opportunity",
+    )
+    positions = [block.index(label) for label in labels]
+    assert positions == sorted(positions), dict(zip(labels, positions, strict=True))
+    assert "Significance" not in block and "Innovation" not in block
+
+
+async def test_a_row_whose_groups_render_nothing_shows_no_key_points_column(
+    client, db_session, admin
+):
+    """An unknown-only (hand-built) or blank-only mapping is not "there are key
+    points": no column, no two-column grid."""
+    _, assessment = await _seed(db_session)
+    assessment.elevator_pitch = "PITCH-MARKER. Hopkins has data on 124 patients."
+    assessment.key_points = {"not_a_group": ["x"], "proposal": ["  "]}
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "assessment-brief-keypoints" not in body
+    assert "md:grid-cols-2" not in body
 
 
 # ---------------------------------------------------------------------------

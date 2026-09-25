@@ -138,9 +138,7 @@ _HUB_ONLY_MACHINERY = (
     ("rationale", "`rationale` is a field on the HUB's assessment sidecar; a "
                   "specialist has no schema slot for it and asking for one "
                   "invites prose the consult contract cannot carry"),
-    ("35%", "the science/commercial weight split is how the HUB combines six "
-            "dimensions into one score"),
-    ("65%", "the science/commercial weight split is how the HUB combines six "
+    ("50%", "the science/commercial weight split is how the HUB combines six "
             "dimensions into one score"),
     ("score market size", "a specialist judges its own domain against a bar; "
                           "it does not score rubric dimensions"),
@@ -165,7 +163,7 @@ def test_no_rendered_bar_carries_the_hubs_scoring_machinery(domain):
     It matters beyond tidiness. A specialist is asked ONE question about ONE
     domain and answers in a fixed four-field schema; the rest of that preamble
     instructs its reader to write `rationale`, to score six dimensions, and it
-    discloses the 35/65 weighting. Handing that to a specialist (a) anchors it
+    discloses the 50/50 weighting. Handing that to a specialist (a) anchors it
     on the hub's own aggregation rather than on its domain, (b) asks for output
     the contract has nowhere to put — `parse_opinion` reads four keys and
     defaults the signal for anything else, and a defaulted signal is an unread

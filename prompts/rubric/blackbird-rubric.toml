@@ -10,8 +10,9 @@
 # One scale, six dimensions. Every dimension carries one weight/anchor pair.
 # Two of the six carry an `evidence` list (BBL's Target Rubric items, owned by
 # the dimension they score). Design rationale and the production back-test
-# behind the weights and thresholds:
-# docs/plans/2026-08-27-rubric-v3-consolidation.md.
+# behind the thresholds and the 3.0.0-3.4.0 weights:
+# docs/plans/2026-08-27-rubric-v3-consolidation.md; the 3.5.0 weights:
+# docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md.
 #
 # Editing workflow (docs/plans/2026-08-20-assessments-rca-ux-specialist-visibility.md §4.3):
 #   1. Edit this file. Bump [meta].version and note the change in [meta].changelog.
@@ -37,10 +38,24 @@
 # `scoring_preamble`.
 
 [meta]
-version = "3.4.0"
-date = "2026-08-29"
+version = "3.5.0"
+date = "2026-09-25"
 source = "data/Blackbird_initial_priorities-criteria_v1.pdf (Blackbird's investment priorities and screening criteria, synthesized from its Project and Target Rubrics and four worked deal memoranda); consolidated to six single-scale dimensions per docs/plans/2026-08-27-rubric-v3-consolidation.md"
 changelog = """
+3.5.0 (2026-09-25): applies the 2026-09-22 Blackbird review of the 3.2.0
+review copy (docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md).
+Weights 25/20/15/15/15/10 -> 25/25/25/15/5/5 (scientific_credibility 20->25,
+translational_path 15->25, venture_potential 15->5, team_executability
+10->5); the science block is now 50 points and the scoring preamble's split
+is re-derived to 50%/50%. fundable_experiment's anchor tightens the
+killer-experiment bar to a $100K–$300K grant over 6–12 months, measures
+replication against the proposed budget instead of a fixed $200K, and drops
+the state/regional non-dilutive leverage credit; one added clause says the
+incubation grant itself can run larger. [stage_bar.budget] is re-derived
+from the new anchor. Thresholds 3.4/2.8, gating, dimensions, pass_label and
+the other stage bars are unchanged. Back-test of the new weights over the 27
+stored 3.x verdicts: 4 bands would move (2 advance->conditional, 1
+conditional->pass, 1 conditional->advance); stored rows are never rescored.
 3.4.0 (2026-08-29): pass_label 'pass (decline)' -> 'decline'; display-only,
 stored vocabulary unchanged (recommendation/band keep writing "pass"). No
 weight, threshold, gating, or dimension changes.
@@ -117,6 +132,12 @@ max = 5
 # captured 4/4 positives with 2/47 declines above the line; advance_min=3.4
 # sits above the observed maximum, 3.30, with headroom). Scheduled for
 # re-check after >=20 verdicts stamped 3.x.
+#
+# 3.5.0 (2026-09-25) retained 3.4/2.8 unchanged under the new weights. Re-run
+# over the 27 stored 3.x verdicts, the new weights move 4 bands (velculescu
+# 08-31 and coller 09-09 advance->conditional, lamichhane 09-09
+# conditional->pass, slusher 09-22 conditional->advance); the re-check itself
+# is still owed.
 advance_min = 3.4
 conditional_min = 2.8
 # Vocabulary: 'pass' means pass ON the deal (decline) — not 'passing' the
@@ -190,7 +211,7 @@ not a company already forming; in the rare case where it IS a company forming, s
 `rationale` and name equity as the instrument — the screen itself does not change.
 
 The two scientific dimensions (scientific credibility & mechanism; translational &
-development path) carry 35% of the total; the four commercial dimensions carry 65% —
+development path) carry 50% of the total; the four commercial dimensions carry 50% —
 BBL's actual rejections turn on mechanism, toxicity, and chemistry-to-DC far more often
 than on any single commercial factor, so the score must be able to move on science alone.
 The commercial weight sits in differentiation against a real need and in whether a grant
@@ -222,17 +243,17 @@ you did.
 # Target Rubric), kept binary-phrased on purpose: "does evidence exist for X"
 # is a more reliable probe than another 1-5 judgement.
 #
-# Weight rationale (docs/plans/2026-08-27-rubric-v3-consolidation.md, from a
-# back-test over 51 production verdicts):
-#   - differentiation_unmet_need 25: differentiation is the single strongest
-#     discriminator in the corpus.
-#   - scientific_credibility 20 / translational_path 15: the science block is
-#     35 points, so a purely scientific objection can move the band on its own.
-#   - fundable_experiment 15: "could a grant buy a decisive result?" is the
-#     incubation question and the best per-point discriminator measured.
-#   - venture_potential 15: IP path, platform reach, independent signals and
-#     the exit thesis, folded into the one question they jointly answer.
-#   - team_executability 10.
+# Weights since 3.5.0 are the 2026-09-22 Blackbird review's own calibration
+# (docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md):
+#   - differentiation_unmet_need 25, scientific_credibility 25,
+#     translational_path 25: the science block is 50 points, so a purely
+#     scientific objection moves the band on its own even more readily than
+#     under 3.0.0's 35.
+#   - fundable_experiment 15: unchanged.
+#   - venture_potential 5, team_executability 5.
+# The 3.0.0-3.4.0 weights (25/20/15/15/15/10) and their back-test rationale
+# are in docs/plans/2026-08-27-rubric-v3-consolidation.md and in
+# prompts/rubric/revisions.toml.
 # ---------------------------------------------------------------------------
 
 [[dimension]]
@@ -244,7 +265,7 @@ specialist = "commercial"
 
 [[dimension]]
 key = "scientific_credibility"
-weight = 20
+weight = 25
 title = "Scientific credibility & mechanism"
 anchors = "A credible, *testable* mechanism hypothesis whose key *existing* results are believable — controls, replication, interpretation — with supporting data (genetic, functional, or published). Judge the evidence they have, not evidence the stage hasn't produced: animal rescue is a 5, not the bar for a 4. 1 = the lab cannot say how a key claim was established, or contradictory literature is unacknowledged."
 specialist = "scientific"
@@ -258,7 +279,7 @@ evidence = [
 
 [[dimension]]
 key = "translational_path"
-weight = 15
+weight = 25
 title = "Translational & development path"
 anchors = "A plausible modality and starting point (tool compound, series, format) with an articulable route toward a development candidate — tractability, not progress. On-target liabilities and selectivity risks *identified, with a plan to test them early*: ignorance of the risk scores low; absence of data at this stage does not. If de-risking succeeds, is there a precedented modality/endpoint path? 1 = no route articulable, risks unexamined, or an unprecedented modality and regulatory path with no de-risking plan."
 specialist = "chemistry"
@@ -275,19 +296,19 @@ evidence = [
 key = "fundable_experiment"
 weight = 15
 title = "Fundable killer experiment & capital efficiency"
-anchors = "Could a $100K–$1M grant over 12–24 months buy a *decisive* de-risking result? 5 = a crisp, quantified killer experiment within budget; 1 = no experiment articulable, scope far beyond an incubation grant, or key data that cannot be replicated for less than a $200K budget and a reasonable timeline. State and regional non-dilutive leverage (wherever the lab's institution is eligible) adds."
+anchors = "Could a $100K–$300K grant over 6–12 months buy a *decisive* de-risking result? 5 = a crisp, quantified killer experiment within budget; 1 = no experiment articulable, scope far beyond an incubation grant, or key data that cannot be replicated for less than the proposed budget and a reasonable timeline. The incubation grant can run larger; this asks whether a decisive result comes within the first $100K–$300K and 6–12 months."
 specialist = "budget"
 
 [[dimension]]
 key = "venture_potential"
-weight = 15
+weight = 5
 title = "Venture potential: IP path, platform & signals"
 anchors = 'If the science works, is there a company or license a VC or pharma would want — spin-out-able and syndicable, with a clean *path* to ownable IP (disclosure filed or filable, no known encumbrance or hostile co-ownership, plausible university license path — "FTO secured" is not the bar)? A reusable platform generating a pipeline scores above one shot on goal, but a single asset is the normal shape of a de-risking grant — mark it down only where a clean result would still leave nothing worth building. Any *independent* validation (a KOL endorsement, non-dilutive funder interest, informal pharma-scientist interest, competitive activity validating the space) adds; its absence at this stage is expected and scores nothing down on its own. 1 = grant-only science with no commercial endpoint, or no pharma/investor appetite for the target class, indication, or modality.'
 specialist = "commercial"
 
 [[dimension]]
 key = "team_executability"
-weight = 10
+weight = 5
 title = "Team & executability"
 anchors = "PI credibility and lab capability to execute the de-risking plan in 12–24 months; complementary expertise identified, not necessarily hired."
 specialist = "talent"
@@ -296,8 +317,9 @@ specialist = "talent"
 # Disqualifier-grade only. The recurring dimension-level failure shapes
 # (incremental, no downstream actionability, unworkable economics, single
 # asset with nothing worth building, no pharma/investor appetite,
-# unprecedented path with no plan, >$200K replication) live in the dimension
-# 1-anchors above — they are scores with reasons, not flags.
+# unprecedented path with no plan, replication costlier than the proposed
+# budget) live in the dimension 1-anchors above — they are scores with
+# reasons, not flags.
 intro = "Disqualifier-grade only — a red flag is a specific, named fact that on its own justifies `pass`, stated so staff can act on it. Name at most three. Detailed technical concerns and open questions belong in `rationale`, written as explicit go/no-go results where they are actionable (the experiment, the readout, the threshold); weakness on a scored dimension is a low score with a reason there, not a flag. The recurring disqualifier shapes:"
 items = [
   "**IP genuinely unresolvable** — key IP co-owned by an uncooperative or hostile third party with no plausible license path. (Unresolved FTO on unpublished academic science is the normal starting condition, not a disqualifier.)",
@@ -351,7 +373,7 @@ the endpoint; the grant is what buys the result that makes the decision possible
 # EXTRACTED, like the per-domain bars: it is `scoring.preamble`'s own first
 # sentence, verbatim. It stops there deliberately -- the rest of that preamble is
 # HUB-facing (it instructs the reader to write `rationale`, to score dimensions,
-# and it discloses the 35/65 weighting), none of which a specialist has a schema
+# and it discloses the 50/50 weighting), none of which a specialist has a schema
 # slot for or should be anchored by.
 [stage_bar_global]
 source = "scoring_preamble"
@@ -387,4 +409,4 @@ text = "Adequate here is PI credibility and lab capability to execute the de-ris
 
 [stage_bar.budget]
 source = "fundable_experiment"
-text = "Adequate here is a scope where a $100K–$1M grant over 12–24 months could buy a DECISIVE de-risking result. Below the bar is no articulable experiment, scope far beyond an incubation grant, or key data unreplicable for under a $200K budget and a reasonable timeline."
+text = "Adequate here is a scope where a $100K–$300K grant over 6–12 months could buy a DECISIVE de-risking result — the incubation grant can run larger, but the bar is whether the decisive result comes that early and that cheaply. Below the bar is no articulable experiment, scope far beyond an incubation grant, or key data unreplicable for less than the proposed budget and a reasonable timeline."

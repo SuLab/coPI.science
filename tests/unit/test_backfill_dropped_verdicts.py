@@ -36,10 +36,15 @@ from scripts.backfill_dropped_verdicts import (
     _existing_assessment_for,
     _fallback_llm_log_query,
     _recover_from_llm_logs,
+    _refuse_stamp_drift,
     _subject_matches,
 )
 from src.models import AssessmentDrop, OpportunityAssessment
+from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH as LIVE_RUBRIC_HASH
+from src.services.blackbird_rubric import RUBRIC_VERSION as LIVE_RUBRIC_VERSION
 
+# LIVE_* above are the live document's stamp; RUBRIC_VERSION/RUBRIC_HASH below
+# are run 8b64a0e0's historical stamp (hence the aliases).
 RUN_ID = uuid.uuid4()
 OTHER_RUN_ID = uuid.uuid4()
 RUBRIC_VERSION = "2.0.0"
@@ -638,3 +643,24 @@ def test_max_lookback_seconds_rejects_non_positive_values():
     args = parser.parse_args(["--run", str(uuid.uuid4()), "--max-lookback-seconds", "10"])
     assert args.max_lookback_seconds == 10.0
 
+
+
+def test_the_guard_allows_the_live_stamp_and_an_unstamped_run():
+    assert _refuse_stamp_drift(LIVE_RUBRIC_VERSION, LIVE_RUBRIC_HASH) is None
+    assert _refuse_stamp_drift(None, None) is None
+
+
+def test_the_guard_refuses_a_stamp_whose_weights_differ_from_the_live_document():
+    reason = _refuse_stamp_drift("3.4.0", "b7b0a1d6a4a5")   # registry entry, 25/20/15/15/15/10
+    assert reason is not None
+    assert "refusing" in reason and "3.4.0" in reason and "--allow-rubric-drift" in reason
+
+
+def test_the_guard_refuses_an_unknown_stamp():
+    reason = _refuse_stamp_drift("9.9.9", "000000000000")
+    assert reason is not None and "matches no revision" in reason
+
+
+def test_the_override_allows_any_stamp():
+    assert _refuse_stamp_drift("3.4.0", "b7b0a1d6a4a5", allow_rubric_drift=True) is None
+    assert _refuse_stamp_drift("9.9.9", "000000000000", allow_rubric_drift=True) is None

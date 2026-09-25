@@ -346,11 +346,12 @@
            test_a_row_with_no_headline_falls_back_to_the_short_label asserts
            `assessment-card-points` is absent for such a row.
 
-           `has_points` is the detail page's own expression, and it is a
-           CONTENT check rather than `is mapping`: a mapping of only empty
-           lists is a storable shape (normalize_key_points), and it must render
-           no box rather than an empty tinted one. #}
-        {% set has_points = (a.key_points is mapping and (a.key_points.values() | map('length') | sum) > 0) or (a.key_points is not mapping and a.key_points) %}
+           `key_point_sections` (src/services/assessment_detail.py) returns only
+           non-empty groups, under the row's own labels (current or legacy), so
+           "has points" is a CONTENT check: a mapping of only empty lists, or
+           of groups nothing renders, shows no box rather than an empty one. #}
+        {% set kp_sections = key_point_sections(a.key_points) %}
+        {% set has_points = kp_sections | length > 0 %}
         {% if a.elevator_pitch or has_points %}
         <div class="mt-3 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-4">
             {% if a.elevator_pitch %}
@@ -379,26 +380,23 @@
                 <div class="assessment-card-open mt-3">{{ assessment_link(a) }}</div>
             </div>
             {% endif %}
-            {% if has_points and a.key_points is mapping %}
+            {% if has_points %}
             <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
                 <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+                {% if kp_sections[0][0] is none %}
+                <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
+                    {% for point in kp_sections[0][1] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+                </ul>
+                {% else %}
                 <div class="mt-1 space-y-2">
-                    {% for key, label in key_point_groups %}
-                    {% if a.key_points.get(key) %}
+                    {% for label, points in kp_sections %}
                     <div><span class="font-semibold text-gray-800">{{ label }}</span>
                         <ul class="list-disc list-inside text-sm text-gray-700">
-                        {% for point in a.key_points[key] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+                        {% for point in points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
                         </ul></div>
-                    {% endif %}
                     {% endfor %}
                 </div>
-            </div>
-            {% elif has_points %}
-            <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
-                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
-                <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
-                    {% for point in a.key_points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
-                </ul>
+                {% endif %}
             </div>
             {% endif %}
         </div>

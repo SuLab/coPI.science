@@ -35,6 +35,8 @@ from src.services.blackbird_rubric import (  # noqa: E402
 
 OUT_DIR = REPO_ROOT / "docs" / "rubric-review"
 
+_SCIENCE_KEYS = ("scientific_credibility", "translational_path")
+
 
 def render_review_markdown(rubric: Rubric, generated: str, changelog: str) -> str:
     r = rubric
@@ -93,6 +95,8 @@ def render_review_markdown(rubric: Rubric, generated: str, changelog: str) -> st
             f"{gate['description']}",
             "",
         ]
+    science_pct = sum(d.weight for d in r.dimensions if d.key in _SCIENCE_KEYS)
+    commercial_pct = sum(d.weight for d in r.dimensions) - science_pct
     lines += [
         "## 2. Weighted scoring dimensions",
         "",
@@ -102,7 +106,7 @@ def render_review_markdown(rubric: Rubric, generated: str, changelog: str) -> st
         "",
         "### 2.1 Preamble — `[scoring].preamble`",
         "",
-        "> Note for reviewers: the 35% / 65% split quoted below is derived from the",
+        f"> Note for reviewers: the {science_pct}% / {commercial_pct}% split quoted below is derived from the",
         "> weight column in §2.2 — a drift test recomputes it. If you change weights,",
         "> this prose has to be re-derived with them.",
         "",

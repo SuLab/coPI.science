@@ -110,7 +110,8 @@
        column rather than leaving an empty cell, which reads as missing data
        rather than as data that was never asked for. The whole grid is
        skipped when neither half exists. #}
-    {% set has_points = (a.key_points is mapping and (a.key_points.values() | map('length') | sum) > 0) or (a.key_points is not mapping and a.key_points) %}
+    {% set kp_sections = key_point_sections(a.key_points) %}
+    {% set has_points = kp_sections | length > 0 %}
     {% if a.elevator_pitch or has_points %}
     <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
         {% if a.elevator_pitch %}
@@ -155,26 +156,23 @@
             {% endif %}
         </div>
         {% endif %}
-        {% if has_points and a.key_points is mapping %}
+        {% if has_points %}
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
+            {% if kp_sections[0][0] is none %}
+            <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
+                {% for point in kp_sections[0][1] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+            </ul>
+            {% else %}
             <div class="assessment-brief-points assessment-prose max-w-none mt-1 space-y-2">
-                {% for key, label in key_point_groups %}
-                {% if a.key_points.get(key) %}
+                {% for label, points in kp_sections %}
                 <div><span class="font-semibold">{{ label }}</span>
                     <ul class="list-disc list-inside">
-                    {% for point in a.key_points[key] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+                    {% for point in points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
                     </ul></div>
-                {% endif %}
                 {% endfor %}
             </div>
-        </div>
-        {% elif has_points %}
-        <div class="assessment-brief-keypoints">
-            <div class="text-sm font-semibold text-gray-600">Key points</div>
-            <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
-                {% for point in a.key_points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
-            </ul>
+            {% endif %}
         </div>
         {% endif %}
     </div>

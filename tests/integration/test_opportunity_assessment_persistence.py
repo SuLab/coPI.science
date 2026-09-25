@@ -219,11 +219,11 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
             # Hand-computed under the six-dimension rubric (see
             # test_a_real_verdict_scores_as_hand_computed in
             # tests/unit/test_blackbird_rubric.py for the same fixture and
-            # math: 100 + 60 + 45 + 60 + 30 + 40 = 335 / 100). The claim under
+            # math: 100 + 75 + 75 + 60 + 10 + 20 = 340 / 100). The claim under
             # test: the stored score is COMPUTED, never the model's flattering
             # 4.8.
-            assert row.weighted_score == pytest.approx(3.35)  # computed, not 4.8
-            assert row.band == "conditional"
+            assert row.weighted_score == pytest.approx(3.4)  # computed, not 4.8
+            assert row.band == "advance"
             assert row.subject_agent_id == "wang"
             assert row.agent_id == "blackbird"
             assert row.channel_name == "general"

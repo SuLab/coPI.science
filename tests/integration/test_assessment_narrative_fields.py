@@ -271,10 +271,115 @@ async def test_an_overlong_headline_or_project_label_warns_but_still_stores(
         await _delete_run(factory, run_id)
 
 
-async def test_a_missing_key_point_group_is_stored_and_warned(engine, caplog):
-    """D5: a partial grouped object stores rather than NULLing the whole field,
-    and the omission is named in one WARNING — otherwise the relaxation would
-    trade a loud failure for total silence."""
+async def test_a_missing_current_group_is_stored_and_warned(engine, caplog):
+    """D5: a partial current-shape (scout_hub 1.8.0) object stores rather than
+    NULLing the whole field, and the omission is named in one WARNING —
+    otherwise the relaxation would trade a loud failure for total silence."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    partial = {"indication_audience": ["i"], "proposal": ["p", "q"]}
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "key_points": partial,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.key_points == partial
+
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "key_points omits 4 of 6 groups" in warnings
+        assert "lab_background" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
+    engine, caplog,
+):
+    """A group with the wrong bullet count, or a bullet over the 300-character
+    bound, is a soft contract miss: stored as written and named in a WARNING,
+    never a drop."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    key_points_in = {
+        "indication_audience": ["i"],
+        "lab_background": ["l1", "l2"],
+        "proposal": ["x" * 301, "ok"],
+        "clinical_actionability": ["c1", "c2"],
+        "key_questions": ["a", "b"],
+        "commercial_opportunity": ["o1", "o2"],
+    }
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "key_points": key_points_in,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.key_points == key_points_in
+
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "key_points.key_questions carries 2 bullets (contract asks for 1)" in warnings
+        assert "key_points.proposal has a 301-char bullet" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_legacy_shaped_key_points_is_stored_with_one_legacy_warning(
+    engine, caplog,
+):
+    """A sidecar from a pre-1.8.0 prompt (legacy group names) still stores, and
+    gets the one legacy-shape WARNING instead of the current contract's
+    per-group "omits N of 6" check, which would misdescribe it."""
     import logging
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -312,8 +417,8 @@ async def test_a_missing_key_point_group_is_stored_and_warned(engine, caplog):
         warnings = "\n".join(
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         )
-        assert "key_points omits" in warnings
-        assert "clinical_actionability" in warnings
+        assert "pre-1.8.0 group name(s)" in warnings
+        assert "key_points omits" not in warnings
     finally:
         await _delete_run(factory, run_id)
 
@@ -322,7 +427,8 @@ def test_normalize_rejects_an_unknown_group_key_and_says_so():
     """2026-09-14 audit. `normalize_key_points` rejects a dict carrying an
     unknown group key, which stores `key_points = NULL` and leaves the value
     only in `raw_verdict`. The per-group bounds check cannot see that case —
-    with all five known keys present plus a sixth, nothing is absent and every
+    with all five (then-current, now legacy) keys present plus an unknown one,
+    nothing is absent and every
     value is a list — so the whole field used to be dropped in SILENCE. That is
     exactly the prompt-newer-than-image skew the 0048 deploy note describes."""
     from src.services.assessment_detail import normalize_key_points
@@ -337,7 +443,8 @@ def test_normalize_rejects_an_unknown_group_key_and_says_so():
 
 def test_normalize_accepts_legacy_list_and_the_five_group_object():
     """C1/C2: the flat list (scout_hub <= 1.2.0), the three-group object (1.3.0)
-    and the five-group object (1.4.0) all round-trip unchanged."""
+    and the five-group object (1.4.0-1.7.1) — all legacy shapes since the
+    six-group 1.8.0 contract — still round-trip unchanged."""
     from src.services.assessment_detail import normalize_key_points
 
     assert normalize_key_points(["a", "b", "c"]) == ["a", "b", "c"]

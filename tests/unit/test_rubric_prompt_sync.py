@@ -15,7 +15,7 @@ still restate parts of it and can therefore drift out of sync with it silently:
 * ``src/agent/specialists.py`` — each specialist's ``maps_to_dimensions``, which
   is where a blocking specialist signal lands. A dimension renamed in the
   document leaves that mapping pointing at nothing.
-* the prose percentages in the document's own scoring preamble ("carry 35% of
+* the prose percentages in the document's own scoring preamble ("carry 50% of
   the total"), which are hand-written restatements of the weights.
 
 These tests are the drift alarm for all three, plus the wiring itself: that
@@ -177,7 +177,7 @@ def test_document_specialist_fields_name_real_specialist_domains():
 # The prose percentages vs. the weights
 # ---------------------------------------------------------------------------
 
-def test_science_weights_sum_to_thirty_five_and_the_prose_says_so():
+def test_science_weights_sum_to_fifty_and_the_prose_says_so():
     """The commercial/scientific split is asserted in prose in the document's
     scoring preamble and computed from the weights here, so a weight change
     forces the prose update."""
@@ -185,8 +185,8 @@ def test_science_weights_sum_to_thirty_five_and_the_prose_says_so():
     commercial_total = sum(
         w for k, w in RUBRIC_WEIGHTS.items() if k not in SCIENCE_DIMENSIONS
     )
-    assert science_total == 35
-    assert commercial_total == 65
+    assert science_total == 50
+    assert commercial_total == 50
 
     preamble = _norm(load_rubric().scoring_preamble)
     assert f"carry {science_total}% of the total" in preamble
@@ -274,7 +274,7 @@ def test_skeleton_carries_the_narrative_fields():
     scored and are deliberately absent from the rubric document — the sidecar
     skeleton is their only definition, so this is where drift is caught.
 
-    ``key_points`` is asserted as an ORDERED equality against the five groups
+    ``key_points`` is asserted as an ORDERED equality against the six groups
     of the shared ``KEY_POINT_GROUPS`` contract: the read path renders the
     groups in that order, so a key renamed or a group dropped from the prompt
     silently empties a section of the detail page."""
@@ -285,24 +285,56 @@ def test_skeleton_carries_the_narrative_fields():
     ):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
-        "significance": [],
-        "innovation": [],
+        "indication_audience": [],
+        "lab_background": [],
+        "proposal": [],
         "clinical_actionability": [],
         "key_questions": [],
-        "commercial_potential": [],
+        "commercial_opportunity": [],
     }
     assert list(skeleton["key_points"]) == [
-        "significance",
-        "innovation",
+        "indication_audience",
+        "lab_background",
+        "proposal",
         "clinical_actionability",
         "key_questions",
-        "commercial_potential",
+        "commercial_opportunity",
     ]
     assert skeleton["headline"] == ""
     assert skeleton["elevator_pitch"] == ""
     assert skeleton["score_rationale"] == ""
     assert skeleton["strengths"] == []
     assert skeleton["risks"] == []
+
+
+def test_item_seven_lists_the_six_groups_with_their_bullet_counts_in_skeleton_order():
+    """The prose contract and the skeleton must agree on names, order and
+    counts; the engine warns against the same counts
+    (src/agent/simulation.py `_KEY_POINT_GROUP_BULLETS`)."""
+    from src.agent.simulation import _KEY_POINT_GROUP_BULLETS
+
+    text = _phase4_text()
+    item = text[text.index("7. **Key points.**"): text.index("8. **Elevator pitch.**")]
+    body = _norm(item)
+    words = {1: "**one bullet**", 2: "**two bullets**"}
+    positions = []
+    for key in _skeleton()["key_points"]:
+        at = body.index(f"`{key}` — {words[_KEY_POINT_GROUP_BULLETS[key]]}")
+        positions.append(at)
+    assert positions == sorted(positions)
+    assert "at most 300 characters" in body
+    assert list(_KEY_POINT_GROUP_BULLETS) == list(_skeleton()["key_points"])
+
+
+def test_item_seven_confines_lab_background_to_the_record():
+    body = _norm(_phase4_text())
+    assert "leave out anything not on that record" in body
+
+
+def test_phase4_forbids_an_unsourced_evidence_ceiling_and_dates_stale_facts():
+    body = _norm(_phase4_text())
+    assert "Never assert an evidence ceiling you have not checked" in body
+    assert "Date what can go stale" in body
 
 
 def test_the_scout_hub_prompt_set_version_is_1_5_0_or_later():

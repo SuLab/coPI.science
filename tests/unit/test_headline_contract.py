@@ -86,4 +86,15 @@ def test_the_prompt_set_version_was_bumped():
     the run record. `role.toml` is not embedded in the synced doc, so nothing
     else pins it."""
     toml = (PROMPT.parent / "role.toml").read_text()
-    assert 'version = "1.7.1"' in toml
+    assert 'version = "1.8.0"' in toml
+
+
+def test_item_six_names_modality_and_route_accurately():
+    """2026-09-22 review: card #2's "injected RNA drug" was rewritten as
+    "intrathecal oligonucleotide"; cards #1/#3/#4/#5 kept plain nouns ("Oral
+    drug", "Cell therapy", "A test", "A screening platform"). So the rule asks
+    for accuracy, not jargon. `_item_six_flat` lowercases."""
+    flat = _item_six_flat()
+    assert "use the field's own term when the plain word would be vague or wrong" in flat
+    assert '"intrathecal oligonucleotide", not "injected rna drug"' in flat
+    assert "a plain noun" in flat

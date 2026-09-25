@@ -21,6 +21,7 @@ from src.services.assessment_chat_record import (
     quoted_lines,
     tier_for,
 )
+from src.services.blackbird_rubric import RUBRIC_VERSION
 from tests.assessment_chat_support import RECORD_URL_IN_PITCH, synthetic_detail
 
 
@@ -228,15 +229,19 @@ def test_panel_says_no_consults_only_when_the_transcript_is_available_and_empty(
     ]
 
 
-@pytest.mark.parametrize(
-    "provenance,version,expected",
-    [
-        ("live", "3.4.0", "the revision that scored this row: the current rubric document]"),
-        ("archived", "3.2.0", "an archived revision from the revision registry; the current rubric is 3.4.0"),
-        ("unknown", "9.9.9", "matches no entry in the revision registry"),
-        ("unstamped", None, "none: this verdict predates rubric stamping"),
-    ],
-)
+_RUBRIC_STAMP_CASES = [
+    ("live", "3.4.0", "the revision that scored this row: the current rubric document]"),
+    (
+        "archived",
+        "3.2.0",
+        f"an archived revision from the revision registry; the current rubric is {RUBRIC_VERSION}",
+    ),
+    ("unknown", "9.9.9", "matches no entry in the revision registry"),
+    ("unstamped", None, "none: this verdict predates rubric stamping"),
+]
+
+
+@pytest.mark.parametrize("provenance,version,expected", _RUBRIC_STAMP_CASES)
 def test_rubric_stamp_labels(provenance, version, expected):
     detail = synthetic_detail(revision_provenance=provenance)
     detail["assessment"].rubric_version = version
@@ -358,6 +363,20 @@ def test_the_rubric_document_carries_the_review_form_scale_definitions():
         "[Scale definition — Scientific credibility; 25% weight; current rubric 3.4.0]\n"
         "> ANCHOR-SCI 1 = weak; 5 = strong"
     )
+
+
+def test_six_group_key_points_are_quoted_under_their_labels_in_order():
+    detail = synthetic_detail()
+    detail["assessment"].key_points = {
+        "commercial_opportunity": ["KP-C"], "indication_audience": ["KP-I"],
+        "lab_background": ["KP-L"],
+    }
+    record = build_chat_record(detail, tier="staff")
+    text = _all_text(record)
+    assert text.index("Indication / Audience") < text.index("Lab Background") < text.index(
+        "Commercial Opportunity"
+    )
+    assert "KP-I" in text and "KP-L" in text and "KP-C" in text
 
 
 def test_the_frozen_dataclasses_are_immutable():

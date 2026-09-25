@@ -54,7 +54,7 @@ from src.models import (
 )
 from src.services import display_format as fmt
 from src.services.agent_activation import activate_agent, activation_blockers
-from src.services.assessment_detail import KEY_POINT_GROUPS, build_assessment_detail
+from src.services.assessment_detail import build_assessment_detail, key_point_sections
 from src.services.cohorts import (
     compute_gates,
     record_cohort_audit_event,
@@ -139,15 +139,16 @@ templates.env.filters["ts"] = fmt.timestamp
 # free. A test, not a filter or a global: `selectattr` takes a test name.
 templates.env.tests["truncated_stop"] = is_truncated_stop
 
-# `key_points` >= 1.4.0 is the five-group object (1.3.0 had three); the (key, label) pairs also
-# fix the render order on both `_assessments_body.html` and
-# `_assessment_detail_body.html`. Registered as a Jinja global rather than a
-# context key: the admin assessments handler forbids a new one (see the
-# comment on `_assessments_body.html`'s card-list block).
-templates.env.globals["key_point_groups"] = KEY_POINT_GROUPS
+# The key-point sections a stored `key_points` value renders as (current or
+# legacy labels, see `key_point_sections`), used by both
+# `_assessments_body.html` and `_assessment_detail_body.html`. Registered as a
+# Jinja global rather than a context key: the admin assessments handler
+# forbids a new one (see the comment on `_assessments_body.html`'s card-list
+# block).
+templates.env.globals["key_point_sections"] = key_point_sections
 
 # Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). Registered
-# as globals for the same reason `key_point_groups` is: the admin assessments
+# as globals for the same reason `key_point_sections` is: the admin assessments
 # handler allowlists its context keys and forbids a new one, and BOTH routers
 # include the same two partials while each `Jinja2Templates` keeps its own
 # globals. src/routers/manager.py carries the identical two lines.

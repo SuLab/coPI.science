@@ -6,20 +6,20 @@ from src.services.blackbird_rubric import RUBRIC_WEIGHTS, band, weighted_score
 def test_weights_are_the_six_dimensions_and_sum_to_one_hundred():
     assert RUBRIC_WEIGHTS == {
         "differentiation_unmet_need": 25,
-        "scientific_credibility": 20,
-        "translational_path": 15,
+        "scientific_credibility": 25,
+        "translational_path": 25,
         "fundable_experiment": 15,
-        "venture_potential": 15,
-        "team_executability": 10,
+        "venture_potential": 5,
+        "team_executability": 5,
     }
     assert sum(RUBRIC_WEIGHTS.values()) == 100
 
 
-def test_science_carries_thirty_five_percent():
+def test_science_carries_fifty_percent():
     """BBL rejects on science, so the score must be able to move on science
-    alone — the two scientific dimensions jointly carry 35 points."""
+    alone — the two scientific dimensions jointly carry 50 points."""
     science = {"scientific_credibility", "translational_path"}
-    assert sum(RUBRIC_WEIGHTS[k] for k in science) == 35
+    assert sum(RUBRIC_WEIGHTS[k] for k in science) == 50
 
 
 def test_all_fives_is_five_and_all_ones_is_one():
@@ -33,8 +33,8 @@ def test_a_real_verdict_scores_as_hand_computed():
         "translational_path": 3, "fundable_experiment": 4,
         "venture_potential": 2, "team_executability": 4,
     }
-    # 100 + 60 + 45 + 60 + 30 + 40 = 335 / 100
-    assert weighted_score(scores) == 3.35
+    # 100 + 75 + 75 + 60 + 10 + 20 = 340 / 100
+    assert weighted_score(scores) == 3.4
 
 
 def test_missing_and_unscorable_dimensions_count_as_zero():
@@ -73,24 +73,26 @@ def test_non_finite_scores_count_as_zero_not_a_perfect_five():
     assert weighted_score(dict.fromkeys(RUBRIC_WEIGHTS, ninf)) == 0.0
     # A single non-finite dimension among otherwise-perfect scores must still
     # drag the total down by its full weight, not be dropped from the
-    # denominator or clamped into range: (100 - 10) * 5 / 100 = 4.5.
+    # denominator or clamped into range: (100 - 5) * 5 / 100 = 4.75.
     scores_with_nan = dict.fromkeys(RUBRIC_WEIGHTS, 5)
     scores_with_nan["team_executability"] = nan
-    assert weighted_score(scores_with_nan) == 4.5
+    assert weighted_score(scores_with_nan) == 4.75
     scores_with_inf = dict.fromkeys(RUBRIC_WEIGHTS, 5)
     scores_with_inf["team_executability"] = inf
-    assert weighted_score(scores_with_inf) == 4.5
+    assert weighted_score(scores_with_inf) == 4.75
     scores_with_ninf = dict.fromkeys(RUBRIC_WEIGHTS, 5)
     scores_with_ninf["team_executability"] = ninf
-    assert weighted_score(scores_with_ninf) == 4.5
+    assert weighted_score(scores_with_ninf) == 4.75
 
 
 def test_display_rounding_cannot_flip_the_band_across_a_threshold():
-    # Five dimensions at 3.4, team_executability (weight 10) at 3.35: true mean
-    # is exactly 3.395, which is < 3.4 and must band as "conditional". Naive
-    # round(3.395, 2) == 3.4, which would wrongly band as "advance" — a
-    # proposal promoted by a rounding artefact instead of its true score.
+    # venture_potential and team_executability (weight 5 each) at 3.35, the
+    # other 90 points at 3.4: true mean is exactly 3.395, which is < 3.4 and
+    # must band as "conditional". Naive round(3.395, 2) == 3.4, which would
+    # wrongly band as "advance" — a proposal promoted by a rounding artefact
+    # instead of its true score.
     scores = dict.fromkeys(RUBRIC_WEIGHTS, 3.4)
+    scores["venture_potential"] = 3.35
     scores["team_executability"] = 3.35
     score = weighted_score(scores)
     assert score == 3.39
@@ -107,7 +109,7 @@ def test_case_and_whitespace_variant_keys_still_match_their_dimension():
         "venture_potential": 2, " Team_Executability ": 4,
     }
     # Same hand-computed total as test_a_real_verdict_scores_as_hand_computed.
-    assert weighted_score(scores) == 3.35
+    assert weighted_score(scores) == 3.4
 
 
 def test_unrecognized_key_is_logged_and_still_scores_as_zero(caplog):
@@ -153,7 +155,7 @@ def test_bool_dimension_values_count_as_zero_not_as_one_or_zero():
     assert weighted_score({"differentiation_unmet_need": False}) == 0.0
     scores_with_true = dict.fromkeys(RUBRIC_WEIGHTS, 5)
     scores_with_true["team_executability"] = True
-    assert weighted_score(scores_with_true) == 4.5
+    assert weighted_score(scores_with_true) == 4.75
     scores_with_false = dict.fromkeys(RUBRIC_WEIGHTS, 5)
     scores_with_false["team_executability"] = False
-    assert weighted_score(scores_with_false) == 4.5
+    assert weighted_score(scores_with_false) == 4.75

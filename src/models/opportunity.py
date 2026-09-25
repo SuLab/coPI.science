@@ -65,15 +65,14 @@ class OpportunityAssessment(Base):
     # indistinguishable from one the hub wrote. Every read path falls back to
     # `company_or_project` and renders nothing for absent bullets/pitch.
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 3-5 short strings (scout_hub <= 1.2.0), or the three-group object
-    # {"significance": [...], "innovation": [...], "commercial_potential": [...]}
-    # (1.3.0, Task 7 / F3), or the five-group object (>= 1.4.0, which adds
-    # `clinical_actionability` and `key_questions`) — see
-    # src/services/assessment_detail.py's
-    # `normalize_key_points`/`KEY_POINT_GROUPS`. `none_as_null=True` for the
-    # reason given on `missing_domains` below: without it Python None persists
-    # as the JSONB scalar `null`, which `WHERE key_points IS NULL` does not
-    # match.
+    # 3-5 short strings (scout_hub <= 1.2.0); the three-group (1.3.0) or
+    # five-group (1.4.0-1.7.1) legacy object; or, from 1.8.0, the six-group
+    # object — see src/services/assessment_detail.py's `KEY_POINT_GROUPS`,
+    # `LEGACY_KEY_POINT_GROUPS`, `normalize_key_points` and
+    # `key_point_sections`.
+    # `none_as_null=True` for the reason given on `missing_domains` below:
+    # without it Python None persists as the JSONB scalar `null`, which
+    # `WHERE key_points IS NULL` does not match.
     key_points: Mapped[list | dict | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
