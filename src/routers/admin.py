@@ -162,9 +162,9 @@ VALID_AGENT_STATUSES = ("active", "inactive", "suspended", "pending")
 
 # Module-level dependency singletons, the pattern src/routers/manager.py
 # documents: ruff's B008 flags a `Depends(...)` call sitting in an argument
-# default, and the src/ lint ratchet (scripts/ci.sh's SRC_LINT_MAX) has ~3
-# findings of headroom against 140 existing B008s in this file alone. New
-# handlers here take these instead of adding to that debt.
+# default, and every such default counts against the src/ lint ratchet
+# (scripts/ci.sh's SRC_LINT_MAX). New handlers here take these module-level
+# singletons instead of adding to that debt.
 _DB = Depends(get_db)
 _ADMIN = Depends(get_admin_user)
 
@@ -1195,10 +1195,13 @@ async def admin_provision_slack_callback(
     """
     from src.services.admin_provisioning import ProvisioningError, complete_provisioning
 
-    # An impersonated session is admitted (operator decision 2026-09-11:
-    # nothing is hidden or refused while impersonating). `current_user` is
-    # the impersonated account, which is also who `start_provisioning`
-    # recorded as initiator, so the initiator check below still lines up.
+    # An impersonated session is admitted (operator decision 2026-09-11: the
+    # /manager/pis PI-management controls, this callback included, are not
+    # refused while impersonating; reviewer assign/unassign, prompt-suggestion
+    # generate/status, assessment chat and both account deletes still are).
+    # `current_user` is the impersonated account, which is also who
+    # `start_provisioning` recorded as initiator, so the initiator check below
+    # still lines up.
     is_admin = bool(current_user.is_admin)
 
     def surface_error(msg: str) -> RedirectResponse:
@@ -1560,7 +1563,7 @@ async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
     )
 
     # Most recent topology snapshot written by a running engine — the only way this
-    # process can see the engine's in-memory counters (v2 §9.4 / §13.1).
+    # process can see the engine's in-memory counters (v2 §9 req. 4 / §13.1).
     snapshot = (await db.execute(
         select(CohortAuditEvent)
         .where(CohortAuditEvent.action == COHORT_ACTION_TOPOLOGY_SNAPSHOT)

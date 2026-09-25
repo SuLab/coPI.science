@@ -756,9 +756,11 @@ async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
 
 
 async def test_impersonating_admin_sees_every_manager_control(client, db_session):
-    """Operator decision 2026-09-11: nothing on the manager surface is hidden
-    while impersonating. The Add-PI form, the Edit Profile form and the
-    mute button all render for an admin wearing a manager."""
+    """Operator decision 2026-09-11: the PI-management controls on
+    /manager/pis are not hidden while impersonating. The Add-PI form, the
+    Edit Profile form and the mute button all render for an admin wearing a
+    manager. (Assign/unassign and the chat drawer on the assessment pages are
+    still hidden under impersonation.)"""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Imp")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Imp")
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)

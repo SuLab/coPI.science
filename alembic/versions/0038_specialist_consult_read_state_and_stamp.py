@@ -32,11 +32,11 @@ admin's and manager's) and the engine's ``_record_specialist_consult`` INSERT
 migrate from a one-off container, then start — the same ordering as
 0028/0030/0036/0037 (see CLAUDE.md).
 
-NOT affected: the discussions panel cards at src/services/thread_panel.py
-select an explicit column list rather than the whole mapped class, and that
-list does not name any of these four columns, so that page keeps working
-against either schema. (An earlier draft of this docstring claimed it would
-raise too; verified against the actual query and corrected.)
+Also affected since 46d9a99 (2026-08-28): the discussions panel cards at
+src/services/thread_panel.py select an explicit column list that now names
+``SpecialistConsult.read_state``, so /admin/discussions and
+/manager/discussions also raise against a pre-0038 database. (When this
+docstring was first written the list named none of the four columns.)
 """
 from typing import Sequence, Union
 

@@ -85,9 +85,18 @@ async def test_provisioning_failure_returns_to_the_manager_page(
 async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
     client, db_session, monkeypatch
 ):
-    """Operator decision 2026-09-11: nothing is hidden or refused while
-    impersonating. An admin wearing a manager reaches both provisioning
-    POSTs, attributed to the impersonated manager; a reviewer still cannot."""
+    """Operator decision 2026-09-11: the PI-management controls on
+    /manager/pis (Add-PI, Edit Profile, mute, Slack provision/activate/
+    callback) are neither hidden nor refused while an admin impersonates a
+    manager. An admin wearing a manager reaches both provisioning POSTs,
+    attributed to the impersonated manager; a reviewer still cannot.
+
+    Still refused while impersonating: reviewer assign/unassign and
+    prompt-suggestion generate/status (`_refuse_impersonation`, reviews.py),
+    every assessment-chat route (`_refused`, assessment_chat.py), self-service
+    account deletion (profile.py) and the admin user delete (admin.py). Review
+    feedback and review-status writes are allowed, attributed to the
+    impersonated user (CLAUDE.md, Account Types)."""
     manager = await _manager(db_session)
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
@@ -300,8 +309,8 @@ async def test_a_non_pi_lab_agent_is_not_reachable_from_the_manager_page(
 async def test_the_callback_admits_an_impersonated_session(
     client, db_session, monkeypatch
 ):
-    """Operator decision 2026-09-11: impersonation refuses nothing. The
-    impersonated manager is both the initiator and the completer, so the
+    """Operator decision 2026-09-11: the Slack provisioning callback admits an
+    impersonated session. The impersonated manager is both the initiator and the completer, so the
     initiator check (migration 0046) lines up and the token lands."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     manager = await _manager(db_session)
