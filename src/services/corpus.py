@@ -482,7 +482,7 @@ async def resolve_corpus(
 
     if doi_pool:
         mapping = await _stage(
-            "doi_resolution", convert_dois_to_pmids(list(doi_pool))
+            "doi_resolution", convert_dois_to_pmids(list(doi_pool), strict=True)
         )
         for doi, pmid in mapping.items():
             stage = doi_pool.get(doi)
@@ -503,7 +503,7 @@ async def resolve_corpus(
                 orcid_dois[str(pmid)] = doi
 
     records = (
-        await _stage("efetch", fetch_pubmed_records(list(stages)))
+        await _stage("efetch", fetch_pubmed_records(list(stages), strict=True))
         if stages
         else []
     )
@@ -589,7 +589,15 @@ async def resolve_corpus(
                 flagged.append(
                     {
                         "pmid": rec.get("pmid"),
-                        "reason": "bare_initial_unconfirmed",
+                        # The two misses are different evidence: an
+                        # initial-only name nobody corroborated, versus a
+                        # full-name S4-only hit whose author affiliation did
+                        # not match. Keep them apart in the progress text.
+                        "reason": (
+                            "bare_initial_unconfirmed"
+                            if bare_initial
+                            else "s4_affiliation_mismatch"
+                        ),
                         "title": rec.get("title", ""),
                         "stages": rec["stages"],
                     }

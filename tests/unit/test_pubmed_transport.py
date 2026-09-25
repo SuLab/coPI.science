@@ -191,12 +191,15 @@ async def test_malformed_xml_does_not_claim_the_record_is_absent(monkeypatch):
 
 
 async def test_the_batch_path_still_survives_one_bad_response(monkeypatch):
-    """`fetch_pubmed_records`' documented job is to keep a long ingest going, so
-    the new exception must be swallowed THERE and only there.
+    """With the default ``strict=False``, `fetch_pubmed_records` keeps a long
+    ingest going: an ingest caller (industry evidence, the repair scripts) loses
+    the bad batch's 100 PMIDs and no more.
 
     Two chunks (the batch size is 100): the first comes back unparseable, the
-    second is fine. The good records must still arrive — a profile build must not
-    lose 100 publications to one bad response — and nothing may propagate.
+    second is fine. The good records must still arrive and nothing may
+    propagate. The profile corpus does NOT take this path — it passes
+    ``strict=True`` (next test), because a silently thinned corpus is a wrong
+    profile.
     """
     calls = {"n": 0}
 
@@ -210,6 +213,25 @@ async def test_the_batch_path_still_survives_one_bad_response(monkeypatch):
     records = await pubmed.fetch_pubmed_records([str(i) for i in range(150)])
     assert calls["n"] == 2
     assert [r["pmid"] for r in records] == ["41130592"]
+
+
+async def test_strict_batch_path_raises_on_one_bad_response(monkeypatch):
+    """``strict=True`` is the corpus path: the same one-bad-batch input must
+    raise the parse error rather than return the surviving batch."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, text="<not-xml")
+        return httpx.Response(200, text=_ONE_RECORD_XML)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(pubmed.PubMedParseError):
+        await pubmed.fetch_pubmed_records(
+            [str(i) for i in range(150)], strict=True
+        )
+    assert calls["n"] == 1, "strict stops at the first failed batch"
 
 
 def test_a_parse_failure_is_its_own_exception_not_an_empty_result():

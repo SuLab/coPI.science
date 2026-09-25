@@ -108,10 +108,12 @@ def _install_fakes(monkeypatch):
     async def fake_search_pmids(term, retmax=200):
         return []  # S3/S4 find nothing new
 
-    async def fake_convert_dois_to_pmids(dois):
+    async def fake_convert_dois_to_pmids(dois, *, strict=False):
+        assert strict, "resolve_corpus must call the strict DOI resolver"
         return {}
 
-    async def fake_fetch_pubmed_records(pmids):
+    async def fake_fetch_pubmed_records(pmids, *, strict=False):
+        assert strict, "resolve_corpus must call the strict EFetch path"
         # Authoritative DOIs match the ORCID-assigned DOIs -> reconcile returns "ok".
         # Authors are present so the REAL resolve_corpus keeps both records.
         return [
@@ -297,10 +299,12 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     async def fake_search_pmids(term, retmax=200):
         return []
 
-    async def fake_convert_dois_to_pmids(dois):
+    async def fake_convert_dois_to_pmids(dois, *, strict=False):
+        assert strict, "resolve_corpus must call the strict DOI resolver"
         return {}
 
-    async def fake_fetch_pubmed_records(pmids):
+    async def fake_fetch_pubmed_records(pmids, *, strict=False):
+        assert strict, "resolve_corpus must call the strict EFetch path"
         # PubMed's record for the SAME PMID carries the authoritative DOI.
         return [
             {
@@ -631,7 +635,7 @@ async def test_profile_pipeline_pubmed_outage_raises_instead_of_fabricating(
     """
     _install_fakes(monkeypatch)
 
-    async def pubmed_is_down(pmids):
+    async def pubmed_is_down(pmids, *, strict=False):
         raise ConnectionError("simulated PubMed outage")
 
     monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)
@@ -641,8 +645,11 @@ async def test_profile_pipeline_pubmed_outage_raises_instead_of_fabricating(
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0104",
     )
-    with pytest.raises(CorpusStageError):
+    with pytest.raises(CorpusStageError) as ei:
         await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    # The simulated outage — not, say, a TypeError from a fake whose signature
+    # drifted, which _stage would wrap the same way — is what failed the stage.
+    assert isinstance(ei.value.__cause__, ConnectionError)
 
     pubs = (
         await db_session.execute(select(Publication).where(Publication.user_id == user.id))
@@ -727,8 +734,11 @@ async def test_profile_pipeline_orcid_works_failure_raises(
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0106",
     )
-    with pytest.raises(CorpusStageError):
+    with pytest.raises(CorpusStageError) as ei:
         await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    # The simulated outage — not, say, a TypeError from a fake whose signature
+    # drifted, which _stage would wrap the same way — is what failed the stage.
+    assert isinstance(ei.value.__cause__, ConnectionError)
     assert len(fake_llm.calls) == 0
 
 
@@ -752,12 +762,15 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
     first_version = first.profile_version
     first_generated_at = first.profile_generated_at
 
-    async def pubmed_is_down(pmids):
+    async def pubmed_is_down(pmids, *, strict=False):
         raise ConnectionError("simulated PubMed outage")
 
     monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)
-    with pytest.raises(CorpusStageError):
+    with pytest.raises(CorpusStageError) as ei:
         await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    # The simulated outage — not, say, a TypeError from a fake whose signature
+    # drifted, which _stage would wrap the same way — is what failed the stage.
+    assert isinstance(ei.value.__cause__, ConnectionError)
 
     await db_session.refresh(first)
     assert first.profile_version == first_version == 1

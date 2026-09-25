@@ -1,0 +1,215 @@
+"""A failed NCBI request inside ``resolve_corpus`` fails the corpus.
+
+``fetch_pubmed_records`` and ``convert_dois_to_pmids`` swallow their own
+failures by default, which is right for a long ingest and wrong for a profile
+corpus: ``resolve_corpus``'s ``_stage`` wrapper can only raise
+``CorpusStageError`` for an exception it SEES, so a swallowed EFetch batch or
+DOI lookup used to thin the corpus — and the tenure start and synthesis built
+on it — silently. The corpus path now passes ``strict=True``.
+
+The two pubmed functions run for real here, over an ``httpx.MockTransport``;
+only the non-NCBI stages (ORCID works, OpenAlex, the PubMed searches) are
+faked. A fake of the pubmed functions themselves could not show that the real
+ones raise.
+"""
+
+import ast
+import asyncio
+import inspect
+
+import httpx
+import pytest
+
+from src.services import corpus, pubmed
+from src.services.corpus import CorpusStageError, resolve_corpus
+
+_ORCID = "0000-0001-2345-6789"
+_DOI = "10.1234/abc.def"
+
+
+@pytest.fixture(autouse=True)
+def _no_waiting(monkeypatch):
+    monkeypatch.setattr(pubmed, "_pace_interval", lambda: 0.0)
+    pubmed._next_slot = 0.0
+    real_sleep = asyncio.sleep
+
+    async def _instant(seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(pubmed.asyncio, "sleep", _instant)
+
+
+def _client_factory(handler):
+    """A ``_make_client`` replacement whose transport runs ``handler``."""
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _wire(monkeypatch, *, orcid_works):
+    async def fake_orcid_works(orcid):
+        return list(orcid_works)
+
+    async def fake_openalex(orcid):
+        return []
+
+    async def fake_search(term, retmax=200):
+        return []
+
+    monkeypatch.setattr(corpus, "fetch_orcid_works", fake_orcid_works)
+    monkeypatch.setattr(corpus, "fetch_works_by_orcid", fake_openalex)
+    monkeypatch.setattr(corpus, "search_pmids", fake_search)
+
+
+def _route(request) -> str:
+    path = request.url.path
+    if "idconv" in path:
+        return "idconv"
+    if path.endswith("esearch.fcgi"):
+        return "esearch"
+    if path.endswith("efetch.fcgi"):
+        return "efetch"
+    raise AssertionError(f"unexpected NCBI request: {request.url}")
+
+
+_EMPTY_IDCONV = {"records": []}
+_EMPTY_ESEARCH = {"esearchresult": {"idlist": []}}
+
+
+async def _resolve():
+    return await resolve_corpus(_ORCID, "Rachel Green", "Johns Hopkins University")
+
+
+async def test_one_failed_efetch_batch_raises_corpus_stage_error(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": str(i)} for i in range(1, 151)])
+    calls = {"efetch": 0}
+
+    def handler(request):
+        assert _route(request) == "efetch"
+        calls["efetch"] += 1
+        if calls["efetch"] == 1:
+            return httpx.Response(200, text="<not-xml")
+        return httpx.Response(
+            200, text='<?xml version="1.0"?><PubmedArticleSet></PubmedArticleSet>'
+        )
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="efetch") as ei:
+        await _resolve()
+    assert isinstance(ei.value.__cause__, pubmed.PubMedParseError)
+
+
+async def test_an_idconv_failure_raises_corpus_stage_error(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+
+    def handler(request):
+        assert _route(request) == "idconv"
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="doi_resolution") as ei:
+        await _resolve()
+    assert isinstance(ei.value.__cause__, httpx.ConnectError)
+
+
+async def test_a_failed_doi_esearch_raises_corpus_stage_error(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+    calls = {"esearch": 0}
+
+    def handler(request):
+        route = _route(request)
+        if route == "idconv":
+            return httpx.Response(200, json=_EMPTY_IDCONV)
+        assert route == "esearch"
+        calls["esearch"] += 1
+        return httpx.Response(503, text="Service Unavailable")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="doi_resolution") as ei:
+        await _resolve()
+    assert calls["esearch"] == 3, "the 503 is retried to the budget before failing"
+    assert isinstance(ei.value.__cause__, httpx.HTTPStatusError)
+
+
+async def test_a_failed_doi_roundtrip_efetch_raises(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+    calls = {"efetch": 0}
+
+    def handler(request):
+        route = _route(request)
+        if route == "idconv":
+            return httpx.Response(200, json=_EMPTY_IDCONV)
+        if route == "esearch":
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["31000000"]}})
+        calls["efetch"] += 1
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    with pytest.raises(CorpusStageError, match="doi_resolution") as ei:
+        await _resolve()
+    assert calls["efetch"] == 3
+    assert isinstance(ei.value.__cause__, httpx.RemoteProtocolError)
+
+
+async def test_a_doi_answered_as_absent_is_not_a_failure(monkeypatch):
+    # Positive control: every request COMPLETES and NCBI simply maps nothing —
+    # an idconv error record, then an ESearch with no hit. That is an answer,
+    # so strictness must not turn it into a failed job.
+    _wire(monkeypatch, orcid_works=[{"pmid": None, "doi": _DOI}])
+    seen = []
+
+    def handler(request):
+        route = _route(request)
+        seen.append(route)
+        if route == "idconv":
+            return httpx.Response(
+                200, json={"records": [{"doi": _DOI, "status": "error"}]}
+            )
+        assert route == "esearch"
+        return httpx.Response(200, json=_EMPTY_ESEARCH)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    result = await _resolve()
+    assert result.kept == []
+    assert seen == ["idconv", "esearch"], "both lookups must actually have run"
+
+
+_STRICT_REQUIRED = {"convert_dois_to_pmids", "fetch_pubmed_records"}
+
+
+def _callee(node: ast.Call) -> str | None:
+    return node.func.id if isinstance(node.func, ast.Name) else None
+
+
+def _passes_strict_true(node: ast.Call) -> bool:
+    return any(
+        kw.arg == "strict"
+        and isinstance(kw.value, ast.Constant)
+        and kw.value.value is True
+        for kw in node.keywords
+    )
+
+
+def test_every_corpus_stage_call_is_strict():
+    """A new ``_stage`` over either swallowing function without ``strict=True``
+    would reintroduce the silent thinning, and no fake-driven test would see
+    it: the fakes answer whatever they are asked."""
+    tree = ast.parse(inspect.getsource(resolve_corpus))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    wrapped = [
+        inner
+        for outer in calls
+        if _callee(outer) == "_stage" and len(outer.args) >= 2
+        for inner in [outer.args[1]]
+        if isinstance(inner, ast.Call) and _callee(inner) in _STRICT_REQUIRED
+    ]
+    assert {_callee(c) for c in wrapped} == _STRICT_REQUIRED, (
+        "resolve_corpus no longer stages both NCBI lookups — this guard has "
+        "gone vacuous; re-point it"
+    )
+    for call in wrapped:
+        assert _passes_strict_true(call), (
+            f"_stage({_callee(call)}(...)) is missing strict=True"
+        )
+    # And neither function is called OUTSIDE a _stage, where a raise would
+    # escape as something other than CorpusStageError.
+    bare = [c for c in calls if _callee(c) in _STRICT_REQUIRED]
+    assert len(bare) == len(wrapped)

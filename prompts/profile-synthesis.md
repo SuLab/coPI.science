@@ -73,9 +73,8 @@ Return ONLY valid JSON with this exact schema:
 2. **No hallucination.** Only include what is supported by the provided publications and grants.
    If you don't have evidence for a technique, don't include it.
 
-3. **Weighting.** Last-author publications reflect the PI's independent research program and should
-   be weighted more heavily. First-author papers from before the PI's independent career are useful
-   but secondary.
+3. **Weighting.** The context lists publications newest first and does not state the PI's author
+   position; do not infer the PI's role on a paper from author order.
 
 4. **Computational lab handling.** For bioinformatics/computational labs, "experimental models" should
    include databases, knowledge graphs, and computational platforms used as primary research objects.

@@ -195,18 +195,29 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
                 return resp
 
 
-async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
+async def fetch_pubmed_records(
+    pmids: list[str], *, strict: bool = False
+) -> list[dict[str, Any]]:
     """
     Batch fetch PubMed records for a list of PMIDs.
     Returns list of dicts with: pmid, doi, pmcid, title, abstract, journal, year,
     pub_types, authors, author_count, coi_statement.
 
-    This is the path whose job is to keep a long ingest going, so it swallows
-    per-batch failures — ``PubMedParseError`` included, which is why raising it
-    from ``_parse_pubmed_xml`` costs a profile build nothing: one unreadable
-    response loses its own 100 PMIDs and no more. ``fetch_abstract`` deliberately
-    does NOT come through here (see its docstring): a single-record lookup needs
-    exactly the information this loop discards.
+    ``strict`` decides what one failed batch (transport error, HTTP error, or an
+    unparseable body — ``PubMedParseError``) costs:
+
+    * ``strict=False`` (the default, for ingest callers such as
+      ``industry_evidence`` and the repair/sparse-data scripts): the failure is
+      logged and that batch's 100 PMIDs are lost, no more — the job of those
+      callers is to keep a long ingest going.
+    * ``strict=True`` (``resolve_corpus``): the first failed batch re-raises.
+      A profile corpus silently missing a batch is thinner than the PI's real
+      record, and the tenure start and synthesis built on it would be wrong
+      with nothing to show for it.
+
+    ``fetch_abstract`` deliberately does NOT come through here (see its
+    docstring): a single-record lookup needs exactly the information the
+    non-strict loop discards.
     """
     if not pmids:
         return []
@@ -219,6 +230,8 @@ async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
             records = await _fetch_pubmed_batch(batch)
             results.extend(records)
         except Exception as exc:
+            if strict:
+                raise
             logger.error("Failed to fetch PubMed batch %s: %s", batch[:3], exc)
     return results
 
@@ -450,12 +463,21 @@ async def search_pmids(
     return list(data.get("esearchresult", {}).get("idlist", []))
 
 
-async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
+async def convert_dois_to_pmids(
+    dois: list[str], *, strict: bool = False
+) -> dict[str, str]:
     """
     Convert DOIs to PMIDs. First tries NCBI ID converter (batch, but PMC-only),
     then falls back to PubMed ESearch for unresolved DOIs.
     Returns dict of {doi: pmid}, keyed by the CALLER's DOI form — every key is
     an element of ``dois``, never the resolver's own spelling of one.
+
+    A DOI absent from the result is an ANSWER ("NCBI does not map it"): an
+    idconv ``status == "error"`` record, an ESearch with other than exactly one
+    hit, or a round-trip DOI mismatch. A FAILED request (idconv batch, per-DOI
+    ESearch, or the round-trip EFetch) is logged and swallowed by default, which
+    makes it indistinguishable from an answer; with ``strict=True``
+    (``resolve_corpus``) it re-raises instead.
     """
     if not dois:
         return {}
@@ -498,6 +520,8 @@ async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
                     continue
                 mapping[requested_doi] = str(pmid)
         except Exception as exc:
+            if strict:
+                raise
             logger.warning("Failed batch DOI→PMID via ID converter: %s", exc)
 
     # Phase 2: PubMed ESearch for remaining DOIs
@@ -528,7 +552,7 @@ async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
                 pmid = id_list[0]
                 # Round-trip verify: the PMID's authoritative DOI must equal
                 # the queried DOI, or the single hit is still the wrong paper.
-                records = await fetch_pubmed_records([pmid])
+                records = await fetch_pubmed_records([pmid], strict=strict)
                 authoritative = normalize_doi(records[0].get("doi")) if records else None
                 queried = normalize_doi(doi)
                 if (
@@ -544,6 +568,8 @@ async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
                         "miss (D4b)", doi, pmid, authoritative,
                     )
             except Exception as exc:
+                if strict:
+                    raise
                 logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
 
     return mapping

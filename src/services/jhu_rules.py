@@ -12,11 +12,12 @@ Persistence (audit findings H1/M1): one AppSetting row per user
 (``jhu_tenure_start:{user_id}``, JSON ``{"year", "source", "derived_at"}``),
 written as an upsert so there is no read-modify-write of a shared map and no
 lock to hold. Callers decide the transaction: the manager route passes its
-request session (atomic with user creation); the pipeline passes a SHORT
-dedicated session, never the job session, because the worker COMMITS
-mid-pipeline state when a job fails — a paper-derived year from a degraded run
-must not outlive the run that derived it. The 2026-08-13 curated map (legacy
-key ``jhu_tenure_start``, keyed by agent_id) is read as a fallback.
+request session (atomic with user creation); the profile pipeline writes on
+the job session, so a year it derives commits only with a successful run —
+when the job fails, ``process_job`` (``src/worker/main.py``) rolls the session
+back before its failure bookkeeping, and the year goes with it. The 2026-08-13
+curated map (legacy key ``jhu_tenure_start``, keyed by agent_id) is read as a
+fallback.
 """
 
 import json

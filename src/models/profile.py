@@ -59,11 +59,12 @@ class ResearcherProfile(Base):
     # stored). Both None means "no synthesis stored / pre-0023 row".
     #   evidence_pmid_count — in-tenure corpus records (len(in_tenure) in
     #                         profile_pipeline), i.e. what the pipeline had in scope
-    #   evidence_pub_count  — PubMed records that were research-type AND carried an
+    #   evidence_pub_count  — PubMed records that were in-tenure AND carried an
     #                         abstract, i.e. the set offered to the synthesis prompt
     #                         (len(pubs_for_synthesis) at profile_pipeline.py step 9).
-    #                         Read it as a lower bound on grounding, not as a count of
-    #                         what the model saw: _build_synthesis_context sorts by year
+    #                         Read it as what was offered to the synthesis step — an
+    #                         upper bound on what the model saw, not a count of it:
+    #                         _build_synthesis_context sorts by year
     #                         and keeps sorted_pubs[:30], so for a PI with more than 30
     #                         abstract-bearing papers this exceeds what reached the
     #                         prompt. It is exact where it matters — the 0 / non-zero
@@ -108,10 +109,11 @@ class ResearcherProfile(Base):
 
           grounded              at least one abstract reached the prompt
           evidence_lost         identifiers were resolved but no abstract
-                                survived (a PubMed/NCBI outage or rate-limit), or
-                                — on a row written before a corpus stage failure
-                                began failing the job — the ORCID works lookup
-                                itself failed so the identifier count is unknown.
+                                survived, or — on a row written before a corpus
+                                stage failure began failing the job — a
+                                PubMed/NCBI outage or rate-limit lost them, or the
+                                ORCID works lookup itself failed so the
+                                identifier count is unknown.
                                 Ungrounded and worth regenerating.
           no_evidence_available nothing to fetch in the first place (a genuinely
                                 publication-less or non-PubMed-indexed
@@ -120,13 +122,15 @@ class ResearcherProfile(Base):
           unknown               pre-0023 row, or no synthesis was ever stored
 
         Limit of what two counts can tell you: they describe what the synthesis
-        HAD, not every reason it had that. One case is still understated —
-        `convert_dois_to_pmids` failing (it swallows its own errors) for a
-        researcher whose ORCID/OpenAlex works carry only DOIs, with no PubMed
-        search hit, leaves zero identifiers in hand and reads as
-        no_evidence_available. The count is a measured lower bound, deliberately,
-        because a partial count is more useful than NULL; the NCBI failure itself
-        is logged by `convert_dois_to_pmids` during steps 3+4.
+        HAD, not every reason it had that. The corpus path calls
+        `convert_dois_to_pmids` and `fetch_pubmed_records` with `strict=True`, so
+        an NCBI failure there raises `CorpusStageError` and fails the job rather
+        than storing a thinner profile; only ingest callers keep the swallowing
+        default. One case is still understated on rows written before the strict
+        corpus path shipped (2026-09-25) — `convert_dois_to_pmids` failing (it
+        then swallowed its own errors) for a researcher whose ORCID/OpenAlex works
+        carry only DOIs, with no PubMed search hit, left zero identifiers in hand
+        and reads as no_evidence_available.
         """
         if self.evidence_pub_count is None:
             return "unknown"

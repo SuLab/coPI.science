@@ -15,6 +15,7 @@ Implements the pipeline from profile-ingestion.md:
 import hashlib
 import logging
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -46,6 +47,26 @@ logger = logging.getLogger(__name__)
 
 # The stored-corpus cap (coverage design §4.1; applied LAST, after ranking).
 CORPUS_CAP = DEFAULT_CAP
+
+# Progress-text label for each ``CorpusResult.flagged`` reason code that
+# ``resolve_corpus`` emits. A code missing here shows raw rather than being
+# mislabelled; tests/unit/test_corpus.py keeps the two sets equal.
+_FLAG_REASON_LABELS = {
+    "no_individual_author_match": "no individual author match",
+    "bare_initial_unconfirmed": "initial-only name match not confirmed",
+    "s4_affiliation_mismatch": (
+        "name+affiliation search hit with a different author affiliation"
+    ),
+}
+
+
+def _flag_reason_summary(flagged: list[dict[str, Any]]) -> str:
+    """``"N <label>; M <label>"`` over the flagged records' reasons."""
+    counts = Counter(str(f.get("reason")) for f in flagged)
+    return "; ".join(
+        f"{n} {_FLAG_REASON_LABELS.get(reason, reason)}"
+        for reason, n in counts.most_common()
+    )
 
 
 def append_job_progress(job: Job, step: str, detail: str = "") -> None:
@@ -100,9 +121,13 @@ async def run_profile_pipeline(
             user.institution = orcid_profile["institution"]
         if orcid_profile.get("department") and not user.department:
             user.department = orcid_profile["department"]
+        step1_failed = False
     except Exception as exc:
         logger.warning("Step 1 failed for %s: %s", orcid_id, exc)
         orcid_profile = {"name": user.name, "orcid": orcid_id}
+        # The fallback has no ``employments``, so the tenure block below must
+        # not treat "no Hopkins employment found" as an answer (D8).
+        step1_failed = True
 
     # Step 2: Fetch ORCID grants
     update_progress("step2", "Fetching grant information...")
@@ -142,7 +167,7 @@ async def run_profile_pipeline(
         update_progress(
             "corpus_flagged",
             f"{len(corpus_result.flagged)} records withheld for review "
-            f"(no individual author match): {sample}",
+            f"({_flag_reason_summary(corpus_result.flagged)}): {sample}",
         )
     if len(corpus_result.kept) < 5:
         update_progress(
@@ -153,10 +178,13 @@ async def run_profile_pipeline(
 
     # JHU tenure window (R2): recorded value, else ORCID employment, else the
     # earliest paper the PI herself wrote at Hopkins. Derived values are
-    # persisted with provenance — and only ever from a COMPLETE corpus, since
-    # resolve_corpus raises on any stage failure before this point runs
-    # (audit H1: the worker COMMITS mid-pipeline state when a job fails, so a
-    # year derived from partial data must never be flushed).
+    # persisted with provenance, on the job session, and only from a COMPLETE
+    # corpus AND a successful step 1: resolve_corpus raises on any stage
+    # failure before this point runs, and a failed job's writes never commit
+    # (process_job rolls back before its failure bookkeeping). When step 1
+    # failed, ORCID employment was never consulted, so a paper-derived year is
+    # used for this run's filtering but NOT stored — get_tenure_start prefers a
+    # stored year on every later run, so it would outlive ORCID's recovery (D8).
     tenure_start = await get_tenure_start(
         db, user_id, agent_id=agent_reg.agent_id if agent_reg else None
     )
@@ -174,7 +202,18 @@ async def run_profile_pipeline(
             )
     if tenure_start is None:
         tenure_start = derive_start_from_papers(corpus_result.kept)
-        if tenure_start is not None:
+        if tenure_start is not None and step1_failed:
+            logger.warning(
+                "JHU tenure start %s for %s derived from papers while the "
+                "ORCID profile was unavailable; using it for this run only, "
+                "not recording it", tenure_start, orcid_id,
+            )
+            update_progress(
+                "tenure_derived",
+                f"JHU tenure start {tenure_start} used for this run only "
+                "(ORCID profile unavailable; not recorded).",
+            )
+        elif tenure_start is not None:
             await set_tenure_start(
                 user_id, tenure_start, "earliest_hopkins_paper", db=db
             )
@@ -621,7 +660,7 @@ def _build_synthesis_context(
         for title in grant_titles:
             parts.append(f"- {title}")
 
-    # Publications (most recent 25-30, last-author prioritized)
+    # Publications (most recent 30)
     sorted_pubs = sorted(publications, key=lambda p: p.get("year") or 0, reverse=True)
     # Take up to 30
     selected_pubs = sorted_pubs[:30]

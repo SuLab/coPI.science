@@ -8,9 +8,12 @@ A stage failure raises (job retry) instead of quietly producing the thin
 S1-only corpus that was defect D1/D2.
 """
 
+import ast
+import inspect
+
 import pytest
 
-from src.services import corpus, pubmed
+from src.services import corpus, profile_pipeline, pubmed
 from src.services.corpus import (
     CorpusStageError,
     match_pi_author,
@@ -111,11 +114,16 @@ def _wire(monkeypatch, *, orcid_works=(), openalex_works=(), s3=(), s4=(),
             return list(s3)
         return list(s4)
 
-    async def fake_fetch(pmids):
+    # Both take the real keyword-only ``strict`` and demand it be True: a fake
+    # without it would raise TypeError, _stage would wrap that as a
+    # CorpusStageError, and a stage-failure test would pass for the wrong reason.
+    async def fake_fetch(pmids, *, strict=False):
+        assert strict is True
         by_pmid = {r["pmid"]: r for r in records}
         return [by_pmid[p] for p in pmids if p in by_pmid]
 
-    async def fake_dois(dois):
+    async def fake_dois(dois, *, strict=False):
+        assert strict is True
         return dict(doi_map or {})
 
     monkeypatch.setattr(corpus, "fetch_orcid_works", fake_orcid_works)
@@ -162,6 +170,8 @@ async def test_an_s4_only_candidate_needs_an_affiliation_match_too(monkeypatch):
         "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
     )
     assert result.kept == []
+    # A full-forename miss is an affiliation mismatch, not an initial-only one.
+    assert [f["reason"] for f in result.flagged] == ["s4_affiliation_mismatch"]
 
 
 async def test_consortium_and_no_match_papers_cannot_take_cap_slots(monkeypatch):
@@ -338,6 +348,57 @@ async def test_a_bare_initial_match_is_kept_with_a_matching_affiliation(monkeypa
         "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
     )
     assert [r["pmid"] for r in result.kept] == ["1"]
+
+
+async def test_a_bare_initial_unconfirmed_miss_keeps_its_reason(monkeypatch):
+    # The other branch of the same flag: an initial-only name with no anchor
+    # and a disagreeing affiliation is flagged as unconfirmed, not as an S4
+    # affiliation mismatch (which it would read as if the split were lost).
+    records = [
+        _rec(
+            1, year=2019,
+            authors=[_author("Green", "R", "R", affs=["Unrelated University"])],
+        ),
+    ]
+    _wire(monkeypatch, s4=["1"], records=records)
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert result.kept == []
+    assert [f["reason"] for f in result.flagged] == ["bare_initial_unconfirmed"]
+
+
+def _flag_reason_literals() -> set[str]:
+    """Every string literal ``resolve_corpus`` puts under a ``"reason"`` key of
+    a flagged dict, including both arms of a conditional expression."""
+    tree = ast.parse(inspect.getsource(corpus.resolve_corpus))
+    reasons: set[str] = set()
+
+    def collect(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            reasons.add(node.value)
+        elif isinstance(node, ast.IfExp):
+            collect(node.body)
+            collect(node.orelse)
+        else:
+            raise AssertionError(
+                f"unrecognised flag-reason expression: {ast.dump(node)}"
+            )
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if isinstance(key, ast.Constant) and key.value == "reason":
+                    collect(value)
+    return reasons
+
+
+def test_every_flag_reason_has_a_progress_label():
+    # A reason code without a label reaches the job's progress text raw; a
+    # label without a code is dead. Either drift fails here.
+    reasons = _flag_reason_literals()
+    assert reasons, "found no flag reasons — the AST walk has gone vacuous"
+    assert reasons == set(profile_pipeline._FLAG_REASON_LABELS)
 
 
 # ---------------------------------------------------------------------------

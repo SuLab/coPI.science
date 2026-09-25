@@ -12,7 +12,10 @@ Pins the audited behaviors end to end against a real database:
   full-career store — the exact regression that put pre-tenure papers into 9
   agents' prompts on 2026-08-14 (audit H3);
 * tenure derivation: ORCID employment year first, else earliest paper the PI
-  herself wrote at Hopkins, else a loud ``tenure_unknown`` progress flag.
+  herself wrote at Hopkins, else a loud ``tenure_unknown`` progress flag; when
+  the ORCID profile fetch itself failed, a paper-derived year scopes that run
+  but is not persisted (D8);
+* the ``corpus_flagged`` progress text names each flag's actual reason.
 """
 
 from types import SimpleNamespace
@@ -219,6 +222,74 @@ async def test_a_corpus_stage_failure_raises_and_persists_no_tenure_entry(
         await run_profile_pipeline(user.id, db_session, job)
 
     assert await get_tenure_start(db_session, user.id) is None
+
+
+async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
+    db_session, wired, monkeypatch
+):
+    # Step 1 failing leaves no ``employments`` to consult, so "no Hopkins
+    # employment" is unknown rather than answered. A paper-derived year is
+    # still the best scope for THIS run, but storing it would pin it forever:
+    # get_tenure_start prefers a stored year even after ORCID recovers.
+    user, agent, job = await _make_pi(db_session)
+
+    async def orcid_profile_down(orcid):
+        raise ConnectionError("simulated ORCID outage")
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", orcid_profile_down)
+    wired.corpus = CorpusResult(
+        kept=[
+            _rec(1, 2005, "Elsewhere paper"),
+            _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
+        ],
+        flagged=[],
+    )
+
+    await run_profile_pipeline(user.id, db_session, job)
+
+    assert await get_tenure_start(db_session, user.id) is None
+    context = wired.contexts[0]
+    assert "First Hopkins paper" in context
+    assert "Elsewhere paper" not in context, (
+        "the paper-derived year must still scope this run's synthesis"
+    )
+    details = [p["detail"] for p in job.payload.get("progress", [])]
+    assert any(
+        "JHU tenure start 2015 used for this run only" in d
+        and "not recorded" in d
+        for d in details
+    ), details
+
+
+async def test_flag_progress_names_the_actual_reasons(db_session, wired):
+    user, agent, job = await _make_pi(db_session)
+    wired.corpus = CorpusResult(
+        kept=[_rec(1, 2020, "Kept paper")],
+        flagged=[
+            {"pmid": "7", "reason": "no_individual_author_match"},
+            {"pmid": "8", "reason": "bare_initial_unconfirmed"},
+            {"pmid": "9", "reason": "bare_initial_unconfirmed"},
+            {"pmid": "10", "reason": "s4_affiliation_mismatch"},
+            {"pmid": "11", "reason": "some_future_code"},
+        ],
+    )
+
+    await run_profile_pipeline(user.id, db_session, job)
+
+    [detail] = [
+        p["detail"] for p in job.payload.get("progress", [])
+        if p["step"] == "corpus_flagged"
+    ]
+    assert detail.startswith("5 records withheld for review (")
+    assert "2 initial-only name match not confirmed" in detail
+    assert "1 no individual author match" in detail
+    assert (
+        "1 name+affiliation search hit with a different author affiliation"
+        in detail
+    )
+    # An unlabelled code shows raw rather than borrowing another's label.
+    assert "1 some_future_code" in detail
+    assert detail.endswith("): 7, 8, 9, 10, 11")
 
 
 async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(

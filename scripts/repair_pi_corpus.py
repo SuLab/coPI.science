@@ -41,8 +41,9 @@ Review set (``--review``, NEVER applied automatically):
 Addition set: ``resolve_corpus``'s kept set (ranked year-DESC/PMID-DESC,
 capped), excluding PMIDs already stored.
 
-Usage (run via ``docker compose ... run --rm``, never ``exec`` — the running
-container may still hold the pre-fix matcher, plan Task 4):
+Usage (run via ``docker compose -f docker-compose.prod.yml run --rm --no-deps -T
+blackbird-app``, never ``exec`` — the running container may still hold the
+pre-fix matcher, plan Task 4):
 
     # Preview everyone:
     python scripts/repair_pi_corpus.py
@@ -211,7 +212,12 @@ def partition_duplicate_pmids(
     """Split out extra rows sharing an identical stored PMID (D8: the index
     is non-unique, so this is observed, not enforced). The first row seen per
     PMID is kept as canonical; later ones are automatic removals — they are
-    the exact same paper stored twice, not a judgement call."""
+    the exact same paper stored twice, not a judgement call.
+
+    "First seen" is the load order of ``load_stored_publications``:
+    ``created_at``, then ``id``. Rows written in the same transaction share
+    ``created_at`` (it is the transaction's ``now()``), so their ties fall back
+    to ``id`` — deterministic, though not insertion order."""
     seen: dict[str, StoredPublication] = {}
     removals: list[RemovalCandidate] = []
     canonical: list[StoredPublication] = []
@@ -504,7 +510,7 @@ async def load_stored_publications(
             await db.execute(
                 select(Publication)
                 .where(Publication.user_id == user_id)
-                .order_by(Publication.id)
+                .order_by(Publication.created_at, Publication.id)
             )
         )
         .scalars()
