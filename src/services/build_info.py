@@ -9,11 +9,11 @@ Two sources, in order:
    ``scripts/write_build_info.py`` during the Docker build, the only moment a
    git binary is available (``python:3.11-slim`` ships none). Carries a
    ``dirty_files`` count, which the fallback below cannot know.
-2. A pure-Python read of ``.git/HEAD`` + loose refs + ``packed-refs`` — works
-   because the whole repo, ``.git`` included, is ``COPY . .``-ed into every
-   image (there is deliberately no ``.dockerignore``; if one ever appears and
-   excludes ``.git``, this fallback degrades to "unavailable" rather than
-   breaking, which is why every read below is guarded).
+2. A pure-Python read of ``.git/HEAD`` + loose refs + ``packed-refs``. This
+   serves only processes running from a host checkout: images never carry
+   ``.git`` (the Dockerfile's builder stage deletes it after writing the JSON),
+   so inside an image a missing JSON degrades to "unavailable". Every read
+   below is guarded, so neither source's absence raises.
 
 Dependency-free on purpose: imported by the simulation engine at startup and
 by tests that never touch a database.

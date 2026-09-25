@@ -41,9 +41,8 @@ profiles/memory/*.md
 profiles/**/*.md
 profiles/*.log
 
-# Generated/scratch data and static asset bundles (not source)
+# Generated/scratch data (not source)
 data/
-static/
 
 # IDE
 .idea/

@@ -1,7 +1,8 @@
 """build_info: image-baked JSON preferred, pure-Python .git parse as fallback.
 
-The agent image has no git binary but does carry .git (Dockerfile `COPY . .`,
-no .dockerignore), so the runtime reader must never shell out to git.
+No image has a git binary, and images no longer carry .git (the Dockerfile's
+builder stage deletes it), so the runtime reader must never shell out to git.
+The .git fallback serves host-checkout processes only.
 """
 import json
 

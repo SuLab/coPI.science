@@ -1,4 +1,4 @@
-"""Two repository-level invariants nothing else covers.
+"""Three repository-level invariants nothing else covers.
 
 1. **`logs/` is fully ignored.** It holds run artifacts that are not source and
    are sometimes not publishable: `logs/opportunity_assessments_backup_*.sql` is
@@ -18,6 +18,11 @@
    `src/services/email_notifications.py`) can be retired against a proof rather
    than an assumption. See
    `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` (M1).
+
+3. **`static/` is source, not ignored.** Every file under it is tracked and
+   served by the app, but `.gitignore` listed `static/` as a generated bundle, so
+   a new asset stayed untracked unless someone forced it in with `git add -f`.
+   See `docs/audits/2026-09-24-comment-cleanup-rca/README.md` (I36).
 """
 import ast
 import subprocess
@@ -69,6 +74,21 @@ def test_logs_directory_is_fully_ignored():
             f"{relpath} is not gitignored — `git add -A` would commit it. `logs/` "
             "holds run artifacts (including dumps of assessment bodies and agent "
             "profiles) and must be ignored wholesale, not per-extension."
+        )
+
+
+def test_static_sources_are_not_ignored():
+    """A new file under `static/` must be addable with plain `git add`."""
+    if not (ROOT / ".git").exists():
+        pytest.skip("not a git work tree")
+
+    assert _check_ignore("src/main.py") == 1, (
+        "git check-ignore reports src/main.py as ignored — the probe itself is broken"
+    )
+    for relpath in ("static/js/new_asset.js", "static/css/new.css"):
+        assert _check_ignore(relpath) == 1, (
+            f"{relpath} is gitignored — `static/` holds tracked source the app serves, "
+            "so a new asset would silently stay out of every commit and every image"
         )
 
 

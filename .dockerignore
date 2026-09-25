@@ -1,0 +1,43 @@
+# Build-context filter. Secrets, production data and local tooling never reach
+# the Docker daemon, so no cache layer can hold them.
+#
+# Rules (pinned by tests/unit/test_docker_build_context.py):
+# - Exclude ONLY untracked paths. The builder stage runs
+#   `git status --untracked-files=no` to count dirty files; an excluded TRACKED
+#   path would look deleted there and inflate `dirty_files` in every image.
+# - Keep `.git`: the builder (`source`) stage needs it to write
+#   .build_info.json, then deletes it. The final stage never receives it.
+# - The only negation allowed is `!.env.example`, so no later `!` line can
+#   re-include something excluded above.
+# This is the first layer. The second is the builder stage's `git clean -ffdx`,
+# which drops any untracked file this list does not name.
+.env*
+!.env.example
+.provision_state.json
+certbot
+backups
+data
+logs
+profiles
+.venv
+.venv-test
+venv
+.superpowers
+.claude
+.notes
+.playwright-mcp
+docs/superpowers
+.mutmut-cache
+mutants
+.pytest_cache
+.ruff_cache
+htmlcov
+.coverage
+build
+dist
+*.egg-info
+**/__pycache__
+**/*.pyc
+.idea
+.vscode
+.build_info.json
