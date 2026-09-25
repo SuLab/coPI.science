@@ -51,8 +51,8 @@ anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
                                              DB inbox; no channel is created)
 
 Both edges are one-way and mutually exclusive: the endpoints reject any second action
-by the same agent (`/review` with 400 "Already reviewed", `/reopen` with a silent
-redirect), and a uniqueness constraint backs it at the DB level. The two agents on a
+by the same agent (`/review` with a redirect to the dashboard, like `/reopen`), and a
+uniqueness constraint backs it at the DB level. The two agents on a
 proposal transition independently. `rating=0` is not reachable through `/review` —
 the form validates 1..4 — so it is genuinely a reopen sentinel and not a rating.
 """
@@ -557,8 +557,8 @@ async def test_a_decided_review_cannot_be_re_decided(
 
     Positive control: the OTHER agent in the same proposal can still review it. The
     lock is per (thread_decision, agent), not "this proposal is now closed to
-    everyone" — without this half, a 400 from a globally broken endpoint would look
-    like correct idempotency.
+    everyone" — without this half, a redirect from a globally broken endpoint would
+    look like correct idempotency.
     """
     first = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",
@@ -570,11 +570,13 @@ async def test_a_decided_review_cannot_be_re_decided(
         f"/agent/alpha/proposals/{proposal.id}/review",
         data={"rating": "1", "comment": "changed my mind"}, headers=_auth(lab.pi_a_id),
     )
-    assert second.status_code == 400, (
-        f"a second review by the same agent was accepted ({second.status_code}) — the "
-        "PI's decision is overwritable"
+    # D10: a sequential duplicate is answered like a lost race — a redirect to
+    # the dashboard. The row assertions below are what prove it wrote nothing.
+    assert second.status_code == 302, (
+        f"a second review by the same agent answered {second.status_code}, not the "
+        "dashboard redirect"
     )
-    assert "Already reviewed" in second.text
+    assert second.headers["location"] == "/agent/alpha/dashboard"
 
     db_session.expire_all()
     rows = (await db_session.execute(
@@ -592,13 +594,61 @@ async def test_a_decided_review_cannot_be_re_decided(
         headers=_auth(lab.pi_b_id),
     )
     assert other.status_code == 302, (
-        f"the other agent's PI was ALSO refused ({other.status_code}), so the 400 "
-        "above is not evidence of a per-agent lock"
+        f"the other agent's PI was ALSO refused ({other.status_code}), so the "
+        "unchanged row above is not evidence of a per-agent lock"
     )
     db_session.expire_all()
     assert sorted(r.rating for r in (await db_session.execute(
         select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
     )).scalars().all()) == [2, 4]
+
+
+async def _non_proposal_decision(db_session, lab) -> ThreadDecision:
+    """A decision both labs participate in whose outcome is not 'proposal'."""
+    td = ThreadDecision(
+        simulation_run_id=lab.run_id, thread_id="1700009999.000100",
+        channel="degrader-chem", agent_a="alpha", agent_b="beta", outcome="timeout",
+    )
+    db_session.add(td)
+    await db_session.flush()
+    return td
+
+
+async def test_review_of_a_non_proposal_decision_is_404(client, db_session, lab):
+    """Only a proposal can be rated: a 'timeout' decision is refused and files nothing."""
+    td = await _non_proposal_decision(db_session, lab)
+    r = await client.post(
+        f"/agent/alpha/proposals/{td.id}/review",
+        data={"rating": "3", "comment": ""}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 404, r.status_code
+    db_session.expire_all()
+    assert (await db_session.scalar(
+        select(func.count(ProposalReview.id)).where(
+            ProposalReview.thread_decision_id == td.id
+        )
+    )) == 0, "a review of a non-proposal decision still wrote a row"
+
+
+async def test_reopen_of_a_non_proposal_decision_is_404(client, db_session, lab):
+    """Only a proposal can be reopened: a 'timeout' decision is refused, and neither a
+    review row nor an inbox message is written."""
+    td = await _non_proposal_decision(db_session, lab)
+    r = await client.post(
+        f"/agent/alpha/proposals/{td.id}/reopen",
+        data={"guidance": "Refine it."}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 404, r.status_code
+    db_session.expire_all()
+    assert (await db_session.scalar(
+        select(func.count(ProposalReview.id)).where(
+            ProposalReview.thread_decision_id == td.id
+        )
+    )) == 0, "a reopen of a non-proposal decision still wrote a review row"
+    assert (await db_session.scalar(select(func.count(AgentMessage.id)).where(
+        AgentMessage.thread_ts == td.thread_id,
+        AgentMessage.agent_id.is_(None),
+    ))) == 0, "a reopen of a non-proposal decision still wrote guidance"
 
 
 async def test_a_review_cannot_be_filed_against_someone_elses_proposal(

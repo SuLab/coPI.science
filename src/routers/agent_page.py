@@ -472,7 +472,13 @@ async def review_proposal(
         raise HTTPException(status_code=404, detail="Proposal not found")
     if agent.agent_id not in (td.agent_a, td.agent_b):
         raise HTTPException(status_code=403, detail="Not your proposal")
+    if td.outcome != "proposal":
+        # A 'no_proposal'/'timeout' decision has nothing to rate.
+        raise HTTPException(status_code=404, detail="Proposal not found")
 
+    # A review is terminal per (decision, agent). A sequential duplicate (stale
+    # page, Back button) is answered exactly like a lost race below: a redirect
+    # to the dashboard, which already shows the recorded review.
     existing = await db.execute(
         select(ProposalReview).where(
             ProposalReview.thread_decision_id == thread_decision_id,
@@ -480,7 +486,7 @@ async def review_proposal(
         )
     )
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Already reviewed")
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
     review = ProposalReview(
         thread_decision_id=thread_decision_id,
@@ -510,8 +516,8 @@ async def review_proposal(
         # two tabs): a review for this decision+agent now exists. The
         # rollback also discards THIS request's record_engagement /
         # mark_notification_responded writes — correct, because the winning
-        # racer performed its own. Unlike the SELECT guard above, which answers a
-        # sequential duplicate with 400, a lost race redirects like the winner.
+        # racer performed its own. The loser redirects like the winner and like
+        # the SELECT guard above answers a sequential duplicate.
         await db.rollback()
         return RedirectResponse(
             url=f"/agent/{agent_id}/dashboard", status_code=302
@@ -589,6 +595,9 @@ async def reopen_proposal(
         raise HTTPException(status_code=404, detail="Proposal not found")
     if agent.agent_id not in (td.agent_a, td.agent_b):
         raise HTTPException(status_code=403, detail="Not your proposal")
+    if td.outcome != "proposal":
+        # A 'no_proposal'/'timeout' decision has nothing to reopen.
+        raise HTTPException(status_code=404, detail="Proposal not found")
 
     # Idempotency guard. A proposal is reopened at most once per agent: the
     # dashboard hides the reopen form once a review/reopen exists, but a stale
@@ -627,31 +636,37 @@ async def reopen_proposal(
         )
     logger.info("Reopen guidance for %s written to DB inbox", td.thread_id)
 
-    existing = await db.execute(
-        select(ProposalReview).where(
-            ProposalReview.thread_decision_id == thread_decision_id,
-            ProposalReview.agent_id == agent.agent_id,
-        )
+    # Added unconditionally: the guard above already returned if a review
+    # exists, so on a concurrent reopen this insert is what collides on
+    # uq_proposal_reviews_decision_agent, and the loser's rollback below takes
+    # its inbox row with it.
+    review = ProposalReview(
+        thread_decision_id=thread_decision_id,
+        agent_id=agent.agent_id,
+        user_id=agent.user_id,  # Always the PI
+        delegate_user_id=current_user.id if not is_owner else None,
+        reviewed_by_user_id=current_user.id,
+        rating=0,  # 0 = reopened with guidance, not a rating
+        comment=f"[Reopened] {guidance[:500]}",
+        submitted_via="web",
     )
-    if not existing.scalar_one_or_none():
-        review = ProposalReview(
-            thread_decision_id=thread_decision_id,
-            agent_id=agent.agent_id,
-            user_id=agent.user_id,  # Always the PI
-            delegate_user_id=current_user.id if not is_owner else None,
-            reviewed_by_user_id=current_user.id,
-            rating=0,  # 0 = reopened with guidance, not a rating
-            comment=f"[Reopened] {guidance[:500]}",
-            submitted_via="web",
-        )
-        db.add(review)
+    db.add(review)
 
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
+    try:
+        # Inside the try for the same reason as in review_proposal: these
+        # helpers' SELECTs autoflush the pending inserts, so a lost race can
+        # raise here rather than at commit().
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
 
-    await db.commit()
+        await db.commit()
+    except IntegrityError:
+        # Concurrent reopen (double-click, two tabs) lost the race: the
+        # winner's rating=0 review and guidance are already committed, so
+        # this request's duplicate inbox row is discarded with the rollback.
+        await db.rollback()
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
