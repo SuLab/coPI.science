@@ -304,8 +304,8 @@ async def test_flush_throttles_run_stats_count(db_session):
 
 
 # ---------------------------------------------------------------
-# B2 — the startup rebuild loads a bounded window (recent + undecided threads),
-# and old closed threads are hydrated on demand.
+# B2 — the startup rebuild loads a bounded window (recent + undecided threads);
+# old closed threads stay in the DB.
 # ---------------------------------------------------------------
 
 async def test_rebuild_windows_recent_and_undecided_only(db_session):
@@ -340,32 +340,6 @@ async def test_rebuild_windows_recent_and_undecided_only(db_session):
     assert engine.message_log.get_entry("OLDCLOSED") is None
     assert engine.message_log.get_entry("OLDLIVE") is not None
     assert engine.message_log.get_entry("RECENT") is not None
-
-
-async def test_hydrate_thread_loads_windowed_out_thread(db_session):
-    run = await factories.make_simulation_run(db_session)
-    old = time.time() - REBUILD_WINDOW_S - 100_000
-    await factories.make_agent_message(
-        db_session, run=run, agent_id="su", is_bot=True,
-        channel_id="local:general", channel_name="general",
-        message_ts="THR", thread_ts=None, posted_at=old, content="root",
-    )
-    await factories.make_agent_message(
-        db_session, run=run, agent_id="lairson", is_bot=True,
-        channel_id="local:general", channel_name="general",
-        message_ts="THR-r1", thread_ts="THR", posted_at=old + 1, content="reply",
-    )
-
-    engine = _engine_for(db_session, run.id)
-    assert engine.message_log.get_entry("THR") is None  # not yet loaded
-
-    await engine._hydrate_thread_from_db("THR")
-    assert engine.message_log.get_entry("THR") is not None
-    assert len(engine.message_log.get_thread_history("THR")) == 2
-
-    # Idempotent — a second hydrate doesn't duplicate.
-    await engine._hydrate_thread_from_db("THR")
-    assert len(engine.message_log.get_thread_history("THR")) == 2
 
 
 # ---------------------------------------------------------------
@@ -454,9 +428,6 @@ class _HistoryClient:
 
     async def apoll_channel_messages(self, *args, **kwargs):
         return await asyncio.to_thread(self.poll_channel_messages, *args, **kwargs)
-
-    def resolve_user_name(self, user_id):
-        return user_id
 
 
 async def test_polled_bot_message_keeps_its_slack_mapping(db_session):

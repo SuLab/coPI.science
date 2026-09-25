@@ -234,9 +234,8 @@ def test_gate_off_accepts_everything_the_role_declared():
 
 
 def test_the_star_still_rejects_the_retired_idea_post_type():
-    """Resolving the alias must not smuggle the type past the topology filter:
-    `idea` resolves to `idea_crosslab`, which no longer exists in the
-    vocabulary at all — a star spoke still cannot use it."""
+    """`idea` is not in the vocabulary at all, and no alias maps it onto a
+    live type — a star spoke still cannot use it."""
     eng, gill, _, _ = _star()
     avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "idea", "pearce", avail) is not None
@@ -467,8 +466,8 @@ _NON_STRING_TAGGED_AGENT = (
 
 
 async def test_a_non_string_post_type_does_not_publish(monkeypatch, caplog):
-    """resolve_post_type_name's dict.get on an unhashable key (a list, here)
-    raises TypeError before layer 1 ever runs."""
+    """_post_type_rejection's ``by_name.get`` on an unhashable key (a list,
+    here) raises TypeError before layer 1 ever runs."""
     caplog.set_level("ERROR")
     eng, gill, client = await _drive(monkeypatch, _NON_STRING_POST_TYPE)
     assert client.posted == []

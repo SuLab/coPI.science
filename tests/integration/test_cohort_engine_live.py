@@ -486,7 +486,6 @@ async def test_resumed_run_rebuild_then_first_recompute_grandfathers(live, monke
         "the first recompute after a rebuild must grandfather inherited "
         "cross-cohort threads"
     )
-    assert eng._owes_reply(su) is False, "and it must not win reactive priority"
 
 
 async def test_topology_snapshot_is_actually_written(live, monkeypatch):
@@ -736,7 +735,7 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
     """§8's central promise, driven end to end rather than asserted structurally.
 
     A thread whose partner has left the cohort must still be answered — abandoning
-    it mid-flight wastes every call already spent — while losing reactive priority.
+    it mid-flight wastes every call already spent.
     """
     from tests.fakes import FakeAnthropic
 
@@ -772,11 +771,9 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
     thread = su.state.active_threads["1000.0071"]
     assert thread.grandfathered is True
 
-    # It must not win reactive priority...
-    assert eng._owes_reply(su) is False
-    # ...but the reply lane must still pick it up and reply (Task 11: the
-    # reactive tier and _phase4_reply_threads are gone; the reply lane's
-    # ungated _pending_reply_pairs / _service_reply replace it).
+    # The reply lane must still pick it up and reply (Task 11: the reactive
+    # tier and _phase4_reply_threads are gone; the reply lane's ungated
+    # _pending_reply_pairs / _service_reply replace it).
     pairs = eng._pending_reply_pairs()
     replied = {t.thread_id for a, t in pairs if a.agent_id == "su"}
     assert "1000.0071" in replied, (
@@ -1225,13 +1222,11 @@ async def test_every_outbound_channel_class_is_stamped(live, monkeypatch):
 # ===========================================================================
 
 
-async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypatch):
-    """§8's two halves in one test, so neither can pass on its own.
-
-    "Loses reactive priority" is an absence: _owes_reply going False would also be
-    satisfied by a thread that had simply gone quiet. So the same thread is asserted to
-    still receive a Phase 4 reply, with the LLM call as the witness — that is what
-    "concludes rather than being abandoned" means.
+async def test_grandfathered_thread_still_concludes(live, monkeypatch):
+    """§8: a thread whose partner leaves the cohort is grandfathered, and still
+    receives a Phase 4 reply, with the LLM call as the witness — that is what
+    "concludes rather than being abandoned" means. The grandfathered flag is
+    reporting-only; it does not affect scheduling.
     """
     from src.agent.state import ThreadState
     from tests.fakes import FakeAnthropic
@@ -1259,8 +1254,10 @@ async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypat
         message_count=2,
     )
 
-    # Positive leg BEFORE the split: the thread owes a reply and wins priority.
-    assert eng._owes_reply(su) is True, (
+    # Positive leg BEFORE the split: the thread owes a reply in-cohort.
+    assert "4000.0001" in {
+        t.thread_id for a, t in eng._pending_reply_pairs() if a.agent_id == "su"
+    }, (
         "precondition failed: the thread does not owe a reply even in-cohort, so the "
         "post-split assertion would prove nothing"
     )
@@ -1270,10 +1267,7 @@ async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypat
     thread = su.state.active_threads["4000.0001"]
     assert thread.grandfathered is True, "the open cross-cohort thread must be marked"
 
-    # Absence: it no longer jumps the queue.
-    assert eng._owes_reply(su) is False
-
-    # Presence: the reply lane still replies, so it can conclude (Task 11:
+    # The reply lane still replies, so it can conclude (Task 11:
     # _phase4_reply_threads is gone; _pending_reply_pairs / _service_reply
     # replace it).
     pairs = eng._pending_reply_pairs()

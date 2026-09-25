@@ -10,13 +10,11 @@ import src.agent.post_types as post_types_mod
 from src.agent.post_types import (
     CANONICAL,
     DEFAULT_POST_TYPES,
-    LEGACY_POST_TYPE_ALIASES,
     PostTypeSpec,
     available_for,
     eligible_targets,
     parse_post_types,
     render_menu,
-    resolve_post_type_name,
 )
 
 # The star: a spoke may reach only itself, the hub, and grantbot (which has no
@@ -70,26 +68,13 @@ def test_idea_is_not_a_type_anymore():
     assert "idea" not in _by_name(DEFAULT_POST_TYPES)
 
 
-def test_the_retired_idea_name_still_resolves():
-    """Retired in the vocabulary, still accepted on input — the alias table
-    itself does not care whether its destination is still canonical."""
-    assert resolve_post_type_name("idea") == "idea_crosslab"
-
-
-def test_resolve_passes_current_and_unknown_names_through():
-    assert resolve_post_type_name("pitch") == "pitch"
-    assert resolve_post_type_name("nonsense") == "nonsense"
-
-
-def test_an_alias_is_never_offered_as_a_type():
-    """Resolving on input must not put the retired name back in circulation."""
-    for alias in LEGACY_POST_TYPE_ALIASES:
-        assert alias not in CANONICAL
-        out = render_menu(
-            DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
-            self_id="gill", bot_names=BOT_NAMES,
-        )
-        assert f"**`{alias}`**" not in out
+def test_the_retired_idea_name_is_never_offered_as_a_type():
+    """The rendered menu must not put the retired name back in circulation."""
+    out = render_menu(
+        DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
+        self_id="gill", bot_names=BOT_NAMES,
+    )
+    assert "**`idea`**" not in out
 
 
 def test_default_post_types_is_the_pi_lab_set():

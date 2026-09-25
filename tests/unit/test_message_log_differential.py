@@ -69,19 +69,6 @@ class LinearReference:
         )
         return posts[-limit:]
 
-    def get_last_bot_sender_in_channel(self, channel_name):
-        best = None
-        for entry in self._entries:
-            if is_panel_note(entry):
-                continue
-            if entry.channel != channel_name:
-                continue
-            if not entry.is_bot or not entry.sender_agent_id:
-                continue
-            if best is None or entry.posted_at >= best.posted_at:
-                best = entry
-        return best.sender_agent_id if best else None
-
     def get_replies_to_agent_posts(self, agent_id, since,
                                    allowed_sender_ids=None):
         agent_post_ts = {
@@ -192,6 +179,3 @@ def test_indexed_reads_match_the_linear_reference_exactly():
         for a in ["blackbird", "su", "wang", "wu"]:
             assert log.get_agent_top_level_posts(a, 10) == \
                 ref.get_agent_top_level_posts(a, 10)
-        for ch in ["general", "chemical-biology", "collab-x"]:
-            assert log.get_last_bot_sender_in_channel(ch) == \
-                ref.get_last_bot_sender_in_channel(ch)

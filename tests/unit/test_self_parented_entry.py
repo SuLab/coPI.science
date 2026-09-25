@@ -9,7 +9,7 @@ count IS the interview's turn budget (`_reply_to_thread` assigns it to
 
 `normalize_inbound_message` guards the Slack ingest path — Slack sets
 `thread_ts == ts` on a parent once it has replies — but `_rebuild_state_from_db`
-and `_hydrate_thread_from_db` copy `thread_ts` verbatim out of the database.
+copies `thread_ts` verbatim out of the database.
 
 Guarding only the `_by_thread` insertion is NOT the fix, and
 `test_a_self_parented_entry_is_still_a_top_level_post` is what says so: `_record`

@@ -10,7 +10,7 @@ section so a failure names the rule it broke:
 - TestReadPathInventory     §6    every public read method is classified
 - TestDbPrimaryPaths        §6.2  ingestion is never gated; is_bot keying
 - TestPrivateChannels       §7    PI pairings outrank the gate
-- TestGrandfathering        §8    resumed runs, conclude-but-deprioritise
+- TestGrandfathering        §8    resumed runs; still concludes, flag is reporting-only
 - TestTagHygiene            §9    outbound mention stripping
 - TestScheduler             §10   eligibility, fairness valve, ratio counters
 - TestTopologySnapshot      §13.1 provenance
@@ -703,8 +703,8 @@ class TestGatedReads:
         """Asserted explicitly so widening one becomes a deliberate act."""
         for name in (
             "get_thread_history", "get_thread_message_count",
-            "get_agent_top_level_posts", "get_last_bot_sender_in_channel",
-            "get_thread_allowed_agents", "get_entry",
+            "get_agent_top_level_posts", "get_thread_allowed_agents",
+            "get_entry",
         ):
             sig = inspect.signature(getattr(MessageLog, name))
             assert "allowed_sender_ids" not in sig.parameters, name
@@ -899,24 +899,6 @@ class TestGrandfathering:
         await eng._recompute_allowed_sender_ids()
         assert t.grandfathered is False
 
-    async def test_grandfathered_thread_loses_reactive_priority(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "cravatt"], membership_rows=[(c1, "su")])
-        _thread(eng.agents["su"], "1", "cravatt", pending=True)
-        await eng._recompute_allowed_sender_ids()
-        assert eng._owes_reply(eng.agents["su"]) is False
-
-    async def test_permitted_thread_keeps_reactive_priority(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "wiseman"], membership_rows=[(c1, "su"), (c1, "wiseman")])
-        _thread(eng.agents["su"], "1", "wiseman", pending=True)
-        await eng._recompute_allowed_sender_ids()
-        assert eng._owes_reply(eng.agents["su"]) is True
-
     async def test_non_cohort_third_party_cannot_manufacture_priority(self, monkeypatch):
         """Locked decision (#29 branch-2 engine reconciliation): ex-funding thread
         roots follow the NORMAL participation rule — no open-to-all exception.
@@ -957,16 +939,6 @@ class TestGrandfathering:
         src = inspect.getsource(SimulationEngine._pending_reply_pairs)
         assert "allowed_sender_ids=None" in src
         assert "entitled to conclude" in src
-
-    async def test_closed_thread_is_not_grandfathered_or_owed(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "cravatt"], membership_rows=[(c1, "su")])
-        t = _thread(eng.agents["su"], "1", "cravatt", pending=True)
-        t.status = "closed"
-        await eng._recompute_allowed_sender_ids()
-        assert eng._owes_reply(eng.agents["su"]) is False
 
 
 # ---------------------------------------------------------------------------

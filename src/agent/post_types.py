@@ -73,24 +73,6 @@ DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
     CANONICAL["pitch"],
 )
 
-# Retired names a running deployment may still emit. ``idea`` sat in the old
-# phase-5 enum alongside ``idea_crosslab`` with no documented difference and no
-# code distinguishing them (design §2), so collapsing them is right — but a mesh
-# deployment whose bind-mounted prompts lag the baked-in code would otherwise
-# have every ``idea`` post rejected by layer 1 and silently publish nothing.
-# That is a regression in a deployment this change is not supposed to touch.
-#
-# Aliases resolve on INPUT only. They are deliberately absent from CANONICAL,
-# from any role's declared list, and from every rendered menu, so nothing here
-# re-offers a name the vocabulary retired.
-LEGACY_POST_TYPE_ALIASES: dict[str, str] = {"idea": "idea_crosslab"}
-
-
-def resolve_post_type_name(name: str) -> str:
-    """Map a retired post-type name onto its current one; pass anything else through."""
-    return LEGACY_POST_TYPE_ALIASES.get(name, name)
-
-
 # Roles a `targets` entry may name. Hardcoded rather than sourced from
 # roles.available_roles() — not to dodge an import cycle (available_roles()
 # only lists a directory, so importing it would not actually create one), but

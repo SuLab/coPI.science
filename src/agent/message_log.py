@@ -58,8 +58,8 @@ class LogEntry:
     # pre-existing caller wants and gets by leaving this unset. It is set
     # explicitly only for a message that is NOT conversation:
     # PHASE_PANEL_NOTE. Restored from the row on every DB-origin ingest path
-    # (`_rebuild_state_from_db`, `_hydrate_thread_from_db`,
-    # `_poll_inbound_from_db`) so the exclusions below survive a restart.
+    # (`_rebuild_state_from_db`, `_poll_inbound_from_db`) so the exclusions
+    # below survive a restart.
     phase: str | None = None
 
 
@@ -135,10 +135,9 @@ class MessageLog:
     ``get_tags_for_agent`` — history/observability is kept), but must never drive
     BOT BEHAVIOR — pending state, reactive priority, or thread activation.
     ``has_new_reply_from_other`` is the one method whose entire job IS driving bot
-    behavior (it feeds ``_owes_reply`` and ``_pending_reply_pairs``'s
-    pending-reply trigger, and has no other caller), so
-    it alone filters out human rows unconditionally, independent of
-    ``allowed_sender_ids`` — including the ``allowed_sender_ids=None`` case, which
+    behavior (it feeds ``_pending_reply_pairs``'s pending-reply trigger, and
+    has no other caller), so it alone filters out human rows unconditionally,
+    independent of ``allowed_sender_ids`` — including the ``allowed_sender_ids=None`` case, which
     bypasses ``_entry_allowed`` entirely. The other three GATED methods' only real
     caller today is ``SimulationEngine._phase3_activate_threads`` (thread
     activation), so THAT function — not the shared read — is where the
@@ -149,8 +148,8 @@ class MessageLog:
 
     UNGATED by design — thread-internal, self-authored, or bookkeeping:
         get_entry, get_thread_history, get_thread_message_count,
-        get_agent_top_level_posts, get_last_bot_sender_in_channel,
-        get_thread_allowed_agents, latest_timestamp
+        get_agent_top_level_posts, get_thread_allowed_agents,
+        latest_timestamp
 
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
@@ -196,8 +195,7 @@ class MessageLog:
         # the event-loop thread — dozens of scans per main-loop tick over an
         # append-only list (measured 0.7s/tick at 100k entries). The indexes
         # below make each read O(matches). INVARIANTS the indexes must not
-        # change: since-readers return matches in INSERTION order; ties in
-        # get_last_bot_sender_in_channel keep the LATER insertion;
+        # change: since-readers return matches in INSERTION order;
         # get_thread_history is stable by (posted_at, insertion); panel-note
         # and cohort filters stay at READ time (get_entry must keep seeing
         # notes). tests/unit/test_message_log_differential.py is the contract.
@@ -210,7 +208,6 @@ class MessageLog:
         # matched by the old `e.sender_agent_id == agent_id` comparison too.
         self._top_level_ts_by_sender: dict[str | None, set[str]] = {}
         self._top_level_by_sender: dict[str | None, list[LogEntry]] = {}
-        self._last_bot_in_channel: dict[str, LogEntry] = {}
 
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
@@ -281,15 +278,14 @@ class MessageLog:
         has to key on posted_at rather than on the tail of ``_entries``.
 
         Runs once per unique ts (append/load_entry dedupe first), in
-        insertion order — which is what makes the incremental
-        ``_last_bot_in_channel`` update below exactly equivalent to the old full
-        scan's ``>=`` tie rule.
+        insertion order, so the per-insertion ``seq`` below is the insertion
+        rank the since-readers and ``get_thread_history`` tie-break on.
         """
         # NORMALISE a self-parented entry into the root it is, before any index
         # sees it. Slack marks a parent that has replies with `thread_ts == ts`;
         # `slack_client.normalize_inbound_message` strips that on the ingest
-        # paths, but `_rebuild_state_from_db` and `_hydrate_thread_from_db` copy
-        # the column verbatim out of the database.
+        # paths, but `_rebuild_state_from_db` copies the column verbatim out of
+        # the database.
         #
         # Left alone, such an entry lands in BOTH `_by_ts[ts]` and
         # `_by_thread[ts]`, so `get_thread_history` returns it twice and
@@ -323,10 +319,6 @@ class MessageLog:
             self._top_level_by_sender.setdefault(
                 entry.sender_agent_id, []
             ).append(entry)
-        if entry.is_bot and entry.sender_agent_id and not is_panel_note(entry):
-            best = self._last_bot_in_channel.get(entry.channel)
-            if best is None or entry.posted_at >= best.posted_at:
-                self._last_bot_in_channel[entry.channel] = entry
 
     def _since(self, since: float) -> list[LogEntry]:
         """Entries with posted_at strictly greater than ``since``, in
@@ -464,29 +456,6 @@ class MessageLog:
         )
         return posts[-limit:]
 
-    def get_last_bot_sender_in_channel(self, channel_name: str) -> str | None:
-        """Return the agent_id of the most recent bot-authored message in a channel.
-
-        Returns None if no bot has posted there yet. Used to enforce
-        turn-taking in flat collab_private channels (a bot shouldn't post
-        back-to-back there without the other bot responding first).
-
-        "Most recent" is by ``posted_at``. Scanning ``reversed(_entries)`` instead
-        would let a late-appended *older* message answer as the last poster and
-        hand the turn to the wrong bot. Ties keep the later insertion, matching
-        the previous behaviour when posted_at values collide.
-                COHORT-GATE: UNGATED by design — turn-taking within one channel, and the
-        only callers are collab_private channels, which the gate exempts (v2 §7).
-        """
-        # Maintained incrementally by ``_record``, which applies the very same
-        # filters (a note is not a turn: letting one answer as "the last
-        # poster" would hand the turn to the other bot in a flat private
-        # channel on the strength of the hub's own bookkeeping) and the very
-        # same ``>=`` tie rule, in insertion order — so this is the old full
-        # scan's fold, precomputed.
-        best = self._last_bot_in_channel.get(channel_name)
-        return best.sender_agent_id if best else None
-
     def get_replies_to_agent_posts(
         self,
         agent_id: str,
@@ -621,12 +590,11 @@ class MessageLog:
         COHORT-GATE: GATED via allowed_sender_ids.
 
         See specs/cohort-system-v2.md §6, §8. This is the read that drives
-        both ``_owes_reply`` and the Phase 4 reply decision
-        (``_pending_reply_pairs``), so leaving it ungated made the scheduler
-        prioritise exactly the threads the gate had rejected. Callers pass
-        ``allowed_sender_ids=None`` for a thread that is already open and not
-        grandfathered — an open conversation is entitled to conclude (v2 §8) —
-        and pass the agent's gate otherwise.
+        the Phase 4 reply decision (``_pending_reply_pairs``), its only caller,
+        which passes ``allowed_sender_ids=None``: the thread is already open,
+        grandfathered or not, and an open conversation is entitled to conclude
+        (v2 §8). The gate parameter stays for a caller that wants the gated
+        read.
 
         A human-authored (``is_bot=False``) entry is never treated as "a new
         reply from the other participant", regardless of the gate — including

@@ -247,37 +247,6 @@ class TestHasNewReplyFromOther:
 
 
 # ---------------------------------------------------------------
-# get_last_bot_sender_in_channel (private-channel turn-taking)
-# ---------------------------------------------------------------
-
-class TestLastBotSenderInChannel:
-    def test_returns_most_recent_bot(self, log):
-        log.append(_post("1", "priv-x", "su", "SuBot", "first"))
-        log.append(_post("2", "priv-x", "wiseman", "WisemanBot", "second"))
-        log.append(_post("3", "priv-x", "su", "SuBot", "third"))
-        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
-
-    def test_scoped_by_channel(self, log):
-        log.append(_post("1", "priv-x", "su", "SuBot", "hi"))
-        log.append(_post("2", "priv-y", "wiseman", "WisemanBot", "hi"))
-        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
-        assert log.get_last_bot_sender_in_channel("priv-y") == "wiseman"
-
-    def test_none_when_empty(self, log):
-        assert log.get_last_bot_sender_in_channel("priv-x") is None
-
-    def test_skips_human_messages(self, log):
-        log.append(_post("1", "priv-x", "su", "SuBot", "bot"))
-        # Human message (is_bot=False, no sender_agent_id)
-        human = LogEntry(
-            ts="2", channel="priv-x", sender_agent_id=None,
-            sender_name="PI", content="human msg", posted_at=2.0, is_bot=False,
-        )
-        log.append(human)
-        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
-
-
-# ---------------------------------------------------------------
 # Idempotent append + persist callback (DB-primary store)
 # ---------------------------------------------------------------
 
@@ -344,18 +313,3 @@ class TestOrderingIsByPostedAtNotInsertion:
         log.append(_post("20", "general", "su", "SuBot", "reply", thread_ts="10"))
         log.append(_post("30", "general", "wiseman", "WisemanBot", "other"))
         assert [e.content for e in log.get_agent_top_level_posts("su")] == ["root"]
-
-    def test_last_bot_sender_ignores_a_late_appended_older_message(self, log):
-        log.append(_post("10", "priv-x", "wiseman", "WisemanBot", "first"))
-        log.append(_post("20", "priv-x", "su", "SuBot", "second — the real latest"))
-        # Reconcile pulls in a message that predates both; scanning the log
-        # backwards would name wiseman the last poster and hand su another turn.
-        log.append(_post("5", "priv-x", "wiseman", "WisemanBot", "older, late"))
-        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
-
-    def test_last_bot_sender_breaks_posted_at_ties_by_insertion(self, log):
-        log.append(_post("10", "priv-x", "wiseman", "WisemanBot", "a"))
-        tie = _post("10", "priv-x", "su", "SuBot", "b")
-        tie.ts = "10-b"  # distinct id, identical posted_at
-        log.append(tie)
-        assert log.get_last_bot_sender_in_channel("priv-x") == "su"

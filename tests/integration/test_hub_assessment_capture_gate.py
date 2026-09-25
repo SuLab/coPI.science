@@ -926,6 +926,9 @@ async def test_a_superseded_row_with_a_null_verdict_says_so(engine, caplog):
             "cannot carry the verdict, and said nothing about it: "
             f"{messages}"
         )
+        # The column is not new: a NULL here is an out-of-band row, not a
+        # pre-migration one, so the warning must not blame a migration.
+        assert not any("migration 0035" in m for m in messages), messages
     finally:
         await _delete_run(factory, run_id)
 

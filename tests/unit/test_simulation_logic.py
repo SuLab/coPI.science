@@ -1217,10 +1217,10 @@ class TestPhase4ReplySuppression:
 # (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
 # a human-authored row that the DB-inbound poller ingests into the shared
 # MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
-# `_owes_reply` and the reply lane's ungated call, `_pending_reply_pairs`)
-# would have treated that row as "a new reply from the other
-# participant" — setting `has_pending_reply`, granting reactive priority, and
-# (via `_reply_to_thread`'s message-count recompute) shifting the thread's
+# the reply lane's ungated call, `_pending_reply_pairs`) would have treated
+# that row as "a new reply from the other participant" — setting
+# `has_pending_reply`, pulling the thread into the reply lane, and (via
+# `_reply_to_thread`'s message-count recompute) shifting the thread's
 # ordinal.
 # ---------------------------------------------------------------
 
@@ -1257,19 +1257,19 @@ class TestHumanRepliesAreInertToPhase4:
             content=content, thread_ts="t1", posted_at=float(ts), is_bot=True,
         )
 
-    def test_human_reply_does_not_grant_reactive_priority(self):
-        engine, agent, _thread, _client = self._engine_with_thread()
+    def test_human_reply_does_not_owe_a_reply(self):
+        engine, _agent, _thread, _client = self._engine_with_thread()
         engine.message_log.append(self._human_entry())
 
-        assert engine._owes_reply(agent) is False
+        assert engine._pending_reply_pairs() == []
 
-    def test_control_bot_reply_does_grant_reactive_priority(self):
+    def test_control_bot_reply_does_owe_a_reply(self):
         """Positive control: the same shape of entry, bot-authored, DOES owe
         a reply — so the test above is provably about is_bot."""
-        engine, agent, _thread, _client = self._engine_with_thread()
+        engine, agent, thread, _client = self._engine_with_thread()
         engine.message_log.append(self._bot_entry())
 
-        assert engine._owes_reply(agent) is True
+        assert engine._pending_reply_pairs() == [(agent, thread)]
 
     @pytest.mark.asyncio
     async def test_human_reply_does_not_trigger_phase4_or_shift_the_ordinal(self, monkeypatch):
@@ -1774,11 +1774,9 @@ class TestPanelNotesDriveNoBotBehaviour:
         lab.state.last_seen_cursor = 2.0  # already answered the hub's question
 
         assert engine._pending_reply_pairs() == []
-        assert engine._owes_reply(lab) is False
 
         note.phase = None  # control: this is the only thing holding it back
         assert [a.agent_id for a, _t in engine._pending_reply_pairs()] == ["wang"]
-        assert engine._owes_reply(lab) is True
 
     @pytest.mark.asyncio
     async def test_a_panel_note_never_enters_a_working_memory_synthesis(

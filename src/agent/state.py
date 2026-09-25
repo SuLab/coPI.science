@@ -30,8 +30,8 @@ class ThreadState:
     # the owning agent (membership changed, or — on every resumed run — the DB
     # state rebuild reconstructed the thread before the first gate recompute).
     # A grandfathered thread still gets Phase 4 replies so the conversation can
-    # conclude, but it is barred from the reactive-priority tier so it cannot
-    # outrank gate-compliant work. Cleared if the partner becomes permitted again.
+    # conclude. The flag is reported in `cohort_topology_snapshot`; it no longer
+    # affects scheduling. Cleared if the partner becomes permitted again.
     # See specs/cohort-system-v2.md §8.
     grandfathered: bool = False
     # Whether the specialist floor (SimulationEngine._specialist_floor_gap) has

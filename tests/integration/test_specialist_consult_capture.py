@@ -1099,11 +1099,6 @@ async def test_a_restart_does_not_resurrect_a_note_as_conversation(engine):
             "past the reply the only thing left in the thread is the note at "
             "100.3 — and a restored note is still not a reply"
         )
-        # And the same thread hydrated on demand (what a reopen used to trigger)
-        # agrees.
-        sim.message_log = MessageLog()
-        await sim._hydrate_thread_from_db("100.1")
-        assert sim.message_log.get_thread_message_count("100.1") == 2
     finally:
         await _delete_run(factory, run_id)
 

@@ -23,7 +23,6 @@ from src.agent.post_types import (
     available_for,
     eligible_targets,
     render_menu,
-    resolve_post_type_name,
 )
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role, prompt_set_stamp
@@ -345,8 +344,7 @@ PRIOR_THREADS_KEPT_PER_PAIR = 50
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
 # Old *closed* threads are left in the DB. Nothing in the engine reopens one
-# since 23da58d (2026-08-13), so _hydrate_thread_from_db, which loads one on
-# demand, is reached only from tests. Sized to comfortably cover any active
+# since 23da58d (2026-08-13). Sized to comfortably cover any active
 # conversation's lifetime.
 REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 
@@ -1531,45 +1529,6 @@ class SimulationEngine:
     # Agent selection (weighted random)
     # ------------------------------------------------------------------
 
-    def _owes_reply(self, agent: Agent) -> bool:
-        """True if the agent has an active thread with a new reply from the other
-        party that it hasn't answered yet.
-
-        Historical note (Task 11 — two-lane scheduler): this used to be the
-        scheduler-visible signal driving the post lane's reactive-priority
-        tier, but that tier is gone — replies leave the paced pool entirely
-        (see `_dispatch_reply_lane` / `_pending_reply_pairs`, which are
-        deliberately ungated and carry no such distinction). This method is
-        kept for the GATED cohort-gate distinction it still encodes, which
-        nothing else in the engine computes:
-
-        Two cohort rules apply here and nowhere else (v2 §8):
-
-        - **Grandfathered threads are skipped.** A thread whose partner has left the
-          cohort still gets answered by Phase 4 so it can conclude, but this method
-          reports it as no longer "owed" in the gated sense.
-        - **The remaining threads are read through the agent's gate.** An
-          untagged thread with fewer than 2 posters is still open
-          (``get_thread_allowed_agents`` returns None) — so a non-cohort third
-          party posting into an otherwise legal thread would otherwise
-          manufacture a false positive for a sender the agent is not supposed
-          to act on. (Funding threads used to be unconditionally open-to-all
-          here too; that exception was removed — ex-funding thread roots now
-          follow this same normal rule. See message_log.get_thread_allowed_agents.)
-        """
-        cursor = agent.state.last_seen_cursor
-        for thread in agent.state.active_threads.values():
-            if thread.status != "active":
-                continue
-            if thread.grandfathered:
-                continue
-            if thread.has_pending_reply or self.message_log.has_new_reply_from_other(
-                thread.thread_id, agent.agent_id, cursor,
-                allowed_sender_ids=agent.allowed_sender_ids,
-            ):
-                return True
-        return False
-
     def _turn_eligible(self, agent: Agent, now: float) -> bool:
         """Selection eligibility for one agent.
 
@@ -1655,8 +1614,7 @@ class SimulationEngine:
         reactive *priority*, but that concept no longer exists now that every
         owed reply is serviced every pass regardless of staleness — the only
         thing left to preserve is that it still gets answered at all. See
-        v2 §8 and `_owes_reply`, which stays gated for the callers that still
-        care about that distinction (the cohort tests).
+        v2 §8.
 
         A genuine new reply resets ``empty_response_count`` so the thread's
         2-strike empty-response backoff gets a fresh attempt at the new
@@ -5311,9 +5269,10 @@ class SimulationEngine:
         if rows[0] is None:
             logger.warning(
                 "[%s] Supersession on thread %s found the stored row for "
-                "slack_ts=%s but its raw_verdict is NULL (the column only "
-                "arrived in migration 0035) — the drop row records that a "
-                "verdict was superseded but cannot carry the verdict itself",
+                "slack_ts=%s but its raw_verdict is NULL (every engine writer "
+                "sets it, so this row was written out of band) — the drop row "
+                "records that a verdict was superseded but cannot carry the "
+                "verdict itself",
                 agent_id, thread.thread_id, superseded.slack_ts,
             )
             return None
@@ -6322,9 +6281,7 @@ class SimulationEngine:
             )
             return reason
 
-        # Resolve retired names on the way in (see LEGACY_POST_TYPE_ALIASES).
-        # The rejection message below still quotes what the model actually said.
-        spec = by_name.get(resolve_post_type_name(post_type))
+        spec = by_name.get(post_type)
         if spec is None:
             return _reject(
                 f"post_type {post_type!r} is not available to role "
@@ -7131,8 +7088,7 @@ class SimulationEngine:
         # thread that has no ThreadDecision (still undecided/active). Active-thread
         # reconstruction only needs undecided threads; old closed-thread bodies
         # would just bloat RAM and startup. Nothing in the engine reopens an old
-        # closed thread since 23da58d; _hydrate_thread_from_db (reached only from
-        # tests) is what would load one on demand.
+        # closed thread since 23da58d.
         recent_floor = time.time() - REBUILD_WINDOW_S
         closed_thread_ids_subq = sa_select(ThreadDecision.thread_id).where(
             ThreadDecision.simulation_run_id == self.simulation_run_id
@@ -7232,58 +7188,6 @@ class SimulationEngine:
             return
         if mx:
             self._pi_inbox_cursor = max(self._pi_inbox_cursor, mx)
-
-    async def _hydrate_thread_from_db(self, thread_ts: str) -> None:
-        """Load one thread's messages into the log if not already present.
-
-        The startup rebuild windows out old *closed*-thread bodies (B2). The PI
-        reopen path used to derive participants / reply budget from the in-memory
-        thread history and called this first; that path was removed in 23da58d
-        (2026-08-13), and no src/ code calls this now — only tests do. This pulls
-        a specific thread's full history on demand. Idempotent (load_entry dedups
-        on ts) and index-backed (run + message_ts/thread_ts).
-        """
-        if not self.session_factory or not self.simulation_run_id or not thread_ts:
-            return
-        from sqlalchemy import or_
-        from sqlalchemy import select as sa_select
-        try:
-            async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(AgentMessage)
-                    .where(
-                        AgentMessage.simulation_run_id == self.simulation_run_id,
-                        or_(
-                            AgentMessage.message_ts == thread_ts,
-                            AgentMessage.thread_ts == thread_ts,
-                        ),
-                    )
-                    .order_by(AgentMessage.posted_at.asc())
-                )).scalars().all()
-        except Exception as exc:
-            logger.warning("Thread hydrate failed for %s: %s", thread_ts, exc)
-            return
-        for r in rows:
-            if not r.content or not r.message_ts:
-                continue
-            self.message_log.load_entry(LogEntry(
-                ts=r.message_ts,
-                channel=r.channel_name,
-                sender_agent_id=r.agent_id,
-                sender_name=r.sender_name or "",
-                content=r.content,
-                thread_ts=r.thread_ts,
-                posted_at=r.posted_at or 0.0,
-                is_bot=r.is_bot,
-                visibility=r.visibility,
-                slack_ts=_restored_slack_ts(r),
-                slack_channel_id=r.slack_channel_id,
-                slack_thread_ts=r.slack_thread_ts,
-                # As in _rebuild_state_from_db: a hydrated panel note must come
-                # back as a panel note, not as a reply the reopened thread's
-                # participants can suddenly read.
-                phase=r.phase,
-            ))
 
     async def _recover_rows_individually(
         self, rows: list, apply_one, *, what: str,
@@ -8728,8 +8632,8 @@ class SimulationEngine:
             self._cohort_gate_active = False
             self._cohort_log_signature = None
             # Reconcile state even on the disabled path: turning isolation off must
-            # clear grandfathered flags, or threads stay permanently deprioritised
-            # after the gate that demoted them is gone.
+            # clear grandfathered flags, or cohort_topology_snapshot keeps
+            # reporting threads the gate no longer affects.
             self._apply_cohort_gate_to_state()
             return
 
@@ -8838,9 +8742,8 @@ class SimulationEngine:
         (v2 §8), because the gate is a *read-time* filter and state outlives a
         membership change. They still get Phase 4 replies (via the reply lane —
         an open conversation is entitled to conclude rather than waste the
-        calls already spent), but ``_owes_reply`` still reports them as
-        not-owed in the gated sense, so a caller that cares about that
-        distinction cannot let them outrank gate-compliant work. This is also
+        calls already spent); the flag is reported in
+        ``cohort_topology_snapshot`` and affects no scheduling. This is also
         the path that marks a *resumed* run's threads: the DB rebuild runs
         before the first recompute, so every restart reconstructs its open
         partnerships gate-blind.
@@ -8878,8 +8781,7 @@ class SimulationEngine:
                     newly_grandfathered += 1
                     logger.info(
                         "[cohort] %s: thread %s with %s grandfathered — partner is "
-                        "outside the cohort; it may conclude but is no longer "
-                        "treated as owed by _owes_reply",
+                        "outside the cohort; it may still conclude",
                         agent.agent_id, thread.thread_id, other,
                     )
 
@@ -8899,7 +8801,7 @@ class SimulationEngine:
         a preflight override.
 
         Also carries the counters the admin UI cannot otherwise see: they live in
-        this process's memory, and the web app is a different process (v2 §9.4/§13).
+        this process's memory, and the web app is a different process (v2 §9 req. 4 / §13).
         """
         settings = get_settings()
         grandfathered = sorted(
