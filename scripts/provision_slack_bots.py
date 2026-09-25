@@ -8,15 +8,18 @@ script only for large batches.
 
 How it works
 ------------
-0. First run `scripts/export_agent_roster.py` IN THE CONTAINER to write
-   data/agent_roster.json (this host script can't reach postgres directly).
+0. First export the roster (this host script can't reach postgres directly):
+     docker compose -f docker-compose.prod.yml run --rm --no-deps -T \\
+         -v "$PWD/data:/app/data" blackbird-app python scripts/export_agent_roster.py
+   A roster older than an hour is refused unless --allow-stale-roster is given.
 1. Reads data/agent_roster.json to find active/pending bots without a token
 2. Creates a Slack app for each via the Manifest API (apps.manifest.create)
 3. Starts a local OAuth callback server on --port (default 8888)
 4. Prints authorize URLs — a workspace admin clicks each one in a browser
 5. Each click redirects back here; the code is exchanged for an xoxb- token
-6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>; run
-   scripts/backfill_agent_tokens.py in-container to copy them into the DB
+6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>; the closing
+   message prints the scripts/backfill_agent_tokens.py command that copies them
+   into the DB
 
 Prerequisites (one-time, done by a workspace admin in a browser)
 -----------------------------------------------------------------
@@ -106,16 +109,58 @@ def _write_state(created: list[dict]) -> None:
 
 ROSTER_PATH = Path("data/agent_roster.json")
 PROVISIONABLE_STATUSES = {"active", "pending"}
+# A roster older than this (seconds) is refused: provisioning against a stale
+# export can mint a second app for an agent that has since been given a token.
+ROSTER_MAX_AGE_S = 3600
+EXPORT_COMMAND = (
+    'docker compose -f docker-compose.prod.yml run --rm --no-deps -T '
+    '-v "$PWD/data:/app/data" blackbird-app python scripts/export_agent_roster.py'
+)
 
 
-def load_roster() -> list[dict]:
+def load_roster(max_age_s: float | None = ROSTER_MAX_AGE_S) -> list[dict]:
+    """Return the provisionable agents from ROSTER_PATH.
+
+    Raises RuntimeError if the file is missing, or older than ``max_age_s``
+    seconds by mtime; ``None`` disables the age check. Always prints the age.
+    """
     if not ROSTER_PATH.exists():
         raise RuntimeError(
-            f"{ROSTER_PATH} not found. Generate it in the container first:\n"
-            f"  docker compose exec app python scripts/export_agent_roster.py"
+            f"{ROSTER_PATH} not found. Export it from the project root first:\n"
+            f"  {EXPORT_COMMAND}"
+        )
+    age_s = time.time() - ROSTER_PATH.stat().st_mtime
+    console.print(f"Roster {ROSTER_PATH} is {age_s / 60:.0f} min old.")
+    if max_age_s is not None and age_s > max_age_s:
+        raise RuntimeError(
+            f"{ROSTER_PATH} is {age_s / 60:.0f} min old (limit {max_age_s / 60:.0f} min). "
+            f"Re-export it from the project root:\n  {EXPORT_COMMAND}\n"
+            "or pass --allow-stale-roster to use it anyway."
         )
     roster = json.loads(ROSTER_PATH.read_text())
     return [r for r in roster if r.get("status") in PROVISIONABLE_STATUSES]
+
+
+def scopes_for(
+    agent_id: str,
+    omit: dict[str, set[str]],
+    add: dict[str, set[str]],
+    base: list[str] = BOT_SCOPES,
+) -> list[str] | None:
+    """The manifest scopes for ``agent_id``, or None to use create_app's default.
+
+    ``omit`` and ``add`` map a lowercased agent_id to the scopes to drop from or
+    append to ``base``. Order follows ``base``, then the added scopes sorted;
+    no scope appears twice. None when neither map names the agent.
+    """
+    key = agent_id.lower()
+    dropped = omit.get(key, set())
+    extra = add.get(key, set())
+    if not dropped and not extra:
+        return None
+    scopes = [x for x in base if x not in dropped]
+    scopes += [x for x in sorted(extra) if x not in scopes]
+    return scopes
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +301,18 @@ def main():
         "--omit-scope", action="append", default=[], metavar="AGENT_ID:SCOPE",
         help="Create AGENT_ID's app without SCOPE. Repeatable. The scope set is fixed "
              "at manifest time — Slack's consent screen has no per-scope choice — so "
-             "this is the only way to install a bot deliberately missing one. The live "
-             "tier needs it for wiseman: --omit-scope wiseman:groups:write",
+             "this is the only way to install a bot deliberately missing one.",
+    )
+    parser.add_argument(
+        "--add-scope", action="append", default=[], metavar="AGENT_ID:SCOPE",
+        help="Create AGENT_ID's app with SCOPE in addition to the default set. "
+             "Repeatable. The live tier needs it for the one bot that creates, "
+             "invites into and lists private channels: --add-scope su:groups:write "
+             "--add-scope su:groups:read",
+    )
+    parser.add_argument(
+        "--allow-stale-roster", action="store_true",
+        help=f"Use {ROSTER_PATH} even if it is older than {ROSTER_MAX_AGE_S // 60} minutes",
     )
     parser.add_argument(
         "--only", nargs="+", metavar="AGENT_ID",
@@ -271,7 +326,7 @@ def main():
     # -----------------------------------------------------------------------
     # 1. Determine which bots are missing tokens
     # -----------------------------------------------------------------------
-    roster = load_roster()
+    roster = load_roster(None if args.allow_stale_roster else ROSTER_MAX_AGE_S)
     existing_env = dotenv_values(args.env_file)
 
     team_id = args.team_id
@@ -298,13 +353,18 @@ def main():
         if not lab.get("has_token") and lab["id"] not in tokenized
     ]
 
-    omit: dict[str, set[str]] = {}
-    for spec in args.omit_scope:
-        aid, _, scope = spec.partition(":")
-        if not aid or not scope:
-            console.print(f"[red]--omit-scope needs AGENT_ID:SCOPE, got {spec!r}[/red]")
-            raise SystemExit(2)
-        omit.setdefault(aid.lower(), set()).add(scope)
+    def _parse_scope_specs(flag: str, specs: list[str]) -> dict[str, set[str]]:
+        parsed: dict[str, set[str]] = {}
+        for spec in specs:
+            aid, _, scope = spec.partition(":")
+            if not aid or not scope:
+                console.print(f"[red]{flag} needs AGENT_ID:SCOPE, got {spec!r}[/red]")
+                raise SystemExit(2)
+            parsed.setdefault(aid.lower(), set()).add(scope)
+        return parsed
+
+    omit = _parse_scope_specs("--omit-scope", args.omit_scope)
+    add = _parse_scope_specs("--add-scope", args.add_scope)
 
     if args.only:
         only = {a.lower() for a in args.only}
@@ -436,9 +496,12 @@ def main():
         for i, lab in enumerate(missing):
             try:
                 dropped = omit.get(lab["id"].lower(), set())
-                scopes = [x for x in BOT_SCOPES if x not in dropped] if dropped else None
+                extra = add.get(lab["id"].lower(), set())
+                scopes = scopes_for(lab["id"], omit, add)
                 if dropped:
                     console.print(f"      [yellow]omitting scope(s) {sorted(dropped)} for {lab['id']}[/yellow]")
+                if extra:
+                    console.print(f"      [yellow]adding scope(s) {sorted(extra)} for {lab['id']}[/yellow]")
                 app = create_app(
                     config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
                     scopes=scopes,
@@ -494,27 +557,18 @@ def main():
     else:
         if STATE_FILE.exists():
             STATE_FILE.unlink()
-        # These names are NOT interchangeable with org1's. This host runs a second,
-        # unrelated CoPI deployment (project `copi-python`) whose simulation container
-        # is named `agent-run` — the UNPREFIXED name. `docker stop agent-run` /
-        # `docker rm agent-run` would kill THAT deployment's production run. This repo's
-        # container is `blackbird-agent-run`. Likewise `-f docker-compose.prod.yml` is
-        # not optional: a bare `docker compose` resolves to the dev stack, whose web
-        # service is `app`, while the deployed prod service is `blackbird-app`.
-        console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
-        # -t 420, not a short grace period: shutdown is cooperative (request_stop() only
-        # flips a flag; the durable flush of buffered llm_call_logs/messages/assessments
-        # runs in main.py's finally-block, which needs the main loop to RETURN), and a
-        # 16000-token thread_reply final call can run ~4-5 minutes uninterrupted. `docker
-        # stop` returns as soon as the container exits, so a generous -t is free insurance.
-        console.print("  docker stop -t 420 blackbird-agent-run  # SIGTERM so the engine flushes")
-        console.print("  docker rm blackbird-agent-run")
-        console.print("  docker compose -f docker-compose.prod.yml up -d --build blackbird-app worker")
-        console.print("  docker compose -f docker-compose.prod.yml --profile agent build agent")
+        # Two stacks share this host: always -f docker-compose.prod.yml; the unprefixed agent-run container is org1's, never stop or remove it.
+        console.print("[green]All done![/green]")
+        console.print("Import the tokens into AgentRegistry (the DB column is authoritative):")
         console.print(
-            "  docker compose -f docker-compose.prod.yml --profile agent run -d "
-            "--name blackbird-agent-run agent python -m src.agent.main"
+            "  docker compose -f docker-compose.prod.yml run --rm --no-deps -T "
+            "blackbird-app python scripts/backfill_agent_tokens.py --dry-run"
         )
+        console.print(
+            "  docker compose -f docker-compose.prod.yml run --rm --no-deps -T "
+            "blackbird-app python scripts/backfill_agent_tokens.py"
+        )
+        console.print("No restart: the running simulation's roster sync picks up the tokens within ~30s.")
 
 
 if __name__ == "__main__":

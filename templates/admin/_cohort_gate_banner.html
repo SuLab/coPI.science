@@ -39,8 +39,10 @@
     <span class="font-semibold text-gray-700">Cohort isolation is OFF</span>
     (<code>cohort_isolation_enabled=false</code>). Cohorts below are recorded but not
     applied — the roster is all-vs-all. Topology edits are kept and take effect the
-    moment isolation is turned on; turning it on requires an <code>agent-run</code>
-    restart, because the setting is read once per process.
+    moment isolation is turned on; turning it on means setting
+    <code>COHORT_ISOLATION_ENABLED=true</code> in <code>.env</code> and <em>recreating</em>
+    the <code>agent</code> container once <a href="/admin/simulation">/admin/simulation</a>
+    shows no live run; a restart keeps the old environment.
 </div>
 {% endif %}
 
@@ -50,12 +52,15 @@
         <li>It filters what an agent <em>acts on</em>. It never changes what a human can read — PI and admin views always show the full history.</li>
         <li>Human messages always pass, in every configuration.</li>
         <li>PI-created private collaboration channels always pass: an explicit human pairing outranks a cohort.</li>
-        <li>A thread that is already open keeps getting replies so it can conclude, but it loses scheduling priority once its partner leaves the cohort.</li>
+        <li>A thread that is already open keeps getting replies so it can conclude, and it is scheduled like any other open thread (since the two-lane scheduler, being grandfathered only marks it in the cohort topology report).</li>
         <li>Filtering is <strong>forward-only</strong>. Adding an agent to a cohort does not replay the messages it missed while excluded.</li>
         <li>Membership edits are picked up by a running simulation within ~30&nbsp;seconds. No restart.</li>
         <li><strong>But the settings are cached per process:</strong> changing
             <code>cohort_isolation_enabled</code> or <code>cohort_default_policy</code>
-            requires restarting <code>agent-run</code>. Only the topology is live.</li>
+            means editing <code>.env</code>, then, once /admin/simulation shows no live run,
+            <code>docker compose -f docker-compose.prod.yml --profile agent up -d --no-deps --force-recreate agent</code>,
+            and <code>docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate blackbird-app</code>
+            for this banner to show the new value. Only the topology is live.</li>
     </ul>
 </div>
 

@@ -22,7 +22,7 @@ that does not exist and promises behaviour that the code inverts.
 | v1 claim | Observed reality | v2 decision |
 |---|---|---|
 | Uncohorted agents interact with everyone (v1 §Agent Changes, §Backward Compatibility) | `allowed_sender_ids = set()` — uncohorted agents are **isolated**; enabling the flag with zero cohorts silences the whole roster | §5: default `open`, explicit opt-in to `isolated`, mandatory preflight |
-| Min-heap turn selection + global semaphore of `concurrent_turns` (v1 §6) | Never implemented in any branch; replaced by a sequential **reactive-priority** scheduler | §10: reactive priority is the design of record; v1 §6/§7 retired |
+| Min-heap turn selection + global semaphore of `concurrent_turns` (v1 §6) | Never implemented in any branch; replaced by a sequential **reactive-priority** scheduler | §10: reactive priority was the design of record; v1 §6/§7 retired. **Superseded 2026-08-15** (`e541706`): the two-lane concurrent scheduler has no reactive tier — see the §10 note |
 | `turn_delay_seconds` becomes a per-agent cooldown (v1 §Configuration) | Still a global `asyncio.sleep`; selection ignores it entirely | §10.3: implement as eligibility filter |
 | Gate applied inside Phase 2/3/5 (v1 §3–§5) | Applied at the `MessageLog` read boundary — **better**, one choke point | §6: keep, and complete the coverage |
 | Migration `0023_add_cohorts.py` | Shipped as `0019_add_cohorts.py`, colliding with `main`'s `0019_agent_message_content.py` | §14: renumber + CI gate |
@@ -306,7 +306,7 @@ of 11 read methods on `MessageLog`, 3 are gated.
 | `get_new_top_level_posts` | **Gated** (done) |
 | `get_replies_to_agent_posts` | **Gated** (done) |
 | `get_tags_for_agent` | **Gated** (done) |
-| `has_new_reply_from_other` | **Must take the gate.** Currently ungated; feeds both `_owes_reply` (scheduler) and the Phase-4 reply decision. See §8 |
+| `has_new_reply_from_other` | Ungated by design in the reply lane: `_pending_reply_pairs` passes `allowed_sender_ids=None` (`simulation.py:1672-1675`). `_owes_reply` was removed (D12). See §8 |
 | `get_thread_history` | Ungated **by design** — once a thread is open, its full history is context. Document it |
 | `get_thread_allowed_agents` | Ungated by design — thread participation, not cohort |
 | `get_agent_top_level_posts` | Ungated by design — an agent's own posts |
@@ -525,10 +525,11 @@ This also means the gate's first effect on a resumed run is at the first resync,
 several seconds in — never during rebuild. Do not "fix" that by gating the rebuild
 reads: the rebuild populates the shared log (§6.2) and must stay complete.
 
-**Confirmed defect.** `has_new_reply_from_other` is ungated, so a reply from a
+~~**Confirmed defect.** `has_new_reply_from_other` is ungated, so a reply from a
 non-cohort agent still marks the recipient as owing a reply, and the reactive tier
 selects that agent **ahead of every gate-compliant agent**. The gate says "ignore
-this sender" while the scheduler says "answer them first."
+this sender" while the scheduler says "answer them first."~~
+**Retired (2026-09-25, D12):** the two-lane scheduler has no reactive tier; `grandfathered` is reported in `cohort_topology_snapshot` only. There is no reactive tier for a grandfathered thread to outrank.
 
 **Requirements.**
 
@@ -543,13 +544,17 @@ this sender" while the scheduler says "answer them first."
    `cohort_isolation_enabled` is true.
 2. Grandfathered threads **do** get Phase-4 replies — they conclude normally, up
    to the existing 12-message cap.
-3. Grandfathered threads are **excluded from the reactive-priority tier**
+3. ~~Grandfathered threads are **excluded from the reactive-priority tier**
    (§10.2). They drain at proactive cadence. Rationale: they are the one class of
    work the operator has signalled they don't want, so they must not outrank
-   everything else.
+   everything else.~~
+   **Retired (2026-09-25, D12):** the two-lane scheduler has no reactive tier; `grandfathered` is reported in `cohort_topology_snapshot` only.
 4. `has_new_reply_from_other` takes `allowed_sender_ids` and applies the §5.1
-   table, with the open-thread row implemented as: the caller passes `None` when
-   the thread is already open and non-grandfathered.
+   table, ~~with the open-thread row implemented as: the caller passes `None` when
+   the thread is already open and non-grandfathered.~~
+   **Retired (2026-09-25, D12):** the reply lane passes `None` for every open
+   thread, grandfathered or not; `grandfathered` is reported in
+   `cohort_topology_snapshot` only.
 5. Log every grandfathering event at INFO with agent, partner, thread id.
 
 ---
@@ -617,7 +622,13 @@ is moving toward.
 v1 §6 (min-heap + `concurrent_turns` global semaphore) and §7 (concurrent
 pair-initiation guard) are **retired**. `concurrent_turns` exists in no branch;
 `_build_heap` and `_run_concurrent_turns` were never written. The implementation
-instead shipped a sequential two-tier scheduler, which is the design of record.
+instead shipped a sequential two-tier scheduler, which was the design of record.
+
+**Superseded (note added 2026-09-25).** Commit `e541706` (2026-08-15) split the post and
+reply lanes and deleted the reactive tier; the scheduler of record is now the two-lane
+concurrent scheduler in `docs/specs/2026-08-14-two-lane-concurrent-scheduler-design.md`,
+whose reply lane is driven by `_pending_reply_pairs`. §10.2 and §10.3 are kept for history;
+nothing in them is enforced, and the grandfathered-priority rule they fed is retired (D12).
 
 Note for reviewers: cohorts and the scheduler are **independent**. They were
 specified and shipped together, which is why neither can currently be evaluated
@@ -637,8 +648,8 @@ it was correct. It should have been written down.
 Two tiers, sequential, one agent per turn:
 
 1. **Reactive** — agents that owe a thread reply, oldest-waiting first, excluding
-   `_last_llm_caller` (so an A→B→A baton alternates without a wasted skip tick)
-   and excluding grandfathered threads (§8). Bounded by
+   `_last_llm_caller` (so an A→B→A baton alternates without a wasted skip tick).
+   Bounded by
    `max_consecutive_reactive_turns`.
 2. **Proactive** — the existing staleness-weighted random selection, with the
    Phase-5-skip penalty (`weight /= 2^(skips-2)` once `skips >= 3`).
@@ -688,7 +699,8 @@ recompute happens before the first turn (verified). Do not add a second timer.
 `cohort_isolation_enabled`, `cohort_default_policy` and
 `max_consecutive_reactive_turns` are read once per process. Editing the topology in
 the admin UI takes effect within ~30 s with no restart; **changing the flag or the
-policy requires restarting `agent-run`.** Verified by execution: setting the env var
+policy requires recreating the agent container (compose resolves `.env` at
+container creation; see CLAUDE.md).** Verified by execution: setting the env var
 in a live process leaves `get_settings()` returning the cached value. Say so in the
 admin banner, or an operator will flip the flag and conclude the feature is broken.
 
@@ -895,7 +907,7 @@ instantly would satisfy a timing bound alone — and an empty gate silences an a
 
 ## 15. Test plan
 
-The shipped 20 tests pass and cover the filter, the recompute, `_owes_reply`, and
+The shipped 20 tests pass and cover the filter, the recompute, `_owes_reply` (removed, D12), and
 the reactive tier honestly. They are also the mechanism by which the inverted
 semantics became load-bearing: `test_enabled_computes_cohort_mates` asserts
 `allowed_sender_ids == set()` for an uncohorted agent, locking in the behaviour
@@ -930,7 +942,7 @@ Required new coverage, one test per normative claim:
 
 **Grandfathered threads (§8)**
 - Membership removal marks an open thread grandfathered; Phase 4 still replies.
-- A grandfathered thread does **not** win the reactive tier.
+- ~~A grandfathered thread does **not** win the reactive tier.~~ **Retired (2026-09-25, D12):** the two-lane scheduler has no reactive tier; `grandfathered` is reported in `cohort_topology_snapshot` only.
 - `has_new_reply_from_other` respects the gate for non-open threads.
 
 **Tag hygiene (§9)**
@@ -1025,9 +1037,10 @@ exists because the §5.2 symmetry test skipped the `None`-vs-set case, which is 
 nobody's mate set, so it opened threads that were never answered.
 
 Both defects were found by a real multi-turn run, not by the suite. Both are now
-mutants in `scripts/mutate_cohorts.sh`, which applies nine one-line edits to
+mutants in `scripts/mutate_cohorts.sh`, which applies its edits (an inert control plus
+the real mutants; M7 was retired with `_owes_reply`, D12) to
 `src/services/cohorts.py`, `src/agent/message_log.py` and `src/agent/simulation.py` and
-requires each to make at least one test fail. A surviving mutant means the behaviour is
+requires each real one to make at least one test fail. A surviving mutant means the behaviour is
 untested regardless of what the test names say. Run it after adding a cohort test; it is
 offline and needs no API key.
 
@@ -1041,7 +1054,7 @@ Sections whose normative claims had been written down but never exercised, now c
 | 6.3 | forward-only cursor: no backlog replay, and the filter is per-read not stamped at ingest | `test_filtering_is_forward_only`, `test_a_rewound_cursor_does_replay_and_the_gate_still_applies` |
 | 6.3.1 | the matrix save commits exactly once, after the diff loop | `test_matrix_save_is_one_transaction` |
 | 7 | the exemption through all three writers, plus every channel class stamped | `test_private_exemption_holds_for_every_write_path`, `test_every_outbound_channel_class_is_stamped` |
-| 8 | grandfathered thread loses priority **and** still concludes | `test_grandfathered_thread_concludes_but_loses_priority` |
+| 8 | grandfathered thread still concludes | `test_grandfathered_thread_still_concludes` |
 | 9 | 14 mention surroundings; indentation never reflowed | `test_strip_cases`, `test_strip_indentation_is_preserved` |
 | 10.3 | the valve at 20 agents over 200 picks | `test_valve_holds_over_sustained_load` |
 | 11 | membership is live, settings are cached | `test_membership_is_live_but_settings_are_cached` |

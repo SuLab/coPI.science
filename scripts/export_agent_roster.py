@@ -8,14 +8,15 @@ can read.
 Token *values* are never written — only a ``has_token`` boolean — so secrets
 don't land on disk.
 
-Usage (inside the app container / on the compose network):
+Usage (on the host, from the project root). The web service has no ``./data``
+mount, so the one-off container binds one and the JSON lands in the host's
+data/agent_roster.json:
 
-    docker run --rm --network copi-python_default \\
-        -v "$PWD":/work -w /work copi-python-app \\
-        python scripts/export_agent_roster.py
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T \\
+        -v "$PWD/data:/app/data" blackbird-app python scripts/export_agent_roster.py
 
-    # or simply:
-    docker compose exec app python scripts/export_agent_roster.py
+Never attach a one-off container to the other deployment's network, or run its
+image: on this host both belong to org1.
 """
 
 from __future__ import annotations
