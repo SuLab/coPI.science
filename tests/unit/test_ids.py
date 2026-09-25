@@ -99,7 +99,8 @@ class TestWriterSlots:
 
 class TestModuleDefaultMinter:
     def test_mint_local_ts_is_monotonic_across_calls(self):
-        # The process-wide minter used by the web PI inbox and GrantBot.
+        # The process-wide minter used by the web PI inbox (and, until its
+        # 2026-08 retirement, GrantBot).
         a = mint_local_ts()
         b = mint_local_ts()
         assert b > a

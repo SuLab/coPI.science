@@ -4,19 +4,19 @@ never-auto-start pin). See src/agent/supervisor.py.
 
 Two test shapes are used, deliberately:
 
-- (b)/(c)/(f) drive `run_supervisor` as a real background `asyncio.create_task`
+- (b)/(c) drive `run_supervisor` as a real background `asyncio.create_task`
   with `poll_seconds` small and `max_loops` left at its default (None,
   forever) — the loop is unbounded so it does not matter exactly which tick
-  notices a command enqueued after boot; a completed run's own `break` (or,
-  for (f), the run's completion) is what ends the task.
-- (a)/(d)/(e) need EXACTLY one relevant loop iteration (`max_loops=1`), and a
+  notices a command enqueued after boot; a completed run's own `break` is
+  what ends the task.
+- (a)/(d)/(e)/(f) need EXACTLY one relevant loop iteration (`max_loops=1`), and a
   pending `stop` command can only be tested post-boot (boot's own
   `mark_pending_stale` has no `command=` filter, so it stales a pending stop
   exactly as it does a pending start — confirmed against
   tests/unit/test_simulation_control_service.py's
   test_mark_pending_stale_flips_pending_only_and_is_command_scoped). Seeding
   a command from a concurrently-running task can land on either side of that
-  one iteration's DB read with no way to force the ordering, so (d)/(e) use a
+  one iteration's DB read with no way to force the ordering, so (d)/(e)/(f) use a
   `session_factory` wrapper that runs a hook synchronously immediately before
   the loop's first post-boot session opens — after boot's own session has
   closed, before the one counted iteration's session opens. No sleeping, no

@@ -78,7 +78,7 @@ def _clear_settings_cache():
 
 
 # Every SLACK_BOT_TOKEN_* name Settings knows about, derived rather than listed: there
-# are 125 of them and the roster grows.
+# are 124 of them and the roster grows.
 _ALL_BOT_TOKEN_ENV = tuple(
     f.upper() for f in Settings.model_fields if f.startswith("slack_bot_token_")
 )
@@ -89,7 +89,7 @@ def _blank_all_bot_tokens(monkeypatch):
 
     Two tests here assert that nothing usable exists, and they used to defend against
     exactly one ambient value — ``monkeypatch.delenv("SLACK_BOT_TOKEN_SU")`` — while
-    ``Settings.get_slack_tokens()`` reads 125. They passed only because .env happened to
+    ``Settings.get_slack_tokens()`` reads 124. They passed only because .env happened to
     hold none of them. Provisioning two probe bots put real tokens in .env and both went
     red, on a machine where the product was working fine.
 
@@ -179,7 +179,7 @@ async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
         _clear_settings_cache()
 
 
-# --- the slack_enabled tri-state (mirrors src/agent/main.py:110-114) ---------------
+# --- the slack_enabled tri-state (mirrors src/agent/main.py:226-231) ---------------
 
 
 ENABLED_CASES = [
@@ -311,8 +311,8 @@ def test_model_dump_is_not_used_on_settings_anywhere_in_src():
     assert "dump-dsn-password" not in repr(leaky)
 
     # Leg 2 — scan. Names treated as a settings object: anything bound from
-    # get_settings(), plus the module-wide convention `settings` (21 files in src/ do
-    # `settings = get_settings()`), plus a `Settings(...)` construction.
+    # get_settings(), plus the module-wide convention `settings` (20 files in src/ did
+    # `settings = get_settings()` on 2026-09-24), plus a `Settings(...)` construction.
     LEAKY_ATTRS = ("model_dump", "model_dump_json", "__dict__")
     LEAKY_BUILTINS = ("dict", "vars")
 

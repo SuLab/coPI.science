@@ -108,8 +108,8 @@
    demonstrated gap, a floor that could not be checked, and a row that does not
    record whether a panel was owed at all. This used to count only the first,
    which left the other two looking unremarkable here while the detail page one
-   click away called them verified. The per-row badge in the table says which
-   state a given row is in — see the Recommendation cell below. #}
+   click away called them verified. The per-row panel badge says which
+   state a given row is in — see each card's footer row below. #}
 {% if incomplete_panel_count %}
 <div class="rounded-xl border border-orange-300 bg-orange-50 p-4 mb-6">
     <div class="flex items-start gap-3">
@@ -133,7 +133,7 @@
             {# Scope, stated. This count follows the RUN, never the lab filter:
                under-warning is the dangerous direction, and an unvetted verdict
                is the run's problem to fix, not the filtered lab's — so with a
-               lab selected the number can legitimately exceed what the table
+               lab selected the number can legitimately exceed what the card list
                below shows (src/services/directory.py::list_assessments). #}
             {% if lab_filter %}
             <span class="block mt-1 text-xs">
@@ -257,7 +257,8 @@
    Jinja Undefined on the admin surface ONLY. Everything below is either an
    attribute of `a`, one of the two wrapper macros, or one of the handful of
    top-level keys already forwarded to both surfaces: `list_surface`,
-   `show_all_runs`, `selected_run_id`, `sort`, `lab_filter`, and — since
+   `show_all_runs`, `selected_run_id`, `runs`, `runs_by_id`, `banding`, `sort`,
+   `lab_filter`, and — since
    2026-09-21 — `review` plus `review_counts` for the review sub-tabs, both of
    which `admin_assessments` forwards explicitly. #}
 {# Contract C6's hidden inputs — FIVE since 2026-09-21 — defined ONCE rather
@@ -426,7 +427,7 @@
            keeps off this page; that one stays on the detail page.
 
            Whitespace-controlled for the measured reason the scores block
-           above gives: rendered once per card, up to 500 cards. #}
+           below gives: rendered once per card, up to 500 cards. #}
         <details class="assessment-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
             <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</summary>
             {#- "pass" renders as "decline": it is the PDF's deal vocabulary

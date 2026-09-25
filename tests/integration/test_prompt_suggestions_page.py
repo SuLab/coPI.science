@@ -1,9 +1,10 @@
-"""Task 12: the staff-only prompt-suggestions pages (manager router) and the
-suggestion-status action (reviews router).
+"""The staff-only prompt-suggestions pages (manager router) and the
+suggestion-status and generate actions (reviews router).
 
-``PromptChangeSuggestion`` rows are written by Task 10's review bot, never by
-a human — these pages are read-and-triage only. The status action is the one
-write, and it lives on ``/reviews`` (not ``/manager``), same split as every
+``PromptChangeSuggestion`` rows are written by the review bot
+(``src/services/review_bot.py``), never by a human — these pages are
+read-and-triage only. The status action and the generate button are the two
+writes, and both live on ``/reviews`` (not ``/manager``), same split as every
 other review write in this app.
 """
 

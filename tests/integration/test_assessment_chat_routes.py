@@ -89,8 +89,8 @@ async def test_a_pi_is_refused_and_an_anonymous_caller_is_sent_to_login(client, 
             for url in (ask_url(seeded.assessment_id), clear_url(seeded.assessment_id))
         ],
     ]
-    # Same {"error": "forbidden"} shape as get_review_user's own predicate would
-    # produce, but from _refused, so an impersonating admin is checked first (below).
+    # get_review_user's own predicate, but applied by _refused, which answers
+    # {"error": "forbidden"} and checks an impersonating admin first (below).
     assert [(r.status_code, r.json()) for r in responses] == [(403, {"error": "forbidden"})] * 3
     assert all(r.headers["cache-control"] == "no-store" for r in responses)
     anonymous = await client.get(history_url(seeded.assessment_id), follow_redirects=False)

@@ -84,7 +84,7 @@ def render_run_start_announcement(
     """Render the announcement. Always sentinel-prefixed.
 
     ``template_body``, when given, is used INSTEAD of the template file —
-    an admin-configured override (Task 6, ``app_settings`` key
+    an admin-configured override (``app_settings`` key
     ``run_start_announcement_template``). ``None`` (the default) means
     "behave exactly as before": read ``prompts/run_start_announcement.md``
     if present, else ``DEFAULT_TEMPLATE``.
@@ -124,7 +124,7 @@ def validate_template(body: str) -> str | None:
     covering every ``ANNOUNCEMENT_VALUE_KEYS`` placeholder; otherwise a
     human-readable error naming what went wrong.
 
-    For the admin-panel route (Task 7) to reject a bad template inline at
+    For the admin-panel route to reject a bad template inline at
     save time, rather than silently degrading the way
     ``render_run_start_announcement``'s runtime guard does — the two are
     deliberately separate checks: this one is advisory and used before a

@@ -16,7 +16,7 @@ cost a rewrite there:
 1. **The labs are complementary.** Every pair is a plausible collaboration, so nothing
    the agents fail to do can be explained away by scientific irrelevance.
 2. **The roster is trimmed to the agents under test**, and the workspace is collapsed to
-   ONE channel. Phase 1 keyword-matches profiles against seven seeded channels and Phase 5
+   ONE channel. Phase 1 keyword-matches profiles against six seeded channels and Phase 5
    posts into whichever subscribed channel the model names; left alone, three agents
    scatter and never meet, and every outcome claim comes back inconclusive.
 3. **Harness-authored messages are recorded and excluded** from every "the agents
@@ -203,7 +203,7 @@ class RunCtx:
 
 @dataclass
 class TurnRecord:
-    """What the loop did, sampled per turn from inside _run_turn."""
+    """What the loop did, sampled per turn from inside _run_post_turn."""
 
     turns: int = 0
     errors: list = field(default_factory=list)

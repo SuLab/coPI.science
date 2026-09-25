@@ -85,7 +85,7 @@ class _Usage:
     # the one run that used caching report fewer input tokens than the system
     # prompt alone can be, one of them 2 tokens for a 30 KB prompt.
     #
-    # None by DEFAULT, matching the deployed SDK (anthropic 1.0.0: both are
+    # None by DEFAULT, matching the SDK deployed on 2026-08-22 (anthropic 1.0.0: both are
     # ``Optional[int]`` and are None on a reply that used no cache — verified in
     # the deployed image) and every pre-existing user of this fake, for which
     # the field is simply not the subject. llm._call_stat must therefore record

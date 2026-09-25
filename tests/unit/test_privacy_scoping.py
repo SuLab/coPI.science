@@ -186,7 +186,8 @@ def agent_with_memory(tmp_path, monkeypatch):
     (tmp_path / "memory" / "su" / "public.md").write_text("PUBLIC_MEMORY_MARKER\n")
     (tmp_path / "memory" / "su" / "private" / "CPRIV.md").write_text("PRIVATE_MEMORY_MARKER\n")
     (tmp_path / "memory" / "su" / "private" / "COTHER.md").write_text("OTHER_PRIVATE_MARKER\n")
-    # Minimal public/private profiles so the prompt builders don't emit defaults.
+    # Minimal public profile so the prompt builders don't emit its default (the
+    # private file is inert: nothing reads profiles/private/ anymore).
     (tmp_path / "public" / "su.md").write_text("public profile")
     (tmp_path / "private" / "su.md").write_text("private instructions")
     return Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")

@@ -1508,7 +1508,7 @@ async def admin_allowlist_remove(
 #
 # The gate is an agent-BEHAVIOUR filter, never access control: it changes what an
 # agent acts on, never what a human can read. Nothing in this section may be reused
-# to scope a PI-facing view. See .notes/cohort-system-v2.md §6.2.
+# to scope a PI-facing view. See specs/cohort-system-v2.md §6.2.
 #
 # Enforcement only happens in the running simulation, and only when
 # settings.cohort_isolation_enabled is True. Membership edits are picked up live on
@@ -2145,7 +2145,7 @@ async def _rubric_stamps_by_run(
 ) -> dict[uuid.UUID, list[str]]:
     """FALLBACK ONLY, for the runs in `run_ids` (legacy rows opened before
     `_stamp_run_config` started recording `SimulationRun.config["rubric_version"]`
-    — see `_run_selector_rubric_label`, which prefers the config stamp and only
+    — see `_run_selector_labels`, which prefers the config stamp and only
     calls this for a run missing one). Derives a stamp from whatever distinct
     (rubric_version, rubric_content_hash) an OpportunityAssessment row in that
     run was stamped with, most-common first — a run that straddled a rubric

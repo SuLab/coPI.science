@@ -9,7 +9,7 @@ See specs/privacy-and-channel-visibility.md:
 - ``collab_private``  — 2 bots + up to 2 PIs; Slack ``is_private=true``.
 
 ``src/agent/message_log.py`` needs ``VISIBILITY_COLLAB_PRIVATE`` for the cohort
-gate's private-channel exemption (.notes/cohort-system-v2.md §7) and is otherwise
+gate's private-channel exemption (specs/cohort-system-v2.md §7) and is otherwise
 dependency-free; importing the ORM module there would couple the in-memory log to
 SQLAlchemy for the sake of one string.
 """

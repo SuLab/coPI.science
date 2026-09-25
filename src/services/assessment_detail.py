@@ -8,7 +8,7 @@ Two sources, deliberately kept separate:
 
 * ``specialist_consults`` (``src/models/specialist_consult.py``) — the durable,
   forward-only record of a panel consult. It is EMPTY for every assessment that
-  already exists: the table is written from the engine's consult success path,
+  predates it: the table is written from the engine's consult success path,
   so rows only appear for runs that happen after it shipped.
 * ``llm_call_logs.messages_json`` for the hub's ``thread_reply`` rows — the full
   tool conversation of every hub turn, ``tool_use`` blocks (tool + input) paired
@@ -109,7 +109,7 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
-#: Task 7 / F3. scout_hub >= 1.3.0 emits `key_points` as named groups rather
+#: F3. scout_hub >= 1.3.0 emits `key_points` as named groups rather
 #: than one flat 3-5 bullet list; since scout_hub 1.4.0 there are FIVE of them
 #: (`clinical_actionability` and `key_questions` joined the original three).
 #: The (key, label) order here is also the render order on both assessment
@@ -221,9 +221,10 @@ def visible_body(response_text: str) -> str:
 # Tool-conversation parsing
 # ---------------------------------------------------------------------------
 
-# The engine returns a successful consult as
-# "<Specialist Title> — signal: <signal>\n\n<raw opinion>"
-# (src/agent/tools.py::_execute_consult_specialist). Its absence is how a
+# The engine returns a successful consult with a "— signal: <signal>" line
+# (src/agent/tools.py::_execute_consult_specialist): since 2026-08-28 it trails
+# the raw opinion, before that it led as
+# "<Specialist Title> — signal: <signal>\n\n<raw opinion>". Its absence is how a
 # FAILED consult is told apart from an opinion: an unknown domain, a missing
 # persona file, an API error and an empty reply all return prose with no signal
 # line, and none of them may be shown as if a specialist had cleared anything.
@@ -1213,10 +1214,10 @@ async def build_assessment_detail(
 
     # Counted over PLACED turns only, not over every scanned turn.
     # `_load_tool_turns` selects log rows by (run, phase, agent, channel, time
-    # window) because `llm_call_logs` carries no thread id, and several
-    # interviews share a channel — so the scan legitimately returns other
-    # threads' turns and `correlate_turns_to_messages` hands them back as
-    # `unplaced`. Summing over `turns` therefore attributed other interviews'
+    # window) — it does not filter on `llm_call_logs.thread_ts` (added in 0042,
+    # NULL on older rows) — and several interviews share a channel, so the scan
+    # legitimately returns other threads' turns and `correlate_turns_to_messages`
+    # hands them back as `unplaced`. Summing over `turns` therefore attributed other interviews'
     # consults to this one: production run 60c53424's kevrekidis assessment
     # reported 11 against 7 real consults, the difference being its 4 unplaced
     # turns exactly. The unplaced turns are still SHOWN, under their own heading
@@ -1325,7 +1326,7 @@ async def build_assessment_detail(
         # key in `templates/admin/_assessment_detail_body.html`; a fifth such
         # field belongs in the same place.
         "viewer_is_staff": viewer_is_staff,
-        # Human-review card (Task 6). All three review tables are ordered
+        # Human-review card. All three review tables are ordered
         # (created_at, id) — Postgres `now()` is transaction-start, so ties
         # inside one write burst are real and `id` is the tiebreak.
         # ``review_status`` is the LATEST event (last of the ordered history),
@@ -1360,7 +1361,7 @@ def _review_dimension_rows(review: AssessmentReview) -> tuple[list[dict], str]:
     # keys from TODAY's document with no warning, which is exactly what this
     # function exists to avoid. That combination (scores present, both stamp
     # columns NULL) is unreachable in practice, by two independent facts
-    # rather than one: Task 3's `submit_feedback`/`edit_feedback` always
+    # rather than one: `submit_feedback`/`edit_feedback` always
     # stamp both columns whenever a row is written, so any row that HAS
     # `dimension_scores` also has a stamp; and every row written before
     # `dimension_scores` existed (pre-0043) has it NULL, which the `if not

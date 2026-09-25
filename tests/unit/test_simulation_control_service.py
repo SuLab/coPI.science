@@ -75,7 +75,8 @@ async def test_claim_pending_filters_by_command_and_blocks_a_concurrent_claim(en
 
         await finish_command(session_a, claimed.id, status="done", result="started run x")
 
-        # Now that session_a committed, the row is claimable again.
+        # Now that session_a committed, the lock is released, yet the row is
+        # still not claimable:
         reclaimed = await claim_pending(session_b, command="start")
         assert reclaimed is None  # it is "done" now, no longer pending
     finally:

@@ -117,7 +117,7 @@ def test_list_channel_ids_raises_rather_than_returning_a_subset(monkeypatch):
 
 
 def test_post_message_threads_the_reply_when_thread_ts_is_given(monkeypatch):
-    """The two legacy PI-guidance callers post into a proposal thread.
+    """The two legacy PI-guidance callers posted into a proposal thread (both since removed).
 
     Without thread_ts they could not use this boundary at all: guidance posted
     without one lands in the channel root instead of the thread, which is worse
@@ -151,8 +151,9 @@ def test_post_message_omits_thread_ts_entirely_when_not_threading(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The async wrappers. Six of the seven call sites are FastAPI route handlers, and
-# _call sleeps synchronously between retries, so calling the sync functions from
+# The async wrappers. Their callers are FastAPI route handlers or code those call
+# (six of the seven call sites when this was written), and _call sleeps
+# synchronously between retries, so calling the sync functions from
 # an `async def` stalls the event loop for every request the process is serving —
 # strictly worse than the raw WebClient they replaced, which had no retry at all.
 # ---------------------------------------------------------------------------

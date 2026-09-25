@@ -276,7 +276,7 @@ async def test_an_uncohorted_agent_still_sees_its_own_posts(
     before any admin adds the agent to a cohort), so a PI must still see their
     OWN bot's posts in that gap, or their page goes blank the moment their bot
     goes live. This is the safe, deliberate divergence from `_entry_allowed`
-    documented at the `own_or_gated` clause in agent_page.py: it can only ever
+    documented at `own_or_gated` in conversation_feed.py: it can only ever
     admit this agent's own rows, never another agent's."""
     from src.config import get_settings
     from src.services.conversation_feed import resolve_agent_gate
@@ -371,9 +371,8 @@ async def test_reply_count_excludes_out_of_cohort_replies(
     (Task 5) will not show. A root with one in-cohort reply and one
     out-of-cohort reply must report reply_count == 1, not 2.
 
-    The template does not render reply_count yet (Task 6 owns that), so this
-    intercepts the context handed to templates.TemplateResponse rather than
-    reading it out of rendered HTML.
+    This intercepts the context handed to templates.TemplateResponse rather
+    than reading reply_count out of rendered HTML.
     """
     import src.routers.agent_page as agent_page_module
     from src.config import get_settings
@@ -668,14 +667,14 @@ async def test_expanding_a_root_from_a_channel_the_viewer_never_posted_in_is_404
     client, db_session, monkeypatch
 ):
     """Authorization check #3 of the four in ``agent_thread_replies``'s
-    docstring (``agent_page.py:870-874``): the root's channel must be in the
+    docstring (``agent_page.py:793-797``): the root's channel must be in the
     VIEWER's own channel set (``_visible_channels`` — channels this agent has
     authored in, plus ``#general``), not merely pass the cohort gate.
 
     Every other test in this module uses ``channel_name="general"``, which
     ``_visible_channels`` adds unconditionally regardless of what the agent has
     posted — so ``AgentMessage.channel_name.in_(channels)`` at
-    ``agent_page.py:907`` is a tautology everywhere else in this file and its
+    ``agent_page.py:830`` is a tautology everywhere else in this file and its
     absence would not be caught. This test puts a cohort-mate's root in a
     channel the viewer's own agent (``spoke1``) has never authored in
     (``secret-room``, not ``general``) so the root passes ``gate_clause`` (the

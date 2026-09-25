@@ -122,11 +122,12 @@ async def test_a_pi_can_still_use_every_pi_write(client, db_session, path, build
 
 @pytest.mark.parametrize("path,build", PI_ONLY_WRITES, ids=_IDS)
 async def test_an_admin_keeps_every_pi_write(client, db_session, path, build):
-    """Deliberate scope call: the gate is `is_manager`, not `user_role ==
-    'pi'`. An admin is not a `pi` either, and templates/base.html still offers
-    admins the My Profile and My Agent links, so a `== 'pi'` gate would 403
-    every admin on their own navigation. Admins keep these surfaces exactly as
-    they did before this branch; only managers lose them."""
+    """Deliberate scope call: the gate is `is_manager or is_reviewer`, not
+    `user_role == 'pi'`. An admin is not a `pi` either, and templates/base.html
+    still offers admins the My Profile and My Agent links, so a `== 'pi'` gate
+    would 403 every admin on their own navigation. Admins keep these surfaces
+    exactly as they did before this branch; only managers and reviewers lose
+    them."""
     admin = await factories.make_user(
         db_session, user_role=USER_ROLE_ADMIN, name="Ozzy Adminson"
     )

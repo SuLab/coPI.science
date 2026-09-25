@@ -234,7 +234,7 @@ async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp
         try:
             await eng.start()
         finally:
-            # start() installs a process-global LLM-log callback (:849,
+            # start() installs a process-global LLM-log callback (:910,
             # src/services/llm.py) pointing at this dead test engine —
             # clear it so no later test's LLM fake calls into it.
             from src.agent.simulation import set_call_log_callback

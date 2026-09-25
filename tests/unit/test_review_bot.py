@@ -1,4 +1,4 @@
-"""Task 10: the review bot job handler (``src/services/review_bot.py``).
+"""The review bot job handler (``src/services/review_bot.py``).
 
 DB-backed despite living in ``tests/unit`` — same precedent as
 ``tests/unit/test_worker_deletion_races.py`` and

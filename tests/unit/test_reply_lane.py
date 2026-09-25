@@ -458,12 +458,12 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
 
     Final review fix: Task 14 raised ``reply_lane_max_in_flight``'s default
     from 1 to 4 (see ``src/config.py``), which silently disarmed the SECOND
-    check this test guards (``simulation.py:1184-1185``, inside the acquired
+    check this test guards (``simulation.py:1911-1912``, inside the acquired
     semaphore). At the default cap=4, all 5 pending pairs take a semaphore
     slot without ever parking on it, `_running` flips during pair 1's
-    `_serve`, and pair 2's own FIRST check (`:1151`, before the semaphore) is
+    `_serve`, and pair 2's own FIRST check (`:1878`, before the semaphore) is
     the one that actually catches the stop — the whole unit suite stayed
-    green with `:1184-1185` deleted outright (confirmed via a disposable
+    green with `:1911-1912` deleted outright (confirmed via a disposable
     worktree). Pin the semaphore to 1 explicitly, independent of the
     configured default, so a contended semaphore is exercised and this test
     discriminates on the guard it names."""
@@ -500,7 +500,7 @@ async def test_a_pair_found_only_via_new_reply_keeps_its_retry_signal_if_skipped
     """Final review fix: the C2 property, isolated from `_engine_with_pending`'s
     fixture, which seeds every thread with ``has_pending_reply=True`` already
     — under that fixture, deleting the promotion loop at
-    `simulation.py:1135-1136` (``for _agent, thread in pairs: thread.
+    `simulation.py:1860-1861` (``for _agent, thread in pairs: thread.
     has_pending_reply = True``) cannot be caught: every pair the assertion
     above checks was ALREADY durably True before the sweep even started, from
     `_engine_with_pending`'s own construction, not from the promotion loop
@@ -590,10 +590,10 @@ def _hub_with_one_pending_thread():
 # ---------------------------------------------------------------------------
 # Task 13 — concurrent reply lane behind reply_lane_max_in_flight.
 #
-# The default is 1 (concurrency OFF); the two tests below that actually
-# exercise overlap skip under that default and must be re-run with
-# REPLY_LANE_MAX_IN_FLIGHT=4 (or any cap >= 2) to be exercised at all — see
-# the task-13-report.md TDD evidence section for that run's output.
+# The default is 4 (see src/config.py; it was 1, concurrency OFF, when this
+# section was written). At a cap below 2 the overlap test below skips and must
+# be re-run with REPLY_LANE_MAX_IN_FLIGHT=4 (or any cap >= 2) to be exercised
+# at all — see the task-13-report.md TDD evidence section for that run's output.
 # ---------------------------------------------------------------------------
 
 

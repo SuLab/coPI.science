@@ -323,7 +323,7 @@ def test_an_over_limit_post_reports_every_message_it_created(
     # No content was lost or duplicated across the split.
     assert re.sub(r"\s+", "", "".join(live)) == re.sub(r"\s+", "", body)
     # A split root stays ONE top-level post: the continuations hang off the first
-    # message, so nobody else's Phase 2 scan sees several roots for one post.
+    # message, so no reader of top-level history sees several roots for one post.
     assert posted[0]["thread_ts"] is None
     assert all(p["thread_ts"] == posted[0]["ts"] for p in posted[1:]), (
         f"continuation chunks are not threaded on the first: {[p['thread_ts'] for p in posted]}"
@@ -382,8 +382,9 @@ def test_a_code_fence_spanning_a_split_is_closed_and_reopened(
 
 def test_dm_send_lands_in_slack_but_is_not_polled_back(slack_client_su, slack_pi_user_id):
     """`poll_dm_messages` filters to messages FROM the target user, excluding the bot's
-    own. That filter is load-bearing: `handle_dm` replies to whatever the poll returns,
-    so a bot that saw its own DM would answer itself forever.
+    own. That filter is load-bearing: a caller that replies to whatever the poll returns
+    (as `handle_dm` did, before it was removed) would answer itself forever if the bot
+    saw its own DM.
 
     Both halves. The bot's message must really be in the DM channel (read back
     unfiltered, Rule S1) and must be absent from the filtered poll.
@@ -447,7 +448,7 @@ def test_private_channel_creation_needs_groups_write(slack_clients):
 
     This is why the fix is a scope-coverage test rather than a one-line edit: a bot
     provisioned from the old manifest connects, posts and polls perfectly, and only
-    fails the one call that PI pairing depends on.
+    fails the one call that PI pairing depended on.
     """
     su, wiseman = slack_clients["su"], slack_clients["wiseman"]
 

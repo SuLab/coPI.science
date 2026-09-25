@@ -58,8 +58,6 @@ def test_manifest_sets_label_and_tool_allow_list(tmp_path, monkeypatch):
         'label = "Scout Hub"\n'
         'tools = ["retrieve_profile", "search_prior_art"]\n',
     )
-    # search_prior_art must exist in TOOL_DEFINITIONS by the time this runs
-    # (Task 7). Until then this asserts only the known tool survives.
     spec = load_role("scout_hub")
     assert spec.name == "scout_hub"
     assert spec.label == "Scout Hub"
@@ -87,8 +85,8 @@ def test_malformed_toml_falls_back_to_defaults(tmp_path, monkeypatch, caplog):
 
 
 # ----------------------------------------------------------------------
-# scout_hub role content (Task 9) — uses the REAL prompts/roles dir, no
-# monkeypatch, so this exercises the actual shipped role.toml / phase5
+# scout_hub role content — uses the REAL prompts/roles dir, no
+# monkeypatch, so this exercises the actual shipped role.toml / phase4
 # override on disk.
 # ----------------------------------------------------------------------
 

@@ -22,7 +22,7 @@ LAST API call's latency, not the turn's — verified equal to the last call in
 532 of 532 rows on that run, and equal to the sum in only the 334 that were
 single-call — so the stored total understated the true 289.4 min by 25%.
 ``latency_ms`` is deliberately left alone rather than redefined:
-``_rebuild_state_from_db`` rebuilds ``api_call_count`` as a row COUNT and the
+``_rebuild_agent_state`` rebuilds ``api_call_count`` as a row COUNT and the
 rate limiter's ``call_times`` as one entry per row, and the token columns'
 per-turn-cumulative semantics are pinned to that arrangement.
 

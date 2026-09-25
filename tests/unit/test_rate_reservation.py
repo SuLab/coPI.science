@@ -54,8 +54,9 @@ async def test_allowance_holds_under_concurrent_callers():
 #
 # Round 1's regression: making record_api_call NEVER append to call_times
 # (to stop it double-booking the two sites that call try_reserve) silently
-# took SIX other call sites off the window entirely — specialist consults,
-# both truncation-retry hooks, the memory update, and its own retry hook.
+# took SIX other call sites off the window entirely — specialist consults and
+# each consult's own truncation-retry hook, both reserved turns'
+# truncation-retry hooks, the memory update, and its own retry hook.
 # None of those six separately reserves a slot, so record_api_call is the
 # ONLY place they get booked at all. record_api_call now takes
 # ``already_reserved`` to distinguish "try_reserve just booked this exact

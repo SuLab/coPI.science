@@ -414,7 +414,7 @@ class Settings(BaseSettings):
     # agents that share at least one cohort with it. When False (default), the
     # roster is all-vs-all as before. Humans, PI-created private channels and
     # already-open threads always pass the gate.
-    # See .notes/cohort-system-v2.md §5.
+    # See specs/cohort-system-v2.md §5.
     cohort_isolation_enabled: bool = False
     # What happens to an agent that belongs to no cohort while isolation is on:
     #   "open"     — unrestricted (default). Enabling isolation is then safe even
@@ -422,10 +422,10 @@ class Settings(BaseSettings):
     #                actually builds a topology.
     #   "isolated" — the agent sees only humans. Cohort membership becomes
     #                mandatory to participate. Guarded by the startup preflight
-    #                (_cohort_preflight): with zero cohorts defined this policy
-    #                would silence the entire roster, so it is refused and
-    #                isolation is forced off with an ERROR.
-    # See .notes/cohort-system-v2.md §5.2 / §5.3.
+    #                (src.services.cohorts.preflight_reason): with zero cohorts
+    #                defined this policy would silence the entire roster, so it
+    #                is refused and isolation is forced off with an ERROR.
+    # See specs/cohort-system-v2.md §5.2 / §5.3.
     cohort_default_policy: Literal["open", "isolated"] = "open"
 
     # Load-proportional rate limiter. Replaces the cumulative --budget cap as the
@@ -433,7 +433,7 @@ class Settings(BaseSettings):
     # measured over a sliding llm_rate_window_seconds.
     #
     # A rate self-heals — a throttled agent is eligible again as the window slides
-    # — where a cumulative cap benches permanently, and, because _rebuild_state
+    # — where a cumulative cap benches permanently, and, because _rebuild_agent_state
     # restores api_call_count from llm_call_logs, benches permanently ACROSS
     # RESTARTS. That is what took the blackbird hub off the air for 161 turns.
     #

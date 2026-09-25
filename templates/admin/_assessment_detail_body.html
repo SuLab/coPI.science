@@ -12,7 +12,7 @@
 
    EXCEPTION, recorded (Task 6, human-review card): literal `/reviews/...`
    action paths ARE allowed here, unlike `/admin/...`/`/manager/...`. That
-   router is not split by surface — the same six routes serve admin, manager
+   router is not split by surface — the same routes serve admin, manager
    and reviewer alike, and `src/routers/reviews.py`'s `_assessments_redirect`
    (keyed on the form's `surface` hidden input) is what sends each caller back
    to its OWN detail page after the write — so a literal `/reviews/` action
@@ -213,7 +213,8 @@
    already stores — dimension scores, gating states, red flags and specialist
    signals (decision D2) — so it works on every existing row without a
    migration. `verdict_signals` is the service's single new context key
-   (contract C3): three lists of {source, label, detail} plus `scale_known`.
+   (contract C3): three lists of {source, label, detail, ...} plus
+   `scale_known`, `thresholds` and two dimension counts.
 
    A plain card, never a <details> (finding S3): this is the summary a
    reviewer reads first, and the same reasoning that keeps the red-flag card
@@ -243,7 +244,7 @@
 {% set hub_maturity = a.evidence_maturity if (viewer_is_staff and a.evidence_maturity is iterable and a.evidence_maturity is not string and a.evidence_maturity is not mapping) else [] %}
 {# One derived row. `kind` is strengths|risks|unestablished. Layout is a
    single full-width line: glyph, label — detail, an optional count badge,
-   and (consults only) a one-line clipped preview that truncates; the
+   and (consults only) a preview clamped to two lines; the
    quoted text sits behind the click. Only consults and long red flags are
    collapsible — a gate's rubric description is a tooltip and a dimension's
    weight is inline, so trivial rows never grow a disclosure control. #}
@@ -618,8 +619,8 @@
    gap, [] = the floor could not check at all (typically a mid-interview
    restart), and the stored `panel_owed` splits NULL into "a panel was owed so
    the floor evaluated this verdict" (verified), "none was owed" (not required)
-   and "the row does not say" (not recorded). Rendering ANY of the last four as
-   "fine" is how an unvetted verdict gets acted on.
+   and "the row does not say" (not recorded). Rendering ANY of them but verified
+   as "fine" is how an unvetted verdict gets acted on.
 
    GREEN IS AN EXPLICIT BRANCH, and the terminal {% else %} is deliberately the
    neutral box. It used to be the other way round, which meant every state the
@@ -838,16 +839,18 @@
    Human review (Task 6)
 
    `effective_user` is base.html's `impersonation_banner or current_user`
-   (base.html:41) and is already in scope by the time this include is
+   (base.html:47) and is already in scope by the time this include is
    reached — but it is re-set HERE too, defensively: it makes this card
    self-contained if it is ever rendered outside the base.html include chain
    (a unit-style template render with stub context, for instance), and a
    redundant `{% set %}` to the same value is harmless.
 
-   Every write form is wrapped in `can_write`, which forbids the whole write
-   half under impersonation (F6): a route behind `_refuse_impersonation`
-   that still rendered a live-looking form would 403 on submission, and a
-   dead control is worse than none. Within `can_write`, three further author/
+   Every write form is wrapped in `can_write`, which is now always true: F4
+   (below) reversed F6's suppression of the whole write half under
+   impersonation. The assign/unassign forms add `not impersonation_banner`
+   because their routes are still behind `_refuse_impersonation`: a
+   live-looking form would 403 on submission, and a dead control is worse
+   than none. Within `can_write`, three further author/
    role checks narrow individual forms: edit (review author only), delete
    (admin only) and assign/unassign (staff only) — see
    src/routers/reviews.py's own gates, which these mirror.
@@ -1169,9 +1172,10 @@
     </p>
 
     {% if not messages_available %}
-        {# Not an error. `--fresh` wipes agent_messages and never wipes
-           opportunity_assessments, so a verdict legitimately outlives its own
-           transcript; the verdict above is the durable record. #}
+        {# Not an error. `--fresh` wiped agent_messages until 2026-08-22 (it
+           deletes nothing now) and never wiped opportunity_assessments, so a
+           verdict legitimately outlives its own transcript; the verdict above
+           is the durable record. #}
         <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
             Interview messages unavailable. The thread this verdict came from is not in
             <span class="font-mono">agent_messages</span> — a <code>--fresh</code> run

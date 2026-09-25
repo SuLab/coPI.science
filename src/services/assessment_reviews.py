@@ -1,11 +1,11 @@
 """Review-feedback writes: submit, edit, the MANUAL prompt-suggestion
 scheduler, plus the approval-status audit trail and reviewer-assignment
-writes (Task 5).
+writes.
 
 **Nothing here enqueues a ``review_feedback_analysis`` job as a side effect
 of a review write any more** (F2, 2026-09-14, decision D7). Submitting or
 editing 'learn' feedback records the row and stops there; a job is created
-only when a human presses "Generate prompt suggestions"
+only when a human presses "Generate suggestions from current reviews"
 (``POST /reviews/suggestions/generate`` → ``enqueue_pending_analyses``).
 Each job is a 70-90k-token Opus call, and paying for one per submission —
 which is what the old auto-enqueue did whenever no pending job happened to
@@ -32,17 +32,18 @@ writes behind it. ``assign_reviewer`` is idempotent via
 ``pg_insert(...).on_conflict_do_nothing(constraint="uq_review_assignment_once")``
 — reassigning the same (assessment, assignee) pair is a no-op, not a
 duplicate row or a raised IntegrityError (the named-constraint form has
-precedent at ``src/agent/simulation.py:6298``).
+precedent at ``src/agent/simulation.py:7415``).
 
-``review_columns_for`` (Task 7) is the batched read behind the two list
+``review_columns_for`` is the batched read behind the two list
 pages' "Assigned"/"Reviewed by" columns and approval-status chip — see its
 own docstring for why it is exactly three ``IN``-clause queries plus a
 Python fold, never a ``DISTINCT ON``.
 
 ``blackbird_rubric`` is imported here for dimension-key validation. That is
 safe because this module is web-tier only — it is imported by
-``src/routers/reviews.py`` and ``src/services/directory.py`` and by nothing the
-worker loads. ``src/services/review_bot.py``, which DOES run on the worker,
+``src/routers/reviews.py``, ``src/routers/manager.py`` and
+``src/services/directory.py`` and by nothing the worker loads.
+``src/services/review_bot.py``, which DOES run on the worker,
 must stay free of ``blackbird_rubric``/``rubric_revisions``/``assessment_detail``/
 ``assessment_reviews``; see
 ``tests/unit/test_review_bot.py::test_the_bot_module_stays_free_of_web_tier_rubric_modules``,
@@ -88,7 +89,7 @@ VALID_FEEDBACK_MODES = ("learn", "log_only")
 _MAX_COMMENT_CHARS = 10_000
 
 #: The list-page columns behind one assessment row's "Assigned"/"Reviewed by"
-#: cells and status chip (Task 7). ``status`` is ``None`` for "never
+#: cells and status chip. ``status`` is ``None`` for "never
 #: reviewed" AND for "reviewed, then cleared" — see ``_CHIP_STATUSES``.
 ReviewColumns = namedtuple("ReviewColumns", "assigned_names reviewed_by_names status")
 
@@ -196,7 +197,7 @@ async def enqueue_analysis_if_absent(
 #: reviewer cannot see the suggestions page or press the button at all. So one
 #: privileged click could otherwise spend an unbounded amount on work a
 #: non-privileged account queued up. Capped rather than rate-limited because
-#: the cap is also legible: the page reports "queued X of Y (capped at N)" and
+#: the cap is also legible: the page reports "Queued X of Y" and the cap, and
 #: a second press picks up where the first stopped.
 MAX_ANALYSES_PER_PRESS = 25
 
@@ -205,7 +206,7 @@ async def _eligible_assessment_ids(
     db: AsyncSession, assessment_id: uuid.UUID | None = None
 ) -> tuple[list[uuid.UUID], int]:
     """``(ids_to_consider, total_eligible)`` — every assessment id with at
-    least one UNCONSUMED 'learn' review, oldest feedback first, capped.
+    least one UNCONSUMED 'learn' review, oldest feedback first.
 
     Eligibility is deliberately blind to the job queue: whether an id already
     has a pending job is ``enqueue_analysis_if_absent``'s question, not this

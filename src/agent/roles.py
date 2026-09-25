@@ -40,8 +40,9 @@ class RoleSpec:
     # it is NOT the mechanism — the load signal is (design §4.4). No role sets it.
     calls_per_load_per_window: int | None = None
     # Layer 1 of post-type gating: what this role may emit as a NEW top-level
-    # post. Defaults to DEFAULT_POST_TYPES, which IS the pi_lab set (pi_lab has
-    # no role.toml — the absence of overrides is pi_lab).
+    # post. Defaults to DEFAULT_POST_TYPES, the fallback for a role with no
+    # manifest or a manifest without post_types; pi_lab's role.toml declares its
+    # own list explicitly.
     post_types: tuple[PostTypeSpec, ...] = DEFAULT_POST_TYPES
 
 
@@ -73,8 +74,8 @@ def resolve_prompt_path(role: str, filename: str) -> Path:
 
 
 def _known_tool_names() -> set[str]:
-    # Lazy import: avoids an import cycle (tools.py imports nothing from roles,
-    # but keeping this lazy documents that roles.py must stay import-light).
+    # Lazy import: avoids an import cycle (tools.py imports load_role from
+    # roles at module level), and keeps roles.py import-light.
     from src.agent.tools import TOOL_DEFINITIONS
 
     return {t["name"] for t in TOOL_DEFINITIONS}
@@ -126,7 +127,7 @@ def load_role(name: str) -> RoleSpec:
 
 
 #: The prompt files a role actually composes, per Agent._load_prompt's call
-#: sites (src/agent/agent.py:286/:311/:401/:490). scout_hub deliberately
+#: sites (src/agent/agent.py:289/:314/:404/:493). scout_hub deliberately
 #: omits phase5-new-post.md: the hub is reply-only (post_types = [] in its
 #: role.toml, and the engine hard-gates Phase 5 for it), so that file is never
 #: composed for the hub and a pi-side edit to it must not move the hub's hash.

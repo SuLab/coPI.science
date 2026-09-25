@@ -197,7 +197,7 @@ async def test_user_detail_shows_the_role_and_no_admin_yes_no_row(client, db_ses
         await client.get(f"/admin/users/{mgr.id}", headers=auth_headers(admin.id))
     ).text
     # Discriminating on the Role row's actual markup, not a bare substring —
-    # the Account Type help text below names all three roles regardless of
+    # the Account Type help text below names all four roles regardless of
     # whether this row renders correctly, so "manager" in body alone proves
     # nothing.
     assert '<dd class="font-medium">manager</dd>' in body

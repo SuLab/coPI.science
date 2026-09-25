@@ -1,6 +1,7 @@
 """Job queue worker process.
 
-Polls the jobs table and executes generate_profile and monthly_refresh jobs.
+Polls the jobs table and executes generate_profile, monthly_refresh,
+review_feedback_analysis, enrich_grants and industry_evidence jobs.
 """
 
 import asyncio

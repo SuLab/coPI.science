@@ -95,8 +95,8 @@ def _find_call_sites() -> dict[tuple[str, ...], list[ast.Call]]:
                 and node.func.id == "export_profile_to_markdown"
             ):
                 calls.append(node)
-            # also catch `export_profile_to_markdown` defined in this very
-            # module — skip its own def, not a call to it.
+            # `export_profile_to_markdown`'s own def (in profile_export.py) is
+            # a FunctionDef, not a Call, so the match above never counts it.
         rel = path.relative_to(REPO_ROOT).parts
         if calls:
             sites[rel] = calls

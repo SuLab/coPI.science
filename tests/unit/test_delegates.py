@@ -28,7 +28,9 @@ class TestDelegateInvitation:
         assert inv.accepted_by_user_id is None
 
     def test_default_status(self):
-        """Default status is 'pending' (applied by DB server_default, not Python default)."""
+        """Status 'pending' round-trips when set explicitly. The default itself
+        (model default="pending", migration 0007 server_default) applies only at
+        INSERT, which this test never does, so it is not exercised here."""
         inv = DelegateInvitation(
             agent_registry_id=uuid.uuid4(),
             invited_by_user_id=uuid.uuid4(),

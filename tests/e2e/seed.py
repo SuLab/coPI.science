@@ -65,7 +65,7 @@ GRAPH_EDGES = [
 POST_AT = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
 DECIDED_AT = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
 
-# Guard rail: the production database is at alembic 0018 and has real users.
+# Guard rail: the production database has real users.
 ALLOWED_DATABASES = ("copi_slack_test", "copi_test", "copi_e2e")
 
 
@@ -176,7 +176,7 @@ async def seed(session) -> dict[str, str]:
     # ...and RESET the row if a previous run walked it. Get-or-create alone does
     # not deliver the state the paragraph above promises, because the flow is
     # destructive to its own fixture: its last step POSTs
-    # /onboarding/private-profile, which sets onboarding_complete=True, and its
+    # /onboarding/save-profile, which sets onboarding_complete=True, and its
     # "substitute" step leaves a ResearcherProfile and a generate_profile job in
     # status 'completed' behind. Any of the three and the flow is unreplayable —
     # `onboarding_complete` makes /onboarding 302 straight to /profile

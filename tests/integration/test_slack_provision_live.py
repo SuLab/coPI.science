@@ -55,7 +55,7 @@ def test_lookup_team_id_agrees_with_auth_test(slack_bot_tokens):
 
 
 def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
-    """apps.permissions.scopes reports what the install actually granted.
+    """Slack's x-oauth-scopes header reports what the install actually granted.
 
     su and cravatt were installed with groups:write; wiseman deliberately was not — it
     carries exactly the BOT_SCOPES list as it shipped before this work. That asymmetry

@@ -1,9 +1,10 @@
 """Golden master of the deterministic slice of an agent turn.
 
-The full SimulationEngine._run_turn is not deterministically constructible in a
-unit test — it is coupled to a DB session factory, live roster/proposal-review
-sync, Slack polling, wall-clock timers, and a rotating poll-client pool. What IS
-deterministic (and is the substance of a turn) is pinned here:
+A full SimulationEngine turn (_run_post_turn / _service_reply) is not
+deterministically constructible in a unit test — it is coupled to a DB session
+factory, live roster/proposal-review sync, Slack polling, wall-clock timers,
+and a rotating poll-client pool. What IS deterministic (and is the substance
+of a turn) is pinned here:
 
   * Agent prompt assembly for every phase — system, thread-reply (public
     and collab_private), phase4 (EXPLORE/DECIDE/MUST-CONCLUDE, PI
@@ -51,7 +52,7 @@ def _system_text(system) -> str:
 
 @pytest.fixture(autouse=True)
 def _hermetic_profiles(tmp_path, monkeypatch):
-    """Prompt assembly reads public/private profile + working memory from PROFILES_DIR
+    """Prompt assembly reads public profile + working memory from PROFILES_DIR
     (= Path("profiles"), relative to CWD) with on-disk fallbacks. The dockerized
     agent-run writes profiles/memory/<agent>/*.md, so without pinning this to an empty
     dir these snapshots would silently depend on repo state and start failing after any

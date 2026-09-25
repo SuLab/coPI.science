@@ -1,8 +1,8 @@
 """A specialist consult is a real, billed Opus call and must be booked as one.
 
-`Agent.record_api_call`'s own docstring states the invariant: "Every call site
-must use this rather than bumping ``api_call_count`` directly — a site that bumps
-only the counter is invisible to the rate limiter". `_execute_consult_specialist`
+`Agent.record_api_call`'s own docstring states the invariant: "every call site
+must use this rather than bumping the counter directly, or that call is
+invisible to ``SimulationRun.total_api_calls``". `_execute_consult_specialist`
 called `generate_agent_response` without booking anything at all, so up to eight
 consults per concluding reply were invisible to both the sliding-window limiter
 and `SimulationRun.total_api_calls`.

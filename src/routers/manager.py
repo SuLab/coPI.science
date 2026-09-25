@@ -5,7 +5,7 @@ The router-level dependency (``Depends(get_review_user)``) is deliberately
 the WIDEST audience this surface admits — admin, manager, or reviewer — and
 it exists so a route added here with no dependency of its own is still
 gated by construction, unlike /admin, which declares Depends(get_admin_user)
-on 34 separate handlers (F5) and is therefore only as safe as every
+on 39 separate handlers (F5) and is therefore only as safe as every
 individual declaration. But the router-level dependency is NOT the real
 gate for any individual handler: it only proves a caller is one of the
 three roles above, never which one. The per-handler singleton — ``_STAFF``
@@ -15,10 +15,11 @@ regardless of what the router-level dependency alone would allow through.
 Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
 ``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
 takes no per-handler dependency at all (its only job is a redirect to a
-route that is itself reviewer-reachable). Every other handler — the four
-POSTs, ``manager_discussions`` and ``manager_activity``/
-``manager_activity_detail`` — stays on ``_STAFF``, so a reviewer reaches
-none of them. This docstring is not what enforces that split;
+route that is itself reviewer-reachable). Every other handler — the eight
+POSTs, ``manager_slack_bots``, ``manager_discussions``, ``manager_activity``/
+``manager_activity_detail`` and the two prompt-suggestion pages — stays on
+``_STAFF``, so a reviewer reaches none of them. This docstring is not what
+enforces that split;
 ``tests/integration/test_reviewer_role.py``'s
 ``test_reviewer_manager_surface_is_exactly_the_read_slice`` enumerates the
 live router for both methods against an explicit expectation map and fails
@@ -131,10 +132,11 @@ def _template_context(
 ) -> dict:
     """Build the template context, surfacing the impersonation banner.
 
-    ``current_user`` here is the *effective* user from ``get_staff_user`` —
-    the impersonated user when an admin is impersonating a manager (see that
-    dependency's docstring: it 403s an admin impersonating a PI, but an admin
-    impersonating a *manager* satisfies ``is_staff`` and reaches this router).
+    ``current_user`` here is the *effective* user from ``get_staff_user`` or
+    ``get_review_user`` — the impersonated user when an admin is impersonating
+    a manager (see get_staff_user's docstring: it 403s an admin impersonating
+    a PI, but an admin impersonating a *manager* satisfies ``is_staff`` and
+    reaches this router).
     Without this, every /manager/* page rendered with no banner and no Stop
     button, and because the effective user is a manager, `is_admin` is false
     on the nav too — stranding the admin with no visible route back to
@@ -289,9 +291,10 @@ async def manager_create_pi(
     tenure entry, in ONE commit — so the worker can never claim the job
     before the agent row exists (the ordering gap that silently skipped
     exports/revisions for seeded PIs; scripts/backfill_agents.py repairs it
-    after the fact). The pending row is provisioned and activated by an
-    admin on /admin/agents, never here (D1: no new manager write route; D7:
-    the row belongs to the new PI, never the manager)."""
+    after the fact). The pending row is provisioned and activated in a
+    separate step (/admin/agents, or this router's /slack/provision and
+    /activate routes), never here (D7: the row belongs to the new PI, never
+    the manager)."""
     try:
         pi = await find_or_create_pi_by_orcid(db, orcid)
         await create_pending_agent_for(db, pi)
@@ -693,7 +696,7 @@ async def manager_discussions(
     """Thread-level view of what each lab's bot did.
 
     Carries no `export` parameter: the export branch is admin-only, and this
-    router is strictly read-only-and-render (D12).
+    router's GETs are strictly read-and-render (D12).
 
     Per D5 this includes threads from collab_private channels. That is a
     deliberate policy decision recorded in the spec, not an oversight — no

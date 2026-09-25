@@ -4,7 +4,8 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 §8. Organised by design section so a failure names the rule it broke:
 
 - TestAgentLoad            §4.1  the shared load signal
-- TestRoleRateOverride     §4.4  optional per-role allowance
+- TestRateLimiter          §4.4  optional per-role allowance
+                                 (test_role_override_beats_the_global_setting)
 - TestCallLedger           §4.2  record_api_call maintains the lifetime counter
                                  only (Task 9: the ledger append moved to
                                  Agent.try_reserve, so record_api_call cannot
@@ -165,8 +166,8 @@ class TestCallLedger:
     def test_record_api_call_books_both_by_default(self):
         """Fix round 1 (Ruling R5): record_api_call's DEFAULT
         (already_reserved=False) still appends to call_times — this is what
-        the six call sites that are never separately reserved (consults,
-        retries, the memory update) rely on to be booked into the window at
+        the seven call sites that are never separately reserved (consults,
+        retries, the memory update, tool rounds) rely on to be booked into the window at
         all. Only the two call sites that call try_reserve immediately
         beforehand pass already_reserved=True to skip this append."""
         a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")

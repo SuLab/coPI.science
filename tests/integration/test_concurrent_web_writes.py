@@ -67,8 +67,9 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
 
     Two tabs / a double-click submit the same agent's review for the same
     proposal at once. Pre-fix, the loser's commit raises IntegrityError out
-    of the handler; post-fix it rolls back and redirects like a normal
-    "already reviewed" outcome, same as the winner.
+    of the handler; post-fix it rolls back and returns without raising, so
+    exactly one review row exists (the handler redirects the loser to the
+    dashboard like the winner; this test does not assert the response).
 
     The two racers are pinned on `_ExistenceCheckGate` (see its docstring) so
     both are guaranteed to pass the pre-insert existence check before either

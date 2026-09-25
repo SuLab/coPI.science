@@ -21,8 +21,9 @@ Each call creates a real Slack app and persists a ``SlackAppProvision`` bridge
 row keyed by a random ``state``; re-running for the same agent drops that
 agent's previous bridge row, so the newest link is the only live one.
 
-The redirect lands on an admin-only route, so open the links **while signed in
-to {BASE_URL} as an admin**. If you are not, the 302 to ``/login`` preserves
+The redirect lands on a route that completes these unattributed links for an
+admin only, so open the links **while signed in to {BASE_URL} as an admin**.
+If you are not, the 302 to ``/login`` preserves
 ``code`` and ``state`` in ``next``, so provisioning still completes after login —
 but OAuth codes are short-lived, so signing in first is safer.
 
@@ -96,7 +97,7 @@ async def _run(only: set[str] | None, dry_run: bool) -> int:
             try:
                 # initiated_by=None: this script mints links for an admin to
                 # open later, so there is no request user to attribute the
-                # install to and any staff account may finish it (0046).
+                # install to and only an admin may finish it (0046).
                 url = await start_provisioning(db, agent, initiated_by=None)
             except ProvisioningError as exc:
                 failures += 1

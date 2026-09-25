@@ -14,9 +14,10 @@ a failing test rather than a defect discovered in production.
 
 The core is synchronous, because ``slack_sdk.WebClient`` is and because one route
 helper has no event loop. **Async callers must use the ``_async``
-wrappers at the bottom of this module, not the sync functions.** Six of the seven
-call sites are FastAPI route handlers, and a synchronous ``time.sleep`` inside one
-of those stalls the whole event loop, not just that request — see ``_call``.
+wrappers at the bottom of this module, not the sync functions.** Four of the five
+call sites run on the event loop (route handlers, and the account-deletion teardown
+they call), and a synchronous ``time.sleep`` inside one of those stalls the whole
+event loop, not just that request — see ``_call``.
 """
 from __future__ import annotations
 
@@ -236,12 +237,14 @@ def post_message(
     it, including for one that passes text already in mrkdwn. If you wire a
     caller that posts prose a model wrote, convert it first.
 
-    ``thread_ts`` exists because two callers post *threaded* replies — the
+    ``thread_ts`` exists because two callers posted *threaded* replies — the
     legacy PI-guidance path in ``routers/agent_page.py`` and its email
-    equivalent in ``services/email_inbound.py``. Without it they could not come
+    equivalent in ``services/email_inbound.py``, both since removed with the
+    PI-interaction engine (2026-08-12 removal cycle; 855be6a / b40d04a).
+    Without it they could not have come
     through here at all: posting their guidance without a ``thread_ts`` would
-    move it out of the proposal thread and into the channel root, which is a
-    worse defect than the raw client they were using. It is omitted from the
+    have moved it out of the proposal thread and into the channel root, which is
+    a worse defect than the raw client they were using. It is omitted from the
     payload entirely when None, so a top-level post is byte-identical to before
     this parameter existed.
     """
@@ -289,7 +292,7 @@ def revoke_token(token: str) -> bool:
 # single blocking HTTP call rather than four plus backoff.
 #
 # asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
-# that request its latency and nothing else. Six of the seven call sites are async;
+# that request its latency and nothing else. Four of the five call sites are async;
 # _resolve_delegate_names is the remaining sync caller and uses the plain functions.
 # ---------------------------------------------------------------------------
 

@@ -198,7 +198,8 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
     """
     Batch fetch PubMed records for a list of PMIDs.
-    Returns list of dicts with: pmid, title, abstract, journal, year, author_position.
+    Returns list of dicts with: pmid, doi, pmcid, title, abstract, journal, year,
+    pub_types, authors, author_count, coi_statement.
 
     This is the path whose job is to keep a long ingest going, so it swallows
     per-batch failures — ``PubMedParseError`` included, which is why raising it
@@ -228,7 +229,7 @@ async def fetch_authoritative_dois(pmids: list[str]) -> dict[str, str]:
     Uses the esummary endpoint, whose ``articleids`` are strictly article-scoped
     (they never include the reference list), making this an authoritative source
     independent of the efetch XML parser. PMIDs with no record or no DOI on file
-    are omitted. Used by the ingest gate's audit counterpart and
+    are omitted. Used by the ingest gate's audit counterpart,
     ``scripts/audit_pub_dois.py``.
     """
     clean = [str(p) for p in pmids if p]

@@ -9,7 +9,7 @@ review tables CASCADE off ``opportunity_assessments.id``
 (``AssessmentReview``, ``AssessmentReviewEvent``, ``AssessmentReviewAssignment``)
 and the fourth (``PromptChangeSuggestion``) is SET NULL — so, unrepointed, a
 human's review of a verdict that turned out to be provisional is silently
-destroyed (the first two) or orphaned (the third) the moment a later reply in
+destroyed (the first three) or orphaned (the fourth) the moment a later reply in
 the SAME interview supersedes it, minutes later, mid-run. This module proves
 the re-point that now runs, in the same transaction as the delete, before it.
 
@@ -258,7 +258,7 @@ async def test_re_point_skips_conflicting_assignments(engine):
     """The same assignee already has a row on BOTH the superseded verdict and
     its replacement (a staff member assigned before the interview concluded a
     second time). The unique constraint on (assessment_id, assignee_user_id)
-    means a naive re-point would violate it outright; the brief's SQL instead
+    means a naive re-point would violate it outright; the re-point's SQL instead
     filters the moved rows to assignees not already present on the
     replacement, so the conflicting old row is left in place — and is then
     swept away for free when the DELETE removes its now-orphaned parent."""
@@ -386,7 +386,7 @@ async def test_persist_returns_false_none_with_no_db():
 
 @pytest.mark.asyncio
 async def test_supersession_re_points_the_pending_review_job(engine):
-    """A review left on a provisional verdict enqueues a job whose payload
+    """A review job queued for a provisional verdict carries a payload that
     names THAT verdict's id. The re-point must move the job too, or it runs
     after the delete, finds no assessment, completes as a no-op, and the
     re-pointed review stays unconsumed with nothing left to consume it

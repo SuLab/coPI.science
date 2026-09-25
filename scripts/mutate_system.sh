@@ -13,9 +13,8 @@
 #
 # As of 2026-08-04 mutate_cohorts.sh shares this file's isolation strategy — it was
 # converted from in-place editing to copy+provenance, and its 9/9 was re-measured under
-# the new strategy and held. mutate_slack_mirror.sh still edits src/ in place; it needs
-# live Slack credentials, so it could not be re-verified after a rewrite and was left
-# alone with a header warning rather than silently changed.
+# the new strategy and held. mutate_slack_mirror.sh was converted the same way once live
+# Slack credentials became available (see its header).
 #
 # THE INERT MUTANTS ARE NOT OPTIONAL. Every tier below carries one edit that changes no
 # behaviour (a docstring, a comment, a log string) and MUST SURVIVE. Without it a tier
@@ -37,7 +36,7 @@
 #   # offline tiers only (free, no third-party calls):
 #   ./scripts/mutate_system.sh
 #
-#   # + the live ORCID / NCBI / grants.gov tiers (free, but real HTTP):
+#   # + the live ORCID / NCBI tiers (free, but real HTTP):
 #   LIVE_API_TESTS=1 ./scripts/mutate_system.sh
 #
 #   # + the profile-pipeline tier (real Anthropic tokens, ~7 calls total):
@@ -204,7 +203,7 @@ MUTANTS=(
 'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or orcid_id~~    result["name"] = "Ada Lovelace"~~M1 fetch_orcid_profile returns a constant name instead of parsing person.name'
 # M1b is the same defect as M1 with the constant chosen to equal today's expected value.
 # It is the difference between "the test reads the record" and "the test restates the
-# answer". SURVIVES the live tier (see KNOWN SURVIVORS above).
+# answer". SURVIVES the live tier (see M1b in the header above).
 'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or orcid_id~~    result["name"] = "Josiah Carberry"~~M1b the same hardcode, set to the value the test pins (probes whether the assertion is derived from the live record or merely restated)'
 # --- PubMed / NCBI (T2) ----------------------------------------------------------------
 'pubmed_both~~src/services/pubmed.py~~    """Make a rate-limited, identified GET request to NCBI."""~~    """Make a rate-limited, identified GET request to NCBI E-utilities. [INERT EDIT]"""~~M12b INERT docstring — MUST SURVIVE'

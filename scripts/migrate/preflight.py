@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-migration safety gate for the 0018/0019 -> 0023 upgrade.
+"""Pre-migration safety gate for the SUPPORTED_START_REVISIONS -> DEFAULT_TARGET upgrade.
 
 Run this BEFORE `alembic upgrade`, against the database you are about to migrate.
 It answers one question: *will this migration succeed, and what will it cost?*
@@ -132,8 +132,8 @@ DEFAULT_TARGET = "0051"
 #: opportunity_assessments), 0031 (data-only, no DDL), 0032 (one nullable JSONB column
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
-#: one foreign-key constraint on agents) and 0035 (three nullable columns across three
-#: tables, no backfill).
+#: one foreign-key constraint on agents), 0035 (three nullable columns across three
+#: tables, no backfill), and the 0036-0051 objects enumerated in PLANNED_OBJECTS below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
@@ -201,14 +201,14 @@ DEFAULT_BACKUP_DIRS = ("backups", "data/backups", "/backups", "/var/backups/copi
 BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", "*.bak")
 
 # ---------------------------------------------------------------------------
-# What the migration chain CREATES, per revision. Derived by reading 0019-0025;
+# What the migration chain CREATES, per revision. Derived by reading 0019-0051;
 # tests/unit/test_migration_checks.py re-derives this from the migration files and
 # asserts it still matches, so it cannot silently drift.
 #
 # Note: postflight.py's own EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES (schema
 # verification after upgrade) are still pinned to the 0019-0023 chain only, and it scopes
 # its read of PLANNED_OBJECTS accordingly (see postflight.VERIFIED_REVISIONS) — it has not
-# been extended to verify 0024/0025's objects yet. That is a separate, pre-existing gap;
+# been extended to verify 0024+'s objects yet. That is a separate, pre-existing gap;
 # this collision check (below) covers every revision up to DEFAULT_TARGET regardless.
 # ---------------------------------------------------------------------------
 

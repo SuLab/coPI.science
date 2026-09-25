@@ -352,14 +352,14 @@ class AgentSlackClient:
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
         self._user_is_bot_cache: dict[str, bool] = {}
-        # Guards both caches above. Before Task 1 (2026-08-14) moved the
-        # transport off the event loop, "concurrent" asyncio callers of a
+        # Guards both caches above. Before the transport moved off the event
+        # loop (2026-08-14), "concurrent" asyncio callers of a
         # synchronous method never actually overlapped in execution, so the
         # check-then-act reads/writes on these two dicts were safe by
         # accident. Now that post_message/poll_channel_messages etc. run
-        # inside asyncio.to_thread, Phase 4's bounded-concurrency replies
-        # (asyncio.gather over a semaphore, simulation.py's
-        # _phase4_reply_threads) can genuinely run several of this SAME
+        # inside asyncio.to_thread, the reply lane's bounded-concurrency replies
+        # (up to reply_lane_max_in_flight at once, simulation.py's
+        # _dispatch_reply_lane) can genuinely run several of this SAME
         # client's calls on different OS threads at once, so the two caches
         # need a real lock, not just a comment. Reentrant (RLock) because
         # _resolve_channel_id/get_channel_id hold it across the refresh call
@@ -529,13 +529,13 @@ class AgentSlackClient:
             )
             return True
         except SlackApiError as exc:
-            # Drop the client. `is_connected` is `self._client is not None`, and nine
-            # call sites gate "is Slack usable" on it — the poll-client rotation,
+            # Drop the client. `is_connected` is `self._client is not None`, and the
+            # engine's "is Slack usable" checks gate on it — the poll-client rotation,
             # _client_for_channel, _ensure_seeded_channels, the mirror branch in
-            # _post_message, the PI DM path. Leaving a client behind after a failed
-            # auth made every one of them take the Slack-ON path with a dead token, so
-            # an invalid_auth degraded into every call failing on every tick instead of
-            # into the DB-only mode the design already has.
+            # _post_message, the #assessments-summary and run-start posts. Leaving a
+            # client behind after a failed auth made every one of them take the Slack-ON
+            # path with a dead token, so an invalid_auth degraded into every call failing
+            # on every tick instead of into the DB-only mode the design already has.
             logger.error("[%s] Slack auth failed: %s", self.agent_id, exc)
             self._client = None
             return False
@@ -941,7 +941,8 @@ class AgentSlackClient:
         ``user_id`` cannot both reach Slack: the second blocks, then finds the
         first's result already cached and returns it instead of opening a
         second (redundant, if harmless) DM channel. Not reachable
-        concurrently today — this method has no caller in ``src/`` — but it
+        concurrently today — its only callers, ``send_dm`` and
+        ``poll_dm_messages``, have no caller in ``src/`` — but it
         has the identical check-then-act shape as ``_channel_name_to_id``
         below, so it gets the same guard rather than leaving a second
         instance of the same bug for whenever a caller does appear.
@@ -1149,7 +1150,7 @@ class AgentSlackClient:
         ``not_in_channel``.
 
         ``exclude_archived`` defaults to **False**, i.e. archived channels are
-        included, because both callers ask this question to find out whether a
+        included, because its callers ask this question to find out whether a
         *name* is in use, and an archived channel still owns its name. Excluding
         them would reintroduce exactly the defect above by a different route.
         Callers that want only channels they can post in pass True.

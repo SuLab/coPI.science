@@ -7,7 +7,7 @@ Two of the Task 12 flows cannot be driven by the automation browser:
 * **Slack OAuth approval.** The Playwright browser has no Slack session, so
   Slack's "Allow" screen cannot be reached, let alone clicked.
 * Anything downstream of it, because Slack redirects to
-  ``/admin/agents/slack/callback`` which is behind ``get_admin_user``.
+  ``/admin/agents/slack/callback`` which is behind ``get_staff_user``.
 
 So the human drives it in *their* browser, which is signed into Slack. They
 still need our admin session cookie, and ORCID login is broken (see

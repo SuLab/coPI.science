@@ -1,4 +1,4 @@
-"""start_provisioning awaits synchronous httpx calls (and, on a Slack 429,
+"""start_provisioning used to make synchronous httpx calls (and, on a Slack 429,
 time.sleep(retry_after) loops) — on the single-worker web loop that is a
 site-wide freeze (issue #24 C2; nginx's 120s proxy_read_timeout turns it
 into a 504). The stub below stands in for the blocking manifest call; the
@@ -60,7 +60,7 @@ async def test_start_provisioning_does_not_block_the_loop(engine, monkeypatch):
         # timestamp and park on asyncio.sleep(0.05)) before calling
         # start_provisioning. asyncio.create_task only SCHEDULES the task;
         # it doesn't run until the current coroutine yields to the loop. The
-        # faked _config_token below has no internal await that suspends, so
+        # faked _config_token above has no internal await that suspends, so
         # without this yield the (still-synchronous, pre-fix) blocking call
         # would run and finish before the heartbeat ever executes its first
         # line — producing a false pass that hides the freeze entirely.

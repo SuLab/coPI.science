@@ -8,7 +8,7 @@ Renumbered from 0019 at merge time. The cohort branch was cut before main's
 db-primary work, so its original "0019" collided with 0019_agent_message_content:
 two revisions sharing an id resolve to whichever file sorts last, which silently
 skips the other while stamping the DB as fully migrated. Revision ids are assigned
-at merge, never at branch. See .notes/cohort-system-v2.md §4.2 / §14 and the
+at merge, never at branch. See specs/cohort-system-v2.md §4.2 / §14 and the
 alembic guard in scripts/ci.sh.
 
 Downgrades are idempotent (if_exists) so a rollback cannot wedge on an object that
@@ -30,7 +30,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # A cohort is a named group of agents permitted to act on each other's
-    # activity during simulation. See .notes/cohort-system-v2.md.
+    # activity during simulation. See specs/cohort-system-v2.md.
     op.create_table(
         "cohorts",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),

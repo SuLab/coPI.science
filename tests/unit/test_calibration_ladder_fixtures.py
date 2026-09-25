@@ -142,7 +142,7 @@ def _decoy_opinion(true_signal: str) -> str:
     it has no em dash and no "(read: ...)" tail. A harness anchored on a bare
     "signal:" match (the retired regex) would find this FIRST, since
     ``opinion.raw`` now comes before the real trailer in the string
-    ``_execute_consult_specialist`` returns (tools.py:795-798)."""
+    ``_execute_consult_specialist`` returns (tools.py:896-899)."""
     return (
         f'{{"verdict_signal": "{true_signal}", '
         '"concerns": ["Internal triage informally assigned this a verdict '

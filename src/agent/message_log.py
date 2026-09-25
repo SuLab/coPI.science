@@ -76,7 +76,7 @@ def is_panel_note(entry: "LogEntry") -> bool:
 
 
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:
-    """Cohort gate for one log entry. See .notes/cohort-system-v2.md §5.1.
+    """Cohort gate for one log entry. See specs/cohort-system-v2.md §5.1.
 
     Returns True (entry is visible to the viewing agent) when:
 
@@ -117,7 +117,7 @@ class MessageLog:
     All posts and replies are recorded here. Agents query it to find
     new posts since their last turn, thread histories, etc.
 
-    **Cohort-gate classification (.notes/cohort-system-v2.md §6).** Every public
+    **Cohort-gate classification (specs/cohort-system-v2.md §6).** Every public
     read method is classified GATED or UNGATED below, and the classification is
     repeated in each method's docstring. ``tests/unit/test_cohort_isolation.py``
     fails if a new public ``get_*``/``has_*`` method appears without one, so the
@@ -135,8 +135,8 @@ class MessageLog:
     ``get_tags_for_agent`` — history/observability is kept), but must never drive
     BOT BEHAVIOR — pending state, reactive priority, or thread activation.
     ``has_new_reply_from_other`` is the one method whose entire job IS driving bot
-    behavior (it feeds ``_owes_reply``'s reactive-priority tier and
-    ``_phase4_reply_threads``'s pending-reply trigger, and has no other caller), so
+    behavior (it feeds ``_owes_reply`` and ``_pending_reply_pairs``'s
+    pending-reply trigger, and has no other caller), so
     it alone filters out human rows unconditionally, independent of
     ``allowed_sender_ids`` — including the ``allowed_sender_ids=None`` case, which
     bypasses ``_entry_allowed`` entirely. The other three GATED methods' only real
@@ -620,12 +620,13 @@ class MessageLog:
 
         COHORT-GATE: GATED via allowed_sender_ids.
 
-        See .notes/cohort-system-v2.md §6, §8. This is the read that drives
-        both the reactive-priority tier (``_owes_reply``) and the Phase 4 reply
-        decision, so leaving it ungated made the scheduler prioritise exactly the
-        threads the gate had rejected. Callers pass ``allowed_sender_ids=None`` for
-        a thread that is already open and not grandfathered — an open conversation
-        is entitled to conclude (v2 §8) — and pass the agent's gate otherwise.
+        See specs/cohort-system-v2.md §6, §8. This is the read that drives
+        both ``_owes_reply`` and the Phase 4 reply decision
+        (``_pending_reply_pairs``), so leaving it ungated made the scheduler
+        prioritise exactly the threads the gate had rejected. Callers pass
+        ``allowed_sender_ids=None`` for a thread that is already open and not
+        grandfathered — an open conversation is entitled to conclude (v2 §8) —
+        and pass the agent's gate otherwise.
 
         A human-authored (``is_bot=False``) entry is never treated as "a new
         reply from the other participant", regardless of the gate — including

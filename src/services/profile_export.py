@@ -28,7 +28,8 @@ def export_profile_to_markdown(
     tenure-attribution audit, which is how pre-tenure publications reached
     agent personas (audit H3).
 
-    Returns the path written, or None if the user has no AgentRegistry entry.
+    Returns the path written, or None if the user has no AgentRegistry entry
+    (``agent_id`` is empty) or the write fails.
     """
     if publications is not None and not isinstance(publications, TenureScopedPublications):
         raise TypeError(

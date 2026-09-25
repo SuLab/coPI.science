@@ -305,8 +305,8 @@ async def test_a_turn_with_a_truncated_call_is_badged_and_a_clean_one_is_not(
 async def test_the_cache_counts_round_trip_through_the_buffered_flush(engine):
     """The columns exist to be SUMmed: billable input volume is
     `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
-    (see LlmCallLog's docstring), and that sum is unavailable while either
-    column is NULL on every row."""
+    (see LlmCallLog's cache-column comments), and that sum is unavailable
+    while either column is NULL on every row."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     try:

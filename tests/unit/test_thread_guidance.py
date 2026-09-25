@@ -64,7 +64,8 @@ def test_scout_hub_decide_phase_works_the_gating_criteria():
     assert "do not ask the lab about market size" in blob
     assert "never a market, competitive, or ip question" in blob
     assert "baltimore" not in blob
-    # Part C.4 of the rubric — the target-level scientific checklist.
+    # The target-level evidence list, now worked under the rubric's
+    # scientific-credibility and translational-path dimensions.
     assert "proof of mechanism" in blob
 
 

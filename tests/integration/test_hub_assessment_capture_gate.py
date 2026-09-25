@@ -1,4 +1,4 @@
-"""One interview, one verdict — and it comes from the turn that ENDS the interview.
+"""One interview, one verdict — and it comes from the LAST verdict-bearing turn.
 
 Two production defects meet in this gate, and they pull in opposite directions.
 
@@ -23,15 +23,17 @@ verdicts, 12-14k output tokens each, with orphaned `specialist_consults` rows an
 nothing stored. Under that gate a `pass` could never be stored at all: delivering
 one closes the thread long before ordinal 12 (1 of 62 threads reached it).
 
-So the gate asks "does this reply end the interview?", not "is the ordinal 12":
+So the gate no longer asks "is the ordinal 12" (and, since 2026-08-22, not
+"does this reply end the interview?" either — a sidecar is trusted on its own):
 
-* a reply that CONCLUDES (ordinal 12) or CLOSES the thread (⏸️) may store a
+* a reply that CONCLUDES (ordinal 12) or CLOSES the thread (⏸️) stores a final
   verdict — that is the interview's real, last word;
-* an early, non-closing sidecar is still refused and recorded
-  (`premature_sidecar`), because a later turn is genuinely still owed a verdict;
-* and a later concluding/closing verdict SUPERSEDES an earlier provisional one
-  (last write wins, the earlier row retired) while a re-capture of the same turn
-  is still refused as a duplicate.
+* an early, non-closing sidecar is stored as PROVISIONAL (it used to be refused
+  as `premature_sidecar`, on the unbacked promise that a later turn would
+  supply the verdict);
+* and a later verdict SUPERSEDES an earlier provisional one (last write wins,
+  the earlier row retired) while a re-capture of the same turn, or any sidecar
+  after a closing verdict, is still refused as a duplicate.
 
 Every refusal is recorded as an `AssessmentDrop` rather than dropped silently: the
 reply is already in Slack by the time any of this runs, so an invisible refusal is
@@ -892,9 +894,10 @@ async def test_a_superseded_row_with_a_null_verdict_says_so(engine, caplog):
     matches the filter but stores a NULL `raw_verdict` makes `rows[0]` itself
     `None`, and the function returned it with no log at all. That is the same
     indistinguishability the not-found warning exists to end, on the same path
-    whose stated purpose is "never lose the retired verdict" — and it is the
-    SHAPE OF EVERY ROW WRITTEN BEFORE 0035, so it is the likely case on any
-    restart that rehydrates an older run.
+    whose stated purpose is "never lose the retired verdict". (It is not the
+    shape of pre-0035 rows: 0035 added `assessment_drops.raw_verdict`, while
+    `opportunity_assessments.raw_verdict` dates from 0025 and the engine always
+    sets it, so a NULL here comes from a row written some other way.)
 
     `_seed_assessment` leaves `raw_verdict` NULL, which is exactly the fixture.
     """

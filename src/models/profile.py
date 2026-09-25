@@ -26,7 +26,7 @@ class ResearcherProfile(Base):
     key_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     grant_titles: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
-    # [{label: str, content: str, submitted_at: str}]  — deprecated, use private_profile_md
+    # [{label: str, content: str, submitted_at: str}]  — deprecated, no writers
     # `none_as_null=True` so "nothing submitted" is SQL NULL, not the JSON scalar
     # `null`. The ORM cannot tell the two apart (both decode to `None`), so the
     # cost falls entirely on SQL-level readers, where `WHERE col IS NULL` silently
@@ -57,8 +57,8 @@ class ResearcherProfile(Base):
     # the synthesized fields, so they always describe the same synthesis (unlike
     # raw_abstracts_hash, which records this run's input even when nothing was
     # stored). Both None means "no synthesis stored / pre-0023 row".
-    #   evidence_pmid_count — distinct PMIDs resolved from the ORCID works list,
-    #                         i.e. what the pipeline should have been able to fetch
+    #   evidence_pmid_count — in-tenure corpus records (len(in_tenure) in
+    #                         profile_pipeline), i.e. what the pipeline had in scope
     #   evidence_pub_count  — PubMed records that were research-type AND carried an
     #                         abstract, i.e. the set offered to the synthesis prompt
     #                         (len(pubs_for_synthesis) at profile_pipeline.py step 9).
@@ -109,9 +109,10 @@ class ResearcherProfile(Base):
           grounded              at least one abstract reached the prompt
           evidence_lost         identifiers were resolved but no abstract
                                 survived (a PubMed/NCBI outage or rate-limit), or
-                                the ORCID works lookup itself failed so the
-                                identifier count is unknown. Ungrounded and worth
-                                regenerating.
+                                — on a row written before a corpus stage failure
+                                began failing the job — the ORCID works lookup
+                                itself failed so the identifier count is unknown.
+                                Ungrounded and worth regenerating.
           no_evidence_available nothing to fetch in the first place (a genuinely
                                 publication-less or non-PubMed-indexed
                                 researcher). Ungrounded, but nothing was lost and
@@ -120,10 +121,12 @@ class ResearcherProfile(Base):
 
         Limit of what two counts can tell you: they describe what the synthesis
         HAD, not every reason it had that. One case is still understated —
-        `convert_dois_to_pmids` failing for a researcher whose ORCID lists only
-        DOIs leaves zero identifiers in hand and reads as no_evidence_available.
-        The count is a measured lower bound, deliberately, because a partial count
-        is more useful than NULL; the NCBI failure itself is logged by step 3/4.
+        `convert_dois_to_pmids` failing (it swallows its own errors) for a
+        researcher whose ORCID/OpenAlex works carry only DOIs, with no PubMed
+        search hit, leaves zero identifiers in hand and reads as
+        no_evidence_available. The count is a measured lower bound, deliberately,
+        because a partial count is more useful than NULL; the NCBI failure itself
+        is logged by `convert_dois_to_pmids` during steps 3+4.
         """
         if self.evidence_pub_count is None:
             return "unknown"

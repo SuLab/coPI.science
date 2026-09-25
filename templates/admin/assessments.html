@@ -2,12 +2,12 @@
 {% block title %}Admin — Assessments — CoPI{% endblock %}
 
 {% block extra_head %}
-{# Same three scripts and the same style block as the two detail wrappers
+{# Same three scripts as the two detail wrappers
    (templates/admin/assessment_detail.html, templates/manager/assessment_detail.html),
-   copied verbatim — including the SRI integrity attributes — so the list page
-   can render the same sanitized markdown and reading scale as the detail page.
-   These two NEW list wrappers must stay IDENTICAL to each other; the detail
-   wrappers are a separate pair (Task B's area) and are not touched here. #}
+   copied verbatim — including the SRI integrity attributes — and a style block
+   adapted from theirs, so the list page can render the same sanitized markdown
+   and reading scale as the detail page. These two list wrappers must stay
+   IDENTICAL to each other; the detail wrappers are a separate pair. #}
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
         integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
         crossorigin="anonymous"></script>
@@ -126,8 +126,8 @@
             {% endfor %}
         </select>
         {% if lab_options %}
-        {# The option text is the bare subject_agent_id, matching the table's
-           own Lab column — "WangBot" here against "wang" in the column it
+        {# The option text is the bare subject_agent_id, matching the cards'
+           own "Lab:" line — "WangBot" here against "wang" on the cards it
            filters would read as two different things. #}
         <label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label>
         <select id="assessments-lab-select" name="lab" onchange="this.form.submit()"
@@ -198,14 +198,14 @@
    route under tests/unit/test_reachability.py's strict _link_credits matcher,
    which only accepts a Jinja expression in a {path_param} slot. Defining it as
    a macro before the include keeps the URL literal on both surfaces while the
-   table markup stays shared (Jinja passes the including template's context,
+   card markup stays shared (Jinja passes the including template's context,
    macros included, into an {% include %}).
 
    The class name deliberately avoids the substring "assessment-detail":
    test_admin_assessments_page_renders_no_inline_detail_rows asserts the page
    contains no such string anywhere. #}
 {% macro assessment_link(a) %}<a class="assessment-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
-{# Same reasoning as assessment_link above, applied to the Lab cell: a link to
+{# Same reasoning as assessment_link above, applied to the Lab line: a link to
    the PI's own profile has to be a literal /admin/users/{id} URL for
    test_reachability's _link_credits to see it, so it is defined here as a
    macro and rendered inside the shared body via pi_user_ids (Task 7). Falls

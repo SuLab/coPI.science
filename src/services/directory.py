@@ -1,9 +1,9 @@
-"""HTTP-free read queries behind the admin (and, later, manager) directory pages.
+"""HTTP-free read queries behind the admin and manager directory pages.
 
 These six query bodies used to live directly inside `src/routers/admin.py`
 handlers. They move here verbatim (Task 3 of the user-account-types plan) so
-the forthcoming `/manager` router can call the exact same code — most of it
-by way of the new `roles=` filter on `list_pi_directory` — instead of
+the `/manager` router can call the exact same code — most of it
+by way of the `roles=` filter on `list_pi_directory` — instead of
 carrying a second copy of a ~280-line discussions query. Nothing here knows
 about `Request`, `HTTPException`, or Jinja2 templates: callers (routers) own
 the HTTP concerns (404s, template rendering, query-param parsing) and pass in

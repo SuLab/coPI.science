@@ -1,10 +1,11 @@
 """The throttle and the run summary must count API CALLS, not turns.
 
-`Agent.record_api_call` already books six sites — the two reserved turns,
-specialist consults, truncation retries, the working-memory update. What was
-never booked is the extra TOOL ROUNDS inside `generate_with_tools`: a turn that
-used three rounds before its final text call made four real, billed API calls
-and was booked as one.
+`Agent.record_api_call` already books eight sites — the two reserved turns,
+specialist consults and each consult's own truncation retry, the truncation
+retries of both reserved turns, and the working-memory update and its retry.
+What was never booked is the extra TOOL ROUNDS inside
+`generate_with_tools`: a turn that used three rounds before its final text call
+made four real, billed API calls and was booked as one.
 
 The obvious fix — "book `len(call_stats)`" — is wrong in the other direction. A
 retry already fires `on_retry=agent.record_api_call`, and the two reserved sites
@@ -153,7 +154,7 @@ def test_a_malformed_call_stats_payload_is_ignored(engine):
 
 # ----------------------------------------------------------------------
 # The units change has to reach a HUMAN. `SimulationRun.total_api_calls` is
-# rendered in three admin templates; a staff member comparing the next run
+# rendered in four templates (three admin, one manager); a staff member comparing the next run
 # against 8b64a0e0 reads a number whose meaning silently changed.
 # ----------------------------------------------------------------------
 

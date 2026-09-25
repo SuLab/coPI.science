@@ -1,7 +1,7 @@
 """Integration tests for the DB-native PI inbox (src/services/pi_inbox.py).
 
 ``record_pi_message`` is how a PI's web-authored guidance (``reopen_proposal``)
-enters the simulation's DB inbox when Slack is off — the engine ingests the row
+enters the simulation's DB inbox, Slack on or off — the engine ingests the row
 for history/observability only (2026-08-12 PI-interaction removal cycle;
 ``MessageLog``'s GATED reads filter it out of every trigger path). Exercised
 against the real migrated Postgres so the actual ``agent_messages`` schema

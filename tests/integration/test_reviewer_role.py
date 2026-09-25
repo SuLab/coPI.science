@@ -12,7 +12,7 @@ PI (no lab profile or agent). This file pins:
   - Login/onboarding/profile GETs bounce a reviewer to /manager/assessments
     rather than rendering a PI page it can never complete.
   - Task 3 (below): the manager router actually admits a reviewer to exactly
-    four read routes — GET /manager, /manager/pis, /manager/pis/{id},
+    five read routes — GET /manager, /manager/pis, /manager/pis/{id},
     /manager/assessments, /manager/assessments/{id} — and refuses it
     everywhere else on that router, and the manager templates render
     read-only for a reviewer (and for an admin impersonating one).

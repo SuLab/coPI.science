@@ -209,8 +209,8 @@ def test_max_runtime_and_proposal_cap_are_independent_stop_conditions():
 
     # max_proposals cap reached and drained, with no max_runtime configured
     # at all: the drain alone satisfies the loop-exit condition regardless
-    # of the (permanently True, since max_runtime_minutes defaults to 0/off)
-    # time check.
+    # of the time check (True here: the engine was never started, so
+    # `_start_time` is None).
     eng2, _ = _engine(max_proposals=2)
     eng2._running = True
     eng2._proposals_posted = 2

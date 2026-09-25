@@ -3,8 +3,8 @@
 All three flushers (`_flush_persisted`, `_flush_llm_logs`,
 `_flush_pending_assessments`) add N rows, commit ONCE, and on failure re-queue
 the whole batch while logging "re-queued for retry". `stop()` makes exactly one
-final attempt, so at shutdown that message is false: the batch is lost, quietly,
-and a single bad row loses every good row beside it.
+final attempt, so at shutdown that message used to be false: the batch was lost,
+quietly, and a single bad row lost every good row beside it.
 
 Two traps make the naive fix harmful, and both are pinned here.
 

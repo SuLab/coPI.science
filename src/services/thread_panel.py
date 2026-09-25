@@ -43,7 +43,7 @@ from src.models import SpecialistConsult
 # Hard bounds. Everything below is unbounded production text: `question` and
 # `raw_opinion` are `Text`, `concerns`/`questions_to_ask` are JSONB arrays
 # written from a model's reply, and NONE of it is length-limited on the write
-# path (src/agent/simulation.py::_record_consult). This page renders every
+# path (src/agent/simulation.py::_record_specialist_consult). This page renders every
 # consult of every thread it lists at once, with no pagination, so the clipping
 # happens here rather than being left to the browser.
 CONSULT_ROW_LIMIT = 500

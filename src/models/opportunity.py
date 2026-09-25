@@ -67,7 +67,9 @@ class OpportunityAssessment(Base):
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 3-5 short strings (scout_hub <= 1.2.0), or the three-group object
     # {"significance": [...], "innovation": [...], "commercial_potential": [...]}
-    # (>= 1.3.0, Task 7 / F3) — see src/services/assessment_detail.py's
+    # (1.3.0, Task 7 / F3), or the five-group object (>= 1.4.0, which adds
+    # `clinical_actionability` and `key_questions`) — see
+    # src/services/assessment_detail.py's
     # `normalize_key_points`/`KEY_POINT_GROUPS`. `none_as_null=True` for the
     # reason given on `missing_domains` below: without it Python None persists
     # as the JSONB scalar `null`, which `WHERE key_points IS NULL` does not
@@ -152,9 +154,9 @@ class OpportunityAssessment(Base):
     # `recommended_next_experiment`, and — since the elevator-pitch sidecar
     # fields landed in the same commit — `elevator_pitch` were all written
     # under the markdown-prompt contract and are safe to render through the
-    # sanitized data-markdown pipeline. All three fields share one stamp
-    # because they come from the same prompt and the same commit; there is no
-    # per-field granularity here.
+    # sanitized data-markdown pipeline. Those three share one stamp because they
+    # come from the same prompt and the same commit, and `score_rationale`
+    # (0048) is rendered under it too; there is no per-field granularity here.
     prose_format: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # The durable half of the at-most-once headline guarantee (2026-08-29).
     # Set when a `#assessments-summary` headline for THIS row reaches Slack.

@@ -78,7 +78,7 @@ _HUB_CONCLUDE_RESPONSE = (
 #
 # IMPORTANT SCOPE NOTE (task review, Critical C1): the lock applied here is
 # one this TEST builds (`eng._thread_locks.acquire_all(...)`), not the
-# production one at `simulation.py:1201` inside `_dispatch_reply_lane._run`.
+# production one at `simulation.py:1928` inside `_dispatch_reply_lane._run`.
 # Deleting that production line leaves this test (and the two static lock-
 # order guards) green — confirmed via a disposable worktree, see
 # task-14-report.md's C1 fix section. This test still has standalone value
@@ -172,7 +172,7 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
 #     and lab) each owing a reply into the SAME thread — the star topology's
 #     normal steady state, and literally spec §4.1's own scenario. No lock is
 #     applied by this test anywhere; only the production line at
-#     `simulation.py:1201` (inside `_dispatch_reply_lane._run`) can prevent
+#     `simulation.py:1928` (inside `_dispatch_reply_lane._run`) can prevent
 #     overlap here. `_pending_reply_pairs()` returns both (agent, thread)
 #     pairs; the in-flight dedup key is `(agent_id, thread_id)`, which does
 #     NOT collide for two different agents on the same thread_id, so both are
@@ -185,7 +185,7 @@ async def test_two_agents_replying_into_one_thread_do_not_overlap_at_the_product
     engine, monkeypatch,
 ):
     """Confirmed via a disposable worktree (task-14-report.md, C1 fix
-    section) that deleting `simulation.py:1201`'s
+    section) that deleting `simulation.py:1928`'s
     `async with self._thread_locks.acquire_all(thread.thread_id):` makes this
     test fail: peak overlapping `_service_reply` calls goes from 1 to 2, and
     a second `ThreadDecision` row appears."""
@@ -433,7 +433,7 @@ async def test_cross_agent_close_does_not_deadlock(engine, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 3c. Final review fix (item 2) — `_evict_dead_thread`'s OWN agent lock
-# (`simulation.py:1902`) is likewise untested. It takes EVERY agent's key,
+# (`simulation.py:2920`) is likewise untested. It takes EVERY agent's key,
 # so it can never truly overlap with `_close_thread` for the SAME thread
 # unless it is allowed to run while `_close_thread` is genuinely suspended
 # waiting to ACQUIRE its own (narrower) agent lock — before close has
@@ -459,7 +459,7 @@ async def test_evict_dead_threads_agent_lock_prevents_it_from_racing_ahead_of_cl
     """With the real lock, eviction cannot run until close_thread has fully
     released both agent locks — by which point close has already set
     `wang`'s own ThreadState.status = "closed". Confirmed via a disposable
-    worktree that deleting `simulation.py:1902`'s
+    worktree that deleting `simulation.py:2920`'s
     `async with self._agent_locks.acquire_all(*self.agents.keys()):` makes
     this fail (status never gets set at all)."""
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
@@ -656,7 +656,7 @@ async def test_event_loop_stays_responsive_during_a_slack_post(monkeypatch):
 #    second CONCLUDE/assessment/decision even without this set): without it,
 #    the real `_service_reply` still gets ENTERED a second time (it just
 #    no-ops quickly once inside, via its own closed/evicted guard), burning a
-#    second Phase-3-reactivation pass and a second task-scheduling slot. The
+#    second task-scheduling slot. The
 #    spy below wraps (not replaces) the real method, so this counts actual
 #    entries rather than final DB state.
 # ---------------------------------------------------------------------------
@@ -766,7 +766,7 @@ async def test_sequential_drain_prevents_a_lost_memory_update(
     monkeypatch, tmp_path,
 ):
     """Successor to test_close_threads_agent_lock_prevents_a_lost_memory_update
-    (which this task DELETES — see Step 3): the serialization duty moves from
+    (since deleted): the serialization duty moves from
     the agent lock to the drain. Two closes both involving the hub enqueue
     two hub events; the drain must apply them sequentially so the second
     reads the first's written text. The fake is the same interleave detector:

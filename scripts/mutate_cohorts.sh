@@ -34,7 +34,7 @@
 #
 # THE INERT MUTANT IS NOT OPTIONAL. M0 below changes no behaviour (a docstring) and
 # MUST SURVIVE. Without it, a selection that is red for any unrelated reason — a dead
-# fixture, a migrated-away column, a leftover row — scores 9/9 and looks maximally
+# fixture, a migrated-away column, a leftover row — scores 8/8 and looks maximally
 # sensitive when it is merely broken. It is listed FIRST so that failure is detected
 # before any of the real mutants are believed.
 #

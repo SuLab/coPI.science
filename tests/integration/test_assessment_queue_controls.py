@@ -4,7 +4,7 @@ The service tests (``tests/unit/test_directory_assessment_sorting.py``) prove th
 SQL. These prove the wiring, which is a different failure: the query parameters
 have to be declared on BOTH handlers, the chosen values have to reach BOTH
 wrappers, and the three selects have to sit in ONE form — otherwise changing the
-sort silently resets the run to "current", which on a `--fresh`-wiped instance
+sort silently resets the run to "current", which after a `--fresh` start
 means the rows a reader was looking at vanish.
 """
 
@@ -519,9 +519,8 @@ async def _seed_reviewed_row(db_session, run, *, project="Reviewed Co"):
 
 
 #: The exact opening substring the template's card `<div>` must carry
-#: (trailing space included) — see the header comment of
-#: templates/admin/_assessments_body.html and the card list section of
-#: task-9-brief.md.
+#: (trailing space included) — see the comment above the card `<div>` in
+#: templates/admin/_assessments_body.html.
 _CARD_OPEN = 'class="assessment-card '
 
 
@@ -595,9 +594,9 @@ def _row_slice(html: str, marker: str) -> str:
 
 
 def test_row_slice_stops_at_the_next_card():
-    """Guard on the guard. `_row_slice` is what makes four column assertions
+    """Guard on the guard. `_row_slice` is what makes every card assertion
     ROW-scoped. If its boundary string stops matching the markup it does not
-    fail — it returns the whole page, and those four stop testing anything."""
+    fail — it returns the whole page, and those stop testing anything."""
     html = (
         '<div class="assessment-card p-5">A-MARKER Alice</div>'
         '<div class="assessment-card p-5">B-MARKER Bob</div>'
@@ -1492,8 +1491,8 @@ async def test_both_surfaces_offer_the_review_tabs(client, db_session, base, rol
 
 
 async def test_the_review_tab_survives_a_sort_change(client, db_session, admin):
-    """The run/sort/lab controls are ONE GET form with no hidden inputs, so a
-    param that is not a form field is dropped the moment a select changes."""
+    """The run/sort/lab controls are ONE GET form, so a param that is not a
+    form field is dropped the moment a select changes."""
     run, _ = await _seed_narrative_row(db_session, project="Sticky Tab Co")
     html = (await client.get(
         f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)

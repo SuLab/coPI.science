@@ -1,7 +1,7 @@
 """Live integration tests for the cohort admin surface.
 
 Real ASGI requests, real Postgres, real Jinja templates. Covers the granular
-topology control (.notes/cohort-system-v2.md §12), the audit trail (§4.1/§13.1),
+topology control (specs/cohort-system-v2.md §12), the audit trail (§4.1/§13.1),
 the delete guard, and the rule that the gate never becomes access control (§6.2).
 """
 
@@ -387,7 +387,7 @@ async def test_rendered_cells_are_exactly_the_marker_cross_product(
     ``present_cohort`` markers the save route trusts to reconstruct ``rendered``
     must equal the ACTUAL cross product of cells the table drew, or a save can
     silently delete memberships for a cell that was never shown (see
-    ``test_topology_save_only_touches_rendered_cells`` and friends above).
+    ``test_topology_save_only_touches_rendered_cells`` and friends below).
 
     The old per-cell ``present`` input was emitted INSIDE the nested cell loop,
     so it was structurally impossible for a cell to render without a matching
@@ -1096,7 +1096,7 @@ async def test_every_cohort_route_answers_a_missing_cohort_the_same_way(
     that does not exist: add-agent raised 404, delete redirected silently to the
     list, remove-agent redirected to a detail page that 404s. They now all match
     the GET detail page, which is the convention the rest of this module uses for a
-    missing path-addressed row (see ``admin_user_delete``, ``admin_approve_agent``,
+    missing path-addressed row (see ``admin_delete_user``, ``admin_approve_agent``,
     ``admin_approve_access`` and friends). ``?error=`` redirects stay reserved for
     bad form input against a cohort that really exists.
     """

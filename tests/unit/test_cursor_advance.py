@@ -18,7 +18,7 @@ This file now:
 1. Retargets the original snapshot-then-assign regression test at
    `_dispatch_reply_lane` (the invariant itself, and the Ruling-P4-style
    discriminator, are unchanged from Task 6 — just relocated).
-2. Pins that `_run_post_turn` touches `last_seen_cursor` at all — a structural
+2. Pins that `_run_post_turn` never touches `last_seen_cursor` — a structural
    guard against the exact regression this fix round found.
 3. Adds the COMPOSITIONAL regression test the review flagged: no prior test
    ever called `_dispatch_reply_lane()` and `_run_post_turn()` in the same

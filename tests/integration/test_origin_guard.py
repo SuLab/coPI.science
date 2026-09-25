@@ -12,11 +12,11 @@ nine tables) and, against a signed-in admin, ``POST /admin/users/{id}/role``.
 
 The probe here is ``POST /logout``. It is the codebase's own documented CSRF
 target — src/routers/auth.py's ``logout`` docstring says it was made POST-only
-for exactly this reason (SEC-8) and names SameSite=lax as the mitigation — it
-needs no fixtures beyond a session, it has a crisp observable (the session is
-cleared, or it is not), and it is rate-limited by nothing. Every refusal below
-asserts that observable, not only the status code: a 403 on a request that was
-inert anyway would prove nothing.
+for exactly this reason (SEC-8) and names OriginGuardMiddleware as what refuses
+the same-site forgeries SameSite=lax lets through — it needs no fixtures beyond a
+session, it has a crisp observable (the session is cleared, or it is not), and it
+is rate-limited by nothing. Every refusal below asserts that observable, not only
+the status code: a 403 on a request that was inert anyway would prove nothing.
 """
 
 from http.cookies import SimpleCookie

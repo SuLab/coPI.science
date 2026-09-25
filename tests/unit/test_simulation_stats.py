@@ -88,7 +88,7 @@ async def test_run_overview_raises_for_a_run_that_does_not_exist(db_session):
 
 async def test_cost_summary_hand_computed_total_and_floor_flag(db_session):
     run = await factories.make_simulation_run(db_session)
-    # Task 8's seeded case: 5.00 + 2.50 + 0.25 + 1.25 = 9.00
+    # 5.00 + 2.50 + 0.25 + 1.25 = 9.00
     await factories.make_llm_call_log(
         db_session, run=run, model="claude-opus-5",
         input_tokens=1_000_000, output_tokens=100_000,
@@ -833,7 +833,7 @@ async def test_cost_by_call_kind_prices_each_call_stats_element(db_session):
     )
     # round: 1_000_000 * 5 / 1e6  = $5.00
     # final:   100_000 * 25 / 1e6 = $2.50 — `thinking_tokens` is a
-    #   DECOMPOSITION of `output_tokens` (src/services/llm.py:112), so adding
+    #   DECOMPOSITION of `output_tokens` (src/services/llm.py:114), so adding
     #   the two would bill those 100k thinking tokens twice.
     await factories.make_llm_call_log(
         db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",

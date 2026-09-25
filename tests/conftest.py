@@ -332,7 +332,7 @@ def slack_probe_channel(slack_clients):
     The name->id cache of *every* client is seeded, not just the creator's. This mirrors
     what the engine does in production — `_ensure_seeded_channels` ends with
     `for c in self.slack_clients.values(): c.cache_channel_ids(existing)`
-    (src/agent/simulation.py:3061) — and it is load-bearing here rather than cosmetic:
+    (src/agent/simulation.py:6959) — and it is load-bearing here rather than cosmetic:
     the engine's `_post_message` passes a channel *name* to `post_message`, which
     resolves it through `_resolve_channel_id` -> `list_channels()`. Only the creating
     client gets a cache entry from `create_channel`, so a post by any other agent used to

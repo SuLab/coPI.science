@@ -2,8 +2,8 @@
 
 Pins the efetch-XML parse path, the esummary/idconv JSON paths, and the
 swallow-and-continue error behavior. respx intercepts the internal httpx client;
-_ncbi_get sleeps ~0.12s per *successful* call (rate limit), so these are a touch
-slow but deterministic.
+_ncbi_get paces every request start (_pace: 0.11s with an NCBI key, 0.34s
+without), so these are a touch slow but deterministic.
 """
 
 import httpx

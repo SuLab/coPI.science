@@ -2,9 +2,9 @@
 
 Pins the end-to-end output of run_profile_pipeline for one researcher with every
 external dependency faked deterministically:
-  - ORCID/PubMed fetches are monkeypatched in the pipeline's namespace (they are
-    imported there by name; reconcile_pub_doi is left REAL so DOI reconciliation
-    is exercised for real).
+  - ORCID/PubMed fetches are monkeypatched in the pipeline's and the corpus
+    module's namespaces (they are imported there by name; reconcile_pub_doi is
+    left REAL so DOI reconciliation is exercised for real).
   - The Anthropic client is replaced via the src.services.llm.get_anthropic_client
     seam, scripted to return a valid public-profile JSON (retries on a failed
     validation consume additional scripted responses in order; the removal
@@ -231,7 +231,7 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
 async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monkeypatch, snapshot):
     """Pin the resilience path: when the public-synthesis LLM call raises, the
     pipeline swallows it, stores no synthesized fields, and leaves version at 0 —
-    but still records grant titles and the abstracts hash and attempts the seed.
+    but still records grant titles and the abstracts hash.
 
     The provenance columns stay NULL here, which is the third state they need: no
     synthesis was stored, so there is nothing to say about its validation or its
@@ -666,11 +666,11 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
     """A genuinely publication-less researcher onboards, and is NOT confused with
     an outage.
 
-    Same observable surface as the test above — 0 abstracts in the prompt, 0
-    Publication rows, a profile written from name and department — but nothing was
-    lost: ORCID was reachable and reported no works. An operator triaging
-    ungrounded profiles must not be sent to regenerate this one, because
-    regenerating cannot help.
+    Same observable surface as the old outage policy the test above describes —
+    0 abstracts in the prompt, 0 Publication rows, a profile written from name
+    and department — but nothing was lost: ORCID was reachable and reported no
+    works. An operator triaging ungrounded profiles must not be sent to
+    regenerate this one, because regenerating cannot help.
     """
     _install_fakes(monkeypatch)
 

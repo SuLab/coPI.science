@@ -36,11 +36,11 @@ Known false negative, recorded because it is not hypothetical. This gate is stat
 link counts as a credit if it appears in a reachable template, and nothing here
 evaluates the Jinja condition the link sits under. A control behind a branch that never
 holds is therefore invisible to it. There is a live instance:
-``POST /onboarding/retry`` (src/routers/onboarding.py:317) has exactly one control in
+``POST /onboarding/retry`` (src/routers/onboarding.py:256) has exactly one control in
 the app — the "Try Again" form at templates/onboarding/profile_review.html:53 — and it
 sits inside ``{% elif job_status == 'failed' %}``. ``job_status`` is
 ``Job.status``, and src/worker/main.py only ever writes 'processing', 'completed',
-'dead' or 'pending'; ``'failed'`` is permitted by the enum (src/models/job.py:23) and
+'dead' or 'pending'; ``'failed'`` is permitted by the enum (src/models/job.py:28) and
 assigned by nothing in src/. So the retry button is unreachable at runtime while this
 gate reports the route as referenced. Closing it would mean evaluating template
 conditions against the values src/ can actually produce — a different and much larger
@@ -363,7 +363,7 @@ _HTTP_DECORATORS = {
 def _excluded_string_nodes(tree: ast.AST) -> set[int]:
     """Strings that mention a path without *calling* it, and must not credit a route.
 
-    Two kinds, and both matter:
+    Three kinds, and all three matter:
 
       * A route decorator's own path (``@router.get("/auth/callback")``). Routers
         mounted without a prefix declare their full path there, so without this every
@@ -910,7 +910,7 @@ def test_every_allowlist_entry_has_a_reason():
 
 def test_every_known_defect_entry_is_paired_with_a_strict_xfail():
     """The ``KNOWN_*`` sets are suppressions: each subtracts a finding from an aggregate
-    gate. The docstring says "Do NOT add to this list to silence a new finding", and
+    gate. The comment above them says "Do NOT add to these to silence a new finding", and
     until now nothing enforced it — a sixth entry would have gone in silently and the
     gate would have gone quiet with it.
 

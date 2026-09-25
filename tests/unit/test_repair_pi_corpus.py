@@ -346,7 +346,8 @@ def test_select_additions_is_empty_when_everything_is_already_stored():
 
 def test_select_additions_never_pushes_the_corpus_past_the_cap():
     # Rothstein's measured shape: 15 survivors + 42 candidates = 57 without a
-    # budget, over a cap of 50 ("leung at 53", CLAUDE.md). Only 35 may land.
+    # budget, over a cap of 50 ("leung at 53",
+    # docs/specs/2026-08-13-pi-profile-coverage-design.md). Only 35 may land.
     kept = [{"pmid": str(i), "year": 2026 - i} for i in range(42)]
     additions, over_cap = select_additions(kept, stored_pmids=[], survivors=15, cap=50)
     assert len(additions) == 35

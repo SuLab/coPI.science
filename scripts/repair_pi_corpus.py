@@ -16,8 +16,8 @@ Removal set (automatic, still gated on --apply):
   - the later-added of two stored rows that share an identical PMID
     (``duplicate_pmid`` — the non-unique index means this is observed, not
     enforced, D8);
-  - rows whose refetched record fails the CURRENT ``match_pi_author`` outright
-    (``no_individual_author_match``);
+  - rows whose refetched record fails the CURRENT ``match_pi_author`` and lists
+    authors, none of whom carries the PI's surname (``no_individual_author_match``);
   - rows whose refetched ``pub_types`` intersect ``EXCLUDED_TYPES`` with NO
     other type alongside (``excluded_type``); a row carrying a non-excluded
     type too (e.g. ``Comment`` + ``Journal Article``) is routed to review
@@ -29,6 +29,9 @@ Removal set (automatic, still gated on --apply):
 Review set (``--review``, NEVER applied automatically):
   - rows whose only identity evidence is a bare single-letter forename/initial
     (``bare_initial_only``, D3 — a judgement call, not a mechanical one);
+  - rows that fail ``match_pi_author`` on weaker evidence: no author list
+    (``unverifiable_no_authors``), consortium-only (``consortium_only``), or
+    the PI's surname present with a disagreeing forename (``forename_mismatch``);
   - rows with a secondary excluded type (``secondary_excluded_type``, D4);
   - rows with no stored PMID at all (``no_pmid`` — nothing to refetch);
   - rows whose stored PMID PubMed no longer returns a record for
@@ -472,10 +475,10 @@ def select_additions(
 
     Without the budget the two sets simply concatenate: Rothstein measured 18
     stored - 3 removed + 42 resolver additions = 57, over a cap of 50. That is
-    the "leung at 53" defect class CLAUDE.md names, and it matters because a
-    surviving stored row is NOT necessarily in the resolver's kept set (7 of
-    Rothstein's 15 survivors are older than its 50th-ranked record), so the
-    union is genuinely larger than either side.
+    the "leung at 53" defect class ``profile_pipeline`` names (audit M4), and
+    it matters because a surviving stored row is NOT necessarily in the
+    resolver's kept set (7 of Rothstein's 15 survivors are older than its
+    50th-ranked record), so the union is genuinely larger than either side.
 
     Trimming the ADDITIONS rather than the survivors is deliberate: a stored
     row may carry per-paper human verification this run cannot reproduce, and

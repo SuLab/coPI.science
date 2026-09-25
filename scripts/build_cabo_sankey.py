@@ -16,7 +16,7 @@ Run inside the app container (scripts/ isn't mounted — docker cp it in first):
       --start 2026-06-06 --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
 
 Output (sankey.html + sankey.png) lands in --out inside the container; retrieve
-with `docker cp app:/app/data/schultz_viz ./data/`.
+with `docker compose cp app:/app/data/schultz_viz ./data/`.
 """
 
 from __future__ import annotations

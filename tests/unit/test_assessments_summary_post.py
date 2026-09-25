@@ -328,7 +328,7 @@ async def test_capture_hub_assessment_posts_nothing_when_the_verdict_is_not_held
     hub.state.active_threads["t5"] = thread
 
     # `session_factory` unset is exactly `_persist_assessment`'s real no-DB
-    # branch, which returns False after logging a debug line.
+    # branch, which returns `(False, None)` after logging a debug line.
     assert eng.session_factory is None
 
     await eng._capture_hub_assessment(hub, thread, _raw(VERDICT), "555.000", closes_thread=True)
@@ -411,7 +411,7 @@ async def test_a_provisional_verdict_is_stored_but_not_announced(monkeypatch, tm
 # original widening happened to touch. Pitch prose below is deliberately
 # chosen to avoid every substring
 # `test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict` scans
-# for (rationale/red_flag/gating/raw_verdict/milestone/confidence) — an
+# for (rationale/red_flag/gating/raw_verdict/milestone/confidence/not_met) — an
 # ordinary-English collision there would fail for a reason that is not a leak.
 # ---------------------------------------------------------------------------
 
@@ -422,7 +422,7 @@ async def test_the_elevator_pitch_reaches_slack_via_post_assessment_summary(
     monkeypatch, tmp_path,
 ):
     """Covers the in-turn / terminal-reply call site (`_capture_hub_assessment`
-    -> `_post_assessment_summary`, `simulation.py:3789`): a verdict dict that
+    -> `_post_assessment_summary`, `simulation.py:3736`): a verdict dict that
     carries `elevator_pitch` must have it show up in the posted text."""
     eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
     thread = ThreadState(thread_id="t14", channel="general", other_agent_id="wang")
@@ -490,7 +490,7 @@ class _FakeOwedSessionCM:
 async def test_the_owed_headline_rescue_path_carries_the_elevator_pitch(
     monkeypatch, tmp_path,
 ):
-    """I1: `_announce_owed_headline` (simulation.py:4108) rebuilds a synthetic
+    """I1: `_announce_owed_headline` (simulation.py:4148) rebuilds a synthetic
     verdict from the stored row to hand to the SAME renderer the terminal-reply
     path uses. Before this fix it named only `company_or_project`,
     `recommendation` and `scores` — dropping `row.elevator_pitch`, which was

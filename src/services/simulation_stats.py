@@ -2,7 +2,7 @@
 
 Every function here is a plain async query (or a handful of them) scoped to
 ONE ``simulation_run_id`` and returning a frozen dataclass defined in this
-module — the control panel route (a later task) renders these, this module
+module — the control panel route (src/routers/admin.py) renders these, this module
 never touches ``Request``/Jinja/HTTP. Nothing here is dependency-heavy: the
 rubric stamp, the prompt-set stamp and the build info are all read the same
 way ``src/agent/main.py``'s startup banner reads them, so the Live tab's
@@ -146,7 +146,7 @@ class StageCost:
 
     ``role`` is ``AgentRegistry.role`` joined on ``agent_id`` (LEFT JOIN — an
     ``agent_id`` with no registry row buckets as ``'unknown'`` rather than
-    vanishing), and ``thread_phase`` is Task 10's column, whose NULL means
+    vanishing), and ``thread_phase`` is migration 0045's column, whose NULL means
     "written before that column existed, or by a call site outside an
     interview" and buckets as ``'unclassified'``. Both keys are always a
     string: ``hbar_list`` labels must never be ``None``.
@@ -184,11 +184,11 @@ class CallKindCost:
     ``src/services/llm.py``'s ``_call_stat``. This is the ONLY aggregate here
     that prices individual API calls rather than whole turns, and it prices
     the FULL bill: ``_call_stat`` records ``cache_read_input_tokens`` and
-    ``cache_creation_input_tokens`` per element (llm.py:779-782) alongside
+    ``cache_creation_input_tokens`` per element (llm.py:783-786) alongside
     ``input_tokens``/``output_tokens``, so all four halves are available here.
 
     ``thinking_tokens`` is deliberately NOT added to ``output_tokens``: it is
-    a DECOMPOSITION of it (llm.py:112 — "the thinking/text split of
+    a DECOMPOSITION of it (llm.py:114 — "the thinking/text split of
     ``output_tokens``"), so summing the two would bill every thinking token
     twice.
 

@@ -830,7 +830,7 @@ _PLATFORM_CUES = ("platform", "pipeline", "multiple shots", "reusable")
 # finding M7, and `tests/unit/test_specialists.py::
 # test_only_the_documented_domains_are_reachable` proves reachability
 # exhaustively rather than trusting it. That mattered most for `commercial`,
-# which owns `differentiation`: the heaviest dimension on both scales (15
+# which then owned `differentiation`: the heaviest dimension on both scales (15
 # investment / 16 incubation). The rubric weighted one dimension above all
 # others and the floor could not demand an opinion on it.
 #
@@ -876,7 +876,7 @@ _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 
 #: The outcomes held to the specialist floor. Read as BAND names as well as
 #: recommendation names — ``band()`` returns exactly ``advance`` / ``conditional``
-#: / ``pass`` on both scales, so one set covers both sides of ``panel_is_owed``.
+#: / ``pass``, so one set covers both sides of ``panel_is_owed``.
 #:
 #: Lives here, next to ``required_domains_for``, because two very different
 #: callers needed the same answer and must not each keep their own copy: the
@@ -955,9 +955,10 @@ def panel_is_owed(recommendation: object, band: object = None) -> bool:
 
     NO call site tests ``recommendation not in PANEL_REQUIRED_FOR`` directly any
     more; this function is the single gate, and the engine alias
-    ``_PANEL_REQUIRED_FOR`` has been deleted for want of readers. The two engine
-    callers — ``SimulationEngine._specialist_floor_gap`` and
-    ``_floor_unverifiable_reason``, both in src/agent/simulation.py, which is
+    ``_PANEL_REQUIRED_FOR`` has been deleted for want of readers. The engine
+    callers — ``SimulationEngine._persist_assessment`` (which records the answer
+    as ``panel_owed``), ``_seed_consults_from_db``, ``_specialist_floor_gap`` and
+    ``_floor_unverifiable_reason``, all in src/agent/simulation.py, which is
     where the computed band is in scope — ask this.
 
     The READ path deliberately does not. ``src.services.assessment_detail

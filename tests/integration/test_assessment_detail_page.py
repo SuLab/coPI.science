@@ -644,9 +644,9 @@ async def test_admin_detail_page_tool_scan_keeps_the_newest_turns(
 
 
 async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session, admin):
-    """`--fresh` wipes agent_messages and never wipes opportunity_assessments,
-    so a verdict legitimately outlives its own thread. The verdict must still
-    render; only the timeline degrades."""
+    """`--fresh` wiped agent_messages until 2026-08-22 and never wiped
+    opportunity_assessments, so a verdict legitimately outlives its own thread.
+    The verdict must still render; only the timeline degrades."""
     _, assessment = await _seed(db_session, with_messages=False, with_consult=False)
     resp = await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
@@ -1020,7 +1020,7 @@ async def test_llm_calls_page_badges_a_consult_signal(client, db_session, admin)
 # `panel_incomplete=False, missing_domains=NULL`) came back green under the
 # band-aware reader; at least five had a demonstrable gap. The page now replays
 # the stored `panel_owed` column and claims nothing when the row does not carry
-# one. See `src/services/assessment_detail.panel_state`.
+# one. See `src/services/assessment_detail.py::panel_state`.
 # ---------------------------------------------------------------------------
 
 
@@ -1283,7 +1283,8 @@ async def test_retro_consult_count_excludes_turns_from_other_interviews(
 # one, and the column already records one. This page was the surviving reader
 # that did not know: `_load_consults` SELECTed the whole row and dropped
 # `truncated` from the dict it projected, so the parse default
-# (src/agent/specialists.py — `caution`) was rendered as though a specialist had
+# (src/agent/specialists.py — `caution` then, `gap` since the 2026-08-28 rename)
+# was rendered as though a specialist had
 # said it, in the chips directly under the panel-state box.
 # ---------------------------------------------------------------------------
 
@@ -1292,7 +1293,8 @@ TRUNCATED_DOMAIN = "translational"
 
 async def _seed_with_a_truncated_consult(db_session):
     """`_seed`'s own consult is the control: `caution`, and NOT truncated. The
-    second is the same signal arrived at by the parser giving up."""
+    second is the same signal arrived at by the (pre-2026-08-28-rename) parser
+    giving up."""
     run, assessment = await _seed(db_session)
     thread_id = (
         await db_session.execute(
@@ -1333,8 +1335,9 @@ async def test_a_truncated_consult_is_not_rendered_as_a_caution_opinion(
     # The control proves the assertion below is not vacuous: an untruncated
     # `caution` still reads as a `caution` in the same chip row.
     assert "scientific &middot; caution" in html
-    # The truncated one must not. Its signal is what the parser defaults to
-    # when it cannot read a reply, not what anyone said.
+    # The truncated one must not. Its signal is what the parser defaulted to
+    # (before the 2026-08-28 rename) when it could not read a reply, not what
+    # anyone said.
     assert f"{TRUNCATED_DOMAIN} &middot; caution" not in html
     # Twice: the summary chip under the panel-state box, and the consult's own
     # card in the timeline. Both are places a reader counts opinions.
@@ -1407,9 +1410,10 @@ def _top_level_details_contents(html: str) -> str:
     rather than cutting it short.
 
     Two failure modes are asserted LOUDLY rather than degrading to a
-    valid-looking value, because both of this helper's two callers
-    (`test_the_panel_banner_is_never_inside_a_collapsed_details` and
-    `test_a_non_empty_red_flag_list_is_never_collapsed`) are pure ABSENCE
+    valid-looking value, because all three of this helper's page callers
+    (`test_the_panel_banner_is_never_inside_a_collapsed_details`,
+    `test_a_non_empty_red_flag_list_is_never_collapsed` and
+    `test_the_box_is_never_inside_a_collapsed_details`) are pure ABSENCE
     assertions against the return value — `"X" not in inside`. Either failure
     mode below used to return a value that made those assertions pass
     vacuously, for a reason that has nothing to do with the thing they claim
@@ -2388,7 +2392,7 @@ async def test_quoted_consult_text_is_collapsed_by_default_with_a_one_line_previ
 async def test_consults_in_one_domain_render_as_a_single_entry_from_the_latest(
     client, db_session, admin
 ):
-    """Six clinical consults are one clinical row, badged with the count and
+    """Three clinical consults are one clinical row, badged with the count and
     quoting only the latest opinion; the panel card below still lists all."""
     run = await factories.make_simulation_run(db_session)
     root_ts = f"{time.time():.6f}"

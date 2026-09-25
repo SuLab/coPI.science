@@ -73,8 +73,10 @@ async def test_the_installed_sdk_draws_the_line_exactly_where_we_do():
     """Checked against the real SDK, offline — no HTTP, no API key that works.
 
     The suite runs against anthropic 0.120.2 (.venv-test) while the deployed
-    agent image resolved 1.0.0, and both carry this guard with the same
-    arithmetic; probed on both, highest accepted 21_333. This asserts it on
+    agent image resolved 1.0.0 on 2026-08-21, and both carry this guard with the
+    same arithmetic; probed on both, highest accepted 21_333. The deployed
+    images were on 1.8.0 by 2026-09-24, which carries the same formula. This
+    asserts it on
     whichever one is installed rather than trusting the comment.
     """
     import anthropic

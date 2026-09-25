@@ -17,8 +17,8 @@ from tests import factories
 
 pytestmark = pytest.mark.characterization
 
-# AgentBadgeMiddleware's session-factory bypass is handled centrally by the `client`
-# fixture (tests/conftest.py) — see the note there.
+# AgentBadgeMiddleware's session-factory bypass is handled centrally by the `asgi_app`
+# fixture behind `client` (tests/conftest.py) — see the note there.
 
 
 def _session_cookie(user_id) -> str:

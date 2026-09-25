@@ -68,7 +68,7 @@ def test_rejects_open_redirects_and_junk(target):
         "/login",                   # auth flow
         "/login/start",
         "/auth/callback",
-        "/logout",                  # would immediately log the user back out
+        "/logout",                  # session flow (and POST-only, so not a GET page)
         "/settings/unsubscribe/sometoken",  # state-mutating GET link
     ],
 )

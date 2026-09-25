@@ -1,8 +1,8 @@
 """USPTO Open Data Portal prior-art search, live.
 
 Gated on `PATENTSVIEW_API_KEY` in addition to the blanket `live_api` marker (see
-`tests/conftest.py::pytest_collection_modifyitems`), because — unlike grants.gov,
-ORCID and PubMed — `search_prior_art` returns `None` rather than raising when no key
+`tests/conftest.py::pytest_collection_modifyitems`), because — unlike ORCID and
+PubMed — `search_prior_art` returns `None` rather than raising when no key
 is configured (src/services/patents.py `_api_key`). Without this extra skip, running
 the whole `live_api` tier with `LIVE_API_TESTS=1` but no key would make these tests
 pass for the wrong reason: "no key" and "the API is broken" both surface as `None`,

@@ -223,7 +223,7 @@
     {% endif %}
 
     {% if not (effective_user.is_staff) %}
-    <!-- Read-only details (reviewer, or any impersonated view): the two
+    <!-- Read-only details (reviewer, or an admin impersonating one): the two
          fields that otherwise only existed inside the Edit Profile form
          above, so a reviewer (or an admin impersonating one) still sees
          them somewhere. -->

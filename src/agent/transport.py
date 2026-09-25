@@ -3,9 +3,9 @@
 The simulation talks to a ``Transport`` rather than to Slack directly. Two
 implementations exist:
 
-- ``SlackTransport`` — the real Slack Web API client (``AgentSlackClient`` in
-  ``slack_client.py`` already conforms to this Protocol structurally; no
-  subclassing is required).
+- ``AgentSlackClient`` (``slack_client.py``) — the real Slack Web API client,
+  the role the spec calls ``SlackTransport``. It already conforms to this
+  Protocol structurally; no subclassing is required.
 - ``NullTransport`` — a no-op used when Slack is disabled. Outbound calls do
   nothing (the engine mints a local canonical id via ``mint_ts``); inbound
   polls return nothing (human/PI input arrives through the DB inbox instead).

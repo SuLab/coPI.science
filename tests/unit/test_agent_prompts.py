@@ -27,9 +27,9 @@ def test_curly_brace_in_profile_does_not_crash(tmp_path, monkeypatch):
 
 
 def test_phase4_honours_role_overrides(tmp_path, monkeypatch):
-    """build_phase4_prompt loads its template via a hardcoded global path rather
-    than the role-aware resolver, so a role's override file would be accepted into
-    the repo and then silently ignored. Pin that it now resolves through
+    """build_phase4_prompt used to load its template via a hardcoded global path
+    rather than the role-aware resolver, so a role's override file was accepted
+    into the repo and then silently ignored. Pin that it now resolves through
     Agent._load_prompt (and therefore src.agent.roles.resolve_prompt_path)."""
     from src.agent import roles as roles_mod
     from src.agent.agent import Agent

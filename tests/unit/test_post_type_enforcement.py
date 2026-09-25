@@ -369,9 +369,9 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
     action" before the post-type gate runs) used to erase the streak on every
     single turn, so the rejection right after it always landed on a bare `1`
     no matter how many times in a row this agent got rejected. That pins the
-    proactive-selection damping (`skips >= 3` in _select_next_agent) off
+    proactive-selection damping (`skips >= 3` in _select_agent) off
     forever for an agent that keeps reaching for an unavailable type — it gets
-    rejected at full weight and full cadence, burning a max_tokens=16000 Opus
+    rejected at full weight and full cadence, burning a max_tokens=3300 Opus
     call every time. Three consecutive rejections of the same agent must climb
     1, 2, 3 — not sit at 1."""
     gill = _spoke("gill")

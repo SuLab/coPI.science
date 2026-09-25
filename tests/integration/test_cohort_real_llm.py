@@ -40,11 +40,10 @@ Cost control:
 - Sonnet, not Opus.
 - One call, one test.
 
-Run it with:
+Run it on the host (the image installs without the ``[dev]`` extra, so has no pytest):
 
-    docker compose exec -e ANTHROPIC_API_KEY=sk-ant-... \\
-      -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_test \\
-      app python -m pytest tests/integration/test_cohort_real_llm.py -v -m real_llm
+    ANTHROPIC_API_KEY=sk-ant-... \\
+      .venv-test/bin/python -m pytest tests/integration/test_cohort_real_llm.py -v -m real_llm
 
 Without a key every test skips, so the default suite stays free and offline.
 """

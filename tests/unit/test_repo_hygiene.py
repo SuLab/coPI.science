@@ -107,10 +107,10 @@ def _string_args(call: ast.Call) -> list[str]:
 def _outcome_arg(call: ast.Call) -> str | None:
     """The `outcome` argument specifically, or None if it is not a literal.
 
-    Narrower than `_string_args` on purpose: `_close_thread`'s signature is
-    expected to grow (recording which role closed the thread is a live plan
-    item), and a set-equality assertion fed by every literal at the call site
-    would fail on an unrelated new argument.
+    Narrower than `_string_args` on purpose: `_close_thread`'s signature has
+    already grown (`closed_by_role` records which role closed the thread) and
+    may grow again, and a set-equality assertion fed by every literal at the
+    call site would fail on an unrelated new argument.
     """
     for kw in call.keywords:
         if kw.arg == "outcome":

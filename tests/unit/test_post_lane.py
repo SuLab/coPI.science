@@ -6,9 +6,10 @@ tests/unit/test_reply_lane.py). `_run_post_turn` therefore has no Phase-4
 concept left to couple Phase 5 to at all: the tests below that used to pin
 "Phase 4 work must not trigger/suppress Phase 5" (Task 10, Ruling R6) are
 superseded by a structural guarantee (`test_run_post_turn_never_touches_the_
-reply_lane`), and the skip-streak-reset / no-timer-stamp invariants that used
-to live in `_run_turn`'s Phase-4 block moved to `_service_reply` — see
-test_reply_lane.py's `test_service_reply_resets_the_skip_streak` and
+reply_lane`), and the no-timer-stamp invariant that used to live in
+`_run_turn`'s Phase-4 block moved to `_service_reply` (the skip-streak reset
+later left the reply lane entirely, Ruling R10) — see test_reply_lane.py's
+`test_reply_lane_never_touches_the_skip_streak` and
 `test_service_reply_does_not_stamp_the_spontaneous_timer`.
 """
 import time as _time

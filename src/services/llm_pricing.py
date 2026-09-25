@@ -10,7 +10,7 @@ verified 2026-08-30). Unknown models are None-priced: the caller renders
 "unpriced" and surfaces the model name; a silent $0 is the one forbidden
 failure mode. Rows written before migration 0036 have NULL cache columns —
 treat NULL as 0 and label those aggregates as floors ("≥"), which
-the read side (Task 9's CostSummary.is_floor) carries; cost_for_tokens itself
+the read side (simulation_stats.CostSummary.is_floor) carries; cost_for_tokens itself
 takes plain token counts and has no flag parameter.
 """
 from dataclasses import dataclass

@@ -302,7 +302,7 @@ async def classify_reply(body: str, proposal_summary: str) -> dict:
        SYNCHRONOUS client, so calling it from inside an ``async def`` froze the
        whole process for the length of the HTTP request — the inbound-email
        poller, the Slack pollers, the DB persist flush and the asyncio SIGTERM
-       handler with it. ``_acreate`` runs it under ``asyncio.to_thread``.
+       handler with it. ``_acreate`` runs it on llm.py's own thread pool.
     2. **It inherits a timeout.** This call had none of its own, so it took the
        SDK's 600 s default read timeout — and both of that run's stalls
        fingerprinted at exactly 600.09 / 600.10 s. Combined with the poller's

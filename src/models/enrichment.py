@@ -85,7 +85,7 @@ class PiIndustryScore(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)          # 0..100, NULL = unscored
     raw_sum: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)      # no_tenure_start | no_evidence | ok
+    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)      # no_tenure_start | no_evidence | cohort_too_small | ok
     components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     field_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
     primary_field: Mapped[str | None] = mapped_column(String(120), nullable=True)

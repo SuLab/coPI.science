@@ -1,6 +1,6 @@
 """Cohort interaction gate + reactive-priority scheduler.
 
-Implements the test plan in .notes/cohort-system-v2.md §15. Organised by spec
+Implements the test plan in specs/cohort-system-v2.md §15. Organised by spec
 section so a failure names the rule it broke:
 
 - TestGateHelper            §5.1  the per-entry decision table
@@ -679,7 +679,7 @@ class TestGatedReads:
         """The pending/reactive-priority trigger loop (2026-08-12 removal
         cycle): a human reply into an active thread must never register as "a
         new reply from the other participant", including the
-        allowed_sender_ids=None path _phase4_reply_threads uses for an
+        allowed_sender_ids=None path _pending_reply_pairs uses for an
         already-open thread — that path bypasses `_entry_allowed` entirely,
         so this has to be enforced independently of the cohort gate."""
         log.append(_post("1", "general", "su", "SuBot", "root"))

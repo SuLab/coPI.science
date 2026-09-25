@@ -434,8 +434,8 @@ async def test_posting_to_an_archived_channel_does_not_crash(lifecycle, slack_cl
 async def test_invite_tolerates_self_and_repeat_but_reports_a_real_failure(slack_clients):
     """`cant_invite_self` and `already_in_channel` are successes by the documented
     contract — "the invite is considered successful as long as every user ends up as a
-    member" — and the migration relies on that, since it invites both bots and one of
-    them created the channel.
+    member" — and the private-channel migration relied on that (before it was removed),
+    since it invited both bots and one of them created the channel.
 
     Control: a genuinely bad user id must still return False, or the tolerance would be
     indistinguishable from a method that always returns True.

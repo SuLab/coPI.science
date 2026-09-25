@@ -87,7 +87,8 @@ def test_consults_for_an_unknown_thread_read_as_empty():
 @pytest.mark.parametrize(
     "recommendation,consulted,expected_missing",
     [
-        # pass and route-to-incubation never need a panel
+        # pass never needs a panel; route-to-incubation does, but an empty
+        # consulted set is the fail-open case (see below), so it yields no gap
         ("pass", set(), set()),
         ("route-to-incubation", set(), set()),
         # advance always needs scientific + talent. "budget" (never a member
@@ -569,7 +570,7 @@ async def test_stop_warns_of_flatness_for_a_genuinely_one_sided_domain(caplog):
     asserts the warning's ABSENCE.
 
     `domain_flatness_warning` logs via `logger.warning`
-    (`simulation.py:1221`), so WARNING is the correct capture level here —
+    (`simulation.py:1524`), so WARNING is the correct capture level here —
     deliberately the opposite choice from the mix-report tests above, which
     log at INFO. The two must not be interchanged.
     """

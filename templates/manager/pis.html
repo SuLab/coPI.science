@@ -7,9 +7,10 @@
     <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
 </div>
 
-{# Same markup as manager/pi_detail.html's: the callback redirects staff here
-   on any error it cannot attribute to one PI (an unknown state, or an
-   initiator mismatch). Staff-gated for the same reason the detail page's
+{# Same markup as manager/pi_detail.html's: the callback redirects a manager
+   here on every error it reports (an admin goes to the agents page instead);
+   it attributes none of them to one PI (an unknown state, or an initiator
+   mismatch, has no PI to return to). Staff-gated for the same reason the detail page's
    banners are: a reviewer never reaches the callback, so a banner they can
    summon from a query string could only ever be a fake. #}
 {% if slack_error and effective_user.is_staff %}

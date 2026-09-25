@@ -510,7 +510,8 @@ async def review_proposal(
         # two tabs): a review for this decision+agent now exists. The
         # rollback also discards THIS request's record_engagement /
         # mark_notification_responded writes — correct, because the winning
-        # racer performed its own. Same outcome as the SELECT guard above.
+        # racer performed its own. Unlike the SELECT guard above, which answers a
+        # sequential duplicate with 400, a lost race redirects like the winner.
         await db.rollback()
         return RedirectResponse(
             url=f"/agent/{agent_id}/dashboard", status_code=302
@@ -798,7 +799,7 @@ async def agent_thread_replies(
     Replies are gated too, with the same clause that produced the count on the
     page (``own_or_gated``), so the badge and the expansion can never disagree.
     This diverges from the engine, which classifies ``get_thread_history`` as
-    UNGATED (``src/agent/message_log.py:224-226``) because it is thread-internal;
+    UNGATED (``src/agent/message_log.py:407-408``) because it is thread-internal;
     here the whole point is that out-of-cohort traffic must not become reachable
     by clicking, and a future reader should not "fix" this back toward engine
     parity.

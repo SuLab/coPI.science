@@ -1,5 +1,6 @@
-"""Role gating: get_staff_user, and the guarantee that a manager cannot reach
-/admin or impersonate anyone.
+"""Role gating: get_staff_user and the is_admin/is_staff filters. The guarantee
+that a manager cannot reach /admin or impersonate anyone is pinned in
+test_manager_views.py.
 """
 
 import base64
@@ -25,7 +26,7 @@ def _session_cookie(user_id) -> str:
 
 
 def auth_headers(user_id) -> dict:
-    """Shared by test_manager_views.py — keep the two in sync."""
+    """Imported by test_manager_views.py and the other integration suites."""
     return {"Cookie": f"copi-session={_session_cookie(user_id)}"}
 
 

@@ -148,7 +148,7 @@ def _count_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channe
 
 
 def _wipe_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channel_names: dict[str, str]) -> int:
-    """Join all channels and delete this bot's messages."""
+    """Delete this bot's messages from every listed channel."""
     print(f"[{agent_id}] authenticating...", flush=True)
     client = WebClient(token=bot_token)
     try:

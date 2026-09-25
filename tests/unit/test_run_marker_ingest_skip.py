@@ -2,7 +2,7 @@
 
 The marker has no agent_messages row by design, so without these skips the
 resume reconcile re-ingests it (it is absent from _known_slack_ts, seeded from
-stored rows only — simulation.py:6479) and the live poller fetches it on the
+stored rows only — simulation.py:7159) and the live poller fetches it on the
 first tick of the fresh run that posted it (it posts AFTER the cursor seed).
 Cursor bookkeeping is part of the contract: a skipped marker that is a
 channel's newest message must still advance the cursor, or every later tick

@@ -158,8 +158,7 @@ SCHULTZ_PILOT_ORCIDS = frozenset({
 # join boundary (window_start_bound) sits EARLIER than the decision window, because a
 # thread can be opened a couple days before its proposal lands (e.g. the group
 # proposals decided Jun 6 came from posts created Jun 4). Bounding posts to the
-# decision window would silently drop those edges. See memory
-# the window constants below.
+# decision window would silently drop those edges.
 #
 # Cabo window:            Apr 27 – May  7, 2026 (inlined in the /cabo-graph route)
 # Schultz alumni pilot:   Jun  1 – Jun  4, 2026
@@ -745,7 +744,7 @@ async def _cached_graph_payload(db: AsyncSession, **kwargs):
 
 @router.get("/cabo-graph", response_class=HTMLResponse)
 async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
-    """PI collaboration network for the Cabo retreat: all active PIs.
+    """PI collaboration network for the Cabo retreat: all PIs, whatever their status.
 
     Scoped to proposals decided during the retreat week (Apr 27 – May 7, 2026).
     """

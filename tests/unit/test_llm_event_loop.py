@@ -3,9 +3,9 @@
 
 Consequences measured on the hub, which sits on all 62 spoke edges:
 
-  * `_phase4_reply_threads` builds its coroutines and `asyncio.gather`s them
-    under a "Run replies in parallel" comment, but they cannot overlap — the
-    first blocking call pins the loop thread until it returns. A production run
+  * `_phase4_reply_threads` built its coroutines and `asyncio.gather`ed them
+    under a "Run replies in parallel" comment, but they could not overlap — the
+    first blocking call pinned the loop thread until it returned. A production run
     logged `Phase 4: Replying to 37 threads` in a single turn with only ~15
     spokes live.
   * For that whole stretch nothing else in the process runs: no Slack poll, no

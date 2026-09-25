@@ -42,7 +42,7 @@ class User(Base):
     )
     email_notification_frequency: Mapped[str] = mapped_column(
         String(20), nullable=False, default="weekly"
-    )  # daily, twice_weekly, weekly, biweekly, off
+    )  # daily, twice_weekly, weekly, biweekly, monthly, off
     email_notifications_paused_by_system: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
@@ -80,13 +80,13 @@ class User(Base):
     )
 
     # is_admin stays readable as a hybrid rather than a plain @property because
-    # src/main.py:53 runs `select(User.is_admin)` — SQL, which a @property
+    # src/main.py:264 runs `select(User.is_admin)` — SQL, which a @property
     # cannot satisfy (F13). The hybrid compiles to `users.user_role = 'admin'`,
-    # so main.py, templates/base.html's nav gating (lines 52, 62, 73) and
+    # so main.py, templates/base.html's nav gating (lines 60, 70, 81) and
     # tests/integration/test_cli.py's
     # test_admin_grant_and_revoke_flip_is_admin_and_are_idempotent all keep
     # working with no edit. `templates/admin/user_detail.html` no longer reads
-    # is_admin: task 8 replaced its Admin Yes/No row with a Role row bound to
+    # is_admin: its Admin Yes/No row was replaced with a Role row bound to
     # `user_role` directly. It is READ-ONLY on purpose: `is_admin =
     # False` on a manager would have no correct answer.
     @hybrid_property

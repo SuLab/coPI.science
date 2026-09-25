@@ -75,7 +75,7 @@ async def apply_profile_edits(
     profile.disease_areas = _parse_list(disease_areas)
     profile.key_targets = _parse_list(key_targets)
     profile.keywords = _parse_list(keywords)
-    # SQL-side increment (matches profile.py's own fix for issue #22 C1) —
+    # SQL-side increment (matches onboarding.py's own fix for issue #22 C1) —
     # nothing below reads profile_version, so the expiry this expression
     # assignment causes needs no refresh here.
     profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1

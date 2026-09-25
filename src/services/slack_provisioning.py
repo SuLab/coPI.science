@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 SLACK_API = "https://slack.com/api"
 
-# All scopes the bots actually use — derived from AgentSlackClient + routers/podcast.
+# All scopes the bots actually use — derived from AgentSlackClient + services/slack_web.
 BOT_SCOPES = [
     "channels:history",   # conversations.history / conversations.replies
     "channels:join",      # conversations.join

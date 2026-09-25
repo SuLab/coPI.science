@@ -174,7 +174,7 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
 
     Returns ``(subject, MIMEMultipart)``. The agent screenshot is embedded
     inline via a Content-ID reference so the email is self-contained. When
-    ``user_id`` is provided, a working one-click unsubscribe link is included.
+    ``user_id`` is provided, a working unsubscribe link is included.
     """
     import email.mime.image
     import email.mime.multipart
@@ -366,7 +366,7 @@ def send_welcome_email(
 ) -> bool:
     """Send the 'Welcome to CoPI' email via AWS SES. Returns True on success.
 
-    ``user_id`` enables a working one-click unsubscribe link.
+    ``user_id`` enables a working unsubscribe link.
     ``force=True`` skips the outbound allowlist (admin/test sends only).
     """
     from src.config import get_settings

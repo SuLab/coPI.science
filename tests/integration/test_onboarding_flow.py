@@ -15,8 +15,8 @@ the terminal step.)
 Real ASGI requests, real Postgres, real Jinja templates, real ``profile_export``.
 Nothing external runs: the ORCID and Anthropic entry points are replaced with
 raising stubs (a first-run route that reached for one would fail loudly rather
-than quietly make a network call), SES is a recorder, and the two export
-directories are redirected into ``tmp_path`` so the suite never writes into
+than quietly make a network call), SES is a recorder, and the export
+directory is redirected into ``tmp_path`` so the suite never writes into
 ``profiles/``.
 
 Discipline (see ``.notes/full-system-test-plan.md``): every absence assertion
@@ -75,7 +75,7 @@ def _auth_as(user_id, impersonate_id) -> dict:
     """Session for ``user_id`` plus the copi-impersonate cookie pointed at another user.
 
     src/dependencies.get_current_user honours that cookie *only* when the session
-    user is an admin. It is the one handle any of these 17 endpoints gives a
+    user is an admin. It is the one handle any of these 13 endpoints gives a
     caller on somebody else's identity, so it is the vector the sweep attacks.
     """
     signer = TimestampSigner(get_settings().secret_key)
@@ -327,7 +327,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
     """The sweeps below are only as complete as this list.
 
     Read the routes off the three routers rather than trusting a hand-count, so
-    a 16th endpoint fails here loudly instead of quietly escaping the
+    a 14th endpoint fails here loudly instead of quietly escaping the
     authorization sweeps.
     """
     live = set()

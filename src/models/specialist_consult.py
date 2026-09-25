@@ -95,8 +95,9 @@ class SpecialistConsult(Base):
     #           the three known-truncated consults on run 8b64a0e0 credit the
     #           floor today, and retroactively invalidating history on no evidence
     #           is the worse error.
-    # `src/agent/tools.py` already refuses to credit a `refusal`-truncated consult
-    # in-process, but nothing was written down, so `_seed_consults_from_db`
+    # `src/agent/tools.py` already refuses to credit a truncated (`refusal` or
+    # `max_tokens`) consult in-process, but before this column nothing was
+    # written down, so `_seed_consults_from_db`
     # rehydrated it after a restart as a complete consult and the floor was
     # satisfied by an opinion nobody finished reading. That is what this column
     # closes: the table's claim ("a row here always means the domain counts as
@@ -120,8 +121,9 @@ class SpecialistConsult(Base):
         JSONB(none_as_null=True), nullable=True
     )
     # Which rubric — and therefore which stage bars — this consult was judged
-    # against. Assessments have carried this since 0030; consults never have,
-    # which is why no pre-2026-08-28 consult can be compared with a later one.
+    # against. Assessments have carried this since 0030; consults never had it
+    # before 0038, which is why no pre-2026-08-28 consult can be compared with a
+    # later one.
     rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rubric_content_hash: Mapped[str | None] = mapped_column(
         String(64), nullable=True

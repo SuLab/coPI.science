@@ -63,8 +63,10 @@ CANONICAL: dict[str, PostTypeSpec] = {
 # ``OpportunityAssessment`` the DB model/table/admin page are unaffected —
 # see src/models/opportunity.py.
 
-# ``pi_lab`` has no role.toml — "pi_lab is the absence of overrides" (roles.py).
-# So this tuple IS pi_lab's declared list. Explicit rather than "everything in
+# The fallback for any role whose manifest omits ``post_types`` (or that has no
+# role.toml at all). pi_lab's own list comes from prompts/roles/pi_lab/role.toml,
+# which currently matches this tuple but is declared separately so a type added
+# here never silently reaches labs. Explicit rather than "everything in
 # CANONICAL", for the same reason roles.DEFAULT_TOOLS is: adding a new type must
 # never silently hand it to every role.
 DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (

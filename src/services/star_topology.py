@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``grantbot`` is deliberately membership-only: no AgentRegistry row and no
 # process in this stack, but it sits in every one of the 62 hand-made spokes,
 # and the engine documents and tolerates the ghost (simulation.py
-# ``_roles_by_agent``, post_types.py ``_reachable_targets``). New spokes match
+# ``_roles_by_agent``, post_types.py ``eligible_targets``). New spokes match
 # the existing shape so the topology stays uniform; dropping it everywhere is
 # an owner decision, not something this maintainer does by halves.
 EXTRA_SPOKE_MEMBERS: tuple[str, ...] = ("grantbot",)

@@ -319,7 +319,8 @@ async def test_a_dimension_only_edit_survives_an_in_flight_analysis_job(
     This test is unaffected by F2 (2026-09-14) and passes unchanged: it builds
     the UPDATE by hand and never reads the job queue. Only the narration above
     needed correcting — `edit_feedback` no longer enqueues a replacement job
-    (nothing does, until a human presses "Generate prompt suggestions"), and
+    (nothing does, until a human presses "Generate suggestions from current
+    reviews"), and
     the guarantee this pins, `consumed_at_predicates`, is exactly what F2 did
     NOT touch: leaving the row unconsumed is what keeps it eligible for that
     next pass, whoever schedules it.

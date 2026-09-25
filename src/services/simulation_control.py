@@ -10,8 +10,9 @@ exactly what the concurrent-claim test exercises (a second claim on the same
 command gets None while the first session's transaction is still open). The
 0042 partial unique index (`uq_simulation_commands_one_pending`) enforces at
 most one pending row per command kind at the database — `enqueue_command`
-lets that `IntegrityError` propagate at flush/commit; callers (the Task 7
-routes) catch it and render a refusal, which IS the double-click guard.
+lets that `IntegrityError` propagate at flush/commit; callers (the admin
+router's `admin_simulation_start` / `admin_simulation_stop`) catch it and
+render a refusal, which IS the double-click guard.
 """
 from datetime import UTC, datetime
 

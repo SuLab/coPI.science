@@ -257,8 +257,7 @@ The actual message.
 
     def test_raw_json_fallback_ignores_a_bare_sidecar(self, engine):
         """A bare <assessment_json> sidecar with no ```json``` action fence at
-        all must never be mistaken for the action (Task 8 fix round 1,
-        Finding 4) — without the fix this returned
+        all must never be mistaken for the action — without the fix this returned
         data={"funnel_stage": "incubation"} and silently discarded the turn."""
         response = (
             '<assessment_json>{"funnel_stage": "incubation"}</assessment_json>'
@@ -559,10 +558,11 @@ class TestFlushPersistedFailure:
 
 # ---------------------------------------------------------------
 # _flush_llm_logs — same requirement as _flush_persisted above (H1): a failed
-# flush must not drop the buffered LLM call logs. Unlike the three writers
-# below, this one already has a natural retry buffer (_llm_log_buffer, drained
-# on a timer from the main loop each turn), so the fix mirrors
-# _flush_persisted's re-queue exactly, just against a different buffer.
+# flush must not drop the buffered LLM call logs. Unlike _record_assessment_drop
+# and _close_thread further below, this one already has a natural retry buffer
+# (_llm_log_buffer, drained on a timer from the main loop each turn), so the
+# fix mirrors _flush_persisted's re-queue exactly, just against a different
+# buffer.
 # ---------------------------------------------------------------
 
 class TestFlushLlmLogsFailure:
@@ -613,16 +613,16 @@ class TestFlushLlmLogsFailure:
 
 
 # ---------------------------------------------------------------
-# _persist_assessment — a fully-built OpportunityAssessment row (Task 2 fix
-# round 1, Finding 1). Structurally it is the same shape as the message-log/
-# LLM-log buffers above: every field is computed synchronously before the
-# write, and nothing else in-process reads the row back the way MessageLog
-# does — so, unlike _record_assessment_drop/_close_thread below, a failure
-# here IS requeued, draining through _flush_pending_assessments on the same
-# per-turn cadence as _flush_persisted/_flush_llm_logs (see _run_main_loop
-# and stop()). This table is the actual product of the screening pipeline,
-# so the first-attempt failure still logs LOUD (ERROR + traceback) even
-# though it is now recoverable — visibility and durability are both kept.
+# _persist_assessment — a fully-built OpportunityAssessment row. Structurally
+# it is the same shape as the message-log/LLM-log buffers above: every field
+# is computed synchronously before the write, and nothing else in-process
+# reads the row back the way MessageLog does — so, unlike
+# _record_assessment_drop/_close_thread below, a failure here IS requeued,
+# draining through _flush_pending_assessments on the same per-turn cadence as
+# _flush_persisted/_flush_llm_logs (see _run_main_loop and stop()). This table
+# is the actual product of the screening pipeline, so the first-attempt
+# failure still logs LOUD (ERROR + traceback) even though it is now
+# recoverable — visibility and durability are both kept.
 # ---------------------------------------------------------------
 
 class TestPersistAssessmentRequeue:
@@ -797,8 +797,9 @@ class TestGracefulShutdown:
     async def test_the_reply_turn_polls_running_so_a_stop_bounds_it(self, monkeypatch):
         """The engine must hand `generate_with_tools` a live view of `_running`.
 
-        This is the longest await in the engine — measured max 134s, up to
-        max_tool_rounds real API calls. `request_stop()` only flips a flag, and
+        This is the longest await in the engine — measured max 134s, 1..8
+        real API calls at the default max_tool_rounds=5. `request_stop()` only
+        flips a flag, and
         the durable flush runs in main.py's finally, which needs the main loop to
         RETURN. So if this call cannot see the flag, `docker stop` expires
         mid-turn and SIGKILL lands before the flush: the in-flight turn's
@@ -989,8 +990,7 @@ class TestSlackParentTranslation:
 # assert on what a Slack client would actually receive
 # (`client.posted[i]["text"]`), instead of testing the strip regexes in
 # isolation. test_assessment_sidecar.py's tests never call _post_message at
-# all, so before this class existed the anti-leak property had zero coverage
-# (Task 8 fix round 1, Finding 2).
+# all, so before this class existed the anti-leak property had zero coverage.
 # ---------------------------------------------------------------
 
 class TestPostMessageStripsAssessmentSidecar:
@@ -1045,7 +1045,7 @@ class TestPostMessageStripsAssessmentSidecar:
 
     @pytest.mark.asyncio
     async def test_unclosed_sidecar_is_dropped_to_end_of_text_not_leaked(self):
-        # Simulates a Phase 5 response truncated mid-sidecar (Finding 1): the
+        # Simulates a hub reply truncated mid-sidecar: the
         # closing </assessment_json> never arrives because max_tokens was hit.
         engine, client = self._engine_with_client()
         text = (
@@ -1064,7 +1064,7 @@ class TestPostMessageStripsAssessmentSidecar:
 
     @pytest.mark.asyncio
     async def test_uppercase_and_spaced_tag_variants_are_stripped(self):
-        # Finding 3: the tag match must be case-insensitive and tolerant of
+        # The tag match must be case-insensitive and tolerant of
         # stray whitespace inside the delimiters.
         engine, client = self._engine_with_client()
         text = (
@@ -1085,7 +1085,7 @@ class TestPostMessageStripsAssessmentSidecar:
 
     @pytest.mark.asyncio
     async def test_unclosed_sidecar_with_no_body_suppresses_the_post(self):
-        # Fix round 2 finding: an unclosed sidecar with NO legitimate text
+        # An unclosed sidecar with NO legitimate text
         # before it strips to "". Before this fix, _post_message still posted
         # the empty string to Slack and wrote a phantom LogEntry
         # (content="", slack_ts=None) for a message that was never actually
@@ -1217,8 +1217,8 @@ class TestPhase4ReplySuppression:
 # (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
 # a human-authored row that the DB-inbound poller ingests into the shared
 # MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
-# `_owes_reply` and the reply lane's ungated call, `_pending_reply_pairs`
-# since Task 11) would have treated that row as "a new reply from the other
+# `_owes_reply` and the reply lane's ungated call, `_pending_reply_pairs`)
+# would have treated that row as "a new reply from the other
 # participant" — setting `has_pending_reply`, granting reactive priority, and
 # (via `_reply_to_thread`'s message-count recompute) shifting the thread's
 # ordinal.
@@ -1331,7 +1331,7 @@ class TestHubAssessmentRelocation:
         """A hub mid-interview, with ``prior_messages`` already in the thread.
 
         The default of 11 makes this turn's reply the 12th — the CONCLUDE turn,
-        the only one `_capture_hub_assessment` will persist a sidecar from.
+        whose sidecar `_capture_hub_assessment` stores as terminal, not provisional.
         Seeding the real MessageLog is what makes that true: `_reply_to_thread`
         overwrites `ThreadState.message_count` with the log's own thread history
         length before computing the phase, so `message_count=11` over an empty log
@@ -1484,7 +1484,7 @@ class TestHubAssessmentRelocation:
 
 
 # ---------------------------------------------------------------
-# Ordinal regression pin (fix round T6, round 2). `_reply_to_thread` passed
+# Ordinal regression pin. `_reply_to_thread` passed
 # thread.message_count — the count of messages ALREADY in the thread — straight
 # into `Agent.build_phase4_prompt`, but `phase4_guidance`'s own contract is the
 # ORDINAL of the reply about to be written ("This is message 12", not "message
@@ -1827,8 +1827,8 @@ class TestPanelNotesDriveNoBotBehaviour:
 
 
 # ---------------------------------------------------------------
-# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
-# (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
+# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap.
+# thread_guidance.py's CONCLUDE branch is a hardcoded
 # ordinal >= 12. Now that the message_count/ordinal off-by-one is fixed
 # (`Agent.build_phase4_prompt` and this warning's own `phase4_guidance` call
 # both feed it `thread.message_count + 1`), a reply generated when the

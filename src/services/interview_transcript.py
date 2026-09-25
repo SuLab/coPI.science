@@ -1,10 +1,10 @@
 """Reconstructing the interview thread behind a stored verdict.
 
 Deliberately dependency-free beyond stdlib + SQLAlchemy + `src.models`: this
-module is imported by the worker's review-bot job handler (Task 10), and the
+module is imported by the worker's review-bot job handler, and the
 worker must never pull in `src.services.blackbird_rubric` or
 `src.services.rubric_revisions` — both fail-fast parse a TOML document under
-`prompts/` at import time. Once the worker bind-mounts `prompts/` (Task 14), a
+`prompts/` at import time. Once the worker bind-mounts `prompts/`, a
 mid-edit or malformed rubric document would otherwise crash-loop the whole
 worker process (`restart: unless-stopped`), taking profile generation and
 email notifications down with it. Kept free-standing, a bad TOML degrades only
@@ -19,9 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models import AgentMessage, OpportunityAssessment
 
 # Hard bound on how many rows of one interview thread a single load will
-# return. Mirrors `assessment_detail.MESSAGE_SCAN_LIMIT` — kept as a private
-# constant here rather than imported, since importing from `assessment_detail`
-# would reintroduce exactly the coupling this module exists to avoid.
+# return. Moved here from `assessment_detail` (which now imports
+# `load_interview_thread` from this module) rather than imported from it, since
+# importing from `assessment_detail` would reintroduce exactly the coupling this
+# module exists to avoid.
 MESSAGE_SCAN_LIMIT = 500
 
 

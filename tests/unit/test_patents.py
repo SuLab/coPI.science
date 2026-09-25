@@ -575,7 +575,7 @@ def test_a_leading_hyphen_can_never_reach_uspto():
 
 
 def test_the_character_class_still_blocks_a_leading_dash():
-    # The transliteration step folds six Unicode dash codepoints to ASCII "-"
+    # The transliteration step folds eight Unicode dash codepoints to ASCII "-"
     # BEFORE tokenising, which is exactly the move that could have opened this
     # hole: a caller (or a model quoting a PDF) writing U+2212 MINUS SIGN in
     # front of a term must not end up with ODP's NOT operator in the query.

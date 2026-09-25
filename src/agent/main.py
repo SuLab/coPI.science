@@ -61,8 +61,9 @@ def main(
 ):
     """Run the turn-based agent simulation."""
     # Claim this process's canonical-id writer slot before anything mints. The
-    # engine's own minter owns WRITER_ENGINE; the module default is used here
-    # only for PI DM rows, so it takes the aux slot (R1).
+    # engine's own minter owns WRITER_ENGINE; nothing in this process mints on
+    # the module default since PI DM rows were removed, but it still takes the
+    # aux slot rather than the web app's (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals))
 

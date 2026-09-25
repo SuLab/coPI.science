@@ -15,7 +15,7 @@ Additive and nullable, so OLD CODE AGAINST THE NEW SCHEMA IS SAFE. NULL on
 every pre-0046 row and never backfilled: those bridge rows are short-lived
 (deleted on a successful install or a failed exchange) and no record of who
 clicked exists for them. ``complete_provisioning`` reads NULL as "unknown
-initiator — allow", which is exactly the pre-0046 behaviour.
+initiator — admin only", which matches the pre-0046 admin-only callback.
 
 Revision ID: 0046
 Revises: 0045

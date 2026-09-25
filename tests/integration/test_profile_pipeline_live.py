@@ -4,7 +4,7 @@
 and Anthropic run together against a real database. It is the actual production path for
 onboarding a PI: `worker.execute_generate_profile` calls exactly this function.
 
-Everything else that touches `run_profile_pipeline` — the four golden masters in
+Everything else that touches `run_profile_pipeline` — the golden masters in
 `tests/characterization/test_profile_pipeline_gm.py` — replaces every external boundary
 with a fake. Those tests prove the pipeline wires its own parts together. They cannot
 prove that the parts still fit the world: the fakes return the shapes their author
@@ -38,11 +38,10 @@ makes two further Anthropic *requests* that spend no tokens: they are deliberate
 unauthenticated, which is how the GM #2 failure path is reproduced against the real API
 rather than against a fake that raises RuntimeError.
 
-Run it with:
+Run it on the host (the image installs without the ``[dev]`` extra, so has no pytest):
 
-    docker compose exec -T -e LIVE_API_TESTS=1 -e ANTHROPIC_API_KEY=sk-ant-... \\
-      -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_b2 \\
-      app python -m pytest tests/integration/test_profile_pipeline_live.py -q \\
+    LIVE_API_TESTS=1 ANTHROPIC_API_KEY=sk-ant-... \\
+      .venv-test/bin/python -m pytest tests/integration/test_profile_pipeline_live.py -q \\
       -m 'live_api and real_llm'
 """
 
@@ -92,9 +91,9 @@ pytestmark = [
 #     test noticed, and the failure would be the *correct* signal rather than noise.
 #   * It is small and slow-growing — 12 work entries spanning 2002-2025 as of
 #     2026-07-30, roughly one paper a year. Small matters twice over: it bounds the token
-#     spend, and it bounds the number of unthrottled NCBI requests `run_profile_pipeline`
-#     fires (see `_ncbi_get`, which paces itself at ~8 req/s against a 3 req/s anonymous
-#     policy limit — a large corpus would be the thing that gets this IP blocked).
+#     spend, and it bounds the number of NCBI requests `run_profile_pipeline` fires (see
+#     `_ncbi_get`, which `_pace` spaces to NCBI's policy limit — 3 req/s anonymous, ~9 with
+#     an API key — so a large corpus would make every live run slow).
 #   * It exercises BOTH ORCID→PubMed resolution paths: as of 2026-07-30, 7 works carry a
 #     PMID directly and 5 are DOI-only, so `convert_dois_to_pmids` (ID converter, then
 #     the per-DOI ESearch fallback) really runs. One of the DOI-only entries is a bioRxiv

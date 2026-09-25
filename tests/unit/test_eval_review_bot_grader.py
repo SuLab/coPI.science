@@ -103,7 +103,7 @@ async def test_run_case_records_error_for_missing_assessment(db_session):
     exist hits `.scalar_one()`'s `NoResultFound` inside `_build`, and that is
     caught and returned as an `"error"` record rather than propagating out of
     `run()`'s loop and losing every result already gathered. Exercised in
-    dry-run mode deliberately (per the amendment) — the miss happens at the DB
+    dry-run mode deliberately — the miss happens at the DB
     lookup, before any model call would ever be attempted either way."""
     from src.config import get_settings
 

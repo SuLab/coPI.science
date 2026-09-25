@@ -70,7 +70,7 @@ def _per_file_tokens() -> dict[str, set[str]]:
 def test_token_regex_matches_no_json_example_braces():
     """Guard against the regex accidentally matching JSON example blocks.
 
-    Most covered templates contain a fenced ` ```json ` example — an
+    At least one covered template contains a fenced ` ```json ` example — an
     `{"action": ...}` action block, or a bare `{}` — that a careless token
     regex could mistake for a substitution placeholder. `r"\\{[a-z_]+\\}"`
     never matches inside one: the character after `{` in a JSON example is

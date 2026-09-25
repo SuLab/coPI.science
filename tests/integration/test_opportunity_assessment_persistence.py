@@ -666,8 +666,8 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
 
 @pytest.mark.asyncio
 async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(engine):
-    """F9: company_or_project/rationale are Text columns guarded with only
-    `or None`, not an isinstance check. A model emitting a structured (dict)
+    """F9: company_or_project/rationale are Text columns that were guarded with
+    only `or None`, not an isinstance check. A model emitting a structured (dict)
     rationale — or a company_or_project that comes back as a list — is a
     plain Python object of the wrong type for a str column; passing it
     straight to the ORM raises DataError at commit, which the outer except
@@ -873,9 +873,9 @@ async def _drive_reply_to_thread(
 
     ``prior_messages`` is how many messages the thread ALREADY holds, seeded
     into the engine's real ``MessageLog``. It defaults to 11, which makes this
-    turn's reply the 12th — the interview's CONCLUDE turn, the only turn whose
-    guidance asks for an ``<assessment_json>`` sidecar and therefore the only
-    one `_capture_hub_assessment` will persist one from.
+    turn's reply the 12th — the interview's CONCLUDE turn, the one whose
+    verdict `_verdict_is_terminal` treats as final rather than as a provisional
+    row a later turn supersedes.
     ``ThreadState.message_count`` cannot carry this on its own: `_reply_to_thread`
     overwrites it with ``len(get_thread_history(thread_id))`` before computing the
     phase, so a ThreadState built with ``message_count=11`` over an EMPTY log was
@@ -1558,8 +1558,8 @@ async def _two_runs_with_one_assessment_each(db_session):
     """Older run + a 'stale' verdict, newer run + a 'current' verdict —
     the exact shape --fresh (src/agent/main.py) leaves behind: a fresh
     restart creates a new SimulationRun but never deletes
-    opportunity_assessments, so the old run's verdict is still tied to Slack
-    messages that no longer exist.
+    opportunity_assessments, so the old run's verdict is still in the table
+    alongside the new run's.
 
     started_at is set explicitly rather than left to the column's
     ``server_default=func.now()``: Postgres's ``now()`` is pinned to
@@ -1766,7 +1766,7 @@ async def test_a_gapped_verdict_persists_with_no_drop_row(engine):
     """A gapped verdict is stored flagged, never routed through the drop table.
 
     This used to be `test_a_refused_verdict_is_recorded_as_a_drop`: until the
-    fix in test_a_gapped_verdict_is_stored_and_flagged_not_discarded (above),
+    fix in test_a_gapped_verdict_is_stored_and_flagged_not_discarded (below),
     an incomplete panel meant `_persist_assessment` recorded an
     `AssessmentDrop` with reason "specialist_floor" and returned early,
     discarding the verdict — after the concluding reply was already in Slack.
@@ -2384,7 +2384,8 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
       is detail-page content;
     * the headline cards count by RECOMMENDATION (route-to-incubation is the
       designed positive outcome for incubation-stage ideas and lives inside
-      the <3.0 band, so band-only cards read "everything failed").
+      the <2.8 (`conditional_min`) band, so band-only cards read "everything
+      failed").
     """
     run = SimulationRun()
     db_session.add(run)
@@ -2540,7 +2541,7 @@ async def test_persist_assessment_records_that_no_panel_was_owed(engine):
     Both halves have to be unowed for the exemption to hold, which is why the
     scores below are straight 2s and not straight 3s. The floor keys on the
     COMPUTED band as well as the written recommendation, and straight 3s band
-    `conditional` on the investment scale — which would make this verdict OWED a
+    `conditional` — which would make this verdict OWED a
     panel and `panel_owed` True, inverting the claim. Straight 2s band `pass`,
     so recommendation and band agree and the exemption holds.
     """

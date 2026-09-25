@@ -1,4 +1,5 @@
-"""CoPI CLI — seed-profile, seed-profiles, admin:grant, admin:revoke."""
+"""CoPI CLI — seed-profile, seed-profiles, admin:grant, admin:revoke, role:set,
+list-users, regenerate-profiles, backfill-profile-revisions."""
 
 import asyncio
 

@@ -1,10 +1,10 @@
 """Public routes: run-window arithmetic and the privacy boundary.
 
-``tests/characterization/test_public_routes.py`` already pins that the ten public
+``tests/characterization/test_public_routes.py`` already pins that the nine public
 endpoints *render*. This file covers the two things rendering cannot show:
 
 1. **The arithmetic.** The graph routes slice one long-running simulation into
-   date-bounded **run windows** (``.notes/cohort-system-v2.md`` §1 renamed the
+   date-bounded **run windows** (``specs/cohort-system-v2.md`` §1 renamed the
    concept; the constants live in ``src/routers/public.py``). Three boundaries are
    in play and each is tested *at the exact edge*, never at a comfortable value in
    the middle:
@@ -337,7 +337,7 @@ async def test_the_post_creation_bound_is_inclusive_at_the_exact_instant(
     Note the consequence, which is real rather than hypothetical: for
     /schultz-alumni-pilot ``JUNE_POST_START == SCHULTZ_PILOT_START``, so that
     window has ZERO lead-in — a thread opened May 31 and decided June 2 is
-    silently dropped. The route's own docstring warns against exactly this ("a
+    silently dropped. public.py's window-constants comment warns against exactly this ("a
     thread can be opened a couple days before its proposal lands").
     """
     decided = SCHULTZ_PILOT_START + timedelta(days=1)
@@ -553,10 +553,10 @@ async def _exercise(client, method, path, ctx):
 async def test_every_public_route_withholds_collab_private_content(
     client, db_session, roster, run, method, path
 ):
-    """The same private proposal, held against all ten public endpoints.
+    """The same private proposal, held against all nine public endpoints.
 
     The four graph routes carry a positive control (the public proposal renders).
-    The other six render no message content at all by design, so their control is
+    The other five render no message content at all by design, so their control is
     different in kind but not weaker: the test asserts, by direct query in the same
     transaction, that the private row WAS present and visible while the request ran.
     Without that leg a fixture that silently failed to seed would score green here.

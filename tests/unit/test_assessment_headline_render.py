@@ -192,7 +192,7 @@ def test_the_pitch_renders_as_a_second_line():
 
 
 def test_an_absent_pitch_is_byte_identical_to_the_old_output():
-    """A6/A3. Every row in production today has elevator_pitch IS NULL, and the
+    """A6/A3. Every row written before migration 0043 has elevator_pitch IS NULL, and the
     repair script shares this renderer — so the widening must be invisible for
     a row that carries no pitch, or re-running the backfill would change what
     it posts for rows it has already handled."""
@@ -210,7 +210,7 @@ def test_an_absent_pitch_is_byte_identical_to_the_old_output():
 
 
 def test_a_non_string_pitch_is_dropped_not_repr_posted():
-    """`_clip` drops a non-string outright: a model that answers with an object
+    """`_clip_at_sentence` drops a non-string outright: a model that answers with an object
     must not have a Python repr posted to a workspace-visible channel."""
     text = render_assessment_headline(
         pi_label="L", project="P", recommendation="pass", scores={}, permalink=None,
@@ -234,7 +234,7 @@ def test_an_overlong_pitch_is_clipped():
 # ---------------------------------------------------------------------------
 # `_clip_at_sentence` (P1 fix, 2026-09-14) — the pitch is clipped at a
 # sentence boundary rather than mid-word. `test_an_overlong_pitch_is_clipped`
-# above is left unchanged, per the task: it pins the no-boundary/no-whitespace
+# above is left unchanged: it pins the no-boundary/no-whitespace
 # case, which `_clip_at_sentence` must still satisfy.
 # ---------------------------------------------------------------------------
 

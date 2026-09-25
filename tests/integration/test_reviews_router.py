@@ -79,10 +79,10 @@ async def test_learn_feedback_enqueues_nothing_until_a_manual_generate(
 
     Two submissions used to produce exactly one deduped
     ``review_feedback_analysis`` job; they now produce NONE. The job arrives
-    only when a staff member presses "Generate prompt suggestions", and one
-    press covers both reviews of the assessment -- the job re-reads every
-    unconsumed 'learn' row in one pass, so eligibility is per assessment, not
-    per review.
+    only when a staff member presses "Generate suggestions from current
+    reviews", and one press covers both reviews of the assessment -- the job
+    re-reads every unconsumed 'learn' row in one pass, so eligibility is per
+    assessment, not per review.
     """
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

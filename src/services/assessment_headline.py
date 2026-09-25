@@ -111,7 +111,7 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
       abbreviation blocklist would be a guess; "there is more" is a fact. The
       marker is omitted only when the cut lands at the true end of the value.
     * Over the cap, no such boundary, but whitespace exists in the window →
-      clip to ``max_len`` first, then back off to the last space and append
+      clip to ``max_len`` first, then back off to the last whitespace and append
       `" …"`, so a truncation reads as one rather than as a sentence that
       stopped mid-word. The suffix is appended AFTER the `max_len` clip, so
       the return may be `max_len + 1` characters.

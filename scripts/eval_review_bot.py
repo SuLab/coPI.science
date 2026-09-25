@@ -19,7 +19,7 @@ prompt files under test are the branch's, not the image's:
         --cases scripts/review_bot_eval_cases.json \
         --out docs/audits/2026-09-02-review-pipeline/eval-results.json
 
-``--dry-run`` builds and grades nothing but reports payload sizes; ``--max-calls``
+``--dry-run`` calls and grades nothing but reports payload sizes; ``--max-calls``
 is hard-capped at 12 in code (the operator's ceiling for this evaluation).
 
 Grading covers the PRIMARY proposal only. A reply's ``additional_proposals``

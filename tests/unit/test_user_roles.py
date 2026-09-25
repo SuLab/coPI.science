@@ -1,8 +1,8 @@
-"""Account-type predicates: pi / manager / admin.
+"""Account-type predicates: pi / manager / admin / reviewer.
 
 The load-bearing assertion here is that `is_admin` is FALSE for a manager.
-Impersonation (src/dependencies.py:74 and the duplicate check at
-src/main.py:52) is gated on is_admin and returns a fully substituted User, so
+Impersonation (src/dependencies.py:119 and the duplicate check at
+src/main.py:264) is gated on is_admin and returns a fully substituted User, so
 any formulation of is_admin that a manager satisfied would hand managers full
 admin. See F7 in the spec.
 """
@@ -69,14 +69,14 @@ def test_an_admin_is_staff_but_not_a_manager():
 
 
 def test_is_admin_is_read_only():
-    """Proves the three assignment sites must be rewritten: src/cli.py:124,
-    src/cli.py:155, tests/e2e/seed.py:137."""
+    """Proves the three assignment sites must be rewritten: src/cli.py:125,
+    src/cli.py:168, tests/e2e/seed.py:138."""
     with pytest.raises(AttributeError):
         _user(USER_ROLE_PI).is_admin = True
 
 
 def test_is_admin_compiles_to_sql_over_user_role():
-    """Pins src/main.py:52, which runs select(User.is_admin). A plain
+    """Pins src/main.py:264, which runs select(User.is_admin). A plain
     @property is invisible to SQL and that query would raise.
 
     Compile with literal_binds and assert on the actual predicate, not just on

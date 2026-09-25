@@ -5,7 +5,7 @@ disagree, so the decision logic lives here as pure functions over plain data rat
 than inside ``SimulationEngine``. That is also what makes the semantics testable
 without an engine, a database, or a running loop.
 
-See .notes/cohort-system-v2.md §5 (gate semantics) and §12 (admin preview).
+See specs/cohort-system-v2.md §5 (gate semantics) and §12 (admin preview).
 """
 
 from __future__ import annotations

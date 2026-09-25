@@ -216,7 +216,7 @@ class TestHasNewReplyFromOther:
         an active thread must never register as a new reply from the other
         participant — there is no PI-bot interaction surface left for it to
         feed. Checked both gated and ungated: the ungated path
-        (allowed_sender_ids=None) is what `_phase4_reply_threads` uses for an
+        (allowed_sender_ids=None) is what `_pending_reply_pairs` uses for an
         already-open thread, and it bypasses the cohort gate entirely, so the
         human filter has to be enforced independently of it."""
         log.append(_post("1", "general", "su", "SuBot", "Root"))

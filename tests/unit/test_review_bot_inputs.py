@@ -1,4 +1,4 @@
-"""Task 9: dependency-free transcript loader, review-bot model setting, prompt file.
+"""Dependency-free transcript loader, review-bot model setting, prompt file.
 
 These are narrow existence/shape checks, not behavioral tests of the loader logic
 itself (which is unchanged — moved verbatim from `assessment_detail._load_thread_messages`

@@ -76,7 +76,7 @@ class Agent:
         caller already reserved a window slot for this exact call — against
         the sliding-window ledger (``state.call_times``) too.
 
-        Task 9 split call accounting into two questions that used to be
+        Call accounting is split into two questions that used to be
         conflated: "should this call be GATED against the window before it is
         issued?" (only ``_reply_to_thread``/``_phase5_new_post`` need this —
         ``try_reserve``, called immediately before the LLM call, both checks
@@ -96,8 +96,10 @@ class Agent:
         The default (``already_reserved=False``) is for every call site that
         was never separately reserved and so relies on THIS method as the
         only place it is booked into the window:
-        - specialist consults (``on_api_call=agent.record_api_call`` in
-          ``_reply_to_thread``'s tool executor) — booking these is what keeps
+        - specialist consults and each consult's own truncation retry
+          (``on_api_call=agent.record_api_call`` in ``_reply_to_thread``'s tool
+          executor; ``_execute_consult_specialist`` fires it before the consult
+          and forwards it as that consult's ``on_retry``) — booking these is what keeps
           a concluding reply that fires up to 8 consults visible to the
           limiter and to ``SimulationRun.total_api_calls``, not just its own
           one reply;
@@ -107,12 +109,15 @@ class Agent:
           real billed call for a turn that already reserved once;
         - the working-memory update (``_update_agent_memory``) and its own
           retry — a real billed call that is never gated (it is not part of
-          the two-lane fan-out this task bounds), but must still count.
+          the two-lane fan-out ``try_reserve`` bounds), but must still count;
+        - the extra tool rounds inside ``generate_with_tools``
+          (``SimulationEngine._on_llm_call``, counted by ``_unbooked_calls``) —
+          real billed calls that no other site books.
 
-        None of these six sites are gated by ``try_reserve`` on purpose:
-        gating a retry is meaningless (the call was already issued), and
+        None of these seven sites are gated by ``try_reserve`` on purpose:
+        gating a retry or a tool round is meaningless (the call was already issued), and
         refusing a consult mid-turn could leave the specialist panel
-        incomplete, which Task 7's floor treats as an unvetted verdict rather
+        incomplete, which the specialist floor treats as an unvetted verdict rather
         than a completed one — a worse outcome than letting the consult
         through and merely booking it after the fact.
 
@@ -306,7 +311,7 @@ class Agent:
         This is the single composer behind build_system_prompt and
         build_thread_reply_system_prompt — the include_memory/
         include_lab_directory flags reproduce each builder's original section
-        set byte-for-byte (see the callers below).
+        set byte-for-byte (see the callers above).
         """
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         # The scouting hub's system prompt carries the screening rubric as a
@@ -540,7 +545,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             # filtering, matching the "gate is None means no filtering" rule.
             # Role-aware, not DEFAULT_POST_TYPES: a scout_hub agent built by a
             # direct caller would otherwise get the pi_lab menu, offering it
-            # three types its own role.toml forbids.
+            # a type its own role.toml forbids.
             #
             # gate=None also makes render_menu emit guidance instead of an
             # enumeration for an addressed type. There is no roster here to

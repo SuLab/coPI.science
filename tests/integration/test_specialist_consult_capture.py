@@ -1,6 +1,6 @@
 """Durable capture of the specialist panel, and the floor that reads it back.
 
-Three separate holes, all in one seam (design:
+Four separate holes, all in one seam (design:
 docs/plans/2026-08-20-assessments-rca-ux-specialist-visibility.md §3.1-3.2):
 
 1. A consult existed only in engine memory (``_specialist_consults``) and in an
@@ -816,7 +816,7 @@ async def test_a_verdict_that_owes_no_panel_does_not_query_the_table(engine):
     session is opened for this call: the write.
 
     The scores are overridden as well as the recommendation, and that is the
-    point. `_VERDICT`'s straight 3s band `conditional` on the investment scale,
+    point. `_VERDICT`'s straight 3s band `conditional` on the rubric's one scale,
     and the floor now keys on the COMPUTED band as well as the written
     recommendation — so a `pass` sitting on a conditional-banding score sheet
     DOES owe a panel. Exempting this call needs both halves to be unowed.
@@ -1099,7 +1099,8 @@ async def test_a_restart_does_not_resurrect_a_note_as_conversation(engine):
             "past the reply the only thing left in the thread is the note at "
             "100.3 — and a restored note is still not a reply"
         )
-        # And the same thread hydrated on demand (the reopen path) agrees.
+        # And the same thread hydrated on demand (what a reopen used to trigger)
+        # agrees.
         sim.message_log = MessageLog()
         await sim._hydrate_thread_from_db("100.1")
         assert sim.message_log.get_thread_message_count("100.1") == 2
@@ -1208,7 +1209,7 @@ async def test_the_consult_seed_runs_for_a_band_owed_verdict(engine):
     ARE in `specialist_consults`. Reproduced in production: four named domains,
     three of them recorded as consulted on that very thread.
 
-    Straight 3s band `conditional` on the investment scale, so this fixture is
+    Straight 3s band `conditional` on the rubric's one scale, so this fixture is
     owed a panel by its band alone.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)

@@ -87,8 +87,8 @@ async def activate_agent(
     ``inactive`` (a manager unmute) or ``suspended`` must not overwrite that
     provenance with whoever happened to flip the switch back on. The single
     call site for
-    both branches of ``admin_approve_agent``, and for any future caller (e.g.
-    the manager surface) that needs the same gate-then-activate sequence.
+    both branches of ``admin_approve_agent``, and for the manager surface's
+    ``manager_activate_agent``, which needs the same gate-then-activate sequence.
     """
     blockers = await activation_blockers(db, agent)
     if blockers and not override:

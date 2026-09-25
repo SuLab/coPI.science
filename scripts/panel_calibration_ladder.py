@@ -41,7 +41,7 @@ from src.agent.tools import _execute_consult_specialist  # noqa: E402
 # triage informally assigned this a verdict signal: clear last week"), and
 # since `tools.py` moved the label to a trailer AFTER the body
 # (`{title}\n\n{raw}\n\n— signal: {signal} (read: {read_state})`,
-# tools.py:795-798), the model's own words now come first in the string this
+# tools.py:896-899), the model's own words now come first in the string this
 # parses. A bare `re.search(r"signal:\s*([a-z_]+)")` therefore matched the
 # decoy, not the real trailer — precisely the defaulted-versus-read confusion
 # this whole plan exists to separate. The trailer's exact shape — the em dash,

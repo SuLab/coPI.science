@@ -58,8 +58,9 @@ METHOD_SCOPES = {
 def test_manifest_requests_every_scope_the_client_actually_needs():
     """The invariant that keeps provisioning honest.
 
-    AgentSlackClient exposes create_private_channel() and invite_to_channel(), and
-    private-channel migration calls both. Both need `groups:write`. A scope absent here
+    AgentSlackClient exposes create_private_channel() and invite_to_channel(); the
+    private-channel migration that called both is gone, but both still need
+    `groups:write`. A scope absent here
     is invisible until the one call that needs it fails at runtime with missing_scope,
     on a bot that otherwise looks perfectly healthy.
     """

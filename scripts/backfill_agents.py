@@ -46,7 +46,7 @@ def _slugify_last_name(name: str) -> str:
 
 
 async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
-    """Same collision logic as scripts/generate_sparsedata_user.py + agent_page.py.
+    """Same collision tiers as scripts/generate_sparsedata_user.py + src/services/agent_identity.py.
 
     Order: bare last name → first-initial prefix → numeric suffix.
     """

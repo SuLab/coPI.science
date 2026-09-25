@@ -229,9 +229,10 @@ def test_the_plain_anchor_carries_rel_noreferrer():
 
 @pytest.mark.parametrize("value", [0, 3.05, True, ["a"], {"k": "v"}])
 def test_a_non_string_is_returned_rather_than_raising(value):
-    """Two call sites pass raw JSONB elements — `key_points` bullets and the
-    hub's `strengths`/`risks`. A model-written bullet that arrives as a number
-    used to render as text; raising here would 500 the whole list page."""
+    """Call sites pass raw JSONB elements — `key_points` bullets and the hub's
+    `strengths`/`risks`/`competitive_landscape`/`evidence_maturity` lists. A
+    model-written bullet that arrives as a number used to render as text;
+    raising here would 500 the whole list page."""
     assert markdown_with_citation_links(value) == value
     # Escaped, not passed through: a dict or list repr can contain `<`.
     assert str(plain_with_citation_links(value)) == str(escape(value))

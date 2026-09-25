@@ -235,7 +235,7 @@ async def auth_callback(
         else:
             logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
     else:
-        # Existing user — update name/institution if empty
+        # Existing user — update name/institution/department/email if empty
         if not user.name and profile_data.get("name"):
             user.name = profile_data["name"]
         if not user.institution and profile_data.get("institution"):
@@ -297,7 +297,7 @@ async def auth_callback(
     # (D7) and has no research profile to review, so it skips onboarding —
     # without this a manager is sent to a page whose only exit is saving a
     # research profile (POST /onboarding/save-profile is the sole write of
-    # onboarding_complete in src/). A REVIEWER (Task 1) is neither staff nor
+    # onboarding_complete in src/). A REVIEWER is neither staff nor
     # PI and has no research profile either, so it skips onboarding too.
     #
     # Admins are excluded from the skip, not included in it: they keep the PI
@@ -325,8 +325,9 @@ async def logout(request: Request):
     POST-only: logout mutates session state, so exposing it over GET made it a
     cross-site request-forgery target (a third-party page could log a victim
     out via an <img>/<a> to /logout). SameSite=lax on the session cookie blocks
-    forged cross-site POSTs, so the "Sign out" control posts this form
-    (see base.html). (SEC-8)
+    forged cross-site POSTs but not same-site ones from a sibling subdomain;
+    OriginGuardMiddleware (src/main.py) refuses those. The "Sign out" control
+    posts this form (see base.html). (SEC-8)
     """
     request.session.clear()
     response = RedirectResponse(url="/login", status_code=302)

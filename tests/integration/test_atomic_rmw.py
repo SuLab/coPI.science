@@ -75,7 +75,8 @@ async def test_concurrent_version_bumps_both_land(engine):
 
 @pytest.mark.asyncio
 async def test_first_ever_profile_still_reaches_version_one(engine):
-    """The three router sites bump a profile they may have just created.
+    """The three save sites (agent_page.py, onboarding.py, profile_edit.py) bump a
+    profile they may have just created.
 
     A SQL expression assigned to a *pending* object renders inside the INSERT's
     VALUES clause, where Postgres refuses to resolve the target table ("invalid

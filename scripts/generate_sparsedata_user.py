@@ -6,13 +6,13 @@ Input TSV (tab-separated, no header):
 
 For each row this script:
   1. Resolves identity (real ORCID name-check OR synthetic placeholder).
-  2. Searches PubMed by name+affiliation, disambiguates by author/affiliation
-     token-Jaccard against the input affiliations.
+  2. Searches PubMed by name+affiliation, disambiguates by author name and
+     affiliation phrase match against the input affiliations.
   3. Optionally fetches a faculty/lab page for additional context.
   4. Calls the LLM (prompts/profile-synthesis-sparse.md) to synthesize fields.
   5. Persists User + ResearcherProfile + AgentRegistry rows, writes
      profiles/public/{agent_id}.md. The private (behavioral) seed is left NULL
-     on purpose — PIs author that via onboarding, not the LLM.
+     on purpose — private profiles were retired and nothing reads it.
 
 Floor on evidence: ≥3 disambiguated papers OR a fetched faculty page. Rows
 below the floor are audited but not persisted, so a human can review.
@@ -87,7 +87,7 @@ FACULTY_PAGE_MAX_CHARS = 3000    # truncate scraped page text to this
 
 # Institution stopwords, distinctive-token extraction and affiliation
 # matching are NOT redefined here: they are imported from
-# ``src.services.corpus`` below. This script used to carry its own copies,
+# ``src.services.corpus`` above. This script used to carry its own copies,
 # which is how the 2026-09-22 audit's D2/D12 defects survived a fix to the
 # service — the service was corrected and these were not, while this script
 # is what seeded 56 of the 73 production PIs and is still runnable.
@@ -270,7 +270,8 @@ async def _disambiguate(
 ) -> tuple[list[str], int]:
     """Return (pmids_that_match, n_discarded). Match requires:
       1. surname match on at least one author
-      2. that author's first initial matches the input name's first initial
+      2. that author's ForeName/Initials match the input first name
+         (``_author_first_name_matches``: a full forename must start with it)
       3. that author's affiliation matches one of the input affiliations
 
     The first-initial requirement (added 2026-06-03) is critical for common
@@ -578,9 +579,9 @@ async def _persist(
 
     # Private profile seed is intentionally NOT synthesized for generated
     # profiles. The private seed encodes behavioral preferences (collaboration
-    # style, topic priorities) that should come from the PI via the onboarding
-    # flow — not be invented by an LLM. Left NULL so the agent uses defaults
-    # until the PI authors their own.
+    # style, topic priorities) that must not be invented by an LLM. Left NULL;
+    # private profiles were retired in the 2026-08-12 removal cycle, so no
+    # onboarding step or runtime path reads or writes it.
 
     audit.persisted = True
 

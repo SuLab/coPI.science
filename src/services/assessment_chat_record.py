@@ -58,7 +58,7 @@ from src.services.rubric_revisions import (
     PROVENANCE_UNKNOWN,
 )
 
-#: Mirrors templates/admin/_assessment_detail_body.html:216-224. The page gates these
+#: Mirrors templates/admin/_assessment_detail_body.html:236-244. The page gates these
 #: in the TEMPLATE, not in build_assessment_detail, so the chat must gate them itself.
 #: tests/integration/test_assessment_chat_parity.py binds the two.
 STAFF_ONLY_VERDICT_FIELDS = ("strengths", "risks", "competitive_landscape", "evidence_maturity")
@@ -219,7 +219,7 @@ class ChatRecord:
 
 def tier_for(user: Any) -> str:
     """`staff` for admin and manager, `reviewer` otherwise (the caller has already
-    passed get_review_user, so "otherwise" is a reviewer)."""
+    passed get_review_user's predicate, so "otherwise" is a reviewer)."""
     return CHAT_TIER_STAFF if getattr(user, "is_staff", False) else CHAT_TIER_REVIEWER
 
 

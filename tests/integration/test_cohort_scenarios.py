@@ -1,7 +1,7 @@
 """Real multi-turn cohort scenarios. Marked real_llm — skipped without an API key.
 
 Everything else in the cohort suite asserts on logic: given these rows, the gate
-computes this. These four assert on an **emergent** outcome — who actually ends up
+computes this. These three assert on an **emergent** outcome — who actually ends up
 holding a threaded conversation with whom after real Opus/Sonnet turns — which is not
 derivable from the gate computation and is the thing the feature is actually for.
 
@@ -519,7 +519,7 @@ async def run_scenario(
 
 
 async def test_harness_produces_conversation_at_all(scenario_db):
-    """Self-test, and the positive control the other four rest on.
+    """Self-test, and the positive control the other three rest on.
 
     A permissive single-cohort run with one open thread must produce at least one
     agent-authored message in that thread. If it does not, every absence assertion in

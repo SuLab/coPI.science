@@ -149,7 +149,8 @@ def test_fenced_sidecar_does_not_hijack_the_action_parse():
     emitted LAST, a fenced sidecar becomes the LAST fenced block in the raw
     response — exactly what _parse_phase5_response used to take as the
     action. Before the fix, this made ``action_data`` the verdict dict
-    itself: ``action`` fell back to "new_post" (now removed too, see below),
+    itself: ``action`` fell back to "new_post" (now removed too, see
+    `_phase5_new_post`),
     ``channel`` fell back to "general", and post_type came back empty, so
     persistence never fired for a named-PI assessment that posted into the
     workspace's broadest channel."""
@@ -191,7 +192,8 @@ async def test_phase4_reply_budget_fits_the_assessment_sidecar(monkeypatch):
 
     This codebase already sized this exact artifact once: `_phase5_new_post`
     carries a note that 1000 tokens "truncated the verdict first while leaving
-    the Slack post looking complete" and sits at 2500 for it. When the sidecar
+    the Slack post looking complete" and was sized at 2500 for it (3300 today,
+    after the tokenizer change). When the sidecar
     moved into the Phase-4 CONCLUDE reply (Option A), it landed in a call still
     budgeted at 1500 — below the figure the same file documents as necessary.
     Production logs for this phase show 11 `stop_reason=max_tokens` retries and

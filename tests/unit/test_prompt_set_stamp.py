@@ -88,7 +88,7 @@ def test_missing_file_hashes_as_missing_not_crash(tmp_path, monkeypatch):
 
 
 def test_real_role_tomls_declare_a_version_and_still_parse():
-    """Against the REAL prompts/ tree: the version keys this task adds must
+    """Against the REAL prompts/ tree: the version keys must
     exist, and load_role must keep ignoring them (it reads only label/tools/
     calls_per_load_per_window/post_types)."""
     for role in ("scout_hub", "pi_lab"):

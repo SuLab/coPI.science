@@ -9,8 +9,9 @@ Scope, stated once so the gap stays visible:
   anything to a collab_private channel; see §5's module comment below). The engine's
   thread-conclusion path
   (`_check_thread_outcome` -> `_close_thread`) writing a `ThreadDecision` with
-  outcome='no_proposal' (the ⏸️ close) or 'timeout' is also in scope and driven for
-  real; outcome='proposal' is NOT — see the note on `_conclude_thread` below.
+  outcome='no_proposal' (the ⏸️ close) is also in scope and driven for real (the
+  'timeout' arm is not exercised here); outcome='proposal' is NOT — see the note on
+  `_conclude_thread` below.
 * **Out of scope by instruction.** Everything inside `src/services/email.py` and
   `src/services/email_notifications.py` below `send_proposal_notification`: MIME
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
@@ -28,9 +29,11 @@ review/reopen/dashboard machinery below still has to keep serving proposals that
 already exist in the DB, so every fixture in this module that needs one (`proposal`,
 via `_conclude_thread(outcome="proposal", ...)`) fabricates the row directly instead of
 driving the (now nonexistent) live path — see that helper's docstring. This is a
-deliberate scope narrowing, not test debt: `test_a_concluded_thread_records_a_proposal_
-decision` is the control that pins what the live handshake actually does now (produces
-no ThreadDecision at all), alongside the ⏸️ path it still does drive for real.
+deliberate scope narrowing, not test debt:
+`test_a_memo_and_check_mark_reply_no_longer_produces_a_thread_decision` is the control
+that pins what the live handshake actually does now (produces no ThreadDecision at all),
+alongside `test_the_no_proposal_close_still_produces_a_thread_decision` for the ⏸️ path
+that is still driven for real.
 
 Dependencies: the database is REAL (the rolled-back `db_session` from
 tests/conftest.py). The LLM, Slack and SES are all doubled — and the autouse
@@ -44,8 +47,8 @@ anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
     thread concluded (ThreadDecision.outcome='proposal', legacy rows only)  -- no review row
         -- POST /review   rating 1..4  -->  decided, terminal for this agent
         -- POST /reopen   rating 0     -->  reopened, ALSO terminal for this agent
-                                            (+ collab_private channel,
-                                             ThreadDecision.refined_in_channel set)
+                                            (+ PI guidance in the origin thread's
+                                             DB inbox; no channel is created)
 
 Both edges are one-way and mutually exclusive: the endpoints reject any second action
 by the same agent (`/review` with 400 "Already reviewed", `/reopen` with a silent
@@ -232,8 +235,9 @@ async def _conclude_thread(
     shape a legacy run would have left behind, directly via the DB, so the
     review/reopen/dashboard machinery below — which still has to serve
     existing proposals regardless of how they were created — has one to
-    serve. It is NOT simulating reachable behavior: see
-    `test_a_concluded_thread_records_a_proposal_decision`'s control pair for
+    serve. It is NOT simulating reachable behavior: see the control pair
+    `test_the_no_proposal_close_still_produces_a_thread_decision` /
+    `test_a_memo_and_check_mark_reply_no_longer_produces_a_thread_decision` for
     what the live handshake actually does now (nothing).
     """
     root_ts = f"{1_700_000_000 + len(channel) * 7 + abs(hash(channel)) % 9000}.000100"

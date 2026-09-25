@@ -3,7 +3,7 @@
 Implements the pipeline from profile-ingestion.md:
 1. Fetch ORCID profile
 2. Fetch ORCID grants
-3. Fetch ORCID works (PMIDs/DOIs)
+3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py)
 4. Fetch PubMed abstracts
 5. Deep mining: PMC methods sections
 6. Prepare profile record
@@ -423,7 +423,7 @@ async def run_profile_pipeline(
     #     formatting miss the retry above already tried to fix — and then sets
     #     status='dead'. templates/onboarding/profile_review.html keys its "Try
     #     Again" control on job_status == 'failed', which src/worker/main.py never
-    #     assigns (it only ever writes 'pending' or 'dead'), so a dead job falls
+    #     assigns (on failure it only ever writes 'pending' or 'dead'), so a dead job falls
     #     through to that template's `elif profile` branch and the PI is shown the
     #     review form with empty fields and no explanation. Raising would also
     #     skip the markdown export and create_revision below, costing the

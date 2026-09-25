@@ -343,10 +343,10 @@ def test_existing_assessment_lookup_is_scoped_to_the_run():
 def test_a_null_thread_drop_still_finds_an_existing_threaded_row():
     """FIX 6: the asymmetric case the reviewer flagged — a drop with no
     thread_id of its own must still be recognised as a duplicate of an
-    existing row that DOES have one, for the same subject. Unreachable via
-    `_persist_assessment` today (it never writes thread_id), but this
-    function must not silently write a duplicate the moment that changes —
-    or the moment two of THIS SCRIPT's own drops for one subject differ in
+    existing row that DOES have one, for the same subject. Reachable via
+    `_persist_assessment` now that it writes thread_id (it did not when this
+    was written), and this function must not silently write a duplicate —
+    nor when two of THIS SCRIPT's own drops for one subject differ in
     whether their own thread_id could be identified.
     """
     existing_row = _existing_row(subject_agent_id="markham", thread_id="T-markham-1")

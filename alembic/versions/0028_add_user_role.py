@@ -8,6 +8,8 @@ Additive on purpose. The model stops mapping users.is_admin in the same change,
 so this migration is safe to apply BEFORE the new code is running and the old
 code keeps working after it — there is no window where live code and applied
 schema disagree. The column drop is deferred to 0029, a separate later deploy.
+(As of 2026-09-24 that had not happened: 0029 became add_panel_incomplete and the
+drop was still unwritten.)
 """
 
 from typing import Sequence, Union

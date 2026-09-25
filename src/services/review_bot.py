@@ -1,4 +1,4 @@
-"""Task 10: the review bot job handler.
+"""The review bot job handler.
 
 Turns human reviewer feedback (``AssessmentReview`` rows with
 ``feedback_mode == "learn"``) into a distilled prompt-change suggestion. One

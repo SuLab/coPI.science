@@ -150,9 +150,10 @@ def test_closed_thread_id_is_not_reactivated():
 
 # ---------------------------------------------------------------------------
 # Human-authored entries never activate a thread (2026-08-12 PI-interaction
-# removal cycle). The trigger loop this closes: `post_agent_message`/
-# `reopen_proposal` (via `src/services/pi_inbox.py::record_pi_message`) write
-# an `is_bot=False` row into `agent_messages`; the engine's DB-inbound poller
+# removal cycle). The trigger loop this closes: `reopen_proposal` (via
+# `src/services/pi_inbox.py::record_pi_message`), like the since-deleted
+# `post_agent_message` route before it, writes an `is_bot=False` row into
+# `agent_messages`; the engine's DB-inbound poller
 # ingests it into the shared MessageLog; and — before this fix — Phase 3's
 # three loops (fed by `get_tags_for_agent`/`get_replies_to_agent_posts`/
 # `get_new_top_level_posts`, none of which check `is_bot` — those reads

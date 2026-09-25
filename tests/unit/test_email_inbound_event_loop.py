@@ -13,7 +13,7 @@ consequences, both measured on the same run that surfaced them:
   worst case at **1,801.5 s** of a wedged process.
 
 Both are fixed by routing this call through ``llm._acreate`` and the shared
-client: ``asyncio.to_thread`` gives the loop back, and the client carries the
+client: ``_acreate``'s own thread pool gives the loop back, and the client carries the
 300 s read timeout (``llm.CLIENT_READ_TIMEOUT_SECONDS``).
 """
 

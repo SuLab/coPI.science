@@ -221,10 +221,13 @@ async def get_staff_user(
 ) -> User:
     """Dependency that requires admin OR manager.
 
-    Used ONLY by the /manager router. This is deliberately a separate
-    dependency rather than a relaxation of get_admin_user: /admin declares its
-    gate on 34 individual handlers (F5), and widening the one they share is how
-    a read-only role would quietly acquire write endpoints.
+    Used by the /manager router, the /reviews router's staff-only routes, and
+    the /admin Slack OAuth callback (``admin_provision_slack_callback``, widened
+    from admin to staff under F2).
+    This is deliberately a separate dependency rather than a relaxation of
+    get_admin_user: /admin declares its gate on 39 individual handlers (F5),
+    and widening the one they share is how a read-only role would quietly
+    acquire write endpoints.
 
     Note this also 403s an admin who is currently impersonating a PI, because
     get_current_user returns the impersonated user. That is correct.

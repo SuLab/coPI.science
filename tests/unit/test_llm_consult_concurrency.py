@@ -10,7 +10,7 @@ The narrowness is the design, not timidity. Each of the four other tool paths
 breaks under concurrency for its own reason:
 
 - ``ThreadState.abstracts_other`` / ``full_text`` are check-then-increment
-  (``tools.py:278`` / ``:292``), so two concurrent fetches both read the same
+  (``tools.py:320`` / ``:334``), so two concurrent fetches both read the same
   count and both pass a per-thread cap of one;
 - ``agent.record_api_call`` mutates a deque per call (safe only because it is
   synchronous — an ``await`` added inside it would silently become a race);

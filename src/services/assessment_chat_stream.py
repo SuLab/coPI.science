@@ -178,7 +178,7 @@ class UsageSnapshot:
     The API reports cumulative OUTPUT tokens only in ``message_delta``, sent once at
     the very end of the stream — ``message_start``'s usage is a placeholder (output
     tokens ≈ 1). ``delta_seen`` records whether a ``message_delta`` was ever absorbed,
-    so a failure between the two (SEC-2/SB-5) can be told apart from a snapshot whose
+    so a failure between the two (SEC-4/SB-5) can be told apart from a snapshot whose
     counts are the real, final ones."""
 
     model: str | None = None

@@ -45,9 +45,9 @@ WRITER_SLOT_MODULUS = 100
 # minter and the module default used *within* the engine process are listed, so
 # they can never collide with each other either.
 WRITER_ENGINE = 0        # SimulationEngine._ts_minter (agent_messages)
-WRITER_WEB = 1           # web app process (PI messages + DMs)
+WRITER_WEB = 1           # web app process (PI messages; PI DMs too, until removed)
 WRITER_GRANTBOT = 2      # GrantBot (retired 2026-08) — slot stays reserved: historical message ids carry residue 2.
-WRITER_ENGINE_AUX = 3    # module default inside the engine process (PI DMs)
+WRITER_ENGINE_AUX = 3    # module default inside the engine process (PI DMs, since removed)
 
 
 def _fmt(us: int) -> str:
@@ -104,8 +104,8 @@ class TsMinter:
 
 
 # Process-wide default minter for writers that don't own a SimulationEngine
-# instance — the PI web inbox (src/services/pi_inbox.py) and GrantBot
-# (src/agent/grantbot.py). Each *process* must claim its writer id at startup
+# instance — the PI web inbox (src/services/pi_inbox.py). Each *process* must
+# claim its writer id at startup
 # via set_default_writer_id(); the default below is the web app, the most
 # common host for this minter. See WRITER_* above.
 _default = TsMinter(WRITER_WEB)

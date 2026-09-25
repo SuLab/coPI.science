@@ -29,7 +29,7 @@ async def test_manager_visiting_onboarding_is_bounced_to_the_manager_view(
 
 
 async def test_manager_visiting_onboarding_enqueues_no_profile_job(client, db_session):
-    """F8: onboarding.py:75 self-heals by enqueuing generate_profile for any
+    """F8: onboarding.py:100 self-heals by enqueuing generate_profile for any
     allowed user with no profile. A manager must not trip it."""
     mgr = await factories.make_user(
         db_session, user_role=USER_ROLE_MANAGER, onboarding_complete=False

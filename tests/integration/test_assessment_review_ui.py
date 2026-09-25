@@ -519,7 +519,7 @@ async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(
             feedback_mode="log_only",
             dimension_scores={"some_retired_dimension": 5},
             # `rubric_version` is `String(20)` (migration 0043) — this literal
-            # is shortened from the brief's `"1.0.0-not-in-the-registry"`
+            # is shortened from `"1.0.0-not-in-the-registry"`
             # (25 chars, would raise StringDataRightTruncationError) while
             # keeping the same property under test: a stamp matching no
             # registry entry (there IS a bare "1.0.0" in
@@ -541,7 +541,7 @@ async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(
     assert "some_retired_dimension" in html
     # Whitespace-normalized: this phrase is rendered prose from the warning
     # paragraph's literal template text, currently unwrapped onto one source
-    # line — the same reflow risk as test_manager_views.py:530's pattern.
+    # line — the same reflow risk as test_manager_views.py:553's pattern.
     assert "unrecognized rubric revision" in " ".join(html.split())
 
 

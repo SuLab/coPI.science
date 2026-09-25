@@ -123,7 +123,7 @@ class CohortAuditEvent(Base):
     ``topology`` carries the full cohort->members map plus the active gate settings,
     written at run start and on every membership change, so a finished simulation
     run stays attributable to the configuration that produced it.
-    See .notes/cohort-system-v2.md §13.1.
+    See specs/cohort-system-v2.md §13.1.
     """
 
     __tablename__ = "cohort_audit_events"

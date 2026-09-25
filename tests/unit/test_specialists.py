@@ -320,8 +320,10 @@ def test_a_platform_claim_requires_technologic():
 
 
 def test_commercial_is_required_when_a_differentiation_claim_is_made():
-    """`commercial` owns `differentiation` — 16 of 100 incubation weight, the
-    heaviest single dimension — and until now NO input could require it. So the
+    """`commercial` owns `differentiation_unmet_need` — 25 of 100, the heaviest
+    single dimension (under v2 it owned `differentiation`, then also the
+    heaviest at 16 of 100 incubation weight) — and until now NO input could
+    require it. So the
     heaviest dimension in the rubric was the one dimension whose specialist the
     floor could never demand.
     """
@@ -335,9 +337,10 @@ def test_commercial_is_required_when_a_differentiation_claim_is_made():
 
 
 def test_budget_is_required_when_a_workplan_claim_is_made():
-    """`budget` owns `workplan_capital_efficiency`, which the v2 incubation
-    scale re-weighted from 1 to 8 — the single largest weight change in the
-    re-baseline — while leaving the domain unrequirable."""
+    """`budget` owns `fundable_experiment`. Under v2 it owned
+    `workplan_capital_efficiency`, which the v2 incubation scale re-weighted
+    from 1 to 8 — the single largest weight change in the re-baseline — while
+    leaving the domain unrequirable."""
     for text in (
         "The workplan is a 24-month effort at roughly $750k.",
         "A milestone-driven budget with a 12-month timeline.",
@@ -426,11 +429,12 @@ def test_no_persona_claims_to_decide():
 
 # --- the floor's obligations must be stated where the hub can read them ------
 #
-# required_domains_for() refuses an advance/conditional verdict whose panel is
-# incomplete, and _persist_assessment drops that verdict entirely. So every rule
+# required_domains_for() names the consults an owed verdict must have had, and
+# _persist_assessment flags a verdict whose panel is incomplete
+# (`panel_incomplete`). So every rule
 # the function can enforce has to be stated in the prompt the hub actually reads;
 # otherwise the hub is held to a contract it was never given, and the verdict is
-# lost with the reply already posted. See tests/unit/test_specialist_floor.py.
+# flagged with the reply already posted. See tests/unit/test_specialist_floor.py.
 
 _SCOUT_HUB_PHASE4 = Path("prompts/roles/scout_hub/phase4-thread-reply.md")
 
@@ -607,11 +611,11 @@ def test_genuine_cues_still_match():
 def test_only_the_documented_domains_are_reachable():
     """Which domains the floor can EVER require, asserted rather than assumed.
 
-    `commercial` and `budget` cannot be required by any input — proven
-    exhaustively here rather than trusted. That is finding F5, and this test is
-    what would have caught it. F5 and F6a are deferred by D6 (the fixes need a
-    hub prompt change), so this pins the deferred state honestly instead of
-    leaving five-of-eight as a fact remembered only in a design doc.
+    `commercial` and `budget` could not be required by any input. That is
+    finding F5, and this test is what would have caught it. F5 and F6a were
+    deferred by D6 (the fixes needed a hub prompt change); F5 has since been
+    closed (see the history note below), so this now pins, exhaustively rather
+    than trusted, that all eight domains are reachable.
     """
     reachable: set[str] = set()
     cue_texts = [
@@ -639,7 +643,7 @@ def test_only_the_documented_domains_are_reachable():
     )
     # The history this assertion replaces: for as long as the panel existed,
     # `commercial` and `budget` were unreachable — finding F5, deferred by D6
-    # because closing it needed a hub prompt change. `commercial` owns
+    # because closing it needed a hub prompt change. `commercial` owned
     # `differentiation`, the heaviest dimension on both scales (15 investment /
     # 16 incubation), so the floor could not demand an opinion on the thing it
     # weighted most. Re-measured and closed 2026-08-22 (M7).

@@ -5,7 +5,7 @@ import pytest
 from src.config import _SECRET_NAME_HINTS, Settings, _redact_url_credentials
 
 # A DSN with the password embedded in the userinfo — the shape the app ships with
-# (docker-compose sets DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi).
+# (.env.example sets DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi).
 # `database_url` matches none of the credential name hints, so before the positional
 # URL redaction the whole DSN, password included, appeared verbatim in repr(settings).
 LEAKY_DSN = "postgresql+asyncpg://copi:sup3rs3cr3t@postgres:5432/copi"

@@ -46,12 +46,13 @@ CLIENT_READ_TIMEOUT_SECONDS = 300.0
 # ValueError("Streaming is required for operations that may take longer than 10
 # minutes...") as soon as that exceeds its 600-second default timeout. So the
 # last accepted value is floor(600 * 128_000 / 3600) = 21_333, and 21_334 is
-# refused locally, before any HTTP request is made. Probed on both SDKs this
-# repo runs: anthropic 1.0.0 (the deployed agent image) and 0.120.2
-# (.venv-test) — highest accepted 21_333 in each. The SDK also carries a
-# per-model override (`MODEL_NONSTREAMING_TOKENS`, 8192 for the opus-4 ids)
-# which names no model configured here, so the formula is the only binding
-# limit for us.
+# refused locally, before any HTTP request is made. Probed 2026-08-21 on both
+# SDKs this repo then ran: anthropic 1.0.0 (the deployed agent image at the
+# time) and 0.120.2 (.venv-test) — highest accepted 21_333 in each. The deployed
+# images were on 1.8.0 by 2026-09-24, which carries the same formula (checked
+# 2026-09-24). On the two probed SDKs the SDK also carried a per-model override
+# (`MODEL_NONSTREAMING_TOKENS`, 8192 for the opus-4 ids) naming no model
+# configured here, so the formula was the only binding limit for us.
 #
 # Every call in this module is non-streaming, so this is a hard ceiling on what
 # a call site may request AND on what a truncation retry may double up to. It
@@ -68,7 +69,8 @@ CLIENT_READ_TIMEOUT_SECONDS = 300.0
 # is_given(timeout) and self._client.timeout == DEFAULT_TIMEOUT` — and
 # `_client_for_key` now passes a timeout of its own (CLIENT_READ_TIMEOUT_SECONDS
 # above), so that condition is permanently false. Verified against the installed
-# SDK source, both versions this repo runs. The check in `_acreate` is therefore
+# SDK source of anthropic 1.0.0 and 0.120.2, the two versions this repo ran when
+# this was written. The check in `_acreate` is therefore
 # the ONLY thing standing between a mis-sized call site and a request the API
 # will reject after it has been sent: do not remove it, and do not "simplify" it
 # on the grounds that the SDK checks too. tests/unit/
@@ -422,7 +424,7 @@ async def _execute_tool_blocks(
     its own reason:
 
     - ``ThreadState.abstracts_other`` / ``full_text`` are check-then-increment
-      (``tools.py:278`` / ``:292``): two concurrent fetches read the same count
+      (``tools.py:320`` / ``:334``): two concurrent fetches read the same count
       and both pass a per-thread cap of one.
     - ``agent.record_api_call`` mutates a deque per call. It is safe today only
       because it is synchronous — under ``asyncio`` that makes it atomic — and an
@@ -768,8 +770,9 @@ def _call_stat(
         #
         # Read through ``getattr`` like ``_thinking_tokens``: both fields are
         # ``Optional[int]`` and are None on any reply that used no cache
-        # (verified on the deployed anthropic 1.0.0), and an older SDK does not
-        # carry them at all — so a bare arithmetic use of either is a TypeError
+        # (verified on anthropic 1.0.0, the deployed agent image as of 2026-08-21), and an
+        # older SDK does not carry them at all — so a bare arithmetic use of
+        # either is a TypeError
         # raised inside a billed turn.
         #
         # ``usage.cache_creation`` is deliberately NOT read: it is the same
@@ -1313,10 +1316,10 @@ async def generate_with_tools(
     total_input_tokens = 0
     total_output_tokens = 0
     # One entry per REAL API call, in call order. The totals above are per-turn
-    # billing and stay cumulative (see the module docstring on call_stats and
-    # SimulationEngine's restart rebuilds, which count rows, not calls); this
-    # list is what makes a single row interpretable — 78.6% of thread_reply rows
-    # are 2+ calls, so "output_tokens" on its own is a sum of unknown addends.
+    # billing and stay cumulative (see the comment on `_call_log_callback` for
+    # why); this list is what makes a single row interpretable — 78.6% of
+    # thread_reply rows are 2+ calls, so "output_tokens" on its own is a sum of
+    # unknown addends.
     call_stats: list[dict[str, Any]] = []
     seq = 0
     # The tool_result block currently carrying the message-side cache

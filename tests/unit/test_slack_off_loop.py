@@ -57,8 +57,8 @@ def test_message_log_append_is_documented_loop_only():
 # before that, "concurrent" asyncio callers of a synchronous method never
 # actually overlapped in execution, so AgentSlackClient._channel_name_to_id and
 # ._dm_channels were check-then-act dicts that happened to be safe by
-# accident. Phase 4's bounded concurrency (asyncio.gather over a semaphore,
-# simulation.py's _phase4_reply_threads) can now run several of one agent's
+# accident. The reply lane's bounded concurrency (up to reply_lane_max_in_flight
+# at once, simulation.py's _dispatch_reply_lane) can now run several of one agent's
 # posts on different OS threads at once, so a cache miss on the same
 # not-yet-cached channel/user from two threads is a real race.
 #
@@ -133,7 +133,7 @@ async def test_concurrent_dm_channel_opens_for_the_same_user_fetch_only_once():
     """Same shape as above for AgentSlackClient._dm_channels/open_dm_channel.
 
     Not reachable concurrently via any current engine call site (send_dm/
-    open_dm_channel have no caller in src/ — see the task report), but the
+    open_dm_channel have no engine caller in src/), but the
     reviewer flagged it as the identical check-then-act shape, so it gets the
     same guard and the same test.
     """

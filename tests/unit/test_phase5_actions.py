@@ -39,8 +39,7 @@ def _settings(**over):
 
 async def _drive(monkeypatch, response):
     """One pi_lab agent, unblocked, with a reachable scout_hub counterparty
-    (so `pitch` — the only post type pi_lab declares — resolves as available;
-    see test_phase5_terminal_posts.test_a_blocked_pi_lab_agent_is_unaffected)."""
+    (so `pitch` — the only post type pi_lab declares — resolves as available)."""
     lab = _lab()
     lab.allowed_sender_ids = None
     hub = _hub()
@@ -108,7 +107,7 @@ async def test_reply_action_increments_skip_streak_from_true_prior_value(monkeyp
     """The streak reset (to 0) happens before the action dispatch, so the
     rejection must re-increment from the CAPTURED prior value (`previous_skips
     + 1`), not a bare `+= 1` off the just-reset 0 — otherwise a hopeless
-    agent's streak is pinned at 1 forever and the `_select_next_agent` damping
+    agent's streak is pinned at 1 forever and the `_select_agent` damping
     (`skips >= 3`) never engages."""
     lab = _lab()
     lab.state.consecutive_phase5_skips = 2

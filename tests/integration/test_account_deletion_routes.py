@@ -1,7 +1,7 @@
 """Route-level deletion guards (audit F7/F8, decision D6).
 
 The test DB is savepoint-isolated per test (tests/conftest.py::db_session), so
-each test starts from an empty users table and nothing here leaks across tests.
+nothing here leaks across tests.
 """
 import base64
 import json
@@ -38,7 +38,7 @@ def _auth(user_id) -> dict:
 def _auth_as(admin_id, impersonate_id) -> dict:
     """Admin session plus the copi-impersonate cookie.
 
-    Byte-identical to tests/integration/test_onboarding_flow.py:73 — the
+    Byte-identical to tests/integration/test_onboarding_flow.py:74 — the
     impersonate cookie is a PLAIN unsigned UUID (src/dependencies.py reads it
     with uuid.UUID(cookie_value), no signer).
     """

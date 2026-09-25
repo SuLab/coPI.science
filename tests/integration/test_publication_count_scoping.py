@@ -50,9 +50,8 @@ async def test_manager_pis_list_shows_the_scoped_count(client, db_session):
     assert resp.status_code == 200
     body = resp.text
     idx = body.index(str(pi.id))
-    # The scoped count (1 in-tenure paper) and the muted before-tenure marker
-    # both appear near this PI's row; the unscoped total (3) is not what is
-    # printed as the headline number.
+    # The scoped count (1 in-tenure paper) appears near this PI's row; the
+    # unscoped total (3) is not what is printed as the headline number.
     row = body[max(0, idx - 3000) : idx + 3000]
     # Operator decision 2026-09-22: pre-tenure papers are listed NOWHERE, so
     # the row carries the scoped count and no "+N before tenure" marker.

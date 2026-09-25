@@ -658,9 +658,10 @@ async def _execute_consult_specialist(
     # on success would let a flapping specialist run free.
     if on_api_call is not None:
         on_api_call()
-    # Filled by `on_stop_reason` below — a list rather than a scalar because the
-    # callback fires once per generate_agent_response invocation and a truncation
-    # retry makes two. Only the LAST one describes the text we were handed.
+    # Filled by `on_stop_reason` below — a list so the callback can append to it.
+    # generate_agent_response fires it exactly once, with the stop_reason of the
+    # reply whose text we were handed (the retry's, when a retry ran and returned;
+    # the first pass's `max_tokens` when the retry raised and its text was salvaged).
     stop_reasons: list[str] = []
     # Local import, matching the two other get_settings uses in this module.
     from src.config import get_settings

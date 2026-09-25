@@ -34,7 +34,7 @@ JSONB rather than reusing ``messages_json``: that column is ``json`` (not
 ``jsonb``, so not queryable without a cast) and it is the message contract read
 by src/services/assessment_detail.py — overloading it would couple two unrelated
 consumers. And a new column rather than a new TABLE, or one row per API call,
-because ``SimulationEngine._rebuild_state`` reconstructs ``api_call_count`` as a
+because ``SimulationEngine._rebuild_agent_state`` reconstructs ``api_call_count`` as a
 row ``COUNT(*)`` and the sliding-window limiter's ``call_times`` as one entry per
 row; live booking is one per turn (+1 on retry), so row-per-call would inflate
 both rebuilt ledgers and over-throttle every agent after every restart.

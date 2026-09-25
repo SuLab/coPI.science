@@ -69,9 +69,11 @@ async def slack_globally_enabled(db: AsyncSession) -> bool:
     """Whether Slack integration is on for this deployment.
 
     Explicit SLACK_ENABLED wins; otherwise auto-detect (on iff at least one
-    usable bot token exists anywhere). Used to gate secondary Slack posters
-    (the email→Slack relay, web-triggered posts) so they no-op in
-    DB-only mode. See specs/local-db-conversations.md.
+    usable bot token exists anywhere). It used to gate secondary Slack posters
+    (the email→Slack relay, web-triggered posts) so they no-op'd in DB-only
+    mode; both were removed with the PI-interaction engine (2026-08-12 removal
+    cycle; 855be6a / b40d04a), and
+    nothing in ``src/`` calls it now. See specs/local-db-conversations.md.
     """
     setting = get_settings().slack_enabled
     if setting is not None:

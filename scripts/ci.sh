@@ -7,7 +7,7 @@
 # Steps:
 #   1. Alembic sanity: exactly one head, no duplicate revision ids. Cheap, offline,
 #      and first because it catches the one class of breakage that a clean `git merge`
-#      and a fully green test suite both miss. See .notes/cohort-system-v2.md §14.
+#      and a fully green test suite both miss. See specs/cohort-system-v2.md §14.
 #   2. Alembic round trip: upgrade -> downgrade -> upgrade against a THROWAWAY
 #      Postgres that this step starts and destroys itself. On by default since
 #      2026-08-04; set CI_MIGRATION_DB=none to skip.
@@ -45,7 +45,7 @@ COV_MIN="${COV_MIN:-60}"
 # command the ratchet below runs, so the numbers are comparable: origin/main 292, this
 # branch's pre-repair tip (8515f65) 308, HEAD 260. Re-measured 2026-08-12 (final audit
 # wave, fix 8) with the same command: HEAD 249 — lowered from 260 to lock in the debt
-# already paid down by this wave.
+# already paid down by this wave. Lowered again, 249 -> 231, on 2026-08-13 (af5d652).
 #
 # LOWER THIS AS DEBT IS PAID; NEVER RAISE IT. Raising it to make a push go through is
 # precisely how those 16 findings got into admin.py in the first place — a ceiling that

@@ -342,8 +342,9 @@ PRIOR_THREADS_KEPT_PER_PAIR = 50
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
-# Old *closed* threads are left in the DB and hydrated on demand if a PI reopens
-# one (see _hydrate_thread_from_db). Sized to comfortably cover any active
+# Old *closed* threads are left in the DB. Nothing in the engine reopens one
+# since 23da58d (2026-08-13), so _hydrate_thread_from_db, which loads one on
+# demand, is reached only from tests. Sized to comfortably cover any active
 # conversation's lifetime.
 REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 
@@ -362,7 +363,8 @@ class _HeldVerdict(NamedTuple):
     reply CLOSED the thread, so no later turn exists and nothing may supersede
     it. ``slack_ts`` is the stored row's own link back to that reply, and the
     only handle ``_retire_superseded_verdict`` has for finding the row again —
-    ``opportunity_assessments`` carries no thread id of its own.
+    the row's ``thread_id`` cannot stand in for it (see
+    ``_superseded_row_filter``).
 
     ``announced`` records whether this verdict already produced an
     ``#assessments-summary`` headline. Deliberately separate from ``final``: a
@@ -426,9 +428,10 @@ class SimulationEngine:
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
         self._reset_cursors = reset_cursors
-        # True only for `--fresh`, which has just deleted this run's
-        # agent_messages/agent_channels rows. The engine has to KNOW that,
-        # because the DB wipe is only one of the ways prior state gets back in:
+        # True only for `--fresh`, which has just minted a new run with no
+        # agent_messages/agent_channels rows of its own (it deletes nothing —
+        # see main._open_fresh_run). The engine has to KNOW that, because the
+        # new run id is only one of the ways prior state is kept out:
         # the Slack transport still holds every message the workspace ever saw,
         # and both the startup reconcile and the live poller will happily
         # re-import it. See _restore_slack_state.
@@ -542,11 +545,13 @@ class SimulationEngine:
         # one-interview-one-assessment invariant still holds.
         #
         # Process-local on purpose. It is the same scope as the duplicates it
-        # prevents (every observed one came from a single process), and the only
-        # durable alternative is a join back through `agent_messages`, because
-        # `opportunity_assessments.slack_ts` is the REPLY's ts and the table
-        # carries no thread_id of its own. A restart mid-interview can therefore
-        # still let a second verdict through — but `max_thread_messages` closes a
+        # prevents (every observed one came from a single process). A restart
+        # used to leave it empty, because `opportunity_assessments.slack_ts` is
+        # the REPLY's ts and the table carried no thread_id of its own; since
+        # migration 0036 it does, and `_rehydrate_assessed_threads` rebuilds
+        # this map at startup. A row with a NULL `thread_id` (every pre-0036
+        # row) still cannot be placed, so a restart mid-interview can still let
+        # a second verdict through for one — but `max_thread_messages` closes a
         # thread the turn after it concludes, so there is normally no second
         # concluding turn to come back to.
         self._assessed_threads: dict[str, _HeldVerdict] = {}
@@ -571,7 +576,7 @@ class SimulationEngine:
         # _sync_profiles_from_disk.
         self._profile_mtimes: dict[str, float] = {}
 
-        # --- Cohort gate bookkeeping (.notes/cohort-system-v2.md) -------------
+        # --- Cohort gate bookkeeping (specs/cohort-system-v2.md) -------------
         # True once a recompute has actually applied a gate to at least one agent.
         self._cohort_gate_active: bool = False
         # Set to the preflight refusal reason while isolation is being forced off
@@ -720,7 +725,8 @@ class SimulationEngine:
         # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
         # failed at this: it bounded one turn's own fan-out, so N concurrent
         # turns gave N x cap concurrent requests (spec §6.3, ported test
-        # `test_the_fanout_bound_is_global_not_per_turn` below).
+        # `test_the_fanout_bound_is_global_not_per_turn` in
+        # tests/unit/test_reply_lane.py).
         self._reply_sem = asyncio.Semaphore(
             max(1, get_settings().reply_lane_max_in_flight)
         )
@@ -909,7 +915,7 @@ class SimulationEngine:
         # from the previous process get grandfathered and stale banked posts get
         # pruned. The loop's roster sync would also reach it (_last_roster_poll
         # starts at 0.0), but doing it here means no turn can ever run with an
-        # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
+        # unset gate while isolation is on. See specs/cohort-system-v2.md §8.
         await self._recompute_allowed_sender_ids()
         # Fail fast: a cohort layout that isn't star-shaped ({lab, hub} per lab,
         # no lab-to-lab cohort) makes the hub-and-spoke design unrunnable — a lab
@@ -1134,7 +1140,6 @@ class SimulationEngine:
                 except Exception:
                     logger.exception("Error during turn for %s", agent.agent_id)
 
-                # Update last_selected
                 agent.state.last_selected = time.time()
                 turn_count += 1
 
@@ -1160,7 +1165,7 @@ class SimulationEngine:
                 # just ran becomes ineligible for the delay while every other agent
                 # stays selectable. Sleeping the loop instead stalled Slack polling, DB
                 # ingestion and every other agent for one agent's cooldown.
-                # See .notes/cohort-system-v2.md §10.3.
+                # See specs/cohort-system-v2.md §10.3.
             finally:
                 await self._drain_and_flush()
 
@@ -1718,11 +1723,12 @@ class SimulationEngine:
 
     async def _dispatch_reply_lane(self) -> int:
         """Service every pending pair, concurrently, bounded by
-        ``reply_lane_max_in_flight`` (Task 13). Default is 1, which keeps
-        this behaviourally sequential — one pair fully serviced (thread lock
-        released, semaphore released) before the next one's own lock/
-        semaphore acquisition can succeed. Task 14 raises the default once
-        the adversarial concurrency tests exist.
+        ``reply_lane_max_in_flight`` (Task 13). At 1 this is behaviourally
+        sequential — one pair fully serviced (thread lock released, semaphore
+        released) before the next one's own lock/semaphore acquisition can
+        succeed. Task 14 raised the default to 4 once the adversarial
+        concurrency tests (tests/integration/test_concurrent_thread_safety.py)
+        were green.
 
         Phase 3 (thread activation) runs first for every agent, each guarded
         by its own try/except (fix round 2 — see below): nothing else calls
@@ -1759,7 +1765,7 @@ class SimulationEngine:
           within roughly one reply's worth of latency instead of first
           draining the whole sweep — worst case today is ~12 sequential Opus
           calls in a 12-interview star, well past the documented `docker stop
-          -t 30` grace period.
+          -t 420` grace period.
 
         Fix round 2 (task review):
         - **Ruling R10**: this function no longer touches
@@ -1832,9 +1838,10 @@ class SimulationEngine:
         # unprocessed messages "seen" on the strength of a pass that never
         # actually ran, a permanent silent loss of the same shape C2 was
         # added to prevent (see test_dispatch_isolates_one_agents_phase3_
-        # failure_from_the_others above, which only pins that OTHER agents
-        # keep working — it says nothing about the failed agent's own
-        # cursor). Collected here, consulted in the advance loop below.
+        # failure_from_the_others in tests/unit/test_reply_lane.py, which only
+        # pins that OTHER agents keep working — it says nothing about the
+        # failed agent's own cursor). Collected here, consulted in the advance
+        # loop below.
         failed_agent_ids: set[str] = set()
         for agent in self.agents.values():
             try:
@@ -2433,7 +2440,7 @@ class SimulationEngine:
                 # already been posted and no path re-attempts the artifact.
                 # _phase5_new_post carries the sizing history for this exact
                 # artifact (1000 truncated it "while leaving the Slack post
-                # looking complete") and sits at 2500; when Option A moved the
+                # looking complete") and sat at 2500; when Option A moved the
                 # sidecar here, this call was not raised to match. A ceiling is
                 # not a spend — a short pi_lab reply costs the same as before.
                 #
@@ -2514,11 +2521,12 @@ class SimulationEngine:
                 # Cooperative shutdown. `request_stop()` only flips `_running`,
                 # and the durable flush runs in main.py's finally — which needs
                 # the main loop to RETURN. This is the longest await in the whole
-                # engine (measured max 134s: up to max_tool_rounds real API
-                # calls), so without this a `docker stop` expired mid-turn and
-                # SIGKILLed before the flush, losing the in-flight turn's
-                # buffered log rows. Polling the flag here lets a stopping turn
-                # finish the round it already started and skip the rest.
+                # engine (measured max 134s: up to max_tool_rounds + 1
+                # tool-capable API calls plus a final one), so without this a
+                # `docker stop` expired mid-turn and SIGKILLed before the flush,
+                # losing the in-flight turn's buffered log rows. Polling the
+                # flag here lets a stopping turn finish the round it already
+                # started and skip the rest.
                 should_continue=lambda: self._running,
             )
 
@@ -3391,7 +3399,7 @@ class SimulationEngine:
 
                 # Real action — reset skip backoff. Capture the pre-reset value
                 # first: several rejection paths below need the TRUE streak, not
-                # the just-reset 0, to feed _select_next_agent's damping
+                # the just-reset 0, to feed _select_agent's damping
                 # (`skips >= 3`). Every remaining rejection path (unsupported
                 # action, post-type rejection, body-mention rejection) restores it
                 # correctly via `previous_skips + 1`.
@@ -3737,7 +3745,8 @@ class SimulationEngine:
         refusal and answers `None` rather than raising (see the check below).
         Called from _capture_hub_assessment right after a verdict is HELD —
         covers both the immediate fail (closes_thread) path and the pass path
-        symmetrically, since both funnel through that one call site.
+        symmetrically, since both funnel through that one call site — and from
+        _announce_owed_headline for an interview that ended un-announced.
 
         Rendering itself is delegated to `render_assessment_headline`
         (`src/services/assessment_headline.py`) so the engine and
@@ -4104,7 +4113,7 @@ class SimulationEngine:
         """Durably record what was announced on the run row's config.
 
         Reassigns the whole dict rather than mutating: SimulationRun.config is
-        a plain JSON column (src/models/agent_activity.py:66) with no mutation
+        a plain JSON column (src/models/agent_activity.py:65) with no mutation
         tracking, so an in-place update would silently not persist. Best-effort
         and never raises — the Slack posts already happened.
         """
@@ -4210,8 +4219,9 @@ class SimulationEngine:
             # The commonest cause is benign-but-worth-seeing: the verdict's
             # first DB write failed and the row is still on
             # `_pending_assessments`, invisible to this SELECT. That one still
-            # gets another chance — `stop()` re-derives the queue from
-            # `_assessed_threads` AFTER the final `_flush_pending_assessments`.
+            # gets another chance — `stop()` re-derives the queue from the
+            # database (`summary_posted_at IS NULL`, falling back to
+            # `_assessed_threads`) AFTER the final `_flush_pending_assessments`.
             # The rest (a row a cleanup removed, a thread that never got one) are
             # for `scripts/backfill_assessment_headlines.py`.
             logger.warning(
@@ -4494,7 +4504,7 @@ class SimulationEngine:
 
         # The engine can run without a database (see __init__) — in that mode
         # this is a silent no-op, matching every other run-scoped write in
-        # this class (e.g. _check_thread_outcome above, :1520 in the class).
+        # this class (e.g. _close_thread above, :2823 in the class).
         if not self.session_factory or not self.simulation_run_id:
             logger.debug(
                 "[%s] Skipping assessment persistence — no database configured",
@@ -4911,7 +4921,7 @@ class SimulationEngine:
             the same turn captured twice). A true duplicate, refused.
         See ``_assessed_threads`` for why the record is process-local.
 
-        ``concluding`` still matters, just not for admission: the caller uses it
+        ``closes_thread`` still matters, just not for admission: the caller uses it
         to decide whether the verdict is TERMINAL — which marks the held record
         ``final`` and is the only thing that releases the public
         ``#assessments-summary`` headline. A provisional verdict is stored and
@@ -4951,7 +4961,7 @@ class SimulationEngine:
         self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
         *, replacement_ordinal: int, replacement_id: uuid.UUID | None,
     ) -> None:
-        """Remove the provisional verdict a later concluding reply just replaced.
+        """Remove the provisional verdict a later reply's verdict just replaced.
 
         Last-write-wins needs both halves: without this, the later verdict lands
         and the earlier one STAYS, which is precisely the duplication production
@@ -5222,10 +5232,11 @@ class SimulationEngine:
         loudly by the caller, and a DB-less engine is a documented silent no-op
         everywhere).
 
-        The NULL-column case is not exotic: ``raw_verdict`` only arrived in
-        migration 0035, so EVERY row written before it stores NULL there. A
-        restart that rehydrates an older run hits this branch, not the
-        found-and-copied one.
+        The NULL-column case is rare but real: ``opportunity_assessments.
+        raw_verdict`` has been a nullable column since migration 0025 and every
+        engine writer has set it since then, so a NULL here means a row written
+        some other way (a hand-seeded or test row). Migration 0035 added
+        ``assessment_drops.raw_verdict``, not this column.
         """
         if not superseded.slack_ts:
             return None
@@ -5864,7 +5875,7 @@ class SimulationEngine:
         Phase 4 replies, Phase 5 posts, private-channel messages — rather than just
         the one call site Phase 5 used to have.
 
-        Three deliberate behaviours (.notes/cohort-system-v2.md §9):
+        Three deliberate behaviours (specs/cohort-system-v2.md §9):
 
         - The whole mention is removed and the surrounding whitespace normalised.
           Keeping the bare name ("Great point WisemanBot") reads like an addressed
@@ -6187,8 +6198,8 @@ class SimulationEngine:
         evidence of a gap either. It is recorded as the third state the column
         already anticipated: ``missing_domains=[]``.
 
-        True for a verdict no panel was owed for (a ``pass``): nothing to
-        verify is not the same as failing to verify.
+        True for a verdict no panel was owed for (a ``pass`` that also bands
+        ``pass``): nothing to verify is not the same as failing to verify.
         """
         return self._floor_unverifiable_reason(verdict, thread) is None
 
@@ -6300,9 +6311,9 @@ class SimulationEngine:
         )
         if not spec.targets:
             # A broadcast type addresses no one, so the tag is redundant — but
-            # redundant is not wrong. The hub posts its :mag: assessment into
-            # the PI's own channel and naming that PI is the natural thing to
-            # do; rejecting it would destroy the artifact and the whole
+            # redundant is not wrong. The hub used to post its :mag: assessment
+            # into the PI's own channel, where naming that PI was the natural
+            # thing to do; rejecting it would destroy the artifact and the whole
             # interview behind it over a field nothing routes on. Ignore a
             # REACHABLE tag; an unreachable one is still the dangling-ask bug.
             if normalized_tag and normalized_tag not in agent.allowed_sender_ids:
@@ -6801,7 +6812,7 @@ class SimulationEngine:
         #
         # Found by a real multi-turn run: the private-channel messages persisted with
         # visibility='public' while the AgentChannel row said collab_private.
-        # See .notes/cohort-system-v2.md §7.
+        # See specs/cohort-system-v2.md §7.
         visibility = self._resolve_channel_visibility(channel)
         sender_name = agent.bot_name if agent else f"{agent_id}Bot"
         root_ts: str | None = None
@@ -7055,7 +7066,7 @@ class SimulationEngine:
                 sections.append("")
             agent._lab_directory = "\n".join(sections) if sections else None
 
-    # Public alias. `_build_lab_directories` is called from three places whose
+    # Public alias. `_build_lab_directories` is called from several places whose
     # ordering relative to the cohort gate is the whole bug this name documents:
     # it must run AFTER _recompute_allowed_sender_ids, never before.
     def refresh_lab_directories(self) -> None:
@@ -7080,8 +7091,9 @@ class SimulationEngine:
         # Bound the load (B2): recent messages, plus the full history of any
         # thread that has no ThreadDecision (still undecided/active). Active-thread
         # reconstruction only needs undecided threads; old closed-thread bodies
-        # would just bloat RAM and startup. A PI reopening an old closed thread
-        # hydrates it on demand (_hydrate_thread_from_db).
+        # would just bloat RAM and startup. Nothing in the engine reopens an old
+        # closed thread since 23da58d; _hydrate_thread_from_db (reached only from
+        # tests) is what would load one on demand.
         recent_floor = time.time() - REBUILD_WINDOW_S
         closed_thread_ids_subq = sa_select(ThreadDecision.thread_id).where(
             ThreadDecision.simulation_run_id == self.simulation_run_id
@@ -7154,7 +7166,8 @@ class SimulationEngine:
         # picks up genuinely new web-written PI messages. Taken from MAX over the
         # whole run rather than the loaded rows: the rebuild is windowed (B2), and
         # the cursor's job is "don't replay what is already stored", which covers
-        # windowed-out rows too (a PI reopening one of those hydrates it instead).
+        # windowed-out rows too (nothing in the engine reopens one of those since
+        # 23da58d).
         await self._seed_pi_inbox_cursor()
         logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
 
@@ -7184,11 +7197,12 @@ class SimulationEngine:
     async def _hydrate_thread_from_db(self, thread_ts: str) -> None:
         """Load one thread's messages into the log if not already present.
 
-        The startup rebuild windows out old *closed*-thread bodies (B2), but a PI
-        can still reopen such a thread, and the reopen paths derive participants /
-        reply budget from the in-memory thread history. This pulls a specific
-        thread's full history on demand. Idempotent (load_entry dedups on ts) and
-        index-backed (run + message_ts/thread_ts).
+        The startup rebuild windows out old *closed*-thread bodies (B2). The PI
+        reopen path used to derive participants / reply budget from the in-memory
+        thread history and called this first; that path was removed in 23da58d
+        (2026-08-13), and no src/ code calls this now — only tests do. This pulls
+        a specific thread's full history on demand. Idempotent (load_entry dedups
+        on ts) and index-backed (run + message_ts/thread_ts).
         """
         if not self.session_factory or not self.simulation_run_id or not thread_ts:
             return
@@ -7434,7 +7448,7 @@ class SimulationEngine:
                 # at scale — B1). The bulk upsert can't cheaply tell inserts from
                 # updates, so total_messages is a recomputed count; slight
                 # staleness between refreshes is fine for a display counter.
-                # `total_api_calls`, four lines below, is NOT merely cosmetic any
+                # `total_api_calls`, set below, is NOT merely cosmetic any
                 # more — its units changed on 2026-08-22; see the comment there.
                 now = time.time()
                 if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
@@ -7969,7 +7983,7 @@ class SimulationEngine:
                     # Posting a note is not participating. Restoring a thread
                     # off one would resurrect, for the hub, an interview it had
                     # not yet said anything in — and would do it from an entry
-                    # that `get_thread_history` (used three lines down for the
+                    # that `get_thread_history` (used further down for the
                     # participant and pending-reply decisions) cannot see, so
                     # the two halves of this reconstruction would disagree.
                     continue
@@ -8197,7 +8211,7 @@ class SimulationEngine:
                 # call_times is a deque that try_reserve appends to (Task 9)
                 # AND that record_api_call's default (already_reserved=False)
                 # path also appends to (Ruling R5 — see that method's
-                # docstring; the six call sites that rely on this default are
+                # docstring; the seven call sites that rely on this default are
                 # never separately reserved, so record_api_call is the only
                 # place they are booked into the window at all), same
                 # shape as pending_proposals above — so a plain append here is
@@ -9308,17 +9322,9 @@ _PITCH_SOFT_LIMIT = 900
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
 # Task 7 / F3: the grouped (>= 1.3.0) key_points shape bounds each of the
-# three named groups individually rather than the flat 3-5 total above.
+# named groups individually rather than the flat 3-5 total above.
 _KEY_POINT_GROUP_MIN = 1
 _KEY_POINT_GROUP_MAX = 2
-#: Sidecar items 11/12 (scout_hub >= 1.5.0): the hub's own strengths/risks
-#: bullets — and, since 1.7.0, items 13/14 as well, `competitive_landscape`
-#: and `evidence_maturity`. All four share these bounds and are checked by the
-#: one loop in `_persist_assessment`.
-#: SOFT bounds, same policy as the key_points groups above — a
-#: contract violation is warned about and stored as emitted, never dropped
-#: for a count/length reason alone (only `normalize_bullets` itself drops the
-#: whole field, and only for a genuine shape violation).
 #: What counts as a CITATION in `elevator_pitch` for the drift alarm in
 #: `_persist_assessment`. Item 8 of phase4-thread-reply.md asks for the source
 #: "cited the way the lab's own public profile cites it (DOI or PubMed link)",
@@ -9329,6 +9335,14 @@ _PITCH_CITATION_RE = re.compile(
     r"https?://\S+|\bdoi:\s*\S+|\b10\.\d{4,9}/\S+|\bPMID:?\s*\d+",
     re.I,
 )
+#: Sidecar items 11/12 (scout_hub >= 1.5.0): the hub's own strengths/risks
+#: bullets — and, since 1.7.0, items 13/14 as well, `competitive_landscape`
+#: and `evidence_maturity`. All four share these bounds and are checked by the
+#: one loop in `_persist_assessment`.
+#: SOFT bounds, same policy as the key_points groups above — a
+#: contract violation is warned about and stored as emitted, never dropped
+#: for a count/length reason alone (only `normalize_bullets` itself drops the
+#: whole field, and only for a genuine shape violation).
 _HUB_BULLETS_MIN = 2
 _HUB_BULLETS_MAX = 4
 _HUB_BULLET_CHARS = 200

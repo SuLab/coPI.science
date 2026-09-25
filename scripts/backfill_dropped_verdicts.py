@@ -125,14 +125,14 @@ _MAX_LOOKBACK_SECONDS = 60.0
 def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
     """Exactly what ``_persist_assessment`` would have computed for this verdict.
 
-    STAGE-AWARE, and that is the whole point of routing through the rubric module
-    rather than doing the arithmetic here. Since v2.0.0 an incubation-stage
-    verdict is scored on the incubation weights and banded on the incubation
-    lines; everything else uses the investment scale. Both of the verdicts this
-    script exists to recover are incubation-stage, and scoring them on the
-    investment scale understates them — markham comes out at 2.84/conditional
+    Routed through the rubric module rather than doing the arithmetic here.
+    Under rubric v2.x that made it STAGE-AWARE: an incubation-stage verdict was
+    scored on the incubation weights and banded on the incubation lines;
+    everything else used the investment scale. Both of the verdicts this
+    script existed to recover were incubation-stage, and scoring them on the
+    investment scale understated them — markham came out at 2.84/conditional
     instead of 3.04/conditional, which is the wrong number to put in a corpus
-    other rows will be compared against.
+    other rows will be compared against. Rubric v3 has a single scale.
     """
     scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
     if not scores:
@@ -208,16 +208,16 @@ def _existing_assessment_for(
     just the existing row's. Checking only the existing row's left a gap —
     a drop with ``thread_id IS NULL`` against an existing (thread-keyed) row
     for the same subject fired neither clause, and a duplicate would be
-    written. Unreachable today (``_persist_assessment`` never writes
-    ``thread_id``, so nothing in this fallback's INPUT can have a real
-    thread_id... except a row THIS SCRIPT wrote, since fix round 1 wrote
-    ``thread_id=drop.thread_id`` — so this becomes reachable the moment two
-    recoverable drops for the same subject appear in one run and the first
-    one's drop happened to carry a thread_id while a later one's did not, or
-    the moment a later task teaches ``_persist_assessment`` to write
-    ``thread_id`` at all (plan task A2.4, out of scope here). Either way it
-    is this function's own invariant to hold, not something to leave
-    depending on what else happens to be true today.
+    written. Unreachable when this was written (``_persist_assessment`` did
+    not yet write ``thread_id``, so nothing in this fallback's INPUT could
+    have a real thread_id... except a row THIS SCRIPT wrote, since fix round
+    1 wrote ``thread_id=drop.thread_id`` — so this becomes reachable the
+    moment two recoverable drops for the same subject appear in one run and
+    the first one's drop happened to carry a thread_id while a later one's
+    did not). ``_persist_assessment`` now writes ``thread_id`` too, so it is
+    reachable from engine-written rows as well. Either way it is this
+    function's own invariant to hold, not something to leave depending on
+    what else happens to be true today.
 
     The fallback still requires an exact ``subject_agent_id`` match — never
     ``drop.thread_id is not None and row.thread_id != drop.thread_id`` for
@@ -397,11 +397,11 @@ def _build_assessment_row(
     also what lets ``_existing_assessment_for`` key a FUTURE re-run of this
     script on the interview instead of the PI (F1.3).
 
-    F1.1: reads ``suggested_derisking_milestones`` — the sidecar contract key
-    (``prompts/roles/scout_hub/phase4-thread-reply.md``) that
-    ``src/agent/simulation.py`` reads — not the ``derisking_milestones`` key
-    the pre-fix script read, which is a column name, not a verdict field, and
-    is never present on any real sidecar.
+    F1.1: reads ``suggested_derisking_milestones`` — the sidecar key the
+    pre-3.2.0 contract (``prompts/roles/scout_hub/phase4-thread-reply.md``)
+    defined and ``src/agent/simulation.py`` still reads — not the
+    ``derisking_milestones`` key the pre-fix script read, which is a column
+    name, not a verdict field, and is never present on any real sidecar.
 
     F1.2: never asserts a verified panel for a row the specialist floor never
     evaluated. ``missing_domains=[]`` is the documented UNVERIFIED state (see

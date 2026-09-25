@@ -1,6 +1,6 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of six write routes (design
-D1, amended 2026-09-10 by F2)."""
+an explicit, mechanically-enumerated allowlist of eight write routes (design
+D1, amended 2026-09-10 by F2 and 2026-09-11 by the two enrichment vetoes)."""
 
 import re
 import uuid

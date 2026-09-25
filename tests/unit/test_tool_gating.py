@@ -6,7 +6,7 @@ from src.agent.tools import execute_tool, tools_for_role
 def test_pi_lab_tool_list_excludes_hub_only_tools():
     names = {t["name"] for t in tools_for_role("pi_lab")}
     assert "retrieve_profile" in names
-    assert "search_prior_art" not in names  # true before Task 7; still true after
+    assert "search_prior_art" not in names
 
 
 @pytest.mark.asyncio

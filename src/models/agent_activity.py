@@ -1,4 +1,4 @@
-"""Agent activity models: SimulationRun, AgentMessage, AgentChannel, LlmCallLog, ThreadDecision, PrivateChannelMember."""
+"""Agent activity models: SimulationRun, AgentMessage, AgentChannel, LlmCallLog, ThreadDecision, PrivateChannelMember, PiDmMessage."""
 
 import uuid
 from datetime import datetime
@@ -101,7 +101,7 @@ class AgentMessage(Base):
     message_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     message_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    phase: Mapped[str] = mapped_column(String(30), nullable=False)  # scan, prune, thread_reply, new_post, etc.
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)  # thread_reply, new_post, panel_note, etc. (earlier code also wrote scan, prune)
     visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
     )  # denormalized from agent_channels.visibility; see specs/privacy-and-channel-visibility.md §G1/G2
@@ -195,7 +195,7 @@ class LlmCallLog(Base):
         nullable=False,
     )
     agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    phase: Mapped[str] = mapped_column(String(30), nullable=False)  # decide, respond, kickstart, memory
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)  # thread_reply, new_post, consult_<domain>, memory (earlier code: decide, respond, kickstart)
     channel: Mapped[str | None] = mapped_column(String(100), nullable=True)
     #: The interview thread this turn served, when the call site knows it
     #: (thread replies and specialist consults). Nullable and never
@@ -232,7 +232,7 @@ class LlmCallLog(Base):
     # NO LONGER HOLDS and must not be quoted: this comment used to say the
     # restart rebuild counted ROWS while live booking counted TURNS, so a split
     # would inflate both rebuilt ledgers. As of 68e35c6 neither half is true —
-    # `SimulationEngine._rebuild_state_from_db` sums
+    # `SimulationEngine._rebuild_agent_state` sums
     # `COALESCE(jsonb_array_length(call_stats), 1)` (simulation.py's
     # `_CALLS_PER_LOG_ROW`) for BOTH api_call_count and the limiter's
     # call_times, and live booking counts real API calls (`record_api_call`
@@ -449,9 +449,10 @@ class PiDmMessage(Base):
     removal, 2026-08-12): the model/table stay, but the engine-side pollers and
     handler that used to ingest inbound rows and act on them
     (SimulationEngine._poll_pi_dms_from_db, _poll_pi_dms, _seed_pi_dm_cursor,
-    src/agent/pi_handler.py) are gone. A row written here today (e.g. via the
-    web dashboard's DM form, src/routers/agent_page.py) is durable history only
-    — nothing in the running simulation reads it. See
+    src/agent/pi_handler.py) are gone, and so is the web dashboard's DM form
+    that wrote rows (src/routers/agent_page.py). Nothing in src/ writes the table
+    now; existing rows are durable history only — nothing in the running
+    simulation reads them. See
     specs/local-db-conversations.md.
     """
 
@@ -483,7 +484,7 @@ class PiDmMessage(Base):
     __table_args__ = (
         Index("ix_pi_dm_run_agent_posted", "simulation_run_id", "agent_id", "posted_at"),
         Index("ix_pi_dm_run_direction_posted", "simulation_run_id", "direction", "posted_at"),
-        # Backs the DM poller's created_at cursor (R3), as above.
+        # Backed the (now removed) DM poller's created_at cursor (R3), as above.
         Index("ix_pi_dm_run_direction_created", "simulation_run_id", "direction", "created_at"),
     )
 

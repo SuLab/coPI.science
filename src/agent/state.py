@@ -32,7 +32,7 @@ class ThreadState:
     # A grandfathered thread still gets Phase 4 replies so the conversation can
     # conclude, but it is barred from the reactive-priority tier so it cannot
     # outrank gate-compliant work. Cleared if the partner becomes permitted again.
-    # See .notes/cohort-system-v2.md §8.
+    # See specs/cohort-system-v2.md §8.
     grandfathered: bool = False
     # Whether the specialist floor (SimulationEngine._specialist_floor_gap) has
     # seen the GLOBAL SimulationEngine._specialist_consults map be non-empty at

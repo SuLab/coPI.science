@@ -13,9 +13,9 @@ Discipline (see the plan's "The Discipline"):
   * every absence assertion carries a positive control in the same test;
   * state is produced by driving the real route, not hand-built, wherever the
     route that produces it is itself under test;
-  * two known defects are pinned with ``xfail(strict=True)`` so the suite goes
-    red the day they are fixed and the assertion has to be flipped, instead of
-    quietly encoding a bug as expected behaviour.
+  * known defects were pinned with ``xfail(strict=True)`` so the suite went
+    red the day they were fixed and the assertion had to be flipped (all since
+    flipped, 02143de), instead of quietly encoding a bug as expected behaviour.
 """
 
 import base64
@@ -104,7 +104,8 @@ def slack(monkeypatch) -> _SlackRecorder:
     factory = lambda *a, **kw: _FakeWebClient(rec, **kw)  # noqa: E731
     monkeypatch.setattr("slack_sdk.WebClient", factory)
     # AgentSlackClient bound WebClient at import time, so patch that name too —
-    # it is the one `reopen_proposal`'s real-Slack branch uses to post guidance.
+    # it is the one `reopen_proposal`'s real-Slack branch used to post guidance
+    # (that branch is gone — see section 2).
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
     # services/slack_web.py is the web layer's Slack boundary and binds WebClient
     # at import time as well. Patching only `slack_sdk.WebClient` would leave the
@@ -451,8 +452,8 @@ async def test_reopen_never_creates_a_collab_private_channel(
     client, db_session, world, slack
 ):
     """Pin fix 9 directly: no collab_private channel, ever — guidance goes
-    straight into the origin thread's DB inbox instead (Slack is off for
-    `world`'s fictitious agents, so no Slack call either)."""
+    straight into the origin thread's DB inbox instead (the route has had no
+    Slack path since b40d04a, so no Slack call either)."""
     r = await _reopen(client, world, world.td, world.pi)
     assert r.status_code == 302, r.text
     assert await _private_channels(db_session) == [], (
@@ -1017,10 +1018,11 @@ async def thread_root(db_session, world) -> str:
     """A real thread ROOT belonging to OWNER_AGENT, for the
     /agent/{agent_id}/thread/{message_ts} authorization tests.
 
-    Not folded into `world` itself: several tests assert an exact,
-    unfiltered count of `AgentMessage` rows (e.g.
-    test_posting_an_empty_message_is_rejected), so a message seeded into the
-    shared fixture would silently change what they are counting. Without a
+    Not folded into `world` itself: the dashboard test asserts an exact count
+    of OWNER_AGENT's `AgentMessage` rows (e.g.
+    test_the_dashboard_counts_only_this_agents_activity_and_titles_the_proposal),
+    so a message seeded into the shared fixture would silently change what it
+    is counting. Without a
     ts that actually resolves, the owner's positive-control request would 404
     — which is not in the {200, 302} the authorization tests accept — and
     would mask a stranger's 403 test passing for the wrong reason.

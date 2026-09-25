@@ -204,7 +204,7 @@ async def _load_assignee(db: AsyncSession, assignee_user_id: uuid.UUID) -> User:
     """Load and validate a would-be assignee. 400, never a bare lookup
     failure: an unknown id, a PI, or a non-'allowed' account are all request
     errors, not server errors. Mirrors the last-admin guard's allowed-only
-    counting rationale (``admin.py:262-265``): a denied/pending account is
+    counting rationale (``admin.py:339-342``): a denied/pending account is
     not actually reachable to do the review, regardless of its role.
     """
     assignee = (
@@ -354,7 +354,7 @@ async def edit_review_feedback(
     # The form re-posts every dimension on each edit, so parsing unconditionally
     # and always passing the result through (even `{}`) is deliberate: a
     # dimension the reviewer cleared must actually clear on the row, not be
-    # left at its previous value. See edit_feedback's own docstring (Task 3).
+    # left at its previous value. See edit_feedback's own docstring.
     dimension_scores = _parse_dimension_scores(await request.form())
     try:
         await edit_feedback(
@@ -543,7 +543,7 @@ async def set_suggestion_status(
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    """Task 12: staff-set attribution only — never auto-applied, never touches
+    """Staff-set attribution only — never auto-applied, never touches
     the prompt files themselves. Redirects to the full literal detail path,
     never a bare-prefix constant (the same discipline
     ``_assessments_redirect`` documents), because there is no admin/manager

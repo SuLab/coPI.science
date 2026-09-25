@@ -347,7 +347,7 @@ async def test_proposal_review_unique_per_thread_and_agent(db_session):
 
 
 async def test_dat1_deleting_added_by_user_is_safe(db_session):
-    # Contrast: added_by_user_id is also SET NULL, but nulling it violates no
+    # Contrast: added_by_user_id stays SET NULL, but nulling it violates no
     # CHECK, so deleting an added_by user succeeds and the row survives.
     ch = await factories.make_agent_channel(db_session, visibility="collab_private")
     adder = await factories.make_user(db_session)

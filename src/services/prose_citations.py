@@ -216,9 +216,10 @@ def markdown_with_citation_links(text: object) -> object:
     Idempotent: a second pass sees only links whose visible text is
     ``cited paper``, which are left alone.
 
-    A non-string is returned unchanged rather than raising. Two call sites
+    A non-string is returned unchanged rather than raising. Several call sites
     feed these helpers raw JSONB elements (``key_points`` bullets, and the
-    hub's ``strengths``/``risks``), and the templates around them are
+    hub's ``strengths``/``risks``/``competitive_landscape``/
+    ``evidence_maturity``), and the templates around them are
     deliberately defensive about that column's shape — a model-written bullet
     that arrives as a number used to render as text and must not start
     500ing the page.

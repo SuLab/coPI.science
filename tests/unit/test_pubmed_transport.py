@@ -244,7 +244,7 @@ def test_every_timeout_class_is_retried():
         assert subclasses, f"{base.__name__} should have leaves to check"
         for cls in subclasses:
             assert issubclass(cls, pubmed._RETRYABLE_TRANSPORT), cls
-    # The four httpx names in 0.28.1 that this must catch, spelled out so a
+    # The httpx names in 0.28.1 that this must catch, spelled out so a
     # rename shows up as a failure here rather than as silence.
     for cls in (
         httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,

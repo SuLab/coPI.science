@@ -12,8 +12,9 @@ and nothing else was ever asked. Stages here:
 Identity gates, per the 2026-08-13 rehearsal's matcher (ported from
 ``scripts/generate_sparsedata_user.py``): every record must carry the PI as a
 named INDIVIDUAL author (surname + forename discrimination — "R Lara Green" is
-not "Rachel Green"); S4-only candidates additionally need the PI's OWN
-affiliation to match the searched institution. Consortium-only papers
+not "Rachel Green"); S4-only candidates, and bare-initial matches with no
+S1/S3 anchor, additionally need the PI's OWN affiliation to match the searched
+institution (or, from S4, to be absent — see ``resolve_corpus``). Consortium-only papers
 (CollectiveName, no individual match) are identity-correct but are not
 individual lab output and cannot consume cap slots (R1); records with neither
 an individual match nor a collective are withheld AND flagged, never silently

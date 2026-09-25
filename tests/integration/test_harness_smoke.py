@@ -9,7 +9,7 @@ async def test_container_is_migrated(engine):
         v = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         # Head-revision pin: bump it deliberately with each new migration. This is
         # the guard that catches a branch whose migration was renumbered late — see
-        # .notes/cohort-system-v2.md §14 for what a duplicate revision id costs.
+        # specs/cohort-system-v2.md §14 for what a duplicate revision id costs.
         # 0019-0021 db-primary-conversations, 0022 cohorts,
         # 0023 researcher_profiles synthesis provenance, 0024 agents.role column,
         # 0025 opportunity_assessments (BlackbirdBot screening verdicts),

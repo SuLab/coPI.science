@@ -90,8 +90,8 @@ async def test_a_truncated_reply_survives_a_retry_that_returns_nothing(
 ):
     # First call truncates but already carries usable text; the retry (fired
     # because of that truncation) comes back with none. `response_text =
-    # _all_text(retry_msg) or response_text` must keep the truncated text
-    # rather than clobber it with the retry's "" — that's the data-recovery
+    # retry_text if retry_text.strip() else response_text` must keep the
+    # truncated text rather than clobber it with the retry's "" — that's the data-recovery
     # half of the fix the sibling test above only covers the logging half of.
     fake = FakeAnthropic(responses=[
         multi_text_response("partial", stop_reason="max_tokens"),

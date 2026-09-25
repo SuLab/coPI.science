@@ -9,7 +9,7 @@ resurrected refused twice on their first turn and were abandoned, burning
 docs/audits/2026-08-22-run-8b64a0e0/README.md finding M2.
 
 The root cause was a split brain: `--fresh` was implemented entirely in
-`src/agent/main.py` (it deletes the rows and opens a new `SimulationRun`),
+`src/agent/main.py` (it deleted the rows and opened a new `SimulationRun`),
 while `SimulationEngine.start()` called `_rebuild_state_from_slack()`
 unconditionally. The engine was never told the run was fresh.
 
