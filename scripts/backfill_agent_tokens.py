@@ -1,19 +1,25 @@
-"""One-time backfill: copy each agent's Slack bot token from the legacy
-``.env`` / ``config.get_slack_tokens()`` mapping into the
+"""Backfill: copy each agent's Slack bot token from ``.env`` into the
 ``AgentRegistry.slack_bot_token`` DB column.
 
-The simulation now reads tokens from the DB column (so newly-activated agents go
-live without a restart). Run this once BEFORE deploying that change, or existing
-active agents will start with a null token and be skipped.
+The simulation reads tokens from the DB column (so newly-activated agents go
+live without a restart). ``scripts/provision_slack_bots.py`` writes each token
+to ``.env`` as ``SLACK_BOT_TOKEN_<AGENT_ID upper>``; this script imports them.
+
+Tokens are read from the process environment (``os.environ``, not
+``Settings``): ``Settings`` ignores undeclared keys, so a newly provisioned
+agent's key is visible only in the environment, where compose's ``env_file:``
+puts every ``.env`` key. The legacy ``config.get_slack_tokens()`` map is the
+fallback for an agent with no valid per-agent key (see ``env_token_for``).
 
 Idempotent: only fills rows whose ``slack_bot_token`` is currently null/blank,
 and only from a valid (non-placeholder) env token. Safe to re-run.
 
-Usage (inside the app container):
+Usage — a one-off container, not ``exec``: ``.env`` is read when a container is
+created, so a long-running container does not see keys added since it started:
 
-    docker compose exec app python scripts/backfill_agent_tokens.py
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py
     # preview only:
-    docker compose exec app python scripts/backfill_agent_tokens.py --dry-run
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py --dry-run
 """
 
 from __future__ import annotations
@@ -21,10 +27,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
-# Prefer the mounted project root over any baked-in copy of `src` in
+# Prefer the project root (``/app`` in the image) over any baked-in copy of `src` in
 # site-packages (the image installs src/ non-editable).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -42,6 +50,20 @@ def _valid(tok: str | None) -> bool:
     return bool(tok) and not tok.startswith("xoxb-placeholder")
 
 
+def env_token_for(agent_id: str, legacy: Mapping[str, str], environ: Mapping[str, str]) -> str:
+    """Return the env token for ``agent_id``, or ``""`` if none is known.
+
+    Prefers ``environ["SLACK_BOT_TOKEN_<AGENT_ID upper>"]`` (the key
+    ``provision_slack_bots.py`` writes) when it is valid; otherwise falls back
+    to ``legacy[agent_id]``. The fallback may itself be a placeholder, so the
+    caller still checks the result with ``_valid``.
+    """
+    tok = environ.get(f"SLACK_BOT_TOKEN_{agent_id.upper()}")
+    if _valid(tok):
+        return tok
+    return legacy.get(agent_id, "")
+
+
 async def main(dry_run: bool) -> None:
     settings = get_settings()
     env_tokens = settings.get_slack_tokens()
@@ -55,7 +77,7 @@ async def main(dry_run: bool) -> None:
             if _valid(a.slack_bot_token):
                 skipped_present += 1
                 continue
-            env_tok = env_tokens.get(a.agent_id, "")
+            env_tok = env_token_for(a.agent_id, env_tokens, os.environ)
             if not _valid(env_tok):
                 skipped_no_env += 1
                 continue

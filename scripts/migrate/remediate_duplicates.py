@@ -70,19 +70,19 @@ USAGE
 -----
 Dry run (default — writes nothing, in a READ ONLY transaction)::
 
-    docker compose exec -e PYTHONPATH=/app app \\
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app \\
         python scripts/migrate/remediate_duplicates.py
 
 Apply::
 
-    docker compose exec -e PYTHONPATH=/app app \\
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app \\
         python scripts/migrate/remediate_duplicates.py --apply --strategy keep-earliest
 
 ``PYTHONPATH=/app`` is REQUIRED and is not decoration. ``python <path>/x.py`` puts
 the *script's* directory on ``sys.path[0]``, not the repo root, so ``import src``
 resolves to the copy baked into the image at build time
-(``/usr/local/lib/python3.11/site-packages/src``) rather than the mounted
-``/app/src``. Verified inside ``copiscience-app-1``. The header this tool prints
+(``/usr/local/lib/python3.11/site-packages/src``) rather than the
+``/app/src`` tree. Verified inside ``copiscience-app-1``. The header this tool prints
 names the ``src/agent/ids.py`` it actually loaded, so you can see which copy you
 got, and it hard-fails if that copy's writer-slot scheme is not the one it
 expects.
@@ -182,7 +182,7 @@ def load_id_scheme() -> tuple[int, dict[int, str], str]:
         raise SchemeError(
             f"cannot import src.agent.ids ({exc}). Run this from the repo root, or "
             "inside the container with PYTHONPATH=/app:\n"
-            "  docker compose exec -e PYTHONPATH=/app app "
+            "  docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app "
             "python scripts/migrate/remediate_duplicates.py"
         ) from exc
 

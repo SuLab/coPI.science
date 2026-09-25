@@ -14,19 +14,19 @@ legacy ``.env`` mapping as a fallback.
 
 Usage:
     # See what would be deleted (safe):
-    docker compose exec app python3 scripts/wipe_slack.py \
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/wipe_slack.py \
         --workspace T0123ABCD --dry-run
 
     # Actually delete (asks for confirmation):
-    docker compose exec app python3 scripts/wipe_slack.py \
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/wipe_slack.py \
         --workspace T0123ABCD
 
     # Non-interactive delete + reset memories:
-    docker compose exec app python3 scripts/wipe_slack.py \
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/wipe_slack.py \
         --workspace T0123ABCD --yes --memory
 
     # Only reset working memories (no Slack access):
-    docker compose exec app python3 scripts/wipe_slack.py --memory-only
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/wipe_slack.py --memory-only
 """
 
 import argparse

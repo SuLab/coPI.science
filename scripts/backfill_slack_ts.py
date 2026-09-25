@@ -16,8 +16,10 @@ does not recognise is left NULL, which is now the truthful value.
 Run it once per deployment that has pre-Stage-6 history, BEFORE relying on the
 no-inference behaviour:
 
-    docker compose exec app python scripts/backfill_slack_ts.py            # report only
-    docker compose exec app python scripts/backfill_slack_ts.py --apply    # write
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app \\
+        python scripts/backfill_slack_ts.py            # report only
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app \\
+        python scripts/backfill_slack_ts.py --apply    # write
 
 Read-only against Slack; the only DB writes are ``slack_ts`` on rows Slack
 confirmed. Safe to re-run.

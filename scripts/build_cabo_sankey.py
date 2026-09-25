@@ -6,17 +6,19 @@ shares the single resumed simulation_run_id (date is the only way to isolate a
 window — see the window constants in src/routers/public.py).
 
 Run inside the app container (scripts/ isn't mounted — docker cp it in first):
-  docker compose cp scripts/build_cabo_sankey.py app:/app/scripts/
+  docker compose -f docker-compose.prod.yml cp scripts/build_cabo_sankey.py blackbird-app:/app/scripts/
 
   # Cabo run (defaults):
-  docker compose exec app python scripts/build_cabo_sankey.py
+  docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/build_cabo_sankey.py
 
   # Schultz alumni reunion window:
-  docker compose exec app python scripts/build_cabo_sankey.py \
+  docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/build_cabo_sankey.py \
       --start 2026-06-06 --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
 
 Output (sankey.html + sankey.png) lands in --out inside the container; retrieve
-with `docker compose cp app:/app/data/schultz_viz ./data/`.
+with `docker compose -f docker-compose.prod.yml cp blackbird-app:/app/data/schultz_viz "$HOME/schultz_viz"`.
+Not into the host's `./data/`: it is root-owned, and `blackbird-app` does not
+mount it (only `./profiles` and `./prompts`).
 """
 
 from __future__ import annotations

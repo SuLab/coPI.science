@@ -19,8 +19,8 @@ below the floor are audited but not persisted, so a human can review.
 
 Usage (runs inside the app container — needs DB + prompts + profiles):
 
-    docker compose cp scripts/generate_sparsedata_user.py app:/app/scripts/
-    docker compose exec app python scripts/generate_sparsedata_user.py \\
+    docker compose -f docker-compose.prod.yml cp scripts/generate_sparsedata_user.py blackbird-app:/app/scripts/
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/generate_sparsedata_user.py \\
         --file newuserlist02.tsv --force
 
 Outputs:

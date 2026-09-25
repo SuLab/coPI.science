@@ -19,15 +19,15 @@ Categories:
 
 Usage (runs inside the app container — needs DB + network):
     # Audit everyone (report only):
-    docker compose exec app python scripts/audit_pub_dois.py
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/audit_pub_dois.py
 
     # Audit + fix specific users by ORCID:
-    docker compose exec app python scripts/audit_pub_dois.py \\
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/audit_pub_dois.py \\
         --orcids 0000-0002-9943-7557 --fix
 
     # Audit + fix specific agents, or everyone:
-    docker compose exec app python scripts/audit_pub_dois.py --agents liu bollong --fix
-    docker compose exec app python scripts/audit_pub_dois.py --fix
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/audit_pub_dois.py --agents liu bollong --fix
+    docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/audit_pub_dois.py --fix
 """
 
 from __future__ import annotations
