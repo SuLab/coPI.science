@@ -1,14 +1,14 @@
-"""Slack token validity, source precedence, and the `slack_enabled` tri-state.
+"""Slack token validity and source precedence.
 
-These three decide whether the whole Slack integration is on, and which credential each
-agent uses. Nothing tested them directly before: `test_roster_sync.py` exercises
-`token_for_agent_row` incidentally, and the `slack_enabled` resolution in
-`src/agent/main.py` had no coverage at all.
+These decide which credential each agent uses, and whether the engine's Slack
+auto-detect sees a usable token. Nothing tested them directly before:
+`test_roster_sync.py` exercises `token_for_agent_row` incidentally.
 
-Why the token-shape table matters more than it looks: `slack_globally_enabled()`
-auto-detects Slack as ON from the mere *presence* of a "valid" token. So whatever
-`is_valid_token` accepts is what can silently switch the integration on — and then fail
-every API call.
+Why the token-shape table matters more than it looks: with `SLACK_ENABLED` unset,
+`src/agent/main.py` auto-detects Slack as ON from the mere *presence* of a "valid"
+token. So whatever `is_valid_token` accepts is what can silently switch the
+integration on — and then fail every API call. The inline tri-state in `main.py`
+itself (forced on, forced off, auto-detect) has no test.
 """
 
 import pytest
@@ -17,10 +17,8 @@ from src.config import Settings, get_settings
 from src.models import AgentRegistry
 from src.services.slack_tokens import (
     env_token,
-    get_agent_bot_token,
     get_any_bot_token,
     is_valid_token,
-    slack_globally_enabled,
     token_for_agent_row,
 )
 from tests import factories
@@ -87,11 +85,11 @@ _ALL_BOT_TOKEN_ENV = tuple(
 def _blank_all_bot_tokens(monkeypatch):
     """Make "no bot token is configured" actually true.
 
-    Two tests here assert that nothing usable exists, and they used to defend against
-    exactly one ambient value — ``monkeypatch.delenv("SLACK_BOT_TOKEN_SU")`` — while
-    ``Settings.get_slack_tokens()`` reads 124. They passed only because .env happened to
-    hold none of them. Provisioning two probe bots put real tokens in .env and both went
-    red, on a machine where the product was working fine.
+    A test that asserts nothing usable exists has to defend against every ambient
+    value, not one: ``monkeypatch.delenv("SLACK_BOT_TOKEN_SU")`` alone was the old
+    defence, while ``Settings.get_slack_tokens()`` reads 124. That passed only because
+    .env happened to hold none of them. Provisioning two probe bots put real tokens in
+    .env and the tests went red, on a machine where the product was working fine.
 
     ``delenv`` cannot fix it either: pydantic-settings reads the .env *file*, so removing
     a process env var leaves the file value in place. An empty env var does override the
@@ -139,28 +137,11 @@ def test_env_token_for_an_unknown_agent_is_none():
 
 
 @pytest.mark.integration
-async def test_get_agent_bot_token_reads_the_db_then_env(db_session, monkeypatch):
-    user = await factories.make_user(db_session, email="su-tok@example.org")
-    agent = await factories.make_agent(
-        db_session, user=user, agent_id="su", bot_name="SuBot", pi_name="PI Su",
-        status="active", slack_bot_token="xoxb-db-value",
-    )
-    await db_session.flush()
-    monkeypatch.setenv("SLACK_BOT_TOKEN_SU", "xoxb-env-value")
-    _clear_settings_cache()
-    try:
-        assert await get_agent_bot_token(db_session, "su") == "xoxb-db-value"
-        agent.slack_bot_token = None
-        await db_session.flush()
-        assert await get_agent_bot_token(db_session, "su") == "xoxb-env-value"
-    finally:
-        _clear_settings_cache()
-
-
-@pytest.mark.integration
 async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
-    """A placeholder row must not satisfy 'any usable token' — that is what
-    auto-detect keys on, so a placeholder would switch Slack on for the deployment."""
+    """A placeholder row must not satisfy 'any usable token'. The web tier's
+    workspace-wide lookups (delegate names, users.lookupByEmail, provisioning's team
+    lookup) use whatever this returns, so a placeholder would reach Slack as a
+    credential."""
     _blank_all_bot_tokens(monkeypatch)
     _clear_settings_cache()
     try:
@@ -177,61 +158,6 @@ async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
         assert await get_any_bot_token(db_session) == "xoxb-real"
     finally:
         _clear_settings_cache()
-
-
-# --- the slack_enabled tri-state (mirrors src/agent/main.py:226-231) ---------------
-
-
-ENABLED_CASES = [
-    # (name, settings value, a usable token exists, expected)
-    ("forced off, token present", False, True, False),
-    ("forced off, no token", False, False, False),
-    ("forced on, no token", True, False, True),
-    ("forced on, token present", True, True, True),
-    ("auto, no token", None, False, False),
-    ("auto, token present", None, True, True),
-]
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("name,setting,has_token,expected", ENABLED_CASES,
-                         ids=[c[0] for c in ENABLED_CASES])
-async def test_slack_globally_enabled_tri_state(
-    db_session, monkeypatch, name, setting, has_token, expected
-):
-    _blank_all_bot_tokens(monkeypatch)
-    if setting is None:
-        monkeypatch.delenv("SLACK_ENABLED", raising=False)
-    else:
-        monkeypatch.setenv("SLACK_ENABLED", "true" if setting else "false")
-    _clear_settings_cache()
-    if setting is None:
-        # `delenv` cannot make "auto" true on this host: pydantic-settings falls
-        # back to the .env *file* when the process env var is absent, and the
-        # deployed .env sets SLACK_ENABLED=true. Absence of an env var is not
-        # expressible through the env layer, so pin the resolved attribute
-        # directly — the one lever that actually forces auto-detect.
-        monkeypatch.setattr(get_settings(), "slack_enabled", None)
-    try:
-        if has_token:
-            u = await factories.make_user(db_session, email=f"{name[:8]}@example.org")
-            await factories.make_agent(
-                db_session, user=u, agent_id="su", bot_name="SuBot",
-                status="active", slack_bot_token="xoxb-real",
-            )
-            await db_session.flush()
-        assert await slack_globally_enabled(db_session) is expected, name
-    finally:
-        _clear_settings_cache()
-
-
-def test_enabled_cases_cover_all_three_branches():
-    """Control: the table must exercise forced-on, forced-off AND auto-detect, and
-    auto-detect must appear with both outcomes. Otherwise a resolver that ignored the
-    setting, or one that ignored the tokens, would pass."""
-    assert {c[1] for c in ENABLED_CASES} == {True, False, None}
-    auto = {c[3] for c in ENABLED_CASES if c[1] is None}
-    assert auto == {True, False}, "auto-detect is only tested in one direction"
 
 
 # --- secret redaction over the fields that exist today ----------------------------

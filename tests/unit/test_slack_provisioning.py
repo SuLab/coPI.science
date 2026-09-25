@@ -9,7 +9,9 @@ bot that provisions cleanly, connects cleanly, and then fails one specific API c
 runtime — and fixing it needs a manifest change *and* a manual reinstall of every bot.
 """
 
+import ast
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -32,43 +34,114 @@ class _Resp:
 
 # --- the manifest -------------------------------------------------------------------
 
-# Every Slack API method the codebase calls, and the bot scope it needs. Derived by
-# grepping src/ for `client.<method>` — see the Surface Inventory in
-# .notes/slack-integration-test-plan.md.
+# Every Slack API method the bots call, and the bot scope it needs, per Slack's method
+# reference (https://docs.slack.dev/reference/methods). "Every" is enforced, not
+# asserted: test_method_scope_table_matches_the_methods_src_calls collects the method
+# names from the two modules allowed to import slack_sdk and compares them with these
+# keys, less the parenthesised qualifier. A qualifier splits one method whose scope
+# depends on the channel type.
 METHOD_SCOPES = {
     "auth.test": None,                                  # no scope required
+    # "No scopes required": https://docs.slack.dev/reference/methods/auth.revoke
+    # (slack_web.revoke_token, the account-deletion teardown).
+    "auth.revoke": None,
+    # A user id as `channel` needs chat:write alone, not im:write:
+    # https://docs.slack.dev/reference/methods/chat.postMessage
     "chat.postMessage": "chat:write",
     "chat.delete": "chat:write",
+    # "No scopes required": https://docs.slack.dev/reference/methods/chat.getPermalink
+    # (AgentSlackClient's permalink lookup for the #assessments-summary headline).
+    "chat.getPermalink": None,
+    # Public only: no caller lists private channels, so groups:read is not requested
+    # (https://docs.slack.dev/reference/scopes/groups.read).
     "conversations.list (public)": "channels:read",
-    "conversations.list (private)": "groups:read",
     "conversations.create (public)": "channels:manage",
-    "conversations.create (private)": "groups:write",
     "conversations.join": "channels:join",
-    "conversations.invite (private)": "groups:write",
     "conversations.history (public)": "channels:history",
+    # The engine still reads collab_private channels: _sync_private_channels_from_db
+    # (src/agent/simulation.py) loads the ones the web-UI reopen flow created, and the
+    # main-loop poll covers "seeded channels plus any collab_private channels tracked".
     "conversations.history (private)": "groups:history",
     "conversations.replies (public)": "channels:history",
-    "conversations.open": "im:write",
-    "conversations.history (dm)": "im:history",
     "users.info": "users:read",
     "users.lookupByEmail": "users:read.email",
 }
+
+# The two modules test_slack_boundary.py allows to import slack_sdk, and the call that
+# names a Slack method in each: the method is a string argument, spelled the way
+# slack_sdk spells its WebClient attribute (`users_lookupByEmail`).
+_REPO = Path(__file__).resolve().parents[2]
+_SLACK_CLIENT = _REPO / "src" / "agent" / "slack_client.py"
+_SLACK_WEB = _REPO / "src" / "services" / "slack_web.py"
+
+
+def _methods_called() -> dict[str, set[str]]:
+    """Slack method names (``users.lookupByEmail`` form) each module passes to its
+    call helper, collected from the AST: ``self._api``/``self._paginate`` in
+    slack_client.py (first argument) and ``_call(<client>, "…")`` in slack_web.py
+    (second argument). A non-literal argument, such as ``_paginate`` forwarding its
+    own ``method``, is skipped: the literal it forwards is collected at its caller."""
+    found: dict[str, set[str]] = {}
+    for path, pick in (
+        (_SLACK_CLIENT, lambda c: (
+            c.args[0] if isinstance(c.func, ast.Attribute)
+            and c.func.attr in ("_api", "_paginate")
+            and isinstance(c.func.value, ast.Name) and c.func.value.id == "self"
+            and c.args else None)),
+        (_SLACK_WEB, lambda c: (
+            c.args[1] if isinstance(c.func, ast.Name) and c.func.id == "_call"
+            and len(c.args) >= 2 else None)),
+    ):
+        names = set()
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if not isinstance(node, ast.Call):
+                continue
+            arg = pick(node)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                names.add(arg.value.replace("_", ".", 1))
+        found[path.name] = names
+    return found
+
+
+def test_method_scope_table_matches_the_methods_src_calls():
+    """METHOD_SCOPES is only as good as its coverage. A method the code calls that the
+    table lacks is a scope nobody checked; a row for a method nothing calls keeps a
+    scope in BOT_SCOPES that no bot uses."""
+    found = _methods_called()
+    # Control: each module yields its known calls, so a scan that matched nothing (a
+    # renamed helper, a moved file) fails here rather than comparing two empty sets.
+    assert "chat.postMessage" in found["slack_client.py"], found
+    assert "auth.revoke" in found["slack_web.py"], found
+    called = set().union(*found.values())
+    tabled = {k.split(" (")[0] for k in METHOD_SCOPES}
+    assert tabled == called, (
+        f"called but not in METHOD_SCOPES: {sorted(called - tabled)}; "
+        f"in METHOD_SCOPES but never called: {sorted(tabled - called)}"
+    )
 
 
 def test_manifest_requests_every_scope_the_client_actually_needs():
     """The invariant that keeps provisioning honest.
 
-    AgentSlackClient exposes create_private_channel() and invite_to_channel(); the
-    private-channel migration that called both is gone, but both still need
-    `groups:write`. A scope absent here
-    is invisible until the one call that needs it fails at runtime with missing_scope,
-    on a bot that otherwise looks perfectly healthy.
+    A scope absent from BOT_SCOPES is invisible until the one call that needs it fails
+    at runtime with missing_scope, on a bot that otherwise looks perfectly healthy.
     """
     needed = {s for s in METHOD_SCOPES.values() if s}
     missing = sorted(needed - set(BOT_SCOPES))
     assert not missing, (
         f"BOT_SCOPES is missing {missing}. Methods that need them: "
         + ", ".join(m for m, s in METHOD_SCOPES.items() if s in missing)
+    )
+
+
+def test_manifest_requests_no_scope_nothing_needs():
+    """The other direction: every scope a bot is granted is one more thing its token
+    can do if it leaks, so BOT_SCOPES asks for exactly what METHOD_SCOPES needs."""
+    needed = {s for s in METHOD_SCOPES.values() if s}
+    assert len(BOT_SCOPES) == len(set(BOT_SCOPES)), "BOT_SCOPES lists a scope twice"
+    assert set(BOT_SCOPES) == needed, (
+        f"requested but needed by no method: {sorted(set(BOT_SCOPES) - needed)}; "
+        f"needed but not requested: {sorted(needed - set(BOT_SCOPES))}"
     )
 
 

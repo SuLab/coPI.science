@@ -21,13 +21,14 @@ def is_valid_token(token: str | None) -> bool:
     """True for a value that could plausibly be a Slack **bot** token.
 
     Every caller passes a bot token, and Slack bot tokens are always ``xoxb-``. The
-    prefix check is not cosmetic: ``slack_globally_enabled()`` auto-detects Slack as ON
-    from the mere *presence* of a valid-looking token, so whatever this accepts is what
-    can switch the whole integration on. Before the prefix check, a user token
-    (``xoxp-``), an app-config token (``xoxe.xoxp-`` — which lives in the same ``.env``
-    as the bot tokens), a stray ``"   "``, or an unfilled ``REPLACE_ME`` all counted as
-    "usable", flipping Slack on and then failing every API call with ``invalid_auth``
-    or ``not_allowed_token_type``.
+    prefix check is not cosmetic. Whatever this accepts is what ``token_for_agent_row``
+    and ``get_any_bot_token`` hand out, and what the engine's ``slack_enabled``
+    auto-detect in ``src/agent/main.py`` counts: with ``SLACK_ENABLED`` unset, the mere
+    *presence* of a valid-looking token switches the whole integration on. Before the
+    prefix check, a user token (``xoxp-``), an app-config token (``xoxe.xoxp-`` — which
+    lives in the same ``.env`` as the bot tokens), a stray ``"   "``, or an unfilled
+    ``REPLACE_ME`` all counted as "usable", flipping Slack on and then failing every
+    API call with ``invalid_auth`` or ``not_allowed_token_type``.
 
     ``xoxb-placeholder`` remains a recognised no-op value for seeded rows.
     """
@@ -49,36 +50,6 @@ def token_for_agent_row(agent: AgentRegistry) -> str | None:
     if is_valid_token(agent.slack_bot_token):
         return agent.slack_bot_token
     return env_token(agent.agent_id)
-
-
-async def get_agent_bot_token(db: AsyncSession, agent_id: str) -> str | None:
-    """Token for a specific agent_id: DB column first, then ``.env`` fallback."""
-    tok = (
-        await db.execute(
-            select(AgentRegistry.slack_bot_token).where(
-                AgentRegistry.agent_id == agent_id
-            )
-        )
-    ).scalar_one_or_none()
-    if is_valid_token(tok):
-        return tok
-    return env_token(agent_id)
-
-
-async def slack_globally_enabled(db: AsyncSession) -> bool:
-    """Whether Slack integration is on for this deployment.
-
-    Explicit SLACK_ENABLED wins; otherwise auto-detect (on iff at least one
-    usable bot token exists anywhere). It used to gate secondary Slack posters
-    (the email→Slack relay, web-triggered posts) so they no-op'd in DB-only
-    mode; both were removed with the PI-interaction engine (2026-08-12 removal
-    cycle; 855be6a / b40d04a), and
-    nothing in ``src/`` calls it now. See specs/local-db-conversations.md.
-    """
-    setting = get_settings().slack_enabled
-    if setting is not None:
-        return setting
-    return await get_any_bot_token(db) is not None
 
 
 async def get_any_bot_token(db: AsyncSession) -> str | None:

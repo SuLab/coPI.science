@@ -41,6 +41,7 @@ from src.models import (
     ProposalReview,
     ResearcherProfile,
 )
+from src.services.slack_tokens import is_valid_token
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -109,41 +110,28 @@ def slack(monkeypatch) -> _SlackRecorder:
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
     # services/slack_web.py is the web layer's Slack boundary and binds WebClient
     # at import time as well. Patching only `slack_sdk.WebClient` would leave the
-    # routes' user lookups and channel listing talking to the real workspace.
+    # routes' user lookups talking to the real workspace.
     monkeypatch.setattr("src.services.slack_web.WebClient", factory)
     return rec
 
 
 @pytest.fixture(autouse=True)
-def _slack_enabled_auto_detect(monkeypatch):
-    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py):
-    unset (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
-    deployed .env on this host forces.
+def _no_env_bot_tokens(monkeypatch):
+    """Keep this host's ``.env`` bot tokens out of every route under test.
 
-    Without this, a populated .env with SLACK_ENABLED=true forces the real-Slack
-    branch of `reopen_proposal` even for `world`'s fictitious agents (`tstowner`,
-    `tstother`), which have no token anywhere — the route then 500s with "No bot
-    token available". Auto-detect is this suite's actual premise: a test that
-    wants Slack ON gives its own agent a token (e.g.
-    ``world.agent.slack_bot_token = "xoxb-fake-for-tests"``), which is what
-    auto-detect keys on either way.
-
-    ``get_slack_tokens`` is also stubbed to empty (fix 9, 2026-08-12 final audit
-    wave). ``slack_globally_enabled`` -- read by `reopen_proposal`'s now-only
-    code path -- is a WORKSPACE-wide auto-detect (`get_any_bot_token`): true if
-    *any* agent, real roster slug included, has a usable token, in the DB or in
-    ``.env``. The fictitious `tstowner`/`tstother` ids dodge the *per-agent*
-    lookups (`token_for_agent_row`, `env_token`) but not this one — a dev host
-    with a real live-tier ``.env`` (e.g. ``SLACK_BOT_TOKEN_WISEMAN`` set for the
-    live tier) makes `slack_globally_enabled` true regardless, sending these
-    tests down the real-Slack branch and 500ing on "No bot token available"
-    for an agent that was never meant to have one. Stubbing it to ``{}`` keeps
-    the Slack on/off answer keyed on what these tests actually control: DB rows
-    and each test's own `world.agent.slack_bot_token`.
+    ``Settings.get_slack_tokens()`` is the legacy ``.env`` fallback behind both
+    ``env_token`` (per agent, via ``token_for_agent_row``) and ``get_any_bot_token``
+    (workspace-wide: the first valid token of ANY agent, DB rows first, then
+    ``.env``). The fictitious `tstowner`/`tstother` ids dodge the per-agent lookup but
+    not the workspace-wide one, so a dev host with a real live-tier ``.env`` (e.g.
+    ``SLACK_BOT_TOKEN_WISEMAN`` set for the live tier) would hand the dashboard's
+    delegate-name lookup a real token, and it would call the real workspace. Stubbed
+    to ``{}``, the only tokens a route can find are the DB rows and a test's own
+    ``world.agent.slack_bot_token``. Pinned by
+    ``test_env_bot_tokens_never_reach_the_delegate_lookup``.
     """
     from src.config import Settings
 
-    monkeypatch.setattr(get_settings(), "slack_enabled", None)
     # A class-level patch, not an instance one: Settings is a pydantic model, and
     # only declared fields can be set per-instance (an instance-level
     # ``get_slack_tokens`` assignment raises "object has no field").
@@ -616,10 +604,11 @@ async def test_a_pi_review_is_recorded_and_cannot_be_submitted_twice(
     assert review.reviewed_by_user_id == world.pi.id
 
     r2 = await client.post(url, data={"rating": "4"}, headers=_auth(world.pi.id))
-    assert r2.status_code == 400
+    assert r2.status_code == 302
+    assert r2.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
     assert len(await _reviews(db_session, OWNER_AGENT)) == 1
 
-    # Control: a second proposal is still reviewable, so the 400 is the
+    # Control: a second proposal is still reviewable, so the redirect is the
     # already-reviewed guard rather than a route that broke after one write.
     td2 = await factories.make_thread_decision(
         db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
@@ -901,6 +890,43 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     page2 = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
     assert "paused from initiating new posts" not in page2.text
     assert "A shared assay platform" in page2.text
+
+
+async def test_env_bot_tokens_never_reach_the_delegate_lookup(
+    client, db_session, world, slack, monkeypatch, request
+):
+    """The dashboard resolves Slack-only delegate names with ``get_any_bot_token``,
+    whose ``.env`` fallback `_no_env_bot_tokens` must keep shut. With a valid env token
+    set and no usable DB token anywhere, the page must make no Slack call and show
+    the raw id."""
+    monkeypatch.setenv("SLACK_BOT_TOKEN_SU", "xoxb-env-token-that-must-not-be-used")
+    get_settings.cache_clear()
+
+    # This finalizer can run before monkeypatch undoes the env var, so it drops the var
+    # itself: a Settings rebuilt in between would otherwise cache the fake token for the
+    # rest of the session (tests/conftest.py never clears the cache).
+    def _restore():
+        monkeypatch.delenv("SLACK_BOT_TOKEN_SU", raising=False)
+        get_settings.cache_clear()
+
+    request.addfinalizer(_restore)
+    # Control: the env token really is configured, so only the stub keeps it out.
+    assert get_settings().slack_bot_token_su == "xoxb-env-token-that-must-not-be-used"
+
+    world.agent.delegate_slack_ids = ["U1"]
+    await db_session.flush()
+    # get_any_bot_token walks EVERY agent row before the .env fallback, so no row in
+    # the database may hold a usable token, not just the owner's.
+    db_tokens = (await db_session.execute(select(AgentRegistry.slack_bot_token))).scalars()
+    assert not any(is_valid_token(t) for t in db_tokens)
+
+    page = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
+    assert page.status_code == 200
+    assert "users_info" not in slack.methods, slack.calls
+    # The Slack-only delegate is listed under its raw id, the no-token fallback.
+    assert re.search(r'font-medium text-gray-700">U1<', page.text), (
+        "the Slack-only delegate was not rendered under its raw id"
+    )
 
 
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(

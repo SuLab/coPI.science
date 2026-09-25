@@ -10,7 +10,10 @@ unsplit bodies that Slack silently chunked.
 
 This module is the second half of that boundary. `tests/unit/test_slack_boundary.py`
 asserts that `slack_sdk` is imported in exactly two modules, so a ninth bypass is
-a failing test rather than a defect discovered in production.
+a failing test rather than a defect discovered in production. Every function left
+here is a single, unpaginated call that posts nothing, so what this half supplies
+is ``_call``'s retry; pagination and message splitting live only in the agent
+client.
 
 The core is synchronous, because ``slack_sdk.WebClient`` is and because one route
 helper has no event loop. **Async callers must use the ``_async``
@@ -28,14 +31,6 @@ from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
-from src.agent.slack_client import (
-    MAX_PAGES,
-    SLACK_MAX_TEXT_CHARS,
-    SLACK_PAGE_LIMIT,
-    SlackListingIncomplete,
-    split_for_slack,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +55,9 @@ _TERMINAL = frozenset({
 })
 
 __all__ = [
-    "SlackListingIncomplete",
     "get_user_info",
-    "get_user_info_async",
-    "join_channel",
-    "join_channel_async",
-    "list_channel_ids",
-    "list_channel_ids_async",
     "lookup_user_by_email",
     "lookup_user_by_email_async",
-    "post_message",
-    "post_message_async",
     "revoke_token",
     "revoke_token_async",
 ]
@@ -125,61 +112,6 @@ def _call(client: WebClient, method: str, **kwargs: Any) -> Any:
     raise last
 
 
-def list_channel_ids(
-    token: str,
-    *,
-    include_private: bool = True,
-    exclude_archived: bool = False,
-) -> dict[str, str]:
-    """Every channel the token can see, as ``{name: id}``. Fully paginated.
-
-    Raises ``SlackListingIncomplete`` carrying ``.partial`` rather than returning
-    a subset that looks whole — a subset is what makes a caller conclude a channel
-    does not exist when it is merely on page two.
-
-    ``exclude_archived`` defaults to False because the callers that ask "does this
-    name exist" must count archived channels: an archived channel still owns its
-    name. Pass True when the answer feeds an action that archived channels cannot
-    take, such as joining.
-    """
-    types = "public_channel,private_channel" if include_private else "public_channel"
-    out: dict[str, str] = {}
-    cursor = ""
-    seen: set[str] = set()
-    client = _client(token)
-
-    for page in range(MAX_PAGES):
-        call: dict[str, Any] = {
-            "types": types,
-            "limit": SLACK_PAGE_LIMIT,
-            "exclude_archived": exclude_archived,
-        }
-        if cursor:
-            call["cursor"] = cursor
-        try:
-            result = _call(client, "conversations_list", **call)
-        except SlackApiError as exc:
-            if page == 0:
-                raise
-            raise SlackListingIncomplete(
-                "conversations.list", out,
-                f"page {page + 1} failed: {_error_code(exc) or exc}",
-            ) from exc
-
-        for ch in result.get("channels") or []:
-            out[ch["name"]] = ch["id"]
-
-        cursor = ((result.get("response_metadata") or {}).get("next_cursor") or "").strip()
-        if not cursor:
-            return out
-        if cursor in seen:
-            raise SlackListingIncomplete(
-                "conversations.list", out, f"Slack repeated cursor {cursor!r}")
-        seen.add(cursor)
-
-    raise SlackListingIncomplete("conversations.list", out, f"exceeded {MAX_PAGES} pages")
-
-
 def lookup_user_by_email(token: str, email: str) -> str | None:
     """Slack user id for an email, or None when Slack has no such user."""
     try:
@@ -200,68 +132,6 @@ def get_user_info(token: str, user_id: str) -> dict[str, Any] | None:
             return None
         raise
     return result.get("user") or None
-
-
-def join_channel(token: str, channel_id: str) -> None:
-    """Join a channel. ``already_in_channel`` is success, not failure."""
-    try:
-        _call(_client(token), "conversations_join", channel=channel_id)
-    except SlackApiError as exc:
-        if _error_code(exc) == "already_in_channel":
-            return
-        raise
-
-
-def post_message(
-    token: str,
-    channel: str,
-    text: str,
-    *,
-    thread_ts: str | None = None,
-) -> list[dict[str, Any]]:
-    """Post ``text``, split so no chunk exceeds Slack's limit.
-
-    Returns one record per Slack message actually created. Callers that persist
-    what they posted must write one row per returned record, or the DB and Slack
-    disagree about how many messages exist — measured live at >4000 characters,
-    where Slack silently splits and returns only the last ts.
-
-    **This function does NOT apply ``markdown_to_mrkdwn``**, unlike the agent
-    transport (``src/agent/slack_client.py::_post_one``). It therefore does not
-    carry the 2026-09-14 approximation-tilde neutralization either, so a caller
-    that posts model-authored prose through here can still publish a
-    ``~…~`` pair that Slack renders struck through. Left as-is deliberately:
-    this function has NO caller in ``src/`` today (verified 2026-09-14 — every
-    live Slack post goes through the agent transport), so converting here would
-    change behaviour for a hypothetical future caller with nothing exercising
-    it, including for one that passes text already in mrkdwn. If you wire a
-    caller that posts prose a model wrote, convert it first.
-
-    ``thread_ts`` exists because two callers posted *threaded* replies — the
-    legacy PI-guidance path in ``routers/agent_page.py`` and its email
-    equivalent in ``services/email_inbound.py``, both since removed with the
-    PI-interaction engine (2026-08-12 removal cycle; 855be6a / b40d04a).
-    Without it they could not have come
-    through here at all: posting their guidance without a ``thread_ts`` would
-    have moved it out of the proposal thread and into the channel root, which is
-    a worse defect than the raw client they were using. It is omitted from the
-    payload entirely when None, so a top-level post is byte-identical to before
-    this parameter existed.
-    """
-    client = _client(token)
-    posted: list[dict[str, Any]] = []
-    for chunk in split_for_slack(text, SLACK_MAX_TEXT_CHARS):
-        call: dict[str, Any] = {"channel": channel, "text": chunk}
-        if thread_ts:
-            call["thread_ts"] = thread_ts
-        result = _call(client, "chat_postMessage", **call)
-        posted.append({
-            "ts": result.get("ts"),
-            "channel": channel,
-            "text": chunk,
-            "thread_ts": thread_ts,
-        })
-    return posted
 
 
 def revoke_token(token: str) -> bool:
@@ -293,44 +163,15 @@ def revoke_token(token: str) -> bool:
 #
 # asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
 # that request its latency and nothing else. Four of the five call sites are async;
-# _resolve_delegate_names is the remaining sync caller and uses the plain functions.
+# _resolve_delegate_names (routers/agent_page.py) is the remaining sync caller. It
+# calls get_user_info, which therefore has no wrapper here: the route already runs
+# that whole helper through asyncio.to_thread.
 # ---------------------------------------------------------------------------
-
-
-async def list_channel_ids_async(
-    token: str,
-    *,
-    include_private: bool = True,
-    exclude_archived: bool = False,
-) -> dict[str, str]:
-    """``list_channel_ids`` off the event loop."""
-    return await asyncio.to_thread(
-        list_channel_ids, token,
-        include_private=include_private, exclude_archived=exclude_archived,
-    )
 
 
 async def lookup_user_by_email_async(token: str, email: str) -> str | None:
     """``lookup_user_by_email`` off the event loop."""
     return await asyncio.to_thread(lookup_user_by_email, token, email)
-
-
-async def get_user_info_async(token: str, user_id: str) -> dict[str, Any] | None:
-    """``get_user_info`` off the event loop."""
-    return await asyncio.to_thread(get_user_info, token, user_id)
-
-
-async def join_channel_async(token: str, channel_id: str) -> None:
-    """``join_channel`` off the event loop."""
-    return await asyncio.to_thread(join_channel, token, channel_id)
-
-
-async def post_message_async(
-    token: str, channel: str, text: str, *, thread_ts: str | None = None
-) -> list[dict[str, Any]]:
-    """``post_message`` off the event loop."""
-    return await asyncio.to_thread(
-        post_message, token, channel, text, thread_ts=thread_ts)
 
 
 async def revoke_token_async(token: str) -> bool:
