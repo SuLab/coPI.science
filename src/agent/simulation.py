@@ -4612,30 +4612,45 @@ class SimulationEngine:
                         agent_id, len(_lost), PITCH_DISPLAY_CHARS,
                         ", ".join(sorted(_lost))[:200],
                     )
-        if isinstance(key_points, list) and not (
-            _KEY_POINTS_MIN <= len(key_points) <= _KEY_POINTS_MAX
+        # Normalize ONCE, and run the soft-bound checks below against what
+        # will actually be STORED (blank bullets stripped), not the raw
+        # sidecar — otherwise `["x", "  "]` passes a two-bullet count check
+        # and stores one bullet. The raw value is inspected only when
+        # normalization rejected it (the field is then stored NULL).
+        normalized_key_points = normalize_key_points(key_points)
+        checked_key_points = (
+            normalized_key_points if normalized_key_points is not None else key_points
+        )
+        if isinstance(checked_key_points, list) and not (
+            _KEY_POINTS_MIN <= len(checked_key_points) <= _KEY_POINTS_MAX
         ):
             logger.warning(
                 "[%s] Assessment carries %d key_points (contract asks for %d-%d)",
-                agent_id, len(key_points), _KEY_POINTS_MIN, _KEY_POINTS_MAX,
+                agent_id, len(checked_key_points), _KEY_POINTS_MIN, _KEY_POINTS_MAX,
             )
         elif isinstance(key_points, dict):
             # The whole field is about to be DROPPED (stored NULL, kept only in
             # `raw_verdict`) for any dict `normalize_key_points` rejects: an
-            # unknown group key, or a value that is not a list of strings.
-            if normalize_key_points(key_points) is None:
+            # empty object, an unknown group key, a null group value, or a
+            # value that is not a list of strings. The reason names which.
+            if normalized_key_points is None:
                 unknown = sorted(set(key_points) - KEY_POINT_ACCEPTED_KEYS)
+                if not key_points:
+                    reason = "an empty object"
+                elif unknown:
+                    reason = f"unknown group key(s) {unknown}"
+                elif any(v is None for v in key_points.values()):
+                    reason = "a group value is null"
+                else:
+                    reason = "a group value is not a list of strings"
                 logger.warning(
                     "[%s] Assessment key_points was DROPPED (stored NULL; the "
                     "value survives only in raw_verdict): %s. Keys present: %s",
-                    agent_id,
-                    f"unknown group key(s) {unknown}" if unknown
-                    else "a group value is not a list of strings",
-                    sorted(key_points),
+                    agent_id, reason, sorted(key_points),
                 )
-            shape = key_point_shape(key_points)
+            shape = key_point_shape(checked_key_points)
             legacy_only = sorted(
-                set(key_points)
+                set(checked_key_points)
                 & ({k for k, _ in LEGACY_KEY_POINT_GROUPS} - set(_KEY_POINT_GROUP_BULLETS))
             )
             if shape in ("legacy", "mixed"):
@@ -4651,7 +4666,7 @@ class SimulationEngine:
                 )
             if shape in ("current", "mixed"):
                 for group_key, expected in _KEY_POINT_GROUP_BULLETS.items():
-                    group = key_points.get(group_key)
+                    group = checked_key_points.get(group_key)
                     if isinstance(group, list) and len(group) != expected:
                         logger.warning(
                             "[%s] Assessment key_points.%s carries %d bullets "
@@ -4670,7 +4685,9 @@ class SimulationEngine:
                 # An ABSENT group is `None` and fails the isinstance above, so
                 # the count check cannot see it; a partial object still stores
                 # (normalize accepts a subset), so name the omission here.
-                absent = [k for k in _KEY_POINT_GROUP_BULLETS if k not in key_points]
+                absent = [
+                    k for k in _KEY_POINT_GROUP_BULLETS if k not in checked_key_points
+                ]
                 if absent:
                     logger.warning(
                         "[%s] Assessment key_points omits %d of %d groups: %s",
@@ -4744,7 +4761,7 @@ class SimulationEngine:
             # keeps the original, because a malformed narrative field must never
             # cost the verdict (A20).
             headline=_str_or_none(verdict.get("headline")),
-            key_points=normalize_key_points(key_points),
+            key_points=normalized_key_points,
             elevator_pitch=_str_or_none(verdict.get("elevator_pitch")),
             # Sidecar item 10 (0048): why the dimension scores came out where
             # they did. App-only by design (D3) — the six-field

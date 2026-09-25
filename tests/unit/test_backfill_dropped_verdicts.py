@@ -12,6 +12,7 @@ testable helpers:
   * ``_recover_from_llm_logs``      — F1.4, FIX 1, FIX 2(b)/(c)
   * ``_subject_matches``            — FIX 1
   * ``_derive_rubric_stamp``        — FIX 5
+  * ``_stamp_to_check`` / ``_refuse_stamp_drift`` — the rubric-drift guard
 
 None of these touch a session or an engine, so a plain in-memory
 ``AssessmentDrop``/``OpportunityAssessment`` (never added to any session) is
@@ -37,6 +38,7 @@ from scripts.backfill_dropped_verdicts import (
     _fallback_llm_log_query,
     _recover_from_llm_logs,
     _refuse_stamp_drift,
+    _stamp_to_check,
     _subject_matches,
 )
 from src.models import AssessmentDrop, OpportunityAssessment
@@ -664,3 +666,35 @@ def test_the_guard_refuses_an_unknown_stamp():
 def test_the_override_allows_any_stamp():
     assert _refuse_stamp_drift("3.4.0", "b7b0a1d6a4a5", allow_rubric_drift=True) is None
     assert _refuse_stamp_drift("9.9.9", "000000000000", allow_rubric_drift=True) is None
+
+
+def test_the_rows_derived_stamp_wins_over_the_run_config():
+    config = {"rubric_version": "3.4.0", "rubric_content_hash": "b7b0a1d6a4a5"}
+    assert _stamp_to_check(LIVE_RUBRIC_VERSION, LIVE_RUBRIC_HASH, config) == (
+        LIVE_RUBRIC_VERSION, LIVE_RUBRIC_HASH,
+    )
+
+
+def test_an_unstamped_run_falls_back_to_the_run_config_stamp():
+    config = {"rubric_version": "3.4.0", "rubric_content_hash": "b7b0a1d6a4a5"}
+    assert _stamp_to_check(None, None, config) == ("3.4.0", "b7b0a1d6a4a5")
+
+
+@pytest.mark.parametrize("config", [None, {}, {"other": 1}, "not-a-dict"])
+def test_no_stamp_anywhere_stays_unstamped(config):
+    assert _stamp_to_check(None, None, config) == (None, None)
+
+
+def test_a_run_whose_verdicts_were_all_dropped_is_judged_by_its_config_stamp():
+    """No stamped row, but the run opened under 3.4.0: the guard must refuse,
+    not treat the run as unstamped and score it with the live weights."""
+    config = {"rubric_version": "3.4.0", "rubric_content_hash": "b7b0a1d6a4a5"}
+    reason = _refuse_stamp_drift(*_stamp_to_check(None, None, config))
+    assert reason is not None and "3.4.0" in reason
+
+
+def test_allow_rubric_drift_defaults_off_and_parses_on():
+    parser = _build_arg_parser()
+    run = str(uuid.uuid4())
+    assert parser.parse_args(["--run", run]).allow_rubric_drift is False
+    assert parser.parse_args(["--run", run, "--allow-rubric-drift"]).allow_rubric_drift is True

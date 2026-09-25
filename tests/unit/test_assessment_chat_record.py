@@ -382,6 +382,21 @@ def test_six_group_key_points_are_quoted_under_their_labels_in_order():
     assert "KP-I" in text and "KP-L" in text and "KP-C" in text
 
 
+def test_legacy_key_points_are_quoted_under_their_own_labels_in_order():
+    detail = synthetic_detail()
+    detail["assessment"].key_points = {
+        "commercial_potential": ["KP-CP"], "key_questions": ["KP-KQ"],
+        "significance": ["KP-S"], "clinical_actionability": ["KP-CA"],
+        "innovation": ["KP-IN"],
+    }
+    record = build_chat_record(detail, tier="staff")
+    text = _all_text(record)
+    assert text.index("Key point — Significance") < text.index(
+        "Key point — Commercial potential"
+    )
+    assert "Key point — Indication / Audience" not in text
+
+
 def test_the_frozen_dataclasses_are_immutable():
     record = build_chat_record(synthetic_detail(), tier="staff")
     with pytest.raises(AttributeError):

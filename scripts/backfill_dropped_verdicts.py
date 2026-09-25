@@ -69,7 +69,9 @@ written below):
     ... python scripts/backfill_dropped_verdicts.py --run <uuid> --max-lookback-seconds 300
     # recovered rows are scored with the LIVE weights, so a run whose stamp
     # weighs the dimensions differently (or matches no known revision) is
-    # refused; override only if a live-weight score is really wanted:
+    # refused (a run with no stamped row is judged by the stamp its
+    # simulation_runs.config recorded at open); override only if a live-weight
+    # score is really wanted:
     ... python scripts/backfill_dropped_verdicts.py --run <uuid> --allow-rubric-drift
 """
 
@@ -94,7 +96,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.agent.simulation import _bounded_str, _normalize_gating, _str_or_none
 from src.config import get_settings
-from src.models import AssessmentDrop, LlmCallLog, OpportunityAssessment
+from src.models import AssessmentDrop, LlmCallLog, OpportunityAssessment, SimulationRun
 from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
@@ -368,6 +370,23 @@ def _derive_rubric_stamp(
     return next(iter(pairs))
 
 
+def _stamp_to_check(
+    rubric_version: str | None,
+    rubric_hash: str | None,
+    run_config: dict | None,
+) -> tuple[str | None, str | None]:
+    """The stamp the drift guard judges. The run's own rows win; a run with no
+    stamped row falls back to the stamp `simulation_runs.config` recorded when
+    the run opened (src/agent/main.py), so a run whose verdicts were all
+    dropped cannot slip through as "unstamped" and be scored with today's
+    weights. A run whose config carries no stamp either (it predates stamping)
+    stays (None, None), which the guard treats as live, as before."""
+    if rubric_version is not None or rubric_hash is not None:
+        return rubric_version, rubric_hash
+    config = run_config if isinstance(run_config, dict) else {}
+    return config.get("rubric_version"), config.get("rubric_content_hash")
+
+
 def _refuse_stamp_drift(
     rubric_version: str | None,
     rubric_hash: str | None,
@@ -379,9 +398,10 @@ def _refuse_stamp_drift(
 
     `_score_and_band` always scores with the live document, so a stamp whose
     revision weighs the dimensions differently (rubric 3.5.0 changed them)
-    would store a score that revision never produced. An unstamped run
-    resolves to the live view and behaves exactly as before this guard.
-    `--allow-rubric-drift` overrides.
+    would store a score that revision never produced. A (None, None) stamp
+    resolves to the live view and passes; callers pass the pair from
+    `_stamp_to_check`, so that happens only for a run that recorded no stamp
+    anywhere. `--allow-rubric-drift` overrides.
     """
     if allow_rubric_drift:
         return None
@@ -604,8 +624,14 @@ async def main() -> int:
             "rubric stamp for this run: version=%r hash=%r",
             rubric_version, rubric_hash,
         )
+        # The guard judges the run's config stamp when no row was stamped; the
+        # recovered rows are still written with (rubric_version, rubric_hash).
+        run_row = await db.get(SimulationRun, run_id)
         refusal = _refuse_stamp_drift(
-            rubric_version, rubric_hash, allow_rubric_drift=args.allow_rubric_drift,
+            *_stamp_to_check(
+                rubric_version, rubric_hash, run_row.config if run_row else None,
+            ),
+            allow_rubric_drift=args.allow_rubric_drift,
         )
         if refusal is not None:
             logger.error("%s", refusal)

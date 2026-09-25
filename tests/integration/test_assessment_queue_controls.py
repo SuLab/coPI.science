@@ -1163,6 +1163,34 @@ async def test_the_card_renders_the_six_groups_in_order(client, db_session, admi
     assert "Indication / Audience" in block and "Commercial Opportunity" in block
 
 
+async def test_a_legacy_five_group_card_keeps_its_labels_and_order(
+    client, db_session, admin
+):
+    """A pre-1.8.0 row (legacy-only keys) renders under the legacy labels in
+    legacy order, never the six-group labels."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Legacy Groups Co",
+        elevator_pitch="PITCH-MARKER: one tube of blood, two-week answer.",
+        key_points={
+            "commercial_potential": ["CP-MARK"], "key_questions": ["KQ-MARK"],
+            "significance": ["S-MARK"], "clinical_actionability": ["CA-MARK"],
+            "innovation": ["IN-MARK"],
+        },
+    )
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    block = html[html.index("assessment-card-points"):]
+    labels = [
+        "Significance", "Innovation", "Clinical actionability",
+        "Key questions / experiments", "Commercial potential",
+    ]
+    assert [block.index(label) for label in labels] == sorted(
+        block.index(label) for label in labels
+    )
+    assert "Indication / Audience" not in block
+
+
 async def test_a_row_with_no_pitch_or_points_renders_neither_box(
     client, db_session, admin
 ):

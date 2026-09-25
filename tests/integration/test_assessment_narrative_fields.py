@@ -318,6 +318,109 @@ async def test_a_missing_current_group_is_stored_and_warned(engine, caplog):
         await _delete_run(factory, run_id)
 
 
+async def test_an_empty_key_points_object_is_dropped_with_an_accurate_reason(
+    engine, caplog,
+):
+    """An empty `{}` is rejected by `normalize_key_points` and stored NULL; the
+    DROPPED warning must say it was empty, not that a group value was not a
+    list of strings (there is no group value at all)."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "key_points": {},
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.key_points is None
+
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "an empty object" in warnings
+        assert "not a list of strings" not in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
+    engine, caplog,
+):
+    """The count check runs on the NORMALIZED value: a blank bullet is stripped
+    before storage, so `["x", "  "]` stores one bullet and must be warned about
+    as one bullet, not pass as the two the raw sidecar appears to carry."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    key_points_in = {
+        "indication_audience": ["i"],
+        "lab_background": ["x", "  "],
+        "proposal": ["p1", "p2"],
+        "clinical_actionability": ["c1", "c2"],
+        "key_questions": ["q"],
+        "commercial_opportunity": ["o1", "o2"],
+    }
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+                "company_or_project": "Short label",
+                "key_points": key_points_in,
+                "recommendation": "conditional",
+                "scores": {},
+            })
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        assert row.key_points["lab_background"] == ["x"]
+
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "key_points.lab_background carries 1 bullets (contract asks for 2)" in warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
 async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
     engine, caplog,
 ):

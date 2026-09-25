@@ -2090,10 +2090,12 @@ async def test_a_row_whose_groups_render_nothing_shows_no_key_points_column(
     client, db_session, admin
 ):
     """An unknown-only (hand-built) or blank-only mapping is not "there are key
-    points": no column, no two-column grid."""
+    points": no column, no two-column grid, and "Why this score" renders once,
+    full width, rather than inside the pitch column."""
     _, assessment = await _seed(db_session)
     assessment.elevator_pitch = "PITCH-MARKER. Hopkins has data on 124 patients."
     assessment.key_points = {"not_a_group": ["x"], "proposal": ["  "]}
+    assessment.score_rationale = "WHY-MARK: scored on the cohort."
     await db_session.flush()
 
     body = _main((await client.get(
@@ -2101,6 +2103,8 @@ async def test_a_row_whose_groups_render_nothing_shows_no_key_points_column(
     )).text)
     assert "assessment-brief-keypoints" not in body
     assert "md:grid-cols-2" not in body
+    assert "WHY-MARK" in body
+    assert body.count('id="score-rationale"') == 1
 
 
 # ---------------------------------------------------------------------------
