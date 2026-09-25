@@ -19,7 +19,7 @@ Fixture, one run:
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from itsdangerous import TimestampSigner
@@ -31,7 +31,7 @@ from tests import factories
 
 pytestmark = pytest.mark.integration
 
-T0 = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
 RUN_WIDE_COUNTS = {"timeout": 1, "active": 1, "no_replies": 1, "no_proposal": 1}
 
