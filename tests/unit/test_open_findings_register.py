@@ -113,7 +113,8 @@ def test_fixed_rows_cite_real_evidence():
 def _infra_audit_ids() -> list[str]:
     text = INFRA_AUDIT.read_text(encoding="utf-8")
     start = text.index("\n## Findings")
-    end = re.compile(r"^## ", re.M).search(text, start + 1)
+    # Search past the heading itself, or `^## ` matches "## Findings" at start + 1.
+    end = re.compile(r"^## ", re.M).search(text, start + len("\n## Findings"))
     section = text[start : end.start() if end else len(text)]
     return re.findall(r"^### ([CHML]\d+) — ", section, re.M)
 

@@ -79,6 +79,59 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
+    # Genuinely dead code the 2026-09-25 integration scan found (plan §5 step 2).
+    "src.agent.channels:is_seeded_channel": (
+        "No caller anywhere, tests included (git grep, 2026-09-25). "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.channels:make_collaboration_channel_name": (
+        "No caller anywhere, tests included (git grep, 2026-09-25). "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.channels:normalize_channel_name": (
+        "Called only by make_collaboration_channel_name, which is itself dead. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.channels:record_channel_archived": (
+        "No caller anywhere, tests included (git grep, 2026-09-25). "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.ids:TsMinter.writer_id": (
+        "Read only by tests/unit/test_ids.py; production code never reads the property. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.ids:default_writer_id": (
+        "Used only by tests/unit/test_ids.py. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.agent.simulation:_extract_json": (
+        "Used only by tests; scripts/generate_sparsedata_user.py imports the different src.services.llm._extract_json. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.routers.profile:_parse_list": (
+        "Never called in profile.py; the calls in agent_page.py are to that module's own _parse_list. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.services.llm:make_decision": (
+        "Used only by tests (test_llm_service.py, test_agent_turn_gm.py). "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.services.patents:_tokenise": (
+        "Named only in a src/agent/tools.py comment and in tests/unit/test_patents.py. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.services.patents:clear_prior_art_cache": (
+        "Test-support cache reset, used only by tests/unit/test_patents.py. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.services.pi_inbox:web_pi_user_id": (
+        "No caller anywhere, tests included (git grep, 2026-09-25). "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
+    "src.services.validators:csv_safe_cell": (
+        "No CSV export exists in src/ any more (git grep -i csv, 2026-09-25); used only by tests/unit/test_validators.py. "
+        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    ),
 }
 
 
@@ -95,7 +148,11 @@ class Definition:
 @dataclass
 class ScanResult:
     definitions: dict[str, Definition] = field(default_factory=dict)
+    # Dead with the scan's ``roots`` treated as live (an allowlisted entry point's own
+    # callees are live), and dead with no roots at all. The second answers "is this
+    # allowlist entry still needed?", which seeding would otherwise always say yes to.
     dead: set[str] = field(default_factory=set)
+    dead_unseeded: set[str] = field(default_factory=set)
 
 
 def _module_name(rel: Path) -> str:
@@ -283,8 +340,12 @@ class _RefCollector(ast.NodeVisitor):
                 self._credit(key)
 
 
-def scan(root: Path) -> ScanResult:
-    """Scan the tree at ``root`` (a repo root, or a synthetic one in a control case)."""
+def scan(root: Path, roots: frozenset[str] = frozenset()) -> ScanResult:
+    """Scan the tree at ``root`` (a repo root, or a synthetic one in a control case).
+
+    ``roots`` are definition keys to treat as live: the allowlisted entry points, whose
+    bodies' references must count. ``dead_unseeded`` repeats the fixpoint without them.
+    """
     result = ScanResult()
     modules = _load_modules(root)
     for mod in modules:
@@ -315,24 +376,31 @@ def scan(root: Path) -> ScanResult:
             for key in methods_by_name[name]:
                 credits.setdefault(key, set()).add(None)
 
-    live: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for key, containers in credits.items():
-            if key not in live and any(c is None or c in live for c in containers):
-                live.add(key)
-                changed = True
-    result.dead = set(result.definitions) - live
+    def fixpoint(seed: set[str]) -> set[str]:
+        live = set(seed)
+        changed = True
+        while changed:
+            changed = False
+            for key, containers in credits.items():
+                if key not in live and any(c is None or c in live for c in containers):
+                    live.add(key)
+                    changed = True
+        return live
+
+    result.dead = set(result.definitions) - fixpoint(set(roots) & set(result.definitions))
+    result.dead_unseeded = set(result.definitions) - fixpoint(set())
     return result
 
 
 def allowlist_problems(
     result: ScanResult, allowlist: dict[str, str]
 ) -> tuple[list[str], list[str]]:
-    """``(unlisted dead keys, stale allowlist keys)``, each sorted."""
+    """``(unlisted dead keys, stale allowlist keys)``, each sorted.
+
+    An entry is stale when it is undefined, or live without being seeded as a root.
+    """
     unlisted = sorted(result.dead - allowlist.keys())
-    stale = sorted(k for k in allowlist if k not in result.dead)
+    stale = sorted(k for k in allowlist if k not in result.dead_unseeded)
     return unlisted, stale
 
 
@@ -343,7 +411,7 @@ def _describe(result: ScanResult, key: str) -> str:
 
 @functools.cache
 def _repo_scan() -> ScanResult:
-    return scan(REPO_ROOT)
+    return scan(REPO_ROOT, roots=frozenset(ALLOWLIST))
 
 
 def test_src_has_no_unlisted_dead_definitions():
@@ -378,6 +446,28 @@ def _tree(root: Path, files: dict[str, str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(text), encoding="utf-8")
     return root
+
+
+def test_control_an_allowlisted_root_keeps_its_callees_live(tmp_path):
+    files = {
+        "src/web.py": """
+            def helper(): pass
+            class Hook:
+                def dispatch(self):
+                    helper()
+        """,
+    }
+    unseeded = scan(_tree(tmp_path, files))
+    assert unseeded.dead == {"src.web:Hook.dispatch", "src.web:helper"}
+
+    seeded = scan(tmp_path, roots=frozenset({"src.web:Hook.dispatch"}))
+    assert seeded.dead == set()
+    # The root is still needed: without the seed it would be dead, so it is not stale.
+    assert allowlist_problems(seeded, {"src.web:Hook.dispatch": "framework hook"}) == ([], [])
+    # A root that is also live on its own merit is stale.
+    live_files = {"src/web2.py": "def entry(): pass\nentry()\n"}
+    both = scan(_tree(tmp_path, live_files), roots=frozenset({"src.web2:entry"}))
+    assert "src.web2:entry" in allowlist_problems(both, {"src.web2:entry": "x"})[1]
 
 
 def test_control_an_unreferenced_function_is_reported_and_allowlists_are_checked(tmp_path):
