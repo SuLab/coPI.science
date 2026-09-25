@@ -265,8 +265,8 @@ echo "=============================================================="
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 2: target database ---"
-if ! DSN_INFO="$(run_img python -c 'import os; from sqlalchemy.engine import make_url as m; u = m(os.environ["DATABASE_URL"]); print(u.database or ""); print(u.render_as_string(hide_password=True)); print(u.host or "")' \
-                 2>"$ERR_FILE" | tr -d '\r' | tail -n 3)"; then
+if ! DSN_INFO="$(run_img python -c 'import os; from sqlalchemy.engine import make_url as m; u = m(os.environ["DATABASE_URL"]); print(u.database or ""); print(u.render_as_string(hide_password=True)); print(u.host or ""); print(",".join(sorted(k for k in u.query if k.lower() in ("host", "port", "hostaddr"))))' \
+                 2>"$ERR_FILE" | tr -d '\r' | tail -n 4)"; then
   echo "BLOCKED: could not read DATABASE_URL inside the $SVC container." >&2
   show_err
   exit "$EX_BLOCKED"
@@ -274,6 +274,14 @@ fi
 DBNAME="$(printf '%s\n' "$DSN_INFO" | sed -n 1p)"
 DSN_SHOWN="$(printf '%s\n' "$DSN_INFO" | sed -n 2p)"
 DSN_HOST="$(printf '%s\n' "$DSN_INFO" | sed -n 3p)"
+DSN_QUERY_ADDR="$(printf '%s\n' "$DSN_INFO" | sed -n 4p)"
+if [ -n "$DSN_QUERY_ADDR" ]; then
+  # asyncpg can take the server address from the query string, so a DSN like
+  # ...@postgres/db?host=other would pass the host check below and connect elsewhere.
+  echo "BLOCKED: the DSN sets $DSN_QUERY_ADDR in its query string; put the server in the" >&2
+  echo "  URL's host and port instead, so the backup check sees where it really connects." >&2
+  exit "$EX_USAGE"
+fi
 if [ -z "$DBNAME" ]; then
   echo "BLOCKED: the DSN names no database ('${DSN_SHOWN:-<nothing>}')." >&2
   echo "  Refusing to let a default choose the target. Pass --database-url." >&2
@@ -507,9 +515,10 @@ FAILED_CHECKS="$(tr -d '\r' < "$POST_OUT" \
 if [ "$POST" -eq 1 ] && [ "$FAILED_CHECKS" = "$ROW_COUNT_TITLE" ]; then
   # A restore here would throw away every write made since the dump — on a schema
   # that postflight has just verified in every other respect.
-  echo "BLOCKED: postflight FAILED on row counts only; every schema check passed." >&2
-  echo "  Row counts differ from the preflight snapshot. Investigate before deploying code:" >&2
-  echo "  read the \"$ROW_COUNT_TITLE\" item above for the tables that moved." >&2
+  echo "BLOCKED: postflight FAILED on its row-count check only; every schema check passed." >&2
+  echo "  Read the \"$ROW_COUNT_TITLE\" item above: the counts moved, or the snapshot" >&2
+  echo "  could not be used (missing, unreadable, or taken from a different database)." >&2
+  echo "  Investigate before deploying code." >&2
   echo "  Do NOT restore the dump on this alone: a restore loses every write made since it" >&2
   echo "  was taken. Loss usually means a writer deleted rows during the window; growth" >&2
   echo "  means a writer this script did not see was live. The migration IS committed ($STAMP)." >&2
@@ -517,13 +526,19 @@ if [ "$POST" -eq 1 ] && [ "$FAILED_CHECKS" = "$ROW_COUNT_TITLE" ]; then
   echo "    ${DC[*]} run --rm --no-deps -T -v \"$BACKUP_DIR_ABS:$BACKUP_MOUNT\" $SVC \\" >&2
   echo "      python scripts/migrate/postflight.py --target $TARGET --snapshot $SNAP_CTR ${POST_ARGS[*]-}" >&2
   exit "$EX_BLOCKED"
+elif [ "$POST" -eq 1 ] && [ -z "$FAILED_CHECKS" ]; then
+  # Exit 1 with no failing check in the report: postflight died before emitting it
+  # (a traceback, a failed connection, a container that never started). Nothing was
+  # compared, so nothing says the schema is wrong: never print the restore recipe.
+  echo "BLOCKED: postflight exited 1 without reporting a failed check. It did not complete;" >&2
+  echo "  see its output above. The migration IS committed ($STAMP). Do NOT restore on this." >&2
+  echo "  Do NOT deploy application code until postflight passes. Re-run it:" >&2
+  echo "    ${DC[*]} run --rm --no-deps -T -v \"$BACKUP_DIR_ABS:$BACKUP_MOUNT\" $SVC \\" >&2
+  echo "      python scripts/migrate/postflight.py --target $TARGET --snapshot $SNAP_CTR ${POST_ARGS[*]-}" >&2
+  exit "$EX_BLOCKED"
 elif [ "$POST" -eq 1 ]; then
   echo "BLOCKED: postflight FAILED — the schema does not match $TARGET." >&2
-  if [ -n "$FAILED_CHECKS" ]; then
-    printf '%s\n' "$FAILED_CHECKS" | sed 's/^/    FAILED: /' >&2
-  else
-    echo "  (the failing checks could not be read from its output; see the report above)" >&2
-  fi
+  printf '%s\n' "$FAILED_CHECKS" | sed 's/^/    FAILED: /' >&2
   echo "  Do NOT deploy application code. The chain committed as one transaction, so this" >&2
   echo "  is a schema to investigate, not a partial state to repair. To go back to $PRE_STAMP," >&2
   echo "  restore a backup. Stop the run from /admin/simulation (Stop drains and flushes" >&2

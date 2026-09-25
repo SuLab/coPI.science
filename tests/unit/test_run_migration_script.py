@@ -45,7 +45,7 @@ case "$args" in
     echo "$STUB_DEFAULT_TARGET"; exit 0 ;;
   *"make_url"*)
     echo "copi"; echo "postgresql+asyncpg://copi:***@${STUB_DSN_HOST:-postgres}:5432/copi"
-    echo "${STUB_DSN_HOST:-postgres}"; exit 0 ;;
+    echo "${STUB_DSN_HOST:-postgres}"; echo "${STUB_DSN_QUERY_ADDR:-}"; exit 0 ;;
   *"--profile agent config"*)
     [ "${STUB_CONFIG_EXIT:-0}" = 0 ] || exit "$STUB_CONFIG_EXIT"
     printf 'services:\n  agent:\n    command:\n      - python\n      - -m\n      - %s\n    image: x\n  worker:\n    command:\n      - src.agent.supervisor\n' \
@@ -299,7 +299,7 @@ def test_live_writers_tolerate_growth_but_not_loss(run_script):
 
 
 def test_postflight_failure_prints_prod_restore_commands(run_script):
-    run = run_script("--apply", STUB_POSTFLIGHT_EXIT="1")
+    run = run_script("--apply", STUB_POSTFLIGHT_EXIT="1", STUB_POSTFLIGHT_REPORT=_SCHEMA_FAIL)
     assert run.rc == 1, run.output
     dumps = list(run.backup_dir.glob("copi_pre0051_*.dump"))
     assert len(dumps) == 1
@@ -419,7 +419,10 @@ def test_failed_dump_copy_is_operational_and_names_the_container_path(run_script
 
 
 def test_postflight_failure_without_our_dump_prints_no_restore_recipe(run_script):
-    run = run_script("--apply", "--backup-verified-elsewhere", "x", STUB_POSTFLIGHT_EXIT="1")
+    run = run_script(
+        "--apply", "--backup-verified-elsewhere", "x",
+        STUB_POSTFLIGHT_EXIT="1", STUB_POSTFLIGHT_REPORT=_SCHEMA_FAIL,
+    )
     assert run.rc == 1, run.output
     assert not run.calls_with("pg_dump")
     assert "ALTER DATABASE" not in run.stderr
@@ -437,11 +440,35 @@ _ROW_COUNT_FAIL = """=== postflight: postgresql+asyncpg://copi:***@postgres:5432
 
 VERIFICATION FAILED  (13 checks, 1 FAIL, 0 WARN, exit 1)"""
 
+_SCHEMA_FAIL = _ROW_COUNT_FAIL.replace(
+    "11. [BLOCK] Row counts match", "11. [PASS ] Row counts match"
+).replace(" 1. [PASS ] alembic_version", " 1. [BLOCK] alembic_version")
+
+
+def test_postflight_that_reports_no_failed_check_is_not_a_schema_failure(run_script):
+    """Exit 1 with no failing check in the report: postflight died before emitting it.
+    Nothing was compared, so the restore recipe must not be printed."""
+    run = run_script("--apply", STUB_POSTFLIGHT_EXIT="1")
+    assert run.rc == 1, run.output
+    assert "without reporting a failed check" in run.stderr
+    assert "Do NOT restore" in run.stderr
+    assert "schema does not match" not in run.stderr
+    assert "pg_restore" not in run.stderr
+    assert "ALTER DATABASE" not in run.stderr
+
+
+def test_a_dsn_with_a_query_string_host_is_refused(run_script):
+    run = run_script("--database-url", "postgresql+asyncpg://u:secret@postgres/copi?host=other",
+                     STUB_DSN_QUERY_ADDR="host")
+    assert run.rc == 64, run.output
+    assert "query string" in run.stderr
+    assert "secret" not in run.output
+
 
 def test_row_count_only_failure_does_not_advise_a_restore(run_script):
     run = run_script("--apply", STUB_POSTFLIGHT_EXIT="1", STUB_POSTFLIGHT_REPORT=_ROW_COUNT_FAIL)
     assert run.rc == 1, run.output
-    assert "Row counts differ" in run.stderr
+    assert "row-count check only" in run.stderr
     assert "Do NOT restore" in run.stderr
     assert "schema does not match" not in run.stderr
     assert "ALTER DATABASE" not in run.stderr

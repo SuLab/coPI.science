@@ -433,6 +433,36 @@ async def request_agent(
 _REVIEW_UNIQUE_CONSTRAINT = "uq_proposal_reviews_decision_agent"
 
 
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """The server-reported constraint name behind ``exc``, if the driver carries one."""
+    orig = exc.orig
+    for candidate in (getattr(orig, "__cause__", None), orig):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return name
+    return None
+
+
+async def _refuse_integrity_error(
+    db: AsyncSession, exc: IntegrityError, action: str, decision_id: uuid.UUID, agent_id: str,
+) -> HTTPException:
+    """Roll back and answer 500 for an integrity failure that is NOT the lost race.
+
+    Logged by constraint name only, then raised as a plain 500: letting the
+    ``IntegrityError`` itself escape would put its SQL parameters (the PI's
+    guidance text, names) into the server's traceback log. Callers pass the
+    route's ``agent_id`` path parameter, never an ORM attribute: the failed flush
+    has expired every loaded object, and reading one here would try to reload it
+    inside the dead transaction.
+    """
+    await db.rollback()
+    logger.error(
+        "%s of decision %s by agent %s failed on constraint %s; rolled back",
+        action, decision_id, agent_id, _constraint_name(exc) or "<unnamed>",
+    )
+    return HTTPException(status_code=500, detail="Internal Server Error")
+
+
 def _is_lost_review_race(exc: IntegrityError) -> bool:
     """True only when ``exc`` is a violation of ``uq_proposal_reviews_decision_agent``.
 
@@ -443,13 +473,10 @@ def _is_lost_review_race(exc: IntegrityError) -> bool:
     violation, an ``agent_messages`` collision) is not a lost race and must not
     be answered as success.
     """
-    orig = exc.orig
-    for candidate in (getattr(orig, "__cause__", None), orig):
-        name = getattr(candidate, "constraint_name", None)
-        if name:
-            return name == _REVIEW_UNIQUE_CONSTRAINT
-    return _REVIEW_UNIQUE_CONSTRAINT in str(orig)
-
+    name = _constraint_name(exc)
+    if name:
+        return name == _REVIEW_UNIQUE_CONSTRAINT
+    return _REVIEW_UNIQUE_CONSTRAINT in str(exc.orig)
 
 
 @router.post("/{agent_id}/proposals/{thread_decision_id}/review")
@@ -536,11 +563,13 @@ async def review_proposal(
         await db.commit()
     except IntegrityError as exc:
         if not _is_lost_review_race(exc):
-            raise
+            raise await _refuse_integrity_error(
+                db, exc, "Review", thread_decision_id, agent_id
+            ) from None
         logger.warning(
             "Lost the race on %s for decision %s, agent %s: another review or "
             "reopen committed first; this request's rating was discarded",
-            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent.agent_id,
+            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent_id,
         )
         # Lost the race on uq_proposal_reviews_decision_agent (double-click,
         # two tabs): a review for this decision+agent now exists. The
@@ -693,7 +722,9 @@ async def reopen_proposal(
         await db.commit()
     except IntegrityError as exc:
         if not _is_lost_review_race(exc):
-            raise
+            raise await _refuse_integrity_error(
+                db, exc, "Reopen", thread_decision_id, agent_id
+            ) from None
         # Lost the race to another review or reopen by this agent (double-click,
         # two tabs, or a rating submitted at the same moment): the winner's row
         # is committed, and the rollback discards this request's inbox row and
@@ -701,7 +732,7 @@ async def reopen_proposal(
         logger.warning(
             "Lost the race on %s for decision %s, agent %s: another review or "
             "reopen committed first; this request's reopen guidance was discarded",
-            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent.agent_id,
+            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent_id,
         )
         await db.rollback()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

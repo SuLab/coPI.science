@@ -1064,11 +1064,13 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
 
 
 async def test_a_reopen_integrity_error_on_another_constraint_is_not_a_redirect(
-    client, db_session, lab, proposal, monkeypatch,
+    client, db_session, lab, proposal, monkeypatch, caplog,
 ):
     """Only a violation of uq_proposal_reviews_decision_agent is a lost race. Any
     other IntegrityError inside reopen's try (an FK violation, an agent_messages
-    collision) must propagate as an error, not be answered with the success 302.
+    collision) is rolled back and answered 500, never with the success 302, and is
+    logged by constraint name only, so its SQL parameters (the PI's guidance) stay
+    out of the server log.
 
     The error is forced from ``mark_notification_responded``, which runs inside
     the route's try, so the assertion reaches the route's own except clause.
@@ -1085,22 +1087,18 @@ async def test_a_reopen_integrity_error_on_another_constraint_is_not_a_redirect(
 
     monkeypatch.setattr(en, "mark_notification_responded", _raise_other_constraint)
 
-    response = None
-    try:
-        response = await client.post(
-            f"/agent/alpha/proposals/{proposal_id}/reopen",
-            data={"guidance": "Refine the readout."}, headers=_auth(lab.pi_a_id),
-        )
-    except IntegrityError as exc:
-        assert "agent_messages_pkey" in str(exc)
-    else:
-        assert response.status_code == 500, (
-            f"a non-review IntegrityError was answered {response.status_code}, "
-            "not surfaced as an error"
-        )
-    finally:
-        # The route did not reach rollback; discard its pending writes here.
-        await db_session.rollback()
+    caplog.set_level("ERROR", logger="src.routers.agent_page")
+    response = await client.post(
+        f"/agent/alpha/proposals/{proposal_id}/reopen",
+        data={"guidance": "Refine the readout."}, headers=_auth(lab.pi_a_id),
+    )
+    assert response.status_code == 500, (
+        f"a non-review IntegrityError was answered {response.status_code}, "
+        "not surfaced as an error"
+    )
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("Reopen of decision" in m and "rolled back" in m for m in errors), errors
+    assert not any("Refine the readout." in m for m in errors), errors
 
 
 async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(
