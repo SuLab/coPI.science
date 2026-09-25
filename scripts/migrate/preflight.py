@@ -4,7 +4,10 @@
 Run this BEFORE `alembic upgrade`, against the database you are about to migrate.
 It answers one question: *will this migration succeed, and what will it cost?*
 
-    docker compose exec -T -e DATABASE_URL=... app python scripts/migrate/preflight.py
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T -v "$PWD/backups:/app/backups" blackbird-app python scripts/migrate/preflight.py --snapshot /app/backups/preflight_snapshot.json
+
+``--print-default-target`` prints DEFAULT_TARGET and exits 0 without connecting to a
+database; scripts/migrate/run_migration.sh reads the image's target that way.
 
 Exit codes (contract; other tooling depends on these):
 
@@ -140,10 +143,6 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
 )
 
-#: Start revisions at which migration 0019 has already run, so the expensive
-#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
-POST_0019_STARTS = ("0020", "0021")
-
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
 SNAPSHOT_SCHEMA = "public"
 
@@ -201,21 +200,22 @@ DEFAULT_BACKUP_DIRS = ("backups", "data/backups", "/backups", "/var/backups/copi
 BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", "*.bak")
 
 # ---------------------------------------------------------------------------
-# What the migration chain CREATES, per revision. Derived by reading 0019-0051;
-# tests/unit/test_migration_checks.py re-derives this from the migration files and
-# asserts it still matches, so it cannot silently drift.
-#
-# Note: postflight.py's own EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES (schema
-# verification after upgrade) are still pinned to the 0019-0023 chain only, and it scopes
-# its read of PLANNED_OBJECTS accordingly (see postflight.VERIFIED_REVISIONS) — it has not
-# been extended to verify 0024+'s objects yet. That is a separate, pre-existing gap;
-# this collision check (below) covers every revision up to DEFAULT_TARGET regardless.
+# What the migration chain CREATES (PLANNED_OBJECTS) and DROPS (PLANNED_DROPS), per
+# revision. Derived by reading 0019-0051; tests/unit/test_migration_checks.py re-derives
+# both from the migration files' upgrade() bodies and asserts they still match, so they
+# cannot silently drift.
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PlannedObject:
-    """A database object a migration will CREATE (so it must not already exist)."""
+    """A database object one revision's ``upgrade()`` creates or drops.
+
+    Which one is decided by the tuple it sits in: an entry in ``PLANNED_OBJECTS`` is
+    created (so it must not already exist, and is legitimately absent from a preflight
+    row-count snapshot); an entry in ``PLANNED_DROPS`` is dropped (so it is legitimately
+    absent afterwards).
+    """
 
     revision: str
     kind: str  # 'table' | 'column' | 'index' | 'constraint' | 'type'
@@ -445,6 +445,13 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0051", "index", "ix_assessment_chat_usage_assessment_id", "assessment_chat_usage"),
 )
 
+#: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
+#: must never treat a drop's precondition (the object exists) as a collision. 0026 is
+#: the only upgrade-time ``drop_table`` in 0019-0051.
+PLANNED_DROPS: tuple[PlannedObject, ...] = (
+    PlannedObject("0026", "table", "grantbot_posted_foas"),
+)
+
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
@@ -453,12 +460,11 @@ REVISION_ORDER = (
 )
 
 
-def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
-    """Objects created by the revisions that will actually run for current -> target.
+def _pending_revisions(current: str, target: str) -> frozenset[str]:
+    """The revisions ``alembic upgrade target`` runs from a database stamped ``current``.
 
-    A revision already applied cannot collide with itself, so its objects are excluded:
-    at 0019 the content columns and ``uq_agent_messages_run_ts`` already exist and that
-    is correct, not a collision.
+    An unknown ``current`` is read as REVISION_ORDER[0] and an unknown ``target`` as the
+    last known revision, so the span errs towards MORE pending revisions, never fewer.
     """
     try:
         lo = REVISION_ORDER.index(current)
@@ -468,8 +474,42 @@ def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, .
         hi = REVISION_ORDER.index(target)
     except ValueError:
         hi = len(REVISION_ORDER) - 1
-    pending = set(REVISION_ORDER[lo + 1 : hi + 1])
+    return frozenset(REVISION_ORDER[lo + 1 : hi + 1])
+
+
+def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
+    """Objects created by the revisions that will actually run for current -> target.
+
+    A revision already applied cannot collide with itself, so its objects are excluded:
+    at 0019 the content columns and ``uq_agent_messages_run_ts`` already exist and that
+    is correct, not a collision.
+    """
+    pending = _pending_revisions(current, target)
     return tuple(o for o in PLANNED_OBJECTS if o.revision in pending)
+
+
+def tables_created_between(current: str, target: str) -> frozenset[str]:
+    """Tables the pending revisions create: absent from a snapshot taken at ``current``."""
+    return frozenset(o.name for o in planned_objects_between(current, target) if o.kind == "table")
+
+
+def tables_dropped_between(current: str, target: str) -> frozenset[str]:
+    """Tables the pending revisions drop: present at ``current``, gone at ``target``."""
+    pending = _pending_revisions(current, target)
+    return frozenset(
+        o.name for o in PLANNED_DROPS if o.kind == "table" and o.revision in pending
+    )
+
+
+def agent_messages_ddl_pending(current: str | None, target: str) -> bool:
+    """Does any pending revision take a lock on agent_messages?
+
+    Derived from PLANNED_OBJECTS: true through 0020 (0021 still builds
+    ``ix_agent_messages_run_created``), false from 0021 on.
+    """
+    return any(
+        o.table == "agent_messages" for o in planned_objects_between(current or "0018", target)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -594,9 +634,9 @@ def worst_status_exit(statuses: list[str]) -> int:
 def estimate_lock_window_ms(rows: int) -> tuple[float, float]:
     """(floor, ceiling) milliseconds of ACCESS EXCLUSIVE on agent_messages.
 
-    The whole 0019..0023 chain runs in ONE transaction (env.py does not pass
-    ``transaction_per_migration``), so the lock 0019's first ``ADD COLUMN`` takes is
-    held until the final commit: the lock window is the chain, not the index build.
+    The whole pending chain runs in ONE transaction (env.py does not pass
+    ``transaction_per_migration``), so the first lock taken on agent_messages is held
+    until the final commit: the lock window is the chain, not the index build.
     """
     floor_ms = LOCK_WINDOW_FIXED_MS + LOCK_WINDOW_PER_ROW_MS * max(rows, 0)
     return floor_ms, floor_ms * LOCK_WINDOW_CONTENTION_FACTOR
@@ -630,6 +670,18 @@ def revision_status(current: str | None, target: str) -> tuple[str, str]:
         )
     if current == target:
         return PASS, f"already at the target revision {target}; migration is a no-op."
+    if target not in REVISION_ORDER:
+        return (
+            BLOCK,
+            f"target {target} is not a revision this tool knows "
+            f"({REVISION_ORDER[0]}..{REVISION_ORDER[-1]}).",
+        )
+    if current in REVISION_ORDER and REVISION_ORDER.index(target) < REVISION_ORDER.index(current):
+        return (
+            BLOCK,
+            f"target {target} is BEHIND the stamp {current}. `alembic upgrade {target}` is "
+            "a silent no-op (exit 0) and this tool never downgrades.",
+        )
     if current in SUPPORTED_START_REVISIONS:
         return PASS, f"at {current}, a supported starting point."
     return (
@@ -808,7 +860,7 @@ def evaluate_backup(
             "no backup found. Rollback past 0019 DROPs agent_messages.content, "
             "sender_name, is_bot and posted_at, so there is no way back without one.",
             "Take one and re-run:",
-            "  docker compose exec -T postgres pg_dump -U copi -d copi | gzip "
+            "  docker compose -f docker-compose.prod.yml exec -T postgres pg_dump -U copi -d copi | gzip "
             "> backups/copi_$(date +%Y%m%dT%H%M%S).sql.gz",
             "then pass --backup-path backups/<file>.",
         ]
@@ -823,7 +875,7 @@ def evaluate_backup(
         return BLOCK, [
             f"backup at {facts.path} is {facts.age_hours:.1f}h old, older than the "
             f"{max_age_hours:.0f}h threshold. Every message written since is not in it.",
-            "  docker compose exec -T postgres pg_dump -U copi -d copi | gzip "
+            "  docker compose -f docker-compose.prod.yml exec -T postgres pg_dump -U copi -d copi | gzip "
             "> backups/copi_$(date +%Y%m%dT%H%M%S).sql.gz",
         ]
     if facts.fmt == "custom":
@@ -831,7 +883,7 @@ def evaluate_backup(
             f"backup at {facts.path} is a pg_dump custom-format archive. Neither "
             "pg_restore nor psql is installed in the app image, so preflight cannot "
             "confirm it carries data. Verify by hand on the postgres container:",
-            "  docker compose exec -T postgres pg_restore -l /path/to/dump "
+            "  docker compose -f docker-compose.prod.yml exec -T postgres pg_restore -l /path/to/dump "
             "| grep -c 'TABLE DATA'",
         ]
     if facts.fmt == "unknown":
@@ -849,7 +901,7 @@ def evaluate_backup(
             f"backup at {facts.path} defines agent_messages but contains NO data section "
             f"for it, while the live table holds {facts.live_agent_messages_rows:,} rows. "
             "This is a --schema-only dump; restoring it would lose every message.",
-            "  docker compose exec -T postgres pg_dump -U copi -d copi | gzip "
+            "  docker compose -f docker-compose.prod.yml exec -T postgres pg_dump -U copi -d copi | gzip "
             "> backups/copi_$(date +%Y%m%dT%H%M%S).sql.gz",
         ]
     notes.append(
@@ -865,6 +917,7 @@ def compare_row_counts(
     after: dict[str, int],
     allow_growth: bool = False,
     expected_new: tuple[str, ...] | frozenset[str] = (),
+    expected_dropped: tuple[str, ...] | frozenset[str] = (),
 ) -> tuple[bool, list[str]]:
     """Compare a preflight snapshot against a postflight count. Shared by both scripts.
 
@@ -872,18 +925,40 @@ def compare_row_counts(
     the migration itself inserts no rows: if a count went up, a writer was live during
     the migration and the lock-window analysis was wrong.
 
-    ``expected_new`` names the tables the chain CREATES (0020's pi_dm_messages, 0022's
-    three cohort tables). Those are absent from the preflight snapshot by construction,
-    so flagging them would be crying wolf — but a table appearing that the chain does
-    not create is still a finding.
+    ``expected_new`` names the tables the pending revisions CREATE
+    (``tables_created_between``). They are absent from the preflight snapshot by
+    construction, so their absence there is not a finding, but they must come out of
+    the migration empty: rows in one mean a writer was live, and fail unless
+    ``allow_growth``. A table appearing that the chain does not create is always a
+    finding. ``expected_new`` is consulted only for tables missing from ``before``, so
+    it can never mask the loss or disappearance of a table that was snapshotted.
+
+    ``expected_dropped`` names the tables the pending revisions DROP
+    (``tables_dropped_between``, i.e. 0026's grantbot_posted_foas). Such a table being
+    gone afterwards is correct; such a table still existing means that revision did not
+    really run, and is a finding.
     """
     problems: list[str] = []
     expected_new = frozenset(expected_new)
+    expected_dropped = frozenset(expected_dropped)
     for table in sorted(set(before) | set(after)):
         b = before.get(table)
         a = after.get(table)
+        if table in expected_dropped:
+            if a is not None:
+                problems.append(
+                    f"{table}: the migration drops this table, but it still exists "
+                    f"({a:,} rows)"
+                )
+            continue
         if b is None:
             if table in expected_new:
+                if a and not allow_growth:
+                    problems.append(
+                        f"{table}: created by this migration but holds {a:,} rows; the "
+                        "migration inserts nothing into a table it creates, so a writer "
+                        "was live"
+                    )
                 continue
             problems.append(f"{table}: table did not exist before the migration, now {a:,} rows")
             continue
@@ -1298,8 +1373,11 @@ async def run_preflight(args) -> Report:
                 "  SELECT * FROM alembic_version;",
                 "If the database is genuinely empty, create it from scratch instead of "
                 "migrating: alembic upgrade head.",
-                "If it is stamped at an unexpected revision, bring it to 0018 or 0019 "
+                "If it is stamped at an unexpected revision, bring it to one of "
+                f"SUPPORTED_START_REVISIONS ({', '.join(SUPPORTED_START_REVISIONS)}) "
                 "first and re-run this preflight.",
+                f"If --target is unknown or behind the stamp, pass a target at or after "
+                f"the stamp (default {DEFAULT_TARGET}, the single alembic head).",
             ]
         report.add(
             "Stamped alembic revision is a supported starting point",
@@ -1355,7 +1433,7 @@ async def run_preflight(args) -> Report:
         # --- 9. sizing / expected lock window ------------------------------------
         rows = 0
         try:
-            sizing = await check_sizing(conn, rev)
+            sizing = await check_sizing(conn, rev, args.target)
             report.add(*sizing)
             rows = sizing[4].get("agent_messages_rows", 0)
         except Exception as exc:  # noqa: BLE001
@@ -1769,15 +1847,10 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
         rem = [
             "Stop the writers first — the agent simulation is the main one, and it must be "
             "stopped GRACEFULLY or the in-flight turn's messages are lost:",
-            # blackbird-agent-run, NOT agent-run: the unprefixed name belongs to the
-            # OTHER deployment on this host (project copi-python), and stopping it
-            # would halt that deployment's production simulation.
-            # -t 420, not -t 30: shutdown is cooperative (request_stop() only flips a
-            # flag; the durable flush needs the main loop in main.py's finally-block to
-            # RETURN), and a 16000-token thread_reply final call can run ~4-5 minutes
-            # uninterrupted. `docker stop` returns as soon as the container exits, so a
-            # generous -t costs nothing on the common path.
-            "  docker stop -t 420 blackbird-agent-run",
+            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period CLAUDE.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
+            "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
+            "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",
             "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "Then re-check, and only terminate what is left if you know what it is:",
             "  SELECT pid, state, now()-xact_start AS age, query FROM pg_stat_activity\n"
@@ -1864,36 +1937,32 @@ def check_migration_harness():
     )
 
 
-async def check_sizing(conn, rev: str | None = None):
+async def check_sizing(conn, rev: str | None, target: str):
     """agent_messages row count, size, and the estimated lock window.
 
-    The estimate is a function of the 0019 index build, so it only applies when 0019 is
-    still pending. Starting from 0020/0021 that cost is already paid and the remaining
-    chain (0022's three empty tables, 0023's three columns on a small table) does not
-    scale with agent_messages at all — quoting the row-scaled number there would tell an
-    operator to book an outage they do not need.
+    The estimate scales with agent_messages only while a pending revision locks that
+    table (``agent_messages_ddl_pending``: through a 0020 start, since 0021 still builds
+    an agent_messages index). From any later start that cost is already paid and nothing
+    the remaining chain does scales with agent_messages — quoting the row-scaled number
+    there would tell an operator to book an outage they do not need.
     """
     title = "Sizing and expected lock window"
     if not await table_exists(conn, "agent_messages"):
         return (title, WARN, "agent_messages does not exist.", [], {"agent_messages_rows": 0})
     rows = int(await fetch_one_value(conn, "SELECT count(*) FROM agent_messages"))
-    if rev in POST_0019_STARTS:
+    if not agent_messages_ddl_pending(rev, target):
         heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
         return (
             title,
             PASS,
-            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — but 0019 has "
-            f"already run at {rev}, so its ACCESS EXCLUSIVE index build is behind you. "
-            f"What remains is 0022 (three empty tables) and 0023 (three columns on "
-            f"researcher_profiles); neither scales with agent_messages. Measured at ~2s "
-            f"at every size tested.",
+            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — but no revision in "
+            f"{rev}..{target} creates a column, index or constraint on agent_messages (derived "
+            "from PLANNED_OBJECTS), so the lock window does not scale with its row count.",
             [],
             {
                 "agent_messages_rows": rows,
                 "agent_messages_heap_bytes": heap,
-                "estimated_lock_window_ms_low": 0,
-                "estimated_lock_window_ms_high": 2000,
-                "index_build_already_done": True,
+                "agent_messages_ddl_pending": False,
             },
         )
     heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
@@ -1908,27 +1977,27 @@ async def check_sizing(conn, rev: str | None = None):
         "database_bytes": dbsize,
         "estimated_lock_window_ms_low": lo,
         "estimated_lock_window_ms_high": hi,
+        "agent_messages_ddl_pending": True,
     }
     detail = (
         f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB, total relation "
         f"{total / 1e6:.1f} MB; database {dbsize / 1e6:.1f} MB.\n"
         f"Estimated ACCESS EXCLUSIVE window {lo / 1000:.1f}s (idle server, warm cache) to "
         f"{hi / 1000:.1f}s (busy server). {note}\n"
-        f"The whole 0019..0023 chain runs in ONE transaction, so the lock is held for the "
-        f"entire chain, not just the index build. Calibrated at 10k/100k/1M rows: "
+        f"The whole {rev}..{target} chain runs in ONE transaction, so the lock is held for "
+        f"the entire chain, not just the index build. Estimate calibrated on the 0019+0021 "
+        f"block, an upper bound when only 0021 is pending: 10k/100k/1M rows took "
         f"112 ms / 747 ms / 7,902 ms."
     )
     rem = []
     if status != PASS:
         rem = [
             "Announce the window and stop the writers for its duration:",
-            # See the note above: the unprefixed `agent-run` is org1's container.
-            # -t 420: cooperative shutdown means the durable flush only runs once the
-            # main loop returns, and a 16000-token thread_reply final call can run
-            # ~4-5 minutes uninterrupted — a larger -t is free insurance since `docker
-            # stop` returns as soon as the container actually exits.
-            "  docker stop -t 420 blackbird-agent-run && "
-            "docker compose -f docker-compose.prod.yml stop blackbird-app worker",
+            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period CLAUDE.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
+            "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
+            "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",
+            "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "There is no CONCURRENTLY option available here: alembic runs the whole chain "
             "in one transaction and CREATE INDEX CONCURRENTLY cannot run inside one.",
         ]
@@ -1961,7 +2030,7 @@ async def check_index_growth(conn, rev: str | None, target: str):
             WARN,
             detail + " That is over 1 GiB; preflight cannot see the filesystem from inside "
             "Postgres, so confirm free space by hand.",
-            ["  docker compose exec postgres df -h /var/lib/postgresql/data"],
+            ["  docker compose -f docker-compose.prod.yml exec postgres df -h /var/lib/postgresql/data"],
             data,
         )
     return (title, PASS, detail, [], data)
@@ -2006,7 +2075,7 @@ async def check_legacy_inventory(conn, rev: str | None):
     if recoverable:
         rem.append(
             "The Slack-side rows can be recovered, with Slack tokens available, by:\n"
-            "  docker compose exec app python scripts/backfill_slack_history_to_db.py\n"
+            "  docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/backfill_slack_history_to_db.py\n"
             "It upserts on (simulation_run_id, message_ts) and is safe to re-run."
         )
     if unrecoverable:
@@ -2064,7 +2133,7 @@ def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None
             [
                 "Re-run with --snapshot to enable the postflight row-count comparison:",
                 "  python scripts/migrate/preflight.py --snapshot "
-                "/app/logs/migration_snapshot.json",
+                "/app/backups/preflight_snapshot.json",
                 "(the counts are also in the --json output under row_counts)",
             ],
         )
@@ -2110,6 +2179,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(ap)
     ap.add_argument("--snapshot", default=None, help="Write the row-count snapshot postflight reads")
+    ap.add_argument(
+        "--print-default-target",
+        action="store_true",
+        help="Print DEFAULT_TARGET and exit 0, without connecting to a database",
+    )
     ap.add_argument(
         "--backup-path",
         default=None,
@@ -2169,6 +2243,11 @@ def main(argv: list[str] | None = None) -> int:
     import asyncio
 
     args = build_parser().parse_args(argv)
+    if args.print_default_target:
+        # Before asyncio.run: run_migration.sh reads the image's target this way, and
+        # there is no database to reach at that point.
+        print(DEFAULT_TARGET)
+        return EXIT_OK
     report = asyncio.run(run_preflight(args))
     return emit(report, args)
 

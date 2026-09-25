@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Post-migration verification for the 0018/0019 -> 0023 upgrade.
+"""Post-migration verification for an upgrade to --target (default DEFAULT_TARGET).
 
 Run this AFTER `alembic upgrade`, against the database you just migrated.
 
-    docker compose exec -T -e DATABASE_URL=... app python scripts/migrate/postflight.py \
-        --snapshot /app/logs/migration_snapshot.json
+    docker compose -f docker-compose.prod.yml run --rm --no-deps -T -v "$PWD/backups:/app/backups" blackbird-app python scripts/migrate/postflight.py --snapshot /app/backups/preflight_snapshot.json
+
+What follows --target and what does not:
+
+  * The revision stamp, the enum check and the row-count comparison follow it. The
+    enum check expects only the types created at or before --target, and the row-count
+    comparison derives the tables legitimately created or dropped from the snapshot's
+    own ``current_revision`` to --target (preflight's ``tables_created_between`` /
+    ``tables_dropped_between``).
+  * The pinned table/column/index/constraint expectations (EXPECTED_*) describe the
+    0019-0023 chain only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -132,17 +141,9 @@ EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_au
 #: actually verify. preflight.PLANNED_OBJECTS now also carries entries past 0023 (for
 #: its own collision check, which covers every revision up to its target), but this
 #: script's pinned expectations have not been extended past 0023 — bump this tuple (and
-#: add the corresponding EXPECTED_* entries) when that happens, do not just widen the
-#: filter below.
+#: add the corresponding EXPECTED_* entries) when that happens. The row-count and enum
+#: checks do not read it: they are scoped by revision span instead.
 VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023")
-
-#: The only tables the 0019..0023 chain creates, so the only ones legitimately absent
-#: from a preflight row-count snapshot. Derived from preflight.PLANNED_OBJECTS rather
-#: than re-listed, so the two cannot drift.
-CHAIN_CREATED_TABLES = frozenset(
-    o.name for o in _pf.PLANNED_OBJECTS
-    if o.kind == "table" and o.revision in VERIFIED_REVISIONS
-)
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -183,6 +184,29 @@ EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {
     "sim_command_enum": ("start", "stop"),
     "sim_command_status_enum": ("pending", "done", "failed", "stale"),
 }
+
+#: enum type name -> the revision that creates it, from preflight.PLANNED_OBJECTS.
+_TYPE_REVISION: dict[str, str] = {
+    o.name: o.revision for o in _pf.PLANNED_OBJECTS if o.kind == "type"
+}
+
+
+def expected_enums_for(target: str) -> dict[str, tuple[str, ...]]:
+    """The EXPECTED_ENUMS entries a database at ``target`` must already have.
+
+    A type whose creating revision is after ``target`` is not expected yet: 0042's two
+    types must not fail a ``--target 0041`` run. An unknown ``target``, or a type with no
+    PLANNED_OBJECTS entry, keeps the entry, so the check errs towards expecting more.
+    """
+    order = _pf.REVISION_ORDER
+    if target not in order:
+        return dict(EXPECTED_ENUMS)
+    hi = order.index(target)
+    return {
+        name: labels
+        for name, labels in EXPECTED_ENUMS.items()
+        if _TYPE_REVISION.get(name) not in order or order.index(_TYPE_REVISION[name]) <= hi
+    }
 
 #: Columns whose NULLs would be a data defect even though the catalog forbids them.
 #: Checked in the data as well as in the catalog: a hand-relaxed column is exactly the
@@ -434,12 +458,17 @@ async def check_expected_constraints(conn):
             {"checked": len(EXPECTED_CONSTRAINTS)})
 
 
-async def check_enums(conn):
-    """0020 creates pi_dm_direction_enum inline in create_table, with no checkfirst."""
-    title = "pi_dm_direction_enum has exactly the expected values"
+async def check_enums(conn, target: str):
+    """Every enum type created at or before ``target`` has exactly its expected values.
+
+    0020 creates pi_dm_direction_enum inline in create_table, with no checkfirst; 0042
+    creates the two simulation-command types.
+    """
+    title = "Enum types created up to the target have exactly the expected values"
+    expected = expected_enums_for(target)
     live = {r["name"]: tuple(r["labels"]) for r in await fetch_all(conn, ENUMS_SQL)}
     problems: list[str] = []
-    for name, labels in EXPECTED_ENUMS.items():
+    for name, labels in expected.items():
         got = live.get(name)
         if got is None:
             problems.append(f"type {name} is MISSING")
@@ -453,9 +482,12 @@ async def check_enums(conn):
                  "recreated:",
                  "  -- inspect first: SELECT DISTINCT direction FROM pi_dm_messages;"],
                 {"problems": problems, "live": {k: list(v) for k, v in live.items()}})
+    if not expected:
+        return (title, PASS, f"no enum type is created at or before {target}.", [],
+                {"expected": []})
     return (title, PASS,
-            ", ".join(f"{k} = {list(v)}" for k, v in EXPECTED_ENUMS.items()) + ".",
-            [], {"live": {k: list(v) for k, v in live.items() if k in EXPECTED_ENUMS}})
+            ", ".join(f"{k} = {list(v)}" for k, v in expected.items()) + ".",
+            [], {"live": {k: list(v) for k, v in live.items() if k in expected}})
 
 
 async def check_no_unintended_nulls(conn):
@@ -550,7 +582,14 @@ async def check_index_validity(conn):
     return (title, PASS, "every index in public is valid, ready and live.", [], {})
 
 
-async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
+async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool, target: str):
+    """Compare live counts with the preflight snapshot over the snapshot's revision span.
+
+    The tables legitimately absent before (created) or after (dropped) are derived from
+    the snapshot's ``current_revision`` to ``target``, so a snapshot without that field
+    cannot be compared and FAILs. ``allow_growth`` tolerates growth, including rows in a
+    newly created table; loss and a missing table always fail.
+    """
     title = "Row counts match the preflight snapshot"
     counts = await _pf.snapshot_row_counts(conn)
     if not snapshot_path:
@@ -571,15 +610,40 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
     except (OSError, ValueError) as exc:
         return (title, FAIL, f"snapshot {snapshot_path} is unreadable: {exc}", [],
                 {"row_counts": counts})
+    before_rev = payload.get("current_revision")
+    if not before_rev:
+        return (title, FAIL,
+                f"snapshot {snapshot_path} records no current_revision, so the tables the "
+                f"migration created or dropped on the way to {target} cannot be derived.",
+                ["Re-take the snapshot with this tree's preflight (it records the stamped "
+                 "revision) before migrating."],
+                {"row_counts": counts})
     before = {k: int(v) for k, v in (payload.get("row_counts") or {}).items()}
+    created = _pf.tables_created_between(before_rev, target)
+    dropped = _pf.tables_dropped_between(before_rev, target)
     ok, problems = compare_row_counts(
-        before, counts, allow_growth=allow_growth, expected_new=CHAIN_CREATED_TABLES
+        before,
+        counts,
+        allow_growth=allow_growth,
+        expected_new=created,
+        expected_dropped=dropped,
     )
-    data = {"row_counts": counts, "snapshot_row_counts": before, "problems": problems}
+    data = {
+        "row_counts": counts,
+        "snapshot_row_counts": before,
+        "snapshot_revision": before_rev,
+        "expected_new": sorted(created),
+        "expected_dropped": sorted(dropped),
+        "problems": problems,
+    }
     if ok:
         return (title, PASS,
-                f"{len(before)} tables, {sum(before.values()):,} rows, identical before and "
-                "after.", [], data)
+                f"{len(before)} tables, {sum(before.values()):,} rows, compared over "
+                f"{before_rev}..{target}: no loss"
+                + (", growth tolerated" if allow_growth else ", no growth")
+                + (f", {len(created)} table(s) created empty" if created else "")
+                + (f", {len(dropped)} table(s) dropped as planned" if dropped else "")
+                + ".", [], data)
     return (title, FAIL,
             "\n".join([f"{len(problems)} row-count problem(s):"] + [f"  {x}" for x in problems]),
             ["Row loss is not something a migration in this chain can cause, so treat it as "
@@ -721,7 +785,8 @@ async def run_postflight(args) -> Report:
             lambda: check_expected_constraints(conn),
         )
         await report.add_guarded(
-            "pi_dm_direction_enum has exactly the expected values", lambda: check_enums(conn)
+            "Enum types created up to the target have exactly the expected values",
+            lambda: check_enums(conn, args.target),
         )
         await report.add_guarded(
             "No invalid indexes (pg_index.indisvalid / indisready / indislive)",
@@ -737,7 +802,7 @@ async def run_postflight(args) -> Report:
         )
         await report.add_guarded(
             "Row counts match the preflight snapshot",
-            lambda: check_row_counts(conn, args.snapshot, args.allow_row_growth),
+            lambda: check_row_counts(conn, args.snapshot, args.allow_row_growth, args.target),
         )
     finally:
         await conn.close()
@@ -767,16 +832,18 @@ def build_parser():
     for action in ap._actions:  # noqa: SLF001 - argparse offers no public way to do this
         if action.dest == "target":
             action.help = (
-                f"Revision alembic_version must equal (default {DEFAULT_TARGET}). NOTE: the "
-                "schema, index, constraint and enum expectations describe 0023 and only "
-                "0023, so --target 0019 will match the stamp and then correctly report "
-                "everything 0020-0023 has not yet created."
+                f"Revision alembic_version must equal (default {DEFAULT_TARGET}). The enum "
+                "check and the row-count comparison are scoped to it; the table, column, "
+                "index and constraint expectations describe 0023 and only 0023, so "
+                "--target 0019 will match the stamp and then correctly report everything "
+                "0020-0023 has not yet created."
             )
     ap.add_argument("--snapshot", default=None, help="Row-count snapshot written by preflight")
     ap.add_argument(
         "--allow-row-growth",
         action="store_true",
-        help="Treat a table that GREW as acceptable (row loss always fails).",
+        help="Treat a table that GREW, or a newly created table holding rows, as "
+        "acceptable (row loss and a missing table always fail).",
     )
     return ap
 

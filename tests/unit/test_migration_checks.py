@@ -227,6 +227,50 @@ def test_revision_status_blocks_anywhere_else(rev):
     assert rev in reason
 
 
+def test_revision_status_blocks_a_target_behind_the_stamp():
+    """`alembic upgrade 0027` from 0050 exits 0 and applies nothing (RCA repro E11), so
+    a target behind the stamp must BLOCK at check 1 rather than pass as a start."""
+    status, reason = pf.revision_status("0050", "0027")
+    assert status == pf.BLOCK
+    assert "BEHIND" in reason
+    assert "0050" in reason and "0027" in reason
+
+
+def test_revision_status_blocks_an_unknown_target():
+    status, reason = pf.revision_status("0050", "9999")
+    assert status == pf.BLOCK
+    assert "not a revision this tool knows" in reason
+    assert "9999" in reason
+
+
+def test_print_default_target_needs_no_database(monkeypatch, capsys):
+    """The interface run_migration.sh consumes: print DEFAULT_TARGET, exit 0, and never
+    reach for a database — in-process with every connection path booby-trapped, and as
+    a real subprocess with no DATABASE_URL at all."""
+    import os
+    import subprocess
+
+    def _no_database(*_a, **_k):
+        raise AssertionError("--print-default-target must not touch a database")
+
+    monkeypatch.setattr(pf, "resolve_database_url", _no_database)
+    monkeypatch.setattr(pf, "open_connection", _no_database)
+    assert pf.main(["--print-default-target"]) == pf.EXIT_OK
+    assert capsys.readouterr().out == pf.DEFAULT_TARGET + "\n"
+
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    proc = subprocess.run(
+        [sys.executable, str(_MIGRATE_DIR / "preflight.py"), "--print-default-target"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == pf.DEFAULT_TARGET + "\n"
+
+
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
@@ -289,11 +333,50 @@ def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
     assert "0022" not in pf.SUPPORTED_START_REVISIONS
 
 
-def test_sizing_does_not_quote_the_0019_index_build_once_0019_has_run():
-    """The row-scaled lock estimate only applies while 0019 is still pending."""
-    assert pf.POST_0019_STARTS == ("0020", "0021")
-    for rev in pf.POST_0019_STARTS:
-        assert rev in pf.SUPPORTED_START_REVISIONS
+def test_agent_messages_ddl_pending_is_derived_from_planned_objects():
+    """The row-scaled lock estimate applies while any pending revision touches
+    agent_messages. That includes a 0020 start: 0021 still builds
+    ix_agent_messages_run_created on it."""
+    for rev in ("0018", "0019", "0020"):
+        assert pf.agent_messages_ddl_pending(rev, pf.DEFAULT_TARGET) is True, rev
+    for rev in ("0021", "0050"):
+        assert pf.agent_messages_ddl_pending(rev, pf.DEFAULT_TARGET) is False, rev
+    assert not hasattr(pf, "POST_0019_STARTS")
+
+
+def _stub_agent_messages(monkeypatch, rows: int) -> None:
+    async def _table_exists(_conn, _name):
+        return True
+
+    async def _fetch_one_value(_conn, sql, **_params):
+        return rows if "count(*)" in sql else 50_000_000
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    monkeypatch.setattr(pf, "fetch_one_value", _fetch_one_value)
+
+
+async def test_sizing_for_a_late_start_is_not_row_scaled(monkeypatch):
+    _stub_agent_messages(monkeypatch, 500_000)
+    _title, status, detail, rem, data = await pf.check_sizing(None, "0050", "0051")
+    assert status == pf.PASS
+    assert rem == []
+    assert "0019..0023" not in detail
+    assert "0022" not in detail
+    assert "0050..0051" in detail
+    assert data["agent_messages_ddl_pending"] is False
+    assert "estimated_lock_window_ms_high" not in data
+
+
+async def test_sizing_from_0020_is_row_scaled(monkeypatch):
+    _stub_agent_messages(monkeypatch, 500_000)
+    _title, status, detail, rem, data = await pf.check_sizing(None, "0020", "0051")
+    assert data["agent_messages_ddl_pending"] is True
+    assert data["estimated_lock_window_ms_high"] == pf.estimate_lock_window_ms(500_000)[1]
+    # 500k rows puts the ceiling past LOCK_WINDOW_WARN_MS.
+    assert status == pf.WARN
+    assert "0020..0051" in detail
+    assert "upper bound when only 0021 is pending" in detail
+    assert not any("&&" in r for r in rem)
 
 
 # --------------------------------------------------------------------------- #
@@ -757,39 +840,103 @@ def test_a_table_that_disappeared_fails():
 
 def test_tables_the_chain_creates_are_not_flagged_as_unexpected():
     """0020 creates pi_dm_messages and 0022 creates three cohort tables, so they are
-    absent from the preflight snapshot by construction. Flagging them would be a false
-    failure on every single successful migration."""
+    absent from a 0019 snapshot by construction. Flagging them would be a false failure
+    on every single successful migration."""
     ok, problems = pf.compare_row_counts(
         {"users": 3},
         {"users": 3, "pi_dm_messages": 0, "cohorts": 0},
-        expected_new=po.CHAIN_CREATED_TABLES,
+        expected_new=pf.tables_created_between("0019", "0023"),
     )
     assert ok and problems == []
 
 
 def test_a_table_the_chain_does_not_create_is_still_flagged():
     ok, problems = pf.compare_row_counts(
-        {"users": 3}, {"users": 3, "mystery": 9}, expected_new=po.CHAIN_CREATED_TABLES
+        {"users": 3},
+        {"users": 3, "mystery": 9},
+        expected_new=pf.tables_created_between("0019", "0023"),
     )
     assert not ok
     assert "did not exist before" in problems[0]
 
 
-def test_chain_created_tables_is_derived_from_planned_objects_not_relisted():
-    assert po.CHAIN_CREATED_TABLES == frozenset(
-        o.name for o in pf.PLANNED_OBJECTS
-        if o.kind == "table" and o.revision in po.VERIFIED_REVISIONS
-    )
-    assert po.CHAIN_CREATED_TABLES == {
-        "pi_dm_messages",
-        "cohorts",
-        "cohort_memberships",
-        "cohort_audit_events",
+def test_tables_created_between_is_every_planned_table_in_the_span():
+    assert pf.tables_created_between("0050", "0051") == {
+        "assessment_chat_turns",
+        "assessment_chat_usage",
     }
-    # 0025 also creates a table (opportunity_assessments), but postflight has not been
-    # extended to verify it yet — it must stay out of CHAIN_CREATED_TABLES until it does,
-    # or a real drop of that table would be masked as "expected to be absent".
-    assert "opportunity_assessments" not in po.CHAIN_CREATED_TABLES
+    assert pf.tables_created_between("0051", "0051") == frozenset()
+    assert not hasattr(po, "CHAIN_CREATED_TABLES")
+
+
+def test_a_correct_0050_to_0051_upgrade_compares_clean():
+    """The RCA's repro E10 inputs: before this was derived per span, a correct 0050 -> 0051
+    upgrade FAILED here and postflight told the operator to restore."""
+    result = pf.compare_row_counts(
+        {"users": 3},
+        {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0},
+        expected_new=pf.tables_created_between("0050", "0051"),
+    )
+    assert result == (True, [])
+
+
+def test_a_new_table_with_rows_is_flagged():
+    before = {"users": 3}
+    after = {"users": 3, "assessment_chat_turns": 2, "assessment_chat_usage": 0}
+    new = pf.tables_created_between("0050", "0051")
+    ok, problems = pf.compare_row_counts(before, after, expected_new=new)
+    assert not ok
+    assert len(problems) == 1
+    assert "assessment_chat_turns" in problems[0]
+    assert "created by this migration but holds 2 rows" in problems[0]
+    assert "a writer was live" in problems[0]
+    # --allow-row-growth tolerates it, exactly as it tolerates growth elsewhere.
+    assert pf.compare_row_counts(before, after, allow_growth=True, expected_new=new) == (
+        True,
+        [],
+    )
+
+
+def test_0026_drop_is_expected_from_a_pre_0026_start():
+    created = pf.tables_created_between("0025", "0027")
+    dropped = pf.tables_dropped_between("0025", "0027")
+    assert created == {"assessment_drops"}
+    assert dropped == {"grantbot_posted_foas"}
+    before = {"users": 3, "grantbot_posted_foas": 5}
+    ok, problems = pf.compare_row_counts(
+        before, {"users": 3, "assessment_drops": 0},
+        expected_new=created, expected_dropped=dropped,
+    )
+    assert ok and problems == []
+    # The drop not having happened is a finding.
+    ok, problems = pf.compare_row_counts(
+        before, {"users": 3, "grantbot_posted_foas": 5, "assessment_drops": 0},
+        expected_new=created, expected_dropped=dropped,
+    )
+    assert not ok
+    assert "still exists" in problems[0]
+    # From 0026 on the drop is behind us, so a missing table is loss again.
+    assert pf.tables_dropped_between("0026", "0027") == frozenset()
+
+
+def test_planned_drops_match_the_migration_files():
+    """Drift guard for PLANNED_DROPS, the drop-side twin of the PLANNED_OBJECTS guard:
+    every table an upgrade() body drops, and nothing else."""
+    import re
+
+    versions_dir = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    drop_re = re.compile(r'drop_table\(\s*\n?\s*"([^"]+)"')
+    raw_drop_re = re.compile(r'DROP TABLE (?:IF EXISTS )?"?(\w+)', re.I)
+    found = set()
+    for revision in pf.REVISION_ORDER[1:]:
+        matches = list(versions_dir.glob(f"{revision}_*.py"))
+        assert len(matches) == 1, (revision, matches)
+        source = matches[0].read_text()
+        upgrade = source.split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+        for name in drop_re.findall(upgrade) + raw_drop_re.findall(upgrade):
+            found.add((revision, name))
+    assert found == {(o.revision, o.name) for o in pf.PLANNED_DROPS}
+    assert {o.kind for o in pf.PLANNED_DROPS} == {"table"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1160,6 +1307,62 @@ def test_postflight_expects_the_enum_the_chain_creates():
     planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind == "type"}
     assert planned == set(po.EXPECTED_ENUMS)
     assert po.EXPECTED_ENUMS["pi_dm_direction_enum"] == ("inbound", "outbound")
+
+
+def test_enum_expectations_are_scoped_to_the_target():
+    assert set(po.expected_enums_for("0041")) == {"pi_dm_direction_enum"}
+    assert set(po.expected_enums_for("0042")) == set(po.EXPECTED_ENUMS)
+    assert po.expected_enums_for("0019") == {}
+    # An unknown target errs towards expecting every type.
+    assert po.expected_enums_for("9999") == po.EXPECTED_ENUMS
+
+
+async def test_check_enums_passes_below_0042(monkeypatch):
+    async def _fetch_all(_conn, _sql, **_params):
+        return [{"name": "pi_dm_direction_enum", "labels": ["inbound", "outbound"]}]
+
+    monkeypatch.setattr(po, "fetch_all", _fetch_all)
+    _title, status, _detail, _rem, _data = await po.check_enums(None, "0041")
+    assert status == po.PASS
+    # Control: the same catalog at 0042 is missing both simulation-command types.
+    _title, status, detail, _rem, _data = await po.check_enums(None, "0042")
+    assert status == po.FAIL
+    assert "sim_command_enum" in detail
+
+
+def _write_snapshot(path, row_counts, current_revision="0050"):
+    import json
+
+    payload = {"kind": "preflight-snapshot", "row_counts": row_counts}
+    if current_revision is not None:
+        payload["current_revision"] = current_revision
+    path.write_text(json.dumps(payload))
+    return str(path)
+
+
+def _stub_live_counts(monkeypatch, counts):
+    async def _snapshot_row_counts(_conn):
+        return dict(counts)
+
+    monkeypatch.setattr(pf, "snapshot_row_counts", _snapshot_row_counts)
+
+
+async def test_row_count_check_passes_a_correct_0050_to_0051_upgrade(monkeypatch, tmp_path):
+    _stub_live_counts(
+        monkeypatch, {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0}
+    )
+    snap = _write_snapshot(tmp_path / "snap.json", {"users": 3})
+    _title, status, _detail, _rem, data = await po.check_row_counts(None, snap, False, "0051")
+    assert status == po.PASS, data["problems"]
+    assert data["expected_new"] == ["assessment_chat_turns", "assessment_chat_usage"]
+
+
+async def test_row_count_check_fails_without_a_snapshot_revision(monkeypatch, tmp_path):
+    _stub_live_counts(monkeypatch, {"users": 3})
+    snap = _write_snapshot(tmp_path / "snap.json", {"users": 3}, current_revision=None)
+    _title, status, detail, _rem, _data = await po.check_row_counts(None, snap, False, "0051")
+    assert status == po.FAIL
+    assert "current_revision" in detail
 
 
 def test_must_be_non_null_is_derived_from_expected_columns():
