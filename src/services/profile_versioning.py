@@ -1,7 +1,8 @@
 """Profile revision tracking service.
 
-Records every change to public profiles, private profiles, and working memory
-with full attribution (who, how, when).
+Records every change to public profiles and working memory with full attribution
+(who, how, when). Rows written before 2026-08-13 may also carry the historical
+``private`` profile type and ``slack_dm`` mechanism; nothing writes them now.
 """
 
 import logging
@@ -60,10 +61,14 @@ async def create_revision(
     Args:
         db: Database session.
         agent_registry_id: The AgentRegistry UUID.
-        profile_type: One of "public", "private", "memory".
+        profile_type: "public" or "memory". ("private" is historical: only rows
+            written before 2026-08-13 carry it.)
         content: Full markdown content after the change.
         changed_by_user_id: The user who initiated the change (None for agent/system).
-        mechanism: One of "web", "slack_dm", "agent", "pipeline", "monthly_refresh".
+        mechanism: "web", "agent" or "pipeline". ("slack_dm" is historical: only
+            rows written before 2026-08-13 carry it. "monthly_refresh" has never
+            been written: the monthly_refresh job runs the profile pipeline, which
+            records "pipeline".)
         change_summary: Optional short description of what changed.
 
     Returns:
@@ -107,32 +112,3 @@ async def create_revision(
     )
     return revision
 
-
-async def get_revision_history(
-    db: AsyncSession,
-    *,
-    agent_registry_id: uuid.UUID,
-    profile_type: str,
-    limit: int = 50,
-) -> list[ProfileRevision]:
-    """Get revision history for a profile, most recent first.
-
-    Args:
-        db: Database session.
-        agent_registry_id: The AgentRegistry UUID.
-        profile_type: One of "public", "private", "memory".
-        limit: Maximum number of revisions to return.
-
-    Returns:
-        List of ProfileRevision ordered by created_at descending.
-    """
-    result = await db.execute(
-        select(ProfileRevision)
-        .where(
-            ProfileRevision.agent_registry_id == agent_registry_id,
-            ProfileRevision.profile_type == profile_type,
-        )
-        .order_by(ProfileRevision.created_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())

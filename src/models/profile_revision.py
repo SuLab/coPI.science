@@ -23,7 +23,7 @@ class ProfileRevision(Base):
     )
     profile_type: Mapped[str] = mapped_column(
         String(10), nullable=False
-    )  # public, private, memory
+    )  # public, memory; "private" only on pre-2026-08-13 rows
     content: Mapped[str] = mapped_column(Text, nullable=False)
     changed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -32,7 +32,8 @@ class ProfileRevision(Base):
     )
     mechanism: Mapped[str] = mapped_column(
         String(20), nullable=False
-    )  # web, slack_dm, agent, pipeline, monthly_refresh
+    )  # web, agent, pipeline; "slack_dm" only on pre-2026-08-13 rows.
+    # "monthly_refresh" is never written: that job records "pipeline".
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
