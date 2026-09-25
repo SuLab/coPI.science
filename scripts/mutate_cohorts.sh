@@ -17,11 +17,16 @@
 # auto-reverted mid-run by a repo guard, silently corrupting three earlier agents'
 # results (mutants reported as SURVIVING would in fact have been killed). It now uses
 # mutate_system.sh's strategy instead, so the two harnesses share one isolation model:
-# copy the tree into the container's /tmp, mutate the COPY, run pytest with the copy as
-# its working directory, and PROVE — by importing `src` and checking `src.__file__` —
-# that the copy is what is under test. That last check is not ceremony: `src` is also
-# installed into site-packages in this image, so without it a run can exercise
-# unmutated code and report every mutant as SURVIVED.
+# copy the tree into a fresh 0700 mktemp directory OUTSIDE the repository, mutate the
+# COPY, run pytest from the host's .venv-test with the copy as its working directory, and
+# PROVE — by importing `src` and checking `src.__file__` — that the copy is what is under
+# test. That last check is not ceremony: if `import src` resolved to the repository (an
+# editable install) or to a site-packages copy, a run would exercise unmutated code and
+# report every mutant as SURVIVED.
+#
+# Run it ON THE HOST, not over sshfs (CLAUDE.md): through a FUSE mount the copy and every
+# pytest run can be 100-400x slower. The images have no pytest, so there is no container
+# path.
 #
 # Three guards, all lifted from mutate_system.sh:
 #   1. provenance — `import src` from the copy must resolve inside the copy;
@@ -29,8 +34,10 @@
 #      harness that cannot tell "the behaviour is tested" from "the file no longer
 #      parses" is not measuring anything. Reported as VOID, never as killed;
 #   3. `git diff --quiet -- src/` before the first mutant and after the last.
-# After every mutant the copy's file is restored from the read-only /app mount and
-# `cmp`-checked, so one bad edit cannot silently pollute the rest of the run.
+# After every mutant the copy's file is restored from the repository and `cmp`-checked,
+# so one bad edit cannot silently pollute the rest of the run. A selection that hangs
+# past MUT_TIMEOUT, or a pytest exit other than 0 or 1, is an ERROR, never a kill: a kill
+# must name a failing test.
 #
 # THE INERT MUTANT IS NOT OPTIONAL. M0 below changes no behaviour (a docstring) and
 # MUST SURVIVE. Without it, a selection that is red for any unrelated reason — a dead
@@ -39,20 +46,23 @@
 # before any of the real mutants are believed.
 #
 # Usage:
-#   TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_test \
-#     ./scripts/mutate_cohorts.sh
+#   ./scripts/mutate_cohorts.sh
 #
 # Overridable env:
-#   TEST_DATABASE_URL   throwaway asyncpg DSN (REQUIRED — these suites commit)
-#   MUTCOH_SERVICE      compose service to exec into (default: app)
-#   MUTCOH_COPY_DIR     where the mutated tree lives inside the container
+#   MUT_PYTHON          interpreter with pytest (default: ./.venv-test/bin/python, the
+#                       host venv; create it ON THE HOST as CLAUDE.md describes)
+#   TEST_DATABASE_URL   throwaway asyncpg DSN (default: unset, so conftest starts an
+#                       ephemeral testcontainers Postgres); refused if it names `copi`
+#   MUT_TIMEOUT         seconds per pytest run before it is killed and scored ERROR
+#                       (default: 900)
+#   MUTCOH_COPY_DIR     where the mutated tree lives (default: a fresh mktemp dir); must
+#                       be absent or empty, and outside the repository
 #   MUTCOH_LOGDIR       where per-mutant pytest logs are kept (default: a mktemp dir)
 #   MUTCOH_KEEP_COPY    set to 1 to leave the mutated tree behind for inspection
 #
 # `RUNNER` is gone. It used to be a whole pytest invocation pasted in as a string,
-# which cannot express "run in the container but with the copy as cwd" — the override
-# and the isolation strategy were mutually exclusive. Use MUTCOH_SERVICE /
-# MUTCOH_COPY_DIR instead.
+# which cannot express "run with the copy as cwd" — the override and the isolation
+# strategy were mutually exclusive. Use MUT_PYTHON / MUTCOH_COPY_DIR instead.
 #
 # MEASURED 2026-08-04, after the conversion: 9/9 real mutants killed, inert control
 # survived, src/ clean. Same 9/9 the in-place harness reported, so no mutant moved —
@@ -62,14 +72,14 @@
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-
-: "${TEST_DATABASE_URL:?set TEST_DATABASE_URL to a throwaway database}"
+ROOT=$(pwd -P)
 
 TESTS="tests/unit/test_cohort_isolation.py tests/integration/test_cohort_engine_live.py tests/integration/test_cohort_admin.py"
-SVC="${MUTCOH_SERVICE:-app}"
-COPY="${MUTCOH_COPY_DIR:-/tmp/mutcoh}"
+PY="${MUT_PYTHON:-$PWD/.venv-test/bin/python}"
+[ -x "$PY" ] || { echo "ERROR: $PY missing — create .venv-test ON THE HOST (CLAUDE.md); the images have no pytest" >&2; exit 1; }
+case "$PY" in /*) ;; *) PY="$ROOT/$PY" ;; esac  # pytest runs from the copy, not from here
 LOGDIR="${MUTCOH_LOGDIR:-$(mktemp -d)}"
-DC=(docker compose exec -T)
+MUT_TIMEOUT="${MUT_TIMEOUT:-900}"
 
 # mkdir, because MUTCOH_LOGDIR is documented as overridable and an absent directory
 # makes every `>"$log"` redirect fail — which the shell scores as a nonzero exit, i.e.
@@ -79,8 +89,9 @@ DC=(docker compose exec -T)
 mkdir -p "$LOGDIR" || { echo "ERROR: cannot create log dir $LOGDIR" >&2; exit 1; }
 
 # Deliberately NOT the live database, and asserted rather than assumed: the cohort
-# engine and admin suites commit.
-case "$TEST_DATABASE_URL" in
+# engine and admin suites commit. Unset or empty means conftest's own throwaway Postgres
+# (tests/conftest.py treats an empty value as unset).
+case "${TEST_DATABASE_URL:-}" in
   */copi|*/copi\?*)
     echo "ERROR: TEST_DATABASE_URL points at the live 'copi' database. These suites" >&2
     echo "commit. Use a throwaway database." >&2
@@ -92,7 +103,7 @@ esac
 # ---------------------------------------------------------------------------
 if ! git diff --quiet -- src/; then
   echo "ERROR: src/ has uncommitted changes." >&2
-  echo "This script does not edit src/ — it mutates a copy inside the container — but a" >&2
+  echo "This script does not edit src/ — it mutates a copy outside the repository — but a" >&2
   echo "dirty tree means the copy would carry changes that are not the mutant, so every" >&2
   echo "result below would be unattributable. Commit or stash first." >&2
   exit 1
@@ -108,7 +119,7 @@ MUTANTS=(
 "src/services/cohorts.py~~gates[aid] = set() if isolate_uncohorted else None~~gates[aid] = set()~~M1 open-policy uncohorted agent is silenced instead of unrestricted"
 "src/services/cohorts.py~~gates[aid] = mates | unrestricted~~gates[aid] = mates~~M2 the open-policy asymmetry (a REAL defect the suite missed)"
 "src/services/cohorts.py~~effective = cohort_count if live_members is None else live_members~~effective = cohort_count~~M3 preflight counts cohorts, not live members, so an empty cohort silences the roster"
-"src/agent/message_log.py~~    if not entry.is_bot:~~    if entry.sender_agent_id is None:~~M4 the human bypass keys on a NULL agent_id, so an unattributable bot row leaks"
+"src/agent/message_log.py~~    if not entry.is_bot:\n        return True~~    if entry.sender_agent_id is None:\n        return True~~M4 the human bypass keys on a NULL agent_id, so an unattributable bot row leaks"
 "src/agent/message_log.py~~    if entry.visibility == VISIBILITY_COLLAB_PRIVATE:~~    if False:~~M5 the private-channel exemption is dead"
 # M6 was pinned to `visibility=self._resolve_channel_visibility(channel),` — the
 # keyword argument inside the LogEntry(...) call. d311170 hoisted the resolution out of
@@ -118,7 +129,9 @@ MUTANTS=(
 # nothing re-ran this script; when it was re-run it reported ERROR rather than a false
 # kill, which is the one thing the old harness did get right.
 "src/agent/simulation.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
-"src/agent/simulation.py~~            if thread.grandfathered:\n                continue~~            if False:\n                continue~~M7 a grandfathered thread keeps reactive priority"
+# M7 was pinned to `_owes_reply`'s grandfathered skip; D12 retired the rule and the
+# function is gone. Removed rather than re-pointed: `grandfathered` is now reporting-only,
+# so there is no behaviour left for a mutant to break.
 # M8 was pinned to `_select_agent`'s reactive-tier valve
 # (`self._reactive_streak < settings.max_consecutive_reactive_turns`). Task 11
 # (two-lane concurrent scheduler) deleted the reactive tier outright — replies
@@ -128,34 +141,68 @@ MUTANTS=(
 )
 
 # ---------------------------------------------------------------------------
-# Build the mutable copy inside the container and PROVE it is what runs.
+# Build the mutable copy OUTSIDE the repository and PROVE it is what runs.
+#
+# The copy directory is guarded before the tar and before every `rm -rf`. If mktemp
+# failed, COPY would be empty, bash's `cd ""` would succeed as a no-op, `pwd -P` would
+# return the repo root, the mutants would land in the live tree and the EXIT trap would
+# delete it. Physical paths are compared with physical paths.
 # ---------------------------------------------------------------------------
+copy_is_safe() {
+  case "$COPY" in
+    ""|/) echo "ERROR: unsafe copy directory '${COPY}'" >&2; return 1 ;;
+    /*) ;;
+    *) echo "ERROR: copy directory '$COPY' is not absolute" >&2; return 1 ;;
+  esac
+  case "$COPY/" in
+    "$ROOT"/*) echo "ERROR: copy directory $COPY is the repository or inside it ($ROOT)" >&2; return 1 ;;
+  esac
+  case "$ROOT/" in
+    "$COPY"/*) echo "ERROR: copy directory $COPY contains the repository ($ROOT)" >&2; return 1 ;;
+  esac
+  return 0
+}
+
+if [ -n "${MUTCOH_COPY_DIR:-}" ]; then
+  COPY="$MUTCOH_COPY_DIR"
+  if [ -e "$COPY" ] && [ -n "$(ls -A -- "$COPY" 2>/dev/null)" ]; then
+    echo "ERROR: MUTCOH_COPY_DIR=$COPY exists and is not empty; refusing to reuse it." >&2
+    exit 1
+  fi
+  mkdir -p -m 0700 -- "$COPY" || { echo "ERROR: cannot create $COPY" >&2; exit 1; }
+else
+  COPY=$(mktemp -d "${TMPDIR:-/tmp}/mutcoh.XXXXXX") || { echo "ERROR: mktemp failed" >&2; exit 1; }
+fi
+[ -n "$COPY" ] || { echo "ERROR: empty copy directory" >&2; exit 1; }
+COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
+copy_is_safe || exit 1
+
 cleanup() {
   if [ "${MUTCOH_KEEP_COPY:-0}" = "1" ]; then
-    echo "(left the mutated tree at ${SVC}:${COPY} — MUTCOH_KEEP_COPY=1)"
-  else
-    "${DC[@]}" "$SVC" rm -rf "$COPY" >/dev/null 2>&1
+    echo "(left the mutated tree at ${COPY} — MUTCOH_KEEP_COPY=1)"
+  elif copy_is_safe; then
+    rm -rf -- "$COPY"
   fi
 }
 trap cleanup EXIT
 
-echo "building a throwaway copy of the tree at ${SVC}:${COPY} (the repo is never written to)"
-if ! "${DC[@]}" "$SVC" sh -c "
-  rm -rf '$COPY' && mkdir -p '$COPY' &&
-  tar -C /app \
-      --exclude=./.git --exclude=./.venv-test --exclude=./mutants --exclude=./build \
-      --exclude=./logs --exclude=./.hypothesis --exclude=./.pytest_cache \
+echo "building a throwaway copy of the tree at ${COPY} (the repo is never written to)"
+copy_is_safe || exit 1
+# backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
+# Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT.
+if ! tar -C "$ROOT" \
+      --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
+      --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \
       --exclude=./.ruff_cache --exclude=./.playwright-mcp --exclude=__pycache__ \
-      -cf - . | tar -C '$COPY' -xf -
-" 2>/dev/null; then
-  echo "ERROR: could not copy /app into $COPY inside the '$SVC' container." >&2
+      -cf - . | tar -C "$COPY" -xf -; then
+  echo "ERROR: could not copy $ROOT into $COPY." >&2
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
 # Guard 1: provenance.
 # ---------------------------------------------------------------------------
-prov=$("${DC[@]}" -w "$COPY" "$SVC" python -c "import src; print(src.__file__)" 2>/dev/null | tr -d '\r')
+prov=$(cd "$COPY" && "$PY" -c 'import src; print(src.__file__)' 2>/dev/null)
 case "$prov" in
   "$COPY"/src/__init__.py) echo "provenance OK: pytest will import $prov" ;;
   *)
@@ -170,7 +217,7 @@ echo
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-fail=0 killed=0 survived=0 void=0 broken_inert=0 inert_ok=0 n=0
+fail=0 killed=0 survived=0 void=0 errors=0 broken_inert=0 inert_ok=0 n=0
 declare -a SURVIVORS=()
 
 for m in "${MUTANTS[@]}"; do
@@ -183,7 +230,7 @@ for m in "${MUTANTS[@]}"; do
   inert=0; [[ "$label" == *INERT* ]] && inert=1
 
   # --- apply the mutation to the COPY --------------------------------------------------
-  if ! "${DC[@]}" -e "FROM=$from" -e "TO=$to" "$SVC" python - "$COPY/$file" <<'PY' 2>&1
+  if ! FROM="$from" TO="$to" "$PY" - "$COPY/$file" <<'PY' 2>&1
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
@@ -199,8 +246,8 @@ PY
   then
     echo "ERROR     $label — target string not found (or not unique); the code moved," >&2
     echo "          fix this script rather than the test." >&2
-    fail=1
-    "${DC[@]}" "$SVC" cp -- "/app/$file" "$COPY/$file" >/dev/null 2>&1
+    fail=1; errors=$((errors + 1))
+    cp -- "$file" "$COPY/$file" >/dev/null 2>&1
     continue
   fi
 
@@ -209,47 +256,62 @@ PY
   # from a kill unless it is checked for. Derived from the path so a new mutant in a new
   # file is covered without editing this line.
   mod=$(printf '%s' "${file%.py}" | tr '/' '.')
-  if ! "${DC[@]}" -w "$COPY" "$SVC" python -c "import $mod" >/dev/null 2>&1; then
+  if ! (cd "$COPY" && "$PY" -c "import $mod") >/dev/null 2>&1; then
     echo "VOID      $label — the mutated module does not import, so a kill here would" >&2
     echo "          only mean 'the file no longer parses'. Fix the replacement text." >&2
     void=$((void + 1)); fail=1
-    "${DC[@]}" "$SVC" cp -- "/app/$file" "$COPY/$file" >/dev/null 2>&1
+    cp -- "$file" "$COPY/$file" >/dev/null 2>&1
     continue
   fi
 
   log="$LOGDIR/$(printf '%02d' "$n")-${short}.log"
   # -x: stop at the first failure. The killer's name is what the report needs, and the
-  # inert control above is what makes attributing it sound.
-  if "${DC[@]}" -e "TEST_DATABASE_URL=$TEST_DATABASE_URL" -w "$COPY" "$SVC" \
-       sh -c "python -m pytest $TESTS -q -x -rf -m 'not real_llm' -p no:cacheprovider" \
-       >"$log" 2>&1; then
-    if [ "$inert" -eq 1 ]; then
-      echo "survived (expected)  $label"
-      inert_ok=$((inert_ok + 1))
-    else
-      echo "SURVIVED  $label"
-      SURVIVORS+=("$label")
-      survived=$((survived + 1)); fail=1
-    fi
-  else
-    killer=$(grep -m1 '^FAILED ' "$log" | sed 's/^FAILED //')
-    if [ "$inert" -eq 1 ]; then
-      echo "KILLED AN INERT MUTANT  $label" >&2
-      echo "          -> ${killer:-see $log}" >&2
-      echo "          The selection is failing for a reason that is NOT the mutation, so" >&2
-      echo "          every other number in this run is meaningless." >&2
-      broken_inert=$((broken_inert + 1)); fail=1
-    else
-      echo "killed    $label"
-      echo "          by ${killer:-<no FAILED line; see $log>}"
-      killed=$((killed + 1))
-    fi
-  fi
+  # inert control above is what makes attributing it sound. timeout bounds a hung mutant
+  # (the repo has no pytest-timeout); `exec` makes the kill reach pytest itself.
+  envargs=()
+  [ -n "${TEST_DATABASE_URL:-}" ] && envargs+=("TEST_DATABASE_URL=$TEST_DATABASE_URL")
+  (cd "$COPY" && env ${envargs[@]+"${envargs[@]}"} timeout -k 30 "$MUT_TIMEOUT" \
+     sh -c "exec \"$PY\" -m pytest $TESTS -q -x -rf -m 'not real_llm' -p no:cacheprovider") \
+     >"$log" 2>&1
+  rc=$?
+  case "$rc" in
+    0)
+      if [ "$inert" -eq 1 ]; then
+        echo "survived (expected)  $label"
+        inert_ok=$((inert_ok + 1))
+      else
+        echo "SURVIVED  $label"
+        SURVIVORS+=("$label")
+        survived=$((survived + 1)); fail=1
+      fi ;;
+    1)
+      killer=$(grep -m1 '^FAILED ' "$log" | sed 's/^FAILED //')
+      if [ "$inert" -eq 1 ]; then
+        echo "KILLED AN INERT MUTANT  $label" >&2
+        echo "          -> ${killer:-see $log}" >&2
+        echo "          The selection is failing for a reason that is NOT the mutation, so" >&2
+        echo "          every other number in this run is meaningless." >&2
+        broken_inert=$((broken_inert + 1)); fail=1
+      else
+        echo "killed    $label"
+        echo "          by ${killer:-<no FAILED line; see $log>}"
+        killed=$((killed + 1))
+      fi ;;
+    124|137)
+      # Never a kill, inert or real: a kill must name a failing test.
+      echo "ERROR     $label — TIMEOUT after ${MUT_TIMEOUT}s (exit $rc); see $log" >&2
+      fail=1; errors=$((errors + 1)) ;;
+    *)
+      # 2 interrupted, 3 internal error, 4 usage error, 5 no tests collected: none of
+      # them names a failing test, so none is a kill.
+      echo "ERROR     $label — pytest exit $rc names no failing test; see $log" >&2
+      fail=1; errors=$((errors + 1)) ;;
+  esac
 
-  # --- restore the copy from the pristine mount, and verify it ------------------------
-  "${DC[@]}" "$SVC" cp -- "/app/$file" "$COPY/$file" >/dev/null 2>&1
-  if ! "${DC[@]}" "$SVC" cmp -s "/app/$file" "$COPY/$file"; then
-    echo "ERROR: $COPY/$file no longer matches /app/$file; the copy is polluted and" >&2
+  # --- restore the copy from the repository, and verify it -----------------------------
+  cp -- "$file" "$COPY/$file" >/dev/null 2>&1
+  if ! cmp -s -- "$file" "$COPY/$file"; then
+    echo "ERROR: $COPY/$file no longer matches $file; the copy is polluted and" >&2
     echo "every result after this point is unattributable. Stopping." >&2
     exit 1
   fi
@@ -267,6 +329,7 @@ fi
 
 echo
 echo "killed ${killed}/$((killed + survived + void)) real mutants"
+echo "${errors} errors (target moved, timeout, or no failing test named); ${void} void"
 echo "inert controls: ${inert_ok}/$((inert_ok + broken_inert)) survived (all of them must)"
 echo "src/ clean: yes"
 

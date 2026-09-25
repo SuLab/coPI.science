@@ -6,8 +6,8 @@
 #
 # Each mutant must be KILLED — at least one test in the named selection must fail with it
 # applied. A SURVIVING mutant means the suite does not actually test that behaviour,
-# whatever its test names claim. Same discipline as scripts/mutate_cohorts.sh (9/9) and
-# scripts/mutate_slack_mirror.sh (4/4), and the same `~~` field delimiter, chosen there
+# whatever its test names claim. Same discipline as scripts/mutate_cohorts.sh and
+# scripts/mutate_slack_mirror.sh, and the same `~~` field delimiter, chosen there
 # because one mutation target contains a `|` and kept here because several contain `~`-free
 # SQL with pipes and quotes of both kinds.
 #
@@ -26,11 +26,22 @@
 # NOTHING IN THIS REPOSITORY IS EVER WRITTEN TO.
 # Three agents previously applied mutations by editing src/ in place. A repo guard
 # auto-reverted them mid-run and silently corrupted the results: mutants reported as
-# SURVIVING would in fact have been killed. So this script copies the tree into the
-# container's /tmp, mutates the COPY, runs pytest with the copy as its working directory,
-# and proves — by importing `src` and checking `src.__file__` — that the copy is what is
-# under test. `git diff --quiet -- src/` is asserted before the first mutant and after the
-# last one.
+# SURVIVING would in fact have been killed. So this script copies the tree into a fresh
+# 0700 mktemp directory OUTSIDE the repository, mutates the COPY, runs pytest from the
+# host's .venv-test with the copy as its working directory, and proves — by importing
+# `src` and checking `src.__file__` — that the copy is what is under test.
+# `git diff --quiet -- src/` is asserted before the first mutant and after the last one.
+#
+# Run it ON THE HOST, not over sshfs (CLAUDE.md): through a FUSE mount the copy and every
+# pytest run can be 100-400x slower. The images have no pytest, so there is no container
+# path. With TEST_DATABASE_URL unset, tests/conftest.py starts its own testcontainers
+# Postgres, exactly as scripts/ci.sh does.
+#
+# THE KILLING MUTATION OF EVERY TEST FIXED FOR VACUITY STAYS HERE (RCA §8 cause 3). Each
+# `vac_*` tier selects only the one fixed test's node, because with a whole file and `-x`
+# whichever test fails first counts as the kill — under M15 an older test in the same file
+# already fails, so a whole-file tier would report "killed" whether or not the fixed test
+# can see the mutation. `vacuity` is their union and holds only the inert control M13.
 #
 # Usage:
 #   # offline tiers only (free, no third-party calls):
@@ -42,7 +53,14 @@
 #   # + the profile-pipeline tier (real Anthropic tokens, ~7 calls total):
 #   LIVE_API_TESTS=1 ANTHROPIC_API_KEY=sk-ant-... ./scripts/mutate_system.sh
 #
-# A tier whose credentials are absent is reported as `skipped`, never as `killed`.
+#   # the live ORCID / NCBI tiers only, with nothing that can spend Anthropic tokens:
+#   LIVE_API_TESTS=1 ANTHROPIC_API_KEY=sk-ant-dummy-no-spend \
+#     MUT_TIERS="orcid pubmed_tool pubmed_doi pubmed_both" ./scripts/mutate_system.sh
+#
+# A tier whose credentials are absent, or that MUT_TIERS leaves out, is reported as
+# `skipped`, never as `killed`. A selection that hangs past MUT_TIMEOUT is an ERROR, never
+# a kill, and so is any pytest exit other than 0 (passed) or 1 (tests failed): a usage
+# error, an interrupted collection or a `-k` that selects nothing names no failing test.
 #
 # Cost control: every mutant runs against ONLY the test file (and often only the single
 # test) that is supposed to kill it, never the whole suite. That is what keeps the
@@ -126,20 +144,27 @@
 # tell: a selection that never loaded the mutant cannot move.
 #
 # Overridable env:
-#   TEST_DATABASE_URL   throwaway asyncpg DSN (default: the copi_a3 scratch database)
-#   MUTSYS_SERVICE      compose service to exec into (default: app)
-#   MUTSYS_COPY_DIR     where the mutated tree lives inside the container
+#   MUT_PYTHON          interpreter with pytest (default: ./.venv-test/bin/python, the
+#                       host venv; create it ON THE HOST as CLAUDE.md describes)
+#   TEST_DATABASE_URL   throwaway asyncpg DSN (default: unset, so conftest starts an
+#                       ephemeral testcontainers Postgres); refused if it names `copi`
+#   MUT_TIERS           space-separated allow-list of tier names (default: every tier)
+#   MUT_TIMEOUT         seconds per pytest run before it is killed and scored ERROR
+#                       (default: 900)
+#   MUTSYS_COPY_DIR     where the mutated tree lives (default: a fresh mktemp dir); must
+#                       be absent or empty, and outside the repository
 #   MUTSYS_LOGDIR       where per-mutant pytest logs are kept (default: a mktemp dir)
 #   MUTSYS_KEEP_COPY    set to 1 to leave the mutated tree behind for inspection
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ROOT=$(pwd -P)
 
-TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgresql+asyncpg://copi:copi@postgres:5432/copi_a3}"
-SVC="${MUTSYS_SERVICE:-app}"
-COPY="${MUTSYS_COPY_DIR:-/tmp/mutsys}"
+PY="${MUT_PYTHON:-$PWD/.venv-test/bin/python}"
+[ -x "$PY" ] || { echo "ERROR: $PY missing — create .venv-test ON THE HOST (CLAUDE.md); the images have no pytest" >&2; exit 1; }
+case "$PY" in /*) ;; *) PY="$ROOT/$PY" ;; esac  # pytest runs from the copy, not from here
 LOGDIR="${MUTSYS_LOGDIR:-$(mktemp -d)}"
-DC=(docker compose exec -T)
+MUT_TIMEOUT="${MUT_TIMEOUT:-900}"
 
 # mkdir, because MUTSYS_LOGDIR is documented as overridable and this script did not
 # create it. Measured 2026-08-04: pass a path that does not exist and every `>"$log"`
@@ -152,8 +177,9 @@ mkdir -p "$LOGDIR" || { echo "ERROR: cannot create log dir $LOGDIR" >&2; exit 1;
 
 # Deliberately NOT the live database, and asserted rather than assumed: several of these
 # suites commit (the worker tests need another connection to see the write, so they cannot
-# use the rolled-back session fixture).
-case "$TEST_DATABASE_URL" in
+# use the rolled-back session fixture). Unset or empty means conftest's own throwaway
+# Postgres (tests/conftest.py treats an empty value as unset).
+case "${TEST_DATABASE_URL:-}" in
   */copi|*/copi\?*)
     echo "ERROR: TEST_DATABASE_URL points at the live 'copi' database. These suites" >&2
     echo "commit. Use a throwaway database." >&2
@@ -165,7 +191,7 @@ esac
 # ---------------------------------------------------------------------------
 if ! git diff --quiet -- src/; then
   echo "ERROR: src/ has uncommitted changes." >&2
-  echo "This script does not edit src/ — it mutates a copy inside the container — but a" >&2
+  echo "This script does not edit src/ — it mutates a copy outside the repository — but a" >&2
   echo "dirty tree means the copy would carry changes that are not the mutant, so every" >&2
   echo "result below would be unattributable. Commit or stash first." >&2
   exit 1
@@ -175,6 +201,10 @@ fi
 # Tiers: the selection each mutant is judged against, and what it costs.
 #
 # CREDS: "" = offline; "live" = needs LIVE_API_TESTS=1; "live+llm" = also real Anthropic.
+# Every tier needs a TIER_CREDS entry: under `set -u` a missing key aborts the run.
+# The vac_i23_* tiers name one parametrization of test_floor_arithmetic by its explicit
+# pytest.param id. The node is single-quoted inside the string because `sh -c` would
+# otherwise treat its `[...]` as a glob.
 # ---------------------------------------------------------------------------
 declare -A TIER_SELECT=(
   [orcid]="tests/live_api/test_orcid_live.py"
@@ -186,17 +216,40 @@ declare -A TIER_SELECT=(
   [graph]="tests/integration/test_public_graph.py"
   [onboarding]="tests/integration/test_onboarding_flow.py"
   [agentpage]="tests/integration/test_agent_page.py"
+  [vac_i20]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller"
+  [vac_i23_route]="'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]'"
+  [vac_i23_pass]="'tests/unit/test_specialist_floor.py::test_floor_arithmetic[pass-armed-exempt]'"
+  [vac_c2]="tests/unit/test_consult_accounting.py::test_a_consults_own_truncation_retry_is_booked"
+  [vac_i21]="tests/unit/test_roles.py::test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar"
+  [vac_i28]="tests/unit/test_delegates.py::TestDelegateInvitation::test_default_status"
+  [vac_i29]="tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500"
+  [vac_i24b]="tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered"
+  [vacuity]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]' 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[pass-armed-exempt]' tests/unit/test_consult_accounting.py::test_a_consults_own_truncation_retry_is_booked tests/unit/test_roles.py::test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar tests/unit/test_delegates.py::TestDelegateInvitation::test_default_status tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500 tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered"
 )
 declare -A TIER_CREDS=(
   [orcid]="live"       [pubmed_tool]="live"  [pubmed_doi]="live"  [pubmed_both]="live"
   [worker]=""          [pipeline]="live+llm" [graph]=""           [onboarding]=""
   [agentpage]=""
+  [vac_i20]=""         [vac_i23_route]=""    [vac_i23_pass]=""    [vac_c2]=""
+  [vac_i21]=""         [vac_i28]=""          [vac_i29]=""         [vac_i24b]=""
+  [vacuity]=""
 )
+
+# MUT_TIERS (D18): an allow-list, so the live ORCID/NCBI tiers can run without `pipeline`,
+# the one tier that spends Anthropic calls. An unknown name is refused rather than
+# silently skipping everything.
+if [ -n "${MUT_TIERS:-}" ]; then
+  for t in $MUT_TIERS; do
+    [ -n "${TIER_SELECT[$t]+x}" ] || { echo "ERROR: MUT_TIERS names unknown tier '$t'" >&2; exit 1; }
+  done
+fi
 
 # tier ~~ file ~~ exact source substring ~~ replacement ~~ label
 #
 # `\n` in the FROM/TO fields is a newline (see the applier below). Entries containing a
-# double quote are single-quoted here and vice versa; no entry needs both.
+# double quote, a backtick or a `$` are single-quoted here; the others are double-quoted.
+# No entry needs both kinds of quote. tests/unit/test_mutation_harness_targets.py checks
+# that every target occurs exactly once and that every tier has an inert control.
 MUTANTS=(
 # --- ORCID (T1) ------------------------------------------------------------------------
 'orcid~~src/services/orcid.py~~    """Extract name, affiliation, and email from ORCID record."""~~    """Extract the name, affiliation and email from an ORCID record. [INERT EDIT]"""~~M12a INERT docstring — MUST SURVIVE'
@@ -206,7 +259,7 @@ MUTANTS=(
 # answer". SURVIVES the live tier (see M1b in the header above).
 'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or orcid_id~~    result["name"] = "Josiah Carberry"~~M1b the same hardcode, set to the value the test pins (probes whether the assertion is derived from the live record or merely restated)'
 # --- PubMed / NCBI (T2) ----------------------------------------------------------------
-'pubmed_both~~src/services/pubmed.py~~    """Make a rate-limited, identified GET request to NCBI."""~~    """Make a rate-limited, identified GET request to NCBI E-utilities. [INERT EDIT]"""~~M12b INERT docstring — MUST SURVIVE'
+'pubmed_both~~src/services/pubmed.py~~    """Make a rate-limited, identified GET request to NCBI, with retry.~~    """Make a rate-limited, identified GET request to NCBI E-utilities, with retry. [INERT EDIT]~~M12b INERT docstring — MUST SURVIVE'
 "pubmed_doi~~src/services/pubmed.py~~    if assigned.lower() == auth.lower():~~    if True:~~M2 reconcile_pub_doi always reports a match, so a PMID keeps whatever DOI it arrived with"
 'pubmed_tool~~src/services/pubmed.py~~    params.setdefault("tool", _NCBI_TOOL)~~    pass  # tool= no longer sent~~M3 _ncbi_get stops identifying itself to NCBI (throttle, then IP block)'
 # --- worker (T5) -----------------------------------------------------------------------
@@ -227,38 +280,84 @@ MUTANTS=(
 # --- agent page (T8) -------------------------------------------------------------------
 'agentpage~~src/routers/agent_page.py~~            "Ignoring duplicate reopen of proposal %s by %s "~~            "Ignoring a duplicate reopen of proposal %s by %s "~~M12g INERT log string — MUST SURVIVE'
 "agentpage~~src/routers/agent_page.py~~    if already_reviewed is not None:~~    if False:~~M10 the reopen idempotency guard is gone, so a replayed POST migrates the thread twice"
+# --- vacuity (RCA §8 cause 3): the killing mutation of every test fixed for vacuity ----
+# Each real mutant is judged against ONLY its fixed test's node (see the header). M13 is
+# the shared inert control, run against the union of those nodes.
+'vacuity~~src/agent/locks.py~~"""Per-key asyncio locks with deadlock-free multi-acquire.~~"""Per-key asyncio locks with deadlock-free multi-acquire. [INERT EDIT]~~M13 INERT docstring — MUST SURVIVE'
+"vac_i20~~src/agent/locks.py~~                await lock.acquire()~~                if lock.locked(): await asyncio.Event().wait()\n                await lock.acquire()~~M14 I20/E2 a contended acquire_all waits forever, so the thread-lock-then-agent-lock path deadlocks"
+'vac_i23_route~~src/agent/specialists.py~~PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset({"pass"})~~PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset({"pass", "route-to-incubation"})~~M15 I23/E3 route-to-incubation is exempted from the specialist floor again'
+'vac_i23_pass~~src/agent/specialists.py~~PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset({"pass"})~~PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset()~~M16 I23 a pass verdict owes a panel too, so no recommendation is exempt'
+"vac_c2~~src/agent/tools.py~~            on_retry=on_api_call,~~            on_retry=None,~~M17 C2/R3 a consult's own max_tokens retry is not booked as an API call"
+'vac_i21~~prompts/roles/scout_hub/phase4-thread-reply.md~~Only your inline verdict also appears in `<slack_message>`~~None of it may appear anywhere in `<slack_message>`~~M18 I21/E7 the phase-4 prompt forbids the inline verdict again (the pre-df4d975 sentence)'
+'vac_i28~~src/models/delegate.py~~String(20), nullable=False, default="pending"~~String(20), nullable=False, default="accepted"~~M19 I28/E14 a new delegate invitation defaults to accepted'
+'vac_i29~~src/routers/agent_page.py~~        # the SELECT guard above answers a sequential duplicate.\n        await db.rollback()\n        return RedirectResponse(\n            url=f"/agent/{agent_id}/dashboard", status_code=302\n        )~~        # the SELECT guard above answers a sequential duplicate.\n        await db.rollback()\n        from fastapi.responses import Response\n        return Response(status_code=500)~~M20 I29/R2 review_proposal answers a lost race with a 500'
+"vac_i24b~~src/services/directory.py~~    root_posts = roots_result.scalars().all()~~    root_posts = []~~M21 I24b/R1 the discussions view lists no threads"
 )
 
 # ---------------------------------------------------------------------------
-# Build the mutable copy inside the container and PROVE it is what runs.
+# Build the mutable copy OUTSIDE the repository and PROVE it is what runs.
+#
+# The copy directory is guarded before the tar and before every `rm -rf`. If mktemp
+# failed, COPY would be empty, bash's `cd ""` would succeed as a no-op, `pwd -P` would
+# return the repo root, the mutants would land in the live tree and the EXIT trap would
+# delete it. Physical paths are compared with physical paths.
 # ---------------------------------------------------------------------------
+copy_is_safe() {
+  case "$COPY" in
+    ""|/) echo "ERROR: unsafe copy directory '${COPY}'" >&2; return 1 ;;
+    /*) ;;
+    *) echo "ERROR: copy directory '$COPY' is not absolute" >&2; return 1 ;;
+  esac
+  case "$COPY/" in
+    "$ROOT"/*) echo "ERROR: copy directory $COPY is the repository or inside it ($ROOT)" >&2; return 1 ;;
+  esac
+  case "$ROOT/" in
+    "$COPY"/*) echo "ERROR: copy directory $COPY contains the repository ($ROOT)" >&2; return 1 ;;
+  esac
+  return 0
+}
+
+if [ -n "${MUTSYS_COPY_DIR:-}" ]; then
+  COPY="$MUTSYS_COPY_DIR"
+  if [ -e "$COPY" ] && [ -n "$(ls -A -- "$COPY" 2>/dev/null)" ]; then
+    echo "ERROR: MUTSYS_COPY_DIR=$COPY exists and is not empty; refusing to reuse it." >&2
+    exit 1
+  fi
+  mkdir -p -m 0700 -- "$COPY" || { echo "ERROR: cannot create $COPY" >&2; exit 1; }
+else
+  COPY=$(mktemp -d "${TMPDIR:-/tmp}/mutsys.XXXXXX") || { echo "ERROR: mktemp failed" >&2; exit 1; }
+fi
+[ -n "$COPY" ] || { echo "ERROR: empty copy directory" >&2; exit 1; }
+COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
+copy_is_safe || exit 1
+
 cleanup() {
   if [ "${MUTSYS_KEEP_COPY:-0}" = "1" ]; then
-    echo "(left the mutated tree at ${SVC}:${COPY} — MUTSYS_KEEP_COPY=1)"
-  else
-    "${DC[@]}" "$SVC" rm -rf "$COPY" >/dev/null 2>&1
+    echo "(left the mutated tree at ${COPY} — MUTSYS_KEEP_COPY=1)"
+  elif copy_is_safe; then
+    rm -rf -- "$COPY"
   fi
 }
 trap cleanup EXIT
 
-echo "building a throwaway copy of the tree at ${SVC}:${COPY} (the repo is never written to)"
-if ! "${DC[@]}" "$SVC" sh -c "
-  rm -rf '$COPY' && mkdir -p '$COPY' &&
-  tar -C /app \
-      --exclude=./.git --exclude=./.venv-test --exclude=./mutants --exclude=./build \
-      --exclude=./logs --exclude=./.hypothesis --exclude=./.pytest_cache \
+echo "building a throwaway copy of the tree at ${COPY} (the repo is never written to)"
+copy_is_safe || exit 1
+# backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
+# Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT.
+if ! tar -C "$ROOT" \
+      --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
+      --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \
       --exclude=./.ruff_cache --exclude=./.playwright-mcp --exclude=__pycache__ \
-      -cf - . | tar -C '$COPY' -xf -
-" 2>/dev/null; then
-  echo "ERROR: could not copy /app into $COPY inside the '$SVC' container." >&2
+      -cf - . | tar -C "$COPY" -xf -; then
+  echo "ERROR: could not copy $ROOT into $COPY." >&2
   exit 1
 fi
 
-# Provenance. `src` is ALSO installed into site-packages in this image, so without this
-# check a run could silently be testing /usr/local/.../src or /app/src — i.e. exercising
-# unmutated code and reporting every mutant as SURVIVED. That is the failure mode this
-# whole script exists to avoid, so it is asserted rather than assumed.
-prov=$("${DC[@]}" -w "$COPY" "$SVC" python -c "import src; print(src.__file__)" 2>/dev/null | tr -d '\r')
+# Provenance. If `import src` from the copy resolved anywhere else (an editable install of
+# the repo, a stray site-packages copy), the run would exercise unmutated code and report
+# every mutant as SURVIVED. That is the failure mode this whole script exists to avoid, so
+# it is asserted rather than assumed.
+prov=$(cd "$COPY" && "$PY" -c 'import src; print(src.__file__)' 2>/dev/null)
 case "$prov" in
   "$COPY"/src/__init__.py) echo "provenance OK: pytest will import $prov" ;;
   *)
@@ -273,7 +372,7 @@ echo
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-fail=0 killed=0 survived=0 skipped=0 broken_inert=0 inert_ok=0 n=0
+fail=0 killed=0 survived=0 skipped=0 skipped_tiers=0 broken_inert=0 inert_ok=0 errors=0 n=0
 declare -a SURVIVORS=()
 
 for m in "${MUTANTS[@]}"; do
@@ -288,25 +387,32 @@ for m in "${MUTANTS[@]}"; do
   select="${TIER_SELECT[$tier]}"
   creds="${TIER_CREDS[$tier]}"
 
+  # --- tier filter (MUT_TIERS) ---------------------------------------------------------
+  if [ -n "${MUT_TIERS:-}" ] && [[ " $MUT_TIERS " != *" $tier "* ]]; then
+    echo "skipped   $label  (MUT_TIERS)"; skipped_tiers=$((skipped_tiers + 1)); continue
+  fi
+
   # --- credentials gate: a tier we cannot run is `skipped`, never `killed` -------------
-  envargs=(-e "TEST_DATABASE_URL=$TEST_DATABASE_URL")
+  # The host environment is inherited; these entries only pin what the tier depends on.
+  envargs=()
+  [ -n "${TEST_DATABASE_URL:-}" ] && envargs+=("TEST_DATABASE_URL=$TEST_DATABASE_URL")
   case "$creds" in
     live|live+llm)
       if [ -z "${LIVE_API_TESTS:-}" ]; then
         echo "skipped   $label  (needs LIVE_API_TESTS=1)"; skipped=$((skipped + 1)); continue
       fi
-      envargs+=(-e "LIVE_API_TESTS=$LIVE_API_TESTS") ;;
+      envargs+=("LIVE_API_TESTS=$LIVE_API_TESTS") ;;
   esac
   if [ "$creds" = "live+llm" ]; then
     if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
       echo "skipped   $label  (needs ANTHROPIC_API_KEY — this tier spends real tokens)"
       skipped=$((skipped + 1)); continue
     fi
-    envargs+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    envargs+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
   fi
 
   # --- apply the mutation to the COPY --------------------------------------------------
-  if ! "${DC[@]}" -e "FROM=$from" -e "TO=$to" "$SVC" python - "$COPY/$file" <<'PY' 2>&1
+  if ! FROM="$from" TO="$to" "$PY" - "$COPY/$file" <<'PY' 2>&1
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
@@ -322,43 +428,57 @@ PY
   then
     echo "ERROR     $label — target string not found (or not unique); the code moved," >&2
     echo "          fix this script rather than the test." >&2
-    fail=1
-    "${DC[@]}" "$SVC" cp -- "/app/$file" "$COPY/$file" >/dev/null 2>&1
+    fail=1; errors=$((errors + 1))
+    cp -- "$file" "$COPY/$file" >/dev/null 2>&1
     continue
   fi
 
   log="$LOGDIR/$(printf '%02d' "$n")-${short}.log"
   # -x: stop at the first failure. The killer's name is what the report needs, and a
   # narrow selection plus a per-tier inert control is what makes attributing it sound.
-  if "${DC[@]}" "${envargs[@]}" -w "$COPY" "$SVC" \
-       sh -c "python -m pytest $select -q -x -rf -p no:cacheprovider" >"$log" 2>&1; then
-    if [ "$inert" -eq 1 ]; then
-      echo "survived (expected)  $label"
-      killed=$((killed + 1)); inert_ok=$((inert_ok + 1))
-    else
-      echo "SURVIVED  $label"
-      SURVIVORS+=("$label")
-      survived=$((survived + 1)); fail=1
-    fi
-  else
-    killer=$(grep -m1 '^FAILED ' "$log" | sed 's/^FAILED //')
-    if [ "$inert" -eq 1 ]; then
-      echo "KILLED AN INERT MUTANT  $label" >&2
-      echo "          -> ${killer:-see $log}" >&2
-      echo "          This tier is failing for a reason that is NOT the mutation, so" >&2
-      echo "          every other number for it is meaningless." >&2
-      broken_inert=$((broken_inert + 1)); fail=1
-    else
-      echo "killed    $label"
-      echo "          by ${killer:-<no FAILED line; see $log>}"
-      killed=$((killed + 1))
-    fi
-  fi
+  # timeout bounds a hung mutant (the repo has no pytest-timeout); `exec` makes the kill
+  # reach pytest itself rather than only `sh`.
+  (cd "$COPY" && env ${envargs[@]+"${envargs[@]}"} timeout -k 30 "$MUT_TIMEOUT" \
+     sh -c "exec \"$PY\" -m pytest $select -q -x -rf -p no:cacheprovider") >"$log" 2>&1
+  rc=$?
+  case "$rc" in
+    0)
+      if [ "$inert" -eq 1 ]; then
+        echo "survived (expected)  $label"
+        killed=$((killed + 1)); inert_ok=$((inert_ok + 1))
+      else
+        echo "SURVIVED  $label"
+        SURVIVORS+=("$label")
+        survived=$((survived + 1)); fail=1
+      fi ;;
+    1)
+      killer=$(grep -m1 '^FAILED ' "$log" | sed 's/^FAILED //')
+      if [ "$inert" -eq 1 ]; then
+        echo "KILLED AN INERT MUTANT  $label" >&2
+        echo "          -> ${killer:-see $log}" >&2
+        echo "          This tier is failing for a reason that is NOT the mutation, so" >&2
+        echo "          every other number for it is meaningless." >&2
+        broken_inert=$((broken_inert + 1)); fail=1
+      else
+        echo "killed    $label"
+        echo "          by ${killer:-<no FAILED line; see $log>}"
+        killed=$((killed + 1))
+      fi ;;
+    124|137)
+      # Never a kill, inert or real: a kill must name a failing test.
+      echo "ERROR     $label — TIMEOUT after ${MUT_TIMEOUT}s (exit $rc); see $log" >&2
+      fail=1; errors=$((errors + 1)) ;;
+    *)
+      # 2 interrupted (e.g. a collection error), 3 internal error, 4 usage error,
+      # 5 no tests collected: none of them names a failing test, so none is a kill.
+      echo "ERROR     $label — pytest exit $rc names no failing test; see $log" >&2
+      fail=1; errors=$((errors + 1)) ;;
+  esac
 
-  # --- restore the copy from the pristine mount, and verify it ------------------------
-  "${DC[@]}" "$SVC" cp -- "/app/$file" "$COPY/$file" >/dev/null 2>&1
-  if ! "${DC[@]}" "$SVC" cmp -s "/app/$file" "$COPY/$file"; then
-    echo "ERROR: $COPY/$file no longer matches /app/$file; the copy is polluted and" >&2
+  # --- restore the copy from the repository, and verify it -----------------------------
+  cp -- "$file" "$COPY/$file" >/dev/null 2>&1
+  if ! cmp -s -- "$file" "$COPY/$file"; then
+    echo "ERROR: $COPY/$file no longer matches $file; the copy is polluted and" >&2
     echo "every result after this point is unattributable. Stopping." >&2
     exit 1
   fi
@@ -379,7 +499,8 @@ real_total=$((real_killed + survived))
 echo
 echo "killed ${real_killed}/${real_total} real mutants"
 echo "inert controls: ${inert_ok}/$((inert_ok + broken_inert)) survived (all of them must)"
-echo "${skipped} skipped for missing credentials"
+echo "${errors} errors (target moved, timeout, or no failing test named)"
+echo "${skipped} skipped for missing credentials, ${skipped_tiers} skipped by MUT_TIERS"
 echo "src/ clean: yes"
 
 if [ "$broken_inert" -gt 0 ]; then
