@@ -657,11 +657,12 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0052`+ — `0031`
-through `0051` are all taken now: `0038` went to
+defaulted. Dropping it is deferred to a separate later migration (`0053`+ — `0031`
+through `0052` are all taken now: `0038` went to
 `specialist_consults`'s `read_state`/`established`/rubric stamp instead, `0039`
 to the reviewer-role/review-tables migration instead, `0040` went to
-`prose_format`, and `0041` to `summary_posted_at`, see the
+`prose_format`, `0041` to `summary_posted_at`, and `0052` to
+`dimension_rationales`, see the
 box below), which **has not been written, let alone applied** — see the design
 doc's §8.
 
@@ -1720,7 +1721,8 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >   both must restart.
 > * **scout_hub 1.7.1 → 1.8.0.** `key_points` is six groups (Indication /
 >   Audience, Lab Background, Proposal, Clinical Actionability, Key
->   Questions/Experiment, Commercial Opportunity). Rows stored under the old
+>   Questions/Experiment, Commercial Opportunity) — the 1.8.0 contract,
+>   superseded by 1.9.0's six one-bullet groups (see the `0052` box). Rows stored under the old
 >   five (or three) keep their own labels; writes accept old and new keys.
 >   **The hazardous half is prompt-without-image:** an old image rejects the
 >   six new keys and stores `key_points` NULL. `prompts/` is live from the
@@ -1751,6 +1753,99 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > renders "matches no entry". Old images render only `clinical_actionability`
 > and `key_questions` of a six-group row; the other four groups stay in the
 > column, hidden until the new code is back.
+
+> **Deploy order for `0052_assessment_dimension_rationales` — migrate BEFORE the
+> new code serves, and rebuild the AGENT image in the same deploy.** `0052` is
+> one additive nullable JSONB column (`opportunity_assessments.dimension_rationales`,
+> the companion to sidecar item 2's `scores` under scout_hub prompt set 1.9.0: one
+> short reason per rubric dimension, keyed like `scores`), so *old code against
+> the new schema* is safe. The reverse breaks both ways. READ: the new code maps
+> the column, so every `select(OpportunityAssessment)` raises `UndefinedColumn` —
+> both assessment list pages, both detail pages, `src/services/review_bot.py` (on
+> the **worker**, so every `review_feedback_analysis` job fails),
+> `src/routers/reviews.py` (feedback submit/edit 500s) and
+> `src/services/directory.py`. WRITE: `_persist_assessment` names it in the
+> INSERT, and that write is best-effort, so **every verdict of a running
+> simulation is lost** to one ERROR line in a log nobody is tailing while the
+> Slack replies keep looking normal. Same shape as the `0048`/`0049`/`0050` boxes.
+> Design: `docs/specs/2026-09-28-assessment-chat-entry-and-key-points-design.md`.
+>
+> ⚠️ **Commit before building.** The builder stage's `git clean -ffdx` drops an
+> UNTRACKED `alembic/versions/0052_assessment_dimension_rationales.py` from the
+> image while the tracked `scripts/migrate/preflight.py` change that targets
+> `0052` survives — the image then targets a revision it does not contain, and
+> the deploy fails mid-way, after the dump. `run_migration.sh` compares only the
+> image's commit to host HEAD and merely WARNs on a dirty count, so it does not
+> catch this. `git status --porcelain --untracked-files=all -- src templates
+> static prompts alembic scripts pyproject.toml alembic.ini` must print nothing
+> before the first `$DC build`. And confirm `/admin/simulation` shows no live
+> engine before the tree lands at all: `prompts/` is the host working tree and is
+> read per use.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0052
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0052)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> **The agent rebuild is required, and the hazardous half of the pairing is
+> prompt-without-image.** `prompts/` is bind-mounted and `src/` is baked. This
+> deploy bumps the scout_hub prompt set to **1.9.0**, whose `key_points` is six
+> groups of **ONE bullet each** — Indication / Audience, Lab Background, Proposal,
+> Clinical Actionability, Path to Clinic / Commercialization, Commercial
+> Opportunity — under a plain-language rule binding every bullet (expand every
+> abbreviation, gloss every gene or pathway symbol, one main clause, at most 300
+> characters). A 1.9.0 sidecar's `path_to_clinic` is an unknown key to an old
+> image's `KEY_POINT_ACCEPTED_KEYS`, so `normalize_key_points` returns `None` and
+> **`key_points` stores NULL for every verdict**, surviving only in
+> `raw_verdict`; the old image also never assigns `dimension_rationales`, so that
+> window writes NULL there too. Image-without-prompt is benign: an old sidecar
+> emits neither new key, and `KEY_POINT_ACCEPTED_KEYS` is still the union of the
+> current, retired and legacy keys, so a 1.8.0 sidecar still stores. **No run may
+> start between landing the tree and `up -d agent`.** The simulation is not
+> started as part of the deploy; start the next run FRESH — a resume would mix
+> 1.8.0 and 1.9.0 key-point shapes and pre/post-`0052` rows in one run.
+>
+> **`key_questions` leaves the write contract but not the page.** The deciding
+> experiment now lives only in `recommended_next_experiment` ("The ask"). The 1.9.0
+> write path still accepts `key_questions` (with a milder "retired" WARNING), and
+> the read path still renders it for every row that carries it:
+> `RETIRED_KEY_POINT_GROUPS` in `src/services/assessment_detail.py` keeps a 1.8.0
+> row's group under its 1.8.0 label, "Key Questions/Experiment", in its 1.8.0
+> fifth slot (between Clinical Actionability and Path to Clinic), while a legacy
+> 1.3.0–1.7.1 row keeps its own legacy labels and order. Stored rows are never
+> rewritten.
+>
+> `dimension_rationales` is NULL on every pre-`0052` row and **deliberately never
+> backfilled**: those verdicts were never asked for per-dimension reasons, and a
+> generated one would be indistinguishable from one the hub wrote. A NULL column
+> renders exactly as before. The rubric stays **3.5.0** — no `[meta].version`
+> bump, so no `prompts/rubric/revisions.toml` entry and no rubric restart concern.
+>
+> Four page changes ride in the same deploy, none with a server change:
+>
+> * the detail page's nav "Ask about this assessment" button is gone, replaced by
+>   a floating chat bubble bottom-right (the one `data-chat-open` on the page);
+> * each list card gains a **chat** link to `…/assessments/{id}#chat`, and the
+>   drawer's own script opens itself on that fragment — no new route;
+> * the Evidence summary gains a neutral **Mid-scale** section, so a dimension
+>   scored between the strength and risk thresholds finally appears somewhere;
+> * each dimension's stored reason renders beside its score, to the **reviewer
+>   tier as well as staff** (design D5, operator decision 2026-09-28), and the
+>   assessment chat record quotes it on both tiers. The prompt tells the model
+>   plainly that reviewers read this field; nothing mechanically stops an
+>   unpublished disclosure landing there — the same residual the published
+>   elevator pitch has carried since 2026-09-09.
+>
+> Rollback: redeploy the `rollback-pre-0052` images and revert the commit. The
+> column is harmless to old code; `alembic downgrade 0051` drops it and every
+> rationale in it.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
@@ -1939,6 +2034,13 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   terminator leaving at least half the budget, falls back to the last space, marks
   either cut with a `" …"` suffix, and returns a short pitch byte-identically
   unchanged.
+  **As of scout_hub 1.9.0 (2026-09-28) the pitch itself is bounded at 250 words**
+  (`_PITCH_WORD_LIMIT` in `src/agent/simulation.py`, a WARNING only — an over-long
+  pitch still stores), replacing the old four-to-six-sentence, 900-character bound.
+  The published excerpt is unchanged: still `PITCH_DISPLAY_CHARS` = 600 characters,
+  still clipped at a sentence boundary, so a longer pitch publishes no more prose
+  than before — it only makes it likelier that the provenance citation falls past
+  the cut, which the engine's citation-loss WARNING reports after the fact.
   **`score_rationale` (sidecar item 10, migration `0048`) is deliberately NOT
   published here** — it reasons about the score, which is exactly the widening
   D12 bounds; it is app-only, on both assessment surfaces. Band/score
