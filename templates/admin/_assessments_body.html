@@ -22,8 +22,9 @@
    CONTRACT: an including template must define, BEFORE the include (see either
    wrapper):
 
-     * an `assessment_link(a)` macro AND a `pi_link(a)` macro. That is how the
-       per-row links to /admin|/manager/assessments/{id} and
+     * an `assessment_link(a)` macro, an `assessment_chat_link(a)` macro AND
+       a `pi_link(a)` macro. That is how the per-row links to
+       /admin|/manager/assessments/{id} (plus its `#chat` fragment) and
        /admin|/manager/users|pis/{id} get literal URLs without one appearing
        here.
      * `{% set list_surface = 'admin-list' %}` (admin wrapper) or
@@ -35,6 +36,16 @@
        `/admin/` appears nowhere on a manager render, so a path-shaped
        discriminator would fail the gate on the manager surface. Paths are
        assembled in src/routers/reviews.py. #}
+{# Whether this session may open the assessment chat, computed the same way
+   admin/_assessment_detail_body.html computes it: the app-state flag set by
+   create_app from `settings.assessment_chat_enabled`, and no impersonation
+   (every chat route 403s an impersonated session, so a live-looking control
+   would be a dead one). Deliberately NOT a new context key — both list
+   handlers render through their router's `_template_context`, which already
+   supplies `request` and `impersonation_banner`. #}
+{% set card_chat_available = request is defined and request.app is defined
+     and request.app.state.assessment_chat_enabled is sameas true
+     and not impersonation_banner %}
 {# The legend stays here, but the glyphs it explains now live ONE CLICK DOWN
    inside each card's "Rubric scores &amp; gating" disclosure (Task C2,
    operator request 2026-09-14) rather than on the card face. Saying so is the
@@ -373,11 +384,13 @@
                 <p class="assessment-card-pitch-body whitespace-pre-line">{{ plain_citations(a.elevator_pitch) }}</p>
                 {% endif %}
                 </div>
-                {# The card's ONE way through to the verdict (D7, 2026-09-21):
+                {# The card's way through to the verdict (D7, 2026-09-21):
                    a button at the foot of "In one minute", not a text link in
-                   the footer row. The macro lives in each wrapper so the href
-                   stays a literal /admin or /manager path. #}
-                <div class="assessment-card-open mt-3">{{ assessment_link(a) }}</div>
+                   the footer row, joined since 2026-09-28 by a second button
+                   that opens the same page with the chat drawer up. Both
+                   macros live in each wrapper so the hrefs stay literal
+                   /admin or /manager paths. #}
+                <div class="assessment-card-open mt-3 flex flex-wrap items-center gap-2">{{ assessment_link(a) }}{% if card_chat_available %}{{ assessment_chat_link(a) }}{% endif %}</div>
             </div>
             {% endif %}
             {% if has_points %}
@@ -405,7 +418,7 @@
         {# The button lives at the foot of the pitch box (D7). 12 of 22
            production rows have no pitch, so without this branch the commonest
            card on the page would have no way through to the verdict. #}
-        <div class="assessment-card-open mt-3">{{ assessment_link(a) }}</div>
+        <div class="assessment-card-open mt-3 flex flex-wrap items-center gap-2">{{ assessment_link(a) }}{% if card_chat_available %}{{ assessment_chat_link(a) }}{% endif %}</div>
         {% endif %}
 
         {# The score, the band and the hub's own account of why it scored that

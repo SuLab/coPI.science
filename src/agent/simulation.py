@@ -65,8 +65,10 @@ from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBL
 from src.services.assessment_detail import (
     KEY_POINT_ACCEPTED_KEYS,
     LEGACY_KEY_POINT_GROUPS,
+    RETIRED_KEY_POINT_GROUPS,
     key_point_shape,
     normalize_bullets,
+    normalize_dimension_rationales,
     normalize_key_points,
 )
 from src.services.assessment_headline import (
@@ -4534,17 +4536,17 @@ class SimulationEngine:
                 PROJECT_DISPLAY_CHARS, verdict["company_or_project"][:80],
             )
         if isinstance(verdict.get("elevator_pitch"), str) and len(
-            verdict["elevator_pitch"]
-        ) > _PITCH_SOFT_LIMIT:
+            verdict["elevator_pitch"].split()
+        ) > _PITCH_WORD_LIMIT:
             logger.warning(
-                "[%s] Assessment elevator_pitch is %d chars (contract asks for <=%d)",
-                agent_id, len(verdict["elevator_pitch"]), _PITCH_SOFT_LIMIT,
+                "[%s] Assessment elevator_pitch is %d words (contract asks for <=%d)",
+                agent_id, len(verdict["elevator_pitch"].split()), _PITCH_WORD_LIMIT,
             )
         # The scout_hub 1.7.0 citation budget's ONLY runtime alarm. Item 8 moved
         # the provenance citation from sentence two to sentence four and asks
         # that sentences 1-4 END within ~550 chars, so the citation completes
         # inside the 600 that `#assessments-summary` publishes. Nothing else
-        # checks that: a 900-char pitch whose sentence four ends at 640 stores
+        # checks that: a within-bound pitch whose sentence four ends at 640 stores
         # clean, warns nothing, and publishes a citation-free excerpt to a
         # channel the post cannot be retracted from. Compare `_HEADLINE_SOFT_LIMIT`
         # — the same class of write-path drift alarm, for the same reason.
@@ -4607,9 +4609,18 @@ class SimulationEngine:
                     agent_id, reason, sorted(key_points),
                 )
             shape = key_point_shape(checked_key_points)
+            retired_keys = {k for k, _ in RETIRED_KEY_POINT_GROUPS}
+            # Retired keys are subtracted here too: `key_questions` is both a
+            # legacy (1.3.0-1.7.1) and a retired (1.8.0) group name, and it was
+            # never reported as "pre-1.8.0" while 1.8.0 was current — the
+            # retired-key warning below is the one that names it now.
             legacy_only = sorted(
                 set(checked_key_points)
-                & ({k for k, _ in LEGACY_KEY_POINT_GROUPS} - set(_KEY_POINT_GROUP_BULLETS))
+                & (
+                    {k for k, _ in LEGACY_KEY_POINT_GROUPS}
+                    - set(_KEY_POINT_GROUP_BULLETS)
+                    - retired_keys
+                )
             )
             if shape in ("legacy", "mixed"):
                 # A stale prompt (scout_hub < 1.8.0) on this image: stored and
@@ -4619,10 +4630,25 @@ class SimulationEngine:
                 logger.warning(
                     "[%s] Assessment key_points uses pre-1.8.0 group name(s) %s; "
                     "stored and rendered under the legacy labels. Is "
-                    "prompts/roles/scout_hub at 1.8.0 on this host?",
+                    "prompts/roles/scout_hub at 1.9.0 on this host?",
                     agent_id, legacy_only,
                 )
             if shape in ("current", "mixed"):
+                # Its OWN site, not the legacy branch above: a retired key is
+                # evidence of neither shape (`key_point_shape`), so a 1.8.0
+                # sidecar classifies "current" and never reaches that branch.
+                # Milder than the legacy warning (spec §6.4) — the group still
+                # stores and renders under the label and in the slot 1.8.0 gave
+                # it — so it carries no stale-prompt question; that hint stays on
+                # the genuinely pre-1.8.0 path above.
+                retired = sorted(set(checked_key_points) & retired_keys)
+                if retired:
+                    logger.warning(
+                        "[%s] Assessment key_points carries group(s) %s retired "
+                        "as of scout_hub 1.9.0; stored and rendered under the "
+                        "1.8.0 label",
+                        agent_id, retired,
+                    )
                 for group_key, expected in _KEY_POINT_GROUP_BULLETS.items():
                     group = checked_key_points.get(group_key)
                     if isinstance(group, list) and len(group) != expected:
@@ -4688,6 +4714,67 @@ class SimulationEngine:
                     "survives only in raw_verdict): not a list",
                     agent_id, _field_name,
                 )
+        # Sidecar item 2's companion (0052). Three warnings, no drops beyond
+        # what the normalizer already refuses: an over-long sentence, a
+        # malformed map, and a dimension that was SCORED but not explained —
+        # the last is the one a reader of the Evidence summary actually feels,
+        # because the row renders a score with no reason beside it.
+        _raw_rationales = verdict.get("dimension_rationales")
+        _rationales = normalize_dimension_rationales(_raw_rationales)
+        # A map whose every value is blank (the skeleton left unfilled) holds
+        # no reasons rather than a malformed one: it stores NULL like a drop,
+        # but the per-dimension warning below names every gap, so it is not
+        # also reported as a DROPPED field.
+        _all_blank = isinstance(_raw_rationales, dict) and bool(_raw_rationales) and all(
+            v is None or (isinstance(v, str) and not v.strip())
+            for v in _raw_rationales.values()
+        )
+        if _raw_rationales is not None and _rationales is None and not _all_blank:
+            logger.warning(
+                "[%s] Assessment dimension_rationales was DROPPED (stored NULL; "
+                "the value survives only in raw_verdict): not a non-empty map of "
+                "dimension key to non-blank sentence",
+                agent_id,
+            )
+        # Two keys that normalize to one dimension (`Venture_Potential` and
+        # `venture_potential`) keep only the later reason; say so rather than
+        # losing one silently.
+        if _rationales and isinstance(_raw_rationales, dict):
+            _slugs = [
+                k.strip().lower() for k, v in _raw_rationales.items()
+                if isinstance(k, str) and isinstance(v, str) and v.strip()
+            ]
+            _collided = sorted({s for s in _slugs if _slugs.count(s) > 1})
+            if _collided:
+                logger.warning(
+                    "[%s] Assessment dimension_rationales has keys that collide "
+                    "after lower-casing (%s); only the last reason for each is stored",
+                    agent_id, ", ".join(_collided),
+                )
+        for _key, _text in (_rationales or {}).items():
+            if len(_text) > _DIMENSION_RATIONALE_CHARS:
+                logger.warning(
+                    "[%s] Assessment dimension_rationales.%s is %d chars "
+                    "(contract asks for <=%d)",
+                    agent_id, _key, len(_text), _DIMENSION_RATIONALE_CHARS,
+                )
+        # Keys compared after the same `.strip().lower()` the normalizer and
+        # the read path apply, so a differently-cased score key is not
+        # reported as unexplained when its rationale will in fact render. A
+        # score counts as SCORED here exactly when the read path's
+        # `_score_value` would render it — a real number, never a bool — so the
+        # warning never names a dimension the page does not show.
+        _unexplained = sorted(
+            k for k, v in scores.items()
+            if isinstance(k, str)
+            and isinstance(v, (int, float)) and not isinstance(v, bool)
+            and k.strip().lower() not in (_rationales or {})
+        )
+        if _unexplained:
+            logger.warning(
+                "[%s] Assessment has %d scored dimension(s) with no rationale: %s",
+                agent_id, len(_unexplained), ", ".join(_unexplained),
+            )
         # Built once, up front, so a failed first attempt has a plain dict —
         # not a session-bound ORM instance — ready to hand straight to
         # _pending_assessments for a later retry.
@@ -4727,6 +4814,10 @@ class SimulationEngine:
             # whole reason it is a column of its own rather than more pitch.
             # Degrades exactly like its narrative siblings above.
             score_rationale=_str_or_none(verdict.get("score_rationale")),
+            # Sidecar item 2's companion (0052): the per-dimension reasons.
+            # Degrades to None on a wrong shape like its narrative siblings;
+            # raw_verdict keeps the original either way.
+            dimension_rationales=_rationales,
             # Sidecar items 11/12 (0049): the hub's own strengths/risks
             # bullets. Degrades to None on a wrong type like its narrative
             # siblings above; raw_verdict keeps the original either way.
@@ -9253,26 +9344,34 @@ _HEADLINE_SOFT_LIMIT = 110
 #: over this bound is stored in full and warned about; one over 120 loses its
 #: tail in Slack.
 _PROJECT_SOFT_LIMIT = 70
-#: The pitch's own soft bound. Deliberately NOT re-derived when the contract went
-#: to four-to-six sentences (scout_hub 1.7.0) — at six sentences 900 is a
-#: tightening, not a generous fit, and that is the intent.
-#: PITCH_DISPLAY_CHARS (600, src/services/assessment_headline.py) is where the
-#: Slack copy is clipped, and 1.7.0 additionally asks that sentences 1-4 END
-#: within ~550 so the citation sentence completes inside that window.
-_PITCH_SOFT_LIMIT = 900
+#: The pitch's own soft bound, raised from 900 CHARACTERS to 250 WORDS on
+#: 2026-09-28 at the operator's request (scout_hub 1.9.0), counted as
+#: `len(text.split())`. Measured before the change: the five verdicts written
+#: under scout_hub 1.8.0 carried 113-222-word pitches (797-961 characters), so
+#: 900 characters was in practice a ~150-word bound.
+#: The public excerpt did NOT move with it: PITCH_DISPLAY_CHARS (600,
+#: src/services/assessment_headline.py) still clips what reaches
+#: #assessments-summary, and item 8 still asks that sentences 1-4 END within
+#: ~550 characters so the provenance citation completes inside that window.
+#: A longer pitch makes that harder, not easier, which is why the
+#: citation-loss alarm in `_persist_assessment` is now the load-bearing check
+#: rather than this one.
+_PITCH_WORD_LIMIT = 250
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
-# scout_hub >= 1.8.0: the exact bullet count each current group carries
-# (prompt item 7), and the per-bullet bound. Warnings only (design D12) — a
-# shape violation is never a drop. Keys and order are pinned to
-# KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py.
+# scout_hub >= 1.9.0: the exact bullet count each current group carries
+# (prompt item 7 — one each since 1.9.0), and the per-bullet bound. Warnings
+# only (design D12) — a shape violation is never a drop. Keys and order are
+# pinned to KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py. The
+# retired 1.8.0 group (`key_questions`, RETIRED_KEY_POINT_GROUPS) carries no
+# count: it still stores, with its own warning in `_persist_assessment`.
 _KEY_POINT_GROUP_BULLETS = {
     "indication_audience": 1,
-    "lab_background": 2,
-    "proposal": 2,
-    "clinical_actionability": 2,
-    "key_questions": 1,
-    "commercial_opportunity": 2,
+    "lab_background": 1,
+    "proposal": 1,
+    "clinical_actionability": 1,
+    "path_to_clinic": 1,
+    "commercial_opportunity": 1,
 }
 _KEY_POINT_BULLET_CHARS = 300
 #: What counts as a CITATION in `elevator_pitch` for the drift alarm in
@@ -9296,6 +9395,9 @@ _PITCH_CITATION_RE = re.compile(
 _HUB_BULLETS_MIN = 2
 _HUB_BULLETS_MAX = 4
 _HUB_BULLET_CHARS = 200
+#: Sidecar item 2's companion (scout_hub >= 1.9.0, migration 0052): one
+#: sentence per dimension. Warnings only, like every other shape check here.
+_DIMENSION_RATIONALE_CHARS = 200
 
 
 def _normalize_gating(raw: object) -> dict | None:

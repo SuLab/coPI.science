@@ -1875,6 +1875,9 @@ async def test_expand_all_controls_render(client, db_session, admin):
     assert 'data-details-toggle="close"' in nav
     assert nav.count('<button type="button"') >= 2
     assert "Expand all" in nav and "Collapse all" in nav
+    # The chat opener moved out of the nav into the drawer partial's floating
+    # bubble (2026-09-28); the nav keeps only the impersonation notice.
+    assert "data-chat-open" not in nav
 
 
 async def test_legacy_rationale_renders_paragraphs(client, db_session, admin):
@@ -1944,7 +1947,11 @@ def _signal_columns(body: str) -> tuple[str, str, str]:
     and `-maturity` BETWEEN risks and unestablished, and both are conditional
     on their columns being non-NULL — so an unconditional `index(...
     -unestablished)` would fold landscape/maturity text into the risks slice
-    whenever a fixture populates them, and attribute it to the red column."""
+    whenever a fixture populates them, and attribute it to the red column.
+    The Mid-scale section (`assessment-signals-neutral`, 2026-09-28) sits
+    between risks and those two for the same reason and is just as
+    conditional — it renders only when a dimension is mid-scale — so it joins
+    the same tuple."""
     card = _signals_card(body)
     i = card.index("assessment-signals-strengths")
     j = card.index("assessment-signals-risks")
@@ -1954,7 +1961,11 @@ def _signal_columns(body: str) -> tuple[str, str, str]:
     risks_end = min(
         [k] + [
             card.index(cls)
-            for cls in ("assessment-signals-landscape", "assessment-signals-maturity")
+            for cls in (
+                "assessment-signals-neutral",
+                "assessment-signals-landscape",
+                "assessment-signals-maturity",
+            )
             if cls in card
         ]
     )
@@ -2374,7 +2385,9 @@ async def test_a_consults_concerns_render_as_risk_sub_bullets(
     assert "specialist's concerns" in risks
 
 
-async def _seed_live_stamped(db_session, *, scores=None, gating=None):
+async def _seed_live_stamped(
+    db_session, *, scores=None, gating=None, dimension_rationales=None, strengths=None
+):
     from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 
     run = await factories.make_simulation_run(db_session)
@@ -2383,7 +2396,8 @@ async def _seed_live_stamped(db_session, *, scores=None, gating=None):
         channel_name=CHANNEL, company_or_project="Live Stamped Fixture Co",
         recommendation="conditional", weighted_score=3.20, band="conditional",
         rubric_version=RUBRIC_VERSION, rubric_content_hash=RUBRIC_CONTENT_HASH,
-        scores=scores, gating=gating,
+        scores=scores, gating=gating, dimension_rationales=dimension_rationales,
+        strengths=strengths,
     )
     db_session.add(assessment)
     await db_session.flush()
@@ -2411,8 +2425,8 @@ async def test_a_row_with_six_mid_scale_scores_shows_the_midscale_line(
     client, db_session, admin
 ):
     """Every scored dimension strictly between the two thresholds: neither
-    column lists any of them, and the card says so instead of looking empty
-    by omission."""
+    Strengths nor Risks lists any of them, and the card says so and points at
+    the Mid-scale section that does, instead of looking empty by omission."""
     scores = {
         "differentiation_unmet_need": 3, "scientific_credibility": 3,
         "translational_path": 3, "fundable_experiment": 3,
@@ -2426,6 +2440,11 @@ async def test_a_row_with_six_mid_scale_scores_shows_the_midscale_line(
     assert "signals-midscale" in card
     assert "sit mid-scale" in card
     assert "All 6 scored dimensions" in card
+    line = " ".join(card.split("signals-midscale", 1)[1].split("</p>", 1)[0].split())
+    assert "listed under Mid-scale below" in line
+    # The old wording claimed the dimensions were unlisted; they are listed now.
+    assert "neither column" not in line
+    assert "assessment-signals-neutral" in card
 
 
 async def test_a_row_with_one_high_score_reports_the_remaining_midscale_count(
@@ -2447,7 +2466,10 @@ async def test_a_row_with_one_high_score_reports_the_remaining_midscale_count(
     card = _signals_card(body)
     assert "signals-midscale" in card
     assert "5 of 6 scored dimensions" in card
-    assert "All " not in " ".join(card.split("signals-midscale", 1)[1].split("</p>", 1)[0].split())
+    line = " ".join(card.split("signals-midscale", 1)[1].split("</p>", 1)[0].split())
+    assert "All " not in line
+    assert "listed under Mid-scale below" in line
+    assert "neither column" not in line
 
 
 async def test_the_manager_route_renders_the_signals_card(
@@ -2907,3 +2929,157 @@ async def test_the_signals_card_is_titled_evidence_summary(client, db_session, a
     )).text)
     assert "Evidence summary" in body
     assert "Strengths and risks" not in body
+
+
+# ---------------------------------------------------------------------------
+# Per-dimension rationale and the Mid-scale section (2026-09-28, migration 0052)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_midscale_dimension_is_listed_with_its_reason(client, db_session, admin):
+    """A 3 of 5 is a real, neutral answer: it gets its own section, with the
+    hub's reason beside it, instead of appearing in no column at all."""
+    scores = {"translational_path": 3, "scientific_credibility": 4}
+    assessment = await _seed_live_stamped(
+        db_session, scores=scores,
+        dimension_rationales={
+            "translational_path": "MIDSCALE-REASON",
+            "scientific_credibility": "STRENGTH-REASON",
+        },
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    card = _signals_card(body)
+    assert "assessment-signals-neutral" in card
+    neutral = card.split("assessment-signals-neutral", 1)[1]
+    assert "signal-midscale" in neutral
+    assert "MIDSCALE-REASON" in neutral
+    assert 'class="signal-rationale' in neutral
+    strengths, risks, _unestablished = _signal_columns(body)
+    # The mid-scale row and its reason stay out of the coloured columns...
+    assert "MIDSCALE-REASON" not in strengths and "MIDSCALE-REASON" not in risks
+    # ...and a strength's reason renders on the strength's own row.
+    assert "STRENGTH-REASON" in strengths
+
+
+async def test_a_row_with_no_midscale_dimension_renders_no_neutral_section(
+    client, db_session, admin
+):
+    """No mid-scale dimension: no section and no empty list, not a heading
+    over nothing."""
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 5, "scientific_credibility": 1},
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "assessment-signals-neutral" not in body
+    assert "signal-midscale" not in body
+    assert "signals-midscale" not in body
+
+
+async def test_a_null_rationale_map_renders_no_reason_lines(client, db_session, admin):
+    """Every row written before 0052 is NULL: the page renders exactly as it
+    did, with no empty reason lines and no provenance claim about reasons."""
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 3, "scientific_credibility": 5},
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "signal-rationale" not in body
+    assert "score-rationale-line" not in body
+    assert "one-sentence reason" not in body
+
+
+async def test_the_scores_disclosure_shows_each_dimensions_reason(
+    client, db_session, admin
+):
+    """The chat record's `scores` anchor quotes this sentence, so it must be
+    in `#scores` itself — on the row of the dimension it explains — and the
+    provenance footnote says whose text it is."""
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 3, "scientific_credibility": 5},
+        dimension_rationales={"translational_path": "SCORES-DISCLOSURE-REASON"},
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    scores = body.split('id="scores"', 1)[1].split("</details>", 1)[0]
+    lines = re.findall(r'<p class="score-rationale-line[^"]*"[^>]*>(.*?)</p>', scores, re.DOTALL)
+    assert [line.strip() for line in lines] == ["SCORES-DISCLOSURE-REASON"]
+    # On its own dimension's row: between that row's div and the next row's.
+    after_row = scores.split('<div class="score-translational_path', 1)[1]
+    next_row = after_row.find('<div class="score-')
+    assert "SCORES-DISCLOSURE-REASON" in (after_row if next_row == -1 else after_row[:next_row])
+    provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
+    assert "BlackbirdBot's own text from the verdict sidecar" in provenance
+    assert "also shown under Scores" in provenance
+    # No hub bullets on this row, so no "In the hub's words" section to compare with.
+    assert "In the hub's words" not in provenance
+
+
+async def test_the_provenance_compares_with_the_hubs_words_only_where_they_render(
+    client, db_session, admin
+):
+    """A staff row that HAS hub bullets renders "In the hub's words", so the
+    provenance clause may point at it."""
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 3},
+        dimension_rationales={"translational_path": "HUB-WORDS-REASON"},
+        strengths=["A hub-written strength bullet."],
+    )
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert "In the hub's words" in _signals_card(body)
+    provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
+    assert 'from the verdict sidecar, like "In the hub\'s words"' in provenance
+
+
+async def test_an_unknown_revision_row_still_shows_its_reasons_in_scores(
+    client, db_session, admin
+):
+    """An unregistered revision contributes no dimension entries to the
+    Evidence summary, so `#scores` is the only place the reason can render —
+    and the chat record quotes it for those rows too."""
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 3},
+        dimension_rationales={"translational_path": "UNKNOWN-REVISION-REASON"},
+    )
+    assessment.rubric_version = "0.0.0-unknown"
+    assessment.rubric_content_hash = "000000000000"
+    await db_session.flush()
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    scores = body.split('id="scores"', 1)[1].split("</details>", 1)[0]
+    assert "score-rationale-line" in scores
+    assert "UNKNOWN-REVISION-REASON" in scores
+
+
+async def test_a_reviewer_sees_the_dimension_reasons(client, db_session):
+    """D5: unlike the hub's strengths/risks bullets, these are NOT staff-only."""
+    from src.models.user import USER_ROLE_REVIEWER
+
+    reviewer = await factories.make_user(
+        db_session, user_role=USER_ROLE_REVIEWER, email="reasons-reviewer@example.org"
+    )
+    assessment = await _seed_live_stamped(
+        db_session, scores={"translational_path": 3},
+        dimension_rationales={"translational_path": "REVIEWER-VISIBLE-REASON"},
+        # Hub bullets present, so the only thing keeping "In the hub's words"
+        # off this page is the reviewer tier — which the clause must honour too.
+        strengths=["A hub-written strength bullet."],
+    )
+    body = _main((await client.get(
+        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+    )).text)
+    assert "REVIEWER-VISIBLE-REASON" in _signals_card(body)
+    assert "REVIEWER-VISIBLE-REASON" in body.split('id="scores"', 1)[1]
+    # The reviewer is told whose text it is, but is not pointed at the
+    # staff-only "In the hub's words" section their page never renders.
+    provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
+    assert "BlackbirdBot's own text from the verdict sidecar" in provenance
+    assert "In the hub's words" not in body

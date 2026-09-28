@@ -80,10 +80,13 @@
        (2026-09-15 audit M2): navigation and action must not look alike. #}
     <button type="button" data-details-toggle="open" class="ml-auto rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Expand all</button>
     <button type="button" data-details-toggle="close" class="rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Collapse all</button>
-    {# An action, styled as one (audit M2): it opens the drawer, it does not navigate. #}
-    {% if chat_available %}
-    <button type="button" data-chat-open aria-controls="assessment-chat" aria-expanded="false" class="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-700">Ask about this assessment</button>
-    {% elif chat_enabled %}
+    {# The opener is the floating bubble in the drawer partial (2026-09-28).
+       This branch is what a user sees when there is deliberately no control:
+       `chat_enabled and not chat_available` is exactly "the feature is on but
+       this session may not use it", i.e. impersonation. A bare
+       `{% if chat_enabled %}` would print it beside a working bubble for every
+       ordinary staff session. #}
+    {% if chat_enabled and not chat_available %}
     <span class="text-sm text-gray-600">Chat unavailable while impersonating</span>
     {% endif %}
 </nav>
@@ -240,16 +243,20 @@
    bullet per character or per key. #}
 {% set hub_landscape = a.competitive_landscape if (viewer_is_staff and a.competitive_landscape is iterable and a.competitive_landscape is not string and a.competitive_landscape is not mapping) else [] %}
 {% set hub_maturity = a.evidence_maturity if (viewer_is_staff and a.evidence_maturity is iterable and a.evidence_maturity is not string and a.evidence_maturity is not mapping) else [] %}
-{# One derived row. `kind` is strengths|risks|unestablished. Layout is a
+{# One derived row. `kind` is strengths|risks|mid_scale|unestablished — BOTH
+   maps below must name every kind, because a miss yields Undefined and
+   `glyph[1]` then raises, 500ing the page. Layout is a
    single full-width line: glyph, label — detail, an optional count badge,
    and (consults only) a preview clamped to two lines; the
-   quoted text sits behind the click. Only consults and long red flags are
+   quoted text sits behind the click. A dimension row may add the hub's own
+   one-sentence reason for its score (`item.rationale`, 0052) as a muted
+   second line; every other source carries None there. Only consults and long red flags are
    collapsible — a gate's rubric description is a tooltip and a dimension's
    weight is inline, so trivial rows never grow a disclosure control. #}
 {% macro signal_row(item, kind) %}
-{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-700', 'Risk'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
+{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-700', 'Risk'), 'mid_scale': ('&ndash;', 'text-slate-700', 'Mid-scale'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
 {% set collapsible = item.body and item.source in ('consult', 'red_flag') %}
-<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0"
+<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'mid_scale': 'midscale', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0"
     {% if item.source == 'gating' and item.body %}title="{{ item.body | join(' ') }}"{% endif %}>
     {% if collapsible %}
     <details class="signal-collapsible group">
@@ -262,6 +269,7 @@
             {% if item.note %}<span class="signal-note whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
             <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
             {% if item.preview %}<span class="signal-preview basis-full ml-6 line-clamp-2 text-sm text-gray-600 group-open:hidden">{{ item.preview }}</span>{% endif %}
+            {% if item.rationale %}<span class="signal-rationale basis-full ml-6 text-sm text-gray-600">{{ item.rationale }}</span>{% endif %}
         </summary>
         <div class="mt-1 ml-6">
             {% if item.source == 'consult' %}
@@ -289,6 +297,11 @@
         {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
         {% if item.source == 'gating' and item.body %}<span class="shrink-0 text-sm text-gray-600" aria-hidden="true">&#9432;</span>{% endif %}
     </div>
+    {# A block line under the flex row rather than a `basis-full` item inside
+       it: this row is deliberately `flex` without `flex-wrap`, so the label
+       shrinks beside its badge instead of dropping below the glyph, and a
+       full-basis item there would be squeezed onto the same line. #}
+    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">{{ item.rationale }}</span>{% endif %}
     {% endif %}
 </li>
 {% endmacro %}
@@ -299,13 +312,13 @@
     {% set scored_n = vs.get('scored_dimension_count') or mid_n %}
     <p class="signals-midscale text-base leading-relaxed text-gray-600 mb-3 max-w-[68ch]">
         {% if mid_n == scored_n and mid_n == 1 %}
-        The one scored dimension sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists it.
+        The one scored dimension sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), listed under Mid-scale below.
         {% elif mid_n == scored_n %}
-        All {{ mid_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists them.
+        All {{ mid_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), listed under Mid-scale below.
         {% elif mid_n == 1 %}
-        1 of {{ scored_n }} scored dimensions sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists it.
+        1 of {{ scored_n }} scored dimensions sits mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), listed under Mid-scale below.
         {% else %}
-        {{ mid_n }} of {{ scored_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), so neither column lists them.
+        {{ mid_n }} of {{ scored_n }} scored dimensions sit mid-scale (between {{ "%g"|format(vs_thresholds.risk) }} and {{ "%g"|format(vs_thresholds.strength) }}), listed under Mid-scale below.
         {% endif %}
     </p>
     {% else %}
@@ -365,6 +378,22 @@
             </p>
             {% endif %}
         </section>
+        {# Mid-scale (2026-09-28). A dimension between the two thresholds is a
+           real, neutral answer, and until now it appeared in NO column — so a
+           reader could not see all six dimensions and their reasons in one
+           place. Class `assessment-signals-neutral`, deliberately not
+           `…-midscale`: `signals-midscale` is already the count paragraph's
+           class above, and one class name being a substring of another makes
+           both the tests and future greps ambiguous. #}
+        {% if vs.get('mid_scale') %}
+        <section class="assessment-signals-neutral rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div class="text-sm font-semibold text-slate-900">Mid-scale</div>
+            <p class="text-sm text-gray-600">Neither a strength nor a risk at this revision's thresholds.</p>
+            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
+                {% for item in vs['mid_scale'] %}{{ signal_row(item, 'mid_scale') }}{% endfor %}
+            </ul>
+        </section>
+        {% endif %}
         {% if hub_landscape %}
         <section class="assessment-signals-landscape rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
             <div class="text-sm font-semibold text-blue-900">Competitive landscape</div>
@@ -396,7 +425,7 @@
     </div>
     {# Legend + provenance, always visible (never behind a disclosure). #}
     <p class="signals-legend text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">
-        &#10003; strength &middot; &#10007; risk &middot; ? not established &middot; "show" opens a row's quoted text &middot; &#9432; hover for the gate's definition
+        &#10003; strength &middot; &#10007; risk &middot; &ndash; mid-scale &middot; ? not established &middot; "show" opens a row's quoted text &middot; &#9432; hover for the gate's definition
     </p>
     <p class="signals-provenance text-base leading-relaxed text-gray-600 mt-1 max-w-[68ch]">
         Derived from this verdict's stored dimension scores, gating states, red
@@ -409,6 +438,18 @@
         "In the hub's words", the competitive landscape and the evidence maturity are BlackbirdBot's own text from the verdict sidecar; derived rows quote the specialists' stored text.
         {% else %}
         Consult rows quote the specialists' stored text.
+        {% endif %}
+        {# D5: not gated on `viewer_is_staff` — like `score_rationale`, the
+           per-dimension reasons render for every tier, so this clause does too.
+           The comparison with "In the hub's words" IS gated, on the same two
+           lists that render that section: a reviewer page (and a staff row with
+           no hub bullets) has no such section to point at. "Under Scores"
+           because that disclosure shows every reason, including for a row
+           whose revision is unknown and whose dimensions this card cannot list.
+           Plain text, not a fragment link: the nav already links there, and a
+           fragment-only href is one test_reachability cannot resolve. #}
+        {% if dimensions | selectattr('rationale') | list %}
+        Each dimension's one-sentence reason, also shown under Scores, is BlackbirdBot's own text from the verdict sidecar{% if hub_strengths or hub_risks %}, like "In the hub's words"{% endif %}.
         {% endif %}
         {% if a.score_rationale %}
         The hub's account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
@@ -822,6 +863,14 @@
                 {% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}
             </span>
         </div>
+        {# The hub's reason for this dimension (0052), as a sibling line: the
+           row above is `sm:flex-nowrap`, so a full-width item inside it would
+           share the line. Indented past the `w-56` title plus its `gap-x-3`
+           (14rem + 0.75rem) so it starts under the score column. Rendered for
+           EVERY dimension row, unknown-revision rows included — the Evidence
+           summary lists no dimension entries for those, and the chat record's
+           `scores` anchor quotes this sentence, so this is where it must be. #}
+        {% if d.rationale %}<p class="score-rationale-line w-full text-sm text-gray-600 sm:pl-[14.75rem]">{{ d.rationale }}</p>{% endif %}
         {% endfor %}
     </div>
     <p class="text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">

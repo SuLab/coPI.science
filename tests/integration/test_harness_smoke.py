@@ -68,7 +68,10 @@ async def test_container_is_migrated(engine):
         #      app-only, never published to #assessments-summary)
         # 0051 assessment_chat_turns / assessment_chat_usage (the assessment-detail
         #      chat's private turns and its content-free usage ledger)
-        assert v == "0051"
+        # 0052 opportunity_assessments.dimension_rationales (the hub's
+        #      one-sentence reason per dimension score, scout_hub 1.9.0;
+        #      app-only, never published to #assessments-summary)
+        assert v == "0052"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

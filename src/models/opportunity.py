@@ -66,10 +66,12 @@ class OpportunityAssessment(Base):
     # `company_or_project` and renders nothing for absent bullets/pitch.
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 3-5 short strings (scout_hub <= 1.2.0); the three-group (1.3.0) or
-    # five-group (1.4.0-1.7.1) legacy object; or, from 1.8.0, the six-group
-    # object — see src/services/assessment_detail.py's `KEY_POINT_GROUPS`,
-    # `LEGACY_KEY_POINT_GROUPS`, `normalize_key_points` and
-    # `key_point_sections`.
+    # five-group (1.4.0-1.7.1) legacy object; the 1.8.0 six-group object; or,
+    # from 1.9.0, the six-group object with `path_to_clinic` in place of
+    # `key_questions` (retired from the write contract, still rendered for the
+    # rows that carry it) — see src/services/assessment_detail.py's
+    # `KEY_POINT_GROUPS`, `RETIRED_KEY_POINT_GROUPS`, `LEGACY_KEY_POINT_GROUPS`,
+    # `normalize_key_points` and `key_point_sections`.
     # `none_as_null=True` for the reason given on `missing_domains` below:
     # without it Python None persists as the JSONB scalar `null`, which
     # `WHERE key_points IS NULL` does not match.
@@ -94,6 +96,22 @@ class OpportunityAssessment(Base):
     # not be smuggled into the pitch, which IS published. Adding it to the
     # headline is a content-policy change requiring sign-off, not a tidy-up.
     score_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sidecar item 2's companion (scout_hub 1.9.0, migration 0052): the hub's
+    # own one-sentence reason for EACH dimension score, keyed by dimension key
+    # (lower-cased by `normalize_dimension_rationales`, the same way
+    # `build_assessment_detail` normalizes the `scores` map). NULL means the row
+    # predates 0052 or the hub emitted a malformed value; `raw_verdict` keeps
+    # what was emitted either way.
+    #
+    # Unlike `strengths`/`risks`/`competitive_landscape`/`evidence_maturity`,
+    # this is NOT staff-only: it renders for the reviewer tier too, like
+    # `score_rationale`, because the Evidence summary is the reviewer's surface
+    # and six scores with the reasons blanked out would defeat the field
+    # (operator decision 2026-09-28). The prompt tells the model so; do not add
+    # it to STAFF_ONLY_VERDICT_FIELDS.
+    dimension_rationales: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     # Sidecar items 11/12 (scout_hub 1.5.0, migration 0049): the hub's own
     # strengths and risks bullets for this verdict. NULL means either the row
     # predates 0049 or the hub emitted a malformed value (`normalize_bullets`

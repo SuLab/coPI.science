@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0051"
+DEFAULT_TARGET = "0052"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -125,6 +125,8 @@ DEFAULT_TARGET = "0051"
 #: moved to 0048, and 0048 joins now as DEFAULT_TARGET moves to 0049.
 #: 0049 joins now as DEFAULT_TARGET moves to 0050.
 #: 0050 joins now as DEFAULT_TARGET moves to 0051.
+#: 0051 joins now as DEFAULT_TARGET moves to 0052: production is stamped 0051,
+#: so it is the starting point for 0052 and must be a supported start, not a BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -137,11 +139,12 @@ DEFAULT_TARGET = "0051"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0051 objects enumerated in PLANNED_OBJECTS below.
+#: tables, no backfill), and the 0036-0052 objects enumerated in PLANNED_OBJECTS below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
+    "0051",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -202,7 +205,7 @@ BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", 
 
 # ---------------------------------------------------------------------------
 # What the migration chain CREATES (PLANNED_OBJECTS) and DROPS (PLANNED_DROPS), per
-# revision. Derived by reading 0019-0051; tests/unit/test_migration_checks.py re-derives
+# revision. Derived by reading 0019-0052; tests/unit/test_migration_checks.py re-derives
 # both from the migration files' upgrade() bodies and asserts they still match, so they
 # cannot silently drift.
 # ---------------------------------------------------------------------------
@@ -444,11 +447,13 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0051", "index", "ix_assessment_chat_usage_created", "assessment_chat_usage"),
     PlannedObject("0051", "index", "ix_assessment_chat_usage_turn_id", "assessment_chat_usage"),
     PlannedObject("0051", "index", "ix_assessment_chat_usage_assessment_id", "assessment_chat_usage"),
+    # 0052_assessment_dimension_rationales
+    PlannedObject("0052", "column", "dimension_rationales", "opportunity_assessments"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0051.
+#: the only upgrade-time ``drop_table`` in 0019-0052.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -457,7 +462,7 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051",
+    "0051", "0052",
 )
 
 

@@ -109,17 +109,29 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
-#: scout_hub >= 1.8.0 (the 2026-09-22 Blackbird review): six named groups, in
-#: the reviewer's own labels. The (key, label) order is the render order on
-#: both assessment surfaces and in the assessment-chat record, all of which
-#: render through `key_point_sections` below.
+#: scout_hub >= 1.9.0 (2026-09-28): six groups, ONE bullet each, in the
+#: reviewer's own labels. 1.8.0 (the 2026-09-22 Blackbird review) had the same
+#: six with `key_questions` where `path_to_clinic` now sits. The (key, label)
+#: order is the render order on both assessment surfaces and in the
+#: assessment-chat record, all of which render through `key_point_sections`
+#: below (via `_RENDER_GROUPS`, which restores the retired group's slot).
 KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
     ("indication_audience", "Indication / Audience"),
     ("lab_background", "Lab Background"),
     ("proposal", "Proposal"),
     ("clinical_actionability", "Clinical Actionability"),
-    ("key_questions", "Key Questions/Experiment"),
+    ("path_to_clinic", "Path to Clinic / Commercialization"),
     ("commercial_opportunity", "Commercial Opportunity"),
+)
+
+#: Retired from the WRITE contract by 1.9.0 and still rendered: five production
+#: rows were written under 1.8.0 with this group, and nine legacy rows carry the
+#: key too. The label here is 1.8.0's, and `_RENDER_GROUPS` below puts it back
+#: in 1.8.0's fifth slot — a stored row renders under the labels AND in the
+#: order it was written with, which is why this is a tuple of its own rather
+#: than a deletion.
+RETIRED_KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
+    ("key_questions", "Key Questions/Experiment"),
 )
 
 #: scout_hub 1.3.0-1.7.1 (1.3.0 carried the first, second and last). Kept for
@@ -134,15 +146,35 @@ LEGACY_KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
     ("commercial_potential", "Commercial potential"),
 )
 
+#: Render order for any non-legacy row: the current six with the retired group
+#: restored to the slot 1.8.0 gave it (fifth, between clinical actionability
+#: and what follows it). Only groups the stored value actually carries render,
+#: so a 1.9.0 row simply has nothing there, and a row carrying both
+#: `key_questions` and `path_to_clinic` shows each once, in this order.
+_RENDER_GROUPS: tuple[tuple[str, str], ...] = (
+    KEY_POINT_GROUPS[:4] + RETIRED_KEY_POINT_GROUPS + KEY_POINT_GROUPS[4:]
+)
+
 _CURRENT_KEY_POINT_KEYS = frozenset(k for k, _ in KEY_POINT_GROUPS)
+_RETIRED_KEY_POINT_KEYS = frozenset(k for k, _ in RETIRED_KEY_POINT_GROUPS)
 _LEGACY_KEY_POINT_KEYS = frozenset(k for k, _ in LEGACY_KEY_POINT_GROUPS)
-_LEGACY_ONLY_KEY_POINT_KEYS = _LEGACY_KEY_POINT_KEYS - _CURRENT_KEY_POINT_KEYS
+#: A RETIRED key is evidence of neither shape — it was written by 1.8.0 (a
+#: "current" prompt at the time) and by the legacy sets alike — so it is
+#: subtracted here. Without this a 1.8.0 row classifies "mixed" and takes the
+#: stale-prompt warning branch it has no business on. It is also what keeps
+#: the legacy-only tail `key_point_sections` appends disjoint from
+#: `_RENDER_GROUPS`, so no key renders twice.
+_LEGACY_ONLY_KEY_POINT_KEYS = (
+    _LEGACY_KEY_POINT_KEYS - _CURRENT_KEY_POINT_KEYS - _RETIRED_KEY_POINT_KEYS
+)
 _CURRENT_ONLY_KEY_POINT_KEYS = _CURRENT_KEY_POINT_KEYS - _LEGACY_KEY_POINT_KEYS
 
-#: Write-time acceptance: the UNION. A rename that accepted only the current
-#: keys would drop `key_points` in both skew directions — a 1.8.0 prompt on an
-#: old image, and a stale prompt on this one.
-KEY_POINT_ACCEPTED_KEYS: frozenset[str] = _CURRENT_KEY_POINT_KEYS | _LEGACY_KEY_POINT_KEYS
+#: Write-time acceptance: the THREE-way union. Accepting only the current keys
+#: would drop `key_points` in both skew directions — a 1.9.0 prompt on an old
+#: image, and a stale 1.8.0 prompt on this one.
+KEY_POINT_ACCEPTED_KEYS: frozenset[str] = (
+    _CURRENT_KEY_POINT_KEYS | _RETIRED_KEY_POINT_KEYS | _LEGACY_KEY_POINT_KEYS
+)
 
 
 def key_point_shape(value: object) -> str | None:
@@ -150,9 +182,13 @@ def key_point_shape(value: object) -> str | None:
     current-only key), ``"current"``, ``"mixed"`` (both), or None for anything
     that is not a list or a non-empty dict.
 
-    A dict holding only the keys both sets share (`clinical_actionability`,
-    `key_questions`) classifies as ``"current"``; no stored row has that shape
-    (measured 2026-09-25), and the two sets label those groups alike.
+    Two kinds of key are evidence of NEITHER shape: `clinical_actionability`,
+    which the current and legacy sets share, and the retired `key_questions`
+    (`RETIRED_KEY_POINT_GROUPS`), which 1.8.0 and the legacy sets both wrote.
+    So a 1.8.0 row — the six 1.8.0 keys, `key_questions` included — classifies
+    ``"current"``, and a dict holding only those neutral keys classifies
+    ``"current"`` too (no stored row has that shape, measured 2026-09-25) and
+    renders under the current labels.
     """
     if isinstance(value, list):
         return "flat"
@@ -176,11 +212,13 @@ def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
     """The renderable key-point sections of a stored value, in display order.
 
     A grouped value yields ``(label, bullets)`` pairs: a legacy-shaped row uses
-    `LEGACY_KEY_POINT_GROUPS`; every other row uses `KEY_POINT_GROUPS` followed
-    by any legacy-only group it also carries, so nothing stored is hidden. A
-    flat list yields one ``(None, bullets)`` pair. Only non-empty groups are
-    returned — blank bullets dropped, unknown keys and non-list values ignored —
-    so "is there anything to show" is the truthiness of the result. Both
+    `LEGACY_KEY_POINT_GROUPS`; every other row uses `_RENDER_GROUPS` — the
+    current six with the retired `key_questions` back in its 1.8.0 fifth slot,
+    under its 1.8.0 label — followed by any legacy-only group it also carries,
+    so nothing stored is hidden and no key renders twice. A flat list yields
+    one ``(None, bullets)`` pair. Only non-empty groups are returned — blank
+    bullets dropped, unknown keys and non-list values ignored — so "is there
+    anything to show" is the truthiness of the result. Both
     assessment templates and the chat record render from this, which is what
     keeps the page and the record identical.
     """
@@ -193,7 +231,7 @@ def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
     if shape == "legacy":
         groups = LEGACY_KEY_POINT_GROUPS
     else:
-        groups = KEY_POINT_GROUPS + tuple(
+        groups = _RENDER_GROUPS + tuple(
             (key, label) for key, label in LEGACY_KEY_POINT_GROUPS
             if key in _LEGACY_ONLY_KEY_POINT_KEYS
         )
@@ -209,8 +247,8 @@ def normalize_key_points(value: object) -> list | dict | None:
     """Write-time shape check for the sidecar's ``key_points``.
 
     Accepts the flat list (<= 1.2.0) and any grouped object whose keys are a
-    non-empty SUBSET of `KEY_POINT_ACCEPTED_KEYS` — current, legacy or both —
-    with every value a list of strings. Blank bullets are stripped. Anything
+    non-empty SUBSET of `KEY_POINT_ACCEPTED_KEYS` — current, retired, legacy
+    or any mix — with every value a list of strings. Blank bullets are stripped. Anything
     else is None: a malformed narrative field never costs the verdict (A20),
     and `raw_verdict` keeps the original.
 
@@ -248,6 +286,85 @@ def normalize_bullets(value: object) -> list[str] | None:
             return None
         out.append(item.strip())
     return out
+
+
+#: Bounds on the sidecar's `dimension_rationales`. A rubric has six dimensions;
+#: 20 leaves room for a future revision without letting an unbounded object
+#: into a JSONB column, and 50 characters is longer than any dimension key this
+#: repo has ever used (`differentiation_unmet_need` is 26).
+_MAX_DIMENSION_RATIONALES = 20
+_MAX_DIMENSION_KEY_CHARS = 50
+
+
+def normalize_dimension_rationales(value: object) -> dict[str, str] | None:
+    """The hub's one-sentence reason per dimension (sidecar item 2, migration
+    0052).
+
+    Accepts a non-empty dict of `str -> str`, at most
+    `_MAX_DIMENSION_RATIONALES` entries. Keys are `.strip().lower()`-normalized
+    the same way `build_assessment_detail` normalizes the `scores` map, so a
+    sidecar emitting `"Scientific_Credibility"` still matches the dimension it
+    is about — without this the rationale stores fine and renders nowhere,
+    which is indistinguishable from the hub not writing one.
+
+    Keys are deliberately NOT validated against the live rubric's dimension
+    keys: a row is rendered against the revision that SCORED it, and a later
+    revision renaming a dimension must not make an older row's reasons
+    unstorable. An unknown key simply matches no rendered dimension.
+
+    A blank or None VALUE is an absent reason, not a type violation, and is
+    skipped rather than rejecting the map: the prompt's skeleton pre-fills every
+    key with `""`, so one dimension the hub could not explain must not cost the
+    other five their reasons (spec §5.3: warn, never drop — the write path's
+    "scored dimension(s) with no rationale" warning names the gap). A map left
+    entirely blank is None.
+
+    Anything else is None: a non-dict, a non-str key or value, a blank or
+    over-long key, or too many entries. A malformed narrative field never costs
+    the verdict (A20), and `raw_verdict` keeps the original either way.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    if len(value) > _MAX_DIMENSION_RATIONALES:
+        return None
+    out: dict[str, str] = {}
+    for key, text in value.items():
+        if not isinstance(key, str):
+            return None
+        slug = key.strip().lower()
+        if not slug or len(slug) > _MAX_DIMENSION_KEY_CHARS:
+            return None
+        if text is None or (isinstance(text, str) and not text.strip()):
+            continue
+        if not isinstance(text, str):
+            return None
+        out[slug] = text.strip()
+    return out or None
+
+
+def _dimension_rationale_map(assessment: object) -> dict[str, str]:
+    """The STORED `dimension_rationales` as a lookup map, keyed the same way
+    the `scores` map is normalized in `build_assessment_detail`.
+
+    `normalize_dimension_rationales` already lower-cases on write, but this is
+    a READ of a JSONB column with no CHECK behind it, so it re-normalizes and
+    skips anything that is not `str -> non-blank str` rather than trusting the
+    writer; a NULL or non-dict value is `{}`. Read with `getattr` so a test
+    double lacking the attribute degrades to "no reasons" instead of raising.
+    """
+    stored = getattr(assessment, "dimension_rationales", None)
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        key.strip().lower(): text.strip()
+        for key, text in stored.items()
+        if isinstance(key, str) and isinstance(text, str) and text.strip()
+    }
+
+
+def _rationale_for(rationales: dict[str, str], key: object) -> str | None:
+    """The stored reason for dimension `key`, matched on `.strip().lower()`."""
+    return rationales.get(key.strip().lower()) if isinstance(key, str) else None
 
 
 def strip_assessment_sidecar(text: str) -> str:
@@ -700,7 +817,8 @@ RISK_THRESHOLD_FRACTION = 0.4
 #: `gap`) because ~1,192 stored consults still carry the retired pair — the
 #: same read-wider-than-you-write asymmetry `_READABLE_SIGNALS` exists for in
 #: `src/agent/specialists.py`. Anything outside BOTH sets is unrecognised and
-#: lands in the third bucket rather than falling off the end of the branch.
+#: lands in the not-established bucket rather than falling off the end of the
+#: branch.
 _STRENGTH_SIGNALS = frozenset({"adequate", "clear"})
 _RISK_SIGNALS = frozenset({"blocking", "gap", "caution"})
 
@@ -811,7 +929,7 @@ def derive_strengths_and_risks(
     revision: Any,
     revision_provenance: str | None = None,
 ) -> dict[str, Any]:
-    """Three buckets, from STORED values only — never a new judgement.
+    """Four buckets, from STORED values only — never a new judgement.
 
     Classification, exactly:
 
@@ -821,8 +939,9 @@ def derive_strengths_and_risks(
     dimension score             strength at `>= 0.8 * scale_max` (4 on a
                                 1-5 scale); risk at `<= 0.4 * scale_max`
                                 (2 on a 1-5 scale)
-    dimension score between     NOT LISTED AT ALL — a 3 of 5 is a real,
-                                neutral answer, not an unknown
+    dimension score between     `mid_scale`: a real, neutral answer (a 3
+                                of 5), listed but bucketed as neither a
+                                strength nor a risk — and not an unknown
     dimension score is None     not established: "not scored — counted as
                                 zero in the weighted score"
     `gating` value "met"        strength
@@ -843,8 +962,8 @@ def derive_strengths_and_risks(
     Four things this function is built around, each a defect this repo has
     already paid for once:
 
-    1. **The third bucket is not decoration.** `unconfirmed` means "never
-       asked", an unscored dimension is not a scored zero, and a truncated
+    1. **The not-established bucket is not decoration.** `unconfirmed` means
+       "never asked", an unscored dimension is not a scored zero, and a truncated
        consult's `verdict_signal` is `src/agent/specialists.py`'s PARSE
        DEFAULT (`gap`) rather than anything a specialist said. Filing any of
        the three as a strength or a risk manufactures a claim nobody made —
@@ -858,15 +977,22 @@ def derive_strengths_and_risks(
        writes no column and must never be mistaken for a write-time finding.
     4. **It cannot raise.** A malformed `gating` value, a non-string red flag,
        a `scores` dict with a bool in it, a NULL `gating`, a consult dict
-       missing a key — each degrades into the third bucket or is skipped. A
-       brief card must never 500 a page.
+       missing a key, a malformed `dimension_rationales` — each degrades into
+       the not-established bucket, loses its rationale, or is skipped. A brief
+       card must never 500 a page.
 
     Returns `{"strengths": [...], "risks": [...], "unestablished": [...],
-    "scale_known": bool, "thresholds": {...}, "mid_scale_count": int,
-    "scored_dimension_count": int}`, each entry being `{"source": str,
-    "label": str, "detail": str, "body": list[str], "preview": str|None,
-    "note": str|None}` with `source` one of `dimension` / `gating` /
-    `red_flag` / `consult`. `body` is ALWAYS present — an empty list when
+    "mid_scale": [...], "scale_known": bool, "thresholds": {...},
+    "mid_scale_count": int, "scored_dimension_count": int}`, each entry being
+    `{"source": str, "label": str, "detail": str, "body": list[str],
+    "preview": str|None, "note": str|None, "rationale": str|None}` with
+    `source` one of `dimension` / `gating` / `red_flag` / `consult`.
+    `rationale` is ALWAYS present: the hub's stored one-sentence reason for a
+    `dimension` entry (strength, risk, not scored or mid-scale), from
+    `dimension_rationales` (migration 0052) matched on the dimension key, and
+    None for every non-dimension source and for a dimension with no stored
+    reason — a NULL column, or a stored key that matches no dimension, attaches
+    to nothing. `body` is ALWAYS present — an empty list when
     there is nothing stored to quote, so the template can test truthiness
     without `.get`. The template renders an entry with a non-empty `body` as
     a COLLAPSED `<details>` whose summary is `label — detail`, the `note`
@@ -878,8 +1004,8 @@ def derive_strengths_and_risks(
     ==========================  ==========================================
     entry                       `body`
     ==========================  ==========================================
-    dimension strength/risk     `["weight: " + weight_note]`, verbatim
-                                (dual-scale notes are not parsed), only when
+    dimension strength/risk/    `["weight: " + weight_note]`, verbatim
+    mid-scale                   (dual-scale notes are not parsed), only when
                                 the dimension's `weight` is not None; else `[]`
     dimension not scored        `[]`, unchanged
     gating met / not_met        `[gating[key]["description"]]` and `label`
@@ -906,11 +1032,13 @@ def derive_strengths_and_risks(
     and strength thresholds (0 when the scale is unknown), and
     `scored_dimension_count` the number of dimensions with a usable score at
     all — the template words the mid-scale line as "N of M" and says "All"
-    only when the two are equal.
+    only when the two are equal. `mid_scale_count == len(mid_scale)` always.
     """
     strengths: list[dict[str, Any]] = []
     risks: list[dict[str, Any]] = []
     unestablished: list[dict[str, Any]] = []
+    mid_scale: list[dict[str, Any]] = []
+    rationales = _dimension_rationale_map(assessment)
     scale_known = revision is not None
     thresholds: dict[str, float | None] = {
         "strength": None, "risk": None, "scale_max": None,
@@ -926,6 +1054,7 @@ def derive_strengths_and_risks(
         body: list[str] | None = None,
         note: str | None = None,
         preview: str | None = None,
+        rationale: str | None = None,
     ) -> None:
         bucket.append({
             "source": source,
@@ -940,6 +1069,8 @@ def derive_strengths_and_risks(
             # "latest of N consults" — so it is not mistaken for text a
             # specialist wrote.
             "note": note,
+            # The hub's own per-dimension reason (0052); None off dimensions.
+            "rationale": rationale,
         })
 
     # Dimensions. Skipped wholesale when the row's revision is unknown: with no
@@ -974,24 +1105,32 @@ def derive_strengths_and_risks(
             if not isinstance(dim, dict):
                 continue
             label = dim.get("title") or dim.get("key")
+            rationale = _rationale_for(rationales, dim.get("key"))
             weight_body = (
                 [f"weight: {dim.get('weight_note')}"] if dim.get("weight") is not None else []
             )
             score = _usable_score(dim.get("score"))
             if score is None:
-                _add(unestablished, "dimension", label, not_scored_detail)
+                _add(unestablished, "dimension", label, not_scored_detail,
+                     rationale=rationale)
                 continue
             scored_dimension_count += 1
             if scale_max is None:
                 continue
             detail = _format_score(score, scale_max)
             if score >= strength_threshold:
-                _add(strengths, "dimension", label, detail, body=weight_body)
+                _add(strengths, "dimension", label, detail, body=weight_body,
+                     rationale=rationale)
             elif score <= risk_threshold:
-                _add(risks, "dimension", label, detail, body=weight_body)
+                _add(risks, "dimension", label, detail, body=weight_body,
+                     rationale=rationale)
             else:
-                # A mid-scale score is a real, neutral answer. No bucket.
+                # A mid-scale score is a real, neutral answer: listed in its
+                # own bucket so every scored dimension appears on the page,
+                # but never as a strength or a risk.
                 mid_scale_count += 1
+                _add(mid_scale, "dimension", label, detail, body=weight_body,
+                     rationale=rationale)
 
     # Gating. The tri-state strings, plus a fourth branch for anything else —
     # `gating` is JSONB with no CHECK constraint behind it.
@@ -1075,6 +1214,7 @@ def derive_strengths_and_risks(
         "strengths": strengths,
         "risks": risks,
         "unestablished": unestablished,
+        "mid_scale": mid_scale,
         "scale_known": scale_known,
         "thresholds": thresholds,
         "mid_scale_count": mid_scale_count,
@@ -1208,6 +1348,11 @@ async def build_assessment_detail(
             return 0.0
         return min(100.0, max(0.0, value / revision.scale_max * 100.0))
 
+    # The hub's per-dimension reasons (0052), keyed the SAME way the scores map
+    # is normalized above — `normalize_dimension_rationales` lower-cases on
+    # write, and this lookup must match it or a stored reason renders nowhere.
+    rationales = _dimension_rationale_map(assessment)
+
     dimensions = []
     named_keys: set[str] = set()
     if revision is not None:
@@ -1221,6 +1366,7 @@ async def build_assessment_detail(
                 "weight_note": dim.weight_note,
                 "score": value,
                 "pct": _pct(value),
+                "rationale": _rationale_for(rationales, dim.key),
             })
     # Score keys the chosen revision does not name still render — a stored row
     # must show its data, never blanks (the pre-registry page dropped a v2
@@ -1238,6 +1384,7 @@ async def build_assessment_detail(
             "weight_note": None,
             "score": value,
             "pct": _pct(value),
+            "rationale": _rationale_for(rationales, key),
         })
 
     thread_id, messages = await load_interview_thread(db, assessment)

@@ -66,9 +66,10 @@ RECOMMENDATION_DISPLAY_CHARS = 30
 # This post's own display bound for the pitch, the same reasoning as
 # PROJECT_DISPLAY_CHARS above: `elevator_pitch` is an unbounded Text column and
 # a headline is not the place for a wall of model prose. The prose contract
-# asks for four to six sentences (scout_hub 1.7.0) and requires sentences
-# 1-4 to END within ~550 characters, so the citation sentence completes inside this
-# window; see _clip_at_sentence below, which publishes only COMPLETE sentences.
+# bounds the pitch at 250 words (scout_hub 1.9.0) — far longer than this
+# window — and requires sentences 1-4 to END within ~550 characters, so the
+# citation sentence completes inside this window; see _clip_at_sentence below,
+# which publishes only COMPLETE sentences.
 PITCH_DISPLAY_CHARS = 600
 
 

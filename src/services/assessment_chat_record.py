@@ -58,7 +58,7 @@ from src.services.rubric_revisions import (
     PROVENANCE_UNKNOWN,
 )
 
-#: Mirrors templates/admin/_assessment_detail_body.html:236-244. The page gates these
+#: Mirrors the `hub_*` sets in templates/admin/_assessment_detail_body.html. The page gates these
 #: in the TEMPLATE, not in build_assessment_detail, so the chat must gate them itself.
 #: tests/integration/test_assessment_chat_parity.py binds the two.
 STAFF_ONLY_VERDICT_FIELDS = ("strengths", "risks", "competitive_landscape", "evidence_maturity")
@@ -508,9 +508,19 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
                 if any_scored
                 else "; not scored — no dimension scores were recorded for this verdict"
             )
-            doc.add(label, anchor="scores")
-        else:
-            doc.add(label, [f"{score:g}"], anchor="scores")
+        # The hub's own reason for THIS dimension (0052). Quotable because the
+        # page renders it in two places — the Evidence summary row and the
+        # `#scores` disclosure — and the anchor below points at the second, so
+        # "Show in page" lands on the sentence being quoted. Without the
+        # `#scores` rendering this would breach parity for any row whose rubric
+        # revision is unknown: `derive_strengths_and_risks` contributes no
+        # dimension entries at all for those, so the Evidence summary shows
+        # nothing to contain the quote. Not staff-only (spec D5): both tiers'
+        # pages render it, so both tiers' records carry it.
+        lines = [] if score is None else [f"{score:g}"]
+        if d.get("rationale"):
+            lines.append(str(d["rationale"]))
+        doc.add(label, lines, anchor="scores")
     if not dims:
         doc.add("Dimension scores — none recorded", anchor="scores")
     return doc

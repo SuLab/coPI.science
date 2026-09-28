@@ -1455,6 +1455,70 @@ async def test_a_card_with_no_pitch_still_has_exactly_one_detail_button(
     assert "/admin/assessments/" in card
 
 
+# --- the chat control (2026-09-28 / spec §3.3) -------------------------------
+
+
+@pytest.mark.parametrize("surface", ["admin", "manager"])
+async def test_each_card_offers_a_chat_button_into_the_open_drawer(
+    client, db_session, admin, manager, surface
+):
+    # Both fixtures, not `request.getfixturevalue`: the user fixtures are async,
+    # and resolving one lazily from inside a running test's event loop raises.
+    user = admin if surface == "admin" else manager
+    run, assessment = await _seed_narrative_row(
+        db_session, project="Chat Button Co",
+        elevator_pitch="One minute of prose about the idea.",
+        key_points=["a point the reviewer can read"],
+    )
+    html = (await client.get(
+        f"/{surface}/assessments?run_id={run.id}", headers=auth_headers(user.id)
+    )).text
+    card = _row_slice(html, "Chat Button Co")
+    assert card.count("assessment-chat-link") == 1
+    assert f"/{surface}/assessments/{assessment.id}#chat" in card
+    # The detail button is untouched: still exactly one.
+    assert card.count("assessment-open-link") == 1
+    if surface == "manager":
+        assert "/admin/" not in html
+
+
+async def test_a_card_with_no_pitch_also_offers_the_chat_button(client, db_session, admin):
+    """The no-pitch fallback is the other call site, and the commoner card."""
+    run, assessment = await _seed_narrative_row(db_session, project="No Pitch Chat Co")
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "No Pitch Chat Co")
+    assert card.count("assessment-chat-link") == 1
+    assert f"/admin/assessments/{assessment.id}#chat" in card
+    assert card.count("assessment-open-link") == 1
+
+
+async def test_the_chat_button_is_absent_while_impersonating(client, db_session, admin, manager):
+    run, _ = await _seed_narrative_row(db_session, project="No Chat Co")
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    html = (await client.get(
+        f"/manager/assessments?run_id={run.id}", headers=headers
+    )).text
+    card = _row_slice(html, "No Chat Co")
+    assert "assessment-chat-link" not in card
+    assert card.count("assessment-open-link") == 1
+
+
+async def test_the_chat_button_is_absent_when_the_chat_is_disabled(
+    asgi_app, client, db_session, admin
+):
+    asgi_app.state.assessment_chat_enabled = False
+    run, _ = await _seed_narrative_row(db_session, project="Disabled Chat Co")
+    html = (await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text
+    card = _row_slice(html, "Disabled Chat Co")
+    assert "assessment-chat-link" not in card
+    assert card.count("assessment-open-link") == 1
+
+
 # --- score and band, one click down (Task 7 / spec §8) ----------------------
 
 

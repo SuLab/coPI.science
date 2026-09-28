@@ -50,6 +50,17 @@ CHANNEL = "chat-parity-channel"
 HUB = "blackbird"
 SUBJECT = "vogelstein"
 RECORD_URL = "https://doi.org/10.1000/parity-url"
+# The hub's per-dimension reasons (0052), one per scored dimension. Page-rendered on
+# both tiers (spec D5), so both records may quote them. Each is ONE token of the
+# containment check's `[a-z0-9]{3,}` split, and a token nothing else on the page
+# carries: a hyphenated sentinel splits into words ("reason", "parity") that the
+# page supplies elsewhere, and would let a missing `#scores` line pass unseen.
+DIM_REASONS = ("paritydimreasonfirst", "paritydimreasonsecond")
+# A stamp no revision answers to: the fixture rubric is 9.9.9/feedfacecafe and the
+# registry (prompts/rubric/revisions.toml) holds only real sha256 prefixes, and
+# `resolve_revision` treats the hash as authoritative — an unmatched hash is
+# UNKNOWN whatever the version says.
+UNKNOWN_STAMP = ("0.0.1-unknown", "0badc0de0000")  # String(20) columns
 
 STAFF_ONLY = (
     "PARITY-HUB-STRENGTH",
@@ -129,7 +140,10 @@ def fixture_rubric(monkeypatch):
     return rubric
 
 
-async def _seed(db_session, rubric, *, prose_format):
+async def _seed(db_session, rubric, *, prose_format, stamp=None):
+    """One interview and its verdict, stamped with ``stamp`` (version, hash) —
+    the fixture rubric's own, so the row resolves ``live``, unless given."""
+    version, content_hash = stamp or (rubric.version, rubric.content_hash)
     run = await factories.make_simulation_run(db_session)
     base = time.time() - 7200
     root = f"{base:.6f}"
@@ -217,11 +231,12 @@ async def _seed(db_session, rubric, *, prose_format):
         gating={"life_sciences_domain": "met", "credible_science": "not_met",
                 "translational_potential": "unconfirmed"},
         scores={dims[0]: 4, dims[1]: 2},
+        dimension_rationales={dims[0]: DIM_REASONS[0], dims[1]: DIM_REASONS[1]},
         red_flags=["PARITY-RED-FLAG"],
         rationale="PARITY-RATIONALE-ONE\n\nPARITY-RATIONALE-TWO",
         raw_verdict={"sentinel": "PARITY-RAW-VERDICT"},
         panel_incomplete=True, missing_domains=["chemistry"], panel_owed=True,
-        rubric_version=rubric.version, rubric_content_hash=rubric.content_hash,
+        rubric_version=version, rubric_content_hash=content_hash,
         prose_format=prose_format,
     )
     db_session.add(assessment)
@@ -300,6 +315,29 @@ def _parse_page(html: str) -> _Corpus:
     return corpus
 
 
+def _uncontained(blocks: list[str], page: _Corpus) -> dict[str, list[str]]:
+    """Containment, rule (1): each block's label mapped to the tokens of its quoted
+    lines that the page's ``<main>`` does not render. Empty means the record holds."""
+    page_tokens = set(_TOKEN_RE.findall(" ".join(page.parts).lower()))
+    missing = {}
+    for block in blocks:
+        extra = set(_TOKEN_RE.findall(" ".join(quoted_lines(block)).lower())) - page_tokens
+        if extra:
+            missing[block.split("\n", 1)[0]] = sorted(extra)
+    return missing
+
+
+def _unresolved_anchors(record, page: _Corpus) -> set[str]:
+    """Rule (5): anchors some block cites that no rendered element id carries."""
+    anchors = {
+        target.anchor
+        for doc_targets in record.targets
+        for target in doc_targets
+        if target.anchor is not None
+    }
+    return anchors - page.ids
+
+
 @pytest.mark.parametrize("prose_format", ["markdown", None])
 @pytest.mark.parametrize("page", list(PAGES))
 async def test_each_tier_record_carries_only_what_its_page_renders(
@@ -311,7 +349,6 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     resp = await client.get(f"/{surface}/assessments/{assessment_id}", headers=auth_headers(viewer.id))
     assert resp.status_code == 200
     page = _parse_page(resp.text)
-    page_tokens = set(_TOKEN_RE.findall(" ".join(page.parts).lower()))
 
     loaded = await load_chat_record(db_session, assessment_id, tier=tier)
     assert loaded is not None
@@ -320,11 +357,7 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     record_text = "\n".join(blocks)
 
     # (1) containment
-    missing = {}
-    for block in blocks:
-        extra = set(_TOKEN_RE.findall(" ".join(quoted_lines(block)).lower())) - page_tokens
-        if extra:
-            missing[block.split("\n", 1)[0]] = sorted(extra)
+    missing = _uncontained(blocks, page)
     assert not missing, missing
 
     # (2) staff-only verdict fields
@@ -342,13 +375,7 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
         assert sentinel not in record_text, sentinel
 
     # (5) every anchor a block cites resolves to a rendered element id on this page
-    anchors = {
-        target.anchor
-        for doc_targets in record.targets
-        for target in doc_targets
-        if target.anchor is not None
-    }
-    missing_anchors = anchors - page.ids
+    missing_anchors = _unresolved_anchors(record, page)
     assert not missing_anchors, missing_anchors
 
     # Positive controls: the seed really exercised the paths the exclusions guard.
@@ -357,3 +384,48 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     assert "PARITY-OTHER-AGENT-REPLY" in record_text
     assert "PARITY-KP-SIGNIFICANCE" in record_text and "PARITY-KP-QUESTIONS" in record_text
     assert RECORD_URL in record.url_tokens
+    for reason in DIM_REASONS:
+        assert reason in record_text, reason
+
+
+@pytest.mark.parametrize("prose_format", ["markdown", None])
+@pytest.mark.parametrize("page", list(PAGES))
+async def test_an_unknown_revision_row_quotes_only_dimension_reasons_its_page_renders(
+    client, db_session, fixture_rubric, page, prose_format
+):
+    """Spec §5.5 / Review Focus 2. For a row whose rubric stamp matches no revision,
+    `derive_strengths_and_risks` contributes NO dimension entries, so the Evidence
+    summary shows no reason at all; `build_assessment_detail` still lists the
+    dimensions from the stored score keys, and the record quotes each one's reason.
+    The only thing that can contain those quotes is the `#scores` disclosure's own
+    rendering of the reason — this is the case that proves it is there."""
+    assert rubric_revisions.resolve_revision(*UNKNOWN_STAMP) == (
+        None, rubric_revisions.PROVENANCE_UNKNOWN
+    ), "the stamp must be unknown to the registry, or this case tests the live path again"
+    role, surface, tier = PAGES[page]
+    assessment_id = await _seed(
+        db_session, fixture_rubric, prose_format=prose_format, stamp=UNKNOWN_STAMP
+    )
+    viewer = await factories.make_user(db_session, user_role=role)
+    resp = await client.get(f"/{surface}/assessments/{assessment_id}", headers=auth_headers(viewer.id))
+    assert resp.status_code == 200
+    page = _parse_page(resp.text)
+
+    loaded = await load_chat_record(db_session, assessment_id, tier=tier)
+    assert loaded is not None
+    record = loaded[0]
+    blocks = [block["text"] for doc in record.documents for block in doc["source"]["content"]]
+    record_text = "\n".join(blocks)
+
+    # Not vacuous: the row really resolved unknown, and each reason is quoted in a
+    # dimension block built by the unnamed-key fallback (no revision, no scale).
+    assert "matches no entry in the revision registry" in record_text
+    for reason in DIM_REASONS:
+        [block] = [b for b in blocks if reason in b]
+        assert block.startswith("[Dimension score — "), block
+        assert "scale unknown" in block.split("\n", 1)[0], block
+
+    missing = _uncontained(blocks, page)
+    assert not missing, missing
+    missing_anchors = _unresolved_anchors(record, page)
+    assert not missing_anchors, missing_anchors

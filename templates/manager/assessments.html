@@ -190,6 +190,11 @@
    click is worse than no control (F6), so this points at /manager, never
    /admin: test_manager_assessments_never_links_into_admin pins that. #}
 {% macro assessment_link(a) %}<a class="assessment-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="/manager/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{# The manager surface's own copy of assessment_chat_link — see the twin
+   comment in templates/admin/assessments.html. Points at /manager, never
+   /admin, for the same F6 reason as assessment_link above:
+   test_manager_assessments_never_links_into_admin pins that. #}
+{% macro assessment_chat_link(a) %}<a class="assessment-chat-link inline-flex items-center gap-1 rounded border border-indigo-300 px-2 py-1 text-sm font-medium text-indigo-700 hover:bg-indigo-50 whitespace-nowrap" href="/manager/assessments/{{ a.id }}#chat" title="Open this assessment and ask about it">chat</a>{% endmacro %}
 {# The manager surface's own copy of pi_link — see the twin comment in
    templates/admin/assessments.html. Points at /manager/pis, never /admin, for
    the same F6 reason as assessment_link above: test_manager_assessments_never_links_into_admin

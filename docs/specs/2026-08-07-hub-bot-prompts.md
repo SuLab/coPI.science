@@ -509,6 +509,16 @@ verdict. Everything below must be captured here in full:
    forward: does a clean result from the experiment you would fund open a program worth
    building? Say which Blackbird instrument this is a candidate for — a non-dilutive
    incubation grant, or equity — as part of the fundable-experiment read.
+
+   For each of the six, also record **one sentence of at most 200 characters**
+   in `dimension_rationales`, under the same key, saying what drove THAT score:
+   the evidence that set it, and what would move it. Never state a number for
+   the weighted score or the band — those are computed server-side. This field
+   is **never posted to Slack**, so it may reason about the score freely. But
+   unlike the staff-only fields in items 11-14, it **is read by Blackbird
+   reviewers as well as staff**, so describe the evidence only at the level the
+   PI has already made public: do not restate a PI's unpublished result,
+   unfiled construct, undisclosed compound or volunteered limitation in it.
 3. **Red flags.** Disqualifier-grade only — a specific, named fact that on its own
    justifies `pass`, as `red_flags` entries, **at most three**. Detailed technical
    concerns and open questions belong in `rationale`, written as explicit go/no-go
@@ -616,43 +626,60 @@ verdict. Everything below must be captured here in full:
    300 characters, not a topic:
    - `indication_audience` — **one bullet**: the disease or condition and the
      patient population, its rough size (an order-of-magnitude US prevalence
-     or incidence is enough), what drives it biologically, and what those
+     or incidence is enough), what goes wrong biologically, and what those
      patients get today.
-   - `lab_background` — **two bullets**: first, who the PI is and the lab's
-     established work that this idea builds on; second, the lab's wider
-     platform or track record — the same approach in other diseases, prior
-     programmes or spin-outs, and any existing IP or option rights worth
-     checking early. State only what the PI's public profile, their
-     publications or the lab in this interview established; leave out
-     anything not on that record rather than supplying it from general
-     knowledge.
-   - `proposal` — **two bullets**: "The asset: …" — what it is, how it works
-     and why it differs from what exists; then "The work: …" — what the grant
-     would buy.
-   - `clinical_actionability` — **two bullets**: what patients get today and
-     the clinical-stage alternatives, each with its stage, and how this
-     differs from them; then the route, endpoint or regulatory precedent that
-     would make it actionable.
-   - `key_questions` — **one bullet**: the single deciding question, phrased
-     as a question, naming the experiment that answers it.
-   - `commercial_opportunity` — **two bullets**: the closest deal comparable
-     or funding signal (who, how much, when); then the realistic commercial
-     shape — licence, platform partnership or spin-out — with the competitive
-     position and any IP or novelty caveat.
+   - `lab_background` — **one bullet**: who the PI is and the specific
+     published or interview-established work this idea builds on. State only
+     what the PI's public profile, their publications or the lab in this
+     interview established; leave out anything not on that record rather than
+     supplying it from general knowledge.
+   - `proposal` — **one bullet**: what the thing is, how it works and why it
+     differs from what exists.
+   - `clinical_actionability` — **one bullet**: what patients get today, the
+     nearest clinical-stage alternative with its stage, and how this differs
+     from it.
+   - `path_to_clinic` — **one bullet**: the development pathway from here to
+     use in patients — the animal or disease model the next step runs in, the
+     validation or IND-enabling work between now and a first-in-human or
+     first-clinical-use study, the regulatory route or precedent, and who
+     would carry it forward (the lab, a spin-out, a partner).
+   - `commercial_opportunity` — **one bullet**: the realistic commercial
+     shape — licence, platform partnership or spin-out — the closest deal
+     comparable or funding signal with its date, and any novelty or IP caveat.
+
+   **Write every one of these six for a non-specialist.** An intelligent
+   reader who does not work in this field must be able to read each bullet
+   once and understand it. Expand every abbreviation on first use, and gloss
+   every gene, protein, receptor or pathway symbol in plain words the first
+   time it appears ("IGHV4-34" → "a particular antibody gene segment,
+   IGHV4-34"). No colon-stacked noun phrases and no slash-separated
+   alternatives — the same two rules item 6 applies to the headline. One main
+   clause per bullet. At most 300 characters.
+
+       Not: "Systemic lupus erythematosus: on the order of 200,000-300,000 US
+       patients, with a refractory fraction in the tens of thousands driven by
+       autoreactive B cells and autoantibody (anti-dsDNA, anti-Sm/RNP). Today
+       they get steroids, mycophenolate, belimumab, anti-CD20
+       rituximab/obinutuzumab off-label, or trial CD19 CAR-T."
+
+       Write: "Lupus, an autoimmune disease affecting roughly 250,000 people in
+       the US; for the tens of thousands whose disease resists treatment, the
+       immune cells driving it survive today's drugs, which suppress the whole
+       immune system rather than removing those cells."
+
+   The `Not:` example is a real bullet this prompt produced under 1.8.0.
 
    Competing programmes may be named in `clinical_actionability` and
    `commercial_opportunity`; item 13 remains the fuller, staff-only
    competitive landscape. Together the six must let a reviewer who reads
    nothing else say who this is for, who is behind it, what it is, how it
-   would change care, what decides it, and why it is worth building. Record
-   them in `key_points` as an object with exactly those six keys, each an
-   array of strings.
-8. **Elevator pitch.** Four to six sentences of plain language, for a
-   scientifically literate reader who is not a specialist in this field, and
-   **at most 900 characters** — the first 600 characters are posted publicly to
-   Blackbird's summary channel and the rest is app-only, so the opening
-   sentences have to stand alone. Where the two bounds conflict, cut a sentence
-   rather than run over.
+   would change care, how it reaches patients, and why it is worth building.
+   Record them in `key_points` as an object with exactly those six keys, each
+   an array holding exactly one string.
+8. **Elevator pitch.** Plain language, for a scientifically literate reader
+   who is not a specialist in this field, and **at most 250 words** — the first
+   600 characters are posted publicly to Blackbird's summary channel and the
+   rest is app-only, so the opening sentences have to stand alone.
 
    Write it in this order, which is how a Blackbird reviewer reads it:
 
@@ -674,13 +701,17 @@ verdict. Everything below must be captured here in full:
    the citation sentence completes inside the first 600 characters that are
    posted publicly — the public excerpt is cut at the last sentence boundary
    inside that window, so a sentence that starts before it and ends after it is
-   dropped whole rather than clipped. If something has to go, cut from 5, which
-   survives in the app-only tail. At four sentences, elements 4 and 6 are the
-   two that must survive: merge 1 with 3 and 2 with 5 before dropping either.
+   dropped whole rather than clipped. At 250 words nothing has to be dropped:
+   spend the extra room on elements 5 and 6, which are app-only, and keep
+   elements 1-4 complete inside the first approximately 550 characters.
+   Element 4, the citation, and element 6, the read-out that matters, are the
+   two that must survive any cut.
 
-   Minimal jargon; spell out an abbreviation the
-   first time. Do not reason about the score here — item 10 is for that. Record
-   it in `elevator_pitch`.
+   Minimal jargon; spell out an abbreviation the first time, and apply the
+   plain-language rule under item 7 to this field too — its abbreviation,
+   gloss, colon-stack and slash rules; its one-clause and 300-character bounds
+   are for key-point bullets, not for the pitch. Do not reason about the score
+   here — item 10 is for that. Record it in `elevator_pitch`.
 9. **Project label.** `company_or_project` is the SHORT name, not a
    description: **at most 70 characters**, what you would write as a slide
    title or a deal name. No lab or institution suffix, no em-dash clauses, no
@@ -796,7 +827,7 @@ every proposal.
   "company_or_project": "",
   "subject_agent_id": "",
   "headline": "",
-  "key_points": {"indication_audience": [], "lab_background": [], "proposal": [], "clinical_actionability": [], "key_questions": [], "commercial_opportunity": []},
+  "key_points": {"indication_audience": [], "lab_background": [], "proposal": [], "clinical_actionability": [], "path_to_clinic": [], "commercial_opportunity": []},
   "elevator_pitch": "",
   "score_rationale": "",
   "strengths": [],
@@ -812,6 +843,11 @@ every proposal.
     "differentiation_unmet_need": 0, "scientific_credibility": 0,
     "translational_path": 0, "fundable_experiment": 0,
     "venture_potential": 0, "team_executability": 0
+  },
+  "dimension_rationales": {
+    "differentiation_unmet_need": "", "scientific_credibility": "",
+    "translational_path": "", "fundable_experiment": "",
+    "venture_potential": "", "team_executability": ""
   },
   "red_flags": [],
   "recommendation": "advance | conditional | pass | route-to-incubation",

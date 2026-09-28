@@ -72,6 +72,39 @@ async def test_a_disabled_chat_renders_nothing(asgi_app, client, db_session):
     assert "Chat unavailable" not in body
 
 
+async def test_the_detail_page_offers_the_bubble_and_no_nav_button(client, db_session):
+    _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
+    assert "data-chat-bubble" in body
+    assert "Ask about this assessment" in body          # the bubble's aria-label
+    assert "<button" in body
+    # The nav button is gone: the only chat opener left is the bubble.
+    assert body.count("data-chat-open") == 1
+    # A normal staff session must NOT be told chat is unavailable: the nav's
+    # remaining branch is `chat_enabled and not chat_available`, and a bare
+    # `chat_enabled` would print it beside a working bubble.
+    assert "Chat unavailable" not in body
+
+
+async def test_the_bubble_sits_under_the_drawer_and_is_not_printed(client, db_session):
+    _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
+    bubble = body[body.index("data-chat-bubble") - 400:body.index("data-chat-bubble") + 400]
+    assert "z-30" in bubble
+    assert "print:hidden" in bubble
+    assert "text-gray-400" not in bubble and "text-gray-500" not in bubble
+    assert "text-xs" not in bubble
+
+
+async def test_the_fragment_is_inert_when_chat_is_unavailable(asgi_app, client, db_session):
+    """The script that reads `#chat` ships with the drawer, and the drawer is
+    not rendered when the chat is off — so the fragment is inert rather than
+    broken. Nothing must reference the drawer or load the script."""
+    asgi_app.state.assessment_chat_enabled = False
+    _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
+    assert "data-chat-bubble" not in body
+    assert "assessment_chat.js" not in body
+    assert "window.ASSESSMENT_CHAT" not in body
+
+
 async def test_the_drawer_has_no_details_and_no_form(client, db_session):
     _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
     opening = re.search(r'<aside[^>]*id="assessment-chat"[^>]*>', body)

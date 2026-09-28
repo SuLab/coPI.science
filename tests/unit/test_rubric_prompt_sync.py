@@ -275,13 +275,14 @@ def test_skeleton_carries_the_narrative_fields():
     skeleton is their only definition, so this is where drift is caught.
 
     ``key_points`` is asserted as an ORDERED equality against the six groups
-    of the shared ``KEY_POINT_GROUPS`` contract: the read path renders the
-    groups in that order, so a key renamed or a group dropped from the prompt
-    silently empties a section of the detail page."""
+    of the shared ``KEY_POINT_GROUPS`` contract (scout_hub 1.9.0): the read
+    path renders the groups in that order, so a key renamed or a group dropped
+    from the prompt silently empties a section of the detail page."""
     skeleton = _skeleton()
     for key in (
         "headline", "key_points", "elevator_pitch", "score_rationale",
         "strengths", "risks", "competitive_landscape", "evidence_maturity",
+        "dimension_rationales",
     ):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
@@ -289,7 +290,7 @@ def test_skeleton_carries_the_narrative_fields():
         "lab_background": [],
         "proposal": [],
         "clinical_actionability": [],
-        "key_questions": [],
+        "path_to_clinic": [],
         "commercial_opportunity": [],
     }
     assert list(skeleton["key_points"]) == [
@@ -297,9 +298,13 @@ def test_skeleton_carries_the_narrative_fields():
         "lab_background",
         "proposal",
         "clinical_actionability",
-        "key_questions",
+        "path_to_clinic",
         "commercial_opportunity",
     ]
+    assert "key_questions" not in skeleton["key_points"], (
+        "key_questions is retired from the WRITE contract by 1.9.0; it stays "
+        "renderable for stored rows, but the hub must not be asked for it"
+    )
     assert skeleton["headline"] == ""
     assert skeleton["elevator_pitch"] == ""
     assert skeleton["score_rationale"] == ""
@@ -310,8 +315,11 @@ def test_skeleton_carries_the_narrative_fields():
 def test_item_seven_lists_the_six_groups_with_their_bullet_counts_in_skeleton_order():
     """The prose contract and the skeleton must agree on names, order and
     counts; the engine warns against the same counts
-    (src/agent/simulation.py `_KEY_POINT_GROUP_BULLETS`)."""
+    (src/agent/simulation.py `_KEY_POINT_GROUP_BULLETS`). Since scout_hub
+    1.9.0 every group is one bullet, and the retired `key_questions` group is
+    no longer asked for anywhere in item 7."""
     from src.agent.simulation import _KEY_POINT_GROUP_BULLETS
+    from src.services.assessment_detail import KEY_POINT_GROUPS
 
     text = _phase4_text()
     item = text[text.index("7. **Key points.**"): text.index("8. **Elevator pitch.**")]
@@ -322,8 +330,66 @@ def test_item_seven_lists_the_six_groups_with_their_bullet_counts_in_skeleton_or
         at = body.index(f"`{key}` — {words[_KEY_POINT_GROUP_BULLETS[key]]}")
         positions.append(at)
     assert positions == sorted(positions)
+    assert set(_KEY_POINT_GROUP_BULLETS.values()) == {1}
+    assert "**two bullets**" not in body
+    assert "`key_questions`" not in body
     assert "at most 300 characters" in body
     assert list(_KEY_POINT_GROUP_BULLETS) == list(_skeleton()["key_points"])
+    assert list(_KEY_POINT_GROUP_BULLETS) == [k for k, _ in KEY_POINT_GROUPS]
+
+
+def test_item_seven_binds_every_bullet_to_plain_language():
+    """Spec 2026-09-28 §6.3: one rule for all six groups, with a worked
+    rewrite of a real 1.8.0 bullet. Pinned so the rule and its example are not
+    dropped without a decision."""
+    text = _phase4_text()
+    item = text[text.index("7. **Key points.**"): text.index("8. **Elevator pitch.**")]
+    body = _norm(item)
+    assert "Write every one of these six for a non-specialist." in body
+    assert "Expand every abbreviation on first use" in body
+    assert "No colon-stacked noun phrases and no slash-separated alternatives" in body
+    assert "One main clause per bullet." in body
+    assert 'Not: "Systemic lupus erythematosus:' in body
+    assert 'Write: "Lupus, an autoimmune disease' in body
+    # Item 8 points at the same rule rather than restating it.
+    pitch = text[text.index("8. **Elevator pitch.**"): text.index("9. **Project label.**")]
+    assert "plain-language rule under item 7" in _norm(pitch)
+    # ...but not its bullet-only bounds, which would contradict the 250-word cap.
+    assert "are for key-point bullets, not for the pitch" in _norm(pitch)
+
+
+def test_the_skeleton_carries_a_rationale_for_every_scored_dimension():
+    """Sidecar item 2's companion (0052). The two maps must name the SAME
+    dimensions: a key in one and not the other stores a rationale that matches
+    no dimension (renders nothing) or a score with no reason. `scores` is
+    already pinned against the live rubric's weights above, so pinning
+    `dimension_rationales` against `scores` transitively pins it to the rubric."""
+    skeleton = _skeleton()
+    assert set(skeleton["dimension_rationales"]) == set(skeleton["scores"])
+    assert all(v == "" for v in skeleton["dimension_rationales"].values())
+    # Written next to the number it explains.
+    keys = list(skeleton)
+    assert keys.index("dimension_rationales") == keys.index("scores") + 1
+
+
+def test_item_two_bounds_the_rationale_and_names_its_audience():
+    """D5: this field is NOT staff-only — a reviewer reads it — so the prompt
+    must say so and must bind it to the no-unpublished-disclosure rule instead
+    of the staff-only promise the 0049/0050 bullets carry."""
+    text = _phase4_text()
+    item = text[text.index("2. **The six dimension scores.**"):text.index("3. **Red flags.**")]
+    body = _norm(item)
+    assert "dimension_rationales" in body
+    assert "at most 200 characters" in body
+    assert "never posted to Slack" in body
+    assert "reviewers" in body
+    assert "Staff-only" not in body
+    # The prohibition is stated IN item 2, not by pointing at another rule:
+    # the confidentiality paragraph above binds only <slack_message> (it sends
+    # confidential detail TO the sidecar), and item 8 carries no rule of its own.
+    assert "do not restate a PI's unpublished result" in body
+    assert "confidentiality rule above" not in body
+    assert "exactly as it applies to the elevator pitch" not in body
 
 
 def test_item_seven_confines_lab_background_to_the_record():

@@ -3,7 +3,9 @@
 Task 2 covers the columns themselves; Task 8 extends this file with the engine
 write path that fills them from the sidecar. `score_rationale` (sidecar item 10,
 migration 0048) joined the set on 2026-09-14 — app-only, never published to
-`#assessments-summary`.
+`#assessments-summary`. `dimension_rationales` (sidecar item 2's companion,
+migration 0052) joined on 2026-09-28, with the scout_hub 1.9.0 key-point groups
+and the 250-word pitch bound.
 """
 
 import pytest
@@ -387,11 +389,11 @@ async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
 
     key_points_in = {
         "indication_audience": ["i"],
-        "lab_background": ["x", "  "],
-        "proposal": ["p1", "p2"],
-        "clinical_actionability": ["c1", "c2"],
-        "key_questions": ["q"],
-        "commercial_opportunity": ["o1", "o2"],
+        "lab_background": ["x", "y", "  "],
+        "proposal": ["p"],
+        "clinical_actionability": ["c"],
+        "path_to_clinic": ["t"],
+        "commercial_opportunity": ["o"],
     }
     try:
         stub = SimulationEngine(
@@ -411,12 +413,13 @@ async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
                     OpportunityAssessment.simulation_run_id == run_id
                 )
             )).scalars().one()
-        assert row.key_points["lab_background"] == ["x"]
+        assert row.key_points["lab_background"] == ["x", "y"]
 
         warnings = "\n".join(
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         )
-        assert "key_points.lab_background carries 1 bullets (contract asks for 2)" in warnings
+        # Three raw bullets, two stored: the count named is the stored one.
+        assert "key_points.lab_background carries 2 bullets (contract asks for 1)" in warnings
     finally:
         await _delete_run(factory, run_id)
 
@@ -442,11 +445,11 @@ async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
 
     key_points_in = {
         "indication_audience": ["i"],
-        "lab_background": ["l1", "l2"],
-        "proposal": ["x" * 301, "ok"],
-        "clinical_actionability": ["c1", "c2"],
-        "key_questions": ["a", "b"],
-        "commercial_opportunity": ["o1", "o2"],
+        "lab_background": ["l"],
+        "proposal": ["x" * 301],
+        "clinical_actionability": ["c"],
+        "path_to_clinic": ["a", "b"],
+        "commercial_opportunity": ["o"],
     }
     try:
         stub = SimulationEngine(
@@ -471,7 +474,7 @@ async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
         warnings = "\n".join(
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         )
-        assert "key_points.key_questions carries 2 bullets (contract asks for 1)" in warnings
+        assert "key_points.path_to_clinic carries 2 bullets (contract asks for 1)" in warnings
         assert "key_points.proposal has a 301-char bullet" in warnings
     finally:
         await _delete_run(factory, run_id)
@@ -1089,3 +1092,259 @@ async def test_an_early_url_does_not_mask_a_dropped_later_citation(engine, caplo
         assert "eLife.94488" in warnings, "the warning names what was lost"
     finally:
         await _delete_run(factory, run_id)
+
+
+async def _persist_and_read(engine, caplog, verdict):
+    """The `_persist_assessment` harness every engine-side test above spells
+    out inline — seed a committed run, drive a stub engine under `caplog`,
+    read the row back, clean up — for the 2026-09-28 tests below. Returns
+    `(row, warnings)`."""
+    import logging
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    try:
+        stub = SimulationEngine(
+            agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+        )
+        with caplog.at_level(logging.WARNING):
+            await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().one()
+        warnings = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        return row, warnings
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.parametrize("words,warns", [(250, False), (251, True)])
+async def test_the_pitch_word_bound_warns_only_past_250(engine, caplog, words, warns):
+    """Boundary, both sides. 250 is the contract (scout_hub 1.9.0), so it must
+    not warn; 251 must. A pitch is never dropped for length — the archive keeps
+    what the hub wrote."""
+    pitch = " ".join(["word"] * words)
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "elevator_pitch": pitch,
+        "recommendation": "pass",
+        "scores": {},
+    })
+    assert (f"elevator_pitch is {words} words" in warnings) is warns
+    assert row.elevator_pitch == pitch          # stored either way
+
+
+async def test_a_blank_pitch_neither_warns_nor_raises(engine, caplog):
+    """`"   ".split()` is `[]`, so the word count is 0 — the bound must not
+    fire, and neither may the citation alarm, and the row must still land."""
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "elevator_pitch": "   ",
+        "recommendation": "pass",
+        "scores": {},
+    })
+    assert row.company_or_project == "Short label"
+    assert "elevator_pitch is" not in warnings
+    assert "does not carry" not in warnings
+
+
+async def test_dimension_rationales_are_stored_and_overlong_ones_warned(engine, caplog):
+    """Sidecar item 2's companion (0052). Warnings, never drops (A4): an
+    over-long rationale is still the archive's copy of what the hub wrote."""
+    rationales = {
+        "scientific_credibility": "Rescue data in two models, published.",
+        "venture_potential": "x" * 201,
+    }
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "scores": {"scientific_credibility": 4, "venture_potential": 2},
+        "dimension_rationales": rationales,
+        "recommendation": "conditional",
+    })
+    assert row.dimension_rationales == rationales
+    assert "dimension_rationales.venture_potential is 201 chars" in warnings
+    assert "dimension_rationales.scientific_credibility is" not in warnings
+    assert "with no rationale" not in warnings
+
+
+async def test_a_malformed_rationale_map_is_dropped_to_null_and_named(engine, caplog):
+    """A20: a wrong-shaped map costs the field, never the verdict, and the
+    drop is named rather than silent."""
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "scores": {},
+        "dimension_rationales": {"a": 3},
+        "recommendation": "pass",
+    })
+    assert row.dimension_rationales is None
+    assert "dimension_rationales was DROPPED" in warnings
+    assert row.raw_verdict["dimension_rationales"] == {"a": 3}
+
+
+async def test_a_scored_dimension_with_no_rationale_is_warned(engine, caplog):
+    """The gap a reader of the Evidence summary actually sees: a score with no
+    reason beside it. Named per dimension; the explained one is not."""
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "scores": {"scientific_credibility": 4, "venture_potential": 2},
+        "dimension_rationales": {"scientific_credibility": "Published rescue data."},
+        "recommendation": "conditional",
+    })
+    assert row.dimension_rationales == {"scientific_credibility": "Published rescue data."}
+    unexplained = [ln for ln in warnings.splitlines() if "with no rationale" in ln]
+    assert len(unexplained) == 1
+    assert "1 scored dimension(s) with no rationale: venture_potential" in unexplained[0]
+    assert "scientific_credibility" not in unexplained[0]
+
+
+async def test_one_blank_rationale_stores_the_rest_and_names_the_gap(engine, caplog):
+    """The skeleton pre-fills every key with "": a hub that leaves one blank
+    stores the others (never all-or-nothing) and the gap is named."""
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "recommendation": "conditional",
+        "scores": {"scientific_credibility": 4, "venture_potential": 2},
+        "dimension_rationales": {
+            "scientific_credibility": "Rescue data in two models.",
+            "venture_potential": "",
+        },
+    })
+    assert row.dimension_rationales == {"scientific_credibility": "Rescue data in two models."}
+    assert "dimension_rationales was DROPPED" not in warnings
+    assert "1 scored dimension(s) with no rationale: venture_potential" in warnings
+
+
+async def test_an_unfilled_rationale_skeleton_is_named_per_dimension_not_dropped(
+    engine, caplog,
+):
+    """Every value blank — the skeleton left as-is. NULL is stored, but it is
+    reported as missing reasons, not as a malformed field."""
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "recommendation": "conditional",
+        "scores": {"scientific_credibility": 4, "venture_potential": 2},
+        "dimension_rationales": {"scientific_credibility": "", "venture_potential": "  "},
+    })
+    assert row.dimension_rationales is None
+    assert "dimension_rationales was DROPPED" not in warnings
+    assert "2 scored dimension(s) with no rationale" in warnings
+
+
+async def test_colliding_rationale_keys_are_warned(engine, caplog):
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "recommendation": "conditional",
+        "scores": {"venture_potential": 2},
+        "dimension_rationales": {"Venture_Potential": "first", "venture_potential": "second"},
+    })
+    assert row.dimension_rationales == {"venture_potential": "second"}
+    assert "collide after lower-casing (venture_potential)" in warnings
+
+
+async def test_a_non_numeric_score_is_not_reported_as_unexplained(engine, caplog):
+    """The read path renders only real-number scores (`_score_value`), so a
+    string or bool score is never a dimension the page shows without a
+    reason — the warning must not name it."""
+    _row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "recommendation": "conditional",
+        "scores": {"scientific_credibility": 4, "venture_potential": "n/a",
+                   "team_executability": True},
+        "dimension_rationales": {"scientific_credibility": "Rescue data in two models."},
+    })
+    assert "with no rationale" not in warnings
+
+
+async def test_a_1_9_0_sidecar_with_path_to_clinic_stores_without_complaint(
+    engine, caplog,
+):
+    """The new group is an ACCEPTED key: a 1.9.0-shaped object stores whole,
+    with no DROPPED/unknown-key warning and neither version warning."""
+    key_points_in = {
+        "indication_audience": ["i"],
+        "lab_background": ["l"],
+        "proposal": ["p"],
+        "clinical_actionability": ["c"],
+        "path_to_clinic": ["t"],
+        "commercial_opportunity": ["o"],
+    }
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "key_points": key_points_in,
+        "recommendation": "conditional",
+        "scores": {},
+    })
+    assert row.key_points == key_points_in
+    assert "key_points was DROPPED" not in warnings
+    assert "unknown group key" not in warnings
+    assert "retired as of scout_hub 1.9.0" not in warnings
+    assert "pre-1.8.0 group name(s)" not in warnings
+    assert "key_points" not in warnings
+
+
+async def test_a_1_8_0_sidecar_carrying_key_questions_stores_with_the_retired_warning(
+    engine, caplog,
+):
+    """A 1.8.0 prompt on a 1.9.0 image: `key_questions` is retired, not
+    unknown, so the object stores whole. It gets the retired-key warning and
+    NOT the pre-1.8.0 legacy warning — `key_questions` was never a stale name
+    while 1.8.0 was current, and a retired key is evidence of neither shape."""
+    key_points_in = {
+        "indication_audience": ["i"],
+        "lab_background": ["l"],
+        "proposal": ["p"],
+        "clinical_actionability": ["c"],
+        "key_questions": ["q"],
+        "commercial_opportunity": ["o"],
+    }
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "key_points": key_points_in,
+        "recommendation": "conditional",
+        "scores": {},
+    })
+    assert row.key_points == key_points_in
+    # The exact message: milder than the legacy warning (spec §6.4), so it
+    # carries no "Is prompts/roles/scout_hub at 1.9.0 on this host?" question.
+    assert (
+        "Assessment key_points carries group(s) ['key_questions'] retired as of "
+        "scout_hub 1.9.0; stored and rendered under the 1.8.0 label"
+    ) in warnings
+    assert "on this host?" not in warnings
+    assert "pre-1.8.0 group name(s)" not in warnings
+    assert "key_points was DROPPED" not in warnings
+
+
+async def test_an_unknown_key_point_group_is_dropped_to_null_and_named(engine, caplog):
+    """Real shape drift is still refused outright: an unknown group key stores
+    `key_points = NULL` (raw_verdict keeps it) and the warning NAMES the key,
+    so a prompt-newer-than-image skew is visible at write time."""
+    key_points_in = {
+        "indication_audience": ["i"],
+        "open_questions": ["y"],
+    }
+    row, warnings = await _persist_and_read(engine, caplog, {
+        "company_or_project": "Short label",
+        "key_points": key_points_in,
+        "recommendation": "conditional",
+        "scores": {},
+    })
+    assert row.key_points is None
+    assert row.raw_verdict["key_points"] == key_points_in
+    assert "key_points was DROPPED" in warnings
+    assert "unknown group key(s) ['open_questions']" in warnings

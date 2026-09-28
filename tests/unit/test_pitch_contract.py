@@ -34,8 +34,17 @@ def test_the_pitch_closes_on_what_a_read_out_would_enable():
     assert "would enable" in _flat()
 
 
-def test_the_pitch_sentence_count_is_four_to_six():
-    assert "four to six sentences" in _flat()
+def test_the_pitch_is_bounded_at_250_words():
+    """Raised from "four to six sentences … at most 900 characters" on
+    2026-09-28. The bound is mirrored by `_PITCH_WORD_LIMIT` on the write path,
+    so the prose and the drift alarm cannot part company."""
+    from src.agent.simulation import _PITCH_WORD_LIMIT
+
+    item = _flat()
+    assert "at most 250 words" in item
+    assert _PITCH_WORD_LIMIT == 250
+    assert "four to six sentences" not in item
+    assert "900 characters" not in item
 
 
 def test_the_citation_budget_bounds_where_sentence_four_ENDS():

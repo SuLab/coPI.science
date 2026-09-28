@@ -205,6 +205,14 @@
    test_admin_assessments_page_renders_no_inline_detail_rows asserts the page
    contains no such string anywhere. #}
 {% macro assessment_link(a) %}<a class="assessment-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{# The card's second way through: the detail page with the chat drawer already
+   open (2026-09-28). Literal path for the same reason assessment_link is one —
+   test_reachability's _link_credits only accepts a Jinja expression in a
+   {path_param} slot. `_normalize_link` strips the `#chat` fragment, so this
+   credits the existing detail route and adds none. A DIFFERENT class from
+   assessment-open-link: two tests assert exactly one of those per card. Only
+   rendered under the shared body's `card_chat_available`. #}
+{% macro assessment_chat_link(a) %}<a class="assessment-chat-link inline-flex items-center gap-1 rounded border border-indigo-300 px-2 py-1 text-sm font-medium text-indigo-700 hover:bg-indigo-50 whitespace-nowrap" href="/admin/assessments/{{ a.id }}#chat" title="Open this assessment and ask about it">chat</a>{% endmacro %}
 {# Same reasoning as assessment_link above, applied to the Lab line: a link to
    the PI's own profile has to be a literal /admin/users/{id} URL for
    test_reachability's _link_credits to see it, so it is defined here as a

@@ -97,6 +97,8 @@ def synthetic_detail(**overrides: Any) -> dict[str, Any]:
         rubric_version="3.4.0",
         rubric_content_hash="b7b0a1d6a4a5",
         missing_domains=None,
+        # The stored map `dimensions[].rationale` below is resolved from (0052).
+        dimension_rationales={"scientific_credibility": "DIM-REASON-SCIENCE"},
         gating={
             "life_sciences_domain": "met",
             "credible_science": "not_met",
@@ -179,9 +181,9 @@ def synthetic_detail(**overrides: Any) -> dict[str, Any]:
         "pi_user_id": None,
         "dimensions": [
             {"key": "scientific_credibility", "title": "Scientific credibility", "weight": 25,
-             "weight_note": "25%", "score": 4.0, "pct": 80.0},
+             "weight_note": "25%", "score": 4.0, "pct": 80.0, "rationale": "DIM-REASON-SCIENCE"},
             {"key": "venture_potential", "title": "Venture potential", "weight": 15,
-             "weight_note": "15%", "score": None, "pct": 0.0},
+             "weight_note": "15%", "score": None, "pct": 0.0, "rationale": None},
         ],
         "revision": revision,
         "revision_provenance": "live",
@@ -201,20 +203,22 @@ def synthetic_detail(**overrides: Any) -> dict[str, Any]:
         "verdict_signals": {
             "strengths": [
                 {"source": "dimension", "label": "Scientific credibility",
-                 "detail": "scored 4 of 5", "body": ["weight: 25%"], "preview": None, "note": None},
+                 "detail": "scored 4 of 5", "body": ["weight: 25%"], "preview": None, "note": None,
+                 "rationale": "DIM-REASON-SCIENCE"},
                 {"source": "gating", "label": "Life sciences", "detail": "met",
-                 "body": ["GATE-DESC-LIFE"], "preview": None, "note": None},
+                 "body": ["GATE-DESC-LIFE"], "preview": None, "note": None, "rationale": None},
                 {"source": "consult", "label": "clinical", "detail": "adequate",
-                 "body": ["EST-ONE"], "preview": "EST-ONE", "note": None},
+                 "body": ["EST-ONE"], "preview": "EST-ONE", "note": None, "rationale": None},
             ],
             "risks": [
                 {"source": "gating", "label": "credible science", "detail": "not met",
-                 "body": [], "preview": None, "note": None},
+                 "body": [], "preview": None, "note": None, "rationale": None},
             ],
             "unestablished": [
                 {"source": "consult", "label": "legal", "detail": "reply cut off — no signal",
-                 "body": [], "preview": None, "note": None},
+                 "body": [], "preview": None, "note": None, "rationale": None},
             ],
+            "mid_scale": [],
             "scale_known": True,
             "thresholds": {"strength": 4.0, "risk": 2.0, "scale_max": 5.0},
             "mid_scale_count": 0,

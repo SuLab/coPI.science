@@ -169,8 +169,13 @@ def test_a_row_with_no_dimension_scores_says_so():
     detail["dimensions"] = [dict(d, score=None, pct=0.0) for d in detail["dimensions"]]
     record = build_chat_record(detail, tier="staff")
     for block in _find(record, 0, "Dimension score"):
-        assert block.endswith("not scored — no dimension scores were recorded for this verdict]")
+        label = block.split("\n", 1)[0]
+        assert label.endswith("not scored — no dimension scores were recorded for this verdict]")
     assert _find(record, 0, "Computed score and band — none")
+    # A stored reason survives its dimension going unscored: the label says so,
+    # and the reason is the block's only quoted line.
+    [science] = _find(record, 0, "Dimension score — Scientific credibility")
+    assert quoted_lines(science) == ["DIM-REASON-SCIENCE"]
 
 
 def test_an_unscored_dimension_beside_scored_ones_counts_as_zero():
@@ -182,7 +187,32 @@ def test_an_unscored_dimension_beside_scored_ones_counts_as_zero():
     ]
     assert _find(record, 0, "Dimension score — Scientific credibility") == [
         "[Dimension score — Scientific credibility; 25% weight; scale 1 to 5]\n> 4"
+        "\n> DIM-REASON-SCIENCE"
     ]
+
+
+@pytest.mark.parametrize("tier", ["staff", "reviewer"])
+def test_a_dimension_block_quotes_its_stored_reason(tier):
+    """The chat must be able to answer "why did this dimension score 4?" — the
+    reason is on the page, so the record may carry it (parity is record ⊆ page).
+    Both tiers: the reason is not staff-only (spec D5)."""
+    record = build_chat_record(synthetic_detail(), tier=tier)
+    [block] = _find(record, 0, "Dimension score — Scientific credibility")
+    assert quoted_lines(block) == ["4", "DIM-REASON-SCIENCE"]
+    # Still cited at the `#scores` disclosure, where the page renders the reason.
+    index = _blocks(record, 0).index(block)
+    assert record.target(0, index).anchor == "scores"
+    assert "dimension_rationales" not in STAFF_ONLY_VERDICT_FIELDS
+
+
+def test_a_dimension_with_no_stored_reason_quotes_only_its_score():
+    detail = synthetic_detail()
+    detail["dimensions"][0]["rationale"] = None
+    record = build_chat_record(detail, tier="staff")
+    assert _find(record, 0, "Dimension score — Scientific credibility") == [
+        "[Dimension score — Scientific credibility; 25% weight; scale 1 to 5]\n> 4"
+    ]
+    assert "DIM-REASON-SCIENCE" not in _all_text(record)
 
 
 def test_empty_documents_carry_an_explanatory_block():

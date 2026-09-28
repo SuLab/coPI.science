@@ -2,10 +2,10 @@
 
 The brief on the assessment detail page is a READ of four stored things —
 dimension scores, `gating`, `red_flags` and the recorded specialist consults.
-It invents nothing, stores nothing, and it is deliberately possible for an
-input to land in NO bucket at all: a mid-scale dimension score is a real,
-neutral answer, and a third bucket ("not established") exists so that "never
-asked", "not scored" and "the specialist's reply was cut off" are never
+It invents nothing and stores nothing. A mid-scale dimension score is a real,
+neutral answer and gets a bucket of its own (`mid_scale`) rather than being
+filed as a strength or a risk, and a "not established" bucket exists so that
+"never asked", "not scored" and "the specialist's reply was cut off" are never
 reported as findings somebody made.
 
 Pure unit tests: hand-built `OpportunityAssessment` instances (never flushed to
@@ -115,23 +115,32 @@ def _details(entries, source: str) -> list[str]:
 def test_the_return_shape_is_the_pinned_contract():
     result = _derive()
     assert set(result) == {
-        "strengths", "risks", "unestablished", "scale_known",
+        "strengths", "risks", "unestablished", "mid_scale", "scale_known",
         "thresholds", "mid_scale_count", "scored_dimension_count",
     }
     assert result["scale_known"] is True
-    assert result["strengths"] == result["risks"] == result["unestablished"] == []
+    assert (
+        result["strengths"] == result["risks"] == result["unestablished"]
+        == result["mid_scale"] == []
+    )
 
 
 def test_every_entry_carries_source_label_and_detail():
     result = _derive(
         _assessment(gating={"life_sciences_domain": "met"}, red_flags=["No IP position"]),
-        dimensions=[_dimension("significance", 5)],
+        dimensions=[_dimension("significance", 5), _dimension("innovation", 3)],
         consults=[_consult("clinical", "blocking")],
     )
-    entries = result["strengths"] + result["risks"] + result["unestablished"]
+    assert result["mid_scale"]
+    entries = (
+        result["strengths"] + result["risks"] + result["unestablished"]
+        + result["mid_scale"]
+    )
     assert entries
     for entry in entries:
-        assert set(entry) == {"source", "label", "detail", "body", "preview", "note"}
+        assert set(entry) == {
+            "source", "label", "detail", "body", "preview", "note", "rationale",
+        }
         assert entry["source"] in {"dimension", "gating", "red_flag", "consult"}
         assert isinstance(entry["label"], str) and entry["label"]
         assert isinstance(entry["detail"], str)
@@ -167,13 +176,114 @@ def test_a_dimension_score_exactly_on_the_risk_threshold_is_a_risk():
     assert _details(result["risks"], "dimension") == ["scored 2 of 5"]
 
 
-def test_a_mid_scale_dimension_is_in_no_bucket():
+def test_a_mid_scale_dimension_is_neither_a_strength_a_risk_nor_an_unknown():
     """A 3 of 5 is a real, neutral answer — not a strength, not a risk, and
-    emphatically not an unknown."""
+    emphatically not an unknown. It is listed only under `mid_scale`."""
     result = _derive(dimensions=[_dimension("significance", 3)])
     assert result["strengths"] == []
     assert result["risks"] == []
     assert result["unestablished"] == []
+    assert len(result["mid_scale"]) == 1
+
+
+def test_a_mid_scale_dimension_lands_in_its_own_bucket_not_in_neither():
+    """A 3 of 5 is a real, neutral answer. It was counted and then dropped;
+    now it is listed, so all six dimensions appear on the page."""
+    result = _derive(dimensions=[_dimension("translational_path", 3)])
+    assert result["strengths"] == result["risks"] == []
+    assert [e["label"] for e in result["mid_scale"]] == ["Translational Path"]
+    assert _details(result["mid_scale"], "dimension") == ["scored 3 of 5"]
+    assert result["mid_scale"][0]["body"] == ["weight: 25%"]
+    assert result["mid_scale_count"] == 1
+
+
+def test_every_dimension_entry_carries_its_stored_rationale():
+    a = _assessment(dimension_rationales={
+        "significance": "Strong genetics.",
+        "innovation": "Me-too mechanism.",
+        "translational_path": "No route named.",
+        "commercial_potential": "Never discussed.",
+    })
+    result = _derive(a, dimensions=[
+        _dimension("significance", 5),
+        _dimension("innovation", 1),
+        _dimension("translational_path", 3),
+        _dimension("commercial_potential", None),
+    ])
+    assert _sole(result["strengths"])["rationale"] == "Strong genetics."
+    assert _sole(result["risks"])["rationale"] == "Me-too mechanism."
+    assert _sole(result["mid_scale"])["rationale"] == "No route named."
+    assert _sole(result["unestablished"])["rationale"] == "Never discussed."
+
+
+def test_a_rationale_matches_its_dimension_case_and_whitespace_insensitively():
+    """The stored map and the dimension key are both matched on
+    `.strip().lower()`, the way `build_assessment_detail` normalizes `scores`."""
+    a = _assessment(dimension_rationales={" Translational_Path ": "  No route named. "})
+    result = _derive(a, dimensions=[_dimension("translational_path", 3)])
+    assert result["mid_scale"][0]["rationale"] == "No route named."
+
+
+def test_non_dimension_entries_carry_a_null_rationale():
+    result = _derive(
+        _assessment(
+            red_flags=["No IP position"],
+            gating={"life_sciences_domain": "met", "credible_science": "unconfirmed"},
+            dimension_rationales={"life_sciences_domain": "must not attach"},
+        ),
+        consults=[_consult("clinical", "blocking"), _consult("legal", "adequate")],
+    )
+    entries = result["strengths"] + result["risks"] + result["unestablished"]
+    assert {e["source"] for e in entries} == {"gating", "red_flag", "consult"}
+    assert all(e["rationale"] is None for e in entries)
+
+
+def test_a_rationale_key_matching_no_dimension_is_rendered_nowhere():
+    """A typo, or a dimension renamed by a later revision. It must attach to
+    nothing and raise nothing — never to the wrong dimension."""
+    a = _assessment(dimension_rationales={"not_a_dimension": "orphan"})
+    result = _derive(a, dimensions=[_dimension("translational_path", 3)])
+    assert result["mid_scale"][0]["rationale"] is None
+    assert all(
+        e["rationale"] != "orphan"
+        for bucket in ("strengths", "risks", "unestablished", "mid_scale")
+        for e in result[bucket]
+    )
+
+
+def test_a_null_or_malformed_rationale_column_gives_every_entry_a_null_rationale():
+    """A NULL column (every pre-0052 row) renders exactly as before: the key is
+    present on every entry, and it is None. A malformed stored value — not a
+    dict, or a non-string reason — degrades the same way rather than raising."""
+    dims = [
+        _dimension("significance", 5),
+        _dimension("innovation", 1),
+        _dimension("translational_path", 3),
+        _dimension("commercial_potential", None),
+    ]
+    for stored in (None, ["x"], "text", {"significance": 3, "innovation": None}):
+        result = _derive(
+            _assessment(dimension_rationales=stored, red_flags=["No IP position"]),
+            dimensions=dims,
+        )
+        entries = [
+            e for bucket in ("strengths", "risks", "unestablished", "mid_scale")
+            for e in result[bucket]
+        ]
+        assert len(entries) == 5, stored
+        assert all(e["rationale"] is None for e in entries), stored
+
+
+def test_an_assessment_without_the_attribute_still_derives():
+    """`dimension_rationales` is read with `getattr`, like `gating`: a stand-in
+    object lacking the attribute yields no reasons rather than an error."""
+
+    class _Bare:
+        gating = None
+        red_flags = None
+
+    result = _derive(_Bare(), dimensions=[_dimension("translational_path", 3)])
+    assert result["mid_scale"][0]["rationale"] is None
 
 
 def test_an_unscored_dimension_is_not_established_rather_than_a_zero():
@@ -237,21 +347,21 @@ def test_thresholds_are_read_from_the_revision_scale():
 def test_a_met_gate_is_a_strength():
     result = _derive(_assessment(gating={"life_sciences_domain": "met"}))
     assert result["strengths"] == [
-        {"source": "gating", "label": "life sciences domain", "detail": "met", "body": [], "preview": None, "note": None}
+        {"source": "gating", "label": "life sciences domain", "detail": "met", "body": [], "preview": None, "note": None, "rationale": None}
     ]
 
 
 def test_an_unmet_gate_is_a_risk():
     result = _derive(_assessment(gating={"credible_science": "not_met"}))
     assert result["risks"] == [
-        {"source": "gating", "label": "credible science", "detail": "not met", "body": [], "preview": None, "note": None}
+        {"source": "gating", "label": "credible science", "detail": "not met", "body": [], "preview": None, "note": None, "rationale": None}
     ]
 
 
 def test_an_unconfirmed_gate_was_never_asked():
     result = _derive(_assessment(gating={"translational_potential": "unconfirmed"}))
     assert result["unestablished"] == [
-        {"source": "gating", "label": "translational potential", "detail": "never asked", "body": [], "preview": None, "note": None}
+        {"source": "gating", "label": "translational potential", "detail": "never asked", "body": [], "preview": None, "note": None, "rationale": None}
     ]
     assert result["strengths"] == []
     assert result["risks"] == []
@@ -287,7 +397,7 @@ def test_every_red_flag_is_a_risk_carrying_its_full_text():
 def test_an_adequate_consult_is_a_strength():
     result = _derive(consults=[_consult("clinical", "adequate")])
     assert result["strengths"] == [
-        {"source": "consult", "label": "clinical", "detail": "adequate", "body": [], "preview": None, "note": None}
+        {"source": "consult", "label": "clinical", "detail": "adequate", "body": [], "preview": None, "note": None, "rationale": None}
     ]
 
 
@@ -299,7 +409,7 @@ def test_the_historical_clear_signal_is_still_read_as_a_strength():
 def test_a_blocking_consult_is_a_risk():
     result = _derive(consults=[_consult("ip", "blocking")])
     assert result["risks"] == [
-        {"source": "consult", "label": "ip", "detail": "blocking", "body": [], "preview": None, "note": None}
+        {"source": "consult", "label": "ip", "detail": "blocking", "body": [], "preview": None, "note": None, "rationale": None}
     ]
 
 

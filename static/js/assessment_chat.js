@@ -99,6 +99,7 @@
     close: drawer.querySelector("[data-chat-close]")
   };
   const openers = Array.from(document.querySelectorAll("[data-chat-open]"));
+  const bubble = document.querySelector("[data-chat-bubble]");
   const main = document.querySelector("main");
   const state = { turns: [], limits: null, busy: false, loaded: false, open: false, opener: null, poll: 0, historySeq: 0 };
 
@@ -913,6 +914,14 @@
     drawer.classList.remove("hidden");
     drawer.classList.add("flex");
     openers.forEach(function (b) { b.setAttribute("aria-expanded", "true"); });
+    // Tailwind's own `hidden`/`flex` pair, toggled together exactly as the
+    // drawer's are above — not an invented class, and not the `aria-expanded:`
+    // variant: the page loads Tailwind from the Play CDN, and a variant that
+    // failed to compile would leave the bubble sitting over the open drawer
+    // with nothing in the rendered HTML to catch it. Removing `flex` rather
+    // than relying on `hidden` winning the cascade keeps the result
+    // independent of the order the CDN emits the two utilities in.
+    if (bubble) { bubble.classList.remove("flex"); bubble.classList.add("hidden"); }
     if (main) {
       main.classList.add(MAIN_PAD);
     }
@@ -932,6 +941,8 @@
     drawer.classList.add("hidden");
     drawer.classList.remove("flex");
     openers.forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
+    // Before the focus return below: focus must not land on a hidden element.
+    if (bubble) { bubble.classList.remove("hidden"); bubble.classList.add("flex"); }
     if (main) {
       main.classList.remove(MAIN_PAD);
     }
@@ -982,4 +993,20 @@
     });
   });
   updateCounter();
+
+  // `#chat` is the list page's way in (2026-09-28): the card's Chat button
+  // links to the detail page with this fragment and the drawer opens itself on
+  // arrival. `openDrawer` is idempotent (`if (state.open) return`), so a
+  // fragment plus a click cannot double-open or double-load history. The
+  // opener is the bubble, so Escape returns focus to a real control. The
+  // fragment is deliberately never rewritten on open or close — it is a
+  // permalink to "open with the chat up", and mutating history would make Back
+  // ambiguous.
+  function openFromHash() {
+    if (window.location.hash === "#chat") {
+      openDrawer(bubble);
+    }
+  }
+  window.addEventListener("hashchange", openFromHash);
+  openFromHash();
 })();
