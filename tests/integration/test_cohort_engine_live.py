@@ -771,9 +771,9 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
     thread = su.state.active_threads["1000.0071"]
     assert thread.grandfathered is True
 
-    # The reply lane must still pick it up and reply (Task 11: the reactive
-    # tier and _phase4_reply_threads are gone; the reply lane's ungated
-    # _pending_reply_pairs / _service_reply replace it).
+    # The reply lane must still pick it up and reply: its ungated
+    # _pending_reply_pairs / _service_reply replaced the reactive tier and
+    # _phase4_reply_threads.
     pairs = eng._pending_reply_pairs()
     replied = {t.thread_id for a, t in pairs if a.agent_id == "su"}
     assert "1000.0071" in replied, (
@@ -1267,9 +1267,8 @@ async def test_grandfathered_thread_still_concludes(live, monkeypatch):
     thread = su.state.active_threads["4000.0001"]
     assert thread.grandfathered is True, "the open cross-cohort thread must be marked"
 
-    # The reply lane still replies, so it can conclude (Task 11:
-    # _phase4_reply_threads is gone; _pending_reply_pairs / _service_reply
-    # replace it).
+    # The reply lane (_pending_reply_pairs / _service_reply) still replies, so
+    # it can conclude.
     pairs = eng._pending_reply_pairs()
     replied = {t.thread_id for a, t in pairs if a.agent_id == "su"}
     assert "4000.0001" in replied, (
@@ -1338,7 +1337,7 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
 
 
 async def test_start_raises_when_cohorts_are_not_star_shaped(live, monkeypatch):
-    """Task 10's actual deliverable, end to end: a lab-to-lab cohort — the shape
+    """End to end: a lab-to-lab cohort — the shape
     every other test in this module still uses via `_recompute_allowed_sender_ids()`
     directly — must fail `start()` fast rather than let a hub-unreachable, lab-to-lab
     roster run.

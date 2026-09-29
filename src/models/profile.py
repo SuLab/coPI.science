@@ -127,8 +127,9 @@ class ResearcherProfile(Base):
         `fetch_orcid_works`, `convert_dois_to_pmids` and `fetch_pubmed_records`
         with `strict=True`, so a failure that is not a per-item one — a
         transport error, a 429 or a 5xx, or an unexpected exception (for the
-        ORCID works lookup, anything but a 404) — raises `CorpusStageError`
-        and fails the job rather than storing a thinner profile; only ingest
+        ORCID works lookup, anything but a 301, 404, 409 or 410 record-state
+        answer) — raises `CorpusStageError` and fails the job rather than
+        storing a thinner profile; only ingest
         callers keep the swallowing default. A PERMANENT per-item NCBI failure
         (a 4xx other than 429, or an unreadable body) does not fail the job,
         since it would fail identically on every retry: that one PMID is

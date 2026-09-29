@@ -223,7 +223,8 @@ async def test_detail_page_renders_the_recommended_next_experiment(
     own labelled block on BOTH surfaces — the shared body template — and only
     when the column holds something (rows written before 0037 are NULL).
 
-    Task 10 moved this block directly under the brief and relabelled it
+    Task 10 of docs/plans/2026-09-09-reviewer-assessment-ui-plan.md moved
+    this block directly under the brief and relabelled it
     "The ask" — the heading text changed, the column and its guard did not."""
     run = await factories.make_simulation_run(db_session)
     assessment = OpportunityAssessment(
@@ -1477,7 +1478,7 @@ async def test_the_truncated_marking_survives_a_manager_render(
 
 
 # ---------------------------------------------------------------------------
-# Task 10: brief first, evidence collapsed, sticky nav
+# Brief first, evidence collapsed, sticky nav
 # ---------------------------------------------------------------------------
 
 _DETAILS_TAG_RE = re.compile(r"<details\b|</details>", re.IGNORECASE)
@@ -1714,7 +1715,7 @@ async def test_the_jump_nav_lists_every_section(client, db_session, admin):
 async def test_the_jump_nav_omits_rationale_when_there_is_none(
     client, db_session, admin
 ):
-    """FIX 1 (review round 1). `rationale` is nullable and the `#rationale`
+    """`rationale` is nullable and the `#rationale`
     section only renders inside `{% if a.rationale %}` — the nav link must be
     gated the same way, or a NULL-rationale row ships a nav that points at
     nothing. `_seed()` always sets a rationale, which is why none of the
@@ -1735,7 +1736,7 @@ async def test_the_jump_nav_omits_rationale_when_there_is_none(
 async def test_a_grouped_key_points_sidecar_renders_the_three_labels_in_order(
     client, db_session, admin
 ):
-    """Task 7 / F3. The three-group `key_points` object (scout_hub >= 1.3.0)
+    """The three-group `key_points` object (scout_hub >= 1.3.0)
     must render its three labels, in order, on the admin detail page."""
     run, assessment = await _seed(db_session)
     obj = {
@@ -2143,7 +2144,7 @@ async def test_the_five_key_point_groups_render_in_order(client, db_session, adm
     """B3. Pins the LEGACY five-group rendering (scout_hub 1.4.0-1.7.x rows):
     a row stored under the five legacy keys keeps its legacy labels, in the
     legacy document's order, not the object's insertion order. Seeded out of
-    order on purpose. The current six groups are pinned by
+    order on purpose. The six 1.8.0 groups are pinned by
     test_the_six_key_point_groups_render_in_order."""
     _, assessment = await _seed(db_session)
     assessment.key_points = {
@@ -2183,8 +2184,9 @@ async def test_the_five_key_point_groups_render_in_order(client, db_session, adm
 
 
 async def test_the_six_key_point_groups_render_in_order(client, db_session, admin):
-    """scout_hub 1.8.0: the reviewer's six groups, in order, under their labels —
-    seeded out of order on purpose."""
+    """A scout_hub 1.8.0 row: its six groups, in order, under their labels —
+    `key_questions` (retired by 1.9.0) keeps its 1.8.0 label and fifth slot.
+    Seeded out of order on purpose."""
     _, assessment = await _seed(db_session)
     assessment.key_points = {
         "commercial_opportunity": ["Comm point"],

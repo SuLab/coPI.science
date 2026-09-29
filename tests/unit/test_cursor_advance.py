@@ -1,10 +1,10 @@
 """The cursor must not mark as read anything Phase 3 did not actually see.
 
-Retargeted for Task 11 fix round 1 (task review, Critical C1). Originally this
-file pinned `_run_turn`'s (later `_run_post_turn`'s) snapshot-then-assign
-cursor invariant from Task 6. Task 11's first pass gave `_run_post_turn` its
-OWN second cursor snapshot/assign, taken *after* `_dispatch_reply_lane` had
-already run for the tick — including, potentially, many slow LLM calls that
+Retargeted after Task 11 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md.
+Originally this file pinned `_run_turn`'s (later `_run_post_turn`'s)
+snapshot-then-assign cursor invariant from that plan's Task 6. Task 11's first
+pass gave `_run_post_turn` its OWN second cursor snapshot/assign, taken *after*
+`_dispatch_reply_lane` had already run for the tick — including, potentially, many slow LLM calls that
 post new messages. That second write had no reader of its own (neither Phase 1
 nor Phase 5 reads `last_seen_cursor`), but it still clobbered the shared
 per-agent field that `_dispatch_reply_lane`'s Phase 3 / `_pending_reply_pairs`
@@ -19,11 +19,11 @@ This file now:
    `_dispatch_reply_lane` (the invariant itself, and the Ruling-P4-style
    discriminator, are unchanged from Task 6 — just relocated).
 2. Pins that `_run_post_turn` never touches `last_seen_cursor` — a structural
-   guard against the exact regression this fix round found.
-3. Adds the COMPOSITIONAL regression test the review flagged: no prior test
+   guard against the exact regression described above.
+3. Adds the COMPOSITIONAL regression test that was missing: no prior test
    ever called `_dispatch_reply_lane()` and `_run_post_turn()` in the same
    tick, which is exactly the shape `_run_main_loop` uses and exactly the gap
-   the Critical bug hid in.
+   the cursor-clobbering bug hid in.
 
 The brief's own drafted test (a fixed far-future `_LATE_TS = 9_999_999_999.0`)
 passes by accident: `time.time()` at turn-end is always far below that
@@ -90,7 +90,8 @@ async def test_dispatch_does_not_swallow_messages_that_arrive_mid_sweep(monkeypa
 
 
 def test_run_post_turn_never_touches_the_cursor():
-    """Structural guard against the exact regression fix round 1 found:
+    """Structural guard against the exact regression the module docstring
+    describes:
     neither Phase 1 nor Phase 5 reads `last_seen_cursor`, and
     `_dispatch_reply_lane` is its sole owner — `_run_post_turn` must not
     reference it at all."""

@@ -22,7 +22,7 @@ because a headline is a public Slack message that cannot be retracted.
 
 **The headline's band/score come from THIS ROW'S OWN stored
 `weighted_score`/`band`** (`render_assessment_headline`'s `score`/`band`
-override, fix round 1 2026-08-29) — never recomputed from `scores` against
+override, added 2026-08-29) — never recomputed from `scores` against
 whatever rubric document happens to be loaded when this script runs. That is
 what makes the rubric-drift check below ADVISORY rather than a correctness
 requirement: a drifted row's rendered number is already correct, because it
@@ -109,8 +109,8 @@ def select_rows_needing_headline(
     A row whose ``rubric_content_hash`` is set and DIFFERS from
     ``live_rubric_hash`` is skipped as rubric drift, unless
     ``allow_rubric_drift`` is passed — but ONLY on the posting path
-    (``for_stamp_only=False``, the default). Fix round 1 (2026-08-29):
-    stamping renders nothing and posts nothing, so there is no number that
+    (``for_stamp_only=False``, the default). Stamping is exempt (2026-08-29):
+    it renders nothing and posts nothing, so there is no number that
     could be published wrongly, and gating it on drift made the exact
     production situation this script exists for unfixable — five
     already-in-Slack rows from run `61ccad6d`, all stamped rubric 3.2.0
@@ -282,7 +282,7 @@ def _render_for(row: OpportunityAssessment, pi_labels: dict[str, str], permalink
         recommendation=row.recommendation,
         scores=row.scores,
         permalink=permalink,
-        # Fix round 1: replay the row's OWN stored band/score rather than
+        # Replay the row's OWN stored band/score rather than
         # recomputing from `scores` against whatever rubric is live today —
         # see the module docstring and assessment_headline.py's.
         score=row.weighted_score,
@@ -294,7 +294,7 @@ def _render_for(row: OpportunityAssessment, pi_labels: dict[str, str], permalink
 def _rubric_note(row: OpportunityAssessment, live_version: str, live_hash: str) -> str:
     """A one-line, human-legible statement of which rubric revision this
     row's band/score came from — preview-only. It plays no role in the
-    post/stamp decision: Fix round 1 made the drift gate advisory rather than
+    post/stamp decision: the drift gate became advisory rather than
     a correctness requirement, once the headline stopped recomputing from the
     live rubric and started replaying the row's own stored values.
     """

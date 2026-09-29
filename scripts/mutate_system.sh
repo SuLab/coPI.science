@@ -17,11 +17,11 @@
 # Slack credentials became available (see its header).
 #
 # THE INERT MUTANTS ARE NOT OPTIONAL. Every tier below carries one edit that changes no
-# behaviour (a docstring, a comment, a log string) and MUST SURVIVE. Without it a tier
-# that is broken for any unrelated reason — a dead credential, a migrated-away column, a
-# leftover row — scores 100% and looks sensitive when it is merely failing. Each tier's
-# inert mutant is listed FIRST so a broken tier is detected before any money is spent on
-# it.
+# behaviour (a docstring, a comment, a log string) and MUST SURVIVE, or is covered by the
+# control of a tier whose selection contains its own (INERT_COVERS in the harness test).
+# Without it a tier broken for any unrelated reason — a dead credential, a migrated-away
+# column, a leftover row — scores 100% and looks sensitive when it is merely failing. Each
+# inert mutant is listed FIRST so a broken tier shows before any money is spent on it.
 #
 # NOTHING IN THIS REPOSITORY IS EVER WRITTEN TO.
 # Three agents previously applied mutations by editing src/ in place. A repo guard
@@ -95,8 +95,9 @@
 #        copied from the argument, not parsed. Measured then: the PRE-EXISTING contract
 #        test tests/contract/test_orcid_contract.py::
 #        test_fetch_orcid_profile_falls_back_to_orcid_when_no_name DOES kill it, so this
-#        is a gap in the new tier rather than in the repo. Re-run with LIVE_API_TESTS=1
-#        before claiming it either way.
+#        is a gap in the new tier rather than in the repo. Measured again 2026-09-25
+#        with LIVE_API_TESTS=1: it SURVIVED (docs/audits/open-findings.md,
+#        2026-09-25/R-mut-M1b), and the contract test still kills it.
 #
 #   M6   RESOLVED 2026-08-04. _validate_profile hardwired to `return True` is now KILLED
 #        by tests/characterization/test_profile_pipeline_gm.py (3 failed:
@@ -274,9 +275,9 @@ declare -A TIER_CREDS=(
   [vacuity]=""
 )
 
-# MUT_TIERS (D18): an allow-list, so the live ORCID/NCBI tiers can run without `pipeline`,
-# the one tier that spends Anthropic calls. An unknown name is refused rather than
-# silently skipping everything.
+# MUT_TIERS (D18 of docs/plans/2026-09-25-rca-remediation-plan.md): an allow-list, so the
+# live ORCID/NCBI tiers can run without `pipeline`, the one tier that spends Anthropic
+# calls. An unknown name is refused rather than silently skipping everything.
 if [ -n "${MUT_TIERS:-}" ]; then
   for t in $MUT_TIERS; do
     [ -n "${TIER_SELECT[$t]+x}" ] || { echo "ERROR: MUT_TIERS names unknown tier '$t'" >&2; exit 1; }
@@ -366,9 +367,9 @@ fi
 COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
 copy_is_safe || exit 1
 
-# INT and TERM are trapped too, so an interrupted run still removes the copy (which holds
-# `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal; the
-# `cleaned` flag makes a second call a no-op either way.
+# INT, TERM and HUP are trapped too, so an interrupted run still removes the copy (which
+# holds `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal;
+# the `cleaned` flag makes a second call a no-op either way.
 cleaned=0
 cleanup() {
   [ "$cleaned" -eq 1 ] && return 0
@@ -389,7 +390,7 @@ echo "building a throwaway copy of the tree at ${COPY} (the repo is never writte
 copy_is_safe || exit 1
 # backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
 # Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT,
-# INT or TERM.
+# INT, TERM or HUP.
 if ! tar -C "$ROOT" \
       --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
       --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \

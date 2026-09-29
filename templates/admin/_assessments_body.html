@@ -47,7 +47,8 @@
      and request.app.state.assessment_chat_enabled is sameas true
      and not impersonation_banner %}
 {# The legend stays here, but the glyphs it explains now live ONE CLICK DOWN
-   inside each card's "Rubric scores &amp; gating" disclosure (Task C2,
+   inside each card's "Rubric scores &amp; gating" disclosure (Task C2 of
+   docs/plans/2026-09-14-assessment-ux-and-prompt-suggestions-implementation-plan.md,
    operator request 2026-09-14) rather than on the card face. Saying so is the
    point of the reworded sentence: a legend for symbols a reader cannot see is
    worse than no legend. #}
@@ -346,8 +347,9 @@
             </div>
         </div>
 
-        {# Two columns, mirroring the detail page's brief (Task C1): the pitch
-           reads LEFT, the key points RIGHT, so the two surfaces cannot put the
+        {# Two columns, mirroring the detail page's brief (Task C1 of the
+           2026-09-14 assessment-UX plan): the pitch reads LEFT, the key
+           points RIGHT, so the two surfaces cannot put the
            same two fields in two different orders. Either half may be absent —
            EVERY row in production today has `headline IS NULL` and
            `key_points IS NULL` — so the grid collapses to one column rather
@@ -464,8 +466,8 @@
 
         <div class="mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
             {# The gating glyph row moved (VERBATIM) into the collapsed
-               "Rubric scores &amp; gating" disclosure below — Task C2,
-               operator request 2026-09-14. What stays in this row: flag
+               "Rubric scores &amp; gating" disclosure below — Task C2 of the
+               2026-09-14 assessment-UX plan, operator request 2026-09-14. What stays in this row: flag
                count, panel badge, review status chip, Assigned, Reviewed by.
                The detail link left it on 2026-09-21 — it is now a button at
                the foot of the pitch box (D7). #}
@@ -507,7 +509,8 @@
             <span class="text-gray-500">Reviewed by: {{ a.review_cols.reviewed_by_names | join(", ") if a.review_cols.reviewed_by_names else "—" }}</span>
         </div>
 
-        {# Per-dimension scores + the gating glyphs, one click down (Task C2).
+        {# Per-dimension scores + the gating glyphs, one click down (Task C2
+           of the 2026-09-14 assessment-UX plan).
            CLOSED by default — no `open` attribute — because the card face is a
            triage surface and six bars per row is what made the old table
            unreadable.
@@ -551,7 +554,8 @@
             <p class="mt-2 text-xs text-gray-600">No per-dimension scores were stored for this verdict.</p>
             {%- endif %}
 
-            {# Moved verbatim from the card face (Task C2), including the three
+            {# Moved verbatim from the card face (Task C2 of the 2026-09-14
+               assessment-UX plan), including the three
                glyphs, their `title`s and the `gating-row gating-*` classes —
                test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face
                and _gating_state_for both read them. #}
@@ -564,7 +568,8 @@
             {%- endif %}
         </details>
 
-        {# Quick scoring (Task C3, operator request 4): the narrow review write
+        {# Quick scoring (Task C3 of the 2026-09-14 assessment-UX plan,
+           operator request 4): the narrow review write
            a triage reader actually wants from the queue — an overall rating, a
            comment and a feedback mode — without a trip to the detail page.
 

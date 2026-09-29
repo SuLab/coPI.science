@@ -182,7 +182,7 @@ def _text():
 
 
 # ---------------------------------------------------------------------------
-# Live Slack tier — see .notes/slack-integration-test-plan.md
+# Live Slack tier
 # ---------------------------------------------------------------------------
 
 _LIVE_SLACK_ENV = ("SLACK_TEST_WORKSPACE", "SLACK_TEST_PI_USER_ID",

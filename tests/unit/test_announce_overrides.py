@@ -1,4 +1,5 @@
-"""DB-overridable run-start announce channels/template (Task 6).
+"""DB-overridable run-start announce channels/template (Task 6 of
+docs/plans/2026-08-30-simulation-control-panel.md).
 
 `_announce_run_start` reads two `app_settings` keys —
 `run_start_announce_channels` and `run_start_announcement_template` — via a

@@ -1,4 +1,4 @@
-"""Task T4 — the profile pipeline, end to end and live.
+"""The profile pipeline, end to end and live.
 
 `live_api` **and** `real_llm`. This is the first test in the system where ORCID, PubMed
 and Anthropic run together against a real database. It is the actual production path for

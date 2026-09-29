@@ -1,7 +1,7 @@
 """The cohort gate and the Slack mirror together.
 
-`.notes/cohort-thorough-test-plan.md` excluded this block by instruction and noted it
-was not testable anyway: no agent carried a bot token. With three probe bots it is.
+This block used to be untestable: no agent carried a bot token. With three probe bots
+it is.
 
 The claim that matters is a distinction the Slack-off suite structurally cannot make:
 the gate filters **reads**, never **writes**. Every agent's message must reach Slack —
@@ -320,10 +320,10 @@ async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, sla
         eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
         # cravatt posts to this channel by NAME below, and create_private_channel caches
         # the id in no client. Without the shared cache, cravatt's
-        # _resolve_channel_id falls back to list_channels() — which lists public channels
-        # only — and the raw name is handed to
-        # chat.postMessage. The engine shares the map for exactly this reason in
-        # production (_sync_private_channels_from_db / cache_channel_ids).
+        # _resolve_channel_id falls back to list_channels() — which lists
+        # public channels only — and the raw name is handed to
+        # chat.postMessage. The engine shares the map for exactly this reason
+        # in production (_sync_private_channels_from_db / cache_channel_ids).
         for c in slack_clients.values():
             c.cache_channel_ids({pname: pcid})
         for a in eng.agents.values():

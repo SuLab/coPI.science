@@ -282,7 +282,7 @@ async def test_shutdown_does_not_re_announce_an_already_posted_headline(
 async def test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later(
     engine, monkeypatch,
 ):
-    """Carried finding from Task 3's review: `_capture_hub_assessment` resets
+    """`_capture_hub_assessment` resets
     `announced` back to False when `_post_assessment_summary` returns False on
     the CONCLUDE turn itself, so a transient Slack failure there must not
     permanently hide the verdict from the close path, the shutdown sweep, or
@@ -368,7 +368,7 @@ class _SlackRefusesTheHeadline(FakeSlackClient):
 async def test_a_slack_refused_headline_is_never_recorded_as_posted(
     engine, monkeypatch,
 ):
-    """Fix round 2, finding 1. `_post_assessment_summary` discarded
+    """`_post_assessment_summary` discarded
     `apost_message`'s return value, so a REFUSED post — which raises nothing —
     was reported as success, and `_capture_hub_assessment` then stamped
     `summary_posted_at` on a headline that never reached the channel. That
@@ -438,7 +438,7 @@ async def test_a_slack_refused_headline_is_never_recorded_as_posted(
 async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
     engine, monkeypatch,
 ):
-    """Fix round 1, finding 1. The shutdown sweep seeds from
+    """The shutdown sweep seeds from
     `summary_posted_at IS NULL`, not from `_assessed_threads`, because the
     in-memory map can say `announced=False` over a row that is already
     stamped — and those entries sit at the FRONT of the insertion-ordered

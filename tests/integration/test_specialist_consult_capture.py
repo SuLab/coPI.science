@@ -292,7 +292,7 @@ async def test_a_successful_consult_writes_a_row_carrying_the_whole_exchange(
         # credit, never instead of it.
         assert turn.sim._consulted_domains("wang", "t1") == frozenset({"legal"})
         # The model still got its opinion back, unchanged by the write.
-        # Task 6 moved the label after the body ("<Title>\n\n<raw>\n\n— signal:
+        # The label sits after the body ("<Title>\n\n<raw>\n\n— signal:
         # ... (read: ...)"), so the opinion text now leads and the label
         # trails — pin both halves rather than the old startswith shape.
         assert turn.results[0].startswith("Legal Specialist\n\n")
@@ -464,7 +464,7 @@ async def test_a_write_failure_costs_the_row_and_nothing_else(engine, monkeypatc
         # would otherwise have replaced it with "Error executing
         # consult_specialist: ..." — telling the model its consult failed while
         # the parsed opinion sat right there.
-        # Task 6 moved the label after the body ("<Title>\n\n<raw>\n\n— signal:
+        # The label sits after the body ("<Title>\n\n<raw>\n\n— signal:
         # ... (read: ...)"), so the opinion text now leads and the label
         # trails — pin both halves rather than the old startswith shape.
         assert turn.results[0].startswith("Legal Specialist\n\n")
@@ -994,7 +994,7 @@ async def test_the_flag_off_posts_no_note_and_costs_nothing_else(
         # The consult itself is untouched: recorded, credited, answered.
         assert len(await _consult_rows(turn.factory, turn.run_id)) == 1
         assert turn.sim._consulted_domains("wang", "t1") == frozenset({"legal"})
-        # Task 6 moved the label after the body ("<Title>\n\n<raw>\n\n— signal:
+        # The label sits after the body ("<Title>\n\n<raw>\n\n— signal:
         # ... (read: ...)"), so the opinion text now leads and the label
         # trails — pin both halves rather than the old startswith shape.
         assert turn.results[0].startswith("Legal Specialist\n\n")
@@ -1035,7 +1035,7 @@ async def test_a_failed_note_post_costs_the_note_and_nothing_else(
         assert [p["text"] for p in turn.client.posted] == ["Thanks — one more question."]
         # The opinion is unchanged — `execute_tool`'s outer handler would
         # otherwise have replaced it with "Error executing consult_specialist".
-        # Task 6 moved the label after the body ("<Title>\n\n<raw>\n\n— signal:
+        # The label sits after the body ("<Title>\n\n<raw>\n\n— signal:
         # ... (read: ...)"), so the opinion text now leads and the label
         # trails — pin both halves rather than the old startswith shape.
         assert turn.results[0].startswith("Legal Specialist\n\n")

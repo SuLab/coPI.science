@@ -1,12 +1,11 @@
-"""Task 12 — browser flows, as repeatable scripts.
+"""Browser flows, as repeatable scripts.
 
 Two layers, because the two things worth recording are different:
 
 1. **``FLOWS``** — a machine-readable transcript of every flow: what to open,
    what to click, and what must be visible. This is the part a human (or an
-   MCP-driven browser agent) replays. Playwright-over-MCP is interactive, so the
-   plan (.notes/full-system-test-plan.md, Task 12) asks for scripts rather than
-   pytest tests; ``FLOWS`` is that script, and ``test_every_flow_is_well_formed``
+   MCP-driven browser agent) replays. Playwright-over-MCP is interactive, so these
+   flows are scripts rather than pytest tests; ``FLOWS`` is that script, and ``test_every_flow_is_well_formed``
    keeps it honest.
 
 2. **HTTP replays** — for every flow whose steps are ordinary form posts, a
@@ -198,7 +197,7 @@ FLOWS: dict[str, dict] = {
             # This is now the terminal step: the private-profile step (and its
             # own terminal POST) was removed with private instructions; the
             # onboarding_complete flip/welcome-email/redirect-resume side
-            # effects relocated onto this same POST (removal cycle, Task 5).
+            # effects relocated onto this same POST (removal cycle).
             ("click", "Save & Finish", "POST /onboarding/save-profile"),
         ],
         "expect": [

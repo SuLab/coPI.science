@@ -1,7 +1,8 @@
 """An incomplete-panel verdict must be visibly distinct from a vetted one.
 
-Storing it (Task 3) is only safe if the page says so — otherwise Task 3 turns
-a loud refusal into a silent, ordinary-looking row.
+Storing it (Task 3 of docs/plans/2026-08-18-specialist-panel-remediation.md) is
+only safe if the page says so — otherwise that change turns a loud refusal
+into a silent, ordinary-looking row.
 """
 
 import pathlib

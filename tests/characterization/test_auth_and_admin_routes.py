@@ -203,7 +203,8 @@ async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db
 
 
 async def test_admin_discussions_export_with_zero_runs_still_renders_html(client, db_session):
-    """Regression: the services/directory extraction (Task 3) moved the
+    """Regression: the services/directory extraction (Task 3 of
+    docs/plans/2026-08-17-user-account-types-plan.md) moved the
     "no simulation runs exist at all" early return to AFTER the `if export:`
     branch was evaluated, so `?export=true` on a fresh instance (zero
     `SimulationRun` rows) started returning a `PlainTextResponse` attachment

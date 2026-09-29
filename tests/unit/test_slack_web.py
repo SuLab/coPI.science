@@ -57,9 +57,9 @@ def test_get_user_info_returns_none_without_retrying(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The async wrappers. Their callers are FastAPI route handlers or code those call
-# (four of the five call sites), and _call sleeps
-# synchronously between retries, so calling the sync functions from
+# The async wrappers. Four of the module's five call sites are FastAPI route
+# handlers or code those call, and _call sleeps synchronously between
+# retries, so calling the sync functions from
 # an `async def` stalls the event loop for every request the process is serving —
 # strictly worse than the raw WebClient they replaced, which had no retry at all.
 # ---------------------------------------------------------------------------

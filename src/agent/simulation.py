@@ -799,8 +799,9 @@ class SimulationEngine:
     def _allowance_for(self, agent: Agent) -> int:
         """Window allowance for one agent. The hub is on its own ceiling.
 
-        A ``scout_hub`` sits on an unpaced lane (Task 9's reservation reply
-        path fires without the per-turn fan-out cap re-checking it), so the
+        A ``scout_hub`` sits on an unpaced lane (the reservation reply path
+        of Task 9 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md
+        fires without the per-turn fan-out cap re-checking it), so the
         per-load allowance that bounds every ``pi_lab`` no longer applies to
         it — it gets ``hub_llm_calls_per_window`` instead, a brake against
         runaway rather than a load-scaled budget. Every other role keeps the
@@ -1064,17 +1065,16 @@ class SimulationEngine:
                 # weighted draw runs. See docs/specs/2026-08-14-two-lane-
                 # concurrent-scheduler-design.md §2.1.
                 #
-                # Fix round 2 (task review): the blanket try/except that used to
-                # wrap this whole call is gone — `_dispatch_reply_lane` now
-                # isolates both one pair's servicing failure (fix round 1, C2)
-                # AND one agent's Phase-3-activation failure (fix round 2) from
-                # their siblings; what is left unguarded is a genuine failure in
+                # The blanket try/except that used to wrap this whole call is
+                # gone — `_dispatch_reply_lane` now isolates both one pair's
+                # servicing failure AND one agent's Phase-3-activation failure
+                # from their siblings; what is left unguarded is a genuine failure in
                 # pair *selection* itself, which is a real bug that should
                 # surface rather than repeat one swallowed ERROR per tick forever
                 # while no interview progresses.
                 #
                 # "Did work" for the backoff below must reflect actual SPEND, not
-                # attempts (fix round 2, Critical): `_dispatch_reply_lane`'s
+                # attempts: `_dispatch_reply_lane`'s
                 # return counts pairs ATTEMPTED, including ones the reservation
                 # limiter deferred with zero LLM calls and `has_pending_reply`
                 # left True — so the identical pair recurs every tick. Driving
@@ -1117,7 +1117,7 @@ class SimulationEngine:
                         # though no post-lane agent was eligible right now. This
                         # is not an idle tick — sleeping the idle backoff here
                         # would pace the "unpaced" lane, delaying the next reply
-                        # sweep by up to 30s (fix round 1, I2).
+                        # sweep by up to 30s.
                         consecutive_idle = 0
                         continue
                     consecutive_idle += 1
@@ -1146,8 +1146,8 @@ class SimulationEngine:
                 turn_count += 1
 
                 # Idle backoff: if no LLM calls were made in EITHER lane this
-                # tick, delay before next turn. Reply-lane SPEND counts too (fix
-                # round 1, I2 / fix round 2, Critical) — the hub in particular
+                # tick, delay before next turn. Reply-lane SPEND counts too —
+                # the hub in particular
                 # has no post_types at all, so `did_work` alone is false on
                 # nearly every one of its ticks, and gating solely on it would
                 # pace the reply lane behind a 30s idle-backoff ceiling on every
@@ -1642,8 +1642,7 @@ class SimulationEngine:
     async def _service_reply(self, agent: Agent, thread: ThreadState) -> None:
         """Phase 4 for one (agent, thread) pair.
 
-        Fix round 1 (task review, Important I4): guards against a thread that
-        closed *mid-sweep* — `pairs` is snapshotted once by
+        Guards against a thread that closed *mid-sweep* — `pairs` is snapshotted once by
         `_dispatch_reply_lane` before any of its (possibly many, possibly
         slow) LLM calls run, and `_close_thread` can pop this exact thread out
         from under a sibling pair's call in the same sweep. Without this, the
@@ -1661,10 +1660,10 @@ class SimulationEngine:
 
         Does NOT touch ``last_phase5_action_time`` — only a real Phase 5
         action (inside `_phase5_new_post`) may stamp that; conflating
-        replying with posting is exactly the cross-lane coupling Task 10
-        removed. Does NOT touch ``consecutive_phase5_skips`` either (fix
-        round 2, Ruling R10): the reply lane briefly owned a once-per-tick
-        reset here (fix round 1, I3), but the reset is idempotent, so
+        replying with posting is exactly the cross-lane coupling Task 10 of
+        docs/plans/2026-08-14-two-lane-concurrent-scheduler.md removed. Does
+        NOT touch ``consecutive_phase5_skips`` either: the reply lane briefly
+        owned a once-per-tick reset here, but the reset is idempotent, so
         per-pair and per-tick produce identical final state — any agent
         holding an open pending thread was zeroed every tick either way,
         permanently disabling `_select_agent`'s skip de-weighting. The
@@ -1685,24 +1684,27 @@ class SimulationEngine:
 
     async def _dispatch_reply_lane(self) -> int:
         """Service every pending pair, concurrently, bounded by
-        ``reply_lane_max_in_flight`` (Task 13). At 1 this is behaviourally
-        sequential — one pair fully serviced (thread lock released, semaphore
-        released) before the next one's own lock/semaphore acquisition can
-        succeed. Task 14 raised the default to 4 once the adversarial
+        ``reply_lane_max_in_flight`` (Task 13 of
+        docs/plans/2026-08-14-two-lane-concurrent-scheduler.md). At 1 this is
+        behaviourally sequential — one pair fully serviced (thread lock
+        released, semaphore released) before the next one's own
+        lock/semaphore acquisition can succeed. Task 14 of the same plan
+        raised the default to 4 once the adversarial
         concurrency tests (tests/integration/test_concurrent_thread_safety.py)
         were green.
 
         Phase 3 (thread activation) runs first for every agent, each guarded
-        by its own try/except (fix round 2 — see below): nothing else calls
+        by its own try/except (see below): nothing else calls
         it now that `_run_post_turn` is Phase 1 + 5 only, so without this a
         brand-new @-mention or reply-to-a-post would never open a thread at
         all.
 
-        Cursor advancement mirrors Task 6's snapshot-then-assign idempotent
-        pattern, applied per agent: `_phase3_activate_threads` and
-        `_pending_reply_pairs`'s `has_new_reply_from_other` check both read
-        `last_seen_cursor` to bound their "since cursor" scans (linear scans
-        over the whole log — see message_log.py), and nothing else advances
+        Cursor advancement mirrors the snapshot-then-assign idempotent
+        pattern of that plan's Task 6, applied per agent:
+        `_phase3_activate_threads` and `_pending_reply_pairs`'s
+        `has_new_reply_from_other` check both read `last_seen_cursor` to
+        bound their "since cursor" scans (linear scans over the whole log —
+        see message_log.py), and nothing else advances
         it for an agent the post lane does not happen to pick this tick.
         Without this, such an agent would rescan the entire message log from
         turn zero on every single main-loop tick, forever. The snapshot is
@@ -1710,10 +1712,11 @@ class SimulationEngine:
         pairs` has read the (still old) cursor — advancing early would hide
         the very replies this pass exists to find, exactly as it would in
         `_run_post_turn`. Nothing in `_run_post_turn` writes this cursor any
-        more (Fix round 1, Critical C1) — this function is its sole owner.
+        more — this function is its sole owner.
 
-        Fix round 1 (task review):
-        - **C2**: every pair's `has_pending_reply` is promoted for the WHOLE
+        Retry signal and per-pair isolation:
+        - **Batch-wide retry promotion**: every pair's `has_pending_reply` is
+          promoted for the WHOLE
           batch, immediately after `_pending_reply_pairs()` returns and
           before the cursor advances or any servicing `await` runs. A pair
           found only via `has_new` (not yet durable) whose SIBLING later in
@@ -1723,15 +1726,17 @@ class SimulationEngine:
           `_pending_reply_pairs`'s docstring). Each pair is then serviced
           inside its own try/except so one failing reply can never abort the
           rest of the sweep (spec §8) or propagate out of this call.
-        - **I5**: checks `self._running` so a shutdown request is honoured
+        - **Early stop on shutdown**: checks `self._running` so a shutdown
+          request is honoured
           within roughly one reply's worth of latency instead of first
           draining the whole sweep — worst case today is ~12 sequential Opus
           calls in a 12-interview star, well past the documented `docker stop
           -t 420` grace period.
 
-        Fix round 2 (task review):
-        - **Ruling R10**: this function no longer touches
-          `consecutive_phase5_skips` at all. Fix round 1 moved the reset here
+        Lane ownership and prologue guarding:
+        - **The skip streak is post-lane-owned**: this function no longer
+          touches `consecutive_phase5_skips` at all. An earlier version moved
+          the reset here
           (once per engaged agent per tick, instead of once per pending pair)
           on the theory that batching would fix the coupling — but the reset
           is idempotent, so per-pair and per-tick produce IDENTICAL final
@@ -1744,12 +1749,11 @@ class SimulationEngine:
           `_phase5_new_post` increments it on a skip/rejection and resets it
           to 0 on a genuinely successful post (verified — see that method's
           `previous_skips` handling).
-        - **New Important, prologue failures**: the blanket try/except that
+        - **Only Phase 3 is guarded**: the blanket try/except that
           used to wrap the ENTIRE call to this function (in `_run_main_loop`)
           is gone — it swallowed a deterministic failure in
           `_pending_reply_pairs` or the cursor-advance step just as silently
-          and permanently as the two Criticals this same review round fixed
-          (one ERROR per tick, forever, no interview ever progressing, while
+          and permanently (one ERROR per tick, forever, no interview ever progressing, while
           the post lane kept posting as if nothing were wrong). What's left
           guarded, narrowly, is `_phase3_activate_threads`: it runs once per
           agent, so one agent's activation bug must not stop every OTHER
@@ -1757,7 +1761,7 @@ class SimulationEngine:
           anything below it, is now genuinely unguarded — a bug there
           surfaces (crashes the run) rather than being swallowed wholesale.
 
-        Final review fix: catching that per-agent Phase 3 failure is not
+        Catching that per-agent Phase 3 failure is not
         enough on its own — the cursor-advance loop below used to run
         unconditionally for every agent, so a caught-and-logged exception
         for agent X still marked X's own unprocessed messages "seen" for
@@ -1767,40 +1771,41 @@ class SimulationEngine:
         it was; its unactivated messages are retried on the next dispatch
         rather than lost.
 
-        Fix round 3 (task review, Critical):
-        - **I5 regressed by the concurrent rewrite**: `_run` originally
-          checked `self._running` only once, at the top, before acquiring
-          anything. `asyncio.gather` schedules every pair's `_run` task up
-          front, and an uncontended `Semaphore.acquire`/`Lock.acquire` never
-          actually suspends — so with only that one check, pair 0 reaches
-          its first genuine `await` (the Opus call inside `_service_reply`)
-          before pair 1 even LOOKS at `self._running`, which is still True at
-          that instant. Every other pair then passes the same stale check and
-          parks on the semaphore; a stop requested while pair 0 is in flight
-          is invisible to all of them, and the WHOLE sweep drains instead of
-          stopping after pair 0 — measured, at cap=1, with a real `await`
-          inside the mocked `_service_reply`: 6 pending pairs, stop requested
-          during pair 0, served 6 instead of 1. `_run` now re-checks
-          `self._running` a second time, inside the semaphore, immediately
-          before the thread lock and the real service call — that is the
-          check that actually matters, since it fires at the moment a pair
-          is genuinely about to be serviced rather than at task-creation
-          time. `test_dispatch_stops_early_when_the_engine_stops_mid_sweep`'s
-          mock now does a real `await asyncio.sleep(0)` inside
-          `_service_reply` — without it, the test cannot fail even against
-          the pre-fix single-check code, because a mock with no `await` never
-          exercises the task-scheduling gap the bug lived in.
+        Shutdown re-check inside the semaphore (the concurrent rewrite
+        regressed the early stop above): `_run` originally
+        checked `self._running` only once, at the top, before acquiring
+        anything. `asyncio.gather` schedules every pair's `_run` task up
+        front, and an uncontended `Semaphore.acquire`/`Lock.acquire` never
+        actually suspends — so with only that one check, pair 0 reaches
+        its first genuine `await` (the Opus call inside `_service_reply`)
+        before pair 1 even LOOKS at `self._running`, which is still True at
+        that instant. Every other pair then passes the same stale check and
+        parks on the semaphore; a stop requested while pair 0 is in flight
+        is invisible to all of them, and the WHOLE sweep drains instead of
+        stopping after pair 0 — measured, at cap=1, with a real `await`
+        inside the mocked `_service_reply`: 6 pending pairs, stop requested
+        during pair 0, served 6 instead of 1. `_run` now re-checks
+        `self._running` a second time, inside the semaphore, immediately
+        before the thread lock and the real service call — that is the
+        check that actually matters, since it fires at the moment a pair
+        is genuinely about to be serviced rather than at task-creation
+        time. `test_dispatch_stops_early_when_the_engine_stops_mid_sweep`'s
+        mock now does a real `await asyncio.sleep(0)` inside
+        `_service_reply` — without it, the test cannot fail even against
+        the pre-fix single-check code, because a mock with no `await` never
+        exercises the task-scheduling gap the bug lived in.
         """
         cursor_snapshots = {
             agent.agent_id: self.message_log.latest_timestamp
             for agent in self.agents.values()
         }
-        # Final review fix: an agent whose Phase 3 pass raises must NOT have
+        # An agent whose Phase 3 pass raises must NOT have
         # its cursor advanced below — that would mark this exact agent's
         # unprocessed messages "seen" on the strength of a pass that never
-        # actually ran, a permanent silent loss of the same shape C2 was
-        # added to prevent (see test_dispatch_isolates_one_agents_phase3_
-        # failure_from_the_others in tests/unit/test_reply_lane.py, which only
+        # actually ran, a permanent silent loss of the same shape the
+        # batch-wide retry promotion (see the docstring) exists to prevent (see
+        # test_dispatch_isolates_one_agents_phase3_failure_from_the_others in
+        # tests/unit/test_reply_lane.py, which only
         # pins that OTHER agents keep working — it says nothing about the
         # failed agent's own cursor). Collected here, consulted in the advance
         # loop below.
@@ -1818,7 +1823,8 @@ class SimulationEngine:
         pairs = self._pending_reply_pairs()
 
         # Promote the whole batch's retry flag BEFORE the cursor advances
-        # and before any servicing await runs. See "C2" above.
+        # and before any servicing await runs. See "Batch-wide retry
+        # promotion" in the docstring.
         for _agent, thread in pairs:
             thread.has_pending_reply = True
 
@@ -1918,7 +1924,7 @@ class SimulationEngine:
         `_service_reply`) entirely — see docs/specs/2026-08-14-two-lane-
         concurrent-scheduler-design.md §2.
 
-        Fix round 1 (task review, Critical C1): this function does NOT touch
+        This function does NOT touch
         `last_seen_cursor` at all — neither Phase 1 nor Phase 5 reads it, and
         `_dispatch_reply_lane` already owns cursor advancement for every
         agent, every tick (that is the only reader: `_phase3_activate_threads`
@@ -2277,7 +2283,7 @@ class SimulationEngine:
         # max_thread_messages=20 lets ordinals 12-19 all render as CONCLUDE
         # (thread_guidance doesn't know the cap moved), and max_thread_messages
         # < 12 closes the thread as a timeout before CONCLUDE guidance is ever
-        # reachable at all — exactly the failure mode this fix round removed
+        # reachable at all — exactly the failure mode the ordinal fix removed
         # for the default value. `_warn_if_hub_conclude_missing_assessment`
         # reads thread_guidance directly (not this setting) for exactly this
         # reason.
@@ -2381,7 +2387,7 @@ class SimulationEngine:
             )
             return
         # already_reserved=True: try_reserve just appended this exact call to
-        # call_times — appending again here would double-book it (Ruling R5).
+        # call_times — appending again here would double-book it.
         agent.record_api_call(already_reserved=True)
         # Filled by `on_stop_reason` below, then read once the reply is
         # extracted. A list rather than a scalar for the same reason
@@ -2733,9 +2739,9 @@ class SimulationEngine:
         `_check_thread_outcome` (⏸️ decline), both of which run under the
         reply lane's THREAD lock for `thread.thread_id` — see
         `_dispatch_reply_lane`. This method's own mutation of BOTH agents'
-        `active_threads` (this ruling — Task 12 review Finding B / Ruling
-        R11 — is one of the two motivating cases for `_agent_locks` at all,
-        alongside `_evict_dead_thread` below) is additionally guarded by the
+        `active_threads` (one of the two motivating cases for `_agent_locks`
+        at all, alongside `_evict_dead_thread` below) is additionally guarded
+        by the
         AGENT lock, acquired here, nested INSIDE the already-held thread
         lock: thread-lock-outer, agent-lock-inner, per the ordering note on
         `_thread_locks` in __init__. `acquire_all` sorts the two agent ids,
@@ -2866,9 +2872,8 @@ class SimulationEngine:
         Called from `_post_message`'s ThreadNotFound handling, itself called
         from `_reply_to_thread` — i.e. from inside the reply lane's THREAD
         lock for this exact `thread_id` (see `_dispatch_reply_lane`). This
-        loops over EVERY agent's `active_threads`, so — Task 12 review
-        Finding B / Ruling R11 — it needs the AGENT lock for every agent, not
-        just the two `_close_thread` above locks: without it, `_close_thread`
+        loops over EVERY agent's `active_threads`, so it needs the AGENT lock
+        for every agent, not just the two `_close_thread` above locks: without it, `_close_thread`
         would be the only mutator of `active_threads` under agent-lock
         protection while this one, mutating the SAME dict, raced unguarded.
         `acquire_all` takes every key sorted, so this composes with
@@ -3271,7 +3276,7 @@ class SimulationEngine:
                 )
                 return
             # already_reserved=True: try_reserve just appended this exact call to
-            # call_times — appending again here would double-book it (Ruling R5).
+            # call_times — appending again here would double-book it.
             agent.record_api_call(already_reserved=True)
             # See `_was_truncated`; same collection idiom as the Phase-4 site.
             stop_reasons: list[str] = []
@@ -3465,8 +3470,7 @@ class SimulationEngine:
                     # _post_message already logged why (e.g. the text stripped to
                     # empty). Nothing reached Slack, so neither the turn counter
                     # nor an assessment row may be written for it — either would
-                    # be a phantom record with no corresponding Slack message
-                    # (Task 11 fix round 1, Finding 3).
+                    # be a phantom record with no corresponding Slack message.
                     logger.info(
                         "[%s] Phase 5: New post in #%s suppressed — not counted, "
                         "nothing persisted",
@@ -3984,7 +3988,8 @@ class SimulationEngine:
         regressed — see run_marker.py); falls back to any connected client
         with a WARNING. The markers post AFTER the fresh-start cursor seed,
         so the live poller WILL fetch them on its first tick — the sentinel
-        skip (Task 4) is what drops them there and on every later resume.
+        skip (Task 4 of docs/plans/2026-08-29-run-start-announcements.md) is
+        what drops them there and on every later resume.
         """
         try:
             names = parse_announce_channels(
@@ -4509,7 +4514,7 @@ class SimulationEngine:
         # would sail past an isinstance check straight into a DataError at
         # commit — which the outer except then drops the WHOLE row for. Clip
         # instead of dropping: a truncated recommendation is still useful for
-        # triage, an absent one is not (Task 11 fix round 1, Finding 5).
+        # triage, an absent one is not.
         subject_agent_id = _bounded_str(subject_view.get("subject_agent_id"), 50)
         funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
         recommendation = _bounded_str(verdict.get("recommendation"), 30)
@@ -4637,10 +4642,11 @@ class SimulationEngine:
                 # Its OWN site, not the legacy branch above: a retired key is
                 # evidence of neither shape (`key_point_shape`), so a 1.8.0
                 # sidecar classifies "current" and never reaches that branch.
-                # Milder than the legacy warning (spec §6.4) — the group still
-                # stores and renders under the label and in the slot 1.8.0 gave
-                # it — so it carries no stale-prompt question; that hint stays on
-                # the genuinely pre-1.8.0 path above.
+                # Milder than the legacy warning (§6.4 of
+                # docs/specs/2026-09-28-assessment-chat-entry-and-key-points-design.md)
+                # — the group still stores and renders under the label and in the
+                # slot 1.8.0 gave it — so it carries no stale-prompt question; that
+                # hint stays on the genuinely pre-1.8.0 path above.
                 retired = sorted(set(checked_key_points) & retired_keys)
                 if retired:
                     logger.warning(
@@ -6791,8 +6797,7 @@ class SimulationEngine:
         written. Callers that count a turn or persist something derived from
         the post (e.g. the opportunity_assessment verdict sidecar, which
         stores this id as ``slack_ts`` for a link back to the post it
-        summarises — F7) must check this before doing either — see Task 11
-        fix round 1, Finding 3. The return value is truthy exactly when a post
+        summarises — F7) must check this before doing either. The return value is truthy exactly when a post
         was recorded, so existing callers that only did ``if not posted:`` (or
         ignore the return value entirely) are unaffected by the ``bool`` ->
         ``str | None`` change.
@@ -7536,7 +7541,8 @@ class SimulationEngine:
         """Retry OpportunityAssessment rows queued by _persist_assessment.
 
         _persist_assessment attempts an immediate write; a failure there
-        (most commonly the pool-checkout timeout Task 2 sized the pool for)
+        (most commonly the pool-checkout timeout that Task 2 of
+        docs/plans/2026-08-14-two-lane-concurrent-scheduler.md sized the pool for)
         appends the fully-built row here instead of dropping it. Mirrors
         _flush_persisted's buffer/retry pattern exactly, just against
         _pending_assessments instead of _pending_persist.
@@ -8242,9 +8248,9 @@ class SimulationEngine:
                         .order_by(LlmCallLog.created_at)
                     )
                     rows = result.all()
-                # call_times is a deque that try_reserve appends to (Task 9)
+                # call_times is a deque that try_reserve appends to
                 # AND that record_api_call's default (already_reserved=False)
-                # path also appends to (Ruling R5 — see that method's
+                # path also appends to (see that method's
                 # docstring; the seven call sites that rely on this default are
                 # never separately reserved, so record_api_call is the only
                 # place they are booked into the window at all), same
@@ -9361,8 +9367,9 @@ _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
 # scout_hub >= 1.9.0: the exact bullet count each current group carries
 # (prompt item 7 — one each since 1.9.0), and the per-bullet bound. Warnings
-# only (design D12) — a shape violation is never a drop. Keys and order are
-# pinned to KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py. The
+# only (D12 of docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md)
+# — a shape violation is never a drop. Keys and order are pinned to
+# KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py. The
 # retired 1.8.0 group (`key_questions`, RETIRED_KEY_POINT_GROUPS) carries no
 # count: it still stores, with its own warning in `_persist_assessment`.
 _KEY_POINT_GROUP_BULLETS = {
@@ -9413,8 +9420,8 @@ def _normalize_gating(raw: object) -> dict | None:
     structured column. So each key is kept only when its own value already
     conforms; anything else is dropped for that key alone.
 
-    Filtering per key rather than dropping the whole map (Task 11 fix round 1,
-    Finding 4) matches how every sibling field on this row already degrades —
+    Filtering per key rather than dropping the whole map matches how every
+    sibling field on this row already degrades —
     ``red_flags``/``derisking_milestones`` null only when THEY are the wrong
     type, never because some unrelated field was also bad. Wholesale-dropping
     a map with three good gates over one bad one denied the (now-shipped)
@@ -9451,7 +9458,7 @@ def _bounded_str(value: object, max_len: int) -> str | None:
     place a value of the *right* type can still blow up the write, since an
     oversized string is a perfectly good Python str right up until Postgres
     raises DataError at commit — which takes the whole row down with it, not
-    just the one field (Task 11 fix round 1, Finding 5). Truncating instead of
+    just the one field. Truncating instead of
     dropping is deliberate: a clipped recommendation is still useful for
     triage, an absent one is not. ``raw_verdict`` keeps the untruncated
     original regardless.

@@ -3,9 +3,10 @@
 `src/routers/admin.py::admin_jobs` filters in Python with no vocabulary
 whitelist (`if type_filter and job.type != type_filter`), so the handler needs
 no change for a new job type to be filterable — this pins the template
-option that lets an admin actually select it from the page, per the plan's
-Task 11 brief. Uses the `client` fixture (rollback `db_session`), not
-`test_worker.py`'s committing harness — the two session regimes are
+option that lets an admin actually select it from the page, per Task 11 of
+docs/plans/2026-08-28-human-review-feedback-implementation-plan.md. Uses the
+`client` fixture (rollback `db_session`), not `test_worker.py`'s committing
+harness — the two session regimes are
 deliberately incompatible.
 """
 

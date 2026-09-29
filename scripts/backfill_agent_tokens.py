@@ -17,7 +17,8 @@ when it reads a token. A column value that test rejects (a ``REPLACE_ME``, a
 user ``xoxp-`` token, the ``xoxe.`` config token pasted into the wrong key) is
 treated as unfilled and replaced from a valid env token, and counted as
 ``replacing_invalid``; otherwise it would count as filled forever, and
-``delete_user_account`` would later try to revoke it.
+``delete_user_account`` would later skip it as not a bot token, leaving any real
+bot token unrevoked.
 
 Idempotent: only writes rows whose ``slack_bot_token`` is null, blank, or
 invalid, and only from a valid env token. Safe to re-run.

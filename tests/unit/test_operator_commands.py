@@ -24,8 +24,12 @@ rules:
 The rules match commands, not prose: "a bare ``docker compose`` resolves to the dev
 stack" names no subcommand, and "the container is ``blackbird-agent-run``" names no
 docker verb, so both stay legal. Lines continued with a trailing backslash are joined
-first, so a ``-f`` on a continuation line still counts. ``$DC``/``"${DC[@]}"`` forms are
-not scanned: the literal ``docker compose`` appears only where the variable is defined.
+first, so a ``-f`` on a continuation line still counts. ``$DC``/``"${DC[@]}"`` forms
+escape the ``-f`` rule, which needs a literal ``docker compose`` and a subcommand; the
+line-level rules still apply to them (``EXEC_DEV_APP`` stands in for the
+compose-command ``app`` check on ``$DC exec app``). Nothing checks the ``-f`` inside a
+variable's own definition: it names no subcommand, and ``run_migration.sh``'s one
+definition is in ``EXEMPT``.
 """
 
 import re

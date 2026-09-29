@@ -78,14 +78,16 @@ Apply::
     docker compose -f docker-compose.prod.yml run --rm --no-deps -T -e PYTHONPATH=/app blackbird-app \\
         python scripts/migrate/remediate_duplicates.py --apply --strategy keep-earliest
 
-``PYTHONPATH=/app`` is REQUIRED and is not decoration. ``python <path>/x.py`` puts
-the *script's* directory on ``sys.path[0]``, not the repo root, so ``import src``
-resolves to the copy baked into the image at build time
-(``/usr/local/lib/python3.11/site-packages/src``) rather than the
-``/app/src`` tree. Verified inside ``copiscience-app-1``. The header this tool prints
-names the ``src/agent/ids.py`` it actually loaded, so you can see which copy you
-got, and it hard-fails if that copy's writer-slot scheme is not the one it
-expects.
+``PYTHONPATH=/app`` makes ``import src`` load the ``/app/src`` tree. Without it,
+``python <path>/x.py`` puts the *script's* directory on ``sys.path[0]``, not the
+repo root, so ``import src`` resolves to the copy pip installed at build time
+(``/usr/local/lib/python3.11/site-packages/src``); verified inside
+``copiscience-app-1``. In a one-off off a freshly built image both copies come
+from the same build; they diverge wherever ``/app`` is bind-mounted over an
+older image (``docker-compose.yml`` mounts the whole repo there). The header this tool
+prints names the ``src/agent/ids.py`` it actually loaded, so you can see which
+copy you got, and it hard-fails if that copy's writer-slot scheme is not the
+one it expects.
 
 EXIT CODES
 ----------

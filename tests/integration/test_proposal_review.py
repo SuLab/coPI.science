@@ -17,11 +17,10 @@ Scope, stated once so the gap stays visible:
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
   test that touches the notification path replaces `send_proposal_notification` with a
   recording double and says so in every assertion message, so a reader cannot mistake a
-  green run here for "proposal email is covered". It is not covered. See
-  `.notes/full-system-test-plan.md` § Global Constraints.
+  green run here for "proposal email is covered". It is not covered.
 
-**outcome='proposal' is legacy-only as of the pitch-only reconciliation (Task 7,
-docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md).** The live ✅-confirms-
+**outcome='proposal' is legacy-only as of the pitch-only reconciliation
+(docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8).** The live ✅-confirms-
 :memo: handshake that used to write these rows was retired: `_check_thread_outcome` has
 no arm left that produces outcome='proposal', and `_check_private_channel_outcome` /
 `_finalize_private_proposal` (the collab_private analog) no longer exist at all. The
@@ -226,10 +225,10 @@ async def _conclude_thread(
     ``outcome='no_proposal'`` drives the REAL conclusion path — replays the ⏸️
     close through the live `_check_thread_outcome` -> `_close_thread` — because
     that arm survived the pitch-only reconciliation (see
-    docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md Task 7).
+    docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8).
 
     ``outcome='proposal'`` does NOT drive the engine. The ✅-confirms-:memo:
-    handshake that used to produce these rows was retired by that same task —
+    handshake that used to produce these rows was retired by that same reconciliation —
     `_check_thread_outcome` has no arm left that can write outcome='proposal'
     (see `_check_private_channel_outcome` too: also gone). A row with this
     outcome is legacy data only, so this branch fabricates exactly the row
@@ -284,7 +283,8 @@ async def _conclude_thread(
         agents[0], thread, f"⏸️ No viable overlap. {body}",
     )
     # _close_thread now QUEUES its working-memory synthesis calls instead of
-    # awaiting them inline (perf/memory/race remediation, Task 1) — drain
+    # awaiting them inline (Task 1 of
+    # docs/plans/2026-08-21-perf-memory-race-remediation.md) — drain
     # before asserting the double actually ran.
     await engine._drain_memory_events()
 
@@ -354,7 +354,7 @@ async def test_the_no_proposal_close_still_produces_a_thread_decision(db_session
 async def test_a_memo_and_check_mark_reply_no_longer_produces_a_thread_decision(
     db_session, lab,
 ):
-    """Control half 2/2 — and the actual regression pin for Task 7.
+    """Control half 2/2 — and the actual regression pin for the handshake's retirement.
 
     Before the pitch-only reconciliation this was
     `test_a_concluded_thread_records_a_proposal_decision`'s "yes" half: replaying

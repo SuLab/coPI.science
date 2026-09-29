@@ -1,4 +1,4 @@
-"""Own-paper abstract-cap exemption + reworded phase-4 injection (Task 11).
+"""Own-paper abstract-cap exemption + reworded phase-4 injection.
 
 ``execute_tool``'s ``retrieve_abstract`` branch enforces a per-thread cap
 (``ThreadState.abstracts_other`` vs ``settings.max_abstracts_other_per_thread``)

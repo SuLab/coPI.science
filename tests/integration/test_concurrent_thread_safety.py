@@ -7,10 +7,10 @@ a monkeypatched LLM/Slack call that performs a genuine ``await`` (a real
 ``asyncio.sleep``), because an uncontended ``asyncio.Lock``/``Semaphore``
 never actually suspends — a fake with no real await lets both "concurrent"
 tasks race through their whole body in one scheduler step, which is exactly
-how three previous tests in this same plan shipped green against locking
+how three earlier tests shipped green against locking
 code that did not work (a tag-strip test, a lock-ordering test, and a
-shutdown test — see task-14-report.md for how each of the tests below was
-independently confirmed to fail with its guard removed).
+shutdown test). Each of the tests below was independently confirmed to fail
+with its guard removed.
 
 See docs/specs/2026-08-14-two-lane-concurrent-scheduler-design.md §4 (the
 races) and §9 (this table of tests).
@@ -76,12 +76,11 @@ _HUB_CONCLUDE_RESPONSE = (
 #    bypassing the dispatcher's own in-flight dedup set (that dedup is tested
 #    separately, in test 6 below).
 #
-# IMPORTANT SCOPE NOTE (task review, Critical C1): the lock applied here is
+# IMPORTANT SCOPE NOTE: the lock applied here is
 # one this TEST builds (`eng._thread_locks.acquire_all(...)`), not the
-# production one at `simulation.py:1928` inside `_dispatch_reply_lane._run`.
+# production `acquire_all` call inside `_dispatch_reply_lane._run`.
 # Deleting that production line leaves this test (and the two static lock-
-# order guards) green — confirmed via a disposable worktree, see
-# task-14-report.md's C1 fix section. This test still has standalone value
+# order guards) green — confirmed via a disposable worktree. This test still has standalone value
 # (it pins that `_service_reply`'s closed/evicted guard correctly prevents a
 # double-service WHEN serialized), but the production call site's OWN
 # protection is what
@@ -167,12 +166,12 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
 
 
 # ---------------------------------------------------------------------------
-# 1b. Task review, Critical C1: the SAME race as test 1, but driven through
+# 1b. The SAME race as test 1, but driven through
 #     the REAL `_dispatch_reply_lane()` with two DIFFERENT real agents (hub
 #     and lab) each owing a reply into the SAME thread — the star topology's
 #     normal steady state, and literally spec §4.1's own scenario. No lock is
-#     applied by this test anywhere; only the production line at
-#     `simulation.py:1928` (inside `_dispatch_reply_lane._run`) can prevent
+#     applied by this test anywhere; only the production `acquire_all`
+#     call inside `_dispatch_reply_lane._run` can prevent
 #     overlap here. `_pending_reply_pairs()` returns both (agent, thread)
 #     pairs; the in-flight dedup key is `(agent_id, thread_id)`, which does
 #     NOT collide for two different agents on the same thread_id, so both are
@@ -184,8 +183,7 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
 async def test_two_agents_replying_into_one_thread_do_not_overlap_at_the_production_call_site(
     engine, monkeypatch,
 ):
-    """Confirmed via a disposable worktree (task-14-report.md, C1 fix
-    section) that deleting `simulation.py:1928`'s
+    """Confirmed via a disposable worktree that deleting `_dispatch_reply_lane._run`'s
     `async with self._thread_locks.acquire_all(thread.thread_id):` makes this
     test fail: peak overlapping `_service_reply` calls goes from 1 to 2, and
     a second `ThreadDecision` row appears."""
@@ -333,7 +331,7 @@ async def test_concurrent_phase5_respects_the_daily_cap(engine, monkeypatch):
 #    §3.2/§4). `_close_thread` mutates the OTHER agent's state, so hub-closes-
 #    against-lab and lab-closes-against-hub acquire the SAME two agent locks.
 #
-# Task review, Important I1: an uncontended `asyncio.Lock.acquire()` never
+# An uncontended `asyncio.Lock.acquire()` never
 # suspends, so `ensure_future(close_ab)` followed by `sleep(0.001)` lets
 # close_ab silently acquire BOTH its agent locks in one uninterrupted step
 # before close_ba even starts — close_ba then just queues behind an
@@ -343,8 +341,7 @@ async def test_concurrent_phase5_respects_the_daily_cap(engine, monkeypatch):
 # `test_engine_locks.py::test_acquire_all_does_not_deadlock_under_genuine_contention`
 # does: pre-acquire one of the two shared locks (`"blackbird"`) externally so
 # BOTH closes are forced to actually suspend and interleave, then release it.
-# Verified via a disposable worktree (task-14-report.md, I1 fix section)
-# that this reproduces a genuine timeout when `LockRegistry.acquire_all`'s
+# Verified via a disposable worktree that this reproduces a genuine timeout when `LockRegistry.acquire_all`'s
 # `sorted(set(keys))` is removed, and passes cleanly against the real
 # (sorted) implementation.
 # ---------------------------------------------------------------------------
@@ -432,8 +429,8 @@ async def test_cross_agent_close_does_not_deadlock(engine, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3c. Final review fix (item 2) — `_evict_dead_thread`'s OWN agent lock
-# (`simulation.py:2920`) is likewise untested. It takes EVERY agent's key,
+# 3c. `_evict_dead_thread`'s OWN agent lock
+# (its `acquire_all(*self.agents.keys())`) is likewise untested. It takes EVERY agent's key,
 # so it can never truly overlap with `_close_thread` for the SAME thread
 # unless it is allowed to run while `_close_thread` is genuinely suspended
 # waiting to ACQUIRE its own (narrower) agent lock — before close has
@@ -459,7 +456,7 @@ async def test_evict_dead_threads_agent_lock_prevents_it_from_racing_ahead_of_cl
     """With the real lock, eviction cannot run until close_thread has fully
     released both agent locks — by which point close has already set
     `wang`'s own ThreadState.status = "closed". Confirmed via a disposable
-    worktree that deleting `simulation.py:2920`'s
+    worktree that deleting `_evict_dead_thread`'s
     `async with self._agent_locks.acquire_all(*self.agents.keys()):` makes
     this fail (status never gets set at all)."""
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")

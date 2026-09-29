@@ -86,11 +86,11 @@ async def test_a_consult_is_booked_against_the_rate_limiter(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(monkeypatch):
-    """The `on_consult` closure built inside `_reply_to_thread` (Task 9) takes
+    """The `on_consult` closure built inside `_reply_to_thread` takes
     TWO arguments now — domain and the parsed verdict_signal — and must land
     both in `_note_consult`: the domain into the per-interview floor map, and
     the signal into the per-run `_consult_signal_counts` tally the mix report
-    in `stop()` reads. A one-argument closure (the pre-Task-9 shape)
+    in `stop()` reads. A one-argument closure (the earlier shape)
     would TypeError the moment `execute_tool` calls it with two arguments."""
     engine, hub, thread = _hub_engine()
 
@@ -186,7 +186,7 @@ async def test_the_live_path_refuses_a_retired_verdict_label(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_consult_appends_to_the_sliding_window_ledger(monkeypatch):
-    """Fix round 1 (Ruling R5): booking a consult against api_call_count is
+    """Booking a consult against api_call_count is
     not enough — it must also land in call_times, or the limiter's coverage
     silently narrows to just the two reserved call sites and a hub that fires
     consults all day never looks throttled for them."""
@@ -496,7 +496,7 @@ async def test_a_consult_whose_stop_reason_never_arrives_is_credited(monkeypatch
 
 # --- label placement --------------------------------------------------------
 #
-# Task 6: the label ("<Title> — signal: X") must follow the opinion body, not
+# The label ("<Title> — signal: X") must follow the opinion body, not
 # precede it, in the string the hub reads. A verdict word already in context
 # anchors the hub's own subsequent reasoning: anchoring on a score already in
 # context reaches Cohen's d = 0.71 and is NOT removable by instruction

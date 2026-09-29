@@ -1,4 +1,4 @@
-"""NCBI E-utilities (PubMed / PMC / ID-converter), live. Task T2.
+"""NCBI E-utilities (PubMed / PMC / ID-converter), live.
 
 `src/services/pubmed.py` is the largest external surface in the system and the one
 whose failure mode is silent-and-wrong rather than loud: a mis-parsed ArticleId

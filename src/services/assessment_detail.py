@@ -136,8 +136,9 @@ RETIRED_KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
 
 #: scout_hub 1.3.0-1.7.1 (1.3.0 carried the first, second and last). Kept for
 #: two reasons only: a stored verdict renders under the labels and order it was
-#: written with (design D2), and a sidecar from a stale prompt still stores
-#: rather than losing the field to `raw_verdict`.
+#: written with (D2 of
+#: docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md), and a sidecar
+#: from a stale prompt still stores rather than losing the field to `raw_verdict`.
 LEGACY_KEY_POINT_GROUPS: tuple[tuple[str, str], ...] = (
     ("significance", "Significance"),
     ("innovation", "Innovation"),
@@ -170,8 +171,9 @@ _LEGACY_ONLY_KEY_POINT_KEYS = (
 _CURRENT_ONLY_KEY_POINT_KEYS = _CURRENT_KEY_POINT_KEYS - _LEGACY_KEY_POINT_KEYS
 
 #: Write-time acceptance: the THREE-way union. Accepting only the current keys
-#: would drop `key_points` in both skew directions — a 1.9.0 prompt on an old
-#: image, and a stale 1.8.0 prompt on this one.
+#: would drop `key_points` from a stale 1.8.0 or legacy prompt on this image.
+#: The other skew direction, a 1.9.0 prompt on an older image, cannot be fixed
+#: here: that image's own accepted set lacks `path_to_clinic`.
 KEY_POINT_ACCEPTED_KEYS: frozenset[str] = (
     _CURRENT_KEY_POINT_KEYS | _RETIRED_KEY_POINT_KEYS | _LEGACY_KEY_POINT_KEYS
 )
@@ -315,9 +317,10 @@ def normalize_dimension_rationales(value: object) -> dict[str, str] | None:
     A blank or None VALUE is an absent reason, not a type violation, and is
     skipped rather than rejecting the map: the prompt's skeleton pre-fills every
     key with `""`, so one dimension the hub could not explain must not cost the
-    other five their reasons (spec §5.3: warn, never drop — the write path's
-    "scored dimension(s) with no rationale" warning names the gap). A map left
-    entirely blank is None.
+    other five their reasons
+    (docs/specs/2026-09-28-assessment-chat-entry-and-key-points-design.md
+    §5.3: warn, never drop — the write path's "scored dimension(s) with no
+    rationale" warning names the gap). A map left entirely blank is None.
 
     Anything else is None: a non-dict, a non-str key or value, a blank or
     over-long key, or too many entries. A malformed narrative field never costs

@@ -58,8 +58,9 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     accidental ninth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
-    The grant veto joined 2026-09-11 (Task 5 of the PI-external-enrichment
-    plan): a manager may mark one NIH RePORTER grant as "not this PI". The
+    The grant veto joined 2026-09-11 (Task 5 of
+    docs/plans/2026-09-11-pi-external-enrichment-implementation-plan.md): a
+    manager may mark one NIH RePORTER grant as "not this PI". The
     industry-evidence veto joined the same day (Task 9): a manager may mark
     one industry-evidence row as "not this PI / not industry".
     """
@@ -114,7 +115,7 @@ async def test_staff_can_reach_every_manager_route(client, db_session):
     the assertion above, so this sweep needs a run that actually exists rather
     than a syntactically-valid-but-absent one. The same is true of the
     {assessment_id} slot that /manager/assessments/{id} added, and of the
-    {suggestion_id} slot that Task 12's /manager/prompt-suggestions/{id}
+    {suggestion_id} slot that /manager/prompt-suggestions/{id}
     added, so a real OpportunityAssessment and a real PromptChangeSuggestion
     back those two."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

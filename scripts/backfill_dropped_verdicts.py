@@ -102,7 +102,7 @@ from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 from src.services.rubric_revisions import resolve_revision
 
-# NOT configured here (fix round 1, FIX 7): `logging.basicConfig` used to run
+# NOT configured here: `logging.basicConfig` used to run
 # at import time, which fired on every test collection too. Configured only
 # under `if __name__ == "__main__"` below.
 logger = logging.getLogger("backfill_dropped_verdicts")
@@ -115,7 +115,7 @@ _SIDECAR_RE = re.compile(
 # `missing_sidecar` and `empty_reply` are NOT recoverable — nothing was emitted.
 _RECOVERABLE = ("premature_sidecar", "duplicate_thread_verdict", "unparseable_sidecar")
 
-# Fix round 1, FIX 2: how far back `_recover_from_llm_logs` may walk before
+# How far back `_recover_from_llm_logs` may walk before
 # giving up, in seconds. Measured directly on the nine real recoverable drops
 # across all three runs in the supervised re-run (88d81cd8, 076e80b6,
 # 8b64a0e0): every one of them has its own matching sidecar 0.2-0.3s before
@@ -155,9 +155,8 @@ def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
 def _subject_matches(candidate_subject: object, drop_subject: str | None) -> bool:
     """Can a sidecar's own ``subject_agent_id`` be trusted to name the drop's subject?
 
-    Fix round 1, FIX 1 — an amendment to the original brief, ruled in: strict
-    equality loses real, recoverable verdicts. The phase-4 prompt never shows
-    the hub its interview partner's real ``agent_id`` — only
+    Strict equality loses real, recoverable verdicts. The phase-4 prompt
+    never shows the hub its interview partner's real ``agent_id`` — only
     ``{other_agent_name}`` (``bot_name``, generated as ``{LastName}Bot``) — so
     a sidecar naming the bot is not a wrong guess, it is the ONLY name the
     model was ever given for that PI. Measured directly on all 63 production
@@ -212,14 +211,14 @@ def _existing_assessment_for(
     pair lacks a ``thread_id`` to key on, match on ``subject_agent_id``
     instead.
 
-    Fix round 1, FIX 6: the fallback checks EITHER side's ``thread_id``, not
+    The fallback checks EITHER side's ``thread_id``, not
     just the existing row's. Checking only the existing row's left a gap —
     a drop with ``thread_id IS NULL`` against an existing (thread-keyed) row
     for the same subject fired neither clause, and a duplicate would be
     written. Unreachable when this was written (``_persist_assessment`` did
     not yet write ``thread_id``, so nothing in this fallback's INPUT could
-    have a real thread_id... except a row THIS SCRIPT wrote, since fix round
-    1 wrote ``thread_id=drop.thread_id`` — so this becomes reachable the
+    have a real thread_id... except a row THIS SCRIPT wrote, since it writes
+    ``thread_id=drop.thread_id`` — so this becomes reachable the
     moment two recoverable drops for the same subject appear in one run and
     the first one's drop happened to carry a thread_id while a later one's
     did not). ``_persist_assessment`` now writes ``thread_id`` too, so it is
@@ -255,7 +254,7 @@ def _fallback_llm_log_query(run_id: uuid.UUID, drop: AssessmentDrop):
     Bounded above by ``drop.created_at`` (a candidate cannot postdate the
     drop it explains) and ordered most-recent-first so
     ``_recover_from_llm_logs`` walks backward in time. The LOWER time bound
-    (``--max-lookback-seconds``, fix round 1 FIX 2) is enforced in
+    (``--max-lookback-seconds``) is enforced in
     ``_recover_from_llm_logs`` instead of here — it is a property of the
     WALK, independently unit-testable there without a database, and cheap
     enough at this table's per-run row counts (single digits to low hundreds
@@ -288,16 +287,16 @@ def _recover_from_llm_logs(
     two real rows (log rows 249 ms and 232 ms before their drops) but nothing
     enforces it" (task brief).
 
-    TWO independent defences, and both are load-bearing (fix round 1,
-    addendum — measured directly on the nine real recoverable drops in the
-    supervised re-run's window ``(drop.created_at - 60s, drop.created_at]``):
+    TWO independent defences, and both are load-bearing (measured directly
+    on the nine real recoverable drops in the supervised re-run's window
+    ``(drop.created_at - 60s, drop.created_at]``):
 
     * A candidate more than ``max_lookback_seconds`` before the drop is
-      skipped outright (FIX 2). Without this, hart's `duplicate_thread_verdict`
+      skipped outright. Without this, hart's `duplicate_thread_verdict`
       drop — whose nearest candidate fails to parse — falls through to a
       272.6s-old SUPERSEDED sidecar and would write it unmarked.
     * A candidate whose own sidecar names a different subject is skipped
-      (via ``_subject_matches``, F1.4/FIX 1) even when it is inside the
+      (via ``_subject_matches``, F1.4) even when it is inside the
       window. Without this, ``pienta`` — which has TWO candidates inside the
       60s window — would take huganir's sidecar, the nearer of the two. The
       cap alone does not make this check redundant.
@@ -324,7 +323,7 @@ def _recover_from_llm_logs(
 def _derive_rubric_stamp(
     existing: Iterable[OpportunityAssessment],
 ) -> tuple[str | None, str | None]:
-    """Stamp from what the RUN ITSELF already wrote (fix round 1, FIX 5).
+    """Stamp from what the RUN ITSELF already wrote.
 
     The module docstring has always promised to stamp a backfilled row from
     the run, not from today's ``blackbird_rubric`` import or a hardcoded
@@ -438,7 +437,7 @@ def _build_assessment_row(
 
       * ``_bounded_str`` clips the bounded VARCHAR columns
         (``funnel_stage``, ``recommendation``, ``confidence``,
-        ``channel_name``, and — fix round 1, FIX 5 — ``rubric_version``/
+        ``channel_name``, and ``rubric_version``/
         ``rubric_content_hash``, both ``String(20)`` and, unlike the other
         four, OPERATOR-sourced via ``--rubric-version``/``--rubric-hash``
         rather than model-sourced) instead of letting an over-long value
@@ -500,7 +499,7 @@ def _build_assessment_row(
         derisking_milestones=milestones if isinstance(milestones, list) else None,
         rationale=_str_or_none(verdict.get("rationale")),
         raw_verdict=verdict,
-        # Fix round 1, FIX 5: guarded the same way as every other bounded
+        # Guarded the same way as every other bounded
         # VARCHAR on this row, even though these two are operator- rather
         # than model-sourced — an operator's --rubric-version typo is the
         # same StringDataRightTruncation risk as an over-long recommendation.
@@ -524,7 +523,7 @@ def _build_assessment_row(
 
 
 def _positive_seconds(value: str) -> float:
-    """``type=`` for ``--max-lookback-seconds`` (fix round 2, item 3).
+    """``type=`` for ``--max-lookback-seconds``.
 
     A non-positive lookback would silently exclude every candidate — every
     delta is >= 0, so ``delta > max_lookback_seconds`` is true for all of
@@ -548,7 +547,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="simulation_run_id to backfill")
     ap.add_argument("--dry-run", action="store_true")
-    # Fix round 1, FIX 5: no more hardcoded default — see _derive_rubric_stamp.
+    # No hardcoded default — see _derive_rubric_stamp.
     # Both or neither: a lone override would let one column drift stamped
     # while the other is derived, defeating the whole point of a single pair.
     ap.add_argument(
@@ -679,7 +678,7 @@ async def main() -> int:
                 f"{row.weighted_score:.2f}" if row.weighted_score is not None else "n/a",
                 row.band, source,
             )
-            # Fix round 1, FIX 7: append regardless of --dry-run, so a
+            # Append regardless of --dry-run, so a
             # preview over two recoverable drops for the SAME interview
             # predicts what a real run would do (write the first, skip the
             # second) instead of showing "WOULD WRITE" for both.

@@ -628,9 +628,10 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
         # transaction that deletes the retired row. If that landed between
         # the worker's job fetch and this lookup, the in-memory payload is
         # stale — re-read it once before concluding there is nothing to do
-        # (2026-09-02 plan, ruling R4). Best-effort: the jobs row itself can
-        # vanish at any await (user deletion cascades it), in which case the
-        # refresh raises and the original miss stands.
+        # (the D3 residual in docs/audits/2026-09-02-review-pipeline/README.md).
+        # Best-effort: the jobs row itself can vanish at any await (user
+        # deletion cascades it), in which case the refresh raises and the
+        # original miss stands.
         try:
             await db.refresh(job, attribute_names=["payload"])
         except Exception:  # noqa: BLE001 — a vanished row is the documented case

@@ -1,17 +1,27 @@
-"""Unit tests for scripts/backfill_dropped_verdicts.py (Task 4, workstream F).
+"""Unit tests for scripts/backfill_dropped_verdicts.py (Task F1 of
+docs/plans/2026-08-22-correctness-remediation.md).
 
-Pure-function tests only — no database. The script's defects (F1.1-F1.4, plus
-fix round 1's FIX 1-FIX 7; see
-.superpowers/sdd/2026-08-22-correctness-remediation/task-4-brief.md and the
-fix-round-1 coordinator messages) are all exercised through the module's
-testable helpers:
+Pure-function tests only — no database. The script's defects (F1.1-F1.4 of
+that plan, plus the later ones named below) are all exercised through the
+module's testable helpers:
 
-  * ``_build_assessment_row``       — F1.1, F1.2, F1.3, FIX 3, FIX 4, FIX 5
-  * ``_existing_assessment_for``    — F1.3, FIX 6
-  * ``_fallback_llm_log_query``     — F1.4, FIX 2(a)
-  * ``_recover_from_llm_logs``      — F1.4, FIX 1, FIX 2(b)/(c)
-  * ``_subject_matches``            — FIX 1
-  * ``_derive_rubric_stamp``        — FIX 5
+  * ``_build_assessment_row``       — F1.1, F1.2, F1.3; also the
+    operator-sourced rubric stamp clipped like any bounded VARCHAR, and a
+    non-string ``company_or_project``/``rationale`` dropped rather than
+    failing the whole batch at commit
+  * ``_existing_assessment_for``    — F1.3; the subject fallback fires when
+    EITHER side lacks a ``thread_id``, so a NULL-thread drop still finds an
+    existing threaded row
+  * ``_fallback_llm_log_query``     — F1.4: three columns, not whole rows,
+    most recent first (its ``drop.created_at`` upper bound is not asserted)
+  * ``_recover_from_llm_logs``      — F1.4: the walk skips a candidate older
+    than ``--max-lookback-seconds`` or naming a different subject
+  * ``_subject_matches``            — accepts the model's bot-name guess
+    (``leebot`` for ``lee``) but never a last-name collision (``epearce``
+    for ``pearce``)
+  * ``_derive_rubric_stamp``        — the stamp comes from the run's own
+    rows, never a hardcoded default, and a run that disagrees with itself
+    is refused
   * ``_stamp_to_check`` / ``_refuse_stamp_drift`` — the rubric-drift guard
 
 None of these touch a session or an engine, so a plain in-memory
@@ -55,8 +65,7 @@ T0 = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
 
 
 def test_importing_the_module_does_not_configure_logging():
-    """Fix round 2, item 2 (FIX 7's logging half): `logging.basicConfig`
-    used to run at module level, so merely IMPORTING this script configured
+    """`logging.basicConfig` used to run at module level, so merely IMPORTING this script configured
     the ROOT logger's handlers and level as a side effect. It now runs only
     under `if __name__ == "__main__":`.
 
@@ -218,7 +227,7 @@ def test_an_overlong_recommendation_is_clipped_not_fatal():
     row = _build_assessment_row(verdict, drop, RUBRIC_VERSION, RUBRIC_HASH)
 
     assert row.recommendation is not None
-    # FIX 4: exact bound, not `<= 30` — a wrong bound (e.g. _bounded_str(...,
+    # Exact bound, not `<= 30` — a wrong bound (e.g. _bounded_str(...,
     # 20)) would still satisfy `<= 30` and pass silently.
     assert len(row.recommendation) == 30
     # raw_verdict keeps the untruncated original regardless.
@@ -255,7 +264,7 @@ def test_a_non_string_rationale_does_not_lose_the_row():
 
 
 def test_company_or_project_guard_drops_a_non_string_value():
-    """FIX 3: `_str_or_none` on `company_or_project` had no direct test —
+    """`_str_or_none` on `company_or_project` had no direct test —
     removing it left all 11 original tests green."""
     drop = _drop()
     structured = {"structured": True, "hq": "La Jolla"}
@@ -276,7 +285,7 @@ def test_company_or_project_guard_drops_a_non_string_value():
     ],
 )
 def test_bounded_varchar_columns_are_clipped_not_fatal(field, max_len):
-    """FIX 3: `_bounded_str` on funnel_stage/confidence/channel_name had no
+    """`_bounded_str` on funnel_stage/confidence/channel_name had no
     direct test — removing any one of the three left all 11 original tests
     green."""
     drop = _drop()
@@ -290,7 +299,7 @@ def test_bounded_varchar_columns_are_clipped_not_fatal(field, max_len):
 
 
 def test_the_rubric_stamp_is_bounded_not_fatal():
-    """FIX 5: an operator-supplied --rubric-version/--rubric-hash is exactly
+    """An operator-supplied --rubric-version/--rubric-hash is exactly
     the same StringDataRightTruncation risk as an over-long LLM field."""
     drop = _drop()
     verdict = _verdict()
@@ -348,7 +357,7 @@ def test_existing_assessment_lookup_is_scoped_to_the_run():
 
 
 def test_a_null_thread_drop_still_finds_an_existing_threaded_row():
-    """FIX 6: the asymmetric case the reviewer flagged — a drop with no
+    """The asymmetric case the reviewer flagged — a drop with no
     thread_id of its own must still be recognised as a duplicate of an
     existing row that DOES have one, for the same subject. Reachable via
     `_persist_assessment` now that it writes thread_id (it did not when this
@@ -365,7 +374,7 @@ def test_a_null_thread_drop_still_finds_an_existing_threaded_row():
 
 
 # ---------------------------------------------------------------------------
-# FIX 1 — subject matching must tolerate the model's bot-name guess
+# Subject matching must tolerate the model's bot-name guess
 # ---------------------------------------------------------------------------
 
 
@@ -390,10 +399,10 @@ def test_a_null_thread_drop_still_finds_an_existing_threaded_row():
         # than left as a bare "different subject" example.
         ("epearce", "pearce", False),
         ("pearce", "epearce", False),
-        # Fix round 2, item 1: a same-lastname PI with extra trailing
+        # A same-lastname PI with extra trailing
         # characters must be refused exactly like `epearce`/`pearce` is —
         # `_subject_matches` mutated to `candidate_folded.startswith(drop_folded)`
-        # left all 39 tests (as of fix round 1) green, because none of them
+        # left all 39 tests then in this file green, because none of them
         # exercised a candidate that starts with, but is not equal to or the
         # bot-name of, the drop's subject. Re-verified directly: mutating to
         # `.startswith(...)` now turns this one case red.
@@ -438,7 +447,7 @@ def test_the_fallback_refuses_a_last_name_collision():
 
 
 # ---------------------------------------------------------------------------
-# F1.4 / FIX 2 — narrow the llm_call_logs fallback, bound and pin the walk
+# F1.4 — narrow the llm_call_logs fallback, bound and pin the walk
 # ---------------------------------------------------------------------------
 
 
@@ -476,7 +485,7 @@ def test_the_fallback_recovers_the_matching_subjects_verdict():
 
 
 def test_the_walk_prefers_a_farther_correct_subject_over_a_nearer_wrong_one():
-    """Mirrors production's `pienta` shape (fix round 1 addendum): two
+    """Mirrors production's `pienta` shape: two
     candidates inside the 60s lookback window, the NEARER one belonging to a
     different PI (`huganir`) whose interview happened to interleave closer in
     time. The 60s cap alone would still hand pienta huganir's verdict; only
@@ -501,7 +510,7 @@ def test_the_walk_prefers_a_farther_correct_subject_over_a_nearer_wrong_one():
 
 
 def test_the_fallback_walk_is_bounded_by_max_lookback_seconds():
-    """FIX 2: mirrors production's `hart` shape — the nearest candidate is
+    """Mirrors production's `hart` shape — the nearest candidate is
     the one that failed to parse (why the drop exists at all), and the only
     same-subject candidate left is a 272.6s-old SUPERSEDED sidecar. Without
     a cap the walk falls through to it and would recover a stale verdict as
@@ -551,7 +560,7 @@ def test_the_fallback_does_not_select_whole_rows():
 
 
 def test_the_fallback_query_orders_most_recent_first():
-    """FIX 2(a): pins `.desc()` — flipping to `.asc()` makes the walk return
+    """Pins `.desc()` — flipping to `.asc()` makes the walk return
     the OLDEST same-subject sidecar in the run instead of the nearest one,
     and every other test in this file hand-orders its `rows` fixture, so
     nothing else would catch that flip.
@@ -564,7 +573,7 @@ def test_the_fallback_query_orders_most_recent_first():
 
 
 # ---------------------------------------------------------------------------
-# FIX 5 — derive the rubric stamp from the run itself
+# Derive the rubric stamp from the run itself
 # ---------------------------------------------------------------------------
 
 
@@ -621,7 +630,7 @@ def test_rubric_stamp_derivation_ignores_no_run_rows():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 2, item 3 — reject a non-positive --max-lookback-seconds
+# Reject a non-positive --max-lookback-seconds
 # ---------------------------------------------------------------------------
 
 

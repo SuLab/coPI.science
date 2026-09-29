@@ -9,7 +9,8 @@ prompts-only phrase guard (tests/unit/test_doc_prompt_sync.py) can't see them:
 - src/routers/onboarding.py: the default template rendered for brand-new
   users with no profile anywhere yet.
 
-The 2026-08-12 removal cycle (Task 5 of the engine-reconciliation plan) then
+The 2026-08-12 removal cycle (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md
+§15) then
 deleted the private-profile feature itself outright: synthesize_private_profile
 and its FileNotFoundError fallback, the onboarding private-profile step (GET/POST
 /onboarding/private-profile), src/services/profile_export.py::export_private_profile,

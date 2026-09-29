@@ -75,7 +75,7 @@ _FORBIDDEN = [
     "collaboration preferences",
     "wet-lab partners",
     # 2026-08-12 removal cycle (private instructions + reply-only hub + PI
-    # interaction + phase-2 prompts) — guards Task 1-3's deletions against
+    # interaction + phase-2 prompts) — guards that cycle's deletions against
     # silently reappearing. Decision 10 keeps PI-*intent* attribution
     # language ("that's a question for my PI", "cannot commit your PI"),
     # which none of these phrases collide with.

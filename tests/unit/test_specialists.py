@@ -532,9 +532,8 @@ def test_compounding_reasons_does_not_summon_the_chemistry_specialist():
 
     On the real `coller` production verdict, "several compounding reasons"
     was the ONLY chemistry cue present, so it alone decided the requirement.
-    Fix round 1: moved "compound" from the prefix tier into
-    `_WORD_ONLY_CUES` because the false-positive class this task exists to
-    close survived there via a prefix cue.
+    "compound" lives in `_WORD_ONLY_CUES`, not the prefix tier: as a prefix
+    cue it matched "compounding", the false positive this test pins.
     """
     assert "chemistry" not in required_domains_for(
         _verdict(

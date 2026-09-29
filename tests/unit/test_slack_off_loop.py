@@ -52,9 +52,9 @@ def test_message_log_append_is_documented_loop_only():
 
 
 # ---------------------------------------------------------------------------
-# Cache-lock races. Task 1 moved post_message/poll_channel_messages/etc into
-# asyncio.to_thread, which is what makes the test below possible at all:
-# before that, "concurrent" asyncio callers of a synchronous method never
+# Cache-lock races. The engine runs post_message/poll_channel_messages/etc
+# through asyncio.to_thread, which is what makes the test below possible at
+# all: before that, "concurrent" asyncio callers of a synchronous method never
 # actually overlapped in execution, so AgentSlackClient._channel_name_to_id
 # was a check-then-act dict that happened to be safe by accident. The reply
 # lane's bounded concurrency (up to reply_lane_max_in_flight at once,
@@ -129,6 +129,5 @@ async def test_concurrent_channel_lookups_on_a_cache_miss_fetch_only_once():
 # GIL already makes a single dict.update()/__setitem__ call with plain string
 # keys atomic in practice, since the C loop backing it never hits a bytecode-
 # level GIL-release checkpoint. A test asserting "no torn state" on the dict
-# itself would pass identically whether or not _cache_lock exists, which is
-# exactly the "test that would pass either way" this file was told not to
-# write. The dedupe test above is the invariant _cache_lock actually changes.
+# itself would pass identically whether or not _cache_lock exists, so it
+# would prove nothing. The dedupe test above is the invariant _cache_lock actually changes.

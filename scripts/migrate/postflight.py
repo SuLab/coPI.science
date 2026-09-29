@@ -14,8 +14,9 @@ What follows --target and what does not:
     ``tables_dropped_between``), so a table any revision in that span creates must exist
     afterwards. The snapshot must name the same database (host, port, name) as this run
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
-  * The pinned table/column/index/constraint expectations (EXPECTED_*) describe the
-    0019-0023 chain only (VERIFIED_REVISIONS), whatever the target.
+  * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
+    EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
+    chain only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 

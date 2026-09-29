@@ -507,7 +507,8 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         # Title. itertext(), not .text: .text ends at the FIRST inline child
         # element, so an <i>/<sup>/<b> inside the title truncated the stored
         # field (112 production titles were repaired for this on 2026-08-13;
-        # coverage plan Task 1 is this fix).
+        # Task 1 of docs/plans/2026-08-13-pi-profile-coverage-plan.md is this
+        # fix).
         title_el = article.find(".//ArticleTitle")
         record["title"] = (
             "".join(title_el.itertext()) if title_el is not None else ""

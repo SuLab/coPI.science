@@ -9,13 +9,13 @@ invisible everywhere in the app.
 Two bounds, both deliberate, both narrower than the assessment detail page's:
 
 * **``specialist_consults`` ONLY.** No read-time parse of
-  ``llm_call_logs.messages_json`` here. The table is forward-only (Ruling R5:
-  no backfill), so an interview that predates it shows no panel on this page at
+  ``llm_call_logs.messages_json`` here. The table is forward-only (never
+  backfilled), so an interview that predates it shows no panel on this page at
   all — the retroactive reconstruction lives on the assessment detail page
   (``src/services/assessment_detail.py``), which is admin-only precisely because
   everything derived from ``llm_call_logs`` is LLM drill-down.
 * **No tool chips.** ``search_prior_art``/``retrieve_abstract`` calls and their
-  results are drill-down too, and this page is read by managers (Ruling R4).
+  results are drill-down too, and this page is read by managers.
   Tool activity stays on the assessment detail page's timeline.
 
 ``raw_opinion`` is dropped for a non-admin render HERE, not merely left
@@ -124,7 +124,7 @@ async def panel_cards_by_thread(
     (2026-08-28) means "meets the bar for THIS STAGE", not "no concerns", and
     the count is what stops a reader taking it for the latter.
 
-    ``raw_opinion`` is present only when ``admin_view`` (Ruling R4) — it is not
+    ``raw_opinion`` is present only when ``admin_view`` — it is not
     even SELECTed otherwise.
     """
     if run_id is None:

@@ -1,5 +1,5 @@
 """Manager UI: industry-interest score panel, evidence drawer + veto, PI-list
-column (Task 9)."""
+column."""
 import pytest
 from sqlalchemy import select
 
@@ -63,8 +63,8 @@ async def test_veto_evidence_rescored_and_hidden(client, db_session):
 
 
 async def test_veto_is_idempotent_on_replay(client, db_session):
-    """Fix round 1, ruling 4: a replayed POST on an already-vetoed row must
-    not rescore a second time."""
+    """A replayed POST on an already-vetoed row must not rescore a second
+    time."""
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     e = PiIndustryEvidence(
@@ -111,7 +111,7 @@ async def test_veto_evidence_belonging_to_another_pi_is_404(client, db_session):
 
 
 async def test_veto_attribution_under_impersonation(client, db_session, caplog):
-    """Fix round 1, ruling 1: vetoed_by_user_id names the worn (impersonated)
+    """vetoed_by_user_id names the worn (impersonated)
     account, per branch convention, but the real session holder is logged."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

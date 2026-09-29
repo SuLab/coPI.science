@@ -1,15 +1,16 @@
 """The reply lane services every pending pair without pacing, and the post lane
 no longer has a reactive tier.
 
-Task 11 splits the single turn-based pool into two lanes: a paced post lane
+Task 11 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md splits
+the single turn-based pool into two lanes: a paced post lane
 (``_run_post_turn`` — Phase 1 + Phase 5) and an unpaced reply lane (this file).
 Nothing else calls ``_phase3_activate_threads`` once ``_run_post_turn`` stops
 doing it, so ``_dispatch_reply_lane`` runs it for every agent before computing
 the pending-pairs queue — otherwise a brand-new @-mention or reply would never
 open a thread at all.
 
-Fix round 1 (task review) added the C2/I3/I4/I5 sections below. `_dispatch_
-reply_lane` now checks ``self._running`` between pairs (I5), which is False
+`_dispatch_reply_lane` checks ``self._running`` between pairs (the I5
+section below), which is False
 by default on a freshly constructed engine (it only becomes True inside
 ``start()``) — so every test that drives the real dispatch sets it explicitly.
 """
@@ -113,10 +114,9 @@ async def test_dispatch_activates_newly_tagged_threads(monkeypatch):
 async def test_dispatch_isolates_one_agents_phase3_failure_from_the_others(
     monkeypatch,
 ):
-    """NEW Important, fix round 2: `_phase3_activate_threads` runs once per
+    """`_phase3_activate_threads` runs once per
     agent, so one agent's activation bug must not stop every OTHER agent's
-    from running too — the same shape of silent, tick-forever failure the
-    two Criticals in this same review round fixed elsewhere."""
+    from running too — a silent, tick-forever failure."""
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
     eng = SimulationEngine(
@@ -155,7 +155,7 @@ async def test_dispatch_isolates_one_agents_phase3_failure_from_the_others(
 async def test_dispatch_does_not_advance_the_cursor_for_an_agent_whose_phase3_failed(
     monkeypatch,
 ):
-    """Final review fix: the try/except above isolates a Phase 3 failure so
+    """The try/except above isolates a Phase 3 failure so
     OTHER agents keep working (see the test above), but isolation alone is
     not enough — the cursor-advance loop used to run unconditionally for
     EVERY agent, so a caught-and-logged exception for the hub still marked
@@ -205,7 +205,8 @@ async def test_dispatch_does_not_advance_the_cursor_for_an_agent_whose_phase3_fa
 async def test_dispatch_advances_the_cursor_so_phase3_does_not_rescan_forever(
     monkeypatch,
 ):
-    """Mirrors Task 6's snapshot-then-assign cursor invariant, applied to the
+    """Mirrors the snapshot-then-assign cursor invariant (Task 6 of
+    docs/plans/2026-08-14-two-lane-concurrent-scheduler.md), applied to the
     reply lane: Phase 3 depends on last_seen_cursor to bound its "since cursor"
     scans (get_tags_for_agent / get_replies_to_agent_posts /
     get_new_top_level_posts are all O(len(log)) linear scans — see
@@ -270,20 +271,21 @@ async def test_dispatch_does_not_hide_a_reply_that_arrives_during_its_own_pass(
 
 
 # ---------------------------------------------------------------------------
-# Carry forward from Task 10: Phase 4 activity must never stamp
+# Carried forward from Task 10 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md:
+# Phase 4 activity must never stamp
 # last_phase5_action_time — that stamp lived inside _run_turn's Phase-4
 # block, which no longer exists now that Phase 4 moved into _service_reply
 # entirely.
 #
-# Fix round 1 (task review, Important I3) moved the skip-backoff reset out of
+# An earlier version moved the skip-backoff reset out of
 # _service_reply (per pair) and into _dispatch_reply_lane (once per engaged
 # agent per tick), on the theory that batching would fix the cross-lane
-# coupling. Fix round 2 (task review, Ruling R10) found that idempotent — a
+# coupling. That reset is idempotent — a
 # reset that fires 5 times a tick and one that fires once produce identical
 # final state, so an agent holding an open pending thread was STILL zeroed
 # every single tick either way, permanently disabling `_select_agent`'s
-# `skips >= 3` de-weighting. Ruling R10 deletes the reply lane's ownership of
-# this counter entirely: it is now wholly post-lane-owned (`_phase5_new_post`
+# `skips >= 3` de-weighting. So the reply lane no longer touches
+# this counter at all: it is now wholly post-lane-owned (`_phase5_new_post`
 # increments it on a skip/rejection, resets it on a genuinely successful
 # post — see tests/unit/test_phase5_actions.py). See the two tests right
 # below.
@@ -310,7 +312,7 @@ async def test_service_reply_does_not_stamp_the_spontaneous_timer(monkeypatch):
 
 
 def test_reply_lane_never_touches_the_skip_streak():
-    """Structural pin for Ruling R10: neither `_service_reply` nor
+    """Structural pin: neither `_service_reply` nor
     `_dispatch_reply_lane` may reference `consecutive_phase5_skips` at all —
     it is wholly post-lane-owned now."""
     import inspect
@@ -327,7 +329,7 @@ def test_reply_lane_never_touches_the_skip_streak():
 async def test_dispatch_does_not_reset_the_skip_streak_for_an_engaged_agent(
     monkeypatch,
 ):
-    """The regression test for Ruling R10: an agent that engages in reply-lane
+    """Regression test: an agent that engages in reply-lane
     activity (has a pending pair serviced this tick) must NOT have its
     skip-backoff streak touched — a reply-lane write of a post-lane pacing
     variable is the cross-lane coupling this feature exists to remove, and
@@ -359,7 +361,7 @@ async def test_one_failing_pair_does_not_abort_the_sweep(monkeypatch):
     ``n`` here is the ATTEMPTED count — `_dispatch_reply_lane`'s return value
     (kept as a log/metric, see its docstring). It does NOT mean "3 units of
     real work happened" and does not drive the main loop's idle backoff any
-    more (fix round 2, NEW Critical): that decision is spend-based
+    more: that decision is spend-based
     (`api_call_count` before/after) and tested separately in
     test_hub_budget_scheduler.py's ``TestReplyLaneIsNotPacedByTheIdleBackoff``,
     including the regression case where every pair is attempted but none of
@@ -447,7 +449,7 @@ async def test_service_reply_skips_a_thread_evicted_from_active_threads(monkeypa
 
 @pytest.mark.asyncio
 async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch):
-    """Fix round 3 (task review, Critical): the mock MUST contain a real
+    """The mock MUST contain a real
     `await` — production `_service_reply` awaits a 10-60s Opus call, and a
     mock with no `await` at all cannot exercise (or fail against) the bug
     this test guards: `asyncio.gather` schedules every pair's task up front,
@@ -457,7 +459,8 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
     ever visible to a later one. `await asyncio.sleep(0)` is the minimal real
     yield point that reproduces the production task-scheduling gap.
 
-    Final review fix: Task 14 raised ``reply_lane_max_in_flight``'s default
+    Task 14 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md raised
+    ``reply_lane_max_in_flight``'s default
     from 1 to 4 (see ``src/config.py``), which silently disarmed the SECOND
     check this test guards (``simulation.py:1911-1912``, inside the acquired
     semaphore). At the default cap=4, all 5 pending pairs take a semaphore
@@ -498,7 +501,7 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
 async def test_a_pair_found_only_via_new_reply_keeps_its_retry_signal_if_skipped(
     monkeypatch,
 ):
-    """Final review fix: the C2 property, isolated from `_engine_with_pending`'s
+    """The C2 property, isolated from `_engine_with_pending`'s
     fixture, which seeds every thread with ``has_pending_reply=True`` already
     — under that fixture, deleting the promotion loop at
     `simulation.py:1860-1861` (``for _agent, thread in pairs: thread.
@@ -589,12 +592,12 @@ def _hub_with_one_pending_thread():
 
 
 # ---------------------------------------------------------------------------
-# Task 13 — concurrent reply lane behind reply_lane_max_in_flight.
+# Concurrent reply lane behind reply_lane_max_in_flight.
 #
 # The default is 4 (see src/config.py; it was 1, concurrency OFF, when this
 # section was written). At a cap below 2 the overlap test below skips and must
 # be re-run with REPLY_LANE_MAX_IN_FLIGHT=4 (or any cap >= 2) to be exercised
-# at all — see the task-13-report.md TDD evidence section for that run's output.
+# at all.
 # ---------------------------------------------------------------------------
 
 
@@ -642,8 +645,8 @@ async def test_a_pair_already_in_flight_is_not_spawned_twice(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
-    """Ruling R7 / spec §6.3, ported from the deleted
-    tests/unit/test_phase4_concurrency.py (Task 11 deleted its only subject,
+    """Spec §6.3, ported from the deleted
+    tests/unit/test_phase4_concurrency.py (the lane split deleted its only subject,
     ``_phase4_reply_threads``, along with the whole file). The property:
     N concurrent turns must share ONE budget, not each get their own cap — a
     semaphore constructed per-call (as ``_llm_fanout_sem`` effectively was,
@@ -653,7 +656,7 @@ async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
     exactly this reason.
 
     Two full ``_dispatch_reply_lane()`` sweeps overlapping is exactly the
-    scenario ``_dispatch_reply_lane``'s own docstring (fix round 1, I5) calls
+    scenario ``_dispatch_reply_lane``'s own docstring calls
     out as possible: a sweep slow enough that the next tick's call starts
     before it finishes. Engineered contention (real overlap, not scheduling
     luck — same technique as
@@ -675,8 +678,8 @@ async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
     # let sweep two's disjoint pair run under its own fresh allowance WHILE
     # sweep one's pair is still asleep holding the (buggy, non-shared) first
     # one, pushing peak to 2 against a cap of 1; the real (shared) `_reply_
-    # sem` keeps peak at 1. Verified empirically before this test was written
-    # (see task-13-report.md's TDD evidence) — this is exactly the property
+    # sem` keeps peak at 1. Verified empirically before this test was
+    # written — this is exactly the property
     # that must run in the default-config gate, not skip in it.
     cap = get_settings().reply_lane_max_in_flight
 
@@ -720,7 +723,7 @@ async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Ruling R11 — lock order. `_close_thread` and `_evict_dead_thread` both take
+# Lock order. `_close_thread` and `_evict_dead_thread` both take
 # an AGENT lock (or several, sorted) while the reply lane's THREAD lock is
 # already held around the whole `_service_reply` call (see `_dispatch_reply_
 # lane`'s `_run`). `_phase5_new_post` takes only an agent lock and never a

@@ -170,9 +170,9 @@ fi
 COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
 copy_is_safe || exit 1
 
-# INT and TERM are trapped too, so an interrupted run still removes the copy (which holds
-# `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal; the
-# `cleaned` flag makes a second call a no-op either way.
+# INT, TERM and HUP are trapped too, so an interrupted run still removes the copy (which
+# holds `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal;
+# the `cleaned` flag makes a second call a no-op either way.
 cleaned=0
 cleanup() {
   [ "$cleaned" -eq 1 ] && return 0
@@ -193,7 +193,7 @@ echo "building a throwaway copy of the tree at ${COPY} (the repo is never writte
 copy_is_safe || exit 1
 # backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
 # Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT,
-# INT or TERM.
+# INT, TERM or HUP.
 if ! tar -C "$ROOT" \
       --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
       --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \

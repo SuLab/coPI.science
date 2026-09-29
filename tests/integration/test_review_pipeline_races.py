@@ -275,7 +275,8 @@ async def test_unchanged_rows_are_still_stamped_and_no_warning_fires(
 async def test_repointed_job_consumes_the_repointed_reviews_under_the_new_id(
     db_session, monkeypatch
 ):
-    """What the engine's re-point (Task 2 of the 2026-09-02 plan) hands the
+    """What the engine's re-point (Task 2 of
+    docs/plans/2026-09-02-review-pipeline-test-and-hardening-plan.md) hands the
     handler: reviews AND the job now name the replacement; the retired row is
     gone. The handler must analyze under the replacement id.
 

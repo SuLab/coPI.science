@@ -32,7 +32,7 @@ def test_a_clean_message_reports_zero_even_after_another_strip():
     answer for one agent's clean message must not be inferred from a
     before/after delta on it.
 
-    Fix round 1: the original version of this test used "@NobodyBot", an
+    The original version of this test used "@NobodyBot", an
     unregistered name that never resolves via _bot_name_to_id and so never
     actually strips anything or bumps ``_cohort_tags_stripped`` — the
     "even after another strip" premise was never established, only assumed.

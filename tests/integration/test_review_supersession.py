@@ -1,4 +1,4 @@
-"""Task 8: before the supersession DELETE removes a superseded assessment row,
+"""Before the supersession DELETE removes a superseded assessment row,
 its human-review rows must be re-pointed to the row that replaces it.
 
 ``_retire_superseded_verdict`` already deletes a provisional

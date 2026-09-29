@@ -5,7 +5,8 @@ Revises: 0025
 Create Date: 2026-08-12 00:00:00.000000
 
 GrantBot and the whole funding/FOA leaf surface are being removed (branch-2
-engine reconciliation, Task 3). ``grantbot_posted_foas`` was its own dedicated
+engine reconciliation, docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md
+§7). ``grantbot_posted_foas`` was its own dedicated
 FOA-dedup coordination table (see 0012), not a column on a shared table, so
 dropping it is a clean, isolated migration. No production data in this table
 has any value once GrantBot itself is gone — it recorded only "which FOAs

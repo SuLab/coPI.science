@@ -1,5 +1,5 @@
-"""Unit tests for scripts/backfill_assessment_headlines.py (Task 7, fix
-round 1).
+"""Unit tests for scripts/backfill_assessment_headlines.py (Task 7 of
+docs/plans/2026-08-29-assessment-headline-delivery-plan.md).
 
 Pure-function tests only — no database. ``select_rows_needing_headline`` is
 exercised against ``types.SimpleNamespace`` stand-ins for
@@ -10,7 +10,7 @@ for the house pattern this one follows (including proof that
 ``from scripts.x import y`` works under this repo's pytest config with no
 ``scripts/__init__.py``). ``apply_headline_repairs``/``exit_code_for`` are
 also dependency-free aside from a caller-supplied Slack client, so the
-safety-critical post/stamp behaviours (fix round 1's Fix 3) are exercised
+safety-critical post/stamp behaviours are exercised
 here too, against ``tests/fakes.py::FakeSlackClient`` — no live database, no
 real Slack workspace.
 """
@@ -97,7 +97,7 @@ def test_a_row_missing_the_rubric_content_hash_attribute_is_not_drift():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1, Fix 2 — --stamp-only must never be gated on rubric drift
+# --stamp-only must never be gated on rubric drift
 # ---------------------------------------------------------------------------
 
 
@@ -150,7 +150,7 @@ def test_stamp_only_still_skips_an_already_announced_row():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1, Fix 3 — the safety-critical post/stamp behaviours
+# The safety-critical post/stamp behaviours
 # ---------------------------------------------------------------------------
 
 

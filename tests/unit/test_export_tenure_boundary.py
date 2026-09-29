@@ -1,8 +1,8 @@
 """Tripwire + behavioural tests for the tenure-scoping boundary at
 ``export_profile_to_markdown``.
 
-Task B10 of ``docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md``
-(§3B D16, §5 Task 10): two of eight call sites tenure-filtered their
+Task 10 of ``docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md``
+(§3B D16, §5): two of eight call sites tenure-filtered their
 publications before calling ``export_profile_to_markdown``, six did not. The
 fix moved the filter inside the function boundary — ``publications`` must now
 be a ``TenureScopedPublications`` (``src/services/tenure_scope.py``), and the

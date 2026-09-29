@@ -1,7 +1,5 @@
 """Restart, reconcile, Slack-off<->Slack-on transitions, and the error paths.
 
-T6, T10 and T11 of .notes/slack-integration-test-plan.md.
-
 The hybrid state is the one production is actually in: a run that started with Slack off
 has DB-origin roots Slack has never seen, and then Slack comes on. Nothing tested that
 combination, and it is where `_slack_parent_ts` earns its keep.

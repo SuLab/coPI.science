@@ -7,7 +7,7 @@ widening rests on the operator's assertion that PIs cannot join the Slack
 workspace, which no code enforces, so it is a deliberately accepted risk, not
 a free extension of the existing five-field policy.
 
-Also covers the `score`/`band` override added in fix round 1 (2026-08-29): a
+Also covers the `score`/`band` override added 2026-08-29: a
 repaired headline must say exactly what the stored row already said —
 `opportunity_assessments.weighted_score`/`.band`, computed once at write time
 — rather than recomputing from `scores` against whatever rubric happens to be
@@ -93,7 +93,7 @@ def test_an_overlong_project_is_clipped_to_a_headline():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1 — the score/band override
+# The score/band override
 # ---------------------------------------------------------------------------
 
 # All six live rubric dimensions maxed out: whatever this computes to is a

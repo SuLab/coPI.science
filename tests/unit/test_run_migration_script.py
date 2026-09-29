@@ -240,8 +240,8 @@ def test_target_the_image_does_not_carry_blocks(run_script):
 
 
 def test_unchanged_stamp_is_not_called_a_silent_rollback(run_script):
-    # RCA E11: `alembic upgrade X` to a revision behind the stamp exits 0 and changes
-    # nothing.
+    # Repro E11 (docs/audits/2026-09-24-comment-cleanup-rca/repro.sh): `alembic upgrade
+    # X` to a revision behind the stamp exits 0 and changes nothing.
     run = run_script("--apply", stamps=("0050", "0050"))
     assert run.rc == 1, run.output
     assert "applied nothing" in run.stderr

@@ -50,7 +50,8 @@ async def _analysis_jobs(db) -> list[Job]:
 
 def test_the_reviews_router_posts_are_an_explicit_allowlist():
     """Same discipline as the manager router: a new write fails loudly.
-    This set was EXTENDED by Task 5 (+3) and Task 12 (+1), and by F2
+    This set was EXTENDED by Tasks 5 (+3) and 12 (+1) of
+    docs/plans/2026-08-28-human-review-feedback-implementation-plan.md, and by F2
     (2026-09-14, +1) with ``/suggestions/generate`` -- the MANUAL replacement
     for the auto-enqueue ``submit_feedback``/``edit_feedback`` used to do as a
     side effect. Final size 8. It is listed here rather than left implicit

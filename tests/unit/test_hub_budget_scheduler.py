@@ -1,7 +1,8 @@
 """Load-proportional budget and scheduling for star topologies.
 
 Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
-§8. Organised by design section so a failure names the rule it broke:
+§8; "Task N" below is a task of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md.
+Organised by design section so a failure names the rule it broke:
 
 - TestAgentLoad            §4.1  the shared load signal
 - TestRateLimiter          §4.4  optional per-role allowance
@@ -71,7 +72,7 @@ _TICK_IO = (
     "_sync_roster_from_db",
     "_flush_persisted",
     "_flush_llm_logs",
-    # The reply lane dispatch (Task 11) also runs every tick, before
+    # The reply lane dispatch also runs every tick, before
     # selection. It is I/O-shaped (Phase 3 + Phase 4 over every agent) and
     # does not affect post-lane selection, so it is stubbed out here too.
     "_dispatch_reply_lane",
@@ -164,7 +165,7 @@ class TestAgentLoad:
 
 class TestCallLedger:
     def test_record_api_call_books_both_by_default(self):
-        """Fix round 1 (Ruling R5): record_api_call's DEFAULT
+        """record_api_call's DEFAULT
         (already_reserved=False) still appends to call_times — this is what
         the seven call sites that are never separately reserved (consults,
         retries, the memory update, tool rounds) rely on to be booked into the window at
@@ -428,8 +429,7 @@ class TestScheduler:
 
 
 class TestReplyLaneIsNotPacedByTheIdleBackoff:
-    """I2 (task review fix round 1), corrected by fix round 2 (task review,
-    NEW Critical). Before fix round 1, ``did_work`` came only from
+    """Originally ``did_work`` came only from
     ``_run_post_turn``, which is False whenever Phase 5 doesn't fire — the
     common case once a lab hits ``lab_daily_post_cap``, and ALWAYS for the
     hub (no ``post_types`` at all) — so ``consecutive_idle`` climbed to the
@@ -437,14 +437,14 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
     directly contradicting design §2.1: "Nothing in the reply lane delays a
     reply that is ready."
 
-    Fix round 1 folded ``_dispatch_reply_lane``'s "how many ran" return
+    A first fix folded ``_dispatch_reply_lane``'s "how many ran" return
     directly into the backoff decision — but that count is pairs ATTEMPTED,
     not pairs that actually spent an LLM call. The reservation limiter defers
     a pair with zero calls and leaves ``has_pending_reply`` True, so the same
-    pair recurs every tick — composed with the fix-round-1 logic, that spun
+    pair recurs every tick — composed with that first fix, that spun
     the main loop at native tick speed forever (measured ~2,800
     iterations/s), never sleeping and never yielding to the periodic
-    flushes. Fix round 2 replaces the attempt count with a SPEND comparison
+    flushes. The current code replaces the attempt count with a SPEND comparison
     (total ``api_call_count`` across the roster, before vs. after the
     dispatch call — mirroring what ``_run_post_turn`` already does with
     ``api_calls_before``), so the tests below simulate spend explicitly by
@@ -521,8 +521,8 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
     async def test_idle_sleep_still_applies_when_the_reply_lane_only_attempted_but_spent_nothing(
         self, monkeypatch
     ):
-        """THE regression test for the NEW Critical: a rate-limited pending
-        pair is "serviced" in the sense that ``_dispatch_reply_lane`` attempts
+        """THE regression test for the attempted-but-unspent case: a
+        rate-limited pending pair is "serviced" in the sense that ``_dispatch_reply_lane`` attempts
         it and counts it in its return value (mirroring
         ``_reply_to_thread``'s real behaviour — it logs "rate-limited;
         deferring this reply" and returns immediately, leaving
@@ -558,12 +558,12 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
 
 
 class TestDispatchFailuresAreNoLongerSwallowedWholesale:
-    """NEW Important (task review fix round 2). The blanket try/except that
+    """The blanket try/except that
     used to wrap the entire `_dispatch_reply_lane()` call in `_run_main_loop`
     is gone. `_dispatch_reply_lane` itself now isolates one pair's servicing
-    failure (fix round 1, C2) and one agent's Phase-3-activation failure (fix
-    round 2) from their siblings — so what is left unguarded at the call
-    site is a genuine failure in pair *selection*, which is a real bug that
+    failure and one agent's Phase-3-activation failure from their siblings —
+    so what is left unguarded at the call site is a genuine failure in pair
+    *selection*, which is a real bug that
     must surface (crash the run) rather than repeat one swallowed ERROR per
     tick forever while no interview progresses and the post lane keeps
     posting as if nothing were wrong.
@@ -769,7 +769,7 @@ class TestStallIsTransient:
 
 
 class TestPhase5CallAccounting:
-    """F2, retargeted after `pi_handler.py`'s removal (removal cycle, Task 5).
+    """F2, retargeted after `pi_handler.py`'s removal.
 
     `pi_handler` used to be the call site that demonstrated this invariant
     end-to-end: an LLM call logged under a REAL agent_id must book against
@@ -840,7 +840,7 @@ class TestPhase5CallAccounting:
 
 
 class TestUnreservedCallSitesStillBookTheLedger:
-    """Fix round 1 (Ruling R5). Round 1's fix for the double-book bug (making
+    """An earlier fix for the double-book bug (making
     record_api_call never append to call_times) silently regressed six OTHER
     call sites off the sliding window entirely: specialist consults, both
     truncation-retry hooks, the memory update, and its own retry hook. None

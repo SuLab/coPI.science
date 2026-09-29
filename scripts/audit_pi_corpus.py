@@ -1,5 +1,5 @@
-"""Read-only per-PI corpus classification (plan Task 8/Task 2,
-docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §3, §5).
+"""Read-only per-PI corpus classification
+(docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §3; §5, Tasks 2 and 8).
 
 Re-runnable measurement instrument, alongside ``scripts/audit_pub_dois.py``.
 For every PI in scope: refetch each stored PMID and classify it against the

@@ -82,57 +82,27 @@ DEFAULT_TARGET = "0052"
 #: deployment that tracks main is therefore stamped 0021, and the first version of this
 #: list — ("0018", "0019") — hard-BLOCKED exactly that state. The framing that produced
 #: it ("migrate from 0018 or 0019") described where production was at the time, not where
-#: main is.
+#: main is. 0022 is deliberately absent: no deployment reaches it (main stops at 0021,
+#: this branch's first head was 0023), and the allowlist holds what was exercised.
 #:
-#: 0023, 0024, 0025, 0026, 0027, 0028, 0029 and 0033 were each added here for the same
-#: reason: production's stamp at the time its target moved past them (0023 -> 0024, then
-#: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
-#: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032, then
-#: 0032 -> 0033, then 0033 -> 0034, then 0034 -> 0035 — see git history on this
-#: constant). Each stays supported afterward; nothing here narrows. An earlier version of this comment claimed
-#: 0026 was "already done" and handled by the current == target branch of
-#: revision_status() instead of by membership in this tuple — that stopped being true the
-#: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
-#: to 0030 here), and the same went stale for 0027 the moment DEFAULT_TARGET moved past
-#: IT, and again for 0028/0029, and again for 0033 the moment DEFAULT_TARGET moved to
-#: 0034 and left 0033 out. Concretely: with DEFAULT_TARGET at 0034 and 0033 absent from
-#: this tuple, a database stamped 0033 is neither current == target nor a supported
-#: start, so revision_status() BLOCKS the very migration (0034) this task adds. Adding it
-#: here is the fix. 0035 is here for exactly that reason: production is stamped 0035, so
-#: it is the starting point for 0036. 0036 joins for the same reason the comment above
-#: predicts every time DEFAULT_TARGET moves: with the target at 0037, a database stamped
-#: 0036 must be a supported start, not a BLOCK. 0037 joins now for the identical reason:
-#: production is stamped 0037, so with DEFAULT_TARGET moved to 0038, 0037 is the starting
-#: point and must be a supported start, not a BLOCK. 0038 joins now for the identical
-#: reason: production is stamped 0038, so with DEFAULT_TARGET moved to 0039 (this
-#: migration), 0038 is the starting point and must be a supported start, not a BLOCK.
-#: 0039 joins now for the identical reason: production is stamped 0039, so with
-#: DEFAULT_TARGET moved to 0040, 0039 is the starting point and must be a supported
-#: start, not a BLOCK. 0040 joins now for the identical reason: production is
-#: stamped 0040, so with DEFAULT_TARGET moved to 0041, 0040 is the starting point
-#: and must be a supported start, not a BLOCK. (0041 itself was added to
-#: SUPPORTED_START_REVISIONS by d129d2e, alongside the 0042 bump below — not by
-#: this sentence, and not in this cycle; it is listed here only because this
-#: comment was not updated at the time.) 0042 joins now for the identical
-#: reason: production is stamped 0042, so with DEFAULT_TARGET moved to 0043,
-#: 0042 is the starting point and must be a supported start, not a BLOCK.
-#: 0043 joins now for the identical reason: production is stamped 0043, so
-#: with DEFAULT_TARGET moved to 0044, 0043 is the starting point and must be
-#: a supported start, not a BLOCK. 0044 and 0045 join for the identical
-#: reason as DEFAULT_TARGET moved to 0045 and then to 0046: the revision
-#: immediately behind the target is the most likely real starting point and
-#: must never be a BLOCK. 0047 joined for that same reason as DEFAULT_TARGET
-#: moved to 0048, and 0048 joins now as DEFAULT_TARGET moves to 0049.
-#: 0049 joins now as DEFAULT_TARGET moves to 0050.
-#: 0050 joins now as DEFAULT_TARGET moves to 0051.
-#: 0051 joins now as DEFAULT_TARGET moves to 0052: production is stamped 0051,
-#: so it is the starting point for 0052 and must be a supported start, not a BLOCK.
+#: Every revision from 0023 up to the one immediately behind DEFAULT_TARGET is here, and
+#: each move of DEFAULT_TARGET must add the revision it leaves behind. That revision is
+#: production's stamp at the time — the most likely real starting point — and a database
+#: stamped there is neither current == target nor a supported start, so revision_status()
+#: would BLOCK the very migration the move adds. That happened for 0026/0027 on the 0028
+#: move and for 0033 on the 0034 move;
+#: tests/unit/test_migration_checks.py::test_every_post_branch_revision_is_a_supported_start
+#: derives the check from REVISION_ORDER, so the next miss fails a test. Entries stay
+#: supported afterward; nothing here narrows.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
-#: wait on. All that remains is 0022 (three empty tables), 0023 (three columns on the small
-#: researcher_profiles), 0024 (one column on agents), 0025 (one new table,
-#: opportunity_assessments), 0026 (drop grantbot_posted_foas), 0027 (one new table,
+#: wait on. A 0020 start still runs 0021, which builds ix_agent_messages_run_created on
+#: agent_messages (so check_sizing still quotes the row-scaled lock window there; see
+#: agent_messages_ddl_pending). After 0021 all that remains is 0022 (three empty
+#: tables), 0023 (three columns on the small researcher_profiles), 0024 (one column on
+#: agents), 0025 (one new table, opportunity_assessments), 0026 (drop
+#: grantbot_posted_foas), 0027 (one new table,
 #: assessment_drops), 0028 (one column + one constraint on users), 0029 (two columns on
 #: opportunity_assessments), 0030 (one new table, specialist_consults, plus two columns on
 #: opportunity_assessments), 0031 (data-only, no DDL), 0032 (one nullable JSONB column

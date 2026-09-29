@@ -200,8 +200,8 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
             "translational_path": 3, "fundable_experiment": 4,
             "venture_potential": 2, "team_executability": 4,
         },
-        # Tri-state strings — the current contract (see corrections to Task 11:
-        # the prompt emits "met"/"not_met"/"unconfirmed", never booleans).
+        # Tri-state strings — the current contract (the prompt emits
+        # "met"/"not_met"/"unconfirmed", never booleans).
         "gating": {"life_sciences_domain": "met",
                    "credible_science": "met", "translational_potential": "not_met"},
         "red_flags": ["No external validation yet"],
@@ -250,9 +250,9 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
 @pytest.mark.asyncio
 async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
     """The old contract wrote gating as booleans; the current one writes
-    "met"/"not_met"/"unconfirmed" strings. Fix round 1, Finding 4: a map with
+    "met"/"not_met"/"unconfirmed" strings. A map with
     three valid gates and one stray boolean must keep the three valid gates —
-    dropping the whole map wholesale (the original Task 11 behavior) denied
+    dropping the whole map wholesale (the original behavior) denied
     the triage page three gates it could have shown for no correctness
     benefit. The invalid key is still never guessed/coerced (a legacy False is
     genuinely ambiguous between not_met and unconfirmed), so it alone is
@@ -382,8 +382,9 @@ async def test_persist_assessment_never_raises_when_the_write_fails(caplog):
 
 @pytest.mark.asyncio
 async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_it(engine):
-    """Task 2 fix round 1, Finding 1: a write that fails on its first attempt
-    (e.g. the pool-checkout timeout Task 2 sized the pool for) must not be
+    """A write that fails on its first attempt (e.g. the pool-checkout
+    timeout Task 2 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md
+    sized the pool for) must not be
     logged-and-dropped — the fully-built row must survive in
     ``_pending_assessments`` and actually reach ``opportunity_assessments`` on
     the next ``_flush_pending_assessments``, the same durability contract
@@ -550,14 +551,13 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
 
 @pytest.mark.asyncio
 async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
-    """Fix round 1, Finding 5: subject_agent_id/funnel_stage/recommendation/
-    confidence are bounded VARCHAR columns. Every other field on this row
-    degrades per-field on a bad *type*, but an oversized value of the *right*
-    type (a plain str, just too long) sails past any isinstance check and
-    raised DataError at commit — which the outer except then dropped the
-    WHOLE row for. The fields must be truncated to fit before the insert, not
-    left to blow up the write, and raw_verdict must still hold the untruncated
-    original."""
+    """subject_agent_id/funnel_stage/recommendation/confidence are bounded
+    VARCHAR columns. Every other field on this row degrades per-field on a
+    bad *type*, but an oversized value of the *right* type (a plain str,
+    just too long) sails past any isinstance check and raised DataError at
+    commit — which the outer except then dropped the WHOLE row for. The
+    fields must be truncated to fit before the insert, not left to blow up
+    the write, and raw_verdict must still hold the untruncated original."""
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -831,8 +831,8 @@ async def test_persist_assessment_stamps_prose_format_markdown(engine):
 
 
 # --- Phase 4 wiring: the real Option A relocation, not the
-# _persist_assessment stub (Task 11 fix round 1, Finding 2; relocated by the
-# reply-only-hub reconciliation, Task 6) -------------------------------------
+# _persist_assessment stub (relocated by the reply-only-hub reconciliation)
+# ---------------------------------------------------------------------------
 #
 # The hub's :mag: Opportunity Assessment is no longer a Phase-5 "New
 # top-level post" at all — Option A extracts the `<assessment_json>` sidecar
@@ -1649,8 +1649,9 @@ async def test_admin_assessments_page_bounds_the_query_and_says_so(
 
     # The limit constant and the query that consumes it both live in
     # src.services.directory as of the admin-router extraction (Task 3 of
-    # the user-account-types plan) — patch it there rather than on the old
-    # src.routers.admin._ASSESSMENTS_LIMIT alias, which no longer exists.
+    # docs/plans/2026-08-17-user-account-types-plan.md) — patch it there
+    # rather than on the old src.routers.admin._ASSESSMENTS_LIMIT alias, which
+    # no longer exists.
     monkeypatch.setattr(directory_service, "ASSESSMENTS_LIMIT", 1)
 
     run = SimulationRun()
@@ -1944,7 +1945,7 @@ async def test_admin_page_has_no_drop_banner_on_a_clean_run(client, db_session, 
     assert "generated but not stored" not in resp.text
 
 
-# --- Round 2: the per-turn monotonic latch (Task 7 fix round) ---------------
+# --- The per-turn monotonic latch ------------------------------------------
 #
 # `ThreadState.floor_armed` was originally frozen forever at whatever value
 # activation saw. Review caught that this reintroduced exactly the failure
@@ -1959,7 +1960,7 @@ async def test_admin_page_has_no_drop_banner_on_a_clean_run(client, db_session, 
 #   restart-restored thread permanently unenforceable, no matter how many
 #   consults the restarted process went on to record.
 #
-# The fix (Ruling R3): re-latch `thread.floor_armed = thread.floor_armed or
+# The fix: re-latch `thread.floor_armed = thread.floor_armed or
 # bool(self._specialist_consults)` at the very top of `_reply_to_thread`,
 # before any `await` in that method — monotonic (never un-arms), global (never
 # keyed on this thread's own subject, so "the hub never convenes a panel at

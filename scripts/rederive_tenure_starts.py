@@ -42,8 +42,8 @@ to an earlier year. A LATER paper-derived year would narrow the tenure window
 and hide in-tenure papers; the preview marks it ``LATER (suspect)``, and
 ``--apply`` skips it (reason ``later_than_stored``, no write) unless
 ``--allow-later`` is given. An earlier year, and an ORCID-employment year in
-either direction (the pipeline prefers employment over papers), apply as
-before.
+either direction (the pipeline prefers employment over papers), apply without
+it.
 
 Usage (production: the app image, with host ``backups/`` mounted so the backup
 outlives the ``run --rm`` container):
@@ -452,7 +452,8 @@ async def run(
             already_pending += 1
             continue
         # A processing job read the old year before this write; its output is
-        # stale, so queue a fresh one behind it rather than counting it.
+        # stale, so queue a fresh one behind it rather than treating it as
+        # covering this change.
         if await _has_processing_profile_job(db, c.user_id):
             behind_processing += 1
             print(

@@ -8,9 +8,10 @@ chat.postMessage for posting.
 and inbound response normalisation are therefore properties of the *client*, not
 of each call site. That shape exists because the alternative was measured: this
 file grew a correct paginator in ``get_full_channel_history`` and never
-retrofitted ``list_channels``; grew a retry in its private-channel create and
-never retrofitted ``create_channel``; and normalised ``thread_ts == ts`` in the
-engine's Slack reconcile but not in its live poller. Four defects, one structural
+retrofitted ``list_channels``; grew a retry in a private-channel create (since
+removed) and never retrofitted ``create_channel``; and normalised
+``thread_ts == ts`` in the engine's Slack reconcile but not in its live poller.
+Four defects, one structural
 absence. ``_api`` takes the endpoint's method *name* rather than a bound
 callable so the chokepoint is enforceable: ``self._client.`` appears exactly once
 in this module, and ``tests/unit/test_slack_client_contract.py`` asserts that at
@@ -34,10 +35,11 @@ logger = logging.getLogger(__name__)
 class BotNotInvitedToPrivateChannel(Exception):
     """Raised when a bot attempts to post to or join a collab_private channel it is not a member of.
 
-    This should only fire in response to a genuine invite-path bug — any private
-    channel a bot is asked to act on should have been one the bot was invited to
-    at channel-creation time. See specs/agent-system.md §"Auto-join retry must
-    gate on visibility".
+    This should only fire in response to a genuine membership bug — any private
+    channel a bot is asked to act on should be one the bot was invited to. This
+    client neither creates private channels nor invites into them, so that
+    membership is arranged outside the engine. See specs/agent-system.md
+    §"Auto-join retry must gate on visibility".
     """
 
     def __init__(self, agent_id: str, channel_id: str, slack_error: str | None = None):
@@ -345,10 +347,10 @@ class AgentSlackClient:
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._user_is_bot_cache: dict[str, bool] = {}
-        # Guards the channel cache (``_channel_name_to_id``). Before the transport moved off the event
-        # loop (2026-08-14), "concurrent" asyncio callers of a
-        # synchronous method never actually overlapped in execution, so the
-        # check-then-act reads/writes on that dict were safe by
+        # Guards the channel cache (``_channel_name_to_id``). Before the
+        # transport moved off the event loop (2026-08-14), "concurrent" asyncio
+        # callers of a synchronous method never actually overlapped in
+        # execution, so the check-then-act reads/writes on that dict were safe by
         # accident. Now that post_message/poll_channel_messages etc. run
         # inside asyncio.to_thread, the reply lane's bounded-concurrency replies
         # (up to reply_lane_max_in_flight at once, simulation.py's

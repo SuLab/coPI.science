@@ -10,7 +10,9 @@
    the admin-only raw-verdict block. Grep this file for absolute admin/manager
    paths — it must print nothing.
 
-   EXCEPTION, recorded (Task 6, human-review card): literal `/reviews/...`
+   EXCEPTION, recorded (human-review card, Task 6 of
+   docs/plans/2026-08-28-human-review-feedback-implementation-plan.md):
+   literal `/reviews/...`
    action paths ARE allowed here, unlike `/admin/...`/`/manager/...`. That
    router is not split by surface — the same routes serve admin, manager
    and reviewer alike, and `src/routers/reviews.py`'s `_assessments_redirect`
@@ -98,7 +100,7 @@
             {# Brackets stripped before re-wrapping, the same way the
                list page does it: the sidecar's value is sometimes
                already bracketed and "[[High]]" is nobody's label. Moved
-               here (Task 10 fix round 1) from the verdict-header card
+               here from the verdict-header card
                below, which used to duplicate the project name in its own
                <h2> right under this one. #}
             <span class="text-sm font-normal text-gray-600">[{{ a.confidence.strip("[]") }}]</span>
@@ -107,7 +109,8 @@
     {% if a.headline and a.company_or_project %}
     <div class="assessment-brief-label text-sm text-gray-600 mt-1">{{ a.company_or_project }}</div>
     {% endif %}
-    {# Two columns (2026-09-11 readability plan, Task A1): the pitch reads
+    {# Two columns (docs/plans/2026-09-11-assessment-readability-implementation-plan.md,
+       Task A item 1): the pitch reads
        LEFT, the key points RIGHT. Either half may be absent — every row
        written before 0043 has both NULL — so the grid collapses to one
        column rather than leaving an empty cell, which reads as missing data
@@ -210,7 +213,9 @@
 </div>
 
 {# --------------------------------------------------------------------------
-   Evidence summary (request 3, plan Task B1). DERIVED from what this row
+   Evidence summary (request 3, B1 of
+   docs/plans/2026-09-14-assessment-ux-and-prompt-suggestions-implementation-plan.md).
+   DERIVED from what this row
    already stores — dimension scores, gating states, red flags and specialist
    signals (decision D2) — so it works on every existing row without a
    migration. `verdict_signals` is the service's single new context key
@@ -379,7 +384,7 @@
             {% endif %}
         </section>
         {# Mid-scale (2026-09-28). A dimension between the two thresholds is a
-           real, neutral answer, and until now it appeared in NO column — so a
+           real, neutral answer, and before then it appeared in NO column — so a
            reader could not see all six dimensions and their reasons in one
            place. Class `assessment-signals-neutral`, deliberately not
            `…-midscale`: `signals-midscale` is already the count paragraph's
@@ -457,10 +462,11 @@
     </p>
 </div>
 
-{# Sidecar item 5 (rubric v2.1.0) — moved directly under the brief (Task 10,
-   design §5): it is the line staff act on, so a reviewer meets it before any
-   evidence, not after the rationale and gating below it. NULL on every row
-   written before 0037, which is why the whole block is conditional rather
+{# Sidecar item 5 (rubric v2.1.0) — moved directly under the brief
+   (docs/plans/2026-09-09-reviewer-assessment-ui-design.md §5): it is the
+   line staff act on, so a reviewer meets it before any evidence, not after
+   the rationale and gating below it. NULL on every row written before 0037,
+   which is why the whole block is conditional rather
    than showing "none". #}
 {% if a.recommended_next_experiment %}
 {# The ask (audit H1): anchored, in the jump nav, and — when the hub wrote it
@@ -572,8 +578,8 @@
         <div>
             {# The project name + confidence chip used to live in an <h2>
                here, duplicating the brief card's title a few lines above it
-               (Task 10 fix round 1 / design doc §5's "fold in rather than
-               duplicate"). The name is gone from here; confidence moved up
+               (docs/plans/2026-09-09-reviewer-assessment-ui-design.md §5's
+               "fold in rather than duplicate"). The name is gone from here; confidence moved up
                into the brief card's own heading rather than being lost. #}
             <div class="text-sm text-gray-600 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
@@ -743,7 +749,8 @@
     {% endif %}
 </div>
 
-{# Gating and Red flags used to share one grid — split (Task 10, design §5):
+{# Gating and Red flags used to share one grid — split
+   (docs/plans/2026-09-09-reviewer-assessment-ui-design.md §5):
    Gating is dense evidence and moves behind a disclosure; Red flags is a
    WARNING (see the N8 comment above the panel banner) and stays a plain,
    always-expanded card. #}
@@ -883,7 +890,7 @@
 </details>
 
 {# ---------------------------------------------------------------------------
-   Human review (Task 6)
+   Human review
 
    `effective_user` is base.html's `impersonation_banner or current_user`
    (base.html:47) and is already in scope by the time this include is
@@ -1386,7 +1393,8 @@
 </div>
 </details>
 
-{# Expand all / Collapse all (readability plan, Task A3). Plain DOM, no
+{# Expand all / Collapse all (Task A item 3 of
+   docs/plans/2026-09-11-assessment-readability-implementation-plan.md). Plain DOM, no
    framework: the two buttons in the jump nav above set or clear `open` on
    every <details> in the page body. Scoped to <main> when there is one so
    the site chrome's own disclosures, if any are ever added, are left alone. #}

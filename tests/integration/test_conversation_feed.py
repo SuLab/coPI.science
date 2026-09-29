@@ -367,8 +367,8 @@ async def test_reply_count_excludes_out_of_cohort_replies(
     client, db_session, monkeypatch
 ):
     """`reply_count` must be computed with the SAME gate as the roots query, so
-    the badge (Task 6) can never promise a reply the thread-expand endpoint
-    (Task 5) will not show. A root with one in-cohort reply and one
+    the reply badge can never promise a reply the thread-expand endpoint will
+    not show. A root with one in-cohort reply and one
     out-of-cohort reply must report reply_count == 1, not 2.
 
     This intercepts the context handed to templates.TemplateResponse rather
@@ -582,7 +582,7 @@ async def test_a_delegate_sees_exactly_what_the_owner_sees(
 
 
 # ---------------------------------------------------------------------------
-# Task 5: thread expand endpoint (GET /agent/{agent_id}/thread/{message_ts})
+# Thread expand endpoint (GET /agent/{agent_id}/thread/{message_ts})
 # ---------------------------------------------------------------------------
 
 
@@ -644,7 +644,7 @@ async def test_expanding_own_thread_returns_the_gated_replies(
     calls out as the deliberate engine divergence: replies must be gated with
     own_or_gated, not merely admitted because the root belongs to the viewer.
     Deleting `gated` from the reply_rows query in agent_thread_replies turns
-    this red (verified by hand — see task-5-report.md).
+    this red (verified by hand).
     """
     pi1 = await _threaded_world(db_session, monkeypatch)
     r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(pi1.id))
@@ -799,7 +799,7 @@ async def test_expanding_an_uncohorted_own_thread_is_200_not_404(
 
 
 # ---------------------------------------------------------------------------
-# Task 6: reply badge + expand-on-click
+# Reply badge + expand-on-click
 # ---------------------------------------------------------------------------
 
 

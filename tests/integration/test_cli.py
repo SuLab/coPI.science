@@ -1,4 +1,4 @@
-"""Integration tests for the management CLI (src/cli.py) — Task 6 of the full-system plan.
+"""Integration tests for the management CLI (src/cli.py).
 
 Eight commands, previously zero coverage. `seed-profiles` is the documented way to add
 PIs (CLAUDE.md), so it is a production path.

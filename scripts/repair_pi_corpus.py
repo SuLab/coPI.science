@@ -1,5 +1,5 @@
-"""Per-PI publication-corpus repair (plan Task A3,
-docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §5, Task 3).
+"""Per-PI publication-corpus repair
+(docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §5, Task 3).
 
 Preview by default; ``--apply`` is required for any write. Mirrors
 ``scripts/enqueue_enrichment.py``'s conventions (preview/--apply,
@@ -13,9 +13,9 @@ PI's corpus before re-inserting; this one never bulk-deletes and never
 removes a row without printing its evidence first.
 
 Removal set (automatic, still gated on --apply):
-  - the later-added of two stored rows that share an identical PMID
-    (``duplicate_pmid`` — the non-unique index means this is observed, not
-    enforced, D8);
+  - every stored row but the first (by ``created_at``, then ``id``) that
+    shares an identical PMID (``duplicate_pmid`` — the non-unique index means
+    this is observed, not enforced, D8);
   - rows whose refetched record fails the CURRENT ``match_pi_author`` and lists
     authors, none of whom carries the PI's surname (``no_individual_author_match``);
   - rows whose refetched ``pub_types`` intersect ``EXCLUDED_TYPES`` with NO

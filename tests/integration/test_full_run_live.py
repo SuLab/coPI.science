@@ -146,8 +146,9 @@ POST_GAP = 1.1
 #   `continue` branch in `_run_main_loop` forever: no turn was taken, `turn_count` never
 #   advanced, `_last_llm_caller` was never cleared on that path, and nothing was logged
 #   above DEBUG. Measured: su=7/7, cravatt=7/7, wiseman=4/7 and the process spun until the
-#   wall-clock deadline. Task 11 deleted `_last_llm_caller` and that guard entirely (the
-#   post lane's only remaining exclusion is budget/rate-limit/cooldown/`in_flight`), which
+#   wall-clock deadline. Task 11 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md
+#   deleted `_last_llm_caller` and that guard entirely (the post lane's only remaining
+#   exclusion is budget/rate-limit/cooldown/`in_flight`), which
 #   removes this specific wedge — a single remaining under-budget agent is now simply
 #   re-selected each tick, paced by its own `turn_delay_seconds` cooldown, rather than
 #   perpetually skipped. Not independently re-verified against a live run.

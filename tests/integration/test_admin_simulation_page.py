@@ -327,10 +327,11 @@ async def test_non_admin_manager_is_refused_on_every_route(client, db_session):
 
 
 # ---------------------------------------------------------------------------
-# Task 11 — the Live tab: stats wired into /admin/simulation.
+# Task 11 of docs/plans/2026-08-30-simulation-control-panel.md — the Live tab:
+# stats wired into /admin/simulation.
 #
 #   (a) a seeded run renders the cost hero with the hand-computed figure
-#       (Task 9/8's canonical case: 1M input + 100k output + 500k cache-read
+#       (that plan's Task 9/8 canonical case: 1M input + 100k output + 500k cache-read
 #       + 200k cache-creation on claude-opus-5 = $9.00) and the cache hit-rate
 #       meter's detail text (500,000 of 1,500,000 input tokens cached),
 #   (b) an unpriced model name appears in a visible warning,
@@ -611,7 +612,8 @@ async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client
 
 
 # ---------------------------------------------------------------------------
-# Task 7 — the admin waitlist views are removed.
+# Task 7 of docs/plans/2026-09-04-assessment-ui-and-proposal-limit-plan.md — the
+# admin waitlist views are removed.
 # ---------------------------------------------------------------------------
 
 
@@ -679,8 +681,9 @@ async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(cl
 
 
 # ---------------------------------------------------------------------------
-# Task 6 — the new chart contract: captions, readability scale, labelled
-# bars, pipeline funnel, UTC timestamps, keyed refresh.
+# Task 6 of docs/plans/2026-09-11-simulation-panel-charts-readability-plan.md —
+# the new chart contract: captions, readability scale, labelled bars, pipeline
+# funnel, UTC timestamps, keyed refresh.
 # ---------------------------------------------------------------------------
 
 _CAPTIONED_CARDS = [

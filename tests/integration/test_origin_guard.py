@@ -257,7 +257,7 @@ def test_the_guard_is_the_outermost_middleware():
 
 
 # ---------------------------------------------------------------------------
-# Sec-Fetch-Site (fix round 1)
+# Sec-Fetch-Site
 #
 # Origin-or-Referer alone is an availability defect, not just an incomplete
 # guard: a browser under a `no-referrer` policy — set by an extension or by

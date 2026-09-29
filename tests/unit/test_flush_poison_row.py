@@ -280,7 +280,7 @@ async def test_the_assessment_flusher_isolates_its_poison_row():
     await eng._flush_pending_assessments()
 
     # Filtered by type: the store also holds the `AssessmentDrop` this loss now
-    # writes (FIX 6), whose agent_id is the poison row's by design.
+    # writes, whose agent_id is the poison row's by design.
     kept = sorted(
         r.agent_id for r in store if type(r).__name__ == "OpportunityAssessment"
     )
@@ -390,7 +390,7 @@ def test_no_flusher_falls_back_on_a_bare_exception(flusher):
 
 
 # ----------------------------------------------------------------------
-# FIX 6 — a verdict lost to per-row recovery must leave an AssessmentDrop.
+# A verdict lost to per-row recovery must leave an AssessmentDrop.
 #
 # `_recover_rows_individually` logs "DROPPING one un-writable ... row" and, for
 # `what="assessment"`, that was a SCREENING VERDICT discarded on one log line —

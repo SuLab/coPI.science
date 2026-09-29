@@ -10,7 +10,8 @@ implementations exist:
   nothing (the engine mints a local canonical id via ``mint_ts``); inbound
   polls return nothing (human/PI input arrives through the DB inbox instead).
 
-This lets the whole 5-phase loop and PI polling run with Slack fully off. See specs/local-db-conversations.md.
+This lets the whole 5-phase loop and PI polling run with Slack fully off. See
+specs/local-db-conversations.md.
 """
 
 from __future__ import annotations

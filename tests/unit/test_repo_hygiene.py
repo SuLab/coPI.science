@@ -8,9 +8,10 @@
    away from being committed.
 
 2. **No `src/` path can construct `ThreadDecision.outcome == "proposal"`.** The
-   ✅-confirms-:memo: handshake that produced those rows was retired in Task 7 of
-   `docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md`, and production
-   has never held one.
+   ✅-confirms-:memo: handshake that produced those rows was retired by the
+   pitch-only reconciliation
+   (`docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md` §8), and
+   production has never held one.
    `tests/integration/test_proposal_review.py`'s module docstring states the fact
    in prose; this pins it in code, so the dead branch cannot be quietly
    resurrected — and so the still-live readers of it (`src/main.py`'s nav badge

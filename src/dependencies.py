@@ -186,7 +186,7 @@ async def get_pi_user(
     reviewer.
 
     D7 makes manager and PI mutually exclusive, and a manager has no lab of
-    its own; a reviewer (Task 1) is neither staff nor PI and has no lab
+    its own; a reviewer is neither staff nor PI and has no lab
     either. Read-only bounces (auth.py's post-login redirect, onboarding.py's
     GET) are not enough on their own: the writes are what actually mint a
     lab. POST /onboarding/save-profile is the ONLY writer of

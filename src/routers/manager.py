@@ -1,5 +1,5 @@
 """Manager dashboard router — global read access, with an explicit write
-allowlist (D1) and, since Task 3, three read tiers instead of one.
+allowlist (D1) and three read tiers instead of one.
 
 The router-level dependency (``Depends(get_review_user)``) is deliberately
 the WIDEST audience this surface admits — admin, manager, or reviewer — and
@@ -113,7 +113,7 @@ _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, a
 _REVIEW = Depends(get_review_user)    # + reviewer — the four read handlers only
 _AGENT_FILTER = Query(default=[])
 
-#: Task 12: the review-bot-drafted prompt-change queue. Read-only display cap
+#: The review-bot-drafted prompt-change queue. Read-only display cap
 #: — a reviewer never reaches this pair (get_staff_user, not get_review_user):
 #: a suggestion can quote an unpublished PI disclosure verbatim (it is
 #: distilled from the same interview transcript the sidecar protects), so it
@@ -143,7 +143,7 @@ def _template_context(
     /admin. Mirrors the same pattern in onboarding.py / profile.py /
     agent_page.py / settings.py.
 
-    Templates DO now key controls off the user (Task 3): pi_detail.html's
+    Templates DO now key controls off the user: pi_detail.html's
     mute buttons and Edit Profile form, pis.html's Add-PI form and
     slack_bots.html's per-row actions are all gated on
     `effective_user.is_staff` in the template, never on `current_user` —
@@ -812,7 +812,7 @@ async def manager_prompt_suggestions(
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    """The review bot's (Task 10) drafted prompt-edit queue. Read-only triage:
+    """The review bot's drafted prompt-edit queue. Read-only triage:
     the only writes this surface offers are the status action, which lives on
     ``POST /reviews/suggestions/{id}/status``, and the generate action, which
     lives on ``POST /reviews/suggestions/generate`` (D1-style split — every
@@ -852,7 +852,7 @@ async def manager_prompt_suggestion_detail(
     current_user: User = _STAFF,
 ):
     """One suggestion in full: the feedback it was distilled from, the
-    interview/assessment it came from (if that row still exists — Task 1's
+    interview/assessment it came from (if that row still exists —
     ``assessment_id`` is SET NULL, not CASCADE, on deletion), and per-file
     staleness against the prompt set on disk right now."""
     suggestion = (

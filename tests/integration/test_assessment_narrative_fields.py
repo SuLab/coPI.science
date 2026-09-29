@@ -1,7 +1,7 @@
 """The reviewer-facing narrative fields on an assessment (migrations 0043, 0048).
 
-Task 2 covers the columns themselves; Task 8 extends this file with the engine
-write path that fills them from the sidecar. `score_rationale` (sidecar item 10,
+Covers the columns themselves and the engine write path that fills them from
+the sidecar. `score_rationale` (sidecar item 10,
 migration 0048) joined the set on 2026-09-14 — app-only, never published to
 `#assessments-summary`. `dimension_rationales` (sidecar item 2's companion,
 migration 0052) joined on 2026-09-28, with the scout_hub 1.9.0 key-point groups
@@ -274,7 +274,7 @@ async def test_an_overlong_headline_or_project_label_warns_but_still_stores(
 
 
 async def test_a_missing_current_group_is_stored_and_warned(engine, caplog):
-    """D5: a partial current-shape (scout_hub 1.8.0) object stores rather than
+    """D5: a partial current-shape (scout_hub >= 1.8.0) object stores rather than
     NULLing the whole field, and the omission is named in one WARNING —
     otherwise the relaxation would trade a loud failure for total silence."""
     import logging

@@ -1,6 +1,6 @@
 """Phase 5 action dispatch: `new_post`/`skip` are the only supported actions.
 
-Task 6 (branch2 engine reconciliation) deletes the `action == "reply"` branch
+The branch2 engine reconciliation deleted the `action == "reply"` branch
 along with the funding-thread plumbing that used to feed it — locked decision:
 any action other than `new_post`/`skip` is unsupported. It must post nothing,
 log it, and increment the skip streak via `previous_skips + 1` (never a bare
@@ -28,7 +28,7 @@ def _settings(**over):
         active_thread_threshold=12,
         phase5_skip_probability=0.0,
         llm_agent_model_opus="test-model",
-        # Task 9: _phase5_new_post now reserves a rate-limiter window slot
+        # _phase5_new_post now reserves a rate-limiter window slot
         # before the LLM call, which reads both of these.
         llm_calls_per_load_per_window=8,
         llm_rate_window_seconds=600,
@@ -144,7 +144,7 @@ async def test_new_post_pitch_still_posts(monkeypatch):
 
 
 async def test_a_successful_post_resets_the_skip_streak(monkeypatch):
-    """Task 11 fix round 2, Ruling R10: `consecutive_phase5_skips` is now
+    """`consecutive_phase5_skips` is now
     wholly post-lane-owned — the reply lane no longer resets it at all, so
     this is the ONLY place in the engine that may. Pins it with a genuinely
     nonzero starting streak, not just the post-reset default of 0."""

@@ -931,11 +931,9 @@ class TestGrandfathering:
 
     def test_phase4_reads_ungated_so_threads_can_conclude(self):
         """The reply lane must see a grandfathered partner's reply — the thread is
-        open and entitled to finish. Pinned on the call site (now
-        `_pending_reply_pairs`, the reply lane's selection function — Task 11
-        split `_phase4_reply_threads` into this plus `_service_reply`), since
-        the whole point of §8 is that the reply lane and the (former)
-        scheduler priority deliberately differ."""
+        open and entitled to finish (§8). Pinned on the call site,
+        `_pending_reply_pairs`, the reply lane's selection function (it and
+        `_service_reply` replaced `_phase4_reply_threads`)."""
         src = inspect.getsource(SimulationEngine._pending_reply_pairs)
         assert "allowed_sender_ids=None" in src
         assert "entitled to conclude" in src

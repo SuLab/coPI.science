@@ -29,7 +29,7 @@ field and is deliberately **not** rendered here — it is not a seventh field,
 and adding it would be exactly the kind of policy widening this section warns
 against.
 
-**Why `score`/`band` can be passed in verbatim (2026-08-29, fix round 1).** The
+**Why `score`/`band` can be passed in verbatim (2026-08-29).** The
 engine's own call site (`_post_assessment_summary`) computes band/score live
 from a verdict's `scores` dict, against whichever rubric document THIS PROCESS
 has loaded — correct for a verdict that just concluded, because "live" and

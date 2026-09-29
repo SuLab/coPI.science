@@ -1,5 +1,6 @@
 """``match_pi_author`` — the D2/D3 attribution-remediation matcher fixes
-(2026-09-22 plan, Task 1, items 1-4).
+(Task 1, items 1-4, of
+docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md).
 
 Every positive fixture below reproduces a REAL production record's author
 fields (surname/forename/affiliation), taken from the plan's own measured

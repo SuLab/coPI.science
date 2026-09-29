@@ -2,7 +2,8 @@
 
 A reviewer (Task 1's `USER_ROLE_REVIEWER` / `User.is_reviewer`) can score and
 comment on assessments but is neither staff (no manager/admin surfaces) nor a
-PI (no lab profile or agent). This file pins:
+PI (no lab profile or agent). This file pins (every "Task N" in this file is Task N of
+docs/plans/2026-08-28-human-review-feedback-implementation-plan.md):
 
   - `get_review_user` (new): admin, manager, OR reviewer; still refuses a PI.
   - `get_staff_user` still refuses a reviewer (is_staff deliberately excludes

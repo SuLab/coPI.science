@@ -22,11 +22,11 @@ class _ExistenceCheckGate:
     run a pre-insert SELECT for an existing review before they INSERT.
     Two real, unsynchronised racers can interleave so that racer #1's SELECT
     *and commit* both finish before racer #2 even reaches its own SELECT —
-    at which point racer #2 correctly finds the row and redirects (D10).
-    That is correct behaviour, but it is the wrong race: it never reaches the
-    INSERT-level collision
-    (uq_proposal_reviews_decision_agent / IntegrityError) this test exists to
-    exercise. Gating both racers on this barrier right after their existence
+    at which point racer #2 correctly finds the row and redirects (D10 of
+    docs/plans/2026-09-25-rca-remediation-plan.md). That is correct
+    behaviour, but it is the wrong race: it never reaches the INSERT-level
+    collision (uq_proposal_reviews_decision_agent / IntegrityError) this test
+    exists to exercise. Gating both racers on this barrier right after their existence
     SELECT returns forces the interleaving the test means to pin: both see
     "no existing row" before either is allowed to proceed to INSERT/commit,
     so the actual conflict is decided at the unique-constraint/IntegrityError

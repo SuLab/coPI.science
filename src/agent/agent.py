@@ -88,10 +88,9 @@ class Agent:
         the two call sites that call ``try_reserve`` immediately beforehand
         (``_reply_to_thread``, ``_phase5_new_post``) — appending again there
         would double-book one real call as two window entries and halve the
-        effective allowance (this was fix round 1's regression: an earlier
-        version of this method never appended at all once ``try_reserve``
-        existed, which fixed that double-count but silently took SIX other
-        call sites off the window entirely).
+        effective allowance (an earlier version of this method never appended
+        at all once ``try_reserve`` existed, which fixed that double-count but
+        silently took SIX other call sites off the window entirely).
 
         The default (``already_reserved=False``) is for every call site that
         was never separately reserved and so relies on THIS method as the

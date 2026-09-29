@@ -435,10 +435,12 @@ async def resolve_corpus(
     Every retrieval stage runs inside ``_stage``, so any failure it raises
     becomes ``CorpusStageError`` and no corpus is built. The three lookups
     that swallow failures by default run with ``strict=True``:
-    ``fetch_orcid_works`` then raises on anything but a 404; the two NCBI
-    lookups raise on a transient failure or a bug, while a permanent per-item
-    failure drops only that PMID/DOI and is reported in
-    ``CorpusResult.permanently_dropped`` rather than hidden.
+    ``fetch_orcid_works`` then raises on anything but a record-state status
+    (``_RECORD_STATE_STATUSES``: 301, 404, 409, 410); the two NCBI lookups
+    raise on a transient failure or a bug, while a permanent per-item failure
+    drops only that PMID/DOI and is reported in
+    ``CorpusResult.permanently_dropped`` rather than hidden (a run of
+    ``_SYSTEMIC_RUN`` identical ones raises instead).
     """
 
     stages: dict[str, set[str]] = {}

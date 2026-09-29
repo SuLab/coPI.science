@@ -469,7 +469,7 @@ async def run_scenario(
             # Snapshot here: by the end of the run a grandfathered thread that did what
             # §8 wants — concluded — has been popped out of active_threads.
             grandfathered_at_split = _grandfathered_now()
-        # Reply lane first (Task 11): every (agent, thread) pair owing a
+        # Reply lane first: every (agent, thread) pair owing a
         # reply, every tick, unpaced — mirrors _run_main_loop's ordering.
         await eng._dispatch_reply_lane()
         agent = eng._select_agent()

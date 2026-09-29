@@ -1,4 +1,5 @@
-"""Manager UI: NIH grants panel + per-grant 'not this PI' veto (Task 5)."""
+"""Manager UI: NIH grants panel + per-grant 'not this PI' veto (Task 5 of
+docs/plans/2026-09-11-pi-external-enrichment-implementation-plan.md)."""
 from unittest.mock import patch
 
 import pytest
@@ -52,9 +53,9 @@ async def test_veto_hides_grant_and_drops_it_from_grant_titles(client, db_sessio
 
 
 async def test_veto_keeps_non_reporter_titles_and_drops_only_the_vetoed_one(client, db_session):
-    """Fix round 1, ruling 2: derive_grant_titles(remaining) returns [] once
-    no eligible PiGrant rows are left, and that must not wipe titles that
-    never came from a PiGrant row at all (e.g. ORCID/publication-derived)."""
+    """derive_grant_titles(remaining) returns [] once no eligible PiGrant
+    rows are left, and that must not wipe titles that never came from a
+    PiGrant row at all (e.g. ORCID/publication-derived)."""
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     db_session.add(ResearcherProfile(

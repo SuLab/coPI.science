@@ -1,7 +1,8 @@
 """What `derive_strengths_and_risks` may and may not claim about a stored row.
 
 The brief on the assessment detail page is a READ of four stored things —
-dimension scores, `gating`, `red_flags` and the recorded specialist consults.
+dimension scores (each with its stored `dimension_rationales` reason),
+`gating`, `red_flags` and the recorded specialist consults.
 It invents nothing and stores nothing. A mid-scale dimension score is a real,
 neutral answer and gets a bucket of its own (`mid_scale`) rather than being
 filed as a strength or a risk, and a "not established" bucket exists so that
@@ -187,8 +188,9 @@ def test_a_mid_scale_dimension_is_neither_a_strength_a_risk_nor_an_unknown():
 
 
 def test_a_mid_scale_dimension_lands_in_its_own_bucket_not_in_neither():
-    """A 3 of 5 is a real, neutral answer. It was counted and then dropped;
-    now it is listed, so all six dimensions appear on the page."""
+    """A 3 of 5 is a real, neutral answer: it is listed under `mid_scale`, not
+    merely counted in `mid_scale_count`, so every scored dimension appears on
+    the page."""
     result = _derive(dimensions=[_dimension("translational_path", 3)])
     assert result["strengths"] == result["risks"] == []
     assert [e["label"] for e in result["mid_scale"]] == ["Translational Path"]

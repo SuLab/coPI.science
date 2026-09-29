@@ -1,6 +1,7 @@
-"""A conversation end to end (spec §5.3, §6, §7.3, §9, §11.2), plus the plan's
-Review Focus inputs. The producer runs on the test's session (use_test_session) and
-the model is FakeAsyncAnthropic, so nothing here spends money.
+"""A conversation end to end (spec §5.3, §6, §7.3, §9, §11.2), plus the Review
+Focus inputs of docs/plans/2026-09-24-assessment-chat-plan.md. The producer
+runs on the test's session (use_test_session) and the model is
+FakeAsyncAnthropic, so nothing here spends money.
 
 Ids are read into locals before any request that can roll the shared session back:
 a rollback expires every loaded object, and touching an expired attribute outside a

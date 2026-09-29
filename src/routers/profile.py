@@ -47,7 +47,7 @@ async def profile_view(
     current_user: User = Depends(get_current_user),
 ):
     """View user's profile page."""
-    # A REVIEWER (Task 1) is neither staff nor PI and has no lab profile to
+    # A REVIEWER is neither staff nor PI and has no lab profile to
     # view — bounce before the onboarding check, which would otherwise send
     # it to a page it can never complete (get_pi_user gates the only writer
     # of onboarding_complete).
@@ -70,10 +70,11 @@ async def profile_view(
     )
     publications = pub_result.scalars().all()
 
-    # Tenure-scope the count/list (Task 13, D17): `current_user` (from
-    # `get_current_user`) does not eager-load `.agent`, so the legacy
-    # agent-keyed tenure fallback needs its own small lookup rather than a
-    # lazy load, which would raise outside a sync context.
+    # Tenure-scope the count/list (D17 of
+    # docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md).
+    # `current_user` (from `get_current_user`) does not eager-load `.agent`,
+    # so the legacy agent-keyed tenure fallback needs its own small lookup
+    # rather than a lazy load, which would raise outside a sync context.
     agent_id = (
         await db.execute(
             select(AgentRegistry.agent_id).where(

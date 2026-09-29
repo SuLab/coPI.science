@@ -228,8 +228,9 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 
 def test_revision_status_blocks_a_target_behind_the_stamp():
-    """`alembic upgrade 0027` from 0050 exits 0 and applies nothing (RCA repro E11), so
-    a target behind the stamp must BLOCK at check 1 rather than pass as a start."""
+    """`alembic upgrade 0027` from 0050 exits 0 and applies nothing (repro E11 in
+    docs/audits/2026-09-24-comment-cleanup-rca/repro.sh), so a target behind the stamp
+    must BLOCK at check 1 rather than pass as a start."""
     status, reason = pf.revision_status("0050", "0027")
     assert status == pf.BLOCK
     assert "BEHIND" in reason
@@ -874,8 +875,9 @@ def test_tables_created_between_is_every_planned_table_in_the_span():
 
 
 def test_a_correct_0050_to_0051_upgrade_compares_clean():
-    """The RCA's repro E10 inputs: before this was derived per span, a correct 0050 -> 0051
-    upgrade FAILED here and postflight told the operator to restore."""
+    """Repro E10's inputs (docs/audits/2026-09-24-comment-cleanup-rca/repro.sh): before
+    this was derived per span, a correct 0050 -> 0051 upgrade FAILED here and postflight
+    told the operator to restore."""
     result = pf.compare_row_counts(
         {"users": 3},
         {"users": 3, "assessment_chat_turns": 0, "assessment_chat_usage": 0},

@@ -169,7 +169,7 @@ def test_final_stage_never_copies_the_build_context():
         paths = [w for w in words if not w.startswith("--")]
         # Every final-stage COPY, the pip layer included, must take from the cleaned
         # `source` stage: a context COPY skips `git clean`, so an untracked file under
-        # src/ would reach /app/src and site-packages (audit 2026-09-25).
+        # src/ would reach /app/src and site-packages.
         assert "--from=source" in flags, (
             f"final-stage `COPY {args}` takes from the build context. Only "
             "`COPY --from=source …` may: anything else can bake untracked checkout "

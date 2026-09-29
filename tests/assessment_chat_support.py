@@ -97,7 +97,8 @@ def synthetic_detail(**overrides: Any) -> dict[str, Any]:
         rubric_version="3.4.0",
         rubric_content_hash="b7b0a1d6a4a5",
         missing_domains=None,
-        # The stored map `dimensions[].rationale` below is resolved from (0052).
+        # The stored map (migration 0052) that `dimensions[].rationale` below
+        # is resolved from.
         dimension_rationales={"scientific_credibility": "DIM-REASON-SCIENCE"},
         gating={
             "life_sciences_domain": "met",

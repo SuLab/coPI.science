@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-Two of the Task 12 flows cannot be driven by the automation browser:
+Two browser flows cannot be driven by the automation browser:
 
 * **Slack OAuth approval.** The Playwright browser has no Slack session, so
   Slack's "Allow" screen cannot be reached, let alone clicked.

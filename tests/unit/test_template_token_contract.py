@@ -15,7 +15,7 @@ Token regex is deliberately narrow: `{[a-z_]+}` only. Templates also contain
 JSON example blocks like `{"action": "skip"}` and `{}` — those never match
 because the character immediately after `{` is `"` (not `[a-z_]`), or because
 `{}` has zero characters between the braces. Verified by direct inspection
-(see task-14-report.md) that this regex extracts exactly the substitution
+that this regex extracts exactly the substitution
 tokens and nothing from the JSON examples.
 
 Identity tokens `{bot_name}`, `{pi_name}`, `{agent_id}` are excluded: they are
@@ -37,8 +37,8 @@ IDENTITY_TOKENS = {"{bot_name}", "{pi_name}", "{agent_id}"}
 # Builder -> its covered templates (pi_lab default + scout_hub override, where
 # a scout_hub variant exists). The phase-2 scan/prune builders and their
 # `{new_posts}`/`{interesting_posts}` tokens were deleted outright by
-# removal-cycle task 7 (they were dormant in the running simulation since
-# Task 8, with zero callers) — nothing phase-2-shaped remains to cover here.
+# removal-cycle task 7 (they were dormant in the running simulation, with
+# zero callers) — nothing phase-2-shaped remains to cover here.
 BUILDER_TEMPLATES: dict[str, list[str]] = {
     "build_phase4_prompt": [
         "prompts/phase4-thread-reply.md",

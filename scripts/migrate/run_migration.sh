@@ -57,7 +57,7 @@
 #   2  rehearsal only: warnings you should read. Nothing written.
 #      (In --apply mode warnings do not stop the run — you already chose to proceed —
 #      so a successful apply is still 0.)
-#   3  operational failure (unreachable DB, backup failed)
+#   3  operational failure: the dump could not be taken, verified or copied out
 #  64  usage error
 #
 # WHAT THIS DOES NOT DO, on purpose:

@@ -8,7 +8,7 @@ panel's work on those threads was invisible everywhere in the app, and the
 expander did not even exist for them (it was gated on `t.decision`).
 
 The manager assertions are the other half: a manager sees the panel's substance
-and never the specialist's verbatim reply (Ruling R4). That is enforced in
+and never the specialist's verbatim reply. That is enforced in
 ``src/services/thread_panel.py`` — the value is not SELECTed for a manager
 render — so the marker's absence below is not merely a template guard.
 """

@@ -2090,8 +2090,8 @@ async def admin_cohort_remove_agent(
 
 
 # ---------------------------------------------------------------------------
-# /admin/simulation — the control-plane panel (Task 7 of the 2026-08-30
-# simulation-control-panel plan). Command/heartbeat/audit primitives live in
+# /admin/simulation — the control-plane panel (Task 7 of
+# docs/plans/2026-08-30-simulation-control-panel.md). Command/heartbeat/audit primitives live in
 # src.services.simulation_control; this module stays thin — read the panel
 # state, shape a form, ask the service a question, render or redirect. The
 # supervisor (src/agent/supervisor.py) and the running engine's own
@@ -2136,7 +2136,7 @@ async def _kv_delete(db: AsyncSession, key: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Live tab (Task 11) — wires src.services.simulation_stats + svg_charts into
+# Live tab — wires src.services.simulation_stats + svg_charts into
 # the control panel. Strictly single-run: every figure below comes from ONE
 # `simulation_run_id`, chosen by `_resolve_selected_run`, and nothing here
 # ever sums across runs — the run selector exists so an operator can compare
@@ -2640,8 +2640,8 @@ async def admin_simulation(
 ):
     """The simulation control panel: status card, start/stop forms, the
     announce-channels + announce-template editors, and recent command/audit
-    history. Stats sections are appended by Task 11 — see the marker comment
-    inside the template."""
+    history, then the Live tab's stats sections — see the Live-tab comment
+    block inside the template."""
     ctx = await _simulation_context(
         db,
         request,

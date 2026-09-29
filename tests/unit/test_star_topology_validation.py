@@ -3,8 +3,7 @@ cohorts.
 
 Design: docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §5 —
 cohort rows must be star-shaped: `{lab, hub}` per lab, never a lab-to-lab
-cohort. Task 10 of
-docs/superpowers/plans/2026-08-12-pr34-branch2-engine-reconciliation.md.
+cohort.
 
 `_validate_star_topology` is a pure read of `self.agents` (role +
 `allowed_sender_ids`) with no DB/session_factory involvement, so gates are set

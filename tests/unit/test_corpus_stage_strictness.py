@@ -366,7 +366,7 @@ def test_every_corpus_stage_call_is_strict():
         assert _passes_strict_true(call), (
             f"_stage({_callee(call)}(...)) is missing strict=True"
         )
-    # And neither function is called OUTSIDE a _stage, where a raise would
+    # And none of the three is called OUTSIDE a _stage, where a raise would
     # escape as something other than CorpusStageError.
     bare = [c for c in calls if _callee(c) in _STRICT_REQUIRED]
     assert len(bare) == len(wrapped)

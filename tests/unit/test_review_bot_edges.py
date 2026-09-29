@@ -468,7 +468,8 @@ async def test_old_consumed_rows_do_not_block_a_second_suggestion(db_session, mo
 
 
 # ---------------------------------------------------------------------------
-# R4: a supersession re-point landing between the worker's job fetch and the
+# D3 residual (docs/audits/2026-09-02-review-pipeline/README.md): a
+# supersession re-point landing between the worker's job fetch and the
 # handler's assessment lookup must not be mistaken for "nothing to do".
 # ---------------------------------------------------------------------------
 
@@ -476,7 +477,7 @@ async def test_old_consumed_rows_do_not_block_a_second_suggestion(db_session, mo
 async def test_stale_in_memory_payload_is_refreshed_after_a_supersession_miss(
     db_session, monkeypatch
 ):
-    """Ruling R4: the engine re-points the job payload and deletes the retired
+    """The engine re-points the job payload and deletes the retired
     row in one transaction. If that lands between the worker's job fetch and
     the handler's lookup, the handler must re-read the payload once rather
     than no-op on the stale id. `synchronize_session=False` keeps the ORM

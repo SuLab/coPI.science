@@ -1,4 +1,5 @@
-"""The "Human review" card on the shared assessment-detail body (Task 6).
+"""The "Human review" card on the shared assessment-detail body (Task 6 of
+docs/plans/2026-08-28-human-review-feedback-implementation-plan.md).
 
 Fed by `build_assessment_detail`'s four new keys (`review_feedback`,
 `review_status`, `review_status_history`, `review_assignments`, plus

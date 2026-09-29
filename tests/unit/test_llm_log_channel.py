@@ -31,7 +31,7 @@ def _settings(**over):
         active_thread_threshold=12,
         phase5_skip_probability=0.0,
         llm_agent_model_opus="test-model",
-        # Task 9: _phase5_new_post now reserves a rate-limiter window slot
+        # _phase5_new_post now reserves a rate-limiter window slot
         # before the LLM call, which reads both of these.
         llm_calls_per_load_per_window=8,
         llm_rate_window_seconds=600,
@@ -97,7 +97,7 @@ async def test_channel_is_stamped_onto_the_callers_own_row_not_the_last_one(monk
 
 
 def test_llm_log_record_maps_thread_phase_and_ordinal():
-    """`_llm_log_record` (Task 10, migration 0045) must carry the producer's
+    """`_llm_log_record` (migration 0045) must carry the producer's
     `thread_phase`/`message_ordinal` log_meta keys onto the row.
     """
     eng = SimulationEngine(agents=[], slack_clients={})

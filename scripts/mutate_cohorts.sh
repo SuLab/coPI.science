@@ -42,7 +42,7 @@
 #
 # THE INERT MUTANT IS NOT OPTIONAL. M0 below changes no behaviour (a docstring) and
 # MUST SURVIVE. Without it, a selection that is red for any unrelated reason — a dead
-# fixture, a migrated-away column, a leftover row — scores 8/8 and looks maximally
+# fixture, a migrated-away column, a leftover row — kills every mutant and looks maximally
 # sensitive when it is merely broken. It is listed FIRST so that failure is detected
 # before any of the real mutants are believed.
 #
@@ -166,14 +166,15 @@ MUTANTS=(
 # nothing re-ran this script; when it was re-run it reported ERROR rather than a false
 # kill, which is the one thing the old harness did get right.
 "src/agent/simulation.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
-# M7 was pinned to `_owes_reply`'s grandfathered skip; D12 retired the rule and the
-# function is gone. Removed rather than re-pointed: `grandfathered` is now reporting-only,
-# so there is no behaviour left for a mutant to break.
+# M7 was pinned to `_owes_reply`'s grandfathered skip; D12 of
+# docs/plans/2026-09-25-rca-remediation-plan.md retired the rule and the function is
+# gone. Removed rather than re-pointed: `grandfathered` is now reporting-only, so there
+# is no behaviour left for a mutant to break.
 # M8 was pinned to `_select_agent`'s reactive-tier valve
-# (`self._reactive_streak < settings.max_consecutive_reactive_turns`). Task 11
-# (two-lane concurrent scheduler) deleted the reactive tier outright — replies
-# leave the paced pool entirely — so there is no equivalent line left to
-# mutate; removed rather than re-pointed.
+# (`self._reactive_streak < settings.max_consecutive_reactive_turns`). Task 11 of
+# docs/plans/2026-08-14-two-lane-concurrent-scheduler.md deleted the reactive tier
+# outright — replies leave the paced pool entirely — so there is no equivalent line
+# left to mutate; removed rather than re-pointed.
 "src/agent/simulation.py~~            if target_id == agent.agent_id or target_id in allowed:~~            if True:~~M9 the outbound tag strip never strips"
 )
 
@@ -210,9 +211,9 @@ fi
 COPY=$(cd -- "$COPY" && pwd -P) || { echo "ERROR: cannot resolve the copy directory" >&2; exit 1; }
 copy_is_safe || exit 1
 
-# INT and TERM are trapped too, so an interrupted run still removes the copy (which holds
-# `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal; the
-# `cleaned` flag makes a second call a no-op either way.
+# INT, TERM and HUP are trapped too, so an interrupted run still removes the copy (which
+# holds `.env`). A signal handler cleans up, disarms the EXIT trap and exits 128+signal;
+# the `cleaned` flag makes a second call a no-op either way.
 cleaned=0
 cleanup() {
   [ "$cleaned" -eq 1 ] && return 0
@@ -233,7 +234,7 @@ echo "building a throwaway copy of the tree at ${COPY} (the repo is never writte
 copy_is_safe || exit 1
 # backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
 # Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT,
-# INT or TERM.
+# INT, TERM or HUP.
 if ! tar -C "$ROOT" \
       --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
       --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \

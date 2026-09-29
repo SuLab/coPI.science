@@ -372,10 +372,11 @@ class Settings(BaseSettings):
     lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
     # Two-lane concurrent scheduler: max reply-lane tasks in flight at once.
     # 1 means concurrency is off — the reply lane processes one thread reply
-    # at a time, same as today's sequential behaviour. Task 13 consumed this;
-    # Task 14 raises it to 4 now that the adversarial concurrency tests
-    # (tests/integration/test_concurrent_thread_safety.py) are green — see
-    # that file and task-14-report.md for the evidence. The .env on the
+    # at a time, same as today's sequential behaviour. Task 13 of
+    # docs/plans/2026-08-14-two-lane-concurrent-scheduler.md consumed this;
+    # its Task 14 raised it to 4 once the adversarial concurrency tests
+    # (tests/integration/test_concurrent_thread_safety.py) were green — see
+    # that file for the evidence. The .env on the
     # deployed host does not set REPLY_LANE_MAX_IN_FLIGHT, so this default is
     # what production actually gets. Rollback: set REPLY_LANE_MAX_IN_FLIGHT=1
     # and recreate the agent container — no code change, no migration.

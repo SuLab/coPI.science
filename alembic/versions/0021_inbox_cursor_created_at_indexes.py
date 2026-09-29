@@ -9,8 +9,7 @@ Both DB inbox pollers used to page over ``posted_at``, which is derived from the
 depend on every writer's clock agreeing with the engine's to within the lookback
 window — fine on one host, silently lossy across hosts. They now page over
 ``created_at`` (``server_default=now()``, i.e. the single Postgres server's
-clock), so these indexes back the new access path. See
-.notes/db-conversations-residual-2026-07-24.md (R3).
+clock), so these indexes back the new access path.
 """
 
 from typing import Sequence, Union

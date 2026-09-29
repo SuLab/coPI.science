@@ -68,7 +68,7 @@ async def onboarding_start(
     if current_user.is_manager:
         return RedirectResponse(url="/manager/pis", status_code=302)
 
-    # A REVIEWER (Task 1) is neither staff nor PI and has no research profile
+    # A REVIEWER is neither staff nor PI and has no research profile
     # to review either — same reasoning as the manager bounce above.
     if current_user.is_reviewer:
         return RedirectResponse(url="/manager/assessments", status_code=302)

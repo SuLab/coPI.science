@@ -1,7 +1,8 @@
 """HTTP-free read queries behind the admin and manager directory pages.
 
 These six query bodies used to live directly inside `src/routers/admin.py`
-handlers. They move here verbatim (Task 3 of the user-account-types plan) so
+handlers. They move here verbatim (Task 3 of
+docs/plans/2026-08-17-user-account-types-plan.md) so
 the `/manager` router can call the exact same code — most of it
 by way of the `roles=` filter on `list_pi_directory` — instead of
 carrying a second copy of a ~280-line discussions query. Nothing here knows
@@ -168,8 +169,9 @@ async def list_pi_directory(
     result = await db.execute(query)
     users = result.scalars().unique().all()
 
-    # Publication counts, scoped to each PI's JHU tenure window (Task 13,
-    # D17). `user.agent` is already eager-loaded above, so the legacy
+    # Publication counts, scoped to each PI's JHU tenure window (Task 13 and
+    # D17 of docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md).
+    # `user.agent` is already eager-loaded above, so the legacy
     # agent-keyed tenure fallback (`scoped_counts`'s `agent_ids` argument) can
     # be built with no extra query — omitting it would silently unscope the
     # 62 PIs who only have a legacy entry.
@@ -188,7 +190,7 @@ async def list_pi_directory(
     for user in users:
         profile = user.profile
         pub_scope = pub_scope_by_user.get(user.id)
-        # Meaning of `pub_count` changes here (Task 13): it is now the
+        # Meaning of `pub_count` changes here: it is now the
         # SCOPED (in-tenure) count, not the full-career count, so every
         # existing template reference to it stays correct without a rename.
         # `pub_scope` carries the split (tenure_start / before_tenure /
@@ -260,8 +262,9 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     )
     publications = pub_result.scalars().all()
 
-    # Tenure-scope the publication list (Task 13, D17) using the rows already
-    # loaded above, so this costs no second SELECT. Both detail routers
+    # Tenure-scope the publication list (D17 of
+    # docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md) using
+    # the rows already loaded above, so this costs no second SELECT. Both detail routers
     # forward an explicitly-named set of context keys rather than splatting
     # this dict, so `pub_scope` is named there too — deliberately NOT stashed
     # as an ad hoc attribute on `user`. Arbitrary
@@ -290,7 +293,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     return {
         "user": user,
         "profile": user.profile,
-        # Now the IN-TENURE rows, not the full career (Task 13). The rows the
+        # Now the IN-TENURE rows, not the full career. The rows the
         # window cuts are deliberately NOT returned: operator decision
         # 2026-09-22 — pre-tenure papers are listed nowhere in the UI. Use
         # `scripts/audit_tenure_scope.py` to see what a tenure year excludes.
@@ -517,7 +520,8 @@ async def list_assessments(
         "all": all_count,
     }
 
-    # Surfaced because Task 3 stops the floor discarding a gapped verdict.
+    # Surfaced because Task 3 of docs/plans/2026-08-18-specialist-panel-remediation.md
+    # stops the floor discarding a gapped verdict.
     # Storing it is only safe if the page distinguishes it from a vetted one.
     #
     # Counts every row whose panel is NOT verified complete — the same three
@@ -590,7 +594,8 @@ async def list_assessments(
     for _row in assessments:
         _row.panel_state = panel_state(_row)
 
-    # Batched Assigned/Reviewed-by/status-chip columns (Task 7) — the exact
+    # Batched Assigned/Reviewed-by/status-chip columns (Task 7 of
+    # docs/plans/2026-08-28-human-review-feedback-implementation-plan.md) — the exact
     # same attach-to-row pattern as `panel_state` above, and for the exact
     # same reason: `_assessments_body.html` is included by an admin template
     # that allowlists every context key it forwards (`src/routers/admin.py`)

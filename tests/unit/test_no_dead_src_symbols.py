@@ -7,7 +7,7 @@ methods, their tests and their Slack scopes stays green indefinitely (RCA
 ``docs/audits/2026-09-24-comment-cleanup-rca/README.md`` §8.1, finding I15). This is a
 pure AST scan, with no vulture dependency.
 
-What is a definition (scope: all of ``src/``, plan decision D15):
+What is a definition (scope: all of ``src/``, D15 of docs/plans/2026-09-25-rca-remediation-plan.md):
 
   * top-level functions, and methods of top-level classes;
   * skipped: dunders, definitions carrying any decorator other than ``staticmethod``,
@@ -79,7 +79,8 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
-    # Genuinely dead code the 2026-09-25 integration scan found (plan §5 step 2).
+    # Genuinely dead code the 2026-09-25 integration scan found (§5 step 2 of the plan
+    # cited in the module docstring).
     # These are NOT roots: code reachable only from them must still be reported.
     "src.agent.channels:is_seeded_channel": (
         "No caller anywhere, tests included (git grep, 2026-09-25). "

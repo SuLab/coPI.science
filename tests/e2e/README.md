@@ -1,6 +1,6 @@
-# `tests/e2e` — browser flows (Task 12)
+# `tests/e2e` — browser flows
 
-Covers `.notes/full-system-test-plan.md` §"Task 12". Two things live here:
+Two things live here:
 
 - **`test_browser_flows.py`** — `FLOWS`, a machine-readable transcript of each
   flow (what to open, what to click, what must be visible), plus HTTP replays of
@@ -22,7 +22,6 @@ afterwards, and the replacement `(slack_config_token, slack_config_refresh_token
 slack_config_token_exp)` triple is written into `app_settings` of whichever
 database the request used. That is `copi_slack_test`. **Drop that database and
 Slack app-configuration access is gone permanently**, with no way to recover it.
-See `.notes/slack-integration-test-plan.md` §"Global Constraints".
 
 ## Setup
 
@@ -191,9 +190,9 @@ litter.
 `status='pending'` → `'active'` (the **Approve & Activate** button) is a
 *separate* step and is **not** covered here: provisioning writes the token and
 leaves the status alone. Covering it needs one more POST to
-`/admin/agents/{id}/approve` plus an assertion that a running `agent-run` picks
+`/admin/agents/{id}/approve` plus an assertion that a running engine picks
 the agent up on its next `_sync_roster_from_db` (~30s) — which needs an engine
-process, so it belongs with Task 13, not here.
+process, so it belongs with the engine tests, not here.
 
 ### Onboarding
 
@@ -207,7 +206,8 @@ auto-enqueues a `generate_profile` job and shows that spinner while
 `run_profile_pipeline`, which fetches the user's ORCID record — so without
 usable ORCID credentials it can never complete, and the page spins forever. The
 flow therefore substitutes the `ResearcherProfile` row the pipeline would have
-written and continues from there; the pipeline itself is Task 4's subject.
+written and continues from there; the pipeline itself is covered by
+`tests/integration/test_profile_pipeline_live.py`.
 
 **The flow destroys its own fixture, so `seed.py` resets it.** Walking it sets
 `users.onboarding_complete=True`, and the substitute step leaves a

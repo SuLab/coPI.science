@@ -1,7 +1,7 @@
 """Live integration tests for the agent page — all 14 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
-flows. Task T8 of .notes/full-system-test-plan.md.
+flows.
 
 Nothing external is real: Slack (`slack_sdk.WebClient` and the copy bound inside
 `src.agent.slack_client`), SES (`send_delegate_invitation`) and the whole httpx

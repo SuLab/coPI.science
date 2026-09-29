@@ -466,9 +466,9 @@ def test_a_conditional_band_with_a_pass_recommendation_still_owes_a_panel():
     )
 
 
-# --- signal-mix report & domain-flatness warning (Task 5, 2026-08-28) ------
+# --- signal-mix report & domain-flatness warning (2026-08-28) --------------
 #
-# The clear-rate monitor (Task 9) is RETIRED. It asserted that a low `clear`
+# The clear-rate monitor is RETIRED. It asserted that a low `clear`
 # share meant the panel could not discriminate; a 48-consult positive control
 # falsified that (blocking 87.5% -> 0% across a quality ladder, p = 5.1e-07),
 # and its floor sat ABOVE the rate a correct panel produces on this

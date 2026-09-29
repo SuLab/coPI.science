@@ -393,7 +393,7 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
 async def test_an_unknown_revision_row_quotes_only_dimension_reasons_its_page_renders(
     client, db_session, fixture_rubric, page, prose_format
 ):
-    """Spec §5.5 / Review Focus 2. For a row whose rubric stamp matches no revision,
+    """Spec §5.5. For a row whose rubric stamp matches no revision,
     `derive_strengths_and_risks` contributes NO dimension entries, so the Evidence
     summary shows no reason at all; `build_assessment_detail` still lists the
     dimensions from the stored score keys, and the record quotes each one's reason.

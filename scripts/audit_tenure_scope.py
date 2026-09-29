@@ -1,5 +1,5 @@
-"""Read-only tenure-scope audit (plan Task B15,
-docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §5, Task 15).
+"""Read-only tenure-scope audit
+(docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md §5, Task 15).
 
 Per PI: the tenure-start year and its source, in-tenure / before-tenure /
 undated publication counts (via ``src.services.tenure_scope.scoped_counts``,

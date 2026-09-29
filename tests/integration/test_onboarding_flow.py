@@ -1,4 +1,4 @@
-"""Task 7 — the first-run experience: onboarding, profile and settings.
+"""The first-run experience: onboarding, profile and settings.
 
 Thirteen HTTP endpoints across ``src/routers/onboarding.py`` (3),
 ``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (4) had no direct
@@ -19,7 +19,7 @@ than quietly make a network call), SES is a recorder, and the export
 directory is redirected into ``tmp_path`` so the suite never writes into
 ``profiles/``.
 
-Discipline (see ``.notes/full-system-test-plan.md``): every absence assertion
+Discipline: every absence assertion
 carries a positive control in the same test. "The victim's row did not change"
 is worthless next to a route that changes nothing for anybody, so each negative
 is paired with the same request producing the effect it is supposed to produce.

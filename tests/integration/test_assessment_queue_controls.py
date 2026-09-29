@@ -458,7 +458,8 @@ async def test_an_unknown_panel_state_is_never_left_unbadged(
 
 
 # ---------------------------------------------------------------------------
-# Task 7: the "Assigned"/"Reviewed by" columns and the approval-status chip
+# Task 7 of docs/plans/2026-08-28-human-review-feedback-implementation-plan.md:
+# the "Assigned"/"Reviewed by" columns and the approval-status chip
 #
 # review_columns_for (src/services/assessment_reviews.py) is the batched read
 # behind both. It is deliberately three IN-clause queries plus a Python fold,
@@ -541,7 +542,7 @@ def _row_slice(html: str, marker: str) -> str:
       the LAST card on a page, so the same over-return happened again, just
       narrower: only the last card leaked into whatever page chrome follows
       it (footer, scripts). Two of the three real call sites hit this exact
-      case (fix round 1, 2026-09-09) and none of them failed, only because
+      case (2026-09-09) and none of them failed, only because
       the trailing markup happened not to contain any asserted string.
 
     A sentinel is the wrong shape of fix twice in a row for the same reason:
@@ -607,7 +608,7 @@ def test_row_slice_stops_at_the_next_card():
 
 
 def test_row_slice_stops_at_the_end_of_the_last_card():
-    """Second guard case, added in fix round 1 (2026-09-09). The 2026-09-09
+    """Second guard case, added 2026-09-09. The 2026-09-09
     `</tr>`-fix bounded on the NEXT `class="assessment-card ` occurrence —
     which does not exist when the marked row is the LAST card on the page, so
     `str.split` on an absent separator again returned everything from the
@@ -812,7 +813,9 @@ async def test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face(
     """N9. Dropping the panel badge in particular would be a real loss:
     rendering a non-verified panel as unremarkable is a named failure mode.
 
-    UPDATED 2026-09-14 (Task C2, D4): the gating string is still ON THE PAGE
+    UPDATED 2026-09-14 (Task C2 of
+    docs/plans/2026-09-14-assessment-ux-and-prompt-suggestions-implementation-plan.md,
+    D4): the gating string is still ON THE PAGE
     but no longer on the card FACE — it moved, verbatim, into each card's
     collapsed "Rubric scores & gating" disclosure, at operator request. This
     test is deliberately page-scoped and so still passes unchanged; the
@@ -1275,7 +1278,7 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
     than the block that was removed.
 
     FIXTURE CHANGED 2026-09-25 (scout_hub 1.8.0): the key points are now the
-    six current groups at 1/2/2/2/1/2 bullets of 225 characters each, not five
+    six 1.8.0 groups at 1/2/2/2/1/2 bullets of 225 characters each, not five
     groups x 2 short bullets, so both tables above predate this fixture.
 
     CEILING is the populated 50-row measurement plus ~20%. If a change pushes
@@ -1335,6 +1338,10 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
         "move something off the card"
     )
 
+
+# Task N / spec §N in the dividers below: Task N of
+# docs/plans/2026-09-21-assessment-queue-and-headline-contract-plan.md, §N of
+# docs/specs/2026-09-21-assessment-queue-and-headline-contract-design.md.
 
 # --- cited-paper links (Task 2 / spec §7) -----------------------------------
 

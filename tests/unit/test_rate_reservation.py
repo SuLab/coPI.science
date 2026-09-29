@@ -50,11 +50,11 @@ async def test_allowance_holds_under_concurrent_callers():
     assert granted == 5, f"allowance 5 exceeded under concurrency: {granted}"
 
 
-# --- Fix round 1 (Ruling R5): record_api_call's already_reserved split -----
+# --- record_api_call's already_reserved split ------------------------------
 #
-# Round 1's regression: making record_api_call NEVER append to call_times
-# (to stop it double-booking the two sites that call try_reserve) silently
-# took SIX other call sites off the window entirely — specialist consults and
+# The regression it fixes: an earlier version made record_api_call NEVER
+# append to call_times (to stop it double-booking the two sites that call
+# try_reserve), which silently took SIX other call sites off the window entirely — specialist consults and
 # each consult's own truncation-retry hook, both reserved turns'
 # truncation-retry hooks, the memory update, and its own retry hook.
 # None of those six separately reserves a slot, so record_api_call is the

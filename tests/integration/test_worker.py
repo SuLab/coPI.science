@@ -1137,7 +1137,7 @@ async def test_an_unknown_job_type_is_rejected_loudly_by_the_dispatcher(wk, monk
 
 async def test_worker_dispatches_review_feedback_analysis(wk, monkeypatch):
     """T11 — `process_job` routes a `review_feedback_analysis` job to
-    `execute_review_analysis` (Task 10), with its payload and the claimed job
+    `execute_review_analysis`, with its payload and the claimed job
     intact.
 
     `execute_review_analysis` is imported module-top in `src/worker/main.py`
