@@ -15,7 +15,8 @@ own load) raises `UndefinedColumn` against a pre-0043 database. WRITE side:
 EVERY verdict write of a running simulation fails — and that write is
 best-effort, so the failure is swallowed and one ERROR line is logged while the
 Slack replies keep looking completely normal. Migrate BEFORE the new code
-serves; see the 0043 deploy box in CLAUDE.md.
+serves; see the 0043 deploy box in
+docs/operations/migration-deploy-notes.md.
 
 Deliberately NOT backfilled. All three narrative fields are NULL on every
 pre-0043 assessment row, because those verdicts were never asked for them and a

@@ -26,7 +26,7 @@ env/
 *.sqlite3
 
 # Run artifacts. The whole directory, not per-extension: the saved-log rotation
-# in CLAUDE.md's restart recipe writes `logs/*.log`, but the same directory also
+# in the restart recipe (docs/operations/host-and-simulation.md) writes `logs/*.log`, but the same directory also
 # accumulates data — `logs/opportunity_assessments_backup_*.sql` (a dump of
 # assessment bodies) and `logs/profiles_public_pre_sync_*.tgz` (a tarball of
 # agent profiles) were untracked AND unignored, one `git add -A` from being

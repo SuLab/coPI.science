@@ -8,7 +8,8 @@
 # single alembic head. Supported starting points: SUPPORTED_START_REVISIONS in
 # scripts/migrate/preflight.py.
 #
-# Run it as CLAUDE.md's deploy step 4, after the build and before `up -d`, in place of a
+# Run it as step 4 of the restart procedure in docs/operations/host-and-simulation.md,
+# after the build and before `up -d`, in place of a
 # bare `alembic upgrade head`. Rehearse first (no --apply).
 #
 # READ docs/production-migration.md BEFORE RUNNING THIS. This script is the

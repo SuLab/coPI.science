@@ -219,9 +219,9 @@ If you hit it: stop the writers and re-run. Stop the run from `/admin/simulation
 docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent
 ```
 
-If an emergency CLI run is live (CLAUDE.md's `docker compose run` path), stop its
-container the same way, with `docker stop -t 420` and the name CLAUDE.md gives it.
-`-t 420` is the grace period CLAUDE.md sizes for the longest uninterruptible turn. Do
+If an emergency CLI run is live (the `docker compose run` path in `docs/operations/host-and-simulation.md`), stop its
+container the same way, with `docker stop -t 420` and the name that page gives it.
+`-t 420` is the grace period that page sizes for the longest uninterruptible turn. Do
 **not** use `docker rm -f` / `kill -9` on the agent: SIGKILL skips the shutdown flush and
 permanently loses the in-flight turn's messages. The DB, not Slack, is the durable store.
 

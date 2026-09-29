@@ -1,4 +1,8 @@
-"""Operator text in templates and CLAUDE.md never sends a compose command to ``app``.
+"""Operator text never sends a compose command to ``app``.
+
+Scanned: templates, the root and nested CLAUDE.md files, and docs/operations/. A
+command written as ``$DC …`` is not recognised (the grammar needs a literal
+``docker compose``), so most of the CLAUDE.md files' commands are out of reach.
 
 ``app`` is the web service of ``docker-compose.yml``, the dev stack (``--reload``, the
 whole repo bind-mounted, host ``:8001``); production's web service is
@@ -80,6 +84,9 @@ def dev_app_commands(line: str) -> list[str]:
 def _scanned_files(root: Path) -> list[Path]:
     files = set(root.glob("templates/**/*.html"))
     files.add(root / "CLAUDE.md")
+    for directory in ("src", "alembic"):
+        files.update((root / directory).rglob("CLAUDE.md"))
+    files.update(root.glob("docs/operations/*.md"))
     return sorted(f for f in files if f.is_file())
 
 
@@ -152,6 +159,7 @@ def test_the_scanner_flags_a_planted_dev_service_command(tmp_path):
 
 def test_no_operator_text_targets_the_dev_web_service():
     failures, commands = scan(ROOT)
-    # Anti-vacuity: CLAUDE.md and the cohort banner hold several compose commands.
+    # Anti-vacuity: docs/operations/ and the cohort banner hold several compose
+    # commands; the CLAUDE.md files mostly write `$DC …`, which is not counted.
     assert commands >= 5, f"only {commands} compose commands recognised; the grammar has drifted"
     assert not failures, "compose instructions aimed at the dev `app` service:\n" + "\n".join(failures)

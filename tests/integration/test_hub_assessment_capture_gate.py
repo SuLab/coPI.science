@@ -171,7 +171,7 @@ async def _drive_reply(
     onto `ThreadState.message_count`: `_reply_to_thread` overwrites that field
     with ``len(get_thread_history(thread_id))`` before the phase is computed, so a
     ThreadState built with ``message_count=11`` over an EMPTY log is an ordinal-1
-    EXPLORE turn, not the CONCLUDE turn it looks like (CLAUDE.md's warning, and
+    EXPLORE turn, not the CONCLUDE turn it looks like (src/agent/CLAUDE.md's warning, and
     the bug 81dbe44 found in both existing harnesses).
 
     ``configure``, if given, runs on the freshly-built engine BEFORE

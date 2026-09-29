@@ -100,7 +100,7 @@ def _blank_all_bot_tokens(monkeypatch):
 
 
 def test_token_for_agent_row_prefers_the_db_column(monkeypatch):
-    """CLAUDE.md: the AgentRegistry column is the source of truth, .env is a read
+    """docs/operations/pis-and-access.md: the AgentRegistry column is the source of truth, .env is a read
     fallback. Both halves, so a resolver that only ever read one source fails."""
     monkeypatch.setenv("SLACK_BOT_TOKEN_SU", "xoxb-from-the-env-file")
     _clear_settings_cache()

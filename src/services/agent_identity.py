@@ -37,7 +37,7 @@ async def derive_agent_identity(
     collision prefix used to be applied to agent_id at one line and bot_name
     rebuilt from the bare last name four lines later, so Peng Wu got
     ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids
-    differed. CLAUDE.md documents ``pwu`` / ``PWuBot``.
+    differed. docs/operations/pis-and-access.md documents ``pwu`` / ``PWuBot``.
 
     Tiers: bare last-name stem → first-initial prefix → numeric suffix
     (``wu2``..``wu19``). The numeric tier exists because the manager Add-PI

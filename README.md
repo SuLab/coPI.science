@@ -103,7 +103,7 @@ ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 # (exit 137), skipping the shutdown handler. Give it real headroom: since the
 # thread_reply ceiling went to 16000 tokens, one uninterruptible final call can
 # run ~4-5 minutes. A larger -t costs nothing — `docker stop` returns as soon as
-# the container exits. See CLAUDE.md's restart procedure.
+# the container exits. See the restart procedure in docs/operations/host-and-simulation.md.
 docker stop -t 420 blackbird-agent-run
 docker rm blackbird-agent-run
 

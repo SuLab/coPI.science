@@ -20,7 +20,7 @@ The reverse is not — the new code maps the column, so every
 pages, the engine's ``_persist_assessment`` INSERT and ``_flush_persisted``
 retry) raises ``UndefinedColumn`` against a pre-0037 database. Build, migrate
 from a one-off container, then start — the same ordering as 0028/0030/0036 (see
-CLAUDE.md).
+docs/operations/migration-deploy-notes.md).
 """
 from typing import Sequence, Union
 

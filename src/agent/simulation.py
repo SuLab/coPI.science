@@ -1382,8 +1382,8 @@ class SimulationEngine:
         # returned, so this sweep can never run concurrently with the main
         # loop's own `_drain_and_flush`. Wrapped like the memory drain above:
         # anything escaping here must not skip the "Simulation stopping..."
-        # line below, which CLAUDE.md documents as the operator's proof the
-        # buffers reached disk.
+        # line below, which docs/operations/host-and-simulation.md documents as the
+        # operator's proof the buffers reached disk.
         try:
             # Seed from a DB query for exactly which interviews still owe a
             # headline, rather than from `_assessed_threads` alone.
@@ -1411,7 +1411,7 @@ class SimulationEngine:
             # headline ever posted, so a resumed pre-`0041` run rehydrates them
             # all as owed and this query returns them all too. No seed can fix
             # that — the column is the only record there is — which is why
-            # CLAUDE.md's `0041` box makes running the repair procedure a
+            # the `0041` box in docs/operations/migration-deploy-notes.md makes running the repair procedure a
             # precondition for resuming such a run.
             owed_thread_ids: list[str] | None = None
             if self.session_factory and self.simulation_run_id:

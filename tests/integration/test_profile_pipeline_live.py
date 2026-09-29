@@ -869,7 +869,7 @@ async def test_t44_pubmed_unreachable_fails_the_run_and_stores_nothing(
     passes through to the real network. That is the honest simulation of "PubMed is
     down" and it is the reason this test is here rather than in the contract tier.
 
-    Requirement (audit M5; CLAUDE.md "A corpus-stage failure FAILS the job"): a PubMed
+    Requirement (audit M5; docs/operations/pis-and-access.md: "A corpus-stage failure FAILS the job"): a PubMed
     outage fails the run rather than storing a thin, ungrounded profile.
     `search_pmids` raises on a transport failure and `resolve_corpus` wraps it in
     `CorpusStageError`, so the job retries instead. The mocked counterpart is GM

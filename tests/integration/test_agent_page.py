@@ -312,7 +312,7 @@ async def _agent_of(db, user) -> AgentRegistry | None:
 
 
 async def test_signup_creates_a_pending_agent_row(client, db_session):
-    """The documented self-service path (CLAUDE.md §Adding New PIs)."""
+    """The documented self-service path (docs/operations/pis-and-access.md, "Adding New PIs")."""
     user, r = await _signup(client, db_session, "Ada Zephyr", "ada@example.org")
     assert r.status_code == 302 and r.headers["location"] == "/agent"
 
@@ -330,7 +330,7 @@ async def test_signup_creates_a_pending_agent_row(client, db_session):
 async def test_signup_prefixes_the_first_initial_only_on_a_last_name_collision(
     client, db_session
 ):
-    """CLAUDE.md: "Chunlei Wu = wu"; a second Wu becomes "pwu".
+    """docs/operations/pis-and-access.md: "Chunlei Wu = wu"; a second Wu becomes "pwu".
 
     Control (the second half): a *non*-colliding last name must come out
     unprefixed. Without it a request_agent() that always prefixed would pass.

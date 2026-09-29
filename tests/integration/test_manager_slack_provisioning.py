@@ -96,7 +96,7 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
     every assessment-chat route (`_refused`, assessment_chat.py), self-service
     account deletion (profile.py) and the admin user delete (admin.py). Review
     feedback and review-status writes are allowed, attributed to the
-    impersonated user (CLAUDE.md, Account Types)."""
+    impersonated user (docs/operations/pis-and-access.md, Account Types)."""
     manager = await _manager(db_session)
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)

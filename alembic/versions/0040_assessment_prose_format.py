@@ -24,7 +24,7 @@ safe. The reverse is not — the new code maps the column, so every
 pages) raises ``UndefinedColumn`` against a pre-0040 database, and the
 engine's ``_persist_assessment`` INSERT names it, so every verdict write
 fails too. Build, migrate from a one-off container, then start — the same
-ordering as 0028/0030/0036/0037/0038 (see CLAUDE.md).
+ordering as 0028/0030/0036/0037/0038 (see docs/operations/migration-deploy-notes.md).
 """
 
 from typing import Sequence, Union

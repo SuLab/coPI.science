@@ -602,7 +602,7 @@ def test_a_greek_letter_is_transliterated_not_dropped():
     represent non-ASCII at all (`inventionTitle:(β)`, `(Qβ)` and `("Qβ")` all
     return HTTP 404, which this module maps to "searched, matched nothing"), so
     every tier would have 404'd and the hub would have been told "No US filings
-    matched this query" — fake novelty, which CLAUDE.md forbids outright.
+    matched this query" — fake novelty, which docs/operations/blackbird-hub.md forbids outright.
     Patent titles spell the letter out, so that is what is searched:
     `inventionTitle:(beta)` -> count 13,640.
     """

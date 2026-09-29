@@ -1851,7 +1851,7 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
         rem = [
             "Stop the writers first — the agent simulation is the main one, and it must be "
             "stopped GRACEFULLY or the in-flight turn's messages are lost:",
-            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period CLAUDE.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
             "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
             "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
             "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",
@@ -1997,7 +1997,7 @@ async def check_sizing(conn, rev: str | None, target: str):
     if status != PASS:
         rem = [
             "Announce the window and stop the writers for its duration:",
-            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period CLAUDE.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
             "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
             "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
             "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",

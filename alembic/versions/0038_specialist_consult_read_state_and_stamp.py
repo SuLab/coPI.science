@@ -30,7 +30,7 @@ at src/services/assessment_detail.py (read by both assessment detail pages,
 admin's and manager's) and the engine's ``_record_specialist_consult`` INSERT
 (src/agent/simulation.py) raise/fail against a pre-0038 database. Build,
 migrate from a one-off container, then start — the same ordering as
-0028/0030/0036/0037 (see CLAUDE.md).
+0028/0030/0036/0037 (see docs/operations/migration-deploy-notes.md).
 
 Also affected since 46d9a99 (2026-08-28): the discussions panel cards at
 src/services/thread_panel.py select an explicit column list that now names

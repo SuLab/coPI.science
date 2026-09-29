@@ -272,7 +272,7 @@ async def test_an_uncohorted_agent_still_sees_its_own_posts(
     """Under policy="isolated" an active-but-uncohorted agent's gate is the
     EMPTY set (not None) — deliberately, so it cannot read any other lab's
     traffic. But activation and cohort assignment are separate admin steps
-    (see CLAUDE.md's onboarding order: Provision -> Approve & Activate happens
+    (see the onboarding order in docs/operations/pis-and-access.md: Provision -> Approve & Activate happens
     before any admin adds the agent to a cohort), so a PI must still see their
     OWN bot's posts in that gap, or their page goes blank the moment their bot
     goes live. This is the safe, deliberate divergence from `_entry_allowed`

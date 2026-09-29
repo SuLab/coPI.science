@@ -3,7 +3,8 @@
 Three new tables and two ``job_type_enum`` values (``enrich_grants``,
 ``industry_evidence``). Purely additive: OLD CODE AGAINST THE NEW SCHEMA IS
 SAFE. New code against the old schema fails only in the new worker handlers
-and the manager PI page's new panels (UndefinedTable) — see the CLAUDE.md box.
+and the manager PI page's new panels (UndefinedTable) — see its box in
+docs/operations/migration-deploy-notes.md.
 
 Enum values cannot be dropped in Postgres; downgrade drops the tables and
 leaves the values, exactly as 0039 does for ``review_feedback_analysis``.

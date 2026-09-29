@@ -1,7 +1,7 @@
 """Which code is this process actually running?
 
-The agent image bakes ``src/`` at build time (see CLAUDE.md: "The agent image
-does NOT mount src/"), so the truthful answer to "what commit is running" is
+The agent image bakes ``src/`` at build time (see docs/operations/host-and-simulation.md:
+"The agent image does NOT mount src/"), so the truthful answer to "what commit is running" is
 the commit the IMAGE was built from, not whatever the host repo says at launch.
 Two sources, in order:
 

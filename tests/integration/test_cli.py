@@ -1,7 +1,7 @@
 """Integration tests for the management CLI (src/cli.py).
 
 Eight commands, previously zero coverage. `seed-profiles` is the documented way to add
-PIs (CLAUDE.md), so it is a production path.
+PIs (docs/operations/pis-and-access.md), so it is a production path.
 
 **Why these tests are shaped oddly.** The CLI does not take a session; every command
 calls `src.cli._get_db()`, which builds its *own* engine from
@@ -330,7 +330,7 @@ def test_seed_profile_falls_back_to_the_bare_orcid_when_the_lookup_fails(
 def test_seed_profiles_reads_the_file_and_ignores_comments_and_blanks(
     db, runner, orcid_stub, tmp_path
 ):
-    """T6.1: the documented bulk path (CLAUDE.md puts `# comment` lines in orcids.txt).
+    """T6.1: the documented bulk path (docs/operations/pis-and-access.md puts `# comment` lines in orcids.txt).
 
     Control for "comments create nothing": the two real lines in the same file do.
     """

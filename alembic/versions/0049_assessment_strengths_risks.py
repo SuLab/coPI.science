@@ -28,7 +28,8 @@ database. WRITE — ``_persist_assessment`` names both in the INSERT, and that
 write is best-effort, so every verdict of a running simulation is lost to one
 ERROR line in a log nobody is tailing while the Slack replies keep looking
 completely normal. Build, migrate from a one-off container, then start — the
-same ordering as 0037/0040/0041/0043/0048 (see CLAUDE.md).
+same ordering as 0037/0040/0041/0043/0048 (see
+docs/operations/migration-deploy-notes.md).
 """
 from typing import Sequence, Union
 

@@ -319,8 +319,8 @@ def test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sid
     confidence label — while the dimension scores, the band, the weighted score
     and `raw_verdict` stay sidecar-only. That is the contract
     `thread_guidance._SCOUT_HUB[CONCLUDE]` and `phase4-thread-reply.md` state,
-    and the one `tests/unit/test_claude_md_disclosure_sync.py` holds CLAUDE.md
-    to.
+    and the one `tests/unit/test_claude_md_disclosure_sync.py` holds
+    `docs/operations/blackbird-hub.md` to.
 
     Renders the LIVE ordinal-12 prompt rather than slicing the template file,
     so the phase guidance and instructions actually substituted into it are

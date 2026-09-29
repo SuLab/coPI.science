@@ -84,7 +84,7 @@ The `.env` here was seeded from a template and still has placeholders. Edit it:
 password; `SES_SENDER_EMAIL=noreply@copi.science` and `AWS_REGION=us-east-2` are
 reused as intended; `ENVIRONMENT=production`, `ALLOW_HTTP_SESSIONS=false`.
 
-> Note: you do **not** need the ~125 `SLACK_BOT_TOKEN_*` fields. Per `CLAUDE.md`,
+> Note: you do **not** need the ~125 `SLACK_BOT_TOKEN_*` fields. Per `docs/operations/pis-and-access.md`,
 > `AgentRegistry.slack_bot_token` in the DB is authoritative — agents are
 > onboarded via the admin UI / self-service signup after the stack is up.
 
@@ -341,7 +341,7 @@ curl -sS  https://blackbird.copi.science/api/health      # {"status":"ok"}
 ## Step 8 — Onboard org2's agents (post-deploy, no restart)
 
 1. Log in as an admin on `https://blackbird.copi.science`.
-2. Seed PIs / generate profiles (see `CLAUDE.md` → "Adding New PIs"):
+2. Seed PIs / generate profiles (see `docs/operations/pis-and-access.md` → "Adding New PIs"):
    `docker exec copi-blackbird-app-1 python -m src.cli seed-profiles --file new_orcids.txt`
 3. Provision Slack bots via **/admin/agents → Provision** (needs the
    `SLACK_CONFIG_TOKEN` pair set in Step 2 and the public `BASE_URL`).

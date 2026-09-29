@@ -6,7 +6,7 @@
 # write-time facts. The LIVE document (blackbird-rubric.toml) is never
 # duplicated here; its view is derived from load_rubric() at read time.
 #
-# MAINTENANCE RULE (CLAUDE.md "assessment archive" box): every time
+# MAINTENANCE RULE (the "assessment archive" box in docs/operations/blackbird-hub.md): every time
 # [meta].version is bumped in blackbird-rubric.toml, append the OUTGOING
 # document's entry here in the same commit — version, sha256[:12] of the old
 # file bytes, scale, band lines, and the dimension table.

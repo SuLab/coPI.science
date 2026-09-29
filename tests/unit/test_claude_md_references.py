@@ -1,27 +1,39 @@
-"""CLAUDE.md's repo references must resolve (RCA §8 cause 4: prose that nothing reads).
+"""The runbook's repo references must resolve (RCA §8 cause 4: prose that nothing reads).
 
-CLAUDE.md is the operator runbook, and outside the two sync-tested anchors nothing
-read it: deploy boxes, file paths and `path:N` citations drifted silently as the
-tree moved underneath them. This module checks the mechanically checkable part:
+The operator runbook is the root CLAUDE.md, the nested CLAUDE.md files Claude Code
+loads when it reads their directory (`NESTED`), and the `docs/operations/` pages they
+point at. Outside the sync-tested anchors nothing read it, so deploy boxes, file paths
+and `path:N` citations drifted silently as the tree moved underneath them. This module
+checks the mechanically checkable part:
 
 - every "Deploy order for `00NN_slug`" box names a migration that exists;
 - every backticked path under one of `REPO_PREFIXES` exists (brace groups
   expanded, `*` treated as a glob, `/**` as "this directory exists");
-- every `path:N` / `path:N-M` citation is within the cited file's length.
+- every `path:N` / `path:N-M` citation is within the cited file's length;
+- every CLAUDE.md stays under the recommended length, and the root one indexes
+  every operations page.
 
 It cannot tell whether a cited line still says what the prose claims; it only
 catches references that point at nothing.
 """
 import glob
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_MD = ROOT / "CLAUDE.md"
+#: Nested CLAUDE.md files. `test_every_claude_md_is_listed` keeps this complete.
+NESTED = (ROOT / "src" / "agent" / "CLAUDE.md", ROOT / "alembic" / "CLAUDE.md")
+OPERATIONS = ROOT / "docs" / "operations"
+#: https://code.claude.com/docs/en/memory, "Write effective instructions": "target
+#: under 200 lines per CLAUDE.md file. Longer files consume more context and reduce
+#: adherence."
+MAX_CLAUDE_MD_LINES = 200
 
 REPO_PREFIXES = ("src", "scripts", "tests", "templates", "prompts", "alembic", "docs", "specs")
 
-# Repo paths CLAUDE.md names on purpose although they do not exist in a clean
+# Repo paths the runbook names on purpose although they do not exist in a clean
 # checkout, each with the reason. Keep it empty unless a path is deliberately
 # untracked or removed; a stale entry fails `test_allowlist_entries_are_needed`.
 ALLOWLIST: dict[str, str] = {}
@@ -36,6 +48,14 @@ _PATH_TOKEN = re.compile(
 _ROOT_FILE_LINE = re.compile(r"(?<![\w./~$-])([A-Za-z][\w.-]*):(\d+)(?:-(\d+))?\b")
 _LINE_SUFFIX = re.compile(r"^(.*?):(\d+)(?:-(\d+))?$")
 _DEPLOY_BOX = re.compile(r"Deploy order for `(\d{4}_\w+)`")
+
+
+def _runbooks() -> list[Path]:
+    return [CLAUDE_MD, *NESTED, *sorted(OPERATIONS.glob("*.md"))]
+
+
+def _texts() -> dict[str, str]:
+    return {p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8") for p in _runbooks()}
 
 
 def _without_fences(text: str) -> str:
@@ -134,35 +154,70 @@ def _out_of_range(text: str, root: Path) -> list[str]:
 
 
 def test_deploy_box_migrations_exist():
-    slugs = _DEPLOY_BOX.findall(CLAUDE_MD.read_text(encoding="utf-8"))
+    slugs = [s for text in _texts().values() for s in _DEPLOY_BOX.findall(text)]
     assert len(slugs) > 10, f"control: expected the deploy boxes, parsed only {slugs}"
     versions = ROOT / "alembic" / "versions"
     missing = [s for s in slugs if not (versions / f"{s}.py").is_file()]
-    assert not missing, f"CLAUDE.md deploy boxes name migrations that do not exist: {missing}"
+    assert not missing, f"runbook deploy boxes name migrations that do not exist: {missing}"
 
 
 def test_referenced_repo_paths_exist():
-    text = CLAUDE_MD.read_text(encoding="utf-8")
-    assert len(_repo_refs(text)) > 50, "control: the path scanner found almost nothing"
-    missing = _missing(text, ROOT)
+    texts = _texts()
+    assert sum(len(_repo_refs(t)) for t in texts.values()) > 50, (
+        "control: the path scanner found almost nothing"
+    )
+    missing = [f"{rel}: {raw}" for rel, text in texts.items() for raw in _missing(text, ROOT)]
     assert not missing, (
-        f"CLAUDE.md names repo paths that do not exist: {missing}. Fix the reference, "
+        f"the runbook names repo paths that do not exist: {missing}. Fix the reference, "
         "or add the path to ALLOWLIST with the reason it is named on purpose."
     )
 
 
 def test_line_references_are_in_range():
-    text = CLAUDE_MD.read_text(encoding="utf-8")
-    bad = _out_of_range(text, ROOT)
-    assert not bad, f"CLAUDE.md cites lines past the end of the file: {bad}"
+    bad = [f"{rel}: {ref}" for rel, text in _texts().items() for ref in _out_of_range(text, ROOT)]
+    assert not bad, f"the runbook cites lines past the end of the file: {bad}"
 
 
 def test_allowlist_entries_are_needed():
-    text = CLAUDE_MD.read_text(encoding="utf-8")
-    named = {path for _, path, _ in _repo_refs(text)}
+    named = {path for text in _texts().values() for _, path, _ in _repo_refs(text)}
     stale = [p for p in ALLOWLIST if p not in named or _resolves(ROOT, p)]
-    assert not stale, f"ALLOWLIST entries CLAUDE.md no longer needs: {stale}"
+    assert not stale, f"ALLOWLIST entries the runbook no longer needs: {stale}"
     assert all(reason.strip() for reason in ALLOWLIST.values()), "every ALLOWLIST entry needs a reason"
+
+
+def test_claude_md_files_stay_under_the_recommended_length():
+    long = {
+        path.relative_to(ROOT).as_posix(): n
+        for path in (CLAUDE_MD, *NESTED)
+        if (n := len(path.read_text(encoding="utf-8").splitlines())) >= MAX_CLAUDE_MD_LINES
+    }
+    assert not long, (
+        f"CLAUDE.md files at or over {MAX_CLAUDE_MD_LINES} lines: {long}. Move reference "
+        "detail to docs/operations/ and keep a pointer."
+    )
+
+
+def test_every_claude_md_is_listed():
+    """A tracked nested CLAUDE.md outside NESTED would escape every check above, and
+    one under prompts/ would be read as a prompt file. Untracked files are ignored, so
+    a git-ignored scratch directory cannot fail this on one machine only."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", ":(glob)**/CLAUDE.md"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.split("\0")
+    found = {ROOT / rel for rel in listed if rel and rel != "CLAUDE.md"}
+    assert found == set(NESTED), (
+        f"tracked nested CLAUDE.md files {sorted(str(p) for p in found)} != NESTED "
+        f"{sorted(str(p) for p in NESTED)}"
+    )
+
+
+def test_claude_md_indexes_every_operations_page():
+    text = CLAUDE_MD.read_text(encoding="utf-8")
+    pages = sorted(p.relative_to(ROOT).as_posix() for p in OPERATIONS.glob("*.md"))
+    assert len(pages) >= 5, f"control: expected the operations pages, found {pages}"
+    unindexed = [page for page in pages if f"`{page}`" not in text]
+    assert not unindexed, f"CLAUDE.md's index does not name {unindexed}"
 
 
 def test_the_scanner_flags_planted_bad_references():

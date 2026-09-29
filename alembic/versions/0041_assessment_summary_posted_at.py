@@ -10,7 +10,8 @@ headline actually posts), and SQLAlchemy omits an unset, no-server-default
 nullable attribute from the generated INSERT's column list, so a fresh verdict
 write SUCCEEDS against a pre-0041 schema either way. Migrate BEFORE the new
 code serves regardless — the read side alone takes down both assessment list
-pages and both detail pages; see the deploy box in CLAUDE.md.
+pages and both detail pages; see its deploy box in
+docs/operations/migration-deploy-notes.md.
 
 Deliberately NOT backfilled. NULL means "no headline has been posted for this
 row", and for a pre-0041 row that is unknowable from the database alone — the
