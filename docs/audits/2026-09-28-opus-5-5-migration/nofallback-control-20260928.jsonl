@@ -1,0 +1,3 @@
+{"route": "consult", "stop_reason": "refusal", "category": "bio", "blocks": [], "out": 0, "model": "claude-opus-5-5"}
+{"route": "new_post", "stop_reason": "refusal", "category": "bio", "blocks": [], "out": 0, "model": "claude-opus-5-5"}
+{"route": "thread_reply_first_lab", "stop_reason": "refusal", "category": "bio", "blocks": [], "out": 0, "model": "claude-opus-5-5"}

@@ -1,0 +1,426 @@
+{
+  "by_route": {
+    "consult": {
+      "n": 7,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3481636551311608,
+      "parse_ok": 7,
+      "baseline_n": 7,
+      "baseline_ok": 7,
+      "new_ok_on_baseline_rows": 7,
+      "both_ok": 7,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 7
+      },
+      "output_p50": 1621,
+      "output_p95": 1755,
+      "output_max": 1755,
+      "thinking_max": 0,
+      "latency_p50": 28.4,
+      "latency_p95": 30.8,
+      "latency_max": 30.8
+    },
+    "hub_final": {
+      "n": 5,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.4507197283469412,
+      "parse_ok": 5,
+      "baseline_n": 5,
+      "baseline_ok": 5,
+      "new_ok_on_baseline_rows": 5,
+      "both_ok": 5,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 5
+      },
+      "output_p50": 8563,
+      "output_p95": 12237,
+      "output_max": 12237,
+      "thinking_max": 3837,
+      "latency_p50": 117.0,
+      "latency_p95": 159.5,
+      "latency_max": 159.5
+    },
+    "new_post": {
+      "n": 7,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3481636551311608,
+      "parse_ok": 7,
+      "baseline_n": 7,
+      "baseline_ok": 7,
+      "new_ok_on_baseline_rows": 7,
+      "both_ok": 7,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 7
+      },
+      "output_p50": 776,
+      "output_p95": 943,
+      "output_max": 943,
+      "thinking_max": 0,
+      "latency_p50": 15.2,
+      "latency_p95": 19.1,
+      "latency_max": 19.1
+    },
+    "profile": {
+      "n": 3,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.6315968501359613,
+      "parse_ok": 3,
+      "baseline_n": 3,
+      "baseline_ok": 3,
+      "new_ok_on_baseline_rows": 3,
+      "both_ok": 3,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 3
+      },
+      "output_p50": 3087,
+      "output_p95": 3528,
+      "output_max": 3528,
+      "thinking_max": 0,
+      "latency_p50": 37.9,
+      "latency_p95": 40.5,
+      "latency_max": 40.5
+    },
+    "review": {
+      "n": 3,
+      "served_by_new": 1,
+      "not_served_upper95": 0.9830475724915586,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.6315968501359613,
+      "parse_ok": 3,
+      "baseline_n": 3,
+      "baseline_ok": 2,
+      "new_ok_on_baseline_rows": 3,
+      "both_ok": 2,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 2
+      },
+      "output_p50": 2135,
+      "output_p95": 2599,
+      "output_max": 2599,
+      "thinking_max": 542,
+      "latency_p50": 25.5,
+      "latency_p95": 38.8,
+      "latency_max": 38.8
+    },
+    "thread_reply_first_hub": {
+      "n": 6,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3930377689970827,
+      "parse_ok": 6,
+      "baseline_n": 6,
+      "baseline_ok": 6,
+      "new_ok_on_baseline_rows": 6,
+      "both_ok": 6,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 6
+      },
+      "output_p50": 224,
+      "output_p95": 3413,
+      "output_max": 3413,
+      "thinking_max": 922,
+      "latency_p50": 6.8,
+      "latency_p95": 45.4,
+      "latency_max": 45.4
+    },
+    "thread_reply_first_lab": {
+      "n": 6,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3930377689970827,
+      "parse_ok": 6,
+      "baseline_n": 6,
+      "baseline_ok": 6,
+      "new_ok_on_baseline_rows": 6,
+      "both_ok": 6,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 6
+      },
+      "output_p50": 669,
+      "output_p95": 1058,
+      "output_max": 1058,
+      "thinking_max": 913,
+      "latency_p50": 13.9,
+      "latency_p95": 18.4,
+      "latency_max": 18.4
+    }
+  },
+  "by_persona": {
+    "budget": {
+      "n": 7,
+      "served_by_new": 0,
+      "not_served_upper95": 1.0,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3481636551311608,
+      "parse_ok": 7,
+      "baseline_n": 7,
+      "baseline_ok": 7,
+      "new_ok_on_baseline_rows": 7,
+      "both_ok": 7,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {
+        "bio": 7
+      },
+      "output_p50": 1621,
+      "output_p95": 1755,
+      "output_max": 1755,
+      "thinking_max": 0,
+      "latency_p50": 28.4,
+      "latency_p95": 30.8,
+      "latency_max": 30.8
+    }
+  },
+  "control": {
+    "consult": {
+      "n": 7,
+      "served_by_new": 7,
+      "not_served_upper95": 0.3481636551311608,
+      "sticky": 0,
+      "lost": 0,
+      "lost_upper95": 0.3481636551311608,
+      "parse_ok": 7,
+      "baseline_n": 0,
+      "baseline_ok": 0,
+      "new_ok_on_baseline_rows": 0,
+      "both_ok": 0,
+      "max_tokens_stops": 0,
+      "early_text_stops": 0,
+      "categories": {},
+      "output_p50": 1908,
+      "output_p95": 2970,
+      "output_max": 2970,
+      "thinking_max": 0,
+      "latency_p50": 30.6,
+      "latency_p95": 45.3,
+      "latency_max": 45.3
+    }
+  },
+  "fit_5_5": {
+    "b": null,
+    "a": {},
+    "a_pooled": null,
+    "n_slope": 1
+  },
+  "fit_opus_5": {
+    "b": 0.006389776357827476,
+    "a": {
+      "consult": 26.322364217252392
+    },
+    "a_pooled": 26.322364217252392,
+    "n_slope": 2
+  },
+  "ceilings": {
+    "consult": {
+      "route": "consult",
+      "current": 4000,
+      "max_observed_output": null,
+      "proposed": 4000,
+      "retry": 8000,
+      "projected_s": {
+        "l55_new": null,
+        "l55_current": null,
+        "lo5_new": 51.881469648562295,
+        "lo5_current": 51.881469648562295,
+        "decline": -6.154952076677315
+      },
+      "clauses": {
+        "i_nonstreaming_cap": true,
+        "ii_latency": false,
+        "iii_rollback": true,
+        "iv_retry": true,
+        "v_rescue": true
+      },
+      "go": false,
+      "blocking": [
+        "ii_latency"
+      ],
+      "accepted_risk": false
+    },
+    "new_post": {
+      "route": "new_post",
+      "current": 3300,
+      "max_observed_output": null,
+      "proposed": 3300,
+      "retry": 6600,
+      "projected_s": {
+        "l55_new": null,
+        "l55_current": null,
+        "lo5_new": 47.40862619808306,
+        "lo5_current": 47.40862619808306,
+        "decline": -12.89648562300319
+      },
+      "clauses": {
+        "i_nonstreaming_cap": true,
+        "ii_latency": false,
+        "iii_rollback": true,
+        "iv_retry": true,
+        "v_rescue": true
+      },
+      "go": false,
+      "blocking": [
+        "ii_latency"
+      ],
+      "accepted_risk": false
+    },
+    "review": {
+      "route": "review",
+      "current": 8000,
+      "max_observed_output": 2135,
+      "proposed": 8000,
+      "retry": 16000,
+      "projected_s": {
+        "l55_new": null,
+        "l55_current": null,
+        "lo5_new": 77.44057507987219,
+        "lo5_current": 77.44057507987219,
+        "decline": -4.129392971246006
+      },
+      "clauses": {
+        "i_nonstreaming_cap": true,
+        "ii_latency": false,
+        "iii_rollback": true,
+        "iv_retry": true,
+        "v_rescue": true
+      },
+      "go": false,
+      "blocking": [
+        "ii_latency"
+      ],
+      "accepted_risk": false
+    },
+    "profile": {
+      "route": "profile",
+      "current": 4000,
+      "max_observed_output": null,
+      "proposed": 4000,
+      "retry": 8000,
+      "projected_s": {
+        "l55_new": null,
+        "l55_current": null,
+        "lo5_new": 51.881469648562295,
+        "lo5_current": 51.881469648562295,
+        "decline": -8.147603833865809
+      },
+      "clauses": {
+        "i_nonstreaming_cap": true,
+        "ii_latency": false,
+        "iii_rollback": true,
+        "iv_retry": true,
+        "v_rescue": true
+      },
+      "go": false,
+      "blocking": [
+        "ii_latency"
+      ],
+      "accepted_risk": false
+    },
+    "thread_reply": {
+      "route": "thread_reply",
+      "current": 16000,
+      "max_observed_output": null,
+      "proposed": 16000,
+      "retry": 21333,
+      "projected_s": {
+        "l55_new": null,
+        "l55_current": null,
+        "lo5_new": 128.558785942492,
+        "lo5_current": 128.558785942492,
+        "decline": 54.98594249201278
+      },
+      "clauses": {
+        "i_nonstreaming_cap": true,
+        "ii_latency": false,
+        "iii_rollback": true,
+        "iv_retry": true,
+        "v_rescue": true
+      },
+      "go": false,
+      "blocking": [
+        "ii_latency"
+      ],
+      "accepted_risk": false,
+      "owner_decision_needed": false
+    }
+  },
+  "gate1": {
+    "consult": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "hub_final": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "new_post": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "profile": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "review": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "thread_reply_first_hub": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    },
+    "thread_reply_first_lab": {
+      "lost": true,
+      "served": false,
+      "parse": true,
+      "reasoning_extraction": true
+    }
+  },
+  "persona_gate": {
+    "budget": false
+  },
+  "gate1_go": false
+}
