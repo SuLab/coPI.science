@@ -15,8 +15,10 @@ from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
-from src.models import AccessAllowlist, Job, User
+from src.models import AccessAllowlist, User
 from src.services.orcid import fetch_orcid_profile
+from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.user_email import assign_user_email
 
 templates = Jinja2Templates(directory="templates")
 
@@ -215,22 +217,20 @@ async def auth_callback(
         user = User(
             orcid=orcid_id,
             name=profile_data.get("name") or orcid_name,
-            email=resolved_email,
             institution=profile_data.get("institution"),
             department=profile_data.get("department"),
             access_status="allowed" if is_allowlisted else "pending",
         )
         db.add(user)
         await db.flush()  # Get the ID
+        # Through the one writer: an address another account already holds is
+        # refused and the login proceeds without an email.
+        if resolved_email:
+            await assign_user_email(db, user, resolved_email)
 
         # Only enqueue profile generation for allowed users
         if user.access_status == "allowed":
-            job = Job(
-                type="generate_profile",
-                user_id=user.id,
-                payload={"user_id": str(user.id), "orcid": orcid_id},
-            )
-            db.add(job)
+            await enqueue_profile_job_if_absent(db, user)
             logger.info("Created allowed user %s (%s), enqueued profile job", user.id, orcid_id)
         else:
             logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
@@ -243,7 +243,7 @@ async def auth_callback(
         if not user.department and profile_data.get("department"):
             user.department = profile_data["department"]
         if not user.email and resolved_email:
-            user.email = resolved_email
+            await assign_user_email(db, user, resolved_email)
         # Allowlist can promote an existing PENDING user to allowed.
         # 'denied' is an explicit admin decision and must not be overruled
         # by a seed list (deletion audit 2026-08-25, F6).
@@ -254,13 +254,7 @@ async def auth_callback(
                 select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
             )
             if profile_check.scalar_one_or_none() is None:
-                db.add(
-                    Job(
-                        type="generate_profile",
-                        user_id=user.id,
-                        payload={"user_id": str(user.id), "orcid": orcid_id},
-                    )
-                )
+                await enqueue_profile_job_if_absent(db, user)
         # Set claimed_at if this was a seeded profile
         if user.claimed_at is None:
             user.claimed_at = datetime.now(timezone.utc)

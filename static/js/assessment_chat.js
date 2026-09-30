@@ -267,6 +267,14 @@
     const instance = new window.marked.Marked();
     instance.use({
       tokenizer: {
+        // The hub writes "~" for "approximately" ("~30-37%"); marked would pair
+        // two tildes into a <del> span and the chat's sanitizer then drops the
+        // tag, deleting the text between them. Returning undefined treats every
+        // tilde as literal text: the same override static/js/markdown.js applies
+        // to the global instance, which this private one never sees.
+        del: function () {
+          return undefined;
+        },
         // marked's own `tag` tokenizer switches the lexer into a raw-block state
         // after <code>, <pre>, <kbd> or <script>, in which later text is emitted
         // UNESCAPED, so an escaped entity decodes after all (RSEC-1, reproduced

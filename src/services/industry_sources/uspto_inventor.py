@@ -44,6 +44,11 @@ async def fetch_jhu_applications(inventor_full_name: str) -> list[dict]:
     q = f'applicationMetaData.firstInventorName:"{inventor_full_name}" AND applicationMetaData.applicantBag.applicantNameText:"Johns Hopkins"'
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(SEARCH_URL, headers={"X-API-KEY": key}, json={"q": q, "pagination": {"offset": 0, "limit": 100}, "fields": _FIELDS})
+        if resp.status_code == 404:
+            # ODP answers 404 for a search with no matching applications — an
+            # empty result, not an outage. Every other error status still
+            # raises, so the job retries a real failure.
+            return []
         resp.raise_for_status()
         return resp.json().get("patentFileWrapperDataBag") or []
 

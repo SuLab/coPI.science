@@ -178,10 +178,18 @@ def _assessments_redirect(
     return RedirectResponse(url=f"/manager/assessments/{assessment_id}", status_code=302)
 
 
-async def _load_review(db: AsyncSession, feedback_id: uuid.UUID) -> AssessmentReview:
-    review = (
-        await db.execute(select(AssessmentReview).where(AssessmentReview.id == feedback_id))
-    ).scalar_one_or_none()
+async def _load_review(
+    db: AsyncSession, feedback_id: uuid.UUID, *, for_update: bool = False,
+) -> AssessmentReview:
+    """The review row, or 404. ``for_update=True`` locks it for the rest of the
+    request's transaction: the edit route uses it so the review bot's predicate
+    stamp (review_bot.consumed_at_predicates) waits for the edit to commit and
+    then matches nothing, instead of landing between the edit's read and write
+    and marking the edited feedback consumed."""
+    stmt = select(AssessmentReview).where(AssessmentReview.id == feedback_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    review = (await db.execute(stmt)).scalar_one_or_none()
     if review is None:
         raise HTTPException(status_code=404, detail="Feedback not found")
     return review
@@ -348,7 +356,7 @@ async def edit_review_feedback(
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    review = await _load_review(db, feedback_id)
+    review = await _load_review(db, feedback_id, for_update=True)
     if review.reviewer_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the author may edit this feedback")
     # The form re-posts every dimension on each edit, so parsing unconditionally

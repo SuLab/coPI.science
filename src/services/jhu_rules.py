@@ -17,7 +17,9 @@ the job session, so a year it derives commits only with a successful run —
 when the job fails, ``process_job`` (``src/worker/main.py``) rolls the session
 back before its failure bookkeeping, and the year goes with it. The 2026-08-13
 curated map (legacy key ``jhu_tenure_start``, keyed by agent_id) is read as a
-fallback.
+fallback. A year the pipeline uses for one run without recording it is kept
+under a separate provisional key (``PROVISIONAL_KEY_PREFIX``) so later exports
+scope the same way; see ``export_tenure_start``.
 """
 
 import json
@@ -26,7 +28,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 TENURE_KEY_PREFIX = "jhu_tenure_start:"
 LEGACY_TENURE_KEY = "jhu_tenure_start"
+
+#: A year the pipeline used "for this run only": derived from papers after a
+#: step-1 failure or with an incomplete corpus, so NOT recorded as the tenure
+#: start, but kept here so every later export scopes the same way the pipeline's
+#: own export did. Deleted by every run that does not write a new one, and by
+#: recording an authoritative year.
+PROVISIONAL_KEY_PREFIX = "jhu_tenure_provisional:"
 
 # Substring patterns (lowercased haystack) and word-bounded acronyms. The
 # acronyms need boundaries: "Jhunjhunwala" contains "jhu".
@@ -161,3 +170,39 @@ async def set_tenure_start(
         index_elements=[AppSetting.key], set_={"value": value}
     )
     await db.execute(stmt)
+    # An authoritative year supersedes any provisional one.
+    await clear_provisional_tenure_start(db, user_id)
+
+
+async def set_provisional_tenure_start(db: AsyncSession, user_id: uuid.UUID, year: int) -> None:
+    """Keep the run-local tenure year for later exports."""
+    value = json.dumps({"year": int(year), "set_at": datetime.now(UTC).isoformat()})
+    stmt = pg_insert(AppSetting).values(key=f"{PROVISIONAL_KEY_PREFIX}{user_id}", value=value)
+    stmt = stmt.on_conflict_do_update(index_elements=[AppSetting.key], set_={"value": value})
+    await db.execute(stmt)
+
+
+async def clear_provisional_tenure_start(db: AsyncSession, user_id: uuid.UUID) -> None:
+    await db.execute(
+        delete(AppSetting).where(AppSetting.key == f"{PROVISIONAL_KEY_PREFIX}{user_id}")
+    )
+
+
+async def export_tenure_start(
+    db: AsyncSession, user_id: uuid.UUID, agent_id: str | None = None,
+) -> int | None:
+    """The year an EXPORT scopes by: the recorded tenure start
+    (``get_tenure_start``), else the provisional year, else None."""
+    year = await get_tenure_start(db, user_id, agent_id=agent_id)
+    if year is not None:
+        return year
+    value = await db.scalar(
+        select(AppSetting.value).where(AppSetting.key == f"{PROVISIONAL_KEY_PREFIX}{user_id}")
+    )
+    if not value:
+        return None
+    try:
+        return int(json.loads(value)["year"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        logger.warning("Unreadable provisional tenure entry for user %s: %r", user_id, value)
+        return None

@@ -35,14 +35,11 @@ Design notes that keep this gate from crying wolf (a noisy gate gets deleted):
 Known false negative, recorded because it is not hypothetical. This gate is static: a
 link counts as a credit if it appears in a reachable template, and nothing here
 evaluates the Jinja condition the link sits under. A control behind a branch that never
-holds is therefore invisible to it. There is a live instance:
-``POST /onboarding/retry`` (src/routers/onboarding.py:256) has exactly one control in
-the app — the "Try Again" form at templates/onboarding/profile_review.html:53 — and it
-sits inside ``{% elif job_status == 'failed' %}``. ``job_status`` is
-``Job.status``, and src/worker/main.py only ever writes 'processing', 'completed',
-'dead' or 'pending'; ``'failed'`` is permitted by the enum (src/models/job.py:28) and
-assigned by nothing in src/. So the retry button is unreachable at runtime while this
-gate reports the route as referenced. Closing it would mean evaluating template
+holds is therefore invisible to it. There was a live instance until 2026-09-29: the
+only "Try Again" control for ``POST /onboarding/retry`` sat inside
+``{% elif job_status == 'failed' %}``, a status nothing in src/ assigns, while the
+worker dead-letters with 'dead'. Spec P0-06 renders 'dead' like 'failed', so that
+control is live now; the static gate's blind spot remains. Closing it would mean evaluating template
 conditions against the values src/ can actually produce — a different and much larger
 analysis, and one that would cry wolf. Left as a false negative on purpose (the same
 trade recorded above: false negatives leave a future orphan, false positives get the

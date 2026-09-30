@@ -13,12 +13,14 @@
         <p class="text-red-800 text-sm">
             {% if error == 'invalid_email' %}Please enter a valid email address.
             {% elif error == 'email_taken' %}That email address is already in use by another account.
+            {% elif error == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% else %}Something went wrong saving your changes. Please try again.{% endif %}
         </p>
     </div>
     {% endif %}
 
     <form method="POST" action="/profile/save" id="profile-form">
+        <input type="hidden" name="profile_version" value="{{ profile.profile_version if profile else '' }}">
 
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-800 mb-4">Basic Information</h2>

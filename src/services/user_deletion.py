@@ -45,7 +45,7 @@ from src.models import (
     ProfileRevision,
     User,
 )
-from src.services.jhu_rules import TENURE_KEY_PREFIX
+from src.services.jhu_rules import PROVISIONAL_KEY_PREFIX, TENURE_KEY_PREFIX
 from src.services.slack_tokens import is_valid_token
 from src.services.slack_web import revoke_token_async
 
@@ -164,7 +164,9 @@ async def delete_user_account(
 
     res = await db.execute(
         sa_delete(AppSetting).where(
-            AppSetting.key == f"{TENURE_KEY_PREFIX}{user.id}"
+            AppSetting.key.in_((
+                f"{TENURE_KEY_PREFIX}{user.id}", f"{PROVISIONAL_KEY_PREFIX}{user.id}",
+            ))
         )
     )
     report.tenure_key_deleted = bool(res.rowcount)

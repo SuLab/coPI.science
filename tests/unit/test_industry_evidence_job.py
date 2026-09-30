@@ -1,4 +1,6 @@
+import httpx
 import pytest
+import respx
 from sqlalchemy import select
 
 from src.models import (
@@ -150,3 +152,36 @@ async def test_rescore_re_reads_tenure_start_when_omitted(db_session):
     await set_tenure_start(u.id, 2018, "manual", db=db_session)
     s = await ie.rescore_user(db_session, u.id)
     assert s.tenure_start_used == 2018
+
+
+@respx.mock
+async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch):
+    from src.services.industry_sources import uspto_inventor
+
+    u = User(orcid="0000-0005-5555-6666", name="No Patents", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    await set_tenure_start(u.id, 2018, "manual", db=db_session)
+    job = Job(type="industry_evidence", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
+    db_session.add(job)
+    await db_session.flush()
+
+    async def none(*a, **k):
+        return []
+
+    async def cf(ids):
+        return set()
+
+    monkeypatch.setattr(ie, "fetch_works_for_pmids", none)
+    monkeypatch.setattr(ie, "fetch_pubmed_records", none)
+    monkeypatch.setattr(ie, "fetch_jhu_industry_trials", none)
+    monkeypatch.setattr(ie, "company_funder_ids", cf)
+    monkeypatch.setattr(
+        "src.services.industry_sources.uspto_inventor.get_settings",
+        lambda: type("S", (), {"uspto_api_key": "k"})(),
+    )
+    respx.post(uspto_inventor.SEARCH_URL).mock(return_value=httpx.Response(404))
+
+    await ie.execute_industry_evidence(job, db_session)  # must not raise
+    progress = [p["step"] for p in (job.payload or {}).get("progress", [])]
+    assert "industry_done" in progress

@@ -82,7 +82,7 @@ from src.services.pi_onboarding import (
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
 )
-from src.services.profile_edit import apply_profile_edits
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_export import export_profile_to_markdown
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.prose_citations import (
@@ -333,6 +333,7 @@ async def manager_edit_pi_profile(
     key_targets: str = Form(""),
     keywords: str = Form(""),
     jhu_tenure_start: str = Form(""),
+    profile_version: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
@@ -350,6 +351,7 @@ async def manager_edit_pi_profile(
         experimental_models=experimental_models, disease_areas=disease_areas,
         key_targets=key_targets, keywords=keywords,
         jhu_tenure_start=jhu_tenure_start,
+        expected_profile_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)

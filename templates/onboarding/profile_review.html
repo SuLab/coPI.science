@@ -20,6 +20,7 @@
             {% if error == 'email_required' %}Please enter your email address — it's required to continue.
             {% elif error == 'invalid_email' %}Please enter a valid email address.
             {% elif error == 'email_taken' %}That email address is already in use by another account.
+            {% elif error == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% else %}Something went wrong saving your changes. Please try again.{% endif %}
         </p>
     </div>
@@ -38,14 +39,17 @@
             {% endfor %}
         </div>
         {% endif %}
+        {% if job and job_status == 'pending' and job.attempts > 0 %}
+        <p class="text-sm text-amber-700 mt-4">This is retrying after a temporary error (attempt {{ job.attempts + 1 }} of {{ job.max_attempts }}).</p>
+        {% endif %}
         <p class="text-sm text-gray-400 mt-4">This page will refresh automatically...</p>
     </div>
     <script>
         setTimeout(function() { location.reload(); }, 5000);
     </script>
 
-    {% elif job_status == 'failed' %}
-    <!-- Pipeline failed -->
+    {% elif job_status == 'failed' or job_status == 'dead' %}
+    <!-- Pipeline failed, or dead after its last retry -->
     <div class="bg-white rounded-xl shadow-sm border border-red-200 p-8 text-center">
         <div class="text-red-500 text-4xl mb-4">⚠️</div>
         <h2 class="text-xl font-semibold text-gray-800 mb-2">Profile Generation Failed</h2>
@@ -73,6 +77,7 @@
         </p>
 
         <form method="POST" action="/onboarding/save-profile" id="profile-form">
+        <input type="hidden" name="profile_version" value="{{ profile.profile_version if profile else '' }}">
             <!-- Email (required) -->
             <div class="mb-6">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Email <span class="text-red-500">*</span></label>

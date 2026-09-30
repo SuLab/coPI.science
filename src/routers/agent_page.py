@@ -27,6 +27,7 @@ from src.models import (
     User,
 )
 from src.services.agent_identity import derive_agent_identity
+from src.services.profile_edit import parse_expected_version, write_profile_text_fields
 from src.services.profile_export import export_profile_to_markdown
 from src.services.validators import is_valid_email
 
@@ -1044,6 +1045,7 @@ async def save_public_profile(
     disease_areas: str = Form(""),
     key_targets: str = Form(""),
     keywords: str = Form(""),
+    profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1076,17 +1078,19 @@ async def save_public_profile(
         # FROM-clause entry for table researcher_profiles").
         await db.flush()
 
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
-    # SQL-side increment: the Python read-modify-write lost updates when two
-    # writers raced (issue #22 C1). Nothing below reads profile_version, so the
-    # expiry the expression assignment causes needs no refresh here.
-    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
-
+    written = await write_profile_text_fields(db, profile, {
+        "research_summary": research_summary,
+        "techniques": _parse_list(techniques),
+        "experimental_models": _parse_list(experimental_models),
+        "disease_areas": _parse_list(disease_areas),
+        "key_targets": _parse_list(key_targets),
+        "keywords": _parse_list(keywords),
+    }, parse_expected_version(profile_version))
+    if not written:
+        await db.rollback()
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/public-profile/edit?error=profile_changed", status_code=302,
+        )
     await db.commit()
 
     # Export to markdown for agent consumption (tenure-scoped publications)

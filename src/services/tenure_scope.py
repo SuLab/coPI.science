@@ -46,7 +46,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AppSetting, Publication
-from src.services.jhu_rules import LEGACY_TENURE_KEY, TENURE_KEY_PREFIX
+from src.services.jhu_rules import LEGACY_TENURE_KEY, TENURE_KEY_PREFIX, export_tenure_start
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +316,13 @@ async def scoped_publications_for_export(
     (audit H3), and the engine reloads that file within one main-loop tick.
     """
     scoped = await scoped_publications_for(db, user_id, agent_id)
+    if scoped.tenure_start is None:
+        # No recorded year: fall back to the pipeline's provisional one, so this
+        # export scopes exactly as the pipeline's last export did. With no
+        # provisional key this is None and nothing changes.
+        provisional = await export_tenure_start(db, user_id, agent_id)
+        if provisional is not None:
+            scoped = partition_publications(scoped.publications, provisional)
     return TenureScopedPublications(
         publications=tuple(scoped.publications), tenure_start=scoped.tenure_start
     )

@@ -12,10 +12,12 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import USER_ROLE_PI, AgentRegistry, Job, User
+from src.models import USER_ROLE_PI, AgentRegistry, User
 from src.services.agent_identity import derive_agent_identity
 from src.services.jhu_rules import derive_employment_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
+from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.user_email import assign_user_email
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 
 
 async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
-    """Create a PI User + enqueue a generate_profile Job for one ORCID iD.
+    """Create a PI User + enqueue its generate_profile job (src/services/profile_jobs.py) for one ORCID iD.
 
     Unlike admin's impersonate flow (which reuses an existing User of any
     role silently), this is an explicit creation action (D6): it raises if
@@ -58,13 +60,14 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     user = User(
         orcid=orcid,
         name=profile_data.get("name", orcid),
-        email=profile_data.get("email"),
         institution=profile_data.get("institution"),
         department=profile_data.get("department"),
         user_role=USER_ROLE_PI,
     )
     db.add(user)
     await db.flush()
+    if profile_data.get("email"):
+        await assign_user_email(db, user, profile_data["email"])
 
     tenure_year = derive_employment_start(profile_data.get("employments") or [])
     if tenure_year is not None:
@@ -73,12 +76,7 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
             "Tenure start %d (orcid_employment) recorded for %s", tenure_year, orcid
         )
 
-    job = Job(
-        type="generate_profile",
-        user_id=user.id,
-        payload={"user_id": str(user.id), "orcid": orcid},
-    )
-    db.add(job)
+    await enqueue_profile_job_if_absent(db, user)
     return user
 
 

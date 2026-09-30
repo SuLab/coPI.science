@@ -31,7 +31,7 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
     """Create user record and optionally enqueue profile generation for one ORCID."""
     from sqlalchemy import select
 
-    from src.models import Job, User
+    from src.models import User
     from src.services.orcid import fetch_orcid_profile
 
     engine, factory = await _get_db()
@@ -54,22 +54,25 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
             user = User(
                 orcid=orcid,
                 name=profile_data.get("name", orcid),
-                email=profile_data.get("email"),
                 institution=profile_data.get("institution"),
                 department=profile_data.get("department"),
             )
             db.add(user)
             await db.flush()
+            if profile_data.get("email"):
+                from src.services.user_email import assign_user_email
+
+                await assign_user_email(db, user, profile_data["email"])
             console.print(f"[green]Created user: {user.name} ({orcid})[/green]")
 
         if run_pipeline:
-            job = Job(
-                type="generate_profile",
-                user_id=user.id,
-                payload={"user_id": str(user.id), "orcid": orcid},
-            )
-            db.add(job)
-            console.print(f"[green]Enqueued profile generation job for {user.name}[/green]")
+            from src.services.profile_jobs import enqueue_profile_job_if_absent
+
+            job = await enqueue_profile_job_if_absent(db, user)
+            if job is None:
+                console.print(f"[yellow]{user.name} is a manager, reviewer or denied account — no profile job[/yellow]")
+            else:
+                console.print(f"[green]Profile generation job queued for {user.name}[/green]")
 
         await db.commit()
     await engine.dispose()
@@ -247,23 +250,22 @@ def regenerate_profiles():
     async def _regenerate():
         from sqlalchemy import select
 
-        from src.models import Job, User
+        from src.models import User
+        from src.services.profile_jobs import enqueue_profile_job_if_absent
         engine, factory = await _get_db()
         async with factory() as db:
             result = await db.execute(select(User).where(User.orcid.isnot(None)))
             users = result.scalars().all()
             count = 0
             for user in users:
-                job = Job(
-                    type="generate_profile",
-                    user_id=user.id,
-                    payload={"user_id": str(user.id), "orcid": user.orcid},
-                )
-                db.add(job)
+                job = await enqueue_profile_job_if_absent(db, user)
+                if job is None:
+                    console.print(f"[yellow]Skipped {user.name} ({user.orcid}): no research profile[/yellow]")
+                    continue
                 count += 1
-                console.print(f"[green]Enqueued regeneration for {user.name} ({user.orcid})[/green]")
+                console.print(f"[green]Regeneration queued (or already pending) for {user.name} ({user.orcid})[/green]")
             await db.commit()
-            console.print(f"\n[bold green]Enqueued {count} profile regeneration jobs.[/bold green]")
+            console.print(f"\n[bold green]{count} profile regeneration job(s) queued or already pending.[/bold green]")
         await engine.dispose()
 
     _run(_regenerate())
