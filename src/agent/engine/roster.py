@@ -123,7 +123,8 @@ class Roster:
         Adds agents that have just been activated (and have a usable token) and
         removes agents that have been inactivated/suspended — all without a
         process restart. Tokens are read from the DB row (falling back to .env),
-        so a freshly provisioned token is picked up on the next tick too.
+        so a freshly provisioned or changed token is picked up on the next tick
+        too (a client is rebuilt only when its resolved token differs).
 
         Mutates self.agents / self.slack_clients IN PLACE — never reassigned —
         in case anything else in the engine has taken a reference to either dict.
@@ -168,8 +169,12 @@ class Roster:
             if self.slack_enabled:
                 for aid in self.agents:
                     r = desired.get(aid)
-                    if r is None or aid in self.slack_clients:
+                    if r is None:
                         continue
+                    # PS-6: resolve exactly as clients are built (main.py's
+                    # `_token_for`): the DB token when valid, else the env token.
+                    # Comparing the RAW column instead would rebuild every
+                    # env-token client on every poll.
                     token = (
                         r.slack_bot_token
                         if is_valid_token(r.slack_bot_token)
@@ -177,16 +182,21 @@ class Roster:
                     )
                     if not is_valid_token(token):
                         continue  # still tokenless — retry on a later tick
+                    existing = self.slack_clients.get(aid)
+                    if existing is not None and getattr(existing, "bot_token", None) == token:
+                        continue
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
                     if not await asyncio.to_thread(client.connect):
                         logger.warning(
-                            "[roster] Slack connect failed adopting %s — will retry", aid,
+                            "[roster] Slack connect failed %s %s — will retry",
+                            "re-keying" if existing is not None else "adopting", aid,
                         )
                         continue
                     self.slack_clients[aid] = client
                     logger.info(
-                        "[roster] Adopted Slack client for %s (token provisioned "
-                        "after startup)", aid,
+                        "[roster] %s Slack client for %s",
+                        "Rebuilt (token changed)" if existing is not None
+                        else "Adopted (token provisioned after startup)", aid,
                     )
 
             current = set(self.agents)

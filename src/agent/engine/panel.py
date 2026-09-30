@@ -41,6 +41,7 @@ class Panel:
         "_panel_notes_posted",
         "_panel_notes_clipped",
         "_panel_note_clip_warned",
+        "_consults_seeded",
     )
 
     def __init__(self, ctx: EngineContext, *, slack_io: SlackIO) -> None:
@@ -68,6 +69,10 @@ class Panel:
         # post-restart verdict silently inflated the clean-panel count. It is
         # now recorded as the third state, `missing_domains=[]` — unverified.
         self._specialist_consults: dict[tuple[str, str | None], set[str]] = {}
+
+        # (subject, thread_id) keys whose specialist_consults rows this process
+        # has already merged into the map (S2-03): the seed runs once per key.
+        self._consults_seeded: set[tuple[str, str | None]] = set()
 
         # verdict_signal -> count, for the whole run. The panel returned caution
         # or blocking on 142/142 consults in run 1787010946 and never once
@@ -352,8 +357,8 @@ class Panel:
     async def _seed_consults_from_db(
         self, verdict: dict, thread: ThreadState | None,
     ) -> None:
-        """Rehydrate this interview's consult record from ``specialist_consults``
-        when memory holds nothing for it.
+        """Merge this interview's ``specialist_consults`` rows into the in-memory
+        consult record, once per interview per process.
 
         The floor's in-memory map dies with the process, so before this every
         verdict written after a restart was UNVERIFIABLE — stored with
@@ -364,10 +369,15 @@ class Panel:
 
         Deliberately ADDITIVE and narrow:
 
-        * Only when ``self._consulted_domains(subject, thread)`` is EMPTY. A
-          process that recorded anything for this interview stays authoritative
-          for it — memory is written on the success path itself and cannot be
-          behind a committed row that path also wrote.
+        * Once per (subject, thread) per process, whatever memory holds
+          (S2-03): a restart mid-interview leaves memory holding only the
+          consults made since, and ignoring the table then would undercount the
+          panel. The merge is additive; on the normal path memory already holds
+          every committed row (it is written on the same success path), so
+          nothing is added and ``floor_armed`` is not touched — the floor is
+          armed here only when the table contributed a domain memory lacked,
+          which is exactly the restart case. A failed SELECT returns before the
+          key is recorded, so the next verdict retries.
         * Only for a verdict that owes a panel at all, asked through
           ``panel_is_owed`` — the SAME question ``_specialist_floor_gap`` asks,
           on the same two inputs (the model's recommendation and the COMPUTED
@@ -419,7 +429,8 @@ class Panel:
         if not self.session_factory or not self.simulation_run_id:
             return
         thread_id = thread.thread_id if thread is not None else None
-        if self._consulted_domains(subject, thread_id):
+        key = (subject, thread_id)
+        if key in self._consults_seeded:
             return
         from sqlalchemy import select as sa_select
 
@@ -443,19 +454,19 @@ class Panel:
                 subject, thread_id or "?", exc, exc_info=True,
             )
             return
-        if not domains:
+        self._consults_seeded.add(key)
+        held = self._specialist_consults.setdefault(key, set())
+        new = set(domains) - held
+        if not new:
             return
-        self._specialist_consults.setdefault((subject, thread_id), set()).update(domains)
+        held.update(new)
         if thread is not None:
-            # The latch's own rule (`floor_armed or bool(_specialist_consults)`)
-            # re-applied to the map as the seed above just left it — not a live
-            # read of anything another task may be doing. See the docstring.
             thread.floor_armed = True
         logger.info(
-            "[specialists] floor rehydrated %d recorded consult(s) for %r "
-            "(thread %s) from specialist_consults — this verdict is checkable "
-            "even though the map was empty (restarted mid-interview?)",
-            len(set(domains)), subject, thread_id or "?",
+            "[specialists] floor merged %d recorded consult(s) for %r (thread %s) "
+            "from specialist_consults that this process had not seen "
+            "(restarted mid-interview?)",
+            len(new), subject, thread_id or "?",
         )
 
     def _record_consult(

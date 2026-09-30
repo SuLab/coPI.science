@@ -94,6 +94,23 @@ class Memory:
                 drained += 1
         return drained
 
+    async def _still_on_roster(self, agent_id: str) -> bool:
+        """AG-13: is the agent still on the live roster (``active_roster_select``)?
+        Checked after the model call, because a deactivation or user deletion can
+        land during it. No user-link check: the hub has none and still gets
+        memory updates. A failed read keeps today's behaviour (write)."""
+        if not self.session_factory:
+            return True
+        from src.agent.roster_query import active_roster_select
+
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(active_roster_select())).all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[memory] roster re-check failed (%s); writing anyway", exc)
+            return True
+        return any(r.agent_id == agent_id for r in rows)
+
     async def _update_agent_memory(
         self,
         agent: Agent,
@@ -203,6 +220,12 @@ Keep it concise — under 300 words.""",
                 return
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
+                return
+            if not await self._still_on_roster(agent.agent_id):
+                logger.info(
+                    "[%s] Memory update skipped: the agent left the live roster "
+                    "during the update (deactivated or deleted)", agent.agent_id,
+                )
                 return
             agent.update_working_memory_file(
                 response, visibility=visibility, channel_id=channel_id,

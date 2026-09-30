@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from src.models import ResearcherProfile, User
+from src.services.fs import atomic_write_text
 from src.services.tenure_scope import TenureScopedPublications
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ def export_profile_to_markdown(
     path = PROFILES_DIR / f"{agent_id}.md"
     try:
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines))
         logger.info("Exported profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
