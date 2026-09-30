@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.agent.agent import Agent
 from src.agent.engine.constants import _ROW_LEVEL_DB_ERRORS
@@ -35,15 +38,7 @@ from src.agent.engine.sidecar import (
 from src.agent.specialists import panel_is_owed
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
-from src.models import (
-    AssessmentDrop,
-    AssessmentReview,
-    AssessmentReviewAssignment,
-    AssessmentReviewEvent,
-    Job,
-    OpportunityAssessment,
-    PromptChangeSuggestion,
-)
+from src.models import AssessmentDrop, OpportunityAssessment
 from src.services.assessment_detail import (
     KEY_POINT_ACCEPTED_KEYS,
     LEGACY_KEY_POINT_GROUPS,
@@ -70,6 +65,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger("src.agent.simulation")
 
 
+class UpsertResult(NamedTuple):
+    """What ``Verdicts.upsert`` did with one verdict (spec §8.1)."""
+
+    outcome: str  # "inserted" | "updated" | "already_applied" | "stale"
+    assessment_id: uuid.UUID
+
+
+_SUPERSEDE_DETAIL = (
+    "verdict from message ordinal {old} superseded by the interview's "
+    "concluding verdict at ordinal {new}; one interview yields one assessment, "
+    "and the later verdict is the better-informed one"
+)
+_STALE_DETAIL = (
+    "queued verdict from message ordinal {new} arrived after the verdict from "
+    "ordinal {old} had landed; the newer verdict is kept"
+)
+#: Columns the in-place UPDATE never writes from the new verdict: the key, the
+#: announcement stamps (coalesced so a set stamp is never overwritten) and the
+#: three 0054 columns (set explicitly).
+_UPSERT_NOT_COPIED = frozenset({
+    "id", "simulation_run_id", "thread_id", "summary_posted_at", "summary_claimed_at",
+    "verdict_revision", "verdict_write_id", "verdict_ordinal",
+})
+
+
 class Verdicts:
     """The verdict store: what each interview concluded, held or queued for a retry.
 
@@ -87,7 +107,7 @@ class Verdicts:
     _recover_rows_individually = via("_persistence")
     _report_flush_failure = via("_persistence")
 
-    OWNED_STATE: tuple[str, ...] = ("_assessed_threads", "_pending_assessments")
+    OWNED_STATE: tuple[str, ...] = ("_assessed_threads", "_pending_assessments", "_landed_write_ids")
 
     def __init__(
         self,
@@ -100,6 +120,11 @@ class Verdicts:
         self.ctx = ctx
         self._persistence = persistence
         self._panel = panel
+        # Write ids this process has landed. The ordinal rule (step 5) orders only
+        # this process's own writes: a resume rebuilds message_count from the
+        # history, so ordinals from an earlier process are not comparable, and a
+        # row an earlier process landed is always superseded, as before 0054.
+        self._landed_write_ids: set[uuid.UUID] = set()
         self._headlines = headlines
         # Threads whose interview has already produced a verdict, so a second
         # `<assessment_json>` sidecar on the same thread cannot become a second
@@ -114,8 +139,9 @@ class Verdicts:
         # a same-turn re-capture is still refused as a duplicate, but a strictly
         # later reply that concludes or closes the interview supersedes a
         # provisional earlier verdict instead of being turned away by it — the
-        # earlier row is then retired (`_retire_superseded_verdict`) so the
-        # one-interview-one-assessment invariant still holds.
+        # interview's one row is updated in place (`upsert`, keyed by run and
+        # thread since migration 0055) so the one-interview-one-assessment
+        # invariant still holds.
         #
         # Process-local on purpose. It is the same scope as the duplicates it
         # prevents (every observed one came from a single process). A restart
@@ -213,6 +239,8 @@ class Verdicts:
                 # or closes the interview. Read before the write, because the
                 # write overwrites this slot.
                 superseded = self._assessed_threads.get(thread.thread_id)
+                write_id = uuid.uuid4()
+                ordinal = thread.message_count + 1
                 # The model is asked for `subject_agent_id` in the sidecar,
                 # but unlike Phase 5's standalone post, a Phase-4 CONCLUDE
                 # reply always has a real interview thread behind it — the PI
@@ -223,7 +251,7 @@ class Verdicts:
                 held, replacement_id = await self._persist_assessment(
                     agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
                     subject_agent_id_fallback=thread.other_agent_id,
-                    thread=thread,
+                    thread=thread, write_id=write_id, ordinal=ordinal,
                 )
                 if held:
                     terminal = self._verdict_is_terminal(
@@ -238,7 +266,7 @@ class Verdicts:
                     )
                     announce = terminal and not already_announced
                     self._assessed_threads[thread.thread_id] = _HeldVerdict(
-                        ordinal=thread.message_count + 1,
+                        ordinal=ordinal,
                         # `final` is CLOSED, not merely concluding — see
                         # `_HeldVerdict`. A CONCLUDE ordinal can repeat.
                         final=closes_thread,
@@ -248,11 +276,10 @@ class Verdicts:
                     # A queued replacement is never claimed at capture (spec
                     # P0-08, SA6-01). With `replacement_id is None` the verdict is
                     # only on `_pending_assessments`, so a by-thread claim here
-                    # would stamp the SUPERSEDED sibling still in the database;
-                    # the retire below deletes that row and its stamp, and a
-                    # resume would announce again. The close path and the stop
-                    # sweep (which runs after the final assessment flush) post it
-                    # once the row exists.
+                    # would stamp the row still holding the SUPERSEDED verdict
+                    # before the new one has landed on it. The close path and the
+                    # stop sweep (which runs after the final assessment flush)
+                    # post it once the row is written.
                     queued_only = replacement_id is None and bool(
                         self.session_factory and self.simulation_run_id
                     )
@@ -303,17 +330,10 @@ class Verdicts:
                             agent.agent_id, thread.other_agent_id or "?",
                             thread.message_count + 1,
                         )
-                    # Retire the earlier row only once its replacement is
-                    # actually HELD — never leave the interview with neither. The
-                    # retire carries the retired rows' headline stamp and claim
-                    # onto the replacement in the same transaction (spec P0-08),
-                    # so an announced interview stays announced across a restart.
-                    if superseded is not None:
-                        await self._retire_superseded_verdict(
-                            agent.agent_id, thread, superseded,
-                            replacement_ordinal=thread.message_count + 1,
-                            replacement_id=replacement_id,
-                        )
+                    # §8.1: no retire. The row was updated in place, and the
+                    # UPDATE keeps `summary_posted_at`/`summary_claimed_at`, so a
+                    # verdict whose interview was already announced stays
+                    # announced — the carry-forward of spec §8.2.
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 await self._record_unusable_sidecar(agent, thread, raw_response)
         except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
@@ -430,6 +450,7 @@ class Verdicts:
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
         *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
+        write_id: uuid.UUID | None = None, ordinal: int | None = None,
     ) -> tuple[bool, uuid.UUID | None]:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
@@ -442,12 +463,15 @@ class Verdicts:
         thread has had its one verdict; a queued row counts, because letting a
         second verdict through while the first is still queued lands BOTH.
 
-        ``assessment_id`` is the row's pre-generated primary key when the write
-        actually committed, and ``None`` in the other two cases (no database;
-        queued for a later retry) — a buffered row is not yet a real FK target,
-        so ``_retire_superseded_verdict`` cannot re-point a superseded
-        verdict's human-review rows onto it until a later flush lands it for
-        real.
+        ``assessment_id`` is the row's primary key when the write committed
+        (inserted, updated in place, or already applied), and ``None`` when the
+        verdict was queued for a retry or arrived stale. Since §8.1 there is one
+        row per (run, thread): a later verdict updates it in place (``upsert``),
+        so no review row is ever re-pointed or deleted.
+
+        ``write_id`` and ``ordinal`` default to a fresh id and
+        ``thread.message_count + 1``; a queued retry carries the same pair, so a
+        late flush can never overwrite a newer verdict.
 
         ``slack_ts`` is the canonical post id ``_post_message`` returned for
         the post/reply the verdict came from (F7) — the row's link back to
@@ -497,6 +521,253 @@ class Verdicts:
         out of it (and regardless of ``subject_agent_id_fallback``), so
         nothing is ever lost to — or invented by — a decision made here.
         """
+        assessment_kwargs = await self._assessment_row(
+            agent_id, channel, verdict, slack_ts,
+            subject_agent_id_fallback=subject_agent_id_fallback, thread=thread,
+        )
+        if assessment_kwargs is None:
+            logger.debug(
+                "[%s] Skipping assessment persistence — no database configured",
+                agent_id,
+            )
+            return False, None
+        if write_id is None:
+            write_id = uuid.uuid4()
+        if ordinal is None and thread is not None:
+            ordinal = thread.message_count + 1
+        # Pre-generated so a buffered row carries a FIXED id from the moment it
+        # is built: a NULL-thread retry whose previous attempt reached the server
+        # surfaces as a PK violation (an `unwritable_row` drop) instead of landing
+        # a second row. A threaded verdict is deduplicated by `write_id` instead.
+        assessment_kwargs["id"] = uuid.uuid4()
+        thread_id = assessment_kwargs.get("thread_id")
+        if thread_id is not None:
+            await self._prune_queued_for_thread(agent_id, thread_id)
+        try:
+            result = await self.upsert(thread, assessment_kwargs, write_id, ordinal)
+        except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
+            # This row is the actual product of the screening pipeline. Queue it
+            # for retry (drained by _flush_pending_assessments on the same
+            # cadence as _pending_persist/_llm_log_buffer — see _run_main_loop
+            # and stop()) instead of dropping it. Still loud: a pool-checkout
+            # timeout on the FIRST attempt is worth an ERROR + traceback even
+            # though it is recoverable.
+            self._pending_assessments.append({
+                **assessment_kwargs,
+                "verdict_write_id": write_id,
+                "verdict_ordinal": ordinal,
+            })
+            logger.error(
+                "[%s] Failed to persist assessment on first attempt, queued "
+                "for retry: %s",
+                agent_id, exc, exc_info=True,
+            )
+            return True, None
+        if result.outcome == "stale":
+            logger.warning(
+                "[%s] Assessment for thread %s arrived stale (ordinal %s) and was "
+                "recorded as a drop; the newer stored verdict stands",
+                agent_id, thread_id, ordinal,
+            )
+            return False, None
+        logger.info(
+            "[%s] Assessment stored: %s -> %s (%s, %s)",
+            agent_id, assessment_kwargs.get("subject_agent_id") or "?",
+            assessment_kwargs.get("recommendation") or "?",
+            assessment_kwargs.get("weighted_score"), assessment_kwargs.get("band"),
+        )
+        return True, result.assessment_id
+
+    async def _prune_queued_for_thread(self, agent_id: str, thread_id: str) -> None:
+        """S2-09: a new verdict for a thread first removes any verdict for the
+        same thread still on the retry queue, recording each as a
+        ``duplicate_thread_verdict`` drop with its raw verdict — even when the
+        new verdict's own write then succeeds (SA3-15)."""
+        queued = [r for r in self._pending_assessments if r.get("thread_id") == thread_id]
+        if not queued:
+            return
+        self._pending_assessments[:] = [
+            r for r in self._pending_assessments if r.get("thread_id") != thread_id
+        ]
+        for row in queued:
+            await self._record_assessment_drop(
+                agent_id, "duplicate_thread_verdict",
+                subject_agent_id=row.get("subject_agent_id"),
+                thread_id=thread_id,
+                detail=(
+                    f"queued verdict from message ordinal {row.get('verdict_ordinal')} "
+                    "was replaced by a newer verdict before it landed"
+                ),
+                raw_verdict=row.get("raw_verdict"),
+            )
+
+    async def _insert_if_absent(self, db, new_id: uuid.UUID, values: dict) -> uuid.UUID | None:
+        """``INSERT ... ON CONFLICT (run, thread) DO NOTHING`` at revision 1;
+        the new id, or ``None`` when the interview already has its row."""
+        insert_values = {k: v for k, v in values.items() if k != "verdict_revision"}
+        return (await db.execute(
+            pg_insert(OpportunityAssessment)
+            .values(id=new_id, verdict_revision=1, **insert_values)
+            .on_conflict_do_nothing(index_elements=["simulation_run_id", "thread_id"])
+            .returning(OpportunityAssessment.id)
+        )).scalar_one_or_none()
+
+    async def _upsert_in(self, db, row: dict) -> UpsertResult:
+        """Steps 1-6 of the §8.1 write protocol inside ``db``'s transaction.
+
+        ``row`` is a fully built ``opportunity_assessments`` row carrying
+        ``verdict_write_id`` and ``verdict_ordinal``. Never commits; the caller
+        does (step 7).
+
+        1. A NULL-thread verdict is a plain INSERT: NULL threads never conflict.
+        2. Otherwise INSERT ... ON CONFLICT (simulation_run_id, thread_id) DO
+           NOTHING with revision 1; an inserted row is done.
+        3. Otherwise lock the existing row FOR NO KEY UPDATE, which a concurrent
+           review or chat-turn FK insert does not wait on (C24). A row deleted
+           in the meantime is inserted afresh.
+        4. The same write id is a retry whose acknowledgement was lost: done.
+        5. A lower incoming ordinal is stale when the landed row is one THIS
+           process wrote: keep the newer verdict and record the incoming one as a
+           ``duplicate_thread_verdict`` drop (C23), once. A row an earlier process
+           landed is always superseded (ordinals restart on a resume; B25).
+        6. Otherwise record the current verdict as a drop, then UPDATE every
+           column a replacement row would carry, ``created_at = now()``,
+           revision + 1, and the new write id and ordinal. The announcement
+           stamps are kept (COALESCE), so an announced interview stays
+           announced: the carry-forward of spec §8.2.
+        """
+        values = {k: v for k, v in row.items() if k != "id"}
+        new_id = row.get("id") or uuid.uuid4()
+        write_id = values.get("verdict_write_id")
+        ordinal = values.get("verdict_ordinal")
+        if values.get("thread_id") is None:
+            db.add(OpportunityAssessment(id=new_id, verdict_revision=1, **{
+                k: v for k, v in values.items() if k != "verdict_revision"
+            }))
+            await db.flush()
+            return UpsertResult("inserted", new_id)
+        inserted = await self._insert_if_absent(db, new_id, values)
+        if inserted is not None:
+            self._note_landed(write_id)
+            return UpsertResult("inserted", inserted)
+        current = (await db.execute(
+            select(
+                OpportunityAssessment.id,
+                OpportunityAssessment.verdict_write_id,
+                OpportunityAssessment.verdict_ordinal,
+                OpportunityAssessment.raw_verdict,
+            )
+            .where(
+                OpportunityAssessment.simulation_run_id == values["simulation_run_id"],
+                OpportunityAssessment.thread_id == values["thread_id"],
+            )
+            .with_for_update(key_share=True)
+        )).one_or_none()
+        if current is None:
+            # Deleted between the conflict and the lock: the slot is free again.
+            inserted = await self._insert_if_absent(db, new_id, values)
+            if inserted is None:
+                raise RuntimeError(
+                    f"assessment row for thread {values['thread_id']} vanished "
+                    "and reappeared during upsert"
+                )
+            self._note_landed(write_id)
+            return UpsertResult("inserted", inserted)
+        if write_id is not None and current.verdict_write_id == write_id:
+            return UpsertResult("already_applied", current.id)
+        landed = current.verdict_ordinal or 0
+        incoming = ordinal or 0
+        drop_common = dict(
+            simulation_run_id=values["simulation_run_id"],
+            agent_id=values["agent_id"],
+            subject_agent_id=values.get("subject_agent_id") or None,
+            thread_id=values["thread_id"],
+            reason="duplicate_thread_verdict",
+        )
+        if landed > incoming and current.verdict_write_id in self._landed_write_ids:
+            await self._record_stale_once(db, drop_common, values.get("raw_verdict"), incoming, landed)
+            return UpsertResult("stale", current.id)
+        db.add(AssessmentDrop(
+            **drop_common,
+            detail=_SUPERSEDE_DETAIL.format(old=landed, new=incoming),
+            raw_verdict=current.raw_verdict,
+        ))
+        await db.flush()
+        set_ = {k: v for k, v in values.items() if k not in _UPSERT_NOT_COPIED}
+        for stamp in ("summary_posted_at", "summary_claimed_at"):
+            if values.get(stamp) is not None:
+                set_[stamp] = func.coalesce(getattr(OpportunityAssessment, stamp), values[stamp])
+        await db.execute(
+            update(OpportunityAssessment)
+            .where(OpportunityAssessment.id == current.id)
+            .values(
+                **set_,
+                created_at=func.now(),
+                verdict_revision=func.coalesce(OpportunityAssessment.verdict_revision, 1) + 1,
+                verdict_write_id=write_id,
+                verdict_ordinal=ordinal,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        self._note_landed(write_id)
+        return UpsertResult("updated", current.id)
+
+    def _note_landed(self, write_id: uuid.UUID | None) -> None:
+        if write_id is not None:
+            self._landed_write_ids.add(write_id)
+
+    async def _record_stale_once(
+        self, db, drop_common: dict, raw_verdict: dict | None, incoming: int, landed: int,
+    ) -> None:
+        """Record a stale queued verdict as a drop, unless the same raw verdict is
+        already recorded for this interview: a lost-ack retry of a stale write
+        must not add a second drop (correction 12)."""
+        existing = (await db.execute(
+            select(AssessmentDrop.id).where(
+                AssessmentDrop.simulation_run_id == drop_common["simulation_run_id"],
+                AssessmentDrop.thread_id == drop_common["thread_id"],
+                AssessmentDrop.reason == "duplicate_thread_verdict",
+                AssessmentDrop.raw_verdict == raw_verdict,
+            ).limit(1)
+        )).first()
+        if existing is None:
+            db.add(AssessmentDrop(
+                **drop_common,
+                detail=_STALE_DETAIL.format(new=incoming, old=landed),
+                raw_verdict=raw_verdict,
+            ))
+        await db.flush()
+
+    async def upsert(
+        self, thread: ThreadState | None, verdict: dict, write_id: uuid.UUID,
+        ordinal: int | None,
+    ) -> UpsertResult:
+        """Write one verdict under the §8.1 protocol and commit (step 7).
+
+        ``verdict`` is the fully built row (``_assessment_row``'s kwargs).
+        Raises on a database error; the caller queues the row with the same
+        ``write_id`` and ``ordinal`` so a late flush can never overwrite a newer
+        verdict (step 5)."""
+        row = {
+            **verdict,
+            "thread_id": (thread.thread_id if thread is not None else None) or None,
+            "verdict_write_id": write_id,
+            "verdict_ordinal": ordinal,
+        }
+        async with self.session_factory() as db:
+            result = await self._upsert_in(db, row)
+            await db.commit()
+        return result
+
+    async def _assessment_row(
+        self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
+        *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
+    ) -> dict | None:
+        """Build the ``opportunity_assessments`` row for one verdict — exactly the
+        kwargs ``_persist_assessment`` has always written (seed, floor, warnings,
+        normalisation). ``None`` when the engine has no database. Split out of
+        ``_persist_assessment`` so the §8.1 equality test can compute "today's
+        replacement row" for a sequence."""
         subject_view, gap, floor_verifiable = await self._panel_floor_findings(
             agent_id, verdict, subject_agent_id_fallback, thread,
         )
@@ -505,11 +776,7 @@ class Verdicts:
         # this is a silent no-op, matching every other run-scoped write in
         # this class (e.g. _close_thread above, :2823 in the class).
         if not self.session_factory or not self.simulation_run_id:
-            logger.debug(
-                "[%s] Skipping assessment persistence — no database configured",
-                agent_id,
-            )
-            return False, None
+            return None
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
         computed_score, computed_band = self._computed_score_and_band(verdict)
@@ -545,7 +812,7 @@ class Verdicts:
         normalized_key_points = self._normalized_key_points(agent_id, key_points)
         self._warn_bullet_fields_shape(agent_id, verdict)
         _rationales = self._normalized_dimension_rationales(agent_id, verdict, scores)
-        assessment_kwargs = self._assessment_kwargs(
+        return self._assessment_kwargs(
             agent_id=agent_id, channel=channel, verdict=verdict, slack_ts=slack_ts,
             thread=thread, subject_agent_id=subject_agent_id,
             funnel_stage=funnel_stage, recommendation=recommendation,
@@ -555,47 +822,6 @@ class Verdicts:
             normalized_key_points=normalized_key_points, _rationales=_rationales,
             gap=gap, floor_verifiable=floor_verifiable, panel_owed=panel_owed,
         )
-        # Pre-generated rather than left to the column's Python-side default:
-        # a buffered row (queued below on a failed first attempt) now carries a
-        # FIXED id from the moment it is built. Deliberate retry-semantics
-        # change: a retry whose PREVIOUS attempt actually reached the server
-        # before failing (e.g. the commit succeeded but the ack was lost) now
-        # surfaces as a PK violation -> an `unwritable_row` drop, instead of
-        # silently landing a second row under a fresh id and duplicating the
-        # verdict — an improvement on this, the engine's most protected write
-        # path. It is also what lets `_retire_superseded_verdict` re-point a
-        # superseded verdict's human-review rows onto the row that will hold
-        # this verdict once it actually commits.
-        assessment_kwargs["id"] = uuid.uuid4()
-        try:
-            async with self.session_factory() as db:
-                db.add(OpportunityAssessment(**assessment_kwargs))
-                await db.commit()
-            logger.info(
-                "[%s] Assessment stored: %s -> %s (%s, %s)",
-                agent_id, subject_agent_id or "?",
-                recommendation or "?", computed_score, computed_band,
-            )
-            return True, assessment_kwargs["id"]
-        except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
-            # This row is the actual product of the screening pipeline, and
-            # unlike _close_thread/_record_assessment_drop it is fully built
-            # before this point with nothing else in-process reading it back
-            # immediately — the same shape as _pending_persist/
-            # _llm_log_buffer. Queue it for retry (drained by
-            # _flush_pending_assessments on the same cadence as those two —
-            # see _run_main_loop and stop()) instead of dropping it. Still
-            # loud: a pool-checkout timeout on the FIRST attempt is worth an
-            # ERROR + traceback even though it is now recoverable, so an
-            # operator sees the pool pressure immediately rather than only if
-            # the retry also fails.
-            self._pending_assessments.append(assessment_kwargs)
-            logger.error(
-                "[%s] Failed to persist assessment on first attempt, queued "
-                "for retry: %s",
-                agent_id, exc, exc_info=True,
-            )
-            return True, None
 
     async def _panel_floor_findings(
         self, agent_id: str, verdict: dict, subject_agent_id_fallback: str | None,
@@ -1117,8 +1343,8 @@ class Verdicts:
         at all that run.
 
         The "wait for a better-informed turn" instinct behind the old refusal is
-        right and is now served by ``_retire_superseded_verdict`` — which landed
-        in the SAME commit as the refusal it makes unnecessary. Last write wins,
+        right and is now served by ``upsert``, which landed in the SAME commit as the
+        refusal it makes unnecessary. Last write wins,
         so a later turn still overrides an earlier one; the difference is that
         the interview is never left with nothing when that later turn does not
         come.
@@ -1164,392 +1390,9 @@ class Verdicts:
             # answers, more consults), so it is better-informed by construction —
             # which is the same argument the old `premature_sidecar` arm used to
             # justify DESTROYING the early one, applied in the direction that
-            # keeps data. The caller retires the superseded row.
+            # keeps data. ``upsert`` updates the interview's row in place.
             return None
         return None
-
-    async def _retire_superseded_verdict(
-        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-        *, replacement_ordinal: int, replacement_id: uuid.UUID | None,
-    ) -> None:
-        """Remove the provisional verdict a later reply's verdict just replaced.
-
-        Last-write-wins needs both halves: without this, the later verdict lands
-        and the earlier one STAYS, which is precisely the duplication production
-        showed (three rows, 2.51/2.66/2.69, for one pearce interview). The
-        interview keeps exactly one row, and the one it keeps is the
-        better-informed one.
-
-        ``replacement_id`` is the replacement row's pre-generated primary key
-        (``_persist_assessment``'s second return value) — ``None`` when the
-        replacement itself only made it to ``_pending_assessments`` and not yet
-        to the database. When it is not ``None``, any ``AssessmentReview``,
-        ``AssessmentReviewEvent``, ``AssessmentReviewAssignment`` or
-        ``PromptChangeSuggestion`` row a human attached to the row being
-        retired is re-pointed onto the replacement BEFORE the delete, in the
-        same transaction — and so is the payload of any pending or processing
-        ``review_feedback_analysis`` ``Job`` that names the retired id.
-        When it is ``None`` the re-point is skipped and the retired row's
-        review rows CASCADE away with it: there is no live replacement row yet
-        to re-point them onto, and stamping them onto a row that may never
-        land (or may land under a different id after `_flush_pending_
-        assessments` retries) would be worse than losing them outright.
-
-        The supersession itself is recorded as a ``duplicate_thread_verdict``
-        drop for the SUPERSEDED verdict — the trail has to survive the deletion,
-        and ``assessment_drops`` is where every other lost verdict on this
-        surface already appears.
-
-        **The drop keeps the verdict.** The refusal path in
-        ``_capture_hub_assessment`` passes ``raw_verdict`` under a comment saying
-        a refusal "is never a licence to destroy it"; supersession was the one
-        path that both DELETED a row and kept nothing, so the earlier verdict —
-        its scores, its rationale, its red flags — existed nowhere afterwards.
-        The row is read back BEFORE it is deleted (``_record_assessment_drop``
-        opens its own session, so the sequence is SELECT -> drop -> DELETE) using
-        the SAME predicate the DELETE uses: if the two diverged and a thread held
-        two rows mid-transition, the drop would preserve the WRONG verdict, which
-        is worse than preserving none because it looks authoritative.
-
-        The retired rows' ``summary_posted_at``/``summary_claimed_at`` are carried
-        onto the replacement (or its queued entry) in the same transaction as the
-        delete, so an announced interview stays announced across a restart.
-
-        Best-effort in the same sense as every other write on this path: the
-        concluding reply is already in Slack, so nothing here may raise. Two
-        honest limits, both logged loudly rather than hidden:
-          * a superseded row with no ``slack_ts`` cannot be located again. The
-            row now carries ``thread_id``, but that is NOT enough on its own —
-            see ``_superseded_row_filter`` — so it is left in place and the
-            duplicate is reported.
-          * a copy still sitting on ``_pending_assessments`` is dropped from the
-            queue first, because a retry that landed afterwards would recreate
-            the duplicate this just removed. A flush already in flight holds its
-            own list reference and can still land such a row; that is the same
-            process-local approximation ``_assessed_threads`` itself is.
-        """
-        detail = (
-            f"verdict from message ordinal {superseded.ordinal} superseded by the "
-            f"interview's concluding verdict at ordinal {replacement_ordinal}; "
-            "one interview yields one assessment, and the later verdict is the "
-            "better-informed one"
-        )
-        logger.info(
-            "[%s] Phase 4: superseded the earlier verdict for %s on thread %s — %s",
-            agent_id, thread.other_agent_id or "?", thread.thread_id, detail,
-        )
-        # Read the row BEFORE recording the drop, because the drop is what has to
-        # carry it and `_record_assessment_drop` commits in its own session.
-        retired_verdict = await self._superseded_raw_verdict(
-            agent_id, thread, superseded,
-        )
-        await self._record_assessment_drop(
-            agent_id, "duplicate_thread_verdict",
-            subject_agent_id=thread.other_agent_id,
-            thread_id=thread.thread_id,
-            detail=detail,
-            raw_verdict=retired_verdict,
-        )
-        self._drop_superseded_from_queue(agent_id, thread, superseded)
-        if not superseded.slack_ts:
-            logger.warning(
-                "[%s] Phase 4: the superseded verdict on thread %s has no "
-                "slack_ts to find its row by — it stays stored, so this "
-                "interview now has TWO assessments",
-                agent_id, thread.thread_id,
-            )
-            return
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        try:
-            from sqlalchemy import delete as sa_delete
-            from sqlalchemy import func as sa_func
-            from sqlalchemy import select as sa_select
-            from sqlalchemy import update as sa_update
-
-            async with self.session_factory() as db:
-                await self._repoint_superseded_children(
-                    db, agent_id, thread, superseded, replacement_id,
-                )
-                # Stamps survive retirement (spec P0-08): the retired rows may
-                # carry this interview's headline stamp or claim, and deleting
-                # them must not un-announce the interview. Copied onto the
-                # replacement in THIS transaction, COALESCE so a stamp the
-                # replacement already has is never overwritten — or, when the
-                # replacement is still queued, onto its queued entry.
-                retired_posted, retired_claimed = (await db.execute(
-                    sa_select(
-                        sa_func.max(OpportunityAssessment.summary_posted_at),
-                        sa_func.max(OpportunityAssessment.summary_claimed_at),
-                    ).where(*self._superseded_row_filter(agent_id, thread, superseded))
-                )).one()
-                carried = {
-                    key: value for key, value in (
-                        ("summary_posted_at", retired_posted),
-                        ("summary_claimed_at", retired_claimed),
-                    ) if value is not None
-                }
-                if carried and replacement_id is not None:
-                    await db.execute(
-                        sa_update(OpportunityAssessment)
-                        .where(OpportunityAssessment.id == replacement_id)
-                        .values(**{
-                            key: sa_func.coalesce(getattr(OpportunityAssessment, key), value)
-                            for key, value in carried.items()
-                        })
-                    )
-                elif carried:
-                    for queued in self._pending_assessments:
-                        if queued.get("thread_id") == thread.thread_id:
-                            for key, value in carried.items():
-                                if queued.get(key) is None:
-                                    queued[key] = value
-                result = await db.execute(
-                    sa_delete(OpportunityAssessment).where(
-                        *self._superseded_row_filter(agent_id, thread, superseded)
-                    )
-                )
-                await db.commit()
-            logger.info(
-                "[%s] Phase 4: removed %d superseded assessment row(s) for "
-                "thread %s (slack_ts=%s)",
-                agent_id, result.rowcount or 0, thread.thread_id,
-                superseded.slack_ts,
-            )
-        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
-            logger.error(
-                "[%s] Failed to remove the superseded assessment row (and "
-                "re-point its review rows) for thread %s (slack_ts=%s): %s — "
-                "the interview now has TWO assessments, the drop row above "
-                "says which is which, and any review re-point for this "
-                "retirement may not have completed",
-                agent_id, thread.thread_id, superseded.slack_ts, exc,
-                exc_info=True,
-            )
-
-    def _drop_superseded_from_queue(
-        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-    ) -> None:
-        """Prune the superseded verdict from the assessment retry queue. Split out
-        of ``_retire_superseded_verdict`` (spec §7.7)."""
-        # Prune the retry queue BEFORE the no-slack_ts bail below, and guard the
-        # match explicitly rather than relying on that bail to keep a `None` out
-        # of it. `row.get("slack_ts") == superseded.slack_ts` with `None` on the
-        # right matches EVERY queued row that never got a Slack ts — other
-        # interviews' verdicts included — and those rows would be dropped from
-        # the queue and never written. A rehydrated verdict
-        # (`_rehydrate_assessed_threads`) is exactly where a `None` comes from,
-        # so this is reachable rather than theoretical, and the guard has to live
-        # here rather than upstream: a later edit that moves the bail must not be
-        # able to re-open it.
-        if superseded.slack_ts:
-            queued = [
-                row for row in self._pending_assessments
-                if row.get("slack_ts") == superseded.slack_ts
-                and row.get("thread_id") == thread.thread_id
-            ]
-            if queued:
-                self._pending_assessments[:] = [
-                    row for row in self._pending_assessments
-                    if row not in queued
-                ]
-                logger.info(
-                    "[%s] Phase 4: dropped %d superseded verdict(s) from the "
-                    "assessment retry queue (thread=%s slack_ts=%s)",
-                    agent_id, len(queued), thread.thread_id, superseded.slack_ts,
-                )
-        elif self._pending_assessments:
-            logger.info(
-                "[%s] Phase 4: the superseded verdict on thread %s has no "
-                "slack_ts, so the assessment retry queue (%d row(s)) is left "
-                "untouched — a NULL match there would sweep every queued verdict "
-                "that has no Slack ts of its own",
-                agent_id, thread.thread_id, len(self._pending_assessments),
-            )
-
-    async def _repoint_superseded_children(
-        self, db, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-        replacement_id: uuid.UUID | None,
-    ) -> None:
-        """Re-point the retired row's human-review rows, suggestions, assignments
-        and review jobs onto the replacement, inside the caller's transaction. Split
-        out of ``_retire_superseded_verdict`` (spec §7.7)."""
-        from sqlalchemy import select as sa_select
-        from sqlalchemy import update as sa_update
-
-        if replacement_id is not None:
-            old_ids = sa_select(OpportunityAssessment.id).where(
-                *self._superseded_row_filter(agent_id, thread, superseded)
-            ).scalar_subquery()
-            for model in (
-                AssessmentReview, AssessmentReviewEvent, PromptChangeSuggestion,
-            ):
-                await db.execute(
-                    sa_update(model)
-                    .where(model.assessment_id.in_(old_ids))
-                    .values(assessment_id=replacement_id)
-                )
-            existing = sa_select(AssessmentReviewAssignment.assignee_user_id).where(
-                AssessmentReviewAssignment.assessment_id == replacement_id
-            ).scalar_subquery()
-            await db.execute(
-                sa_update(AssessmentReviewAssignment)
-                .where(AssessmentReviewAssignment.assessment_id.in_(old_ids),
-                       AssessmentReviewAssignment.assignee_user_id.not_in(existing))
-                .values(assessment_id=replacement_id)
-            )
-            # The job queue is the FOURTH place the retired id lives.
-            # A review job still queued against it would run after
-            # this delete, find no assessment, complete as a no-op and
-            # leave the re-pointed 'learn' rows above unconsumed with
-            # nothing left to consume them (audit 2026-09-02, D3).
-            # 'processing' is included deliberately: a job mid-flight
-            # whose suggestion INSERT then fails on the deleted FK is
-            # retried by the worker, and the retry must run against
-            # the replacement.
-            retired_ids = [
-                str(row) for row in (
-                    await db.execute(
-                        sa_select(OpportunityAssessment.id).where(
-                            *self._superseded_row_filter(
-                                agent_id, thread, superseded,
-                            )
-                        )
-                    )
-                ).scalars().all()
-            ]
-            if retired_ids:
-                await db.execute(
-                    sa_update(Job)
-                    .where(
-                        Job.type == "review_feedback_analysis",
-                        Job.status.in_(("pending", "processing")),
-                        Job.payload["assessment_id"].astext.in_(retired_ids),
-                    )
-                    .values(payload={"assessment_id": str(replacement_id)})
-                )
-
-    def _superseded_row_filter(
-        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-    ) -> tuple:
-        """The predicate that identifies the row a supersession retires.
-
-        ONE definition, because two statements need it and they must not
-        disagree: the SELECT that copies the verdict onto its drop row, and the
-        DELETE that removes it. If they diverged and the thread held two rows
-        mid-transition, the drop would preserve a DIFFERENT verdict from the one
-        deleted — worse than preserving none, because it looks authoritative.
-
-        ``slack_ts`` is load-bearing and cannot be replaced by ``thread_id``.
-        ``_capture_hub_assessment`` reads ``superseded`` BEFORE
-        ``_persist_assessment`` writes the replacement and retires AFTER, so by
-        the time this runs the replacement is already committed on the same run,
-        the same agent and the SAME THREAD. A thread-keyed DELETE would match it
-        too and end every supersession with ZERO assessments while logging
-        success. ``slack_ts`` is the one field that differs.
-
-        ``thread_id`` is therefore an additional NARROWING predicate, never the
-        key: it stops a row from another interview that happens to carry the same
-        Slack ts. ``thread_id IS NULL`` is tolerated alongside it, because a row
-        written by an earlier build of this method (or by a caller with no
-        thread) has no thread on it and is still the row this is retiring.
-
-        Callers must never omit ``superseded.slack_ts`` — a ``None`` here would
-        collapse the predicate to "this thread's rows", which is the trap above.
-        The caller bails before reaching this.
-
-        The narrowing is DEFENCE IN DEPTH and is deliberately NOT pinned by a
-        test. Measured 2026-08-23: deleting the ``sa_or`` element below leaves
-        ``test_hub_assessment_capture_gate.py`` and
-        ``test_opportunity_assessment_persistence.py`` at 79 passed. That is
-        expected, not a coverage gap — ``slack_ts`` is already unique within a
-        ``(simulation_run_id, agent_id)`` pair, so no fixture can construct the
-        collision this guards against without first constructing a different bug.
-        Keep it anyway: it costs one OR and it is the only thing standing between
-        a same-ts row from another interview and a wrong retirement.
-        """
-        from sqlalchemy import or_ as sa_or
-
-        return (
-            OpportunityAssessment.simulation_run_id == self.simulation_run_id,
-            OpportunityAssessment.agent_id == agent_id,
-            OpportunityAssessment.slack_ts == superseded.slack_ts,
-            sa_or(
-                OpportunityAssessment.thread_id == thread.thread_id,
-                OpportunityAssessment.thread_id.is_(None),
-            ),
-        )
-
-    async def _superseded_raw_verdict(
-        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-    ) -> dict | None:
-        """The verdict about to be deleted, so its drop row can keep it.
-
-        ``None`` when there is nothing to read, in FIVE distinct ways: no
-        ``slack_ts`` to find the row by, no database, no matching row, a failed
-        SELECT, or — the one this docstring used to omit — a row that IS found
-        but whose ``raw_verdict`` column is itself NULL. Never raises: the
-        concluding reply is already in Slack, and a lookup that cannot answer
-        must cost the copy, not the supersession.
-
-        All five produce a drop row with ``raw_verdict IS NULL``, so the LOG is
-        the only thing that can tell them apart — and on the one path whose whole
-        purpose is "never lose the retired verdict", "there was no verdict to
-        copy" must not be indistinguishable from "the copy was never attempted".
-        The not-found branch and the NULL-column branch therefore warn
-        explicitly; the two early returns are ordinary, expected states with
-        their own callers' logging (the no-``slack_ts`` case is already reported
-        loudly by the caller, and a DB-less engine is a documented silent no-op
-        everywhere).
-
-        The NULL-column case is rare but real: ``opportunity_assessments.
-        raw_verdict`` has been a nullable column since migration 0025 and every
-        engine writer has set it since then, so a NULL here means a row written
-        some other way (a hand-seeded or test row). Migration 0035 added
-        ``assessment_drops.raw_verdict``, not this column.
-        """
-        if not superseded.slack_ts:
-            return None
-        if not self.session_factory or not self.simulation_run_id:
-            return None
-        from sqlalchemy import select as sa_select
-
-        try:
-            async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(OpportunityAssessment.raw_verdict).where(
-                        *self._superseded_row_filter(agent_id, thread, superseded)
-                    )
-                )).scalars().all()
-        except Exception as exc:  # noqa: BLE001 — a copy must not cost the retire
-            logger.error(
-                "[%s] Failed to read back the superseded verdict for thread %s "
-                "(slack_ts=%s): %s — the drop row will record the supersession "
-                "but not the verdict itself",
-                agent_id, thread.thread_id, superseded.slack_ts, exc,
-                exc_info=True,
-            )
-            return None
-        if not rows:
-            logger.warning(
-                "[%s] Supersession on thread %s found no stored row for "
-                "slack_ts=%s — the drop row records that a verdict was "
-                "superseded but cannot carry the verdict itself, and the DELETE "
-                "below will match nothing either",
-                agent_id, thread.thread_id, superseded.slack_ts,
-            )
-            return None
-        if rows[0] is None:
-            logger.warning(
-                "[%s] Supersession on thread %s found the stored row for "
-                "slack_ts=%s but its raw_verdict is NULL (every engine writer "
-                "sets it, so this row was written out of band) — the drop row "
-                "records that a verdict was superseded but cannot carry the "
-                "verdict itself",
-                agent_id, thread.thread_id, superseded.slack_ts,
-            )
-            return None
-        return rows[0]
 
     async def rehydrate(self, closed_ids: set[str]) -> None:
         """Rebuild ``_assessed_threads`` from this run's stored verdicts.
@@ -1566,11 +1409,16 @@ class Verdicts:
         Every field of the restored record is a decision about which way to
         fail, and three of them are not guesses:
 
-        * ``ordinal=0``. The table does not store the turn a verdict came from.
-          Any guess at or above the real ordinal makes ``_sidecar_refusal``
-          refuse the interview's legitimate LATER verdict
+        * ``ordinal=0``, deliberately NOT the stored ``verdict_ordinal`` (0054).
+          After a resume ``message_count`` is rebuilt from the thread history, so
+          a stored ordinal at or above it would make ``_sidecar_refusal`` refuse
+          the interview's legitimate LATER verdict
           (``if ordinal <= held.ordinal``); zero costs at most a spurious
           ``duplicate_thread_verdict`` drop if the very same turn is re-captured.
+          ``verdict_ordinal`` is still written by ``upsert`` and orders a queued
+          write against the landed row there.
+        * ``revision`` is READ from ``verdict_revision``; a pre-0054 row reads
+          NULL and so 1.
         * ``announced`` is READ, not defaulted, from
           ``summary_posted_at`` (migration 0041). It used to be hardcoded
           ``False`` with the reasoning that ``True`` "would suppress the
@@ -1594,7 +1442,7 @@ class Verdicts:
         placed, and placing them under a guessed thread is how a real verdict
         gets refused. Ordered oldest-first so that a thread carrying several
         historical rows is represented by its NEWEST — the same last-write-wins
-        rule ``_retire_superseded_verdict`` applies.
+        rule ``upsert`` applies.
 
         Never raises: a failed read costs the de-duplication, not the run.
         """
@@ -1609,6 +1457,7 @@ class Verdicts:
                         OpportunityAssessment.thread_id,
                         OpportunityAssessment.slack_ts,
                         OpportunityAssessment.summary_posted_at,
+                        OpportunityAssessment.verdict_revision,
                     )
                     .where(
                         OpportunityAssessment.simulation_run_id == self.simulation_run_id,
@@ -1624,12 +1473,13 @@ class Verdicts:
                 exc,
             )
             return
-        for thread_id, slack_ts, summary_posted_at in rows:
+        for thread_id, slack_ts, summary_posted_at, verdict_revision in rows:
             self._assessed_threads[thread_id] = _HeldVerdict(
                 ordinal=0,
                 final=thread_id in closed_ids,
                 slack_ts=slack_ts,
                 announced=summary_posted_at is not None,
+                revision=verdict_revision or 1,
             )
         if rows:
             # `len(rows)` — the number of stored verdicts read — NOT
@@ -1732,7 +1582,7 @@ class Verdicts:
         try:
             async with self.session_factory() as db:
                 for row in rows:
-                    db.add(OpportunityAssessment(**row))
+                    await self._upsert_in(db, row)
                 await db.commit()
             logger.info("Flushed %d queued assessment(s) to DB", len(rows))
         except Exception as exc:
@@ -1742,10 +1592,12 @@ class Verdicts:
             # front to preserve retry order. And, on a ROW-level error only,
             # isolate the poison row first so the verdicts beside it survive —
             # these rows are the actual product of the screening pipeline.
+            # `_upsert_in` applies the §8.1 protocol per row, so a stale queued
+            # verdict becomes a drop instead of an overwrite.
             requeue = rows
             if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
                 async def _one(db, row):
-                    db.add(OpportunityAssessment(**row))
+                    await self._upsert_in(db, row)
 
                 _written, lost, requeue = await self._recover_rows_individually(
                     rows, _one, what="assessment",

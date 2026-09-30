@@ -893,3 +893,17 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `scripts/migrate/merge_duplicate_assessments.py` (dry run, then `--apply`),
 > then apply `0055`. The agent image must be rebuilt in the same deploy. No
 > live run from before this step until the new agent is up (spec §12).
+
+> **Deploy order for `0055_assessment_run_thread_unique` — step 4 of the Phase 2
+> sequence, after `0054` and the merge script, with NO live run.** `0055` adds
+> `uq_opportunity_assessments_run_thread UNIQUE (simulation_run_id, thread_id)`.
+> NULL threads never conflict. The upgrade refuses while the heartbeat is fresh
+> with state `running`/`stopping`/`starting` (a backstop only: confirm with
+> `/admin/simulation` AND `docker ps` that no engine is up) and refuses, listing
+> them, while any duplicate `(run, thread)` group remains — run
+> `scripts/migrate/merge_duplicate_assessments.py` first. *Old code against the
+> new schema is NOT safe*: the old engine's supersede inserts a second row for
+> the thread before it deletes the first, which this constraint rejects, so the
+> old agent must not run once `0055` is applied. The new agent's
+> `ON CONFLICT (simulation_run_id, thread_id)` requires the constraint, so the
+> new agent must not run before it. Downgrade drops the constraint only.

@@ -15,7 +15,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +35,12 @@ from src.database import Base
 
 class OpportunityAssessment(Base):
     __tablename__ = "opportunity_assessments"
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_run_id", "thread_id",
+            name="uq_opportunity_assessments_run_thread",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -46,10 +63,11 @@ class OpportunityAssessment(Base):
     #: empty and the engine cannot tell a first verdict from a re-capture of a
     #: turn it already stored. Indexed for exactly that per-run lookup.
     #: NULL on every row written before 0036, and on any row whose thread could
-    #: not be identified. Deliberately NOT unique with `simulation_run_id`: all 63
-    #: historical rows are NULL, so a unique index would have to be partial
-    #: (`WHERE thread_id IS NOT NULL`), and choosing that belongs with the change
-    #: that starts writing the column, not with the one that adds it.
+    #: not be identified.
+    #: Unique with `simulation_run_id` since 0055 (constraint
+    #: `uq_opportunity_assessments_run_thread`): one row per interview, updated in
+    #: place by `verdicts.upsert` when a later verdict supersedes it. NULL threads
+    #: never conflict, so NULL-thread rows are plain inserts.
     thread_id: Mapped[str | None] = mapped_column(
         String(50), nullable=True, index=True
     )
@@ -356,8 +374,8 @@ class AssessmentDrop(Base):
         way at ordinal 10 — one of them the run's highest-scoring idea and its
         only ``route-to-incubation`` — and the run's timer ended both interviews
         minutes later. The gate now trusts the sidecar and lets
-        ``_retire_superseded_verdict`` (which shipped in the same commit as this
-        reason) handle "a later turn knows more". No new rows.
+        ``verdicts.upsert`` (which replaced the old retire path) handle "a later
+        turn knows more". No new rows.
       * ``closed_before_verdict`` — a reply from a NON-hub agent closed the
         interview with ⏸️ before the hub reached a verdict. ⏸️ is an instruction
         to both roles, and ``_check_thread_outcome`` acts on whoever replied, so
@@ -367,11 +385,11 @@ class AssessmentDrop(Base):
       * ``duplicate_thread_verdict`` — one interview yields one assessment, and
         this row is the verdict that did not become it: either a re-capture of a
         turn already stored (or anything following a verdict whose reply closed
-        the interview), or an earlier provisional verdict SUPERSEDED by a later
-        concluding one — in which case the earlier row was retired and this drop
-        is the only remaining trace of it. See
-        ``SimulationEngine._assessed_threads`` and
-        ``_retire_superseded_verdict``.
+        the interview), or an earlier verdict SUPERSEDED by a later one — the
+        interview's one row was updated in place (§8.1) and this drop keeps the
+        earlier verdict; a stale queued verdict that arrived after a newer one
+        landed; or a queued verdict replaced before it landed. See
+        ``verdicts.upsert``.
       * ``empty_reply``          — the interview was ABANDONED: two consecutive
         replies produced no usable text (an llm.py empty reply — its ERROR
         names the stop reason — or a reply that could not be parsed into a

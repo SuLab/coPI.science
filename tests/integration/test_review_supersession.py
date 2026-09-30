@@ -1,37 +1,25 @@
-"""Before the supersession DELETE removes a superseded assessment row,
-its human-review rows must be re-pointed to the row that replaces it.
+"""A later verdict updates the interview's one assessment row IN PLACE (§8.1), so
+the human-review rows attached to the earlier verdict are never re-pointed or
+deleted: the row id is unchanged and the review, assignment and pending
+``review_feedback_analysis`` job still reference it.
 
-``_retire_superseded_verdict`` already deletes a provisional
-``opportunity_assessments`` row the moment a later reply in the same
-interview supersedes it (see ``tests/integration/test_hub_assessment_capture_
-gate.py`` for the full "one interview, one verdict" story). Three of the four
-review tables CASCADE off ``opportunity_assessments.id``
+Three of the four review tables CASCADE off ``opportunity_assessments.id``
 (``AssessmentReview``, ``AssessmentReviewEvent``, ``AssessmentReviewAssignment``)
-and the fourth (``PromptChangeSuggestion``) is SET NULL — so, unrepointed, a
-human's review of a verdict that turned out to be provisional is silently
-destroyed (the first three) or orphaned (the fourth) the moment a later reply in
-the SAME interview supersedes it, minutes later, mid-run. This module proves
-the re-point that now runs, in the same transaction as the delete, before it.
-
-Driven directly through ``_persist_assessment``/``_retire_superseded_verdict``
-(the unbound-method-on-a-stub idiom ``test_opportunity_assessment_
-persistence.py`` already uses) rather than through ``_capture_hub_assessment``
-end to end: the ordinal/closes_thread wiring that decides WHETHER a verdict
-supersedes another is already exercised by ``test_hub_assessment_capture_
-gate.py``, so this module only needs a valid ``(agent_id, thread, superseded)``
-triple to drive the retire step itself, and needs to construct scenarios (a
-pre-existing assignment conflict on the REPLACEMENT row, before the retire
-that would otherwise re-point another one onto it) that are not reachable
-through the higher-level call in a single natural turn.
+and the fourth (``PromptChangeSuggestion``) is SET NULL, which is why the old
+supersede-by-delete needed a re-point at all. Driven through
+``_capture_hub_assessment`` so the whole capture path is exercised.
 """
+
+import json
 
 import pytest
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.agent.agent import Agent
 from src.agent.engine.verdicts import Verdicts
-from src.agent.simulation import SimulationEngine, _HeldVerdict
+from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.models import (
     AssessmentDrop,
@@ -44,7 +32,9 @@ from src.models import (
     SimulationRun,
     User,
 )
+from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 from tests import factories
+from tests.fakes import FakeSlackClient
 
 pytestmark = pytest.mark.integration
 
@@ -81,45 +71,11 @@ async def _new_run(factory):
         return run.id
 
 
-def _stub(factory, run_id):
-    return SimulationEngine(
-        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
-    )
-
-
-def _thread(thread_id: str = "t1") -> ThreadState:
-    return ThreadState(thread_id=thread_id, channel="general", other_agent_id="wang")
-
-
-async def _no_seed(*_args, **_kwargs):
-    """Stubs out ``_seed_consults_from_db`` on the engine under test.
-
-    That method conditionally opens its OWN session (only when the verdict's
-    recommendation/band owes a panel and nothing is yet recorded — see its
-    docstring), which would otherwise be an extra, hard-to-predict
-    ``session_factory()`` call ahead of the write this module's buffered-
-    replacement test needs to fail on a specific, single call. The verdict
-    fixture below uses a plain "advance" recommendation for the same reason
-    test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_it
-    stubs this out: the claim under test is about the retry/re-point
-    machinery, not the specialist floor.
-    """
-    return None
-
-
 async def _make_user(factory) -> User:
     async with factory() as db:
         user = await factories.make_user(db)
         await db.commit()
         return user
-
-
-def _verdict(score: int) -> dict:
-    return {
-        "subject_agent_id": "wang",
-        "recommendation": "advance",
-        "scores": {"differentiation": score},
-    }
 
 
 async def _attach_review_rows(factory, assessment_id, assignee_id) -> dict:
@@ -170,202 +126,87 @@ async def _cleanup(factory, run_id, *, user_ids=()):
         await db.commit()
 
 
-class _FailOnceFactory:
-    """Wraps a real session factory and raises exactly once, on its very next
-    call after being armed — the same "fails the first attempt, then behaves"
-    shape as ``flaky_factory`` in
-    ``test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_
-    it``, but arming is explicit here so the ONE call this module means to
-    fail (the replacement verdict's own write) is unambiguous regardless of
-    how many session-factory calls preceded it.
-    """
-
-    def __init__(self, real_factory):
-        self._real = real_factory
-        self.armed = False
-
-    def __call__(self):
-        if self.armed:
-            self.armed = False
-            raise RuntimeError("pool checkout timed out")
-        return self._real()
+def _reply(score: int) -> str:
+    verdict = {
+        "subject_agent_id": "wang", "recommendation": "route-to-incubation",
+        "rationale": f"rationale {score}", "scores": {k: score for k in RUBRIC_WEIGHTS},
+        "company_or_project": f"Project {score}", "elevator_pitch": f"Pitch {score}.",
+    }
+    return (
+        "<slack_message>Noted.</slack_message>\n"
+        f"<assessment_json>{json.dumps(verdict)}</assessment_json>"
+    )
 
 
 @pytest.mark.asyncio
-async def test_supersession_re_points_review_rows_to_the_replacement(engine):
-    """The mission pin: a human's review of a verdict that turns out to be
-    provisional must survive that verdict being superseded — on ALL FOUR
-    review-table kinds, including PromptChangeSuggestion (SET NULL, not
-    CASCADE, and therefore silently orphaned rather than destroyed if the
-    re-point is skipped)."""
+async def test_a_supersession_keeps_the_row_and_everything_attached_to_it(engine):
+    """Seeds a review, an assignment and a pending ``review_feedback_analysis`` job
+    on the first verdict's row, supersedes it through ``_capture_hub_assessment``,
+    and asserts the row id is unchanged, all three still reference it, and one
+    ``duplicate_thread_verdict`` drop exists."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
-    stub = _stub(factory, run_id)
-    stub._seed_consults_from_db = _no_seed
-    thread = _thread()
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    sim = SimulationEngine(
+        agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},
+        session_factory=factory, simulation_run_id=run_id,
+    )
+    thread = ThreadState(thread_id="t1", channel="general", other_agent_id="wang", message_count=7)
     assignee = await _make_user(factory)
+    job_id = None
     try:
-        held_a, a_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
+        await sim.verdicts._capture_hub_assessment(
+            hub, thread, _reply(3), "1.1", closes_thread=False,
         )
-        assert held_a is True and a_id is not None
-
-        ids = await _attach_review_rows(factory, a_id, assignee.id)
-
-        superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
-        )
-        assert held_b is True and b_id is not None
-
-        await Verdicts._retire_superseded_verdict(
-            stub, "blackbird", thread, superseded,
-            replacement_ordinal=2, replacement_id=b_id,
-        )
-
-        async with factory() as check:
-            assert await check.get(OpportunityAssessment, a_id) is None, "A is gone"
-            assert await check.get(OpportunityAssessment, b_id) is not None
-
-            review = await check.get(AssessmentReview, ids["review"])
-            assert review is not None, "CASCADE deleted it — the re-point did not run"
-            assert review.assessment_id == b_id
-
-            event = await check.get(AssessmentReviewEvent, ids["event"])
-            assert event is not None
-            assert event.assessment_id == b_id
-
-            assignment = await check.get(AssessmentReviewAssignment, ids["assignment"])
-            assert assignment is not None
-            assert assignment.assessment_id == b_id
-
-            suggestion = await check.get(PromptChangeSuggestion, ids["suggestion"])
-            assert suggestion is not None
-            assert suggestion.assessment_id == b_id, (
-                "NULL here means the delete's SET NULL fired instead of the "
-                "re-point — i.e. the re-point silently failed (or never ran)"
-            )
-
-            drops = (await check.execute(
-                select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
-            )).scalars().all()
-            assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
-    finally:
-        await _cleanup(factory, run_id, user_ids=[assignee.id])
-
-
-@pytest.mark.asyncio
-async def test_re_point_skips_conflicting_assignments(engine):
-    """The same assignee already has a row on BOTH the superseded verdict and
-    its replacement (a staff member assigned before the interview concluded a
-    second time). The unique constraint on (assessment_id, assignee_user_id)
-    means a naive re-point would violate it outright; the re-point's SQL instead
-    filters the moved rows to assignees not already present on the
-    replacement, so the conflicting old row is left in place — and is then
-    swept away for free when the DELETE removes its now-orphaned parent."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    run_id = await _new_run(factory)
-    stub = _stub(factory, run_id)
-    stub._seed_consults_from_db = _no_seed
-    thread = _thread()
-    assignee = await _make_user(factory)
-    try:
-        held_a, a_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
-        )
-        held_b, b_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
-        )
-        assert a_id is not None and b_id is not None
-
         async with factory() as db:
-            db.add(AssessmentReviewAssignment(
-                assessment_id=a_id, assignee_user_id=assignee.id,
-                assignee_name="Assignee", assigned_by_name="Boss A",
-            ))
-            b_assignment = AssessmentReviewAssignment(
-                assessment_id=b_id, assignee_user_id=assignee.id,
-                assignee_name="Assignee", assigned_by_name="Boss B",
+            (first,) = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+        first_id = first.id
+        ids = await _attach_review_rows(factory, first_id, assignee.id)
+        async with factory() as db:
+            job = Job(
+                type="review_feedback_analysis", payload={"assessment_id": str(first_id)},
             )
-            db.add(b_assignment)
+            db.add(job)
             await db.flush()
-            b_assignment_id = b_assignment.id
+            job_id = job.id
             await db.commit()
 
-        superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        await Verdicts._retire_superseded_verdict(
-            stub, "blackbird", thread, superseded,
-            replacement_ordinal=2, replacement_id=b_id,
+        thread.message_count = 9
+        await sim.verdicts._capture_hub_assessment(
+            hub, thread, _reply(4), "2.2", closes_thread=False,
         )
 
         async with factory() as check:
-            rows = (await check.execute(select(AssessmentReviewAssignment))).scalars().all()
-            assert len(rows) == 1, "the pre-existing conflict must not duplicate"
-            assert rows[0].id == b_assignment_id, (
-                "the surviving row must be B's ORIGINAL assignment — a naive "
-                "re-point either violates the unique constraint or clobbers "
-                "this row with A's copy"
-            )
-            assert rows[0].assigned_by_name == "Boss B"
-    finally:
-        await _cleanup(factory, run_id, user_ids=[assignee.id])
-
-
-@pytest.mark.asyncio
-async def test_re_point_tolerates_a_buffered_replacement(engine):
-    """The replacement verdict's own write fails on its first attempt (a pool
-    timeout, say) and is queued on ``_pending_assessments`` instead of
-    committed — ``_persist_assessment`` returns ``(True, None)``.
-    ``_retire_superseded_verdict`` must still retire A cleanly: nothing to
-    re-point onto (there is no replacement row in the database yet), so the
-    re-point is skipped and A's review row goes with it via CASCADE — and
-    nothing may raise, the same best-effort contract as every other write on
-    this path."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    run_id = await _new_run(factory)
-    stub = _stub(factory, run_id)
-    stub._seed_consults_from_db = _no_seed
-    thread = _thread()
-    failing_factory = _FailOnceFactory(factory)
-    stub.session_factory = failing_factory
-    try:
-        held_a, a_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
-        )
-        assert held_a is True and a_id is not None
-
-        async with factory() as db:
-            db.add(AssessmentReview(
-                assessment_id=a_id, reviewer_name="Dr. Reviewer",
-                score=4, feedback_mode="learn",
-            ))
-            await db.commit()
-
-        failing_factory.armed = True
-        superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
-        )
-        assert held_b is True and b_id is None, "buffered, not committed"
-        assert len(stub._pending_assessments) == 1
-        assert failing_factory.armed is False, "the single arm must be consumed"
-
-        await Verdicts._retire_superseded_verdict(
-            stub, "blackbird", thread, superseded,
-            replacement_ordinal=2, replacement_id=b_id,
-        )
-
-        async with factory() as check:
-            assert await check.get(OpportunityAssessment, a_id) is None
-            reviews = (await check.execute(select(AssessmentReview))).scalars().all()
-            assert reviews == [], "A's review row must CASCADE away, not survive orphaned"
+            rows = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            assert [r.id for r in rows] == [first_id], "updated in place, same id"
+            assert rows[0].slack_ts == "2.2"
+            assert (await check.get(AssessmentReview, ids["review"])).assessment_id == first_id
+            assert (await check.get(AssessmentReviewEvent, ids["event"])).assessment_id == first_id
+            assert (
+                await check.get(AssessmentReviewAssignment, ids["assignment"])
+            ).assessment_id == first_id
+            assert (
+                await check.get(PromptChangeSuggestion, ids["suggestion"])
+            ).assessment_id == first_id
+            assert (await check.get(Job, job_id)).payload == {"assessment_id": str(first_id)}
             drops = (await check.execute(
                 select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
             )).scalars().all()
             assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
     finally:
-        stub.session_factory = factory
-        await _cleanup(factory, run_id)
+        async with factory() as db:
+            if job_id is not None:
+                await db.execute(sa_delete(Job).where(Job.id == job_id))
+            await db.commit()
+        await _cleanup(factory, run_id, user_ids=[assignee.id])
 
 
 @pytest.mark.asyncio
@@ -383,66 +224,3 @@ async def test_persist_returns_false_none_with_no_db():
     )
     assert held is False
     assert replacement_id is None
-
-
-@pytest.mark.asyncio
-async def test_supersession_re_points_the_pending_review_job(engine):
-    """A review job queued for a provisional verdict carries a payload that
-    names THAT verdict's id. The re-point must move the job too, or it runs
-    after the delete, finds no assessment, completes as a no-op, and the
-    re-pointed review stays unconsumed with nothing left to consume it
-    (audit 2026-09-02, D3). Finished jobs are history and stay put; jobs of
-    other types are never touched."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    run_id = await _new_run(factory)
-    stub = _stub(factory, run_id)
-    stub._seed_consults_from_db = _no_seed
-    thread = _thread()
-    job_ids: list = []
-    try:
-        held_a, a_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
-        )
-        assert held_a is True and a_id is not None
-
-        async with factory() as db:
-            queued = Job(
-                type="review_feedback_analysis", payload={"assessment_id": str(a_id)},
-            )
-            in_flight = Job(
-                type="review_feedback_analysis", status="processing",
-                payload={"assessment_id": str(a_id)},
-            )
-            finished = Job(
-                type="review_feedback_analysis", status="completed",
-                payload={"assessment_id": str(a_id)},
-            )
-            other_type = Job(type="generate_profile", payload={"assessment_id": str(a_id)})
-            db.add_all([queued, in_flight, finished, other_type])
-            await db.flush()
-            job_ids = [queued.id, in_flight.id, finished.id, other_type.id]
-            await db.commit()
-
-        superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await Verdicts._persist_assessment(
-            stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
-        )
-        assert held_b is True and b_id is not None
-
-        await Verdicts._retire_superseded_verdict(
-            stub, "blackbird", thread, superseded,
-            replacement_ordinal=2, replacement_id=b_id,
-        )
-
-        async with factory() as check:
-            payloads = [(await check.get(Job, jid)).payload for jid in job_ids]
-        assert payloads[0] == {"assessment_id": str(b_id)}, "pending job not re-pointed"
-        assert payloads[1] == {"assessment_id": str(b_id)}, "processing job not re-pointed"
-        assert payloads[2] == {"assessment_id": str(a_id)}, "completed job must stay history"
-        assert payloads[3] == {"assessment_id": str(a_id)}, "other job types must be untouched"
-    finally:
-        async with factory() as db:
-            if job_ids:
-                await db.execute(sa_delete(Job).where(Job.id.in_(job_ids)))
-            await db.commit()
-        await _cleanup(factory, run_id)

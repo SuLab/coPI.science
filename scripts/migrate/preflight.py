@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0054"
+DEFAULT_TARGET = "0055"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,12 +109,12 @@ DEFAULT_TARGET = "0054"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0054 objects enumerated in PLANNED_OBJECTS below.
+#: tables, no backfill), and the 0036-0055 objects enumerated in PLANNED_OBJECTS below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053",
+    "0051", "0052", "0053", "0054",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -175,7 +175,7 @@ BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", 
 
 # ---------------------------------------------------------------------------
 # What the migration chain CREATES (PLANNED_OBJECTS) and DROPS (PLANNED_DROPS), per
-# revision. Derived by reading 0019-0054; tests/unit/test_migration_checks.py re-derives
+# revision. Derived by reading 0019-0055; tests/unit/test_migration_checks.py re-derives
 # both from the migration files' upgrade() bodies and asserts they still match, so they
 # cannot silently drift.
 # ---------------------------------------------------------------------------
@@ -430,11 +430,15 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0054", "column", "verdict_write_id", "opportunity_assessments"),
     PlannedObject("0054", "column", "verdict_ordinal", "opportunity_assessments"),
     PlannedObject("0054", "column", "verdict_revision", "assessment_chat_turns"),
+    # 0055_assessment_run_thread_unique
+    PlannedObject(
+        "0055", "constraint", "uq_opportunity_assessments_run_thread", "opportunity_assessments",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0054.
+#: the only upgrade-time ``drop_table`` in 0019-0055.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -443,7 +447,7 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054",
+    "0051", "0052", "0053", "0054", "0055",
 )
 
 

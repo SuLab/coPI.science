@@ -77,7 +77,9 @@ async def test_container_is_migrated(engine):
         # 0054 opportunity_assessments.verdict_revision/.verdict_write_id/
         #      .verdict_ordinal and assessment_chat_turns.verdict_revision
         #      (the one-row-per-interview verdict store, spec §8.1)
-        assert v == "0054"
+        # 0055 uq_opportunity_assessments_run_thread (one assessment row per
+        #      interview; prechecks refuse a live run and duplicate groups)
+        assert v == "0055"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

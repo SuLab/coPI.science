@@ -298,7 +298,7 @@ async def test_a_non_closing_decide_reply_is_stored_as_provisional_on_the_real_p
     at ordinal 10, one of them the run's highest-scoring idea and its only
     `route-to-incubation`, and the run's timer ended both interviews minutes
     later. The verdict is now stored as provisional and superseded by any later
-    one, which is what `_retire_superseded_verdict` was built for.
+    one, which is what `verdicts.upsert` (formerly the retire step) does.
     """
     sim, agent, thread, client, factory, run_id = await _drive_reply(
         engine, monkeypatch, _reply_with_sidecar(), prior_messages=_DECIDE_COUNT,
@@ -575,21 +575,13 @@ async def test_supersession_also_retires_a_verdict_still_on_the_retry_queue(engi
 
 
 # ---------------------------------------------------------------------------
-# Supersession keeps what it deletes, and deletes only what it means to
+# Supersession keeps the earlier verdict
 #
-# `_retire_superseded_verdict` DELETEs a row and records a
-# `duplicate_thread_verdict` drop. The refusal path a few lines above it passes
-# `raw_verdict` under a comment saying a refusal "is never a licence to destroy
-# it" — supersession was the one path that both deleted a row and kept nothing,
-# so the earlier verdict (its score, its rationale, its red flags) existed
-# nowhere afterwards. See `AssessmentDrop.raw_verdict`.
-#
-# The other half is what the DELETE must NOT match. `_capture_hub_assessment`
-# reads `superseded` BEFORE the replacement is persisted and retires AFTER, so
-# the replacement is already committed on the same run, agent and thread by the
-# time this runs. A DELETE keyed on the thread would take both and end the
-# interview with ZERO assessments while logging success; `slack_ts` is
-# load-bearing precisely because it is the one field that differs.
+# `verdicts.upsert` updates the interview's one row in place and records a
+# `duplicate_thread_verdict` drop that carries the earlier verdict's
+# `raw_verdict` (see `AssessmentDrop.raw_verdict`): a refusal or supersession is
+# never a licence to destroy a verdict. No row is deleted, and the interview must
+# never end holding zero verdicts.
 # ---------------------------------------------------------------------------
 
 
@@ -667,19 +659,11 @@ async def test_supersession_does_not_delete_the_replacement_row(engine):
 
 
 @pytest.mark.asyncio
-async def test_a_null_slack_ts_does_not_poison_the_retry_queue_filter(engine):
-    """A held verdict with no `slack_ts` must not sweep the retry queue.
-
-    The queue filter matches `row.get("slack_ts") == superseded.slack_ts`. With
-    `None` on the right that matches EVERY queued assessment that has no Slack
-    ts of its own — other interviews' verdicts included — and those rows are
-    dropped from `_pending_assessments` and never written. Rehydrated verdicts
-    (`_rehydrate_assessed_threads`) are exactly where a `None` slack_ts comes
-    from, so this is reachable, not theoretical.
-
-    The unrelated queued row below belongs to a DIFFERENT thread and has no
-    slack_ts — the shape that used to be swept.
-    """
+async def test_a_supersession_leaves_other_threads_queued_verdicts_alone(engine):
+    """A verdict for one interview must not touch another interview's queued
+    verdict. The unrelated queued row below belongs to a DIFFERENT thread and has
+    no slack_ts. `t1` has a rehydrated `_HeldVerdict` but no stored row, so
+    nothing is superseded and no drop is recorded."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     sim, agent = _hub(factory, run_id)
@@ -690,8 +674,6 @@ async def test_a_null_slack_ts_does_not_poison_the_retry_queue_filter(engine):
         "slack_ts": None, "thread_id": "t-elsewhere",
     }
     sim._pending_assessments.append(other_run_row)
-    # A verdict this process only knows about because it read it back off the
-    # table at startup: no slack_ts on the row, so none on the held record.
     sim._assessed_threads["t1"] = _HeldVerdict(
         ordinal=0, final=False, slack_ts=None, announced=False,
     )
@@ -702,14 +684,11 @@ async def test_a_null_slack_ts_does_not_poison_the_retry_queue_filter(engine):
         )
 
         assert sim._pending_assessments == [other_run_row], (
-            "another interview's queued verdict must survive a supersession it "
-            "has nothing to do with"
+            "another interview's queued verdict must survive"
         )
         rows = await _assessments(factory, run_id)
         assert len(rows) == 1 and rows[0].slack_ts == "2.2"
-        assert [d.reason for d in await _drops(factory, run_id)] == [
-            "duplicate_thread_verdict"
-        ]
+        assert await _drops(factory, run_id) == []
     finally:
         await _delete_run(factory, run_id)
 
@@ -836,99 +815,11 @@ async def test_a_rehydrated_verdict_is_superseded_rather_than_duplicated(engine)
         )
 
         rows = await _assessments(factory, run_id)
-        assert len(rows) == 1, "the pre-restart row was retired, not duplicated"
+        assert len(rows) == 1, "the pre-restart row was updated in place, not duplicated"
         assert rows[0].slack_ts == "2.2"
         assert [d.reason for d in await _drops(factory, run_id)] == [
             "duplicate_thread_verdict"
         ]
-    finally:
-        await _delete_run(factory, run_id)
-
-
-@pytest.mark.asyncio
-async def test_a_superseded_row_that_cannot_be_found_says_so(engine, caplog):
-    """"No row to copy" and "the SELECT never ran" must not look identical.
-
-    `_superseded_raw_verdict` returns None for four different reasons and only
-    one of them — an exception — was logged. On the single path whose stated
-    purpose is "never lose the retired verdict", a drop row with
-    `raw_verdict IS NULL` and a silent log leaves an operator unable to tell
-    whether the copy was attempted and found nothing or was skipped entirely.
-
-    Driven by holding a verdict whose `slack_ts` matches no stored row, which is
-    what a rehydrated record pointing at a row a later cleanup removed looks
-    like.
-    """
-    import logging
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    run_id = await _new_run(factory)
-    sim, agent = _hub(factory, run_id)
-    thread = _thread(_CONCLUDE_COUNT)
-    sim._assessed_threads["t1"] = _HeldVerdict(
-        ordinal=0, final=False, slack_ts="no-such-ts", announced=False,
-    )
-    try:
-        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
-            await sim._capture_hub_assessment(
-                agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
-            )
-
-        drops = await _drops(factory, run_id)
-        assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
-        assert drops[0].raw_verdict is None, "there was genuinely nothing to copy"
-        assert any(
-            "no stored row" in record.message or "no stored row" in record.getMessage()
-            for record in caplog.records
-        ), "the not-found branch must announce itself"
-    finally:
-        await _delete_run(factory, run_id)
-
-
-@pytest.mark.asyncio
-async def test_a_superseded_row_with_a_null_verdict_says_so(engine, caplog):
-    """The FIFTH silent-None case: the row IS found, but `raw_verdict` is NULL.
-
-    `_superseded_raw_verdict`'s docstring listed four ways it answers `None` and
-    warned on the one that matters (not-found). It missed a fifth: a row that
-    matches the filter but stores a NULL `raw_verdict` makes `rows[0]` itself
-    `None`, and the function returned it with no log at all. That is the same
-    indistinguishability the not-found warning exists to end, on the same path
-    whose stated purpose is "never lose the retired verdict". (It is not the
-    shape of pre-0035 rows: 0035 added `assessment_drops.raw_verdict`, while
-    `opportunity_assessments.raw_verdict` dates from 0025 and the engine always
-    sets it, so a NULL here comes from a row written some other way.)
-
-    `_seed_assessment` leaves `raw_verdict` NULL, which is exactly the fixture.
-    """
-    import logging
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    run_id = await _new_run(factory)
-    await _seed_assessment(factory, run_id, thread_id="t1", slack_ts="1.1")
-    sim, agent = _hub(factory, run_id)
-    thread = _thread(_CONCLUDE_COUNT)
-    try:
-        await sim._rehydrate_assessed_threads()
-        assert "t1" in sim._assessed_threads
-
-        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
-            await sim._capture_hub_assessment(
-                agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
-            )
-
-        drops = await _drops(factory, run_id)
-        assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
-        assert drops[0].raw_verdict is None
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("raw_verdict" in m and "NULL" in m for m in messages), (
-            "a stored row with a NULL raw_verdict produced a drop row that "
-            "cannot carry the verdict, and said nothing about it: "
-            f"{messages}"
-        )
-        # The column is not new: a NULL here is an out-of-band row, not a
-        # pre-migration one, so the warning must not blame a migration.
-        assert not any("migration 0035" in m for m in messages), messages
     finally:
         await _delete_run(factory, run_id)
 
@@ -946,24 +837,26 @@ async def test_rehydration_logs_the_number_of_threads_it_restored(engine, caplog
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
-    # Three rows, two threads: the historical duplication, reproduced.
+    # Migration 0055 makes (run, thread) unique, so the historical duplication
+    # (three rows, two threads) can no longer be stored; the log still names both
+    # counts, which are now equal by construction.
     await _seed_assessment(factory, run_id, thread_id="t-a", slack_ts="1.1")
-    await _seed_assessment(factory, run_id, thread_id="t-a", slack_ts="1.2")
+    await _seed_assessment(factory, run_id, thread_id="t-c", slack_ts="1.2")
     await _seed_assessment(factory, run_id, thread_id="t-b", slack_ts="2.1")
     sim, _agent = _hub(factory, run_id)
     try:
         with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
             await sim._rehydrate_assessed_threads()
 
-        assert len(sim._assessed_threads) == 2
+        assert len(sim._assessed_threads) == 3
         messages = [r.getMessage() for r in caplog.records]
         # Both numbers, and they must be the right way round: 3 rows read, 2
         # interviews restored. Asserting the pair rather than just the row count
         # is what stops the fix from being "swap the variable" and reintroducing
         # the same ambiguity in the other direction.
         assert any(
-            "Rehydrated 3 stored verdict(s) across 2 interview(s)" in m
+            "Rehydrated 3 stored verdict(s) across 3 interview(s)" in m
             for m in messages
-        ), f"expected 3 rows across 2 interviews; got {messages}"
+        ), f"expected 3 rows across 3 interviews; got {messages}"
     finally:
         await _delete_run(factory, run_id)

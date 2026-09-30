@@ -32,7 +32,7 @@ stopping, restarting).
   characters of `elevator_pitch`, which can carry unpublished disclosures. Do not widen
   what it publishes without the operator's sign-off.
 - One interview yields one assessment row: the last verdict-bearing reply wins
-  (`_capture_hub_assessment`, `_retire_superseded_verdict`). A refusal is recorded in
+  (`_capture_hub_assessment`; `verdicts.upsert` updates the interview's one row in place, keyed by run and thread since migration `0055`). A refusal is recorded in
   `assessment_drops` with its `raw_verdict`, never just logged. A headline cannot be
   retracted, so it posts at most once per interview (`summary_posted_at`), and every poster (the engine
   and `scripts/backfill_assessment_headlines.py`) claims the interview first

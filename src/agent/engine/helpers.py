@@ -115,10 +115,9 @@ class _HeldVerdict(NamedTuple):
     ``ordinal`` is the message ordinal of the reply that carried it
     (``thread.message_count + 1`` as read at capture time). ``final`` means that
     reply CLOSED the thread, so no later turn exists and nothing may supersede
-    it. ``slack_ts`` is the stored row's own link back to that reply, and the
-    only handle ``_retire_superseded_verdict`` has for finding the row again —
-    the row's ``thread_id`` cannot stand in for it (see
-    ``_superseded_row_filter``).
+    it. ``slack_ts`` is the stored row's own link back to that reply, kept for
+    logging; since §8.1 the row is found by (run, thread). ``revision`` is the
+    row's ``verdict_revision`` (1 for a first verdict or a pre-0054 row).
 
     ``announced`` records whether this verdict already produced an
     ``#assessments-summary`` headline. Deliberately separate from ``final``: a
@@ -135,6 +134,7 @@ class _HeldVerdict(NamedTuple):
     final: bool
     slack_ts: str | None
     announced: bool = False
+    revision: int = 1
 
 
 __all__ = [
