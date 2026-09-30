@@ -231,7 +231,7 @@ fi
 # The rc check above is not enough on its own. A missing or unreadable path is NOT an
 # error exit: ruff emits a single E902 diagnostic and still exits 1, so an I/O problem
 # is indistinguishable from "that file has one finding" — and it makes the count go
-# DOWN. Measured 2026-08-04: `chmod 000 src/routers/admin.py` takes the total from 260
+# DOWN. Measured 2026-08-04: `chmod 000` on the former src/routers/admin.py (now src/routers/admin/) takes the total from 260
 # to 193, because that file's 68 findings disappear and one E902 replaces them. The
 # ratchet would pass, and the next person would "helpfully" re-baseline the ceiling to
 # 193 and lock the loss in. So refuse to produce a number at all.

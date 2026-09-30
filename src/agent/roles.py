@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.agent.post_types import DEFAULT_POST_TYPES, PostTypeSpec, parse_post_types
+from src.agent.tool_definitions import TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,6 @@ def resolve_prompt_path(role: str, filename: str) -> Path:
 
 
 def _known_tool_names() -> set[str]:
-    # Lazy import: avoids an import cycle (tools.py imports load_role from
-    # roles at module level), and keeps roles.py import-light.
-    from src.agent.tools import TOOL_DEFINITIONS
-
     return {t["name"] for t in TOOL_DEFINITIONS}
 
 

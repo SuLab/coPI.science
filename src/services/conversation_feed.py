@@ -15,7 +15,7 @@ every row of the engine's own decision table.
 Three functions, one pipeline: ``resolve_agent_gate`` computes *what the gate
 is* for the viewing agent, by calling the engine's own ``compute_gates``
 (``src/services/cohorts.py``) — the same call ``_cohort_gate_context`` in
-``src/routers/admin.py`` makes for the admin preview, so the page can never
+``src/routers/admin/cohorts.py`` makes for the admin preview, so the page can never
 compute a different gate than the engine would. ``gate_clause`` then turns that
 gate into the SQL predicate above, and ``own_or_gated`` widens it with a PI's
 own-post carve-out (see its docstring). The one deliberate difference from the

@@ -110,3 +110,24 @@ def get_build_info(root: Path | None = None) -> BuildInfo:
         info = BuildInfo(None, None, None, "unavailable")
     logger.debug("build info served from %s", info.source)
     return info
+
+
+#: What `SimulationRun.total_api_calls` counts, said where an operator will read
+#: it. The column is rendered to humans in three admin templates, and on
+#: 2026-08-22 its UNITS changed: `Agent.record_api_call` plus
+#: `SimulationEngine._unbooked_calls` now book every real API call (tool rounds
+#: and truncation retries included) where the column used to count turns, and the
+#: restart rebuild moved with it (`_CALLS_PER_LOG_ROW`). 78.6% of stored
+#: `thread_reply` rows are 2+ calls, so the number roughly doubles for reasons
+#: that have nothing to do with the run.
+#:
+#: This sits beside the rubric version/hash line for the same reason that one
+#: exists: a change of meaning that is invisible at read time is a change nobody
+#: can correct for afterwards.
+API_CALL_UNITS_NOTE = (
+    "API-call accounting: SimulationRun.total_api_calls counts REAL API CALLS "
+    "(tool rounds and truncation retries included), not turns, as of "
+    "2026-08-22. It is NOT comparable with any run recorded before that date. "
+    "The old per-turn figure is recoverable for any run as "
+    "SELECT COUNT(*) FROM llm_call_logs WHERE simulation_run_id = <run>."
+)

@@ -343,7 +343,7 @@ async def test_unknown_status_action_and_mode_render_alarming(
             detail["review_status_history"] = [stub_event]
         return detail
 
-    monkeypatch.setattr("src.routers.admin.build_assessment_detail", _patched)
+    monkeypatch.setattr("src.routers.admin.assessments.build_assessment_detail", _patched)
 
     resp = await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)

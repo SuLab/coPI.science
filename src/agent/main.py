@@ -20,6 +20,7 @@ from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+from src.services.build_info import API_CALL_UNITS_NOTE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,27 +74,6 @@ def main(
     # aux slot rather than the web app's (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals))
-
-
-#: What `SimulationRun.total_api_calls` counts, said where an operator will read
-#: it. The column is rendered to humans in three admin templates, and on
-#: 2026-08-22 its UNITS changed: `Agent.record_api_call` plus
-#: `SimulationEngine._unbooked_calls` now book every real API call (tool rounds
-#: and truncation retries included) where the column used to count turns, and the
-#: restart rebuild moved with it (`_CALLS_PER_LOG_ROW`). 78.6% of stored
-#: `thread_reply` rows are 2+ calls, so the number roughly doubles for reasons
-#: that have nothing to do with the run.
-#:
-#: This sits beside the rubric version/hash line for the same reason that one
-#: exists: a change of meaning that is invisible at read time is a change nobody
-#: can correct for afterwards.
-API_CALL_UNITS_NOTE = (
-    "API-call accounting: SimulationRun.total_api_calls counts REAL API CALLS "
-    "(tool rounds and truncation retries included), not turns, as of "
-    "2026-08-22. It is NOT comparable with any run recorded before that date. "
-    "The old per-turn figure is recoverable for any run as "
-    "SELECT COUNT(*) FROM llm_call_logs WHERE simulation_run_id = <run>."
-)
 
 
 def _log_api_call_units() -> None:

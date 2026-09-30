@@ -1,7 +1,7 @@
 """Shared Slack app/bot provisioning helpers.
 
 Used by both the batch CLI (``scripts/provision_slack_bots.py``) and the
-self-service admin endpoints (``src/routers/admin.py``). The two callers differ
+self-service admin endpoints (``src/routers/admin/agents.py``). The two callers differ
 only in their OAuth ``redirect_uri`` (the script runs a localhost callback
 server; the web app uses ``{base_url}/admin/agents/slack/callback``) and in
 where the resulting ``xoxb-`` token is stored.

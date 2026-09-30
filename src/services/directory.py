@@ -1,7 +1,7 @@
 """HTTP-free read queries behind the admin and manager directory pages.
 
-These six query bodies used to live directly inside `src/routers/admin.py`
-handlers. They move here verbatim (Task 3 of
+These six query bodies used to live directly inside the admin router's
+handlers (now the `src/routers/admin/` package). They move here verbatim (Task 3 of
 docs/plans/2026-08-17-user-account-types-plan.md) so
 the `/manager` router can call the exact same code — most of it
 by way of the `roles=` filter on `list_pi_directory` — instead of
@@ -579,7 +579,7 @@ async def list_assessments(
     # detail page uses. Attached to each row rather than returned as a separate
     # context key on purpose: `_assessments_body.html` is included by an admin
     # template whose router allowlists every context key it forwards
-    # (src/routers/admin.py) and by a manager template whose router splats the
+    # (src/routers/admin/assessments.py) and by a manager template whose router splats the
     # whole view — so a new key would reach one surface and be Jinja `Undefined`
     # (silently falsy, never an error) on the other. Riding on `assessments`,
     # which both already forward, is the only shape that cannot half-arrive.
@@ -598,7 +598,7 @@ async def list_assessments(
     # docs/plans/2026-08-28-human-review-feedback-implementation-plan.md) — the exact
     # same attach-to-row pattern as `panel_state` above, and for the exact
     # same reason: `_assessments_body.html` is included by an admin template
-    # that allowlists every context key it forwards (`src/routers/admin.py`)
+    # that allowlists every context key it forwards (`src/routers/admin/assessments.py`)
     # and by a manager template that splats the whole view, so a new
     # top-level key would reach one surface and render as silently-falsy
     # Jinja `Undefined` on the other. Riding on `assessments` is the only
@@ -629,7 +629,7 @@ async def list_assessments(
     # — the exact same attach-to-row pattern as `panel_state` above, and for
     # the exact same reason: a new top-level key would reach the admin
     # template (which allowlists every key it forwards,
-    # `src/routers/admin.py`) or the manager template (which splats the whole
+    # `src/routers/admin/assessments.py`) or the manager template (which splats the whole
     # view) but not both, and would render as silently-falsy Jinja `Undefined`
     # on whichever it missed. Riding on `assessments` is the only shape that
     # reaches both. Each row resolves its OWN rubric revision (an archived one

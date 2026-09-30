@@ -319,7 +319,7 @@ async def test_the_impersonate_cookie_is_secure_when_https_is_required(
     await db_session.flush()
 
     monkeypatch.setattr(
-        "src.routers.admin.get_settings",
+        "src.routers.admin.impersonation.get_settings",
         lambda: real.model_copy(update={"allow_http_sessions": False}),
     )
     https_only = await client.post(
@@ -333,7 +333,7 @@ async def test_the_impersonate_cookie_is_secure_when_https_is_required(
     assert "secure" in cookie.lower(), cookie
 
     monkeypatch.setattr(
-        "src.routers.admin.get_settings",
+        "src.routers.admin.impersonation.get_settings",
         lambda: real.model_copy(update={"allow_http_sessions": True}),
     )
     http_ok = await client.post(

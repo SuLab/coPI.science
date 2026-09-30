@@ -62,7 +62,7 @@ def is_run_start_marker(text: str | None) -> bool:
     return bool(text) and text.lstrip().startswith(RUN_START_MARKER_PREFIX)
 
 
-def _template_body() -> str:
+def template_body() -> str:
     """The operator's template if present and readable, else the default.
 
     Read at call time (not import) from roles.PROMPTS_DIR so the bind-mounted
@@ -75,6 +75,11 @@ def _template_body() -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return DEFAULT_TEMPLATE
+
+
+# render_run_start_announcement's own parameter is also named `template_body`
+# (engine and tests pass it by keyword), which shadows this function inside it.
+_template_body = template_body
 
 
 def render_run_start_announcement(
