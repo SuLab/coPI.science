@@ -83,7 +83,7 @@ async def _stranded_thread(engine, monkeypatch, *, prior_messages, role="scout_h
         return ""
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_with_tools", _empty_reply
+        "src.agent.engine.deps.generate_with_tools", _empty_reply
     )
     return sim, agent, thread, factory, run_id
 

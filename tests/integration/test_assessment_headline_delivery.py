@@ -464,7 +464,7 @@ async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
     memory-derived seed this fails two ways at once: the owed thread is never
     announced, and it is named in a LOST error it does not deserve.
     """
-    monkeypatch.setattr("src.agent.simulation.HEADLINES_MAX_AT_SHUTDOWN", 2)
+    monkeypatch.setattr("src.agent.engine.constants.HEADLINES_MAX_AT_SHUTDOWN", 2)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)

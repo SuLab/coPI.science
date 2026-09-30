@@ -64,7 +64,7 @@ async def test_channel_is_stamped_onto_the_callers_own_row_not_the_last_one(monk
         agents=[lab, hub],
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
 
     async def _fake_generate(**kwargs):
@@ -78,7 +78,7 @@ async def test_channel_is_stamped_onto_the_callers_own_row_not_the_last_one(monk
         eng._on_llm_call({"agent_id": "someone-else", "phase": "new_post"})
         return _PITCH
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     await eng._phase5_new_post(lab)
 

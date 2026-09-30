@@ -106,10 +106,6 @@ ALLOWLIST: dict[str, str] = {
         "Used only by tests/unit/test_ids.py. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
-    "src.agent.simulation:_extract_json": (
-        "Used only by tests. "
-        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
-    ),
     "src.routers.profile:_parse_list": (
         "Never called in profile.py; the calls in agent_page.py are to that module's own _parse_list. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."

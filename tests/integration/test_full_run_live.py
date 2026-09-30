@@ -64,7 +64,8 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import src.agent.simulation as sim
+import src.agent.engine.constants as sim
+import src.agent.engine.deps as sim_deps
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import ThreadNotFound, markdown_to_mrkdwn
@@ -262,7 +263,7 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
         "turn_delay_seconds": 0.0,
         "phase5_skip_probability": 0.0,
     })
-    monkeypatch.setattr(sim, "get_settings", lambda: patched)
+    monkeypatch.setattr(sim_deps, "get_settings", lambda: patched)
 
     # Working memory is process-external state on a shared volume
     # (profiles/memory/{agent}/public.md), written by `_update_agent_memory` on every

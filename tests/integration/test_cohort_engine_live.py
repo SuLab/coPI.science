@@ -151,7 +151,7 @@ def _cfg(monkeypatch, *, enabled=True, policy="isolated", delay=0.0):
         "cohort_default_policy": policy,
         "turn_delay_seconds": delay,
     })
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: patched)
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: patched)
     monkeypatch.setattr("src.config.get_settings", lambda: patched)
 
 

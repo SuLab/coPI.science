@@ -58,7 +58,7 @@ async def _drive(monkeypatch, agent, *, today_posts):
             other.agent_id: FakeSlackClient(agent_id=other.agent_id),
         },
     )
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     monkeypatch.setattr(eng, "_count_today_posts", lambda a: today_posts)
     monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
 
@@ -73,7 +73,7 @@ async def _drive(monkeypatch, agent, *, today_posts):
             '<slack_message>skip</slack_message>'
         )
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
     await eng._phase5_new_post(agent)
     return called["llm"]
 

@@ -51,7 +51,7 @@ def _settings(**kw):
 
 
 def _patch(monkeypatch, **kw):
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings(**kw))
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings(**kw))
 
 
 def _engine(agent_ids, budget_cap=0):
@@ -244,7 +244,7 @@ class TestRateLimiter:
     def test_role_override_beats_the_global_setting(self, monkeypatch):
         _patch(monkeypatch, llm_calls_per_load_per_window=8)
         monkeypatch.setattr(
-            "src.agent.simulation.load_role",
+            "src.agent.engine.deps.load_role",
             lambda name: types.SimpleNamespace(calls_per_load_per_window=2),
         )
         eng = _engine(["spoke"])
@@ -805,7 +805,7 @@ class TestPhase5CallAccounting:
         agent.allowed_sender_ids = None
         eng = SimulationEngine(agents=[agent], slack_clients={})
         monkeypatch.setattr(
-            "src.agent.simulation.get_settings", lambda: self._settings(**settings_over)
+            "src.agent.engine.deps.get_settings", lambda: self._settings(**settings_over)
         )
         # Stub the prompt builder — this class exercises the accounting
         # around the LLM call, not prompt content (matches TestPIHandlerAccounting's
@@ -814,7 +814,7 @@ class TestPhase5CallAccounting:
 
         async def _fake_generate(**kwargs):
             return response if response is not None else self._SKIP
-        monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+        monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
         return eng, agent
 
     async def test_new_post_call_is_recorded_against_the_agent(self, monkeypatch):
@@ -858,7 +858,7 @@ class TestUnreservedCallSitesStillBookTheLedger:
             return "Updated memory."
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_agent_response", _fake_generate
+            "src.agent.engine.deps.generate_agent_response", _fake_generate
         )
         monkeypatch.setattr(
             agent, "build_thread_reply_system_prompt", lambda **kw: "sys"
@@ -909,7 +909,7 @@ class TestRateSettingGuards:
         """The behavioural consequence: with the guard, a 0 in the environment
         degrades to the default allowance instead of benching the whole roster."""
         s = self._settings_obj(llm_calls_per_load_per_window=0)
-        monkeypatch.setattr("src.agent.simulation.get_settings", lambda: s)
+        monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: s)
         eng = _engine(["a"])
         assert eng._turn_eligible(eng.agents["a"], time.time()) is True
 

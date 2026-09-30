@@ -143,7 +143,7 @@ def install_profiles(tmp_path: Path, monkeypatch) -> Path:
     for target in (
         "src.agent.agent.PROFILES_DIR",
         "src.agent.tools.PROFILES_DIR",
-        "src.agent.simulation.PROFILES_DIR",
+        "src.agent.engine.constants.PROFILES_DIR",
     ):
         monkeypatch.setattr(target, root)
     return root

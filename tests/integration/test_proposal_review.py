@@ -122,7 +122,7 @@ def llm(monkeypatch):
         calls.append(kwargs)
         return ""
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake)
     return calls
 
 

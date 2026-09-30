@@ -306,7 +306,7 @@ async def _drive(monkeypatch, response, *, capture=None):
     # PHASE5_SKIP_PROBABILITY in the environment turns every rejection
     # assertion below into a silent skip that passes for the wrong reason.
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: types.SimpleNamespace(
             lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
@@ -318,7 +318,7 @@ async def _drive(monkeypatch, response, *, capture=None):
     )
     monkeypatch.setattr(gill, "build_phase5_prompt", _stub_prompt)
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
+        "src.agent.engine.deps.generate_agent_response", _fake_generate
     )
     await eng._phase5_new_post(gill)
     return eng, gill, client
@@ -387,7 +387,7 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
         return _REJECTED_L1
 
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: types.SimpleNamespace(
             lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
@@ -398,7 +398,7 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
         ),
     )
     monkeypatch.setattr(gill, "build_phase5_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     streak = []
     for _ in range(3):

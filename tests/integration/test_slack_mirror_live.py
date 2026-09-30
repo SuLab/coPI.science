@@ -76,7 +76,7 @@ async def slack_engine(engine, slack_clients, slack_probe_channel, monkeypatch):
     probe channel is registered as the engine's only channel so nothing lands in a
     seeded channel name.
     """
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()

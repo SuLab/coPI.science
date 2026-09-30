@@ -217,7 +217,7 @@ async def _drive_reply(
         return raw_response
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
     )
 
     # A ⏸️ reply reaches `_close_thread` -> `_update_agent_memory`, which makes a

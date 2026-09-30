@@ -94,7 +94,7 @@ def test_validate_template_names_the_unknown_placeholder():
 def _engine(monkeypatch, tmp_path, *, channels="general,assessments-summary"):
     monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: SimpleNamespace(
             run_start_announce_channels=channels,
             reply_lane_max_in_flight=1,

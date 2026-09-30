@@ -144,7 +144,7 @@ def _settings(**kw):
 
 def _patch(monkeypatch, **kw):
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings", lambda: _settings(**kw)
+        "src.agent.engine.deps.get_settings", lambda: _settings(**kw)
     )
 
 

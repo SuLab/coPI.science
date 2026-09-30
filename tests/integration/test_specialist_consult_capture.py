@@ -161,7 +161,7 @@ async def _drive_a_consult(
         return "<slack_message>Thanks — one more question.</slack_message>"
 
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
 
     # slack_ts == ts is pure-Slack-on mode (matching every sibling
     # `_reply_to_thread` harness's seeded root): without it the seeded root has

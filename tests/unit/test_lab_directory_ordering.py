@@ -114,7 +114,7 @@ async def test_recompute_refreshes_the_directory_when_it_disables_the_gate(monke
     import types
 
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         # reply_lane_max_in_flight is required since __init__ eagerly
         # constructs the reply-lane semaphore (self._reply_sem).
         lambda: types.SimpleNamespace(

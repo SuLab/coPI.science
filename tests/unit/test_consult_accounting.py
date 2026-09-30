@@ -68,7 +68,7 @@ async def test_a_consult_is_booked_against_the_rate_limiter(monkeypatch):
         return "<slack_message>Thanks — one more question.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
 
     await engine._reply_to_thread(hub, thread)
@@ -108,7 +108,7 @@ async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(mon
         return "<slack_message>Thanks — that settles it.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
 
     await engine._reply_to_thread(hub, thread)
@@ -161,7 +161,7 @@ async def test_the_live_path_refuses_a_retired_verdict_label(monkeypatch):
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
     monkeypatch.setattr(engine, "_record_specialist_consult", _spy)
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
 
     await engine._reply_to_thread(hub, thread)
@@ -203,7 +203,7 @@ async def test_a_consult_appends_to_the_sliding_window_ledger(monkeypatch):
         return "<slack_message>Thanks — one more question.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
 
     await engine._reply_to_thread(hub, thread)
@@ -231,7 +231,7 @@ async def test_a_truncation_retry_appends_to_the_sliding_window_ledger(monkeypat
         return "<slack_message>Concluding.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
 
     await engine._reply_to_thread(hub, thread)
 
@@ -257,7 +257,7 @@ async def test_every_consult_in_a_turn_is_booked(monkeypatch):
         return "<slack_message>Concluding.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
 
     await engine._reply_to_thread(hub, thread)
@@ -281,7 +281,7 @@ async def test_a_failed_consult_is_not_booked(monkeypatch):
         return "<slack_message>Never mind.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_reply)
 
     await engine._reply_to_thread(hub, thread)
 

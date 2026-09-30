@@ -33,7 +33,8 @@ import pytest
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import src.agent.simulation as sim
+import src.agent.engine.constants as sim
+import src.agent.engine.deps as sim_deps
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport
@@ -148,15 +149,16 @@ async def scenario_db(engine):
     # because the engine reads them from a dozen call sites during a real turn. Restore
     # them here: leaving them patched would silently reconfigure every test that runs
     # after a scenario in the same session.
-    saved = {
-        name: getattr(sim, name)
-        for name in ("get_settings", "_UNIVERSAL_CHANNELS", "_CHANNEL_KEYWORDS")
-    }
+    saved = [
+        (sim_deps, "get_settings", sim_deps.get_settings),
+        (sim, "_UNIVERSAL_CHANNELS", sim._UNIVERSAL_CHANNELS),
+        (sim, "_CHANNEL_KEYWORDS", sim._CHANNEL_KEYWORDS),
+    ]
     try:
         yield factory, run_id
     finally:
-        for name, value in saved.items():
-            setattr(sim, name, value)
+        for module, name, value in saved:
+            setattr(module, name, value)
         # In a finally too: a failing scenario would otherwise leave its roster and
         # cohorts behind for every later test to trip over.
         async with factory() as db:
@@ -316,7 +318,7 @@ def _build_engine(factory, run_id, roster, policy):
         "turn_delay_seconds": 0.0,
         "phase5_skip_probability": 0.0,
     })
-    sim.get_settings = lambda: patched
+    sim_deps.get_settings = lambda: patched
 
     agents = []
     for aid in roster:

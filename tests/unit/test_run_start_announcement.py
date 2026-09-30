@@ -21,7 +21,7 @@ def _engine(monkeypatch, tmp_path, *, with_hub=True, channels="general,assessmen
     # test-built Settings into every later test in the session.
     from types import SimpleNamespace
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: SimpleNamespace(
             run_start_announce_channels=channels,
             # Required since SimulationEngine.__init__ eagerly constructs the

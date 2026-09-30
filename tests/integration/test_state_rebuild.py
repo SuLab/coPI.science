@@ -241,7 +241,7 @@ async def test_call_times_rebuilds_from_the_window_and_api_call_count_stays_all_
     await db_session.flush()
 
     eng = _engine_for(db_session, run.id)
-    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    monkeypatch.setattr("src.agent.engine.deps.datetime", _FrozenClock(frozen_now))
     await eng._rebuild_state_from_db()
     await eng._rebuild_agent_state()
 
@@ -291,7 +291,7 @@ async def test_the_rebuild_counts_api_calls_not_rows(db_session, monkeypatch):
     await db_session.flush()
 
     eng = _engine_for(db_session, run.id)
-    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    monkeypatch.setattr("src.agent.engine.deps.datetime", _FrozenClock(frozen_now))
     await eng._rebuild_state_from_db()
     await eng._rebuild_agent_state()
 
@@ -324,7 +324,7 @@ async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkey
     await db_session.flush()
 
     eng = _engine_for(db_session, run.id)
-    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    monkeypatch.setattr("src.agent.engine.deps.datetime", _FrozenClock(frozen_now))
     await eng._rebuild_state_from_db()
     await eng._rebuild_agent_state()
 
@@ -392,7 +392,7 @@ async def test_a_thread_with_no_root_in_the_log_is_evicted_not_replied(
     async def _must_not_run(**kwargs):
         raise AssertionError("an orphan thread must never reach the model")
 
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _must_not_run)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _must_not_run)
 
     orphan_root = "1111.000100"
     eng.message_log.append(LogEntry(

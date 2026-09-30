@@ -316,7 +316,7 @@ async def test_a_per_row_pass_that_exhausts_its_deadline_requeues_the_rest(
     monkeypatch,
 ):
     """The deadline is the second half of trap 1 — a slow recovery must stop."""
-    import src.agent.simulation as sim
+    import src.agent.engine.deps as sim
 
     store: list = []
     factory = _FakeFactory(store, first_commit_error=IntegrityError(

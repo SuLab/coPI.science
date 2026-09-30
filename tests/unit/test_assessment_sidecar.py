@@ -233,7 +233,7 @@ async def test_phase4_reply_budget_fits_the_assessment_sidecar(monkeypatch):
         return "<slack_message>A concluding reply.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _capture)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _capture)
 
     await engine._reply_to_thread(hub, thread)
 

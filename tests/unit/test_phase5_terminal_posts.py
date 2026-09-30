@@ -67,7 +67,7 @@ def _no_llm_reached(monkeypatch, agent):
         return '```json\n{"action": "skip"}\n```\n\n<slack_message>skip</slack_message>'
 
     monkeypatch.setattr(agent, "build_phase5_prompt", _stub_prompt)
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
     return called
 
 
@@ -82,7 +82,7 @@ async def test_scout_hub_never_reaches_the_llm_in_phase_5(monkeypatch):
     hub.allowed_sender_ids = None
     client = FakeSlackClient(agent_id="blackbird")
     eng = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     called = _no_llm_reached(monkeypatch, hub)
 
     await eng._phase5_new_post(hub)
@@ -120,7 +120,7 @@ async def test_scout_hub_never_reaches_the_llm_in_phase_5_even_when_saturated(mo
     client = FakeSlackClient(agent_id="blackbird")
     eng = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: _settings(active_thread_threshold=1000),
     )
     called = _no_llm_reached(monkeypatch, hub)
@@ -173,7 +173,7 @@ async def test_a_lab_at_the_active_thread_threshold_skips_phase_5_pre_llm(monkey
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: _settings(active_thread_threshold=12),
     )
     called = _no_llm_reached(monkeypatch, lab)
@@ -203,7 +203,7 @@ async def test_a_lab_below_the_threshold_is_unaffected(monkeypatch):
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
+        "src.agent.engine.deps.get_settings",
         lambda: _settings(active_thread_threshold=12),
     )
     monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
@@ -219,7 +219,7 @@ async def test_a_lab_below_the_threshold_is_unaffected(monkeypatch):
     async def _fake_generate(**kwargs):
         return response
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     await eng._phase5_new_post(lab)
 

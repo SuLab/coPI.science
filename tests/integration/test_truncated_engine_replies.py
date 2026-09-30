@@ -114,7 +114,7 @@ async def test_a_truncated_memory_reply_does_not_overwrite_working_memory(
         return _HALF_A_MEMORY
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
+        "src.agent.engine.deps.generate_agent_response", _fake_generate
     )
 
     await sim._update_agent_memory(agent, "an interview closed")
@@ -149,7 +149,7 @@ async def test_a_complete_memory_reply_still_overwrites_working_memory(
         return "(a) Ideas pitched: none. (b) No PI feedback. (c) Keep pitching."
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
+        "src.agent.engine.deps.generate_agent_response", _fake_generate
     )
 
     await sim._update_agent_memory(agent, "an interview closed")
@@ -182,7 +182,7 @@ async def _drive_truncated_reply(monkeypatch, stop_reason, *, text=_HALF_A_REPLY
         return f"<slack_message>{text}</slack_message>"
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
     )
 
     async def _no_memory(*args, **kwargs):
@@ -269,7 +269,7 @@ async def _drive_truncated_post(monkeypatch, stop_reason, *, response):
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     sim, clients = _engine([agent, hub])
     monkeypatch.setattr(
-        "src.agent.simulation.get_settings", lambda: _phase5_settings()
+        "src.agent.engine.deps.get_settings", lambda: _phase5_settings()
     )
     monkeypatch.setattr(
         agent, "build_phase5_prompt", lambda **kw: ("sys", [])
@@ -280,7 +280,7 @@ async def _drive_truncated_post(monkeypatch, stop_reason, *, response):
         return response
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
+        "src.agent.engine.deps.generate_agent_response", _fake_generate
     )
 
     await sim._phase5_new_post(agent)

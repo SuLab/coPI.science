@@ -81,7 +81,7 @@ async def test_a_permanently_broken_channel_does_not_flood_the_log(
 ):
     """The other half: one line per channel per interval, not one per tick."""
     eng, client = _engine()
-    monkeypatch.setattr("src.agent.simulation.CHANNEL_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr("src.agent.engine.constants.CHANNEL_POLL_INTERVAL", 0.0)
 
     with caplog.at_level(logging.DEBUG, logger="src.agent.simulation"):
         for _ in range(20):
@@ -103,7 +103,7 @@ async def test_a_second_broken_channel_gets_its_own_line(caplog, monkeypatch):
     eng._channel_id_map = {
         "general": "C_general", "chemical-biology": "C_chembio",
     }
-    monkeypatch.setattr("src.agent.simulation.CHANNEL_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr("src.agent.engine.constants.CHANNEL_POLL_INTERVAL", 0.0)
 
     with caplog.at_level(logging.DEBUG, logger="src.agent.simulation"):
         for _ in range(5):
@@ -124,11 +124,11 @@ async def test_a_second_broken_channel_gets_its_own_line(caplog, monkeypatch):
 async def test_a_channel_that_recovers_can_warn_again(caplog, monkeypatch):
     """A silenced channel must not stay silenced for the life of the run."""
     eng, client = _engine()
-    monkeypatch.setattr("src.agent.simulation.CHANNEL_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr("src.agent.engine.constants.CHANNEL_POLL_INTERVAL", 0.0)
 
     fake_now = [1000.0]
     monkeypatch.setattr(
-        "src.agent.simulation.time",
+        "src.agent.engine.deps.time",
         types.SimpleNamespace(time=lambda: fake_now[0], monotonic=lambda: fake_now[0]),
     )
 

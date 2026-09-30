@@ -38,7 +38,8 @@ POST_GAP = 1.1
 
 @pytest.fixture
 async def cohort_engine(engine, slack_clients, slack_probe_channel, monkeypatch):
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
+    import src.agent.engine.deps as sim_deps
     from src.config import get_settings as _real
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -50,7 +51,7 @@ async def cohort_engine(engine, slack_clients, slack_probe_channel, monkeypatch)
         "cohort_isolation_enabled": True, "cohort_default_policy": "isolated",
         "turn_delay_seconds": 0.0,
     })
-    monkeypatch.setattr(sim, "get_settings", lambda: patched)
+    monkeypatch.setattr(sim_deps, "get_settings", lambda: patched)
 
     async with factory() as db:
         db.add(SimulationRun(id=run_id, status="running"))

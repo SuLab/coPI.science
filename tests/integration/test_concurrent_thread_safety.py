@@ -131,7 +131,7 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
         await asyncio.sleep(0.03)
         return _HUB_CONCLUDE_RESPONSE
 
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_generate)
 
     async def _locked_service():
         # Mirrors _dispatch_reply_lane._run's exact span: the thread lock held
@@ -232,7 +232,7 @@ async def test_two_agents_replying_into_one_thread_do_not_overlap_at_the_product
         live -= 1
         return _HUB_CONCLUDE_RESPONSE
 
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_generate)
 
     try:
         await asyncio.wait_for(eng._dispatch_reply_lane(), timeout=10.0)
@@ -312,7 +312,7 @@ async def test_concurrent_phase5_respects_the_daily_cap(engine, monkeypatch):
             '<slack_message>New idea: repurposing an existing compound.</slack_message>'
         )
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     try:
         await asyncio.wait_for(
@@ -580,7 +580,7 @@ async def test_reservation_limiter_holds_under_n_concurrent_repliers(
         await asyncio.sleep(0.02)  # real yield: all N genuinely overlap
         return "<slack_message>Sounds interesting, tell me more.</slack_message>"
 
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_generate)
 
     allowance = eng._allowance_for(lab)
     assert allowance == 3, f"test fixture assumption broke: allowance={allowance}"
@@ -683,7 +683,7 @@ async def test_a_pair_already_in_flight_is_not_spawned_twice(engine, monkeypatch
         await asyncio.sleep(0.03)
         return "<slack_message>Tell me more about the mechanism.</slack_message>"
 
-    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_generate)
 
     entries = []
     real_service_reply = eng._service_reply
@@ -743,7 +743,7 @@ async def test_close_thread_defers_memory_updates_out_of_the_dispatch_span(
         return "updated memory"
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", fake_generate
+        "src.agent.engine.deps.generate_agent_response", fake_generate
     )
     eng._running = True
     await eng._dispatch_reply_lane()
@@ -802,7 +802,7 @@ async def test_sequential_drain_prevents_a_lost_memory_update(
         return f"{prior} || {event}"
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
+        "src.agent.engine.deps.generate_agent_response", _fake_generate
     )
 
     await asyncio.gather(
@@ -837,7 +837,7 @@ async def test_stop_drains_a_bounded_number_of_memory_events(
         return "m"
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", fake_generate
+        "src.agent.engine.deps.generate_agent_response", fake_generate
     )
     for i in range(12):
         eng._pending_memory_events.append(

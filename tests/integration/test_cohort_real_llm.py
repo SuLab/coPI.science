@@ -90,7 +90,7 @@ async def test_real_model_prose_gets_its_cross_cohort_mention_stripped(monkeypat
     outbound strip over its actual prose."""
     import types
 
-    import src.agent.simulation as sim
+    import src.agent.engine.deps as sim
     from src.agent.simulation import SimulationEngine
     from src.agent.transport import NullTransport
 

@@ -49,7 +49,7 @@ async def _drive(monkeypatch, response):
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
 
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
 
     def _stub_prompt(**kw):
         return ("sys", [])
@@ -58,7 +58,7 @@ async def _drive(monkeypatch, response):
         return response
 
     monkeypatch.setattr(lab, "build_phase5_prompt", _stub_prompt)
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
     await eng._phase5_new_post(lab)
     return eng, lab, client
 
@@ -89,13 +89,13 @@ async def test_reply_action_is_unsupported_and_posts_nothing(monkeypatch):
         agents=[lab, hub],
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
 
     async def _fake_generate(**kwargs):
         return _REPLY
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     await eng._phase5_new_post(lab)
 
@@ -118,13 +118,13 @@ async def test_reply_action_increments_skip_streak_from_true_prior_value(monkeyp
         agents=[lab, hub],
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
 
     async def _fake_generate(**kwargs):
         return _REPLY
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     await eng._phase5_new_post(lab)
 
@@ -157,13 +157,13 @@ async def test_a_successful_post_resets_the_skip_streak(monkeypatch):
         agents=[lab, hub],
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
     )
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
 
     async def _fake_generate(**kwargs):
         return _PITCH
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _fake_generate)
 
     await eng._phase5_new_post(lab)
 

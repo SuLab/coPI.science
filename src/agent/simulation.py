@@ -5,19 +5,81 @@ import json
 import logging
 import random
 import re
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, NamedTuple
+from typing import Any
 
-from sqlalchemy import func
-from sqlalchemy.exc import DataError, IntegrityError
+from src.agent.agent import Agent
+from src.agent.end_reasons import FINALIZE, HOLD, TODAY, end_reason_class
+from src.agent.engine import constants, deps
+from src.agent.engine.context import EngineContext, RunState, _Via
 
-from src.agent.agent import PROFILES_DIR, Agent
-from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL, SEEDED_CHANNELS
-from src.agent.end_reasons import FINALIZE, HOLD, TODAY, end_reason_class, stronger_reason
+# isort: off
+from src.agent.engine.constants import (  # re-exported: tests and scripts import these from here
+    ASSESSMENTS_SUMMARY_CHANNEL as ASSESSMENTS_SUMMARY_CHANNEL,
+    CHANNEL_POLL_INTERVAL as CHANNEL_POLL_INTERVAL,
+    CONTROL_POLL_INTERVAL as CONTROL_POLL_INTERVAL,
+    HEADLINES_MAX_AT_SHUTDOWN as HEADLINES_MAX_AT_SHUTDOWN,
+    MEMORY_EVENTS_MAX_AT_SHUTDOWN as MEMORY_EVENTS_MAX_AT_SHUTDOWN,
+    PER_ROW_RECOVERY_DEADLINE_S as PER_ROW_RECOVERY_DEADLINE_S,
+    PERSIST_UPSERT_CHUNK_ROWS as PERSIST_UPSERT_CHUNK_ROWS,
+    POLL_ERROR_LOG_INTERVAL as POLL_ERROR_LOG_INTERVAL,
+    PRIOR_THREADS_KEPT_PER_PAIR as PRIOR_THREADS_KEPT_PER_PAIR,
+    PROFILES_DIR as PROFILES_DIR,
+    PROPOSAL_DRAIN_SETTLE_TICKS as PROPOSAL_DRAIN_SETTLE_TICKS,
+    REBUILD_WINDOW_S as REBUILD_WINDOW_S,
+    ROSTER_POLL_INTERVAL as ROSTER_POLL_INTERVAL,
+    RUN_STATS_UPDATE_INTERVAL as RUN_STATS_UPDATE_INTERVAL,
+    SEEDED_CHANNELS as SEEDED_CHANNELS,
+    TRUNCATION_NOTICE as TRUNCATION_NOTICE,
+    _CALLS_PER_LOG_ROW as _CALLS_PER_LOG_ROW,
+    _CHANNEL_KEYWORDS as _CHANNEL_KEYWORDS,
+    _ROW_LEVEL_DB_ERRORS as _ROW_LEVEL_DB_ERRORS,
+    _UNIVERSAL_CHANNELS as _UNIVERSAL_CHANNELS,
+    _UNSET as _UNSET,
+)
+from src.agent.engine.helpers import (  # re-exported
+    HEADLINE_IN_DOUBT as HEADLINE_IN_DOUBT,
+    _HeadlineInDoubt as _HeadlineInDoubt,
+    _HeldVerdict as _HeldVerdict,
+    _restored_slack_ts as _restored_slack_ts,
+    _thread_phase_label as _thread_phase_label,
+    _visibility_permits as _visibility_permits,
+    _was_truncated as _was_truncated,
+)
+from src.agent.engine.sidecar import (  # re-exported
+    _ASSESSMENT_ORPHAN_TAG_RE as _ASSESSMENT_ORPHAN_TAG_RE,
+    _ASSESSMENT_RE as _ASSESSMENT_RE,
+    _ASSESSMENT_UNCLOSED_RE as _ASSESSMENT_UNCLOSED_RE,
+    _DIMENSION_RATIONALE_CHARS as _DIMENSION_RATIONALE_CHARS,
+    _HEADLINE_SOFT_LIMIT as _HEADLINE_SOFT_LIMIT,
+    _HUB_BULLET_CHARS as _HUB_BULLET_CHARS,
+    _HUB_BULLETS_MAX as _HUB_BULLETS_MAX,
+    _HUB_BULLETS_MIN as _HUB_BULLETS_MIN,
+    _KEY_POINT_BULLET_CHARS as _KEY_POINT_BULLET_CHARS,
+    _KEY_POINT_GROUP_BULLETS as _KEY_POINT_GROUP_BULLETS,
+    _KEY_POINTS_MAX as _KEY_POINTS_MAX,
+    _KEY_POINTS_MIN as _KEY_POINTS_MIN,
+    _PITCH_CITATION_RE as _PITCH_CITATION_RE,
+    _PITCH_WORD_LIMIT as _PITCH_WORD_LIMIT,
+    _PROJECT_SOFT_LIMIT as _PROJECT_SOFT_LIMIT,
+    _SIDECAR_FENCE_RE as _SIDECAR_FENCE_RE,
+    _VALID_GATING_STATES as _VALID_GATING_STATES,
+    _bounded_str as _bounded_str,
+    _extract_assessment_json as _extract_assessment_json,
+    _extract_json as _extract_json,
+    _extract_slack_message as _extract_slack_message,
+    _normalize_gating as _normalize_gating,
+    _reply_closes_thread as _reply_closes_thread,
+    _reply_opens_with_pause as _reply_opens_with_pause,
+    _sidecar_has_valid_json_block as _sidecar_has_valid_json_block,
+    _str_or_none as _str_or_none,
+    _strip_assessment_sidecar as _strip_assessment_sidecar,
+    _strip_llm_preamble as _strip_llm_preamble,
+    _unfence_sidecar as _unfence_sidecar,
+)
+# isort: on
 from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.locks import LockRegistry
 from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog, is_panel_note
 from src.agent.post_types import (
     PostTypeSpec,
@@ -26,7 +88,7 @@ from src.agent.post_types import (
     render_menu,
 )
 from src.agent.prompt_safety import delimit
-from src.agent.roles import load_role, prompt_set_stamp
+from src.agent.roles import prompt_set_stamp
 from src.agent.run_marker import (
     is_run_start_marker,
     parse_announce_channels,
@@ -45,7 +107,6 @@ from src.agent.specialists import (
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
-from src.config import get_settings
 from src.models import (
     AgentChannel,
     AgentMessage,
@@ -80,302 +141,36 @@ from src.services.assessment_headline import (
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
-from src.services.build_info import get_build_info
 from src.services.cohorts import compute_gates, summarise_gates
 from src.services.interview_state import ended_thread_ids
-from src.services.llm import (
-    generate_agent_response,
-    generate_with_tools,
-    is_truncated_stop,
-    set_call_log_callback,
-)
+from src.services.llm import set_call_log_callback
 
 logger = logging.getLogger(__name__)
 
-
-def _thread_phase_label(thread_phase: str) -> str:
-    """Map a ``thread_guidance`` phase constant to the ``llm_call_logs``
-    enum value (``explore`` / ``decide`` / ``conclude``).
-
-    ``EXPLORE``/``DECIDE`` lowercase directly; ``CONCLUDE``'s actual value is
-    ``"MUST CONCLUDE"`` (see thread_guidance.py), so it is special-cased
-    rather than blindly lowered.
-    """
-    return "conclude" if thread_phase == CONCLUDE else thread_phase.lower()
-
-
-def _was_truncated(stop_reasons: list[str]) -> bool:
-    """Did the reply this turn is holding stop BEFORE the model finished it?
-
-    ``src/services/llm.py`` reports the terminating ``stop_reason`` through an
-    ``on_stop_reason`` callback and still RETURNS the partial text, because
-    whether a partial answer may be posted, persisted or credited differs per
-    call site. Every engine call site therefore collects the reason into a list
-    (``on_stop_reason=stop_reasons.append``, the idiom ``src/agent/tools.py``
-    already uses) and asks this.
-
-    ``is_truncated_stop`` rather than a ``refusal``-only test, and deliberately
-    not re-derived here: ``refusal`` is the classifier cutting the generation and
-    ``max_tokens`` is the ceiling doing it, the text in hand is equally partial,
-    and a reply that truncated, retried and truncated again reports
-    ``max_tokens`` — as does a fallthrough from the retry path whose first pass
-    was refused. Until 2026-08-22 ``on_stop_reason`` had NO reader in this module
-    at all, so a truncated hub reply was posted to Slack as complete and a
-    truncated synthesis overwrote a good working memory.
-
-    ``any`` rather than "the last one": the contract says the callback fires
-    exactly once, and a guard about incomplete text should not become a no-op if
-    that ever changes.
-    """
-    return any(is_truncated_stop(reason) for reason in stop_reasons)
-
-
-#: Appended to a hub/lab reply whose generation was cut off, so the PI reading
-#: the thread is not left to guess why it stops mid-sentence.
-#:
-#: The partial text is KEPT and posted. Discarding it looks safer and is not:
-#: `_reply_to_thread`'s next guard is "empty or unparseable", which increments
-#: `empty_response_count` and, on a second occurrence, backs off the thread and
-#: records an `empty_reply` drop — the interview abandoned, no verdict, no later
-#: turn. That is how a real interview died. A marked partial reply keeps the
-#: conversation alive and tells the truth about itself.
-TRUNCATION_NOTICE = (
-    "\n\n_(This reply was cut off before it finished — treat it as incomplete.)_"
-)
-
-
-class _HeadlineInDoubt:
-    """What `_post_assessment_summary` returns when the post raised with no Slack
-    response (spec P0-08): the headline may or may not be in the channel. Falsy,
-    so every `if not posted:` still reads it as "not known to be posted"; the
-    claim-aware caller tests `is HEADLINE_IN_DOUBT` and keeps its claim."""
-
-    __slots__ = ()
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __repr__(self) -> str:
-        return "HEADLINE_IN_DOUBT"
-
-
-HEADLINE_IN_DOUBT = _HeadlineInDoubt()
-
-
-#: The DB errors that condemn ONE ROW rather than the connection, the session or
-#: the pool — and therefore the only ones a per-row retry can possibly help with.
-#:
-#: The gate matters more than the recovery. The commonest failure on every flush
-#: path here is the pool-checkout timeout `_persist_assessment`'s own comment
-#: names, and it is a property of the POOL: retrying the batch one row at a time
-#: issues N more sequential checkouts against a pool that is already exhausted.
-#: At ~15 rows and a 30 s checkout timeout that is 450 s inside `stop()`, which
-#: overruns the documented 420 s `docker stop` grace, gets the process SIGKILLed,
-#: and loses the batch PLUS everything not yet flushed. So: never `except
-#: Exception` into the fallback. Anything not in this tuple is transient by
-#: assumption and the batch is re-queued whole, exactly as before.
-_ROW_LEVEL_DB_ERRORS = (IntegrityError, DataError)
-
-#: Wall-clock ceiling on ONE per-row recovery pass, for the same reason: even a
-#: genuinely row-level error can arrive with a slow database behind it, and this
-#: code runs inside a bounded stop grace. Rows the deadline stops us attempting
-#: are re-queued, not dropped.
-PER_ROW_RECOVERY_DEADLINE_S = 30.0
-
-#: Rows per INSERT statement in `_flush_persisted`. The agent_messages upsert
-#: binds 17 parameters per row and asyncpg refuses a statement past 32,767, so
-#: an unchunked flush of 1,928+ rows raised InterfaceError, which is not a
-#: row-level error: the whole batch re-queued and failed identically forever.
-#: 500 rows is 8,500 binds.
-PERSIST_UPSERT_CHUNK_ROWS = 500
-
-
-#: How many REAL API calls one ``llm_call_logs`` row represents.
-#:
-#: A row is one TURN; `call_stats` has one entry per billed API call, and 78.6%
-#: of stored `thread_reply` rows are 2+ calls. Live booking counts calls
-#: (`Agent.record_api_call` plus `SimulationEngine._unbooked_calls` for the tool
-#: rounds), so the restart rebuild has to as well or every restart silently
-#: loosens the throttle by the calls-to-turns ratio.
-#:
-#: The COALESCE is not defensive tidiness: 4,650 of the 5,771 stored rows have
-#: `call_stats IS NULL` (the column arrived in migration 0032), and NULL
-#: propagates through SUM — a bare `jsonb_array_length` collapses the lifetime
-#: rebuild to NULL and loosens the throttle in the OTHER direction. A row that
-#: recorded nothing is worth exactly the one call we know it made.
-_CALLS_PER_LOG_ROW = func.coalesce(
-    func.jsonb_array_length(LlmCallLog.call_stats), 1
-)
-
-
-def _visibility_permits(origin: str, current: str) -> bool:
-    """True iff an origin-visibility record may appear in a current-visibility context.
-
-    Implements the ordering `public < collab_private` from G3:
-    - public origins are visible in any context.
-    - collab_private origins are visible only in a collab_private context.
-
-    See specs/privacy-and-channel-visibility.md §G3.
-    """
-    if origin == VISIBILITY_PUBLIC:
-        return True
-    return current == VISIBILITY_COLLAB_PRIVATE
-
-
-def _restored_slack_ts(row: AgentMessage) -> str | None:
-    """Slack ts for a restored ``agent_messages`` row, or None if it has none.
-
-    Restoring this mapping is what lets ``_slack_parent_ts`` tell a Slack-backed
-    thread from a DB-origin one after a restart. The column is the only evidence:
-    a NULL means the message is not on Slack.
-
-    This used to *infer* a missing mapping — "a row stored against a real Slack
-    ``channel_id`` was born on Slack, so its canonical id is its Slack ts" — to
-    cover pre-Stage-6 rows written before the mapping was recorded. That
-    inference is unsound, because a DB-origin message can also carry a real Slack
-    channel id: a PI message written through the web inbox resolves ``channel_id``
-    from the ``agent_channels`` row (Slack's id when Slack is on), and so does an
-    agent post whose Slack mirror failed. Both mint a *local* canonical id, and
-    inferring turns that id into a Slack ts Slack never issued — which
-    ``_slack_parent_ts`` then hands to ``chat.postMessage`` as a ``thread_ts``,
-    producing an orphan post, a ``ThreadNotFound`` and an evicted thread. Nothing
-    in the row distinguishes the two cases, so the guess is now refused.
-
-    Legacy rows written before the mapping was recorded stay NULL: the one-off
-    repair script for them was retired.
-    """
-    return row.slack_ts
-
-
-# Keywords for channel-profile matching
-_CHANNEL_KEYWORDS: dict[str, list[str]] = {
-    "drug-repurposing": [
-        "drug", "repurpos", "pharmacolog", "therapeutic", "compound",
-        "small molecule", "target", "ligand", "polypharmacol",
-    ],
-    "structural-biology": [
-        "structur", "cryo", "crystallograph", "x-ray", "microscop",
-        "tomograph", "molecular visualization", "conformation",
-    ],
-    "aging-and-longevity": [
-        "aging", "longevity", "lifespan", "neurodegenerat", "age-related",
-        "senescen", "alzheimer", "parkinson",
-    ],
-    "single-cell-omics": [
-        "single-cell", "single cell", "scrna", "transcriptom", "genomic",
-        "multiom", "sequencing", "omics",
-    ],
-    "chemical-biology": [
-        "chemical biolog", "proteomics", "chemoproteom", "covalent",
-        "activity-based", "abpp", "chemical probe", "mass spectrom",
-    ],
+#: Engine members held by the context objects: name -> (engine attribute, name there).
+_CONTEXT_FORWARD: dict[str, tuple[str, str]] = {
+    "agents": ("ctx", "agents"),
+    "slack_clients": ("ctx", "slack_clients"),
+    "message_log": ("ctx", "message_log"),
+    "session_factory": ("ctx", "session_factory"),
+    "simulation_run_id": ("ctx", "simulation_run_id"),
+    "slack_enabled": ("ctx", "slack_enabled"),
+    "_agent_locks": ("ctx", "agent_locks"),
+    "_thread_locks": ("ctx", "thread_locks"),
+    "_running": ("run_state", "running"),
+    "_stop_event": ("run_state", "stop_event"),
+    "_end_reason": ("run_state", "end_reason"),
+    "request_stop": ("run_state", "request_stop"),
 }
-_UNIVERSAL_CHANNELS = {"general"}
 
-# Slack poll throttles. Human channel messages are rare, so sub-turn latency is
-# unnecessary; polling every turn was saturating one bot token's rate limit.
-CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
+#: Engine attribute -> unit class, one entry per unit. Each unit that moves out of
+#: SimulationEngine is added here and constructed in SimulationEngine.__init__.
+_UNIT_CLASSES: dict[str, type] = {}
 
-#: How often ONE channel's poll failure may be reported at WARNING.
-#:
-#: The per-channel `except` in `_poll_slack_for_bot_messages` used to log at
-#: DEBUG, and production runs at INFO — so a channel failing on every tick for
-#: hours produced nothing an operator would ever see. Raising it to WARNING with
-#: no rate limit trades that for the opposite failure: the poller sweeps every
-#: CHANNEL_POLL_INTERVAL (15 s) and a broken channel fails every sweep, which is
-#: 240 identical lines an hour PER CHANNEL burying everything else.
-POLL_ERROR_LOG_INTERVAL = 300.0
-ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
-#: Seconds between control-plane polls (claim a pending stop command, refresh
-#: the heartbeat row). See _poll_control_plane.
-CONTROL_POLL_INTERVAL = 30.0
-
-# How many consecutive main-loop iterations the proposal target must read
-# "cap reached AND no open interviews" before the run ends. Bridges the brief
-# window between the last pitch and the hub opening its interview thread; a
-# single zero-read is not enough. max_runtime is the independent backstop.
-PROPOSAL_DRAIN_SETTLE_TICKS = 3
-
-# Distinguishes "role has no cached rate yet" from "role's cached rate is None
-# (no override)". A plain dict.get() default cannot tell those apart, so the
-# cache would re-read role.toml from disk on every tick for every default role.
-_UNSET = object()
-
-# The run's total_messages / total_api_calls are display counters shown in the
-# admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
-# wasteful once a run accumulates many rows (B1), so refresh the run-stats row at
-# most this often (a final refresh is forced on shutdown). The message rows
-# themselves are still upserted every flush.
-#
-# "Cosmetic" was true of BOTH until 2026-08-22. It is no longer true of
-# `total_api_calls`: that column now counts REAL API CALLS (tool rounds and
-# retries included), where it used to count turns, so it is not comparable with
-# any run recorded before that date. See `Agent.record_api_call`,
-# `SimulationEngine._unbooked_calls` and `_CALLS_PER_LOG_ROW`. The old,
-# per-turn figure is still recoverable for any run as
-# `SELECT COUNT(*) FROM llm_call_logs WHERE simulation_run_id = ...`.
-RUN_STATS_UPDATE_INTERVAL = 30.0
-
-# How many queued working-memory updates stop() will still run. Each is a
-# real LLM call (seconds); the container's stop grace period (-t 420) was
-# sized for ONE 16k call, so an unbounded shutdown drain can outlive it and
-# get SIGKILLed mid-flush. Anything beyond this bound is dropped LOUDLY.
-MEMORY_EVENTS_MAX_AT_SHUTDOWN = 10
-
-# Headlines to post during `stop()`. Each is up to two Slack round-trips and the
-# container's stop grace period is finite, so the sweep is bounded like the
-# memory drain beside it. Higher than that bound because a headline is cheap
-# next to an LLM call, and because a whole run's worth of un-announced verdicts
-# arriving at once is exactly the case this exists for.
-HEADLINES_MAX_AT_SHUTDOWN = 25
-
-# Closed-thread summaries kept in memory per agent pair, for the Phase-5
-# dedup context. The DB's thread_decisions table remains the full record;
-# this bounds only what a process accumulates (audit finding 5: one dict per
-# close, forever). Must be >= agent.PRIOR_THREADS_RENDERED_PER_PAIR.
-PRIOR_THREADS_KEPT_PER_PAIR = 50
-
-# Startup rebuild window (B2): the MessageLog is hydrated with messages from the
-# last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
-# RAM/startup cost grows with recent + live volume rather than all-time history.
-# Old *closed* threads are left in the DB. Nothing in the engine reopens one
-# since 23da58d (2026-08-13). Sized to comfortably cover any active
-# conversation's lifetime.
-REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
-
-
-class _HeldVerdict(NamedTuple):
-    """The verdict an interview thread already holds, and the turn it came from.
-
-    Recorded per thread in ``SimulationEngine._assessed_threads`` so a second
-    ``<assessment_json>`` sidecar on the same thread can be JUDGED rather than
-    merely counted: a re-capture of the same turn is a duplicate and is refused,
-    while a strictly later reply that concludes or closes the interview is the
-    better-informed verdict and supersedes this one. See ``_sidecar_refusal``.
-
-    ``ordinal`` is the message ordinal of the reply that carried it
-    (``thread.message_count + 1`` as read at capture time). ``final`` means that
-    reply CLOSED the thread, so no later turn exists and nothing may supersede
-    it. ``slack_ts`` is the stored row's own link back to that reply, and the
-    only handle ``_retire_superseded_verdict`` has for finding the row again —
-    the row's ``thread_id`` cannot stand in for it (see
-    ``_superseded_row_filter``).
-
-    ``announced`` records whether this verdict already produced an
-    ``#assessments-summary`` headline. Deliberately separate from ``final``: a
-    CONCLUDE-ordinal reply is terminal enough to ANNOUNCE, but not enough to
-    freeze the thread, because ``thread_guidance`` renders CONCLUDE for every
-    ordinal above 11 — so a longer interview gets a run of concluding turns and
-    the last of them is still the verdict of record. Conflating the two blocks
-    that supersession. And because a headline is a public Slack post that cannot
-    be retracted, a superseded verdict that was already announced does not get
-    announced again: the row changes, the channel keeps the first word.
-    """
-
-    ordinal: int
-    final: bool
-    slack_ts: str | None
-    announced: bool = False
+#: Owner-API names two units define under the same name (``headlines.enqueue()``,
+#: ``memory.enqueue()``). They were never engine members, so nothing reaches them as
+#: engine.<name>; callers use engine.<unit>.enqueue.
+_NOT_FORWARDED = frozenset({"enqueue"})
 
 
 class SimulationEngine:
@@ -403,8 +198,17 @@ class SimulationEngine:
         fresh_start: bool = False,
         max_proposals: int = 0,
     ):
-        self.agents = {a.agent_id: a for a in agents}
-        self.slack_clients = slack_clients
+        self.ctx = EngineContext(
+            agents={a.agent_id: a for a in agents},
+            slack_clients=slack_clients,
+            message_log=MessageLog(),
+            session_factory=session_factory,
+            simulation_run_id=simulation_run_id,
+            slack_enabled=slack_enabled,
+        )
+        self.run_state = RunState()
+        # Resolved through the facade until ChannelDirectory owns the map.
+        self.ctx.channel_id_resolver = lambda name: self._channel_id_map.get(name)
         self.max_runtime_minutes = max_runtime_minutes
         # 0 = off. When >0, the engine stops opening NEW pitches once this many
         # top-level posts exist this run, then ends the run when every opened
@@ -420,8 +224,6 @@ class SimulationEngine:
         self._proposals_posted = 0
         self._proposal_drain_streak = 0
         self.budget_cap = budget_cap
-        self.session_factory = session_factory
-        self.simulation_run_id = simulation_run_id
         self._reset_cursors = reset_cursors
         # True only for `--fresh`, which has just minted a new run with no
         # agent_messages/agent_channels rows of its own (it deletes nothing —
@@ -430,10 +232,6 @@ class SimulationEngine:
         # itself. Both kinds of start seed the Slack poll cursors past the
         # history already on the transport (see _restore_slack_state).
         self._fresh_start = fresh_start
-        # When False, the local DB is the sole conversation store and no Slack
-        # API calls are made (transports are NullTransport). Drives the roster
-        # gate and the DB inbox poller. See specs/local-db-conversations.md.
-        self.slack_enabled = slack_enabled
 
         # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
         self._role_rate_cache: dict[str, int | None] = {}
@@ -476,8 +274,6 @@ class SimulationEngine:
         self._consult_signal_counts_by_domain: dict[str, dict[str, int]] = {}
 
         self._start_time: datetime | None = None
-        self._running = False
-        self.message_log = MessageLog()
 
         # Agent name lookups
         self._bot_name_to_id: dict[str, str] = {
@@ -675,41 +471,6 @@ class SimulationEngine:
         # changed from turns to real API calls — see the module comment on
         # RUN_STATS_UPDATE_INTERVAL.
         self._last_run_stats_update: float = 0.0
-        # Set by request_stop() (the signal handler's sync entry point) to both
-        # end the main loop and cut short an in-progress idle-backoff sleep, so
-        # the final flush happens well inside the container's stop grace period.
-        # See _sleep / request_stop (R2).
-        self._stop_event = asyncio.Event()
-        # Why the run is ending (src/agent/end_reasons.py): set only through
-        # request_stop, and read by stop() to choose the shutdown sweep. None
-        # means nothing recorded one — stop() then behaves exactly as before.
-        self._end_reason: str | None = None
-
-        # Two-lane concurrent scheduler (docs/specs/2026-08-14-two-lane-
-        # concurrent-scheduler-design.md §3). Per-key lock registries, keyed
-        # by thread_id and agent_id respectively — disjoint namespaces, so a
-        # single coroutine holding one can never re-acquire the other under
-        # the same key and deadlock on itself. That disjointness does NOT by
-        # itself rule out a cross-coroutine deadlock, though: two coroutines
-        # acquiring the SAME TWO registries in opposite order still can. The
-        # one global rule that prevents it, enforced by convention (no
-        # compiler-checked guarantee exists — see
-        # test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller
-        # and test_no_call_site_bypasses_acquire_all, both in
-        # tests/unit/test_reply_lane.py, for the empirical regression):
-        #
-        #   Acquire the thread lock before the agent lock. Never the reverse.
-        #
-        # Every call site that takes both follows this: the reply lane
-        # (_dispatch_reply_lane's _run) holds a thread lock for the whole
-        # servicing span, and everything nested under it that also needs an
-        # agent lock (_close_thread, _evict_dead_thread) acquires the agent
-        # lock WHILE the thread lock is already held. _phase5_new_post takes
-        # only the agent lock and never a thread lock (its own _post_message
-        # call never carries a thread_ts, so it can never reach
-        # _evict_dead_thread), so it can't invert the order.
-        self._thread_locks = LockRegistry()
-        self._agent_locks = LockRegistry()
         # Bounds concurrent reply-lane tasks PROCESS-WIDE. Constructed once,
         # here, and never re-constructed per call/per turn — the whole reason
         # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
@@ -718,13 +479,42 @@ class SimulationEngine:
         # `test_the_fanout_bound_is_global_not_per_turn` in
         # tests/unit/test_reply_lane.py).
         self._reply_sem = asyncio.Semaphore(
-            max(1, get_settings().reply_lane_max_in_flight)
+            max(1, deps.get_settings().reply_lane_max_in_flight)
         )
         # Dispatcher-level in-flight dedup (spec §4.3): a (agent, thread) pair
         # already being serviced — by this dispatch call's own sub-tasks, or
         # by an earlier dispatch call that is still draining when the next
         # tick's call starts — must not be spawned a second time.
         self._reply_in_flight: set[tuple[str, str]] = set()
+
+    # ------------------------------------------------------------------
+    # Facade: a member that moved to a unit is still engine.<name>
+    # ------------------------------------------------------------------
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward a member that lives on a unit or on ctx/run_state.
+
+        Called only when normal lookup fails, so orchestrator members and
+        instance attributes are unaffected.
+        """
+        target = _FORWARD.get(name)
+        if target is None:
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        return getattr(object.__getattribute__(self, target[0]), target[1])
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        target = _FORWARD.get(name)
+        if target is None:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, target[0]), target[1], value)
+
+    def __delattr__(self, name: str) -> None:
+        target = _FORWARD.get(name)
+        if target is None:
+            object.__delattr__(self, name)
+        else:
+            delattr(object.__getattribute__(self, target[0]), target[1])
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -736,7 +526,7 @@ class SimulationEngine:
             return True  # run forever (until SIGTERM)
         if not self._start_time:
             return True
-        elapsed = (datetime.now(UTC) - self._start_time).total_seconds()
+        elapsed = (deps.datetime.now(UTC) - self._start_time).total_seconds()
         return elapsed < self.max_runtime_minutes * 60
 
     def _agent_within_budget(self, agent: Agent) -> bool:
@@ -763,7 +553,7 @@ class SimulationEngine:
         live = sum(
             1 for t in agent.state.active_threads.values() if t.status == "active"
         )
-        return max(1, min(live, get_settings().active_thread_threshold))
+        return max(1, min(live, deps.get_settings().active_thread_threshold))
 
     def _calls_per_load(self, agent: Agent) -> int:
         """Per-unit-of-load LLM allowance for this agent's role.
@@ -778,11 +568,11 @@ class SimulationEngine:
         """
         cached = self._role_rate_cache.get(agent.role, _UNSET)
         if cached is _UNSET:
-            cached = load_role(agent.role).calls_per_load_per_window
+            cached = deps.load_role(agent.role).calls_per_load_per_window
             self._role_rate_cache[agent.role] = cached
         if cached is not None:
             return cached
-        return get_settings().llm_calls_per_load_per_window
+        return deps.get_settings().llm_calls_per_load_per_window
 
     def _allowance_for(self, agent: Agent) -> int:
         """Window allowance for one agent. The hub is on its own ceiling.
@@ -798,7 +588,7 @@ class SimulationEngine:
         about what the hub deserves — that disagreement is exactly what
         benched the hub for 161 turns in run 4f1e8395.
         """
-        settings = get_settings()
+        settings = deps.get_settings()
         if agent.role == "scout_hub":
             return settings.hub_llm_calls_per_window
         return self._calls_per_load(agent) * self._agent_load(agent)
@@ -819,7 +609,7 @@ class SimulationEngine:
         calls are in flight for one agent.
         """
         allowance = self._allowance_for(agent)
-        window_start = now - get_settings().llm_rate_window_seconds
+        window_start = now - deps.get_settings().llm_rate_window_seconds
         times = agent.state.call_times
         while times and times[0] < window_start:
             times.popleft()
@@ -829,7 +619,7 @@ class SimulationEngine:
                 "[%s] throttled: %d LLM calls in the last %ds (allowance %d). "
                 "Eligible again as the window slides.",
                 agent.agent_id, len(times),
-                get_settings().llm_rate_window_seconds, allowance,
+                deps.get_settings().llm_rate_window_seconds, allowance,
             )
         agent.state.throttled = not ok
         return ok
@@ -849,7 +639,7 @@ class SimulationEngine:
         """
         from zoneinfo import ZoneInfo
         pacific = ZoneInfo("America/Los_Angeles")
-        today_start = datetime.now(pacific).replace(
+        today_start = deps.datetime.now(pacific).replace(
             hour=0, minute=0, second=0, microsecond=0,
         ).timestamp()
         return sum(
@@ -860,9 +650,9 @@ class SimulationEngine:
 
     async def start(self) -> None:
         """Run the full simulation."""
-        self._start_time = datetime.now(UTC)
+        self._start_time = deps.datetime.now(UTC)
         self._running = True
-        settings = get_settings()
+        settings = deps.get_settings()
 
         logger.info(
             "Simulation started. Max runtime: %dm, Budget: %d calls/agent",
@@ -957,7 +747,7 @@ class SimulationEngine:
         reply again to threads it has already answered. Never raises: a failure
         here must not abort startup.
         """
-        since = time.time() - REBUILD_WINDOW_S
+        since = deps.time.time() - REBUILD_WINDOW_S
         for hub in [a for a in self.agents.values() if a.role == "scout_hub"]:
             try:
                 await self._phase1_channel_discovery(hub)
@@ -1066,7 +856,7 @@ class SimulationEngine:
                 # run is alive and stop it without touching the container.
                 # Own cadence gate inside (_last_control_poll), same pattern
                 # as _sync_roster_from_db above.
-                await self._poll_control_plane(time.time())
+                await self._poll_control_plane(deps.time.time())
 
                 # Pick up profile edits made from the web app (separate process).
                 self._sync_profiles_from_disk()
@@ -1157,7 +947,7 @@ class SimulationEngine:
                 except Exception:
                     logger.exception("Error during turn for %s", agent.agent_id)
 
-                agent.state.last_selected = time.time()
+                agent.state.last_selected = deps.time.time()
                 turn_count += 1
 
                 # Idle backoff: if no LLM calls were made in EITHER lane this
@@ -1272,24 +1062,6 @@ class SimulationEngine:
         if self._pending_headlines:
             await self._drain_pending_headlines()
 
-    def request_stop(self, reason: str = "operator") -> None:
-        """Ask the main loop to exit — safe to call from a signal handler.
-
-        ``reason`` is one of `src/agent/end_reasons.py`'s vocabulary (a bare call
-        means the operator's default Stop). It is recorded before anything else,
-        so an unknown reason raises ``ValueError`` and changes nothing; a later
-        call can only raise the recorded reason's class.
-
-        Deliberately does no I/O: it only records the reason, flips the flag and
-        wakes any in-flight idle-backoff sleep. The flush is done by ``stop()`` on
-        the main coroutine's own path (see src/agent/main.py), so it can be
-        awaited to completion rather than left in a fire-and-forget task that the
-        interpreter may cancel at shutdown (R2).
-        """
-        self._end_reason = stronger_reason(self._end_reason, reason)
-        self._running = False
-        self._stop_event.set()
-
     async def _poll_control_plane(self, now: float) -> None:
         """Claim a pending operator `stop` command and refresh the heartbeat.
 
@@ -1324,7 +1096,7 @@ class SimulationEngine:
             )
 
             detail = {
-                "tick_at": datetime.now(UTC).isoformat(),
+                "tick_at": deps.datetime.now(UTC).isoformat(),
                 "agents": {
                     aid: {
                         "active_threads": len(a.state.active_threads),
@@ -1542,7 +1314,7 @@ class SimulationEngine:
             in_doubt_before = len(self._in_doubt_headlines)
             unclaimed_before = len(self._unclaimed_headlines)
             unposted = await self._drain_pending_headlines(
-                limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
+                limit=constants.HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
             in_doubt = self._in_doubt_headlines[in_doubt_before:]
             unclaimed = self._unclaimed_headlines[unclaimed_before:]
@@ -1568,7 +1340,7 @@ class SimulationEngine:
                     lost_attempted + len(over_budget),
                     lost_attempted,
                     len(over_budget),
-                    HEADLINES_MAX_AT_SHUTDOWN,
+                    constants.HEADLINES_MAX_AT_SHUTDOWN,
                     ", ".join(over_budget) or "none",
                     repair,
                 )
@@ -1718,7 +1490,7 @@ class SimulationEngine:
             return False
         if not self._within_rate_limit(agent, now):
             return False
-        delay = get_settings().turn_delay_seconds
+        delay = deps.get_settings().turn_delay_seconds
         if delay > 0 and (now - agent.state.last_selected) < delay:
             return False
         return True
@@ -1740,7 +1512,7 @@ class SimulationEngine:
         sliding-window rate limit, the per-agent `turn_delay_seconds`
         cooldown, and not already `in_flight`.
         """
-        now = time.time()
+        now = deps.time.time()
         candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
         if not candidates:
             return None
@@ -2095,7 +1867,7 @@ class SimulationEngine:
         reintroduced by a second cursor writer with no corresponding reader.
         See tests/unit/test_cursor_advance.py.
         """
-        settings = get_settings()
+        settings = deps.get_settings()
         api_calls_before = agent.api_call_count
         agent.state.in_flight = True
         try:
@@ -2114,7 +1886,7 @@ class SimulationEngine:
                 max(skips, 1), settings.phase5_spontaneous_interval_max_multiplier
             )
             spontaneous_interval = base_interval * stretch
-            since_last_action = time.time() - agent.state.last_phase5_action_time
+            since_last_action = deps.time.time() - agent.state.last_phase5_action_time
             spontaneous_ready = since_last_action >= spontaneous_interval
 
             if spontaneous_ready:
@@ -2137,9 +1909,9 @@ class SimulationEngine:
     async def _phase1_channel_discovery(self, agent: Agent) -> None:
         """Join new channels based on profile keyword matching."""
         profile_text = agent.public_profile.lower()
-        channels_to_join = set(_UNIVERSAL_CHANNELS)
+        channels_to_join = set(constants._UNIVERSAL_CHANNELS)
 
-        for channel_name, keywords in _CHANNEL_KEYWORDS.items():
+        for channel_name, keywords in constants._CHANNEL_KEYWORDS.items():
             if any(kw in profile_text for kw in keywords):
                 channels_to_join.add(channel_name)
 
@@ -2393,7 +2165,7 @@ class SimulationEngine:
         # human can still review at /admin/assessments. Bias to fail-open.
         thread.floor_armed = thread.floor_armed or bool(self._specialist_consults)
 
-        settings = get_settings()
+        settings = deps.get_settings()
 
         # Get thread history from message log
         history_entries = self.message_log.get_thread_history(thread.thread_id)
@@ -2550,7 +2322,7 @@ class SimulationEngine:
             )
 
         if not agent.try_reserve(
-            self._allowance_for(agent), get_settings().llm_rate_window_seconds
+            self._allowance_for(agent), deps.get_settings().llm_rate_window_seconds
         ):
             logger.warning(
                 "[%s] rate-limited; deferring this reply", agent.agent_id,
@@ -2565,7 +2337,7 @@ class SimulationEngine:
         # collection needs no closure and no nonlocal.
         stop_reasons: list[str] = []
         try:
-            raw_response = await generate_with_tools(
+            raw_response = await deps.generate_with_tools(
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=tools_for_role(agent.role),
@@ -3127,13 +2899,13 @@ class SimulationEngine:
         # raise ThreadNotFound / reach _evict_dead_thread — see the ordering
         # note on _thread_locks in __init__.
         async with self._agent_locks.acquire_all(agent.agent_id):
-            settings = get_settings()
+            settings = deps.get_settings()
 
             # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
             # the opportunity regardless of whether we end up posting, skipping, or
             # bailing out early. Without this, a "skip" leaves the timer stale and
             # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
-            agent.state.last_phase5_action_time = time.time()
+            agent.state.last_phase5_action_time = deps.time.time()
 
             # Daily post cap — pi_lab is capped to one pitch per day (design §9).
             # scout_hub never reaches this line (hard-gated above), and it is the
@@ -3229,7 +3001,7 @@ class SimulationEngine:
             llm_call_id = uuid.uuid4().hex
 
             if not agent.try_reserve(
-                self._allowance_for(agent), get_settings().llm_rate_window_seconds
+                self._allowance_for(agent), deps.get_settings().llm_rate_window_seconds
             ):
                 logger.warning(
                     "[%s] rate-limited; deferring this post", agent.agent_id,
@@ -3241,7 +3013,7 @@ class SimulationEngine:
             # See `_was_truncated`; same collection idiom as the Phase-4 site.
             stop_reasons: list[str] = []
             try:
-                response = await generate_agent_response(
+                response = await deps.generate_agent_response(
                     system_prompt=system_prompt,
                     messages=messages,
                     model=settings.llm_agent_model_opus,
@@ -3332,7 +3104,7 @@ class SimulationEngine:
                 # correctly via `previous_skips + 1`.
                 previous_skips = agent.state.consecutive_phase5_skips
                 agent.state.consecutive_phase5_skips = 0
-                agent.state.last_phase5_action_time = time.time()
+                agent.state.last_phase5_action_time = deps.time.time()
 
                 channel = action_data.get("channel", "general").lstrip("#")
                 post_type = action_data.get("post_type", "")
@@ -3942,7 +3714,7 @@ class SimulationEngine:
         """
         if not thread_id:
             return
-        now = datetime.now(UTC)
+        now = deps.datetime.now(UTC)
         for queued in self._pending_assessments:
             if queued.get("thread_id") == thread_id:
                 queued["summary_posted_at"] = now
@@ -3984,8 +3756,8 @@ class SimulationEngine:
         process runs from (see src/services/build_info.py) — for the agent
         that is exactly the code executing, since src/ is baked at build.
         """
-        started = self._start_time or datetime.now(UTC)
-        build = get_build_info()
+        started = self._start_time or deps.datetime.now(UTC)
+        build = deps.get_build_info()
         hub_stamp = prompt_set_stamp("scout_hub")
         pi_stamp = prompt_set_stamp("pi_lab")
         if build.dirty_files is None:
@@ -4071,7 +3843,7 @@ class SimulationEngine:
         """
         try:
             names = parse_announce_channels(
-                get_settings().run_start_announce_channels
+                deps.get_settings().run_start_announce_channels
             )
             template_override: str | None = None
             if self.session_factory:
@@ -4184,7 +3956,7 @@ class SimulationEngine:
                 run.config = {
                     **(run.config or {}),
                     "run_start_announcement": {
-                        "at": datetime.now(UTC).isoformat(),
+                        "at": deps.datetime.now(UTC).isoformat(),
                         "text": text,
                         "posted": posted,
                         "failed": failed,
@@ -5931,7 +5703,7 @@ class SimulationEngine:
             )
             return
         try:
-            if not get_settings().panel_notes_in_thread:
+            if not deps.get_settings().panel_notes_in_thread:
                 return
             posted = await self._post_message(
                 agent_id,
@@ -6185,7 +5957,7 @@ class SimulationEngine:
         """
         cached = self._role_post_types_cache.get(role)
         if cached is None:
-            cached = load_role(role).post_types
+            cached = deps.load_role(role).post_types
             self._role_post_types_cache[role] = cached
         return cached
 
@@ -6656,8 +6428,8 @@ class SimulationEngine:
         if not self.slack_clients:
             return
 
-        now = time.time()
-        if now - self._last_channel_poll < CHANNEL_POLL_INTERVAL:
+        now = deps.time.time()
+        if now - self._last_channel_poll < constants.CHANNEL_POLL_INTERVAL:
             return
         self._last_channel_poll = now
 
@@ -6670,7 +6442,7 @@ class SimulationEngine:
         # polling archived/stale channels from prior sims.
         polled_ids = {
             ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in SEEDED_CHANNELS
+            if ch_name in constants.SEEDED_CHANNELS
             or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
         }
         for ch_name, ch_id in polled_ids.items():
@@ -6769,7 +6541,7 @@ class SimulationEngine:
         to surface. The suppressed repeats still log at DEBUG, so a debug-level
         operator can still see the failure is ongoing rather than resolved.
         """
-        now = time.time()
+        now = deps.time.time()
         last = self._poll_error_last_logged.get(ch_name, 0.0)
         if now - last < POLL_ERROR_LOG_INTERVAL:
             logger.debug(
@@ -6948,7 +6720,7 @@ class SimulationEngine:
             try:
                 posted_at = float(ts)
             except (TypeError, ValueError):
-                posted_at = time.time()
+                posted_at = deps.time.time()
             # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
             # a *root* post hangs off chunk 0 — one logical post stays one top-level
             # post, so the hub's Phase 3 auto-activation scan doesn't see N roots
@@ -7041,9 +6813,9 @@ class SimulationEngine:
         if not client or not client.is_connected:
             # Slack off — channels are DB-native with stable local: ids that
             # can't collide with Slack C…/G… ids. See specs/local-db-conversations.md.
-            self._channel_id_map = {ch: f"local:{ch}" for ch in SEEDED_CHANNELS}
+            self._channel_id_map = {ch: f"local:{ch}" for ch in constants.SEEDED_CHANNELS}
             # All seeded channels are public.
-            self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in SEEDED_CHANNELS}
+            self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in constants.SEEDED_CHANNELS}
             return
 
         # A *complete* listing, or none. list_channels raises rather than hand back a
@@ -7069,7 +6841,7 @@ class SimulationEngine:
 
         # Create missing seeded channels
         if listing_complete:
-            for ch_name in SEEDED_CHANNELS:
+            for ch_name in constants.SEEDED_CHANNELS:
                 if ch_name not in existing:
                     logger.info("Creating seeded channel #%s", ch_name)
                     ch_data = client.create_channel(ch_name)
@@ -7085,7 +6857,7 @@ class SimulationEngine:
 
         # Join the first (polling) client to ALL seeded channels so it can poll them
         for ch_name, ch_id in existing.items():
-            if ch_name in SEEDED_CHANNELS:
+            if ch_name in constants.SEEDED_CHANNELS:
                 client.join_channel(ch_id)
 
         # Share channel map across all clients
@@ -7148,7 +6920,7 @@ class SimulationEngine:
                     )).scalars().all()
                 )
                 created = 0
-                for ch_name in SEEDED_CHANNELS:
+                for ch_name in constants.SEEDED_CHANNELS:
                     if ch_name in existing_names:
                         continue
                     await record_channel_created(
@@ -7226,7 +6998,7 @@ class SimulationEngine:
         # reconstruction only needs undecided threads; old closed-thread bodies
         # would just bloat RAM and startup. Nothing in the engine reopens an old
         # closed thread since 23da58d.
-        recent_floor = time.time() - REBUILD_WINDOW_S
+        recent_floor = deps.time.time() - REBUILD_WINDOW_S
         closed_thread_ids_subq = sa_select(ThreadDecision.thread_id).where(
             ThreadDecision.simulation_run_id == self.simulation_run_id
         )
@@ -7325,11 +7097,11 @@ class SimulationEngine:
         lost: list = []
         ok: list = []
         unattempted: list = []
-        deadline = time.monotonic() + PER_ROW_RECOVERY_DEADLINE_S
+        deadline = deps.time.monotonic() + PER_ROW_RECOVERY_DEADLINE_S
         try:
             async with self.session_factory() as db:
                 for i, row in enumerate(rows):
-                    if time.monotonic() >= deadline:
+                    if deps.time.monotonic() >= deadline:
                         unattempted = list(rows[i:])
                         logger.error(
                             "Per-row recovery of %s hit its %.0fs deadline; "
@@ -7504,7 +7276,7 @@ class SimulationEngine:
                     # staleness between refreshes is fine for a display counter.
                     # `total_api_calls`, set below, is NOT merely cosmetic any
                     # more — its units changed on 2026-08-22; see the comment there.
-                    now = time.time()
+                    now = deps.time.time()
                     if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
                         self._last_run_stats_update = now
                         run = (await db.execute(
@@ -7752,12 +7524,12 @@ class SimulationEngine:
 
         polled_ids = {
             ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in SEEDED_CHANNELS
+            if ch_name in constants.SEEDED_CHANNELS
             or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
         }
         # One wall clock for the whole pass, so every unreadable channel gets the
         # same baseline and the number is not a per-channel accident.
-        now_ts = f"{time.time():.6f}"
+        now_ts = f"{deps.time.time():.6f}"
         channels = 0
         skipped = 0
         unreadable = 0
@@ -7986,8 +7758,8 @@ class SimulationEngine:
 
                 # datetime, UTC and timedelta are already module-level imports
                 # (simulation.py:10) — do not re-import them here.
-                cutoff = datetime.now(UTC) - timedelta(
-                    seconds=get_settings().llm_rate_window_seconds
+                cutoff = deps.datetime.now(UTC) - timedelta(
+                    seconds=deps.get_settings().llm_rate_window_seconds
                 )
                 async with self.session_factory() as db:
                     result = await db.execute(
@@ -8248,7 +8020,7 @@ class SimulationEngine:
         for agent in self.agents.values():
             mtime = 0.0
             for sub in ("public",):
-                path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
+                path = constants.PROFILES_DIR / sub / f"{agent.agent_id}.md"
                 try:
                     mtime = max(mtime, path.stat().st_mtime)
                 except OSError:
@@ -8280,7 +8052,7 @@ class SimulationEngine:
         """
         if not self.session_factory:
             return
-        now = time.time()
+        now = deps.time.time()
         if now - self._last_roster_poll < ROSTER_POLL_INTERVAL:
             return
         self._last_roster_poll = now
@@ -8474,7 +8246,7 @@ class SimulationEngine:
         On a transient DB error the existing gates are left in place: flapping the
         gate open on every blip would be worse than a briefly stale topology.
         """
-        settings = get_settings()
+        settings = deps.get_settings()
         if not settings.cohort_isolation_enabled:
             self._cohort_preflight_error = None
             self._disable_all_gates()
@@ -8653,7 +8425,7 @@ class SimulationEngine:
         Also carries the counters the admin UI cannot otherwise see: they live in
         this process's memory, and the web app is a different process (v2 §9 req. 4 / §13).
         """
-        settings = get_settings()
+        settings = deps.get_settings()
         grandfathered = sorted(
             f"{aid}:{t.thread_id}"
             for aid, a in self.agents.items()
@@ -8808,7 +8580,7 @@ Keep it concise — under 300 words.""",
             agent.record_api_call()
             # See `_was_truncated`; same collection idiom as the two sites above.
             stop_reasons: list[str] = []
-            response = await generate_agent_response(
+            response = await deps.generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
                 # 1800. Was 800, then 1100 on a tokenizer estimate for the
@@ -8888,436 +8660,28 @@ Keep it concise — under 300 words.""",
             logger.error("[%s] Working memory update failed: %s", agent.agent_id, exc)
 
 
-def _extract_slack_message(text: str) -> str:
-    """Extract the message from <slack_message> tags if present, else fall back to preamble stripping.
+def _build_forward_map() -> dict[str, tuple[str, str]]:
+    """Every moved member name -> (engine attribute of its owner, name there).
 
-    Uses the LAST opening tag before the LAST closing tag so that a prior
-    mention of ``<slack_message>`` inside the LLM's reasoning (e.g.
-    "my output is a single `<slack_message>` block") does not anchor the
-    match and pull preceding reasoning into the captured body.
+    Built from the unit classes: each unit's ``OWNED_STATE`` plus every method,
+    property and staticmethod it defines. A name two owners define, or one the
+    orchestrator also defines, is a wiring bug and fails at import: every member
+    has exactly one owner.
     """
-    last_close = text.rfind("</slack_message>")
-    if last_close >= 0:
-        last_open = text.rfind("<slack_message>", 0, last_close)
-        if last_open >= 0:
-            return text[last_open + len("<slack_message>"):last_close].strip()
-    # Fallback: strip preamble heuristically
-    return _strip_llm_preamble(text)
+    forward = dict(_CONTEXT_FORWARD)
+    orchestrator = set(vars(SimulationEngine))
+    for holder, cls in _UNIT_CLASSES.items():
+        members = set(cls.OWNED_STATE)
+        members.update(
+            name for name, value in vars(cls).items()
+            if not name.startswith("__") and name != "OWNED_STATE" and not isinstance(value, _Via)
+        )
+        for name in sorted(members - _NOT_FORWARDED):
+            if name in forward or name in orchestrator:
+                other = forward[name][0] if name in forward else "the orchestrator"
+                raise RuntimeError(f"engine member {name!r} is defined by {holder} and {other}")
+            forward[name] = (holder, name)
+    return forward
 
 
-def _reply_closes_thread(text: str) -> bool:
-    """True if this reply ENDS the interview — the one definition of the ⏸️
-    no-viable-collaboration close.
-
-    ``_check_thread_outcome`` acts on it (``_close_thread(..., "no_proposal")``)
-    and ``_capture_hub_assessment`` reads it a few lines earlier, via the
-    ``closes_thread`` argument ``_reply_to_thread`` hoists. Those two MUST agree:
-    the prompts tell the hub to deliver a negative verdict by opening with ⏸️,
-    so a sidecar on a closing reply is the interview's real, final verdict and
-    there will be no later turn to supply another. When the gate refused those
-    (they are not on ordinal 12) the verdict was destroyed — measured in run
-    076e80b6, where 4 of 5 ``premature_sidecar`` refusals were the thread's
-    terminal message.
-
-    Deliberately permissive about WHERE the marker appears, matching what this
-    check has always done: the thread really is closed by any ⏸️ in the reply,
-    so the capture gate has to treat any ⏸️ as terminal too. The stricter
-    front-of-string variant is ``_reply_opens_with_pause``.
-    """
-    body = text or ""
-    return "⏸️" in body or ":pause_button:" in body
-
-
-def _reply_opens_with_pause(text: str) -> bool:
-    """True if ``text`` follows the ⏸️ no-viable-collaboration convention
-    thread_guidance.py's DECIDE/CONCLUDE instructions ask for verbatim
-    ("start your reply with ⏸️") — checked at the front of the (stripped)
-    string, not merely present anywhere in it.
-
-    Deliberately stricter than ``_reply_closes_thread`` just above: that one
-    exists to actually close the thread (and to tell the capture gate that this
-    reply is the interview's last) and is intentionally permissive about where
-    the marker appears, while this one is asking "did the model follow the
-    documented opening convention" for
-    ``_warn_if_hub_conclude_missing_assessment``'s absent-sidecar detection — a
-    marker buried mid-reply would not have been the ⏸️-only decline
-    thread_guidance describes.
-    """
-    stripped = (text or "").strip()
-    return stripped.startswith("⏸️") or stripped.startswith(":pause_button:")
-
-
-# Case-insensitive and tolerant of stray whitespace inside the delimiters
-# (e.g. `<ASSESSMENT_JSON>`, `<assessment_json >`) — a model is not guaranteed
-# to reproduce the tag verbatim, and a tag variant that slips past these
-# regexes is a verdict that leaks straight into Slack.
-_ASSESSMENT_RE = re.compile(
-    r"<\s*assessment_json\s*>\s*(.*?)\s*<\s*/\s*assessment_json\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-# An opening tag with no matching close — e.g. the LLM response got truncated
-# mid-sidecar (Phase 5's max_tokens budget plus an 11-section body ahead of a
-# ~15-line sidecar makes this a realistic outcome, and the retry path does not
-# re-check stop_reason). `_ASSESSMENT_RE` requires a literal closing tag, so it
-# does not match an unclosed one and would leave the raw verdict JSON — scores,
-# red flags, recommendation — sitting in the text. Strip everything from the
-# orphaned opening tag to the end of the response instead.
-#
-# This can discard trailing legitimate prose that happened to follow the
-# sidecar. That is an accepted, deliberate trade-off: losing a sentence of
-# prose is strictly better than leaking dimension scores and red flags into a
-# channel the assessed scientist reads. Do not "optimize" this into a lazy
-# match that stops short of end-of-string — the whole point is to consume
-# unconditionally to the end once an unclosed opening tag is found.
-_ASSESSMENT_UNCLOSED_RE = re.compile(
-    r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE
-)
-
-# Mop-up for any stray tag markup neither of the above removed (e.g. an
-# orphaned closing tag with no opening).
-_ASSESSMENT_ORPHAN_TAG_RE = re.compile(
-    r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE
-)
-
-
-def _strip_assessment_sidecar(text: str) -> str:
-    """Remove the <assessment_json> sidecar from ``text`` before it reaches Slack.
-
-    That block is for Blackbird staff and the DB, never for the channel. Order
-    matters:
-      1. Remove well-formed pairs whole (tags + contents).
-      2. Anything left starting with an opening tag has no matching close —
-         truncated mid-sidecar — so drop from there to the end of the text
-         rather than leave the verdict JSON exposed.
-      3. Mop up any remaining stray tag markup neither step removed.
-    """
-    text = _ASSESSMENT_RE.sub("", text)
-    text = _ASSESSMENT_UNCLOSED_RE.sub("", text)
-    text = _ASSESSMENT_ORPHAN_TAG_RE.sub("", text)
-    return text
-
-
-# A model routinely wraps the sidecar's JSON in a ```json``` fence despite the
-# prompt asking for bare JSON (see _parse_phase5_response, which now strips
-# the whole <assessment_json>...</assessment_json> span — fence included —
-# before it ever looks for the action). That strip protects the action parse
-# unconditionally, but it would be a shame to also throw the verdict away
-# just because it arrived fenced: tolerate one optional wrapping fence here
-# too, so the verdict itself still comes through.
-_SIDECAR_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
-
-
-def _unfence_sidecar(raw: str) -> str:
-    """Strip one optional ```json```/``` fence wrapping ``raw``, if present."""
-    match = _SIDECAR_FENCE_RE.match(raw.strip())
-    return match.group(1) if match else raw
-
-
-def _extract_assessment_json(text: str) -> dict | None:
-    """Parse the scout hub's machine-readable verdict sidecar, or None.
-
-    The sidecar is deliberately BARE JSON, not a ```json``` fence:
-    _parse_phase5_response strips this whole tagged span before it ever looks
-    for the action fence, so a fenced sidecar would otherwise hijack the
-    action data and silently no-op every assessment post. A fenced sidecar is
-    still tolerated here (see _unfence_sidecar) — the action is already
-    protected regardless, so there is no reason to also lose the verdict over
-    a fence the model added despite the instruction not to.
-
-    Walks blocks newest-first and returns the first one that parses to a JSON
-    object — "the newest verdict that is actually usable", not "the newest
-    block, or nothing": a model that emits a good verdict and then a broken
-    revision (invalid JSON, or valid JSON that isn't an object, e.g. an array)
-    must not lose the good one just because it revised afterward. Last-wins is
-    still right when a revision *does* parse — it should supersede the
-    earlier verdict, which is exactly what returning on the first hit here
-    does. Returns None only when no block parses to a dict; never raises.
-    """
-    matches = _ASSESSMENT_RE.findall(text or "")
-    if not matches:
-        return None
-    last_index = len(matches) - 1
-    for index in range(last_index, -1, -1):
-        try:
-            parsed = json.loads(_unfence_sidecar(matches[index]))
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning(
-                "[assessment] sidecar block %d/%d unparseable: %s",
-                index + 1, len(matches), exc,
-            )
-            continue
-        if not isinstance(parsed, dict):
-            logger.warning(
-                "[assessment] sidecar block %d/%d parsed but was not a JSON "
-                "object (got %s)",
-                index + 1, len(matches), type(parsed).__name__,
-            )
-            continue
-        if index != last_index:
-            logger.warning(
-                "[assessment] using sidecar block %d/%d — %d later block(s) "
-                "were present but unusable, so an earlier valid verdict was "
-                "used instead of losing it",
-                index + 1, len(matches), last_index - index,
-            )
-        return parsed
-    return None
-
-
-def _sidecar_has_valid_json_block(text: str) -> bool:
-    """True if any <assessment_json> block in ``text`` is syntactically valid
-    JSON, whatever its shape.
-
-    Lets a caller distinguish "no block ever parsed" from "a block parsed
-    fine but wasn't an object" (Finding A3) — the two outcomes both leave
-    ``_extract_assessment_json`` returning None, but only the first is
-    actually "unparseable".
-    """
-    for raw in _ASSESSMENT_RE.findall(text or ""):
-        try:
-            json.loads(_unfence_sidecar(raw))
-        except (json.JSONDecodeError, ValueError):
-            continue
-        return True
-    return False
-
-
-# The prompt's tri-state gating contract (see the <assessment_json> skeleton in
-# prompts/roles/scout_hub/phase4-thread-reply.md — relocated there from the
-# deleted phase5-new-post.md by the 2026-08-12 removal cycle's reply-only-hub
-# reconciliation): every gating.* value must be exactly one of these three
-# strings, never a bare boolean — "the PI declined" (not_met) and "we never
-# asked" (unconfirmed) are different facts, and a boolean can express only the
-# first two of these three outcomes.
-_VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
-
-#: Contract bounds from prompts/roles/scout_hub/phase4-thread-reply.md items
-#: 6-7. SOFT: exceeding one logs a WARNING and stores the value as emitted.
-#: Enforcing them by dropping would trade a long headline for a lost verdict,
-#: and the row is the archive.
-_HEADLINE_SOFT_LIMIT = 110
-#: `company_or_project` is the SHORT label, and it is the only project field the
-#: public #assessments-summary headline renders — where it is clipped to
-#: PROJECT_DISPLAY_CHARS (120, src/services/assessment_headline.py). A label
-#: over this bound is stored in full and warned about; one over 120 loses its
-#: tail in Slack.
-_PROJECT_SOFT_LIMIT = 70
-#: The pitch's own soft bound, raised from 900 CHARACTERS to 250 WORDS on
-#: 2026-09-28 at the operator's request (scout_hub 1.9.0), counted as
-#: `len(text.split())`. Measured before the change: the five verdicts written
-#: under scout_hub 1.8.0 carried 113-222-word pitches (797-961 characters), so
-#: 900 characters was in practice a ~150-word bound.
-#: The public excerpt did NOT move with it: PITCH_DISPLAY_CHARS (600,
-#: src/services/assessment_headline.py) still clips what reaches
-#: #assessments-summary, and item 8 still asks that sentences 1-4 END within
-#: ~550 characters so the provenance citation completes inside that window.
-#: A longer pitch makes that harder, not easier, which is why the
-#: citation-loss alarm in `_persist_assessment` is now the load-bearing check
-#: rather than this one.
-_PITCH_WORD_LIMIT = 250
-_KEY_POINTS_MIN = 3
-_KEY_POINTS_MAX = 5
-# scout_hub >= 1.9.0: the exact bullet count each current group carries
-# (prompt item 7 — one each since 1.9.0), and the per-bullet bound. Warnings
-# only (D12 of docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md)
-# — a shape violation is never a drop. Keys and order are pinned to
-# KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py. The
-# retired 1.8.0 group (`key_questions`, RETIRED_KEY_POINT_GROUPS) carries no
-# count: it still stores, with its own warning in `_persist_assessment`.
-_KEY_POINT_GROUP_BULLETS = {
-    "indication_audience": 1,
-    "lab_background": 1,
-    "proposal": 1,
-    "clinical_actionability": 1,
-    "path_to_clinic": 1,
-    "commercial_opportunity": 1,
-}
-_KEY_POINT_BULLET_CHARS = 300
-#: What counts as a CITATION in `elevator_pitch` for the drift alarm in
-#: `_persist_assessment`. Item 8 of phase4-thread-reply.md asks for the source
-#: "cited the way the lab's own public profile cites it (DOI or PubMed link)",
-#: and every one of these forms is legal under that wording — so testing for
-#: `http` alone would stay silent for a bare `doi:10.7554/...` or a `PMID`,
-#: which is precisely the citation most likely to be written without a scheme.
-_PITCH_CITATION_RE = re.compile(
-    r"https?://\S+|\bdoi:\s*\S+|\b10\.\d{4,9}/\S+|\bPMID:?\s*\d+",
-    re.I,
-)
-#: Sidecar items 11/12 (scout_hub >= 1.5.0): the hub's own strengths/risks
-#: bullets — and, since 1.7.0, items 13/14 as well, `competitive_landscape`
-#: and `evidence_maturity`. All four share these bounds and are checked by the
-#: one loop in `_persist_assessment`.
-#: SOFT bounds, same policy as the key_points groups above — a
-#: contract violation is warned about and stored as emitted, never dropped
-#: for a count/length reason alone (only `normalize_bullets` itself drops the
-#: whole field, and only for a genuine shape violation).
-_HUB_BULLETS_MIN = 2
-_HUB_BULLETS_MAX = 4
-_HUB_BULLET_CHARS = 200
-#: Sidecar item 2's companion (scout_hub >= 1.9.0, migration 0052): one
-#: sentence per dimension. Warnings only, like every other shape check here.
-_DIMENSION_RATIONALE_CHARS = 200
-
-
-def _normalize_gating(raw: object) -> dict | None:
-    """Filter a verdict's ``gating`` map down to the keys already conforming to
-    the tri-state contract; drop only the keys that don't.
-
-    The ``gating`` column is plain JSONB, so nothing at the database layer
-    stops a pre-tri-state boolean value — or a genuinely malformed one — from
-    being written verbatim. A key that sometimes holds ``true``/``false`` and
-    sometimes holds ``"met"``/``"not_met"``/``"unconfirmed"`` is worse than one
-    that is occasionally absent: a consumer cannot tell which convention a
-    given key uses without inspecting its value, which defeats the point of a
-    structured column. So each key is kept only when its own value already
-    conforms; anything else is dropped for that key alone.
-
-    Filtering per key rather than dropping the whole map matches how every
-    sibling field on this row already degrades —
-    ``red_flags``/``derisking_milestones`` null only when THEY are the wrong
-    type, never because some unrelated field was also bad. Wholesale-dropping
-    a map with three good gates over one bad one denied the (now-shipped)
-    triage page three gates it could have shown, for no correctness benefit:
-    the reason to refuse the bad key stands on its own (see below) and has
-    nothing to do with its siblings.
-
-    Booleans are deliberately NOT coerced (``True`` -> "met", ``False`` ->
-    "not_met"): under the old boolean-only contract there was no way to say
-    "unconfirmed" at all, so a legacy ``False`` is genuinely ambiguous between
-    "not_met" and "unconfirmed" — guessing would fabricate a certainty the
-    original verdict never had, so that key is omitted rather than guessed.
-    This never loses information regardless: ``raw_verdict`` keeps the
-    original ``gating`` value verbatim no matter what survives here.
-
-    Returns ``None`` when ``raw`` isn't a dict at all, or when no key survives
-    filtering — an empty structured map is no more useful than a missing one.
-    """
-    if not isinstance(raw, dict) or not raw:
-        return None
-    kept = {
-        key: value for key, value in raw.items()
-        if isinstance(value, str) and value in _VALID_GATING_STATES
-    }
-    return kept or None
-
-
-def _bounded_str(value: object, max_len: int) -> str | None:
-    """Coerce a verdict field expected to be a short string into one that
-    fits its column, or drop it if it isn't a (non-empty) string at all.
-
-    Every other field on this row degrades per-field on a bad value via an
-    isinstance check ahead of the insert; a short VARCHAR column is the one
-    place a value of the *right* type can still blow up the write, since an
-    oversized string is a perfectly good Python str right up until Postgres
-    raises DataError at commit — which takes the whole row down with it, not
-    just the one field. Truncating instead of
-    dropping is deliberate: a clipped recommendation is still useful for
-    triage, an absent one is not. ``raw_verdict`` keeps the untruncated
-    original regardless.
-    """
-    if not isinstance(value, str) or not value:
-        return None
-    return value[:max_len]
-
-
-def _str_or_none(value: object) -> str | None:
-    """Coerce a verdict field expected to be a string, dropping it if it
-    isn't a (non-empty) string at all.
-
-    ``company_or_project``/``rationale`` are Text columns, not bounded
-    VARCHARs like ``_bounded_str`` guards, so there is no length to truncate
-    to — but they are exactly as exposed to a wrong-typed value. A model that
-    emits a structured (dict/list) ``rationale`` instead of prose is still a
-    plain Python object of the wrong type for this column, and passing it
-    straight to the ORM raises at commit — which takes the whole row down
-    with it, the same failure ``_bounded_str`` exists to prevent for the
-    VARCHAR columns (F9).
-    """
-    return value if isinstance(value, str) and value else None
-
-
-def _strip_llm_preamble(text: str) -> str:
-    """Remove LLM internal reasoning that leaks before the actual Slack message.
-
-    Strategy: split into paragraphs, identify the first paragraph that looks like
-    an actual Slack message (not meta-commentary), and discard everything before it.
-    """
-    # If there's a --- separator, take everything after the last one
-    if "\n---\n" in text:
-        parts = text.split("\n---\n")
-        candidate = parts[-1].strip()
-        if candidate:
-            text = candidate
-
-    # Split into paragraphs (separated by blank lines)
-    paragraphs = re.split(r"\n\s*\n", text.strip())
-    if len(paragraphs) <= 1:
-        return text
-
-    # Patterns that indicate internal reasoning / meta-commentary
-    _PREAMBLE_RE = re.compile(
-        r"^("
-        r"(That('s| is) (not|exactly|interesting))"
-        r"|Let me"
-        r"|I('ll| should| need| couldn't| didn't| can't| wasn't| don't| have| want)"
-        r"|Now I (have|can|know|need|should)"
-        r"|These |The (search|result|profile|paper|abstract|tool|API|PubMed|query)"
-        r"|My (search|query|tool|approach)"
-        r"|Based on|After (review|search|look)|Since (the|I|my)"
-        r"|Looking at|It seems|Ok[,.]|Okay[,.]|Hmm"
-        r"|This (is|gives|shows|confirms|doesn't|isn't)"
-        r"|None of|No (relevant|useful|results)"
-        r"|Unfortunately"
-        r")",
-        re.IGNORECASE,
-    )
-
-    # Find the first non-preamble paragraph
-    for i, para in enumerate(paragraphs):
-        first_line = para.strip().split("\n")[0]
-        if not _PREAMBLE_RE.match(first_line):
-            if i > 0:
-                stripped = "\n\n".join(paragraphs[i:]).strip()
-                logger.info(
-                    "Stripped %d preamble paragraph(s): %.120s",
-                    i, " | ".join(p.strip()[:50] for p in paragraphs[:i]),
-                )
-                return stripped
-            break
-
-    return text
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    """Extract JSON from LLM response text."""
-    text = text.strip()
-    if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-    if "```json" in text:
-        start = text.find("```json") + 7
-        end = text.find("```", start)
-        if end > start:
-            try:
-                return json.loads(text[start:end].strip())
-            except json.JSONDecodeError:
-                pass
-    if "```" in text:
-        start = text.find("```") + 3
-        end = text.find("```", start)
-        if end > start:
-            try:
-                return json.loads(text[start:end].strip())
-            except json.JSONDecodeError:
-                pass
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            pass
-    raise ValueError(f"Could not extract JSON from response: {text[:200]}")
+_FORWARD = _build_forward_map()

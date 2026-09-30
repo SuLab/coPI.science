@@ -289,7 +289,7 @@ class TestSyncProfilesFromDisk:
 
     @pytest.fixture
     def setup(self, tmp_path, monkeypatch):
-        import src.agent.simulation as sim
+        import src.agent.engine.constants as sim
         from src.agent.agent import Agent
 
         (tmp_path / "public").mkdir()
@@ -748,7 +748,7 @@ class TestGracefulShutdown:
             captured.update(kwargs)
             return "<slack_message>hi</slack_message>"
 
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake)
         await engine._reply_to_thread(agent, thread)
 
         assert "should_continue" in captured, (
@@ -1084,7 +1084,7 @@ class TestPhase4ReplySuppression:
 
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(agent, thread)
@@ -1108,7 +1108,7 @@ class TestPhase4ReplySuppression:
 
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(agent, thread)
@@ -1297,7 +1297,7 @@ class TestHubAssessmentRelocation:
 
         monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(hub, thread)
@@ -1333,7 +1333,7 @@ class TestHubAssessmentRelocation:
 
         monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         with caplog.at_level("ERROR"):
@@ -1382,7 +1382,7 @@ class TestHubAssessmentRelocation:
             return "<slack_message>A normal reply.</slack_message>"
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(lab, thread)
@@ -1508,7 +1508,7 @@ class TestPhase4OrdinalGuidance:
             )
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(hub, thread)
@@ -1532,7 +1532,7 @@ class TestPhase4OrdinalGuidance:
         async def _fail_if_called(**kwargs):
             raise AssertionError("the LLM must not be reached once the thread is full")
 
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fail_if_called)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fail_if_called)
 
         await engine._reply_to_thread(hub, thread)
 
@@ -1575,7 +1575,7 @@ class TestPhase4OrdinalGuidance:
             return "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
 
         await engine._reply_to_thread(hub, thread)
@@ -1618,7 +1618,7 @@ class TestPhase4OrdinalGuidance:
         async def _fail_if_called(**kwargs):
             raise AssertionError("the LLM must not be reached once the thread is full")
 
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fail_if_called)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fail_if_called)
 
         await engine._reply_to_thread(hub, thread)
 
@@ -1704,7 +1704,7 @@ class TestPanelNotesDriveNoBotBehaviour:
             return ""  # stops before the working-memory file write
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_agent_response", _fake_memory_call
+            "src.agent.engine.deps.generate_agent_response", _fake_memory_call
         )
 
         await engine._update_agent_memory(hub, "thread t1 closed")
@@ -1770,7 +1770,7 @@ class TestHubConcludeMissingAssessmentWarning:
             return raw_response
 
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
         await engine._reply_to_thread(hub, thread)
 
@@ -1945,7 +1945,7 @@ class TestSuppressedPostBacksOff:
 
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
         monkeypatch.setattr(
-            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+            "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
         )
         monkeypatch.setattr(engine, "_post_message", _suppressed_post)
         await engine._reply_to_thread(agent, thread)
@@ -1978,10 +1978,10 @@ class TestSuppressedPostBacksOff:
             return "<slack_message>A real reply.</slack_message>"
 
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _ok_generate)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _ok_generate)
         monkeypatch.undo()
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _ok_generate)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _ok_generate)
         await engine._reply_to_thread(agent, thread)
 
         assert thread.suppressed_post_count == 0
@@ -2061,7 +2061,7 @@ class TestMissingSidecarIsRecordedAsADrop:
 
         monkeypatch.setattr(engine, "_record_assessment_drop", _fake_record)
         monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
-        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+        monkeypatch.setattr("src.agent.engine.deps.generate_with_tools", _fake_generate)
 
         await engine._reply_to_thread(hub, thread)
 
@@ -2097,6 +2097,7 @@ class TestEvictionIsAdditive:
 
 @pytest.mark.asyncio
 async def test_prior_threads_per_pair_storage_is_capped(monkeypatch, tmp_path):
+    import src.agent.engine.deps as sim_deps
     import src.agent.simulation as sim
     from src.agent.agent import Agent
     from src.agent.simulation import SimulationEngine
@@ -2107,7 +2108,7 @@ async def test_prior_threads_per_pair_storage_is_capped(monkeypatch, tmp_path):
 
     async def fake_generate(**kwargs):
         return "m"
-    monkeypatch.setattr(sim, "generate_agent_response", fake_generate)
+    monkeypatch.setattr(sim_deps, "generate_agent_response", fake_generate)
 
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     lab = Agent("wang", "WangBot", "Wang", role="pi_lab")

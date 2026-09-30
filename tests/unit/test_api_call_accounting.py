@@ -37,7 +37,7 @@ def _settings(**kw):
 
 @pytest.fixture
 def engine(monkeypatch):
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     agent = Agent("hub", "HubBot", "PI hub")
     eng = SimulationEngine(agents=[agent], slack_clients={})
     # Nothing may be flushed: the buffer threshold would spawn a task and this

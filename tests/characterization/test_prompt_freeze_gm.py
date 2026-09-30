@@ -109,10 +109,10 @@ def _install(monkeypatch, fake):
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
     recorder = CallbackRecorder()
     monkeypatch.setattr(
-        "src.agent.simulation.generate_with_tools", recorder.wrap(llm.generate_with_tools)
+        "src.agent.engine.deps.generate_with_tools", recorder.wrap(llm.generate_with_tools)
     )
     monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response",
+        "src.agent.engine.deps.generate_agent_response",
         recorder.wrap(llm.generate_agent_response),
     )
     monkeypatch.setattr(
@@ -993,7 +993,7 @@ def test_run_start_marker_gm(snapshot, monkeypatch, profiles):
     sim.simulation_run_id = uuid.UUID("00000000-0000-0000-0000-00000000d100")
     sim.max_runtime_minutes = 0
     monkeypatch.setattr(
-        "src.agent.simulation.get_build_info",
+        "src.agent.engine.deps.get_build_info",
         lambda: BuildInfo("d0c0cce0000000000000000000000000000000000", "blackbird", 0, "build_info_json"),
     )
     values = sim._run_start_announcement_values()

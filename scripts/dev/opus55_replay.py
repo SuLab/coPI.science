@@ -827,7 +827,7 @@ def _first_baseline(row: Any) -> bool | None:
 
 
 def _sidecar_parse(_message: Any, text: str) -> dict[str, Any]:
-    from src.agent.simulation import _extract_assessment_json
+    from src.agent.engine.sidecar import _extract_assessment_json
 
     return {"parse_ok": _extract_assessment_json(text) is not None,
             "empty_text": not text.strip()}

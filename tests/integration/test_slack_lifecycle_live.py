@@ -37,7 +37,7 @@ POST_GAP = 1.1
 async def lifecycle(engine, slack_clients, slack_probe_channel, monkeypatch):
     """A factory that can build engines repeatedly over ONE simulation_run_id, so a
     restart is a genuinely new engine object against the same durable state."""
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()
@@ -174,7 +174,7 @@ async def test_ensure_seeded_channels_creates_a_missing_channel_with_a_live_clie
     """Only the Slack-off branch of _ensure_seeded_channels was covered. With a
     connected client a missing channel must be created, get a real C… id, and really
     exist in Slack (Rule S1 — the id in our map proves only that we stored an id)."""
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
 
     build, factory, run_id, name, cid, slack_clients = lifecycle
     fresh = f"t-seeded-{uuid.uuid4().hex[:8]}"
@@ -212,7 +212,7 @@ async def test_ensure_seeded_channels_reuses_an_existing_channel(
     is kept as the *independent* ground truth for "does Slack have this channel", which
     is a different code path from the client's own listing on purpose.
     """
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
 
     build, factory, run_id, name, cid, slack_clients = lifecycle
     su = slack_clients["su"]
@@ -274,7 +274,7 @@ async def test_ensure_seeded_channels_adopts_a_channel_beyond_the_first_page(
     fabricating names beyond page 1 fails) without letting Slack's index latency decide
     the outcome.
     """
-    import src.agent.simulation as sim
+    import src.agent.engine.constants as sim
 
     build, factory, run_id, name, cid, slack_clients = lifecycle
     su = slack_clients["su"]

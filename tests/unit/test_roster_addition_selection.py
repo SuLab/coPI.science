@@ -52,7 +52,7 @@ def test_a_newly_constructed_agent_is_not_infinitely_stale():
 
 
 def test_a_mid_run_roster_addition_does_not_monopolise_selection(monkeypatch):
-    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
 
     incumbents = [
         Agent(f"pi{i}", f"Pi{i}Bot", f"PI {i}") for i in range(10)

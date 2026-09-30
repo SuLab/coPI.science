@@ -948,7 +948,7 @@ async def _drive_reply_to_thread(
         return raw_response
 
     monkeypatch.setattr(
-        "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        "src.agent.engine.deps.generate_with_tools", _fake_generate_with_tools
     )
 
     await sim._reply_to_thread(agent, thread)
