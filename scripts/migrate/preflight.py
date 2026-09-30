@@ -1478,7 +1478,7 @@ async def run_preflight(args) -> Report:
 
         # --- 11b. every agent role has a capability entry (spec §8.5) ------------
         await report.add_guarded(
-            "Every agent_registry role has a ROLE_CAPABILITIES entry",
+            "Every agent role has a ROLE_CAPABILITIES entry",
             lambda: check_agent_roles(conn),
         )
 
@@ -2114,26 +2114,27 @@ async def check_legacy_inventory(conn, rev: str | None):
 
 
 async def check_agent_roles(conn):
-    """Phase 2 (spec §8.5, §12): every ``agent_registry.role`` must have a
-    ``ROLE_CAPABILITIES`` entry. Before Phase 2 an unknown role ran as pi_lab;
-    from Phase 2 the engine skips its agents, so this surfaces them first."""
-    title = "Every agent_registry role has a ROLE_CAPABILITIES entry"
-    if not await table_exists(conn, "agent_registry"):
-        return (title, WARN, "agent_registry does not exist; nothing to check.", [], {})
+    """Phase 2 (spec §8.5, §12): every agent's ``role`` (the ``AgentRegistry``
+    model, table ``agents``) must have a ``ROLE_CAPABILITIES`` entry. Before
+    Phase 2 an unknown role ran as pi_lab; from Phase 2 the engine skips its
+    agents, so this surfaces them first."""
+    title = "Every agent role has a ROLE_CAPABILITIES entry"
+    if not await table_exists(conn, "agents"):
+        return (title, WARN, "the agents table does not exist; nothing to check.", [], {})
     from src.agent.role_capabilities import ROLE_CAPABILITIES  # dependency-free module
 
     roles = [r["role"] for r in await fetch_all(
-        conn, "SELECT DISTINCT role FROM agent_registry ORDER BY role"
+        conn, "SELECT DISTINCT role FROM agents ORDER BY role"
     )]
     unknown = [r for r in roles if r not in ROLE_CAPABILITIES]
     data = {"roles": roles, "unknown": unknown}
     if unknown:
         return (
             title, BLOCK,
-            f"agent_registry holds role(s) with no capability entry: {unknown}. "
+            f"agents holds role(s) with no capability entry: {unknown}. "
             "From Phase 2 the engine skips these agents instead of running them as pi_lab.",
             [
-                "SELECT agent_id, role, status FROM agent_registry WHERE role NOT IN "
+                "SELECT agent_id, role, status FROM agents WHERE role NOT IN "
                 f"({', '.join(repr(r) for r in sorted(ROLE_CAPABILITIES))});",
                 "Fix each role on the admin agent page, then re-run this preflight.",
             ],

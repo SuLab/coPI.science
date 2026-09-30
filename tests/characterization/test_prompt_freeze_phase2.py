@@ -52,6 +52,7 @@ async def test_chat_request_is_identical_for_null_and_non_null_revisions(engine,
                                     channel_name="c", thread_id="t", created_at=base,
                                     recommendation="conditional", headline="H")
         db.add(row)
+        await db.flush()  # the turns' FK needs the row first (no ORM relationship orders them)
         db.add_all([_turn(row.id, user.id, i, None, base + timedelta(minutes=i)) for i in (1, 2)])
         await db.commit()
         try:

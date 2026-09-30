@@ -43,6 +43,13 @@ def test_phase4_honours_role_overrides(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(roles_mod, "PROMPTS_DIR", prompts)
     monkeypatch.setattr(roles_mod, "ROLES_DIR", prompts / "roles")
+    # Roles are a closed code registry now (unknown roles raise); register the
+    # test's custom role with pi_lab's capabilities so only prompt resolution varies.
+    from src.agent import role_capabilities
+
+    monkeypatch.setitem(
+        role_capabilities.ROLE_CAPABILITIES, "widget", role_capabilities.ROLE_CAPABILITIES["pi_lab"]
+    )
 
     agent = Agent("w", "WBot", "W Lab", role="widget")
     thread = ThreadState(thread_id="t1", channel="general", other_agent_id="o", message_count=1)
