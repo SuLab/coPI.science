@@ -72,7 +72,7 @@ def _auth_as(user_id, impersonate_id) -> dict:
     """Session for ``user_id`` plus the copi-impersonate cookie pointed at another user.
 
     src/dependencies.get_current_user honours that cookie *only* when the session
-    user is an admin. It is the one handle any of these 13 endpoints gives a
+    user is an admin. It is the one handle any of these 10 endpoints gives a
     caller on somebody else's identity, so it is the vector the sweep attacks.
     """
     signer = TimestampSigner(get_settings().secret_key)

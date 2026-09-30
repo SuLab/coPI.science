@@ -287,7 +287,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   rationale, red flags, gating, or `raw_verdict` (design D12, widened once). The pitch is
   a SIDECAR field and may carry the PI's unpublished disclosures; publishing it rests on
   the operator's assertion (2026-09-09) that PIs cannot join the workspace, which no code
-  enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:38`) still renders a join link
+  enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:33`) still renders a join link
   on every PI's own `/agent` page. The pitch segment is omitted entirely when
   `elevator_pitch` is NULL, which is every row written before migration `0043`.
   **It is clipped at a SENTENCE boundary, not at an offset (2026-09-14).**

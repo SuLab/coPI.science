@@ -14,10 +14,9 @@
    production has never held one.
    `tests/integration/test_proposal_review.py`'s module docstring states the fact
    in prose; this pins it in code, so the dead branch cannot be quietly
-   resurrected — and so the still-live readers of it (`src/main.py`'s nav badge
-   count, the agent dashboard's Proposals section, `src/routers/public.py`,
-   `src/services/email_notifications.py`) can be retired against a proof rather
-   than an assumption. See
+   resurrected. Its old readers (the nav badge count, the agent dashboard's
+   Proposals section, public voting and the notification emails) were retired on
+   2026-09-29 against this proof. See
    `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` (M1).
 
 3. **`static/` is source, not ignored.** Every file under it is tracked and
@@ -187,8 +186,8 @@ def test_no_src_path_can_construct_a_proposal_outcome():
     assert outcomes == LIVE_OUTCOMES, (
         f"the set of ThreadDecision outcomes src/ can produce changed to {sorted(outcomes)}. "
         "That is not necessarily wrong, but every reader that switches on `outcome` "
-        "(src/main.py, src/routers/agent_page.py, src/routers/public.py, "
-        "src/services/email_notifications.py) has to be checked against the new set."
+        "(src/services/directory.py, src/routers/admin.py, src/agent/simulation.py, "
+        "src/agent/agent.py) has to be checked against the new set."
     )
 
 

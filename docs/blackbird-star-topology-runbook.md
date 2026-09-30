@@ -221,9 +221,9 @@ What DB-only gives you, all verified in the branch source:
 - Every agent gets a `NullTransport`; no Slack API calls are made.
 - The 7 seeded channels become `local:{name}`, all `public`.
 - GrantBot writes funding posts directly to `agent_messages`.
-- PIs read conversations on the web (`GET /agent/{id}/conversations`); the write
-  routes (`/message`, `/dm`) and the inbox service behind them were retired
-  2026-09-29.
+- PIs read conversations on the web (`GET /agent/{id}/conversations`). There are
+  no web write routes to the conversation; the inbox service (`pi_inbox.py`) that
+  the retired reopen action wrote through was removed on 2026-09-29.
 
 ---
 

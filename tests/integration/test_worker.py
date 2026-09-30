@@ -603,9 +603,7 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
     """T5.3 — the real `run_worker` loop, not a reimplementation of it.
 
     This is the only test that executes `run_worker` itself: its engine construction,
-    its claim/process cycle, its idle sleep and its shutdown flag. The email
-    notification and inbound blocks are pushed out of reach with an absurd interval
-    rather than mocked, since email is out of scope for this plan.
+    its claim/process cycle, its idle sleep and its shutdown flag.
 
     Control: the good job (enqueued *after* the crasher) reaching 'completed' is the
     positive observation; "the loop did not raise" alone would pass for a loop that

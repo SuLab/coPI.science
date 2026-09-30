@@ -577,11 +577,12 @@ def main():
         # Two stacks share this host: always -f docker-compose.prod.yml; the unprefixed agent-run container is org1's, never stop or remove it.
         console.print("[green]All done![/green]")
         console.print(
-            "The tokens are in .env. The engine reads SLACK_BOT_TOKEN_<AGENT_ID> as a "
-            "fallback whenever an agent's AgentRegistry.slack_bot_token is empty, once the "
-            "agent service is recreated: $DC up -d --force-recreate agent (only with no "
-            "live run on /admin/simulation). To make a token authoritative in the DB "
-            "instead, paste it into the agent's approval form on /admin/agents/<id>."
+            "The tokens are in .env. For a NEW agent that does nothing: Settings reads "
+            "only the declared legacy SLACK_BOT_TOKEN_<AGENT_ID> fields, so paste each new "
+            "agent's token into its approval form on /admin/agents/<id> (that makes it "
+            "authoritative in AgentRegistry.slack_bot_token). A legacy agent's .env token "
+            "is a fallback once the agent service is recreated: $DC up -d --force-recreate "
+            "agent (only with no live run on /admin/simulation)."
         )
 
 

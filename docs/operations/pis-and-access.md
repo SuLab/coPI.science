@@ -91,18 +91,21 @@ refuses a roster older than 1 h unless given `--allow-stale-roster`: re-export
 rather than provision from a stale roster.
 
 The host script writes tokens to `.env` as `SLACK_BOT_TOKEN_<AGENT_ID>`. The engine
-reads that key as a fallback whenever the agent's `AgentRegistry.slack_bot_token` is
-empty, once the agent service is recreated (`$DC up -d --force-recreate agent`, only
-with no live run: a long-running container's environment dates from its creation). To
-make a token authoritative in the DB, paste it into the agent's approval form on
-`/admin/agents/<id>`. (The one-off importer script was retired 2026-09-29.)
+reads that key as a fallback only for an agent id that `Settings` declares as a
+`slack_bot_token_<id>` field (the legacy map in `config.py get_slack_tokens()`), and
+only once the agent service is recreated (`$DC up -d --force-recreate agent`, only with
+no live run: a long-running container's environment dates from its creation).
+`Settings` ignores undeclared keys, so for any NEW agent the `.env` line does nothing:
+paste the token into the agent's approval form on `/admin/agents/<id>`, which makes it
+authoritative in `AgentRegistry.slack_bot_token`. (The one-off importer script, which
+read `os.environ` directly, was retired 2026-09-29.)
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
 authoritative.)
 
 ## The Origin guard (every non-GET request, added 2026-08-22)
 
-`OriginGuardMiddleware` (`src/main.py:120`) refuses any request whose method is
+`OriginGuardMiddleware` (`src/main.py:101`) refuses any request whose method is
 not GET/HEAD/OPTIONS unless it proves it came from our own origin. It is added
 LAST in `create_app` and is therefore the OUTERMOST middleware — a forged POST
 is refused before the session is even opened — and that position is pinned
@@ -119,7 +122,7 @@ Three operator consequences, in order of how much they will cost you:
 1. ⚠️ **A wrong or missing `BASE_URL` fails the site CLOSED, site-wide.** The
    expected origin is `normalized_origin(settings.base_url)`, and when that is
    `None` the guard sets `allowed = False` unconditionally rather than comparing
-   equal to everything (`src/main.py:176-179`). Every login POST, every form,
+   equal to everything (`src/main.py:154-157`). Every login POST, every form,
    every admin action 403s with `Cross-site request refused.` while GETs keep
    rendering normally — so the site looks up. Production is
    `BASE_URL=https://blackbird.copi.science` (`.env:31`); the *default* is
@@ -224,7 +227,7 @@ onboarding is incomplete to `/onboarding`, and only `POST /onboarding/save-profi
 ever clear that flag. The **five** PI-write POSTs — `/onboarding/save-profile`
 (`src/routers/onboarding.py:133`), `/onboarding/retry` (`:251`), `/profile/save`
 (`src/routers/profile.py:132`), `/profile/refresh` (`:172`) and `/agent/request`
-(`src/routers/agent_page.py:388`) — are gated on **`get_pi_user`** in
+(`src/routers/agent_page.py:275`) — are gated on **`get_pi_user`** in
 `src/dependencies.py:182`, which 403s a manager and lets an admin through. A
 read-only redirect is not enough there: `save-profile` writes
 `onboarding_complete` and creates the profile, which is the whole gate on

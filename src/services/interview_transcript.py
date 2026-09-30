@@ -7,7 +7,7 @@ worker must never pull in `src.services.blackbird_rubric` or
 `prompts/` at import time. Once the worker bind-mounts `prompts/`, a
 mid-edit or malformed rubric document would otherwise crash-loop the whole
 worker process (`restart: unless-stopped`), taking profile generation and
-email notifications down with it. Kept free-standing, a bad TOML degrades only
+every other job type down with it. Kept free-standing, a bad TOML degrades only
 the one job that reads it as data.
 """
 

@@ -136,6 +136,18 @@ def test_env_token_for_an_unknown_agent_is_none():
     assert env_token("nobody-by-that-name") is None
 
 
+def test_an_env_token_for_an_undeclared_agent_is_ignored(monkeypatch):
+    """Settings reads only its declared SLACK_BOT_TOKEN_<id> fields (extra="ignore"),
+    so a new agent's .env line is never a fallback: its token goes in through the
+    /admin/agents/<id> approval form (docs/operations/pis-and-access.md)."""
+    monkeypatch.setenv("SLACK_BOT_TOKEN_NEWAGENT", "xoxb-test-new-agent")
+    _clear_settings_cache()
+    try:
+        assert env_token("newagent") is None
+    finally:
+        _clear_settings_cache()
+
+
 @pytest.mark.integration
 async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
     """A placeholder row must not satisfy 'any usable token'. The web tier's
