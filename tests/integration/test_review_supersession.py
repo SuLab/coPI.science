@@ -30,6 +30,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.agent.engine.verdicts import Verdicts
 from src.agent.simulation import SimulationEngine, _HeldVerdict
 from src.agent.state import ThreadState
 from src.models import (
@@ -204,7 +205,7 @@ async def test_supersession_re_points_review_rows_to_the_replacement(engine):
     thread = _thread()
     assignee = await _make_user(factory)
     try:
-        held_a, a_id = await SimulationEngine._persist_assessment(
+        held_a, a_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
         )
         assert held_a is True and a_id is not None
@@ -212,12 +213,12 @@ async def test_supersession_re_points_review_rows_to_the_replacement(engine):
         ids = await _attach_review_rows(factory, a_id, assignee.id)
 
         superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await SimulationEngine._persist_assessment(
+        held_b, b_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
         )
         assert held_b is True and b_id is not None
 
-        await SimulationEngine._retire_superseded_verdict(
+        await Verdicts._retire_superseded_verdict(
             stub, "blackbird", thread, superseded,
             replacement_ordinal=2, replacement_id=b_id,
         )
@@ -269,10 +270,10 @@ async def test_re_point_skips_conflicting_assignments(engine):
     thread = _thread()
     assignee = await _make_user(factory)
     try:
-        held_a, a_id = await SimulationEngine._persist_assessment(
+        held_a, a_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
         )
-        held_b, b_id = await SimulationEngine._persist_assessment(
+        held_b, b_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
         )
         assert a_id is not None and b_id is not None
@@ -292,7 +293,7 @@ async def test_re_point_skips_conflicting_assignments(engine):
             await db.commit()
 
         superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        await SimulationEngine._retire_superseded_verdict(
+        await Verdicts._retire_superseded_verdict(
             stub, "blackbird", thread, superseded,
             replacement_ordinal=2, replacement_id=b_id,
         )
@@ -328,7 +329,7 @@ async def test_re_point_tolerates_a_buffered_replacement(engine):
     failing_factory = _FailOnceFactory(factory)
     stub.session_factory = failing_factory
     try:
-        held_a, a_id = await SimulationEngine._persist_assessment(
+        held_a, a_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
         )
         assert held_a is True and a_id is not None
@@ -342,14 +343,14 @@ async def test_re_point_tolerates_a_buffered_replacement(engine):
 
         failing_factory.armed = True
         superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await SimulationEngine._persist_assessment(
+        held_b, b_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
         )
         assert held_b is True and b_id is None, "buffered, not committed"
         assert len(stub._pending_assessments) == 1
         assert failing_factory.armed is False, "the single arm must be consumed"
 
-        await SimulationEngine._retire_superseded_verdict(
+        await Verdicts._retire_superseded_verdict(
             stub, "blackbird", thread, superseded,
             replacement_ordinal=2, replacement_id=b_id,
         )
@@ -377,7 +378,7 @@ async def test_persist_returns_false_none_with_no_db():
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=None, simulation_run_id=None,
     )
-    held, replacement_id = await SimulationEngine._persist_assessment(
+    held, replacement_id = await Verdicts._persist_assessment(
         stub, "blackbird", "general", {"scores": {"differentiation": 5}},
     )
     assert held is False
@@ -399,7 +400,7 @@ async def test_supersession_re_points_the_pending_review_job(engine):
     thread = _thread()
     job_ids: list = []
     try:
-        held_a, a_id = await SimulationEngine._persist_assessment(
+        held_a, a_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
         )
         assert held_a is True and a_id is not None
@@ -423,12 +424,12 @@ async def test_supersession_re_points_the_pending_review_job(engine):
             await db.commit()
 
         superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
-        held_b, b_id = await SimulationEngine._persist_assessment(
+        held_b, b_id = await Verdicts._persist_assessment(
             stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
         )
         assert held_b is True and b_id is not None
 
-        await SimulationEngine._retire_superseded_verdict(
+        await Verdicts._retire_superseded_verdict(
             stub, "blackbird", thread, superseded,
             replacement_ordinal=2, replacement_id=b_id,
         )

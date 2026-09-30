@@ -172,6 +172,7 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -188,7 +189,7 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+    await Verdicts._persist_assessment(stub, "blackbird", "general", {
         "subject_agent_id": "wang",
         "company_or_project": "DBT / BCAA-autophagy axis",
         "funnel_stage": "incubation",
@@ -260,6 +261,7 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -287,7 +289,7 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
         "scores": {"differentiation": 3},
         "gating": dict(original_gating),
     }
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+    await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
     try:
         async with factory() as check:
@@ -321,6 +323,7 @@ async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -338,7 +341,7 @@ async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
     verdict = {"subject_agent_id": "wang", "gating": "all four met, trust me"}
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+    await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
     try:
         async with factory() as check:
@@ -365,6 +368,7 @@ async def test_persist_assessment_never_raises_when_the_write_fails(caplog):
     DB row must never take down the turn."""
     import uuid as _uuid
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     def _boom():
@@ -374,7 +378,7 @@ async def test_persist_assessment_never_raises_when_the_write_fails(caplog):
         agents=[], slack_clients={}, session_factory=_boom,
         simulation_run_id=_uuid.uuid4(),
     )
-    await SimulationEngine._persist_assessment(
+    await Verdicts._persist_assessment(
         stub, "blackbird", "general", {"scores": {}}
     )
     assert "Failed to persist assessment" in caplog.text
@@ -394,6 +398,7 @@ async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists
     would pass a weaker assertion)."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     real_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -443,7 +448,7 @@ async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists
     # write is worth not losing.
     verdict = {"subject_agent_id": "wang", "scores": {"differentiation": 3}}
 
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+    await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
     try:
         # First attempt failed: nothing in the DB yet, but the row survived
@@ -457,7 +462,7 @@ async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists
             )).scalars().all()
             assert none_yet == []
 
-        await SimulationEngine._flush_pending_assessments(stub)
+        await Verdicts._flush_pending_assessments(stub)
 
         # The retry succeeded against the now-healthy factory: the buffer
         # drained AND the row genuinely landed in the table.
@@ -487,11 +492,12 @@ async def test_persist_assessment_skips_quietly_without_a_database(caplog):
     be a silent no-op then, never an attempted write against a null session
     factory or a null simulation_run_id foreign key."""
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     stub = SimulationEngine(agents=[], slack_clients={}, session_factory=None, simulation_run_id=None)
     with caplog.at_level("DEBUG"):
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general", {"scores": {"differentiation": 5}}
         )
     assert "Skipping assessment persistence" in caplog.text
@@ -505,6 +511,7 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -522,7 +529,7 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
     # No scores, no gating, red_flags the wrong type entirely.
-    await SimulationEngine._persist_assessment(
+    await Verdicts._persist_assessment(
         stub, "blackbird", "general", {"red_flags": "not a list"}
     )
 
@@ -561,6 +568,7 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -585,7 +593,7 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
         "funnel_stage": "incubation",  # well within String(20) — unaffected
         "scores": {"differentiation": 3},
     }
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+    await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
     try:
         async with factory() as check:
@@ -623,6 +631,7 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -639,7 +648,7 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
-    await SimulationEngine._persist_assessment(
+    await Verdicts._persist_assessment(
         stub, "blackbird", "general", {"subject_agent_id": "wang", "scores": {}}
     )
 
@@ -677,6 +686,7 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -699,7 +709,7 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
         "rationale": {"summary": "structured, not prose"},  # wrong type
         "scores": {"differentiation": 3},
     }
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+    await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
     try:
         async with factory() as check:
@@ -734,6 +744,7 @@ async def test_persist_assessment_stores_the_recommended_next_experiment(engine)
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -746,14 +757,14 @@ async def test_persist_assessment_stores_the_recommended_next_experiment(engine)
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+    await Verdicts._persist_assessment(stub, "blackbird", "general", {
         "subject_agent_id": "wang",
         "recommendation": "advance",
         "recommended_next_experiment": (
             "EXPERIMENT-MARKER: 384-well selectivity panel; pass = >30-fold margin"
         ),
     })
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+    await Verdicts._persist_assessment(stub, "blackbird", "general", {
         "subject_agent_id": "hart",
         "recommendation": "advance",
         "recommended_next_experiment": {"summary": "structured, not prose"},
@@ -794,6 +805,7 @@ async def test_persist_assessment_stamps_prose_format_markdown(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -806,7 +818,7 @@ async def test_persist_assessment_stamps_prose_format_markdown(engine):
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
-    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+    await Verdicts._persist_assessment(stub, "blackbird", "general", {
         "subject_agent_id": "wang",
         "recommendation": "advance",
         "rationale": "**Bold** rationale.",
@@ -1697,6 +1709,7 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1714,7 +1727,7 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
         stub._record_consult("wang", domain)
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 # The bot_name form: the only identifier the prompt ever showed it.
@@ -1779,6 +1792,7 @@ async def test_a_gapped_verdict_persists_with_no_drop_row(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.models import AssessmentDrop
 
@@ -1797,7 +1811,7 @@ async def test_a_gapped_verdict_persists_with_no_drop_row(engine):
     stub._record_consult("someone-else", "scientific")
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "wang",
@@ -1838,6 +1852,7 @@ async def test_a_persisted_verdict_records_no_drop(engine):
     cries wolf on a perfectly healthy run."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.models import AssessmentDrop
 
@@ -1855,7 +1870,7 @@ async def test_a_persisted_verdict_records_no_drop(engine):
         stub._record_consult("wang", domain)
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "wang",
@@ -2134,6 +2149,7 @@ async def test_a_gapped_verdict_is_stored_and_flagged_not_discarded(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2152,7 +2168,7 @@ async def test_a_gapped_verdict_is_stored_and_flagged_not_discarded(engine):
     # rather than that we restarted mid-interview.
     stub._record_consult("someone_else", "scientific")
 
-    await SimulationEngine._persist_assessment(
+    await Verdicts._persist_assessment(
         stub, "blackbird", "general",
         {
             "subject_agent_id": "gordy",
@@ -2179,6 +2195,7 @@ async def test_a_gapped_verdict_is_stored_and_flagged_not_discarded(engine):
 async def test_a_complete_panel_stores_an_unflagged_row(engine):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2195,7 +2212,7 @@ async def test_a_complete_panel_stores_an_unflagged_row(engine):
     for domain in ("scientific", "talent", "chemistry", "clinical", "technologic"):
         stub._record_consult("gordy", domain)
 
-    await SimulationEngine._persist_assessment(
+    await Verdicts._persist_assessment(
         stub, "blackbird", "general",
         {
             "subject_agent_id": "gordy",
@@ -2233,6 +2250,7 @@ async def test_an_unverifiable_floor_stores_the_empty_sentinel_not_null(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2253,7 +2271,7 @@ async def test_an_unverifiable_floor_stores_the_empty_sentinel_not_null(engine):
     assert stub._specialist_consults == {}
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "gordy",
@@ -2292,6 +2310,7 @@ async def test_a_verdict_with_no_subject_is_unverifiable_too(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -2307,7 +2326,7 @@ async def test_a_verdict_with_no_subject_is_unverifiable_too(engine):
     stub._record_consult("someone-else", "scientific")  # the floor IS armed
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {"recommendation": "advance", "company_or_project": "Unattributed"},
         )
@@ -2336,6 +2355,7 @@ async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine)
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -2351,7 +2371,7 @@ async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine)
     assert stub._specialist_consults == {}  # unarmed, as after a restart
 
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "gordy",
@@ -2492,6 +2512,7 @@ async def test_persist_assessment_records_that_a_panel_was_owed(engine):
     only means "verified" on a row where a floor actually ran."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2508,7 +2529,7 @@ async def test_persist_assessment_records_that_a_panel_was_owed(engine):
     for domain in ("scientific", "talent", "chemistry", "clinical", "technologic"):
         stub._record_consult("gordy", domain)
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "gordy",
@@ -2548,6 +2569,7 @@ async def test_persist_assessment_records_that_no_panel_was_owed(engine):
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2562,7 +2584,7 @@ async def test_persist_assessment_records_that_no_panel_was_owed(engine):
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "gordy",
@@ -2591,6 +2613,7 @@ async def test_persist_assessment_records_the_interview_thread(engine):
     own concluding verdict looks like a first verdict and lands a second row."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.agent.state import ThreadState
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
@@ -2610,7 +2633,7 @@ async def test_persist_assessment_records_the_interview_thread(engine):
         message_count=11,
     )
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {
                 "subject_agent_id": "gordy",
@@ -2635,6 +2658,7 @@ async def test_a_caller_with_no_thread_stores_a_null_thread_id(engine):
     would not match and which would collide across interviews."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
@@ -2649,7 +2673,7 @@ async def test_a_caller_with_no_thread_stores_a_null_thread_id(engine):
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
     try:
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {"subject_agent_id": "gordy", "recommendation": "pass",
              "scores": {k: 2 for k in RUBRIC_WEIGHTS}},
@@ -2672,6 +2696,7 @@ async def test_the_retry_queue_carries_panel_owed_and_thread_id(engine):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
     from src.agent.state import ThreadState
     from src.services.blackbird_rubric import RUBRIC_WEIGHTS
@@ -2696,7 +2721,7 @@ async def test_the_retry_queue_carries_panel_owed_and_thread_id(engine):
         # A run id that violates the FK: the insert raises and the row is queued,
         # exactly as a pool-checkout timeout would leave it.
         stub.simulation_run_id = _uuid.uuid4()
-        await SimulationEngine._persist_assessment(
+        await Verdicts._persist_assessment(
             stub, "blackbird", "general",
             {"subject_agent_id": "gordy", "recommendation": "conditional",
              "scores": {k: 3 for k in RUBRIC_WEIGHTS}},

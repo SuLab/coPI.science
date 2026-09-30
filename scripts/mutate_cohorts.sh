@@ -175,7 +175,7 @@ MUTANTS=(
 # docs/plans/2026-08-14-two-lane-concurrent-scheduler.md deleted the reactive tier
 # outright — replies leave the paced pool entirely — so there is no equivalent line
 # left to mutate; removed rather than re-pointed.
-"src/agent/simulation.py~~            if target_id == agent.agent_id or target_id in allowed:~~            if True:~~M9 the outbound tag strip never strips"
+"src/agent/engine/roster.py~~            if target_id == agent.agent_id or target_id in allowed:~~            if True:~~M9 the outbound tag strip never strips"
 )
 
 # ---------------------------------------------------------------------------

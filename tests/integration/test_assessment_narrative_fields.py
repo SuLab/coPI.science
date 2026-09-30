@@ -102,6 +102,7 @@ async def test_persist_assessment_stores_the_four_narrative_fields(engine):
     columns."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -115,7 +116,7 @@ async def test_persist_assessment_stores_the_four_narrative_fields(engine):
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "subject_agent_id": "wang",
             "company_or_project": "Short label",
             "headline": "A blood test that says who responds to immunotherapy.",
@@ -147,6 +148,7 @@ async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engi
     `derisking_milestones` already do."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -160,7 +162,7 @@ async def test_a_non_list_key_points_degrades_to_null_and_keeps_raw_verdict(engi
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "company_or_project": "Short label",
             "key_points": "not a list at all",
             "recommendation": "pass",
@@ -187,6 +189,7 @@ async def test_a_wrong_typed_score_rationale_degrades_to_null_and_keeps_raw_verd
     narrative field must never cost the verdict."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -200,7 +203,7 @@ async def test_a_wrong_typed_score_rationale_degrades_to_null_and_keeps_raw_verd
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "company_or_project": "Short label",
             "score_rationale": {"why": "an object, not a string"},
             "recommendation": "pass",
@@ -231,6 +234,7 @@ async def test_an_overlong_headline_or_project_label_warns_but_still_stores(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -247,7 +251,7 @@ async def test_an_overlong_headline_or_project_label_warns_but_still_stores(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": long_project,
                 "headline": long_headline,
                 "recommendation": "conditional",
@@ -281,6 +285,7 @@ async def test_a_missing_current_group_is_stored_and_warned(engine, caplog):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -296,7 +301,7 @@ async def test_a_missing_current_group_is_stored_and_warned(engine, caplog):
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "key_points": partial,
                 "recommendation": "conditional",
@@ -330,6 +335,7 @@ async def test_an_empty_key_points_object_is_dropped_with_an_accurate_reason(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -344,7 +350,7 @@ async def test_an_empty_key_points_object_is_dropped_with_an_accurate_reason(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "key_points": {},
                 "recommendation": "conditional",
@@ -378,6 +384,7 @@ async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -400,7 +407,7 @@ async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "key_points": key_points_in,
                 "recommendation": "conditional",
@@ -434,6 +441,7 @@ async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -456,7 +464,7 @@ async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "key_points": key_points_in,
                 "recommendation": "conditional",
@@ -490,6 +498,7 @@ async def test_a_legacy_shaped_key_points_is_stored_with_one_legacy_warning(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -505,7 +514,7 @@ async def test_a_legacy_shaped_key_points_is_stored_with_one_legacy_warning(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "key_points": partial,
                 "recommendation": "conditional",
@@ -590,6 +599,7 @@ async def test_persist_assessment_stores_strengths_and_risks(engine):
     """Sidecar items 11/12 (0049): valid bullet lists reach their columns."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -603,7 +613,7 @@ async def test_persist_assessment_stores_strengths_and_risks(engine):
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "company_or_project": "Short label",
             "strengths": ["S one", "S two"],
             "risks": ["R one", "R two"],
@@ -631,6 +641,7 @@ async def test_wrong_typed_strengths_and_risks_degrade_to_null_and_keep_raw_verd
     actually emitted."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -644,7 +655,7 @@ async def test_wrong_typed_strengths_and_risks_degrade_to_null_and_keep_raw_verd
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "company_or_project": "Short label",
             "strengths": "not a list",
             "risks": [1, 2],
@@ -673,6 +684,7 @@ async def test_a_five_bullet_strengths_list_still_stores_and_warns(engine, caplo
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -688,7 +700,7 @@ async def test_a_five_bullet_strengths_list_still_stores_and_warns(engine, caplo
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "strengths": five,
                 "recommendation": "conditional",
@@ -715,6 +727,7 @@ async def test_persist_assessment_stores_landscape_and_evidence_maturity(engine)
     """Sidecar items 13/14 (0050): valid bullet lists reach their columns."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -728,7 +741,7 @@ async def test_persist_assessment_stores_landscape_and_evidence_maturity(engine)
         stub = SimulationEngine(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
-        await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        await Verdicts._persist_assessment(stub, "blackbird", "general", {
             "company_or_project": "Short label",
             "competitive_landscape": ["Program A is Phase I.", "Program B lapsed."],
             "evidence_maturity": ["Biology: settled.", "Chemistry: unverified."],
@@ -762,6 +775,7 @@ async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -776,7 +790,7 @@ async def test_wrong_typed_landscape_degrades_to_null_and_keeps_raw_verdict(
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "competitive_landscape": "not a list",
                 "evidence_maturity": ["Biology: settled.", ""],
@@ -809,6 +823,7 @@ async def test_a_five_bullet_evidence_maturity_still_stores_and_warns(engine, ca
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -824,7 +839,7 @@ async def test_a_five_bullet_evidence_maturity_still_stores_and_warns(engine, ca
         )
         five = ["one", "two", "three", "four", "five"]
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "evidence_maturity": five,
                 "recommendation": "conditional",
@@ -854,6 +869,7 @@ async def test_a_120_character_headline_warns_against_the_110_bound(engine, capl
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -868,7 +884,7 @@ async def test_a_120_character_headline_warns_against_the_110_bound(engine, capl
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "headline": "A" * 120,
                 "recommendation": "conditional",
@@ -890,6 +906,7 @@ async def test_an_overlong_landscape_bullet_still_stores_and_warns(engine, caplo
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -905,7 +922,7 @@ async def test_an_overlong_landscape_bullet_still_stores_and_warns(engine, caplo
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "competitive_landscape": [long_bullet, "Program B lapsed."],
                 "recommendation": "conditional",
@@ -941,6 +958,7 @@ async def test_a_citation_outside_the_published_excerpt_warns(engine, caplog):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -958,7 +976,7 @@ async def test_a_citation_outside_the_published_excerpt_warns(engine, caplog):
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "elevator_pitch": late,
                 "recommendation": "conditional",
@@ -979,6 +997,7 @@ async def test_a_citation_inside_the_published_excerpt_is_silent(engine, caplog)
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -998,7 +1017,7 @@ async def test_a_citation_inside_the_published_excerpt_is_silent(engine, caplog)
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "elevator_pitch": early,
                 "recommendation": "conditional",
@@ -1020,6 +1039,7 @@ async def test_a_bare_doi_outside_the_excerpt_warns(engine, caplog):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1035,7 +1055,7 @@ async def test_a_bare_doi_outside_the_excerpt_warns(engine, caplog):
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "elevator_pitch": late,
                 "recommendation": "conditional",
@@ -1058,6 +1078,7 @@ async def test_an_early_url_does_not_mask_a_dropped_later_citation(engine, caplo
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1077,7 +1098,7 @@ async def test_an_early_url_does_not_mask_a_dropped_later_citation(engine, caplo
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+            await Verdicts._persist_assessment(stub, "blackbird", "general", {
                 "company_or_project": "Short label",
                 "elevator_pitch": pitch,
                 "recommendation": "conditional",
@@ -1103,6 +1124,7 @@ async def _persist_and_read(engine, caplog, verdict):
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from src.agent.engine.verdicts import Verdicts
     from src.agent.simulation import SimulationEngine
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1117,7 +1139,7 @@ async def _persist_and_read(engine, caplog, verdict):
             agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
         )
         with caplog.at_level(logging.WARNING):
-            await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+            await Verdicts._persist_assessment(stub, "blackbird", "general", verdict)
 
         async with factory() as db:
             row = (await db.execute(

@@ -12,6 +12,7 @@ directly on the constructed agents rather than routed through
 """
 
 from src.agent.agent import Agent
+from src.agent.engine.roster import Roster
 from src.agent.simulation import SimulationEngine
 
 
@@ -97,7 +98,7 @@ class TestStartupWiring:
     def test_recompute_never_raises_on_a_violation(self):
         import inspect
 
-        src = inspect.getsource(SimulationEngine._recompute_allowed_sender_ids)
+        src = inspect.getsource(Roster._recompute_allowed_sender_ids)
         assert "_validate_star_topology" in src
         assert "logger.error" in src
         assert "raise RuntimeError" not in src

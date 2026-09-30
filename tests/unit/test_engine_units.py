@@ -103,6 +103,59 @@ def test_panel_is_a_unit():
     assert eng.panel._post_message.__self__ is eng.slack_io
 
 
+def test_headlines_and_verdicts_are_units_joined_by_the_ledger():
+    from src.agent.engine.headlines import Headlines
+    from src.agent.engine.helpers import _HeldVerdict
+    from src.agent.engine.verdicts import Verdicts
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["headlines"] is Headlines
+    assert sim._UNIT_CLASSES["verdicts"] is Verdicts
+    assert eng.headlines._ledger is eng.verdicts
+    held = _HeldVerdict(ordinal=3, final=False, slack_ts="1.1")
+    eng._assessed_threads["t1"] = held
+    assert eng.verdicts.held_for("t1") is held
+    assert eng.verdicts.unannounced_thread_ids() == ["t1"]
+    eng.verdicts.mark_announced("t1", held)
+    assert eng._assessed_threads["t1"] == held._replace(announced=True)
+    assert eng.verdicts.is_announced("t1") and eng.verdicts.unannounced_thread_ids() == []
+    eng._pending_assessments.append({"thread_id": "t1"})
+    eng.verdicts.patch_pending_summary("t1", "NOW")
+    assert eng._pending_assessments == [{"thread_id": "t1", "summary_posted_at": "NOW"}]
+    eng.headlines.enqueue("t2")
+    eng.headlines.enqueue("t2")
+    assert eng._pending_headlines == ["t2"]
+
+
+@pytest.mark.asyncio
+async def test_unbound_unit_calls_accept_an_engine():
+    """Review Focus 2: tests call Verdicts._persist_assessment(engine, ...) with an
+    engine as self; the split helpers must resolve through the facade too."""
+    from src.agent.engine.verdicts import Verdicts
+
+    eng = _engine()  # no database: the method must answer (False, None) as today
+    held, row_id = await Verdicts._persist_assessment(eng, "blackbird", "general", {"scores": {}})
+    assert (held, row_id) == (False, None)
+
+
+def test_roster_is_a_unit_and_reads_rejections_through_the_port():
+    from src.agent.engine.roster import Roster
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["roster"] is Roster
+    assert eng._bot_name_to_id == {"subot": "su"}
+    eng._post_type_rejections["pitch"] = 2
+    assert eng.cohort_topology_snapshot()["counters"]["post_type_rejections"] == {"pitch": 2}
+
+
+def test_run_announcer_is_a_unit():
+    from src.agent.engine.run_announcer import RunAnnouncer
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["run_announcer"] is RunAnnouncer
+    assert eng.run_announcer.max_runtime_minutes == eng.max_runtime_minutes
+
+
 def test_every_self_name_in_a_unit_resolves():
     """A moved body's ``self.<name>`` must be an own member, an owned attribute, a
     ``via`` alias, a holder or a port. A missing alias would otherwise only log,
