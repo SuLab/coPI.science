@@ -150,7 +150,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
-(`_sidecar_refusal`, `src/agent/simulation.py:4966`): emitting one IS the hub
+(`_sidecar_refusal`, `src/agent/simulation.py:5303`): emitting one IS the hub
 saying "this is my verdict", so `_capture_hub_assessment` stores it whether or
 not the reply ends the interview. The only refusal left is a re-capture —
 `duplicate_thread_verdict`, for a turn already stored, for anything after a
@@ -287,7 +287,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   rationale, red flags, gating, or `raw_verdict` (design D12, widened once). The pitch is
   a SIDECAR field and may carry the PI's unpublished disclosures; publishing it rests on
   the operator's assertion (2026-09-09) that PIs cannot join the workspace, which no code
-  enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:37`) still renders a join link
+  enforces — `SLACK_INVITE_URL` (`src/routers/agent_page.py:38`) still renders a join link
   on every PI's own `/agent` page. The pitch segment is omitted entirely when
   `elevator_pitch` is NULL, which is every row written before migration `0043`.
   **It is clipped at a SENTENCE boundary, not at an offset (2026-09-14).**

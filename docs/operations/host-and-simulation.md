@@ -89,7 +89,7 @@ with it. Measured 2026-08-22, before the fix: `llm_call_logs` held 10 runs and
 8b64a0e0's 1,354 messages were gone, 57 of 64 assessments carried a `slack_ts`
 that resolved to no message, and the assessment detail page's interview
 timeline was empty for 90% of the corpus. `_open_fresh_run`
-(`src/agent/main.py:114`) now only mints a new `SimulationRun` row: **the new
+(`src/agent/main.py:121`) now only mints a new `SimulationRun` row: **the new
 `simulation_run_id` IS the isolation**, every startup and main-loop read is
 already run-scoped (true since 2026-08-28 — `thread_decisions`/`proposal_reviews`
 were the unscoped exceptions until then, which fed prior runs' interview

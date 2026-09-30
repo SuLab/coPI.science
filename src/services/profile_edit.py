@@ -25,7 +25,12 @@ def parse_expected_version(raw: str | None) -> int | None:
     (a page rendered before the field existed, or a scripted post), which saves
     without the check, as before."""
     text = (raw or "").strip()
-    return int(text) if text.isdigit() else None
+    # ASCII digits only, and within the Integer column: ``str.isdigit`` also
+    # accepts characters ``int()`` rejects (e.g. "²"), and a larger number
+    # cannot be bound against the column.
+    if not re.fullmatch(r"[0-9]{1,9}", text):
+        return None
+    return int(text)
 
 
 async def write_profile_text_fields(

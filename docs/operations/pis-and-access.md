@@ -227,9 +227,9 @@ the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 
 guard locks admins out of their own account — `/profile` bounces an admin whose
 onboarding is incomplete to `/onboarding`, and only `POST /onboarding/save-profile` can
 ever clear that flag. The **five** PI-write POSTs — `/onboarding/save-profile`
-(`src/routers/onboarding.py:134`), `/onboarding/retry` (`:256`), `/profile/save`
-(`src/routers/profile.py:131`), `/profile/refresh` (`:169`) and `/agent/request`
-(`src/routers/agent_page.py:387`) — are gated on **`get_pi_user`** in
+(`src/routers/onboarding.py:133`), `/onboarding/retry` (`:251`), `/profile/save`
+(`src/routers/profile.py:132`), `/profile/refresh` (`:172`) and `/agent/request`
+(`src/routers/agent_page.py:388`) — are gated on **`get_pi_user`** in
 `src/dependencies.py:182`, which 403s a manager and lets an admin through. A
 read-only redirect is not enough there: `save-profile` writes
 `onboarding_complete` and creates the profile, which is the whole gate on

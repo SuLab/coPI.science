@@ -476,7 +476,9 @@ async def access_pending_email(
 
     result = await db.execute(select(User).where(User.id == _uuid.UUID(user_id)))
     user = result.scalar_one_or_none()
-    if user and not user.email:
+    if user and not user.email and user.access_status == "pending":
+        # Only while the request is still pending: a stale session after an
+        # approval or denial must not rewrite what admins see.
         # Unverified by construction (anyone holding this browser session can
         # type any address), so it lands in its own column for admins to see
         # and is never copied to users.email.
