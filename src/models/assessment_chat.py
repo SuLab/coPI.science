@@ -120,6 +120,10 @@ class AssessmentChatTurn(Base):
     #: history flags an answer whose record has changed since.
     record_sha256_12: Mapped[str] = mapped_column(String(12), nullable=False)
     prompt_sha256_12: Mapped[str] = mapped_column(String(12), nullable=False)
+    #: The assessment's verdict revision this turn was asked against (0054).
+    #: NULL on pre-0054 turns and never backfilled; replay and the turn cap
+    #: compare COALESCE(turn, 1) with COALESCE(assessment, 1) (spec §8.1, B6).
+    verdict_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Question accepted -> final answer persisted.
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Written by the application at insert (see the plan's clock note); the server

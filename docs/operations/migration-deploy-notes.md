@@ -879,3 +879,17 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > Rollback: redeploy the `rollback-pre-0053` images; the columns are harmless to
 > old code, and `alembic downgrade 0052` drops them (and every claim, hold and
 > finalize stamp in them).
+
+> **Deploy order for `0054_verdict_revision_columns` — migrate BEFORE the new
+> code serves, with NO live run, and only as step 2 of the Phase 2 sequence.**
+> `0054` adds four nullable columns (`opportunity_assessments.verdict_revision`,
+> `.verdict_write_id`, `.verdict_ordinal`, `assessment_chat_turns.verdict_revision`).
+> *Old code against the new schema* is safe: nothing old names them. *New code
+> against the old schema* raises `UndefinedColumn` on every assessment read and
+> every chat read, and the engine's verdict write is best-effort, so verdicts
+> would be lost to one ERROR line. NULL is never backfilled; readers coalesce it
+> to 1. Apply with `./scripts/migrate/run_migration.sh --target 0054` (the
+> image's default target is `0055`), then run
+> `scripts/migrate/merge_duplicate_assessments.py` (dry run, then `--apply`),
+> then apply `0055`. The agent image must be rebuilt in the same deploy. No
+> live run from before this step until the new agent is up (spec §12).

@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -195,6 +195,20 @@ class OpportunityAssessment(Base):
     summary_claimed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: How many verdicts this interview row has held (0054). One row per
+    #: (run, thread) since 0055: a later verdict updates this row in place and
+    #: increments the revision. NULL on every pre-0054 row and never backfilled;
+    #: every reader coalesces NULL to 1.
+    verdict_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The write that produced the current verdict (0054). A retry of the same
+    #: write (a lost acknowledgement) finds its own id here and is a no-op.
+    verdict_write_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    #: The hub reply ordinal that produced the current verdict (0054),
+    #: ``thread.message_count + 1`` at capture. A queued write with a LOWER
+    #: ordinal is stale and is recorded as a drop instead of applied.
+    verdict_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never

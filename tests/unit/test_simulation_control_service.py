@@ -236,3 +236,27 @@ def test_derive_panel_state_passes_through_state_when_heartbeat_is_fresh():
     row = SimulationProcessStatus(state="running")
     row.updated_at = now - timedelta(seconds=5)
     assert derive_panel_state(row, now) == "running"
+
+
+@pytest.mark.asyncio
+async def test_boot_stale_can_spare_finalize_stops(engine):
+    from src.services.simulation_control import enqueue_command, mark_pending_stale
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        fin = await enqueue_command(db, command="stop",
+                                    payload={"finalize": True, "run_id": "r1"},
+                                    requested_by_user_id=None)
+        start = await enqueue_command(db, command="start", payload={}, requested_by_user_id=None)
+        n = await mark_pending_stale(db, reason="boot", spare_finalize=True)
+        # Other pending rows left by earlier tests may also flip; scope the
+        # assertions to the rows this test created.
+        assert n >= 1
+        await db.refresh(fin)
+        await db.refresh(start)
+        assert fin.status == "pending"
+        assert start.status == "stale"
+        await mark_pending_stale(db, reason="cleanup")
+        for cmd in (fin, start):
+            await db.delete(await db.get(SimulationCommand, cmd.id))
+        await db.commit()

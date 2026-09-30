@@ -13,14 +13,19 @@ most one pending row per command kind at the database — `enqueue_command`
 lets that `IntegrityError` propagate at flush/commit; callers (the admin
 router's `admin_simulation_start` / `admin_simulation_stop`) catch it and
 render a refusal, which IS the double-click guard.
+
+`derive_panel_state` maps the heartbeat row to a panel state; given an
+`engine_alive` answer (the engine lock in `pg_locks`, `engine_alive` below) it
+applies the liveness table in its docstring, and `panel_state` fetches both.
 """
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AdminAuditEvent, SimulationCommand, SimulationProcessStatus
+from src.services.advisory_locks import ENGINE_LOCK_KEY, advisory_lock_held
 
 #: A status row whose `updated_at` is older than this many seconds is treated
 #: as a dead/unresponsive engine rather than trusted as its literal `state`.
@@ -80,14 +85,19 @@ async def finish_command(db: AsyncSession, cmd_id, *, status: str, result: str |
     await db.commit()
 
 
-async def mark_pending_stale(db: AsyncSession, *, reason: str, command: str | None = None) -> int:
+async def mark_pending_stale(
+    db: AsyncSession, *, reason: str, command: str | None = None,
+    spare_finalize: bool = False,
+) -> int:
     """Flip every pending row (optionally scoped to one command kind) to
     `stale`, recording `reason` as its result. Returns the count flipped.
 
     `command=None` at supervisor boot stales every pending row regardless of
-    kind; `command="start"` after each run stales only stray `start` rows
-    (audit V7) without touching a `stop` that might legitimately still be
-    pending.
+    kind — except, with `spare_finalize=True`, a `stop` carrying `finalize` and
+    a `run_id`: the supervisor runs Finalize run for those once it holds the
+    engine lock (spec §8.2, SA5-02). `command="start"` after each run stales
+    only stray `start` rows (audit V7) without touching a `stop` that might
+    legitimately still be pending.
     """
     stmt = (
         update(SimulationCommand)
@@ -97,6 +107,20 @@ async def mark_pending_stale(db: AsyncSession, *, reason: str, command: str | No
     )
     if command is not None:
         stmt = stmt.where(SimulationCommand.command == command)
+    if spare_finalize:
+        # A NULL payload makes the finalize test NULL, and NOT NULL is NULL,
+        # which would silently spare every payload-less command too; the
+        # explicit IS NULL branch and the COALESCE keep every term non-NULL.
+        stmt = stmt.where(
+            or_(
+                SimulationCommand.payload.is_(None),
+                ~(
+                    (SimulationCommand.command == "stop")
+                    & (func.coalesce(SimulationCommand.payload["finalize"].astext, "false") == "true")
+                    & SimulationCommand.payload.has_key("run_id")
+                ),
+            )
+        )
     res = await db.execute(stmt)
     await db.commit()
     return res.rowcount
@@ -145,13 +169,74 @@ async def record_audit(db: AsyncSession, *, action: str, actor_user_id, payload:
     await db.commit()
 
 
-def derive_panel_state(status_row: SimulationProcessStatus | None, now: datetime) -> str:
-    """Pure function, no DB: 'not_deployed' when there is no row at all,
-    'stale' when the row's `updated_at` is older than
-    `HEARTBEAT_STALE_SECONDS`, else the row's own `state` verbatim."""
-    if status_row is None:
-        return "not_deployed"
-    age_seconds = (now - status_row.updated_at).total_seconds()
-    if age_seconds > HEARTBEAT_STALE_SECONDS:
-        return "stale"
-    return status_row.state
+def derive_panel_state(
+    status_row: SimulationProcessStatus | None,
+    now: datetime,
+    *,
+    engine_alive: bool | None = None,
+) -> str:
+    """Pure function, no DB.
+
+    With ``engine_alive=None`` (the headline repair script's liveness refusal,
+    P0-08) the answer is today's: ``not_deployed`` without a row, ``stale``
+    for a row older than ``HEARTBEAT_STALE_SECONDS``, else the row's state.
+
+    With a liveness answer (spec §8.3):
+
+    ========== ============================== ==============
+    alive      status row                     panel state
+    ========== ============================== ==============
+    no         none                           not_deployed
+    no         ``starting`` and fresh         starting
+    no         anything else                  idle
+    yes        ``running``/``stopping`` fresh that state
+    yes        ``starting``/``idle`` fresh    starting
+    yes        anything else (stale, none)    unresponsive
+    ========== ============================== ==============
+    """
+    fresh = (
+        status_row is not None
+        and (now - status_row.updated_at).total_seconds() <= HEARTBEAT_STALE_SECONDS
+    )
+    if engine_alive is None:
+        if status_row is None:
+            return "not_deployed"
+        return status_row.state if fresh else "stale"
+    if not engine_alive:
+        if status_row is None:
+            return "not_deployed"
+        if fresh and status_row.state == "starting":
+            return "starting"
+        return "idle"
+    if fresh and status_row.state in ("running", "stopping"):
+        return status_row.state
+    if fresh and status_row.state in ("starting", "idle"):
+        return "starting"
+    return "unresponsive"
+
+
+async def engine_alive(db: AsyncSession) -> bool:
+    """True while some process in this database holds the engine lock (B4).
+
+    The authoritative liveness signal from Phase 2 on: the heartbeat row can be
+    stale while an engine is alive (a long tick, S1-05) and fresh for up to
+    ``HEARTBEAT_STALE_SECONDS`` after one died, but the lock lives exactly as
+    long as the engine's dedicated connection."""
+    return await advisory_lock_held(db, ENGINE_LOCK_KEY)
+
+
+async def panel_state(db: AsyncSession, now: datetime) -> tuple[str, SimulationProcessStatus | None, bool]:
+    """The page's panel state with liveness: ``(state, status_row, alive)``."""
+    row = await read_status(db)
+    alive = await engine_alive(db)
+    return derive_panel_state(row, now, engine_alive=alive), row, alive
+
+
+def is_finalize_stop(cmd) -> bool:
+    """A ``stop`` command enqueued by Finalize run (spec §8.2)."""
+    payload = getattr(cmd, "payload", None) or {}
+    return (
+        getattr(cmd, "command", None) == "stop"
+        and bool(payload.get("finalize"))
+        and bool(payload.get("run_id"))
+    )
