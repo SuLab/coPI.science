@@ -76,8 +76,8 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >   `:1718`;
 > * `/admin/activity/{run_id}/llm-calls` raises — `select(LlmCallLog)` at
 >   `src/routers/admin/runs.py:105`;
-> * on the engine side the LLM-log writer (`simulation.py:8398`) and the consult
->   writer (`:5597`) name the new columns in their INSERTs, so every
+> * on the engine side the LLM-log writer (`src/agent/engine/llm_log.py:116`) and the consult
+>   writer (`src/agent/engine/panel.py:164`) name the new columns in their INSERTs, so every
 >   `llm_call_logs` flush and every `specialist_consults` row fails — the flush
 >   path will say LOST with a row count, which is the loud half; the consult
 >   write is best-effort and is the silent half.
@@ -151,7 +151,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > database `select(SpecialistConsult)` at `src/services/assessment_detail.py`
 > — read by both assessment detail pages, admin's and manager's — raises
 > `UndefinedColumn`, and on the engine side `_record_specialist_consult`'s
-> INSERT (`src/agent/simulation.py:5783`) names all four, so every
+> INSERT (`src/agent/engine/panel.py:164`) names all four, so every
 > `specialist_consults` write fails too. (The discussions panel cards at
 > `src/services/thread_panel.py` select an explicit column list that named
 > none of the four when this box was written; it now names `read_state`, so that
@@ -397,7 +397,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >     $DC up -d agent                                 # supervisor returns IDLE
 >
 > **The agent rebuild is REQUIRED, not optional**, for two independent reasons.
-> First, `0045`'s producers live in the engine (`src/agent/simulation.py`, which
+> First, `0045`'s producers live in the engine (`src/agent/engine/llm_log.py`, which
 > stamps the reply's own row, and `src/agent/tools.py`, which stamps a
 > specialist consult's) and `src/` is BAKED into the
 > agent image — an app-only deploy migrates the two columns and then writes
@@ -646,11 +646,11 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >
 > **The agent rebuild in that list changed the agent image's contents but
 > changed no agent behaviour — and the distinction is the whole point.** The
-> `src/` edits are six files: `src/routers/{admin,manager,reviews}.py` and
+> `src/` edits are six files: `src/routers/admin/` (then a single admin.py), `src/routers/manager.py`, `src/routers/reviews.py` and
 > `src/services/{directory,assessment_detail,prose_citations}.py`. Five of
 > those the engine never imports. The sixth does matter:
 > **`src/services/assessment_detail.py` IS on the engine's import graph** —
-> `src/agent/simulation.py` pulls `KEY_POINT_GROUPS`, `normalize_bullets` and
+> `src/agent/engine/verdicts.py` pulls `KEY_POINT_ACCEPTED_KEYS`, `normalize_bullets` and
 > `normalize_key_points` from it, which is the sidecar parser. What this
 > change added to that module is one new function, `has_review_filter()`,
 > called only from `src/services/directory.py`; nothing the engine reaches

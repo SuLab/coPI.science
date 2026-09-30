@@ -111,7 +111,7 @@ and should stay there. Pacing and runaway protection are now handled by the
 sliding-window rate limiter: `llm_calls_per_load_per_window` x the agent's live
 conversational load for a `pi_lab`, and the flat `hub_llm_calls_per_window`
 brake for the `scout_hub`, which sits on an unpaced lane
-(`SimulationEngine._allowance_for`). A hub bot in a star topology will hit any
+(`SimulationEngine._allowance_for`, `src/agent/engine/scheduler.py:108`). A hub bot in a star topology will hit any
 uniform cumulative cap long before any spoke does. See
 `docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
 
@@ -179,7 +179,7 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
 > stored `thread_reply` rows are 2+ calls. `_on_llm_call` now books the
 > unbooked `kind == "round"` entries live, and the restart rebuild moved with it
 > (`COALESCE(jsonb_array_length(call_stats), 1)`, steps 4 and 4b of
-> `_rebuild_agent_state`, `simulation.py:8192`) — otherwise every restart would
+> `_rebuild_agent_state`, `src/agent/engine/rebuild.py:172`) — otherwise every restart would
 > silently loosen the throttle by the calls-to-turns ratio. The COALESCE is
 > load-bearing, not tidiness: 4,650 of 5,771 stored rows have `call_stats IS
 > NULL` (the column arrived in `0032`) and NULL propagates through SUM.
@@ -231,7 +231,7 @@ DC="docker compose -f docker-compose.prod.yml"
 #    llm.py's own, `_API_EXECUTOR_MAX_WORKERS`) rather than serially.
 #
 #    180 -> 420 for the 2026-08-21 thread_reply max_tokens raise (4000 ->
-#    16000, src/agent/simulation.py): a single 16000-token final call can run
+#    16000, src/agent/engine/reply_lane.py): a single 16000-token final call can run
 #    ~4-5 minutes at Opus output rates, and it is the round `should_continue`
 #    already lets finish — so it cannot be interrupted, only awaited out.
 #    Total turn time is not much worse (this one call replaces what used to be
@@ -429,7 +429,7 @@ never re-derives this from anything except the presence of NULLs. Both the
 page's engine-status badge and its Start/Stop buttons are only as honest as
 the heartbeat: the running engine upserts the single
 `simulation_process_status` row roughly every 30s
-(`CONTROL_POLL_INTERVAL`, `src/agent/simulation.py`), and `derive_panel_state`
+(`CONTROL_POLL_INTERVAL`, `src/agent/engine/constants.py:112`), and `derive_panel_state`
 treats it as `stale` once `updated_at` is more than
 `HEARTBEAT_STALE_SECONDS` (120s) old — a stale row disables the Stop button
 (nothing may be listening) and greys the per-agent live columns to "—"

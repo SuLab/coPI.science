@@ -150,7 +150,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
-(`_sidecar_refusal`, `src/agent/simulation.py:5049`): emitting one IS the hub
+(`_sidecar_refusal`, `src/agent/engine/verdicts.py:1083`): emitting one IS the hub
 saying "this is my verdict", so `_capture_hub_assessment` stores it whether or
 not the reply ends the interview. The only refusal left is a re-capture —
 `duplicate_thread_verdict`, for a turn already stored, for anything after a
@@ -276,7 +276,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` §1;
   `tests/unit/test_claude_md_disclosure_sync.py` is now the drift alarm.)
   As of the 2026-08-21 manager-PI-controls cycle
-  (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), a HELD
+  (`SimulationEngine._post_assessment_summary`, defined in `src/agent/engine/headlines.py:96`), a HELD
   verdict — pass or fail alike — does additionally trigger one genuinely top-level post,
   written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
   headline line (PI/lab name, `company_or_project`, `recommendation`,
@@ -301,7 +301,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   either cut with a `" …"` suffix, and returns a short pitch byte-identically
   unchanged.
   **As of scout_hub 1.9.0 (2026-09-28) the pitch itself is bounded at 250 words**
-  (`_PITCH_WORD_LIMIT` in `src/agent/simulation.py`, a WARNING only — an over-long
+  (`_PITCH_WORD_LIMIT` in `src/agent/engine/sidecar.py:239`, a WARNING only — an over-long
   pitch still stores), replacing the old four-to-six-sentence, 900-character bound.
   The published excerpt is unchanged: still `PITCH_DISPLAY_CHARS` = 600 characters,
   still clipped at a sentence boundary, so a longer pitch publishes no more prose
@@ -319,7 +319,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   simulation, only human staff who join the channel directly. The post fires synchronously
   right after `_persist_assessment` returns HELD inside `_capture_hub_assessment` — but
   only for a verdict that is **TERMINAL and not already announced** for that interview
-  (`announce = terminal and not already_announced`, `simulation.py:3605`). That
+  (`announce = terminal and not already_announced`, `src/agent/engine/verdicts.py:239`). That
   condition is not the same as "held", and the difference arrived with provisional
   storage: since a non-terminal sidecar is now STORED rather than refused, one interview
   can hold several verdicts in turn, and a headline is a public Slack post that cannot be
@@ -366,7 +366,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   `opportunity_assessments` and neither is derived from the other.
   A fourth write-time fact joined them in `0036`: **`panel_owed`**, the specialist
   floor's own answer to "was a panel owed here", computed once by `panel_is_owed` in
-  `_persist_assessment` (`simulation.py:4505`) and **replayed** by the read path rather
+  `_persist_assessment` (`src/agent/engine/verdicts.py:430`) and **replayed** by the read path rather
   than recomputed. That is the point of the column. `assessment_detail.panel_state`
   used to ask `panel_is_owed(recommendation, band)` at RENDER time, which answers a
   different question — "would a panel be owed under TODAY's rules" — so every widening

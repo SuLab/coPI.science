@@ -212,7 +212,7 @@ async def _load_assignee(db: AsyncSession, assignee_user_id: uuid.UUID) -> User:
     """Load and validate a would-be assignee. 400, never a bare lookup
     failure: an unknown id, a PI, or a non-'allowed' account are all request
     errors, not server errors. Mirrors the last-admin guard's allowed-only
-    counting rationale (``admin.py:339-342``): a denied/pending account is
+    counting rationale (``admin_set_user_role`` in ``routers/admin/users.py``): a denied/pending account is
     not actually reachable to do the review, regardless of its role.
     """
     assignee = (

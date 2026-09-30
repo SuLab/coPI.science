@@ -9,7 +9,7 @@ stopping, restarting).
   `$DC --profile agent build agent` before it runs. Tell the user when a change
   affects the running agent process.
 - Engine methods live in `src/agent/engine/<unit>.py` (spec §7.1 of
-  `docs/specs/2026-09-29-audit-remediation-design.md`); `SimulationEngine` in
+  the 2026-09-29 audit-remediation spec, kept uncommitted); `SimulationEngine` in
   `src/agent/simulation.py` is the orchestrator and forwards `engine.<name>` to the
   owning unit. Units log as `src.agent.simulation`, and tests patch
   `src.agent.engine.deps.*` / `src.agent.engine.constants.*`. Many tests read engine
