@@ -8,7 +8,8 @@ from typing import Any
 
 from src.agent.dois import extract_dois as _extract_dois
 from src.agent.prompt_safety import delimit
-from src.agent.roles import load_role
+from src.agent.prompt_snapshot import active as active_snapshot
+from src.agent.prompt_snapshot import role_spec
 from src.agent.specialists import (
     DEFAULTED_TALLY_LABEL,
     SPECIALIST_DOMAINS,
@@ -87,7 +88,7 @@ def _require_arg(tool_input: dict[str, Any], name: str, tool_name: str) -> str:
 
 def tools_for_role(role: str) -> list[dict[str, Any]]:
     """``TOOL_DEFINITIONS`` filtered down to what ``role`` is allowed to call."""
-    allowed = load_role(role).tools
+    allowed = role_spec(role).tools
     return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
 
 
@@ -122,8 +123,8 @@ async def execute_tool(
     tool_input: dict[str, Any],
     agent_id: str,
     thread_state: Any | None = None,
-    role: str = "pi_lab",
     *,
+    role: str,
     on_consult: Callable[[str, str], None] | None = None,
     on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
@@ -157,7 +158,7 @@ async def execute_tool(
     you pull in. Only recognizes DOI form: a bare PMID has no DOI substring to
     match, so it always counts against the cap (documented limit, design §10).
     """
-    if tool_name not in load_role(role).tools:
+    if tool_name not in role_spec(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
         return f"Tool '{tool_name}' is not available to this agent."
     try:
@@ -503,14 +504,19 @@ async def _execute_consult_specialist(
         )
 
     path = persona_path(domain)
-    if not path.is_file():
+    # The persona as loaded at engine start when a snapshot is installed (spec
+    # §8.6); otherwise today's disk read.
+    snapshot = active_snapshot()
+    known, persona = snapshot.persona(domain) if snapshot is not None else (False, None)
+    if not known:
+        persona = path.read_text(encoding="utf-8") if path.is_file() else None
+    if persona is None:
         logger.error("[specialists] persona file missing for %s: %s", domain, path)
         return (
             f"The {domain} specialist is unavailable (persona file missing). "
             "Proceed without this opinion; it will not count as consulted."
         )
 
-    persona = path.read_text(encoding="utf-8")
     # The specialists were never inside the mechanism that keeps the hub's
     # prompt and the document in step (render_rubric_markdown -> {rubric},
     # src/agent/agent.py). str.replace, NOT str.format: persona files contain

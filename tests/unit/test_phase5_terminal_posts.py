@@ -138,9 +138,9 @@ def test_scout_hub_gate_is_the_first_check_in_phase5_new_post():
     ``get_settings()`` — i.e. before any other work — not merely somewhere in
     the function."""
     src = inspect.getsource(PostLane._phase5_new_post)
-    gate_pos = src.find('agent.role == "scout_hub"')
+    gate_pos = src.find("capabilities_for(agent.role)")
     settings_pos = src.find("get_settings()")
-    assert gate_pos != -1, "no scout_hub role check found in _phase5_new_post"
+    assert gate_pos != -1, "no role-capability check found in _phase5_new_post"
     assert settings_pos != -1
     assert gate_pos < settings_pos, (
         "the scout_hub gate must run before get_settings() — i.e. before any "

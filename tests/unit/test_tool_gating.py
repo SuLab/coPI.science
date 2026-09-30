@@ -13,16 +13,16 @@ def test_pi_lab_tool_list_excludes_hub_only_tools():
 async def test_executor_refuses_a_tool_not_in_the_role():
     # retrieve_abstract is a pi_lab tool; ask a hypothetical role that lacks it.
     # Use a role dir that does not exist -> DEFAULT_TOOLS (has retrieve_abstract),
-    # so instead assert refusal via a role we can pin: monkeypatch load_role.
+    # so instead assert refusal via a role we can pin: monkeypatch role_spec.
     from src.agent import tools as tools_mod
     from src.agent.roles import RoleSpec
 
-    orig = tools_mod.load_role
-    tools_mod.load_role = lambda name: RoleSpec(name=name, label=name, tools=frozenset({"retrieve_profile"}))
+    orig = tools_mod.role_spec
+    tools_mod.role_spec = lambda name: RoleSpec(name=name, label=name, tools=frozenset({"retrieve_profile"}))
     try:
         out = await execute_tool("retrieve_abstract", {"pmid_or_doi": "12345678"}, "su", None, role="locked")
     finally:
-        tools_mod.load_role = orig
+        tools_mod.role_spec = orig
     assert "not available" in out.lower()
 
 

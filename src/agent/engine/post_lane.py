@@ -16,6 +16,7 @@ from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _strip_assessment_sidecar
 from src.agent.post_types import PostTypeSpec, available_for, eligible_targets, render_menu
+from src.agent.role_capabilities import capabilities_for
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -293,7 +294,8 @@ class PostLane:
         # plain `agent.role` attribute (NOT `self._roles_by_agent()` — see
         # INV-E structural note 4, a separate, separately-recomputed
         # consumer of role knowledge).
-        if agent.role == "scout_hub":
+        caps = capabilities_for(agent.role)
+        if caps is not None and caps.auto_activates_on_lab_posts:
             self._auto_activate_lab_posts(agent, since=cursor)
 
     def _auto_activate_lab_posts(self, agent: Agent, since: float) -> int:
@@ -364,7 +366,8 @@ class PostLane:
         an empty menu, so the invariant holds even if role.toml were ever
         misconfigured back to declaring something.
         """
-        if agent.role == "scout_hub":
+        caps = capabilities_for(agent.role)
+        if caps is None or not caps.posts_new_threads:
             return
 
         # Serialises this agent's Phase-5 turn against the reply lane's

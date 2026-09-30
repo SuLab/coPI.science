@@ -4,9 +4,10 @@ import logging
 import time
 from pathlib import Path
 
+from src.agent import prompt_snapshot
 from src.agent.dois import extract_dois as _extract_dois
 from src.agent.post_types import render_menu
-from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
+from src.agent.roles import DEFAULT_ROLE, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
@@ -270,7 +271,15 @@ class Agent:
         through to the global ``prompts/{filename}`` — that fallthrough *is*
         what keeps existing agents byte-identical after this method's
         introduction.
+
+        Inside the engine the text comes from the start-time snapshot (spec
+        §8.6); a missing file still falls back to ``default``.
         """
+        snapshot = prompt_snapshot.active()
+        if snapshot is not None:
+            known, text = snapshot.prompt_text(self.role, filename)
+            if known:
+                return text if text is not None else default
         return self._load_file(resolve_prompt_path(self.role, filename), default)
 
     def _render_identity(self) -> str:
@@ -540,7 +549,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             # "one of: ." — in a live prompt, and in test_phase5_prompt_gm's
             # committed snapshot.
             post_type_menu = render_menu(
-                load_role(self.role).post_types, gate=None, roles_by_agent={},
+                prompt_snapshot.role_spec(self.role).post_types, gate=None, roles_by_agent={},
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)

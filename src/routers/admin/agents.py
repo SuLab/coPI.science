@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.role_capabilities import requires_linked_user, star_role
 from src.agent.roles import available_roles
 from src.database import get_db
 from src.dependencies import get_admin_user, get_staff_user
@@ -131,7 +132,7 @@ async def admin_agent_detail(
     # Star-spoke state for the evidence panel: "missing" means a run started
     # with this agent active would fail _validate_star_topology at startup.
     spoke_state = None
-    if agent.role == "pi_lab" and agent.status != "suspended":
+    if star_role(agent.role) == "spoke" and agent.status != "suspended":
         from src.services.star_topology import ensure_star_spokes
 
         try:
@@ -168,6 +169,7 @@ async def admin_agent_detail(
             slack_ok=request.query_params.get("slack_ok"),
             role_error=request.query_params.get("role_error"),
             spoke_state=spoke_state,
+            requires_linked_user=requires_linked_user(agent.role),
             spoke_ok=request.query_params.get("spoke_ok"),
             spoke_error=request.query_params.get("spoke_error"),
         ),
@@ -197,7 +199,7 @@ async def admin_ensure_agent_spoke(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.role != "pi_lab":
+    if star_role(agent.role) != "spoke":
         return RedirectResponse(
             url=f"/admin/agents/{agent_id}?spoke_error="
             + quote("Only pi_lab agents have star spokes."),

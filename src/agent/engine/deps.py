@@ -10,7 +10,9 @@ module. Nothing else belongs here.
 import time
 from datetime import datetime
 
-from src.agent.roles import load_role
+# The engine's role reads go through the start-time snapshot (spec §8.6); the name
+# stays `load_role` so `deps.load_role` patches keep working.
+from src.agent.prompt_snapshot import role_spec as load_role
 from src.config import get_settings
 from src.services.build_info import get_build_info
 from src.services.llm import generate_agent_response, generate_with_tools

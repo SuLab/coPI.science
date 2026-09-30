@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.role_capabilities import requires_linked_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 async def activation_blockers(db: AsyncSession, agent: AgentRegistry) -> list[str]:
     """Reasons this agent must not be flipped to ``active``; [] when clear."""
-    if agent.role != "pi_lab":
+    if not requires_linked_user(agent.role):
         return []
 
     if agent.user_id is None:

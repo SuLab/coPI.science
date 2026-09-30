@@ -7,6 +7,7 @@ import logging
 from src.agent.engine import constants
 from src.agent.engine.constants import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.engine.context import EngineContext, via
+from src.agent.engine.helpers import hub_agent
 from src.agent.slack_client import SlackListingIncomplete
 from src.models import AgentChannel
 from src.models.agent_activity import VISIBILITY_PUBLIC
@@ -122,9 +123,7 @@ class ChannelDirectory:
         and join only the hub to it — never added to SEEDED_CHANNELS, so it
         never enters Phase-1 discovery or the poller's scope (design D11).
         """
-        hub = next(
-            (a for a in self.agents.values() if a.role == "scout_hub"), None
-        )
+        hub = hub_agent(self.agents)
         if hub is None:
             return
         client = self.slack_clients.get(hub.agent_id)
