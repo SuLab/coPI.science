@@ -29,7 +29,9 @@ stopping, restarting).
 - One interview yields one assessment row: the last verdict-bearing reply wins
   (`_capture_hub_assessment`, `_retire_superseded_verdict`). A refusal is recorded in
   `assessment_drops` with its `raw_verdict`, never just logged. A headline cannot be
-  retracted, so it posts at most once per interview (`summary_posted_at`): for a
+  retracted, so it posts at most once per interview (`summary_posted_at`), and every poster (the engine
+  and `scripts/backfill_assessment_headlines.py`) claims the interview first
+  (`summary_claimed_at`, `src/services/headline_claims.py`): for a
   terminal verdict when it is stored, or through `_announce_owed_headline` when the
   interview ends another way (timeout, abandoned thread, shutdown). A provisional
   verdict is never announced mid-interview.
@@ -42,8 +44,8 @@ stopping, restarting).
 - Rate limits count real API calls, including tool rounds. Do not raise
   `llm_calls_per_load_per_window` or `hub_llm_calls_per_window` on your own
   initiative.
-- Never reuse or change `RUN_START_MARKER_PREFIX` (`run_marker.py`): both Slack-ingest
-  paths drop messages that carry it.
+- Never reuse or change `RUN_START_MARKER_PREFIX` (`run_marker.py`): the live Slack
+  poller drops messages that carry it.
 - A test that drives a concluding reply must seed the thread's history in the
   `MessageLog`: `_reply_to_thread` overwrites `ThreadState.message_count` from
   `get_thread_history`, so `message_count=11` over an empty log is an ordinal-1 turn.

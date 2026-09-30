@@ -348,6 +348,17 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
 > ordinal (RCA §2.2), which this path makes non-destructive but does not fix.
 > See `docs/audits/2026-08-29-lost-assessment-headlines/README.md`.
 
+> Since 2026-09-29 (audit remediation P0-08) every headline is CLAIMED before it posts:
+> `src/services/headline_claims.py` sets `summary_claimed_at` on every owed row of the
+> interview and refuses when any row of it is already claimed or posted. The engine (at
+> capture, at a close, in the stop sweep) and `scripts/backfill_assessment_headlines.py`
+> both go through it. A definite failure releases the claim; a transport error with no
+> Slack response keeps it (IN DOUBT) and nothing re-posts it. A verdict whose first write
+> was queued is never claimed at capture; its headline waits for the close or the sweep,
+> and a supersession carries the retired row's stamp and claim onto the replacement in the
+> same transaction. Which interviews a stop sweep announces depends on the end reason
+> (`docs/operations/host-and-simulation.md`, "How a run ends").
+
 - **`weighted_score` is computed**, never taken from the model:
   `src/services/blackbird_rubric.py`. `recommendation` (which may be
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`

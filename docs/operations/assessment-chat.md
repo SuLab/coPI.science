@@ -90,3 +90,7 @@ and get short, cited, streamed answers from `claude-opus-5-5`
       -- refusals by category (no content)
       SELECT refusal_category, count(*) FROM assessment_chat_turns
       WHERE status = 'refused' GROUP BY 1;
+
+**Tildes render literally** (2026-09-29, P0-12): the chat's private marked instance
+disables GFM strikethrough like the detail pages do, so "~30%" is not turned into a
+deleted span.

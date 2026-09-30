@@ -129,12 +129,46 @@ built before the two-stage Dockerfile: images no longer carry `.git`, and the
 builder stage fails the build if `.build_info.json` cannot be written
 (rebuild); a pre-feature agent image never announces at all), the hub/PI prompt-set versions
 (`version` keys in the two `prompts/roles/*/role.toml`, which must be bumped
-on any prompt-set edit) and the rubric version. Both Slack-ingest paths drop
+on any prompt-set edit) and the rubric version. The live Slack poller drops
 sentinel-prefixed messages, so markers never enter `agent_messages` — do not
 reuse that prefix for anything else, and do not change it (old markers would
-start re-ingesting on the next resume; see `src/agent/run_marker.py`). What
+start re-ingesting; see `src/agent/run_marker.py`). What
 was announced is recorded under `run_start_announcement` in
 `simulation_runs.config`.
+
+### How a run ends, and what a resume restores (audit remediation, 2026-09-29)
+
+Why a run ended decides what its shutdown sweep announces (`src/agent/end_reasons.py`):
+
+| End | How | Shutdown sweep | Run row |
+|---|---|---|---|
+| Stop, SIGTERM | admin Stop; `docker stop -t 420` | every owed headline, open interviews included, capped at 25 | resumable |
+| Stop — hold open interviews | the second admin button | only interviews with a `thread_decisions` row | `held_at` set |
+| stall, escaped exception, failed start | automatic | as the hold | `held_at` set |
+| natural end | `--max-runtime` reached, `--max-proposals` drained | every owed headline | `finalized_at` set; a resume is refused (`RunFinalized`), start fresh |
+
+The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a natural end.
+
+- **A resume restores from the database only.** The Slack reconcile is gone; the
+  engine's own posts are written to `agent_messages` before they count; the poll cursors
+  are parked past the history already on Slack. Slack-native messages posted while the
+  engine was down are not recovered. On a resume the hub subscribes to its channels and
+  interviews any lab pitch from the last 14 days that has no thread yet. A resume clears
+  `held_at`.
+- **Headline claims.** Every headline (engine or
+  `scripts/backfill_assessment_headlines.py`) claims its interview
+  (`opportunity_assessments.summary_claimed_at`) immediately before posting. A post that
+  raised with no Slack response keeps its claim and is logged IN DOUBT; nothing re-posts
+  it. Check `#assessments-summary`, then run the script with `--list-in-doubt` and, for
+  one that did not post, `--release-in-doubt <id>`.
+- **LOST and HELD lines at shutdown.** `LOST n` names headlines that were never posted
+  (past the 25 cap, no connected hub, Slack off) with the exact repair command; `HELD n`
+  names the open interviews a hold kept back. Release held ones with a resume, or with
+  `--finalize --apply`, which also finalizes the run.
+- **The script refuses to write** while `/admin/simulation` reads running, stopping or
+  starting; `--run-crashed` overrides once you have confirmed the engine process is gone.
+- **Slack-off runs work end to end** (NEW-1): `NullTransport.ajoin_channel` exists, so
+  labs reach Phase 5 in DB-only runs, which the local rehearsal before a deploy needs.
 
 > ⚠️ **As of 2026-08-22 every one of those numbers counts REAL API CALLS, where
 > it used to count turns — and none of them has been re-tuned.**

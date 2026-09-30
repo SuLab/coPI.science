@@ -28,8 +28,8 @@ name-affiliation search, identity-gated, consortium-excluded, year-ranked,
 map still read as fallback — `scripts/migrate_tenure_map.py` migrates the 62
 curated entries). A wrong or missing tenure year is correctable on the manager
 Edit Profile form ("JHU tenure start"). A corpus-stage failure FAILS the job
-(retry ×3 → dead, visible on /admin/jobs and the PI detail page) instead of
-storing a thin ORCID-only profile. **Activation is gated**: `admin_approve_agent`
+(retry ×3, waiting 4 then 16 minutes between attempts → dead, visible on /admin/jobs, the PI detail page and, with a Try Again button, the PI's onboarding page) instead of
+storing a thin ORCID-only profile. A tenure year derived from papers after an ORCID failure or with an incomplete corpus is kept provisionally (app_settings key `jhu_tenure_provisional:{user_id}`), so later profile edits export with the same scoping as the pipeline; the next healthy run replaces or deletes it. Every enqueue goes through `src/services/profile_jobs.py`, so a double click or Add-PI followed by an approval runs one pipeline, not two. **Activation is gated**: `admin_approve_agent`
 refuses to flip a `pi_lab` agent to `active` — through the approve button OR
 the status dropdown — when its profile is missing/ungrounded or its newest
 generation job is dead, unless the logged "activate anyway" override is
@@ -251,6 +251,19 @@ cannot log in, so counting one would just make demotion easier). If no admin can
 New managers are provisioned in two steps: they sign in with ORCID (landing on
 `/access-pending`), an admin approves them at `/admin/access-requests`, then sets their
 role. Between approval and role-setting the account behaves as a PI.
+
+**A pending user's typed address is unverified.** The address typed on `/access-pending`
+goes to `users.contact_email_unverified`, shown as "(unverified)" on
+`/admin/access-requests`, and is never copied to `users.email`. Every `users.email` write
+goes through `src/services/user_email.py::assign_user_email`, which refuses an address
+another account holds in any case (a login whose ORCID address is taken proceeds without
+an email instead of failing), and `tests/unit/test_email_writer_tripwire.py` fails on any
+other writer.
+
+**Profile edit forms refuse a stale save.** The four edit forms carry the
+`profile_version` they were rendered with; a save after a regeneration or another edit
+writes nothing and asks the user to reload. A regeneration keeps a human edit saved while
+it ran.
 
 **Revoking access now ends the session immediately** (`src/dependencies.py:104`,
 fixed 2026-08-22 as E1.2). Sessions are unkeyed signed cookies with a 30-day

@@ -95,6 +95,9 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   edit needs a restart.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
+- A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
+  stopped: the worker holds its transaction across a whole pipeline run and trips the
+  chain's 10 s `lock_timeout`.
 - After any code change that affects the running agent process, tell the user so they
   can decide whether to rebuild and restart.
 
@@ -106,14 +109,23 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   is the emergency CLI path only.
 - Stop gracefully: the admin page's Stop, or `docker stop -t 420 copi-blackbird-agent-1`
   (an emergency CLI run lives in `blackbird-agent-run` instead). Never `docker rm -f`,
-  which skips the shutdown flush. Save logs after the stop.
-- A resume (the CLI default, or the Start form with its default-checked "Fresh run"
-  box cleared) announces, at shutdown, every verdict of that run whose
-  `summary_posted_at` is NULL, and a Slack headline cannot be retracted. Before
-  resuming a run with rows written before migration `0041`, stamp or repair them with
-  `scripts/backfill_assessment_headlines.py` (the `0041` box in
-  `docs/operations/migration-deploy-notes.md`). Start FRESH after a prompt-set or
-  rubric version bump, or one run mixes versions.
+  which skips the shutdown flush. Save logs after the stop. Stop and SIGTERM announce
+  every owed headline, open interviews included (capped at 25); "Stop — hold open
+  interviews" announces only ended interviews and marks the run held. A stall, an escaped
+  exception or a failed start also holds. A natural end (max runtime, a drained
+  `--max-proposals`) announces everything and FINALIZES the run, which can never be
+  resumed. Detail: `docs/operations/host-and-simulation.md`.
+- A resume (the CLI default, or the Start form with its default-checked "Fresh run" box
+  cleared) restores from the database only (nothing is re-read from Slack), clears a held
+  run's hold, and has the hub interview lab pitches the stop left unanswered. It
+  announces, at shutdown, every verdict of that run whose `summary_posted_at` is NULL, and
+  a Slack headline cannot be retracted. Before resuming a run with rows written before
+  migration `0041`, stamp or repair them with `scripts/backfill_assessment_headlines.py`
+  (the `0041` box in `docs/operations/migration-deploy-notes.md`). The script claims every
+  post, refuses to write while an engine is live (`--run-crashed` overrides once the
+  process is gone), and `--finalize`, `--list-in-doubt` and `--release-in-doubt` release
+  held and in-doubt headlines. Start FRESH after a prompt-set or rubric version bump, or
+  one run mixes versions.
 - `--fresh` deletes nothing: the new `simulation_run_id` is the isolation, and rows
   accumulate across runs. `--budget` is deprecated; leave it at 0.
 - `llm_calls_per_load_per_window` and `hub_llm_calls_per_window` count real API calls
