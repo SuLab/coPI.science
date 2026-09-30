@@ -334,7 +334,8 @@ def test_owned_state_matches_each_unit_init():
             and n.value.id == "self" and isinstance(n.ctx, ast.Store)
         }
         deps = {a for a in stored if a == "ctx" or a.lstrip("_") in ALLOWED or a in (
-            "_run_state", "_ledger", "_on_thread_gone", "_strip_disallowed_tags", "_rejection_counts")}
+            "_run_state", "_ledger", "_on_thread_gone", "_strip_disallowed_tags", "_rejection_counts",
+            "_heartbeat")}
         assert stored - deps == set(cls.OWNED_STATE), (holder, stored - deps, cls.OWNED_STATE)
 
 

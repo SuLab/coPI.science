@@ -22,13 +22,12 @@ from src.services import display_format as fmt
 from src.services.headline_claims import held_headline_counts
 from src.services.runs import latest_run_id
 from src.services.simulation_control import (
-    derive_panel_state,
     engine_alive,
     enqueue_command,
     is_finalize_stop,
-    read_status,
     record_audit,
 )
+from src.services.simulation_control import panel_state as read_panel_state
 from src.services.simulation_view import live_tab_context
 
 # ---------------------------------------------------------------------------
@@ -101,8 +100,7 @@ async def _simulation_context(
     redirecting — see that handler's docstring for why).
     """
     now = datetime.now(UTC)
-    status_row = await read_status(db)
-    panel_state = derive_panel_state(status_row, now)
+    panel_state, status_row, engine_is_alive = await read_panel_state(db, now)
 
     pending_result = await db.execute(
         select(SimulationCommand)
@@ -160,6 +158,7 @@ async def _simulation_context(
         current_user,
         active_admin="simulation",
         panel_state=panel_state,
+        engine_is_alive=engine_is_alive,
         status_row=status_row,
         latest_run=latest_run,
         held_counts=held_counts,
@@ -213,10 +212,9 @@ async def admin_simulation_start(
 ):
     """Enqueue a `start` command for the supervisor to claim.
 
-    Refused (no row written) when `derive_panel_state` already reads
-    `running`/`starting` — a live engine, CLI-launched or panel-launched
-    alike, since the heartbeat is state-source-agnostic — or when a `start`
-    is already pending (the common double-click case, caught here before
+    Refused (no row written) while an engine holds the engine lock
+    (`engine_alive`, spec §8.3) — CLI-launched or panel-launched alike — or
+    while a `start` is already pending (the common double-click case, caught here before
     ever reaching the database). The 0042 partial unique index
     (`uq_simulation_commands_one_pending`) is the second, race-proof layer:
     an `IntegrityError` from `enqueue_command` is caught and rendered as the
@@ -225,9 +223,7 @@ async def admin_simulation_start(
     sharp CLI-only flags (`--all-agents`/`--reset-cursors`) are deliberately
     not exposed here; the page links no substitute.
     """
-    now = datetime.now(UTC)
-    status_row = await read_status(db)
-    panel_state = derive_panel_state(status_row, now)
+    alive = await engine_alive(db)
     pending_start = (
         await db.execute(
             select(SimulationCommand).where(
@@ -236,7 +232,7 @@ async def admin_simulation_start(
             )
         )
     ).scalar_one_or_none()
-    if panel_state in ("running", "starting") or pending_start is not None:
+    if alive or pending_start is not None:
         return RedirectResponse(
             url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
             status_code=302,
@@ -345,18 +341,14 @@ async def admin_simulation_stop(
     for a resume or a finalize. The default Stop's payload stays None and its
     behaviour is unchanged.
 
-    Refused when the panel does not currently read `running` — the same
-    predicate the supervisor itself uses (src/agent/supervisor.py) to decide
-    whether a claimed stop has a live engine to reach; anything else, the
-    supervisor would immediately finish a stop as "nothing running" on its
-    own next poll, so refusing here gives the same answer without writing a
-    row nobody will act on. The IntegrityError catch is the same
+    Allowed whenever an engine holds the lock (`engine_alive`), including a
+    `starting` or unresponsive one (the stop applies at that engine's next
+    control poll, as today); refused otherwise — the same predicate the
+    supervisor uses (src/agent/supervisor.py), which would only finish a stop
+    nobody can act on as "nothing running". The IntegrityError catch is the same
     double-click/race guard as the start route.
     """
-    now = datetime.now(UTC)
-    status_row = await read_status(db)
-    panel_state = derive_panel_state(status_row, now)
-    if panel_state != "running":
+    if not await engine_alive(db):
         return RedirectResponse(
             url=f"/admin/simulation?error={quote('Nothing is running.')}", status_code=302
         )

@@ -111,6 +111,12 @@ ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 #: the heartbeat row). See _poll_control_plane.
 CONTROL_POLL_INTERVAL = 30.0
 
+#: The one interview length the phase guidance is written for (spec §8.4 AG-7):
+#: thread_guidance renders EXPLORE <=4, DECIDE <=11, CONCLUDE above, so any
+#: other max_thread_messages desynchronises the CONCLUDE turn from the close.
+#: Checked at engine startup only, so the web app and worker are unaffected.
+REQUIRED_MAX_THREAD_MESSAGES = 12
+
 # How many consecutive main-loop iterations the proposal target must read
 # "cap reached AND no open interviews" before the run ends. Bridges the brief
 # window between the last pitch and the hub opening its interview thread; a

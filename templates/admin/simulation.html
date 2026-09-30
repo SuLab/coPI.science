@@ -110,6 +110,10 @@
         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Not deployed</span>
         {% elif panel_state == 'stale' %}
         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">STALE</span>
+        {% elif panel_state == 'unresponsive' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Unresponsive</span>
+        {% elif panel_state == 'idle' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Idle</span>
         {% elif panel_state == 'running' %}
         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Running</span>
         {% elif panel_state == 'starting' %}
@@ -128,9 +132,18 @@
     </p>
     {% else %}
     <p class="mt-2 text-base text-gray-700">Last heartbeat: {{ status_row.updated_at | ts }}</p>
-    {% if panel_state == 'stale' %}
+    {% if panel_state in ('stale', 'unresponsive') %}
     <p class="mt-1 text-base text-yellow-700 max-w-[68ch]">
-        The engine has not been heard from in over two minutes — it may not be responding.
+        The engine holds its lock but has not refreshed its heartbeat in over two minutes — it may be stuck in a long tick. Stop still reaches it at its next control poll.
+    </p>
+    {% endif %}
+    {% if engine_is_alive %}
+    <p class="mt-1 text-base font-medium text-gray-900">Run in progress</p>
+    {% endif %}
+    {% if status_row and status_row.detail and status_row.detail.circuit_open %}
+    <p class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-base text-red-800 max-w-[68ch]">
+        LLM calls paused: the engine's circuit breaker opened after repeated model-call
+        failures across interviews. Calls resume automatically after ten minutes.
     </p>
     {% endif %}
     {% if status_row.detail %}
@@ -205,7 +218,7 @@
             </div>
             <button type="submit"
                     class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-base font-medium hover:bg-indigo-700 disabled:opacity-50"
-                    {% if panel_state in ('running', 'starting') or pending_start %}disabled{% endif %}>
+                    {% if engine_is_alive or pending_start %}disabled{% endif %}>
                 Start
             </button>
         </form>
@@ -214,8 +227,8 @@
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
         <p class="text-base text-gray-700 max-w-[68ch] mb-3">
-            Sends a graceful stop to the live engine. Refused unless the panel currently
-            reads Running. <strong>Stop</strong> announces every owed headline, open
+            Sends a graceful stop to the live engine. Refused unless an engine is
+            running (including a starting or unresponsive one). <strong>Stop</strong> announces every owed headline, open
             interviews included, as it always has. <strong>Stop — hold open
             interviews</strong> announces only interviews that have ended; the others
             wait for a resume or a finalize.
@@ -224,7 +237,7 @@
             <form action="/admin/simulation/stop" method="post">
                 <button type="submit"
                         class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
-                        {% if panel_state != 'running' %}disabled{% endif %}>
+                        {% if not engine_is_alive %}disabled{% endif %}>
                     Stop
                 </button>
             </form>
@@ -232,7 +245,7 @@
                 <input type="hidden" name="hold_open" value="1">
                 <button type="submit"
                         class="inline-flex items-center px-4 py-2 rounded-md border border-red-600 text-red-700 text-base font-medium hover:bg-red-50 disabled:opacity-50"
-                        {% if panel_state != 'running' %}disabled{% endif %}>
+                        {% if not engine_is_alive %}disabled{% endif %}>
                     Stop — hold open interviews
                 </button>
             </form>

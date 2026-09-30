@@ -1,10 +1,10 @@
 """T7 — /admin/simulation: the control-plane page (routes + refusal semantics).
 
 Covers the brief's test list (a)-(f):
-  (a) not-deployed / stale rendering from derive_panel_state,
+  (a) not-deployed / unresponsive rendering from panel_state,
   (b) start enqueues a pending command + audit row, a second POST while one
       is pending is refused (no second row written),
-  (c) stop is accepted only while the heartbeat reads "running",
+  (c) stop is accepted only while an engine holds the engine lock,
   (d) the announce-channels KV round-trips (write, prefill, explicit disable,
       clear),
   (e) the announce-template editor validates before writing, and reset
@@ -65,7 +65,22 @@ async def test_get_renders_not_deployed_with_no_status_row(client, db_session):
     assert "text-indigo-600 font-semibold" in resp.text
 
 
-async def test_get_renders_stale_when_heartbeat_is_ten_minutes_old(client, db_session):
+def _engine_alive(monkeypatch, value=True):
+    """Stand in for the engine-lock liveness probe (spec §8.3)."""
+    import src.routers.admin.simulation as sim_routes
+    import src.services.simulation_control as control
+
+    async def _alive(db):
+        return value
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _alive)
+    monkeypatch.setattr(control, "engine_alive", _alive)
+
+
+async def test_get_renders_unresponsive_when_the_heartbeat_is_ten_minutes_old(
+    client, db_session, monkeypatch,
+):
+    _engine_alive(monkeypatch)
     admin = await _admin(db_session, "sim-admin-a2@example.org")
     old = datetime.now(UTC) - timedelta(minutes=10)
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=old))
@@ -74,7 +89,7 @@ async def test_get_renders_stale_when_heartbeat_is_ten_minutes_old(client, db_se
     resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
-    assert "STALE" in resp.text
+    assert "Unresponsive" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +134,8 @@ async def test_post_start_creates_pending_command_with_payload_and_audit_row(
 # ---------------------------------------------------------------------------
 
 
-async def test_post_stop_with_running_state_creates_command(client, db_session):
+async def test_post_stop_with_running_state_creates_command(client, db_session, monkeypatch):
+    _engine_alive(monkeypatch)
     admin = await _admin(db_session, "sim-admin-c1@example.org")
     db_session.add(SimulationProcessStatus(id=1, state="running"))
     await db_session.commit()
@@ -795,8 +811,9 @@ async def test_live_tab_latency_and_progress_render_with_real_data(client, db_se
 
 
 async def test_hold_stop_enqueues_a_hold_open_payload_and_the_default_stays_none(
-    client, db_session,
+    client, db_session, monkeypatch,
 ):
+    _engine_alive(monkeypatch)
     admin = await _admin(db_session, "sim-admin-c3@example.org")
     db_session.add(SimulationProcessStatus(id=1, state="running"))
     await db_session.commit()

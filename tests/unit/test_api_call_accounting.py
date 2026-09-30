@@ -200,7 +200,7 @@ def test_the_banner_is_actually_logged_at_startup():
 
     from src.agent import main as agent_main
 
-    src = textwrap.dedent(inspect.getsource(agent_main._run_simulation))
+    src = textwrap.dedent(inspect.getsource(agent_main._run_simulation_locked))
     called = {
         node.func.id for node in ast.walk(ast.parse(src))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

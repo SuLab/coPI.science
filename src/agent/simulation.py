@@ -18,7 +18,7 @@ from src.agent.end_reasons import HOLD, TODAY, end_reason_class
 from src.agent.engine import deps
 from src.agent.engine.channel_directory import ChannelDirectory
 from src.agent.engine.context import EngineContext, RunState, _Via
-from src.agent.engine.control import Control
+from src.agent.engine.control import Control, EngineHeartbeat
 from src.agent.engine.headlines import Headlines
 from src.agent.engine.llm_log import LlmLog
 from src.agent.engine.memory import Memory
@@ -183,6 +183,8 @@ class SimulationEngine:
         slack_enabled: bool = True,
         fresh_start: bool = False,
         max_proposals: int = 0,
+        run_state: RunState | None = None,
+        heartbeat: EngineHeartbeat | None = None,
     ):
         self.ctx = EngineContext(
             agents={a.agent_id: a for a in agents},
@@ -192,12 +194,13 @@ class SimulationEngine:
             simulation_run_id=simulation_run_id,
             slack_enabled=slack_enabled,
         )
-        self.run_state = RunState()
+        self.run_state = run_state if run_state is not None else RunState()
+        self.heartbeat = heartbeat
         self.persistence = Persistence(self.ctx)
         self.channel_directory = ChannelDirectory(self.ctx)
         self.ctx.channel_id_resolver = self.channel_directory.channel_id_for
         self.memory = Memory(self.ctx)
-        self.control = Control(self.ctx, run_state=self.run_state)
+        self.control = Control(self.ctx, run_state=self.run_state, heartbeat=heartbeat)
         self.llm_log = LlmLog(self.ctx, persistence=self.persistence)
         self.slack_io = SlackIO(
             self.ctx,
@@ -288,7 +291,10 @@ class SimulationEngine:
     async def start(self) -> None:
         """Run the full simulation."""
         self._start_time = deps.datetime.now(UTC)
-        self._running = True
+        # AG-3: a signal that landed during startup was replayed into RunState
+        # before this engine existed; never clear it here.
+        if not self.run_state.stop_event.is_set():
+            self.run_state.running = True
         settings = deps.get_settings()
 
         logger.info(
@@ -461,6 +467,8 @@ class SimulationEngine:
         ``_terminal_stall_reason``) is reachable from a unit test without
         standing up the whole startup sequence.
         """
+        if self.heartbeat is not None:
+            self.heartbeat.mark_running()
         turn_count = 0
         stalled = False
         consecutive_idle = 0
@@ -812,6 +820,8 @@ class SimulationEngine:
             logger.warning("%s", line)
 
         logger.info("Simulation stopping...")
+        if self.heartbeat is not None:
+            await self.heartbeat.stop()
 
     async def _rehydrate_assessed_threads(self) -> None:
         """Rehydrate the verdict ledger on a resume (``Verdicts.rehydrate``).

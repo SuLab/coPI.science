@@ -17,9 +17,9 @@ Two test shapes are used, deliberately:
   test_mark_pending_stale_flips_pending_only_and_is_command_scoped). Seeding
   a command from a concurrently-running task can land on either side of that
   one iteration's DB read with no way to force the ordering, so (d)/(e)/(f) use a
-  `session_factory` wrapper that runs a hook synchronously immediately before
-  the loop's first post-boot session opens — after boot's own session has
-  closed, before the one counted iteration's session opens. No sleeping, no
+  `session_factory` wrapper that runs a hook after boot's stale and before the
+  first post-boot decision (boot also opens a finalize-only settle session,
+  which releases a non-finalize stop unclaimed). No sleeping, no
   polling, no flakiness.
 - (g) reuses the same `_hook_before_nth_session` injection as (d)/(e) — a
   fresh foreign `running` heartbeat has to be seeded AFTER boot's own
@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.supervisor import run_supervisor
 from src.models import SimulationCommand
+from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
 from src.services.simulation_control import read_status, upsert_status
 
 
@@ -291,15 +292,17 @@ async def test_pending_stop_with_nothing_running_finishes_done(engine):
 
 
 @pytest.mark.asyncio
-async def test_pending_stop_beside_a_fresh_running_heartbeat_is_left_pending(engine):
-    """(e) A stop alongside a FRESH 'running' status row (a live CLI-run
+async def test_pending_stop_beside_a_live_engine_is_left_pending(engine, pg_url):
+    """(e) A stop alongside an engine holding the engine lock (a live CLI-run
     engine) is left pending for that engine's own control poll to claim."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     await _clear_status(factory)
+    holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
 
     seeded = {"cmd_id": None}
 
     async def seed_live_engine_and_stop():
+        assert await holder.acquire()
         async with factory() as db:
             await upsert_status(db, state="running")  # fresh updated_at
             cmd = SimulationCommand(command="stop", payload=None)
@@ -313,12 +316,14 @@ async def test_pending_stop_beside_a_fresh_running_heartbeat_is_left_pending(eng
         raise AssertionError("run_fn must not be called here")
 
     try:
-        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1)
+        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1,
+                             database_url=pg_url)
 
         async with factory() as db:
             row = await db.get(SimulationCommand, seeded["cmd_id"])
             assert row.status == "pending"
     finally:
+        await holder.release()
         await _cleanup(factory, command_ids=[seeded["cmd_id"]])
 
 
@@ -362,7 +367,7 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
 
     real_mark_pending_stale = supervisor_module.mark_pending_stale
 
-    async def spying_mark_pending_stale(db, *, reason, command=None):
+    async def spying_mark_pending_stale(db, *, reason, command=None, **kwargs):
         if command == "start" and first_holder["id"] is not None:
             second = SimulationCommand(
                 command="start", payload={"fresh": False, "max_runtime": 5}
@@ -370,7 +375,7 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
             db.add(second)
             await db.commit()
             second_holder["id"] = second.id
-        return await real_mark_pending_stale(db, reason=reason, command=command)
+        return await real_mark_pending_stale(db, reason=reason, command=command, **kwargs)
 
     monkeypatch.setattr(supervisor_module, "mark_pending_stale", spying_mark_pending_stale)
 
@@ -390,7 +395,7 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
 
 
 @pytest.mark.asyncio
-async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engine):
+async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engine, pg_url):
     """(g) The idle-branch heartbeat upsert (audit V3) must not overwrite a
     LIVE foreign engine's heartbeat (a CLI-launched `python -m
     src.agent.main`, audit V4's `running` tell). Before this fix the idle
@@ -408,11 +413,14 @@ async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engi
     seeding any earlier would just have boot's own unconditional idle upsert
     clobber it before the loop under test ever ran — then drives two full
     idle iterations (`max_loops=2`) with no command ever pending, and
-    asserts the row still reads `running` throughout."""
+    asserts the row still reads `running` throughout. The foreign engine is
+    one holding the engine lock."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     await _clear_status(factory)
+    holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
 
     async def seed_fresh_running_heartbeat():
+        assert await holder.acquire()
         async with factory() as db:
             await upsert_status(db, state="running")  # fresh updated_at
 
@@ -423,11 +431,13 @@ async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engi
 
     try:
         await run_supervisor(
-            session_factory=hooked_factory, run_fn=stub, max_loops=2, poll_seconds=0.01
+            session_factory=hooked_factory, run_fn=stub, max_loops=2, poll_seconds=0.01,
+            database_url=pg_url,
         )
 
         async with factory() as db:
             status = await read_status(db)
             assert status.state == "running"
     finally:
+        await holder.release()
         await _cleanup(factory)

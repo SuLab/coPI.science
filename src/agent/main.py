@@ -10,15 +10,20 @@ Usage:
 import asyncio
 import logging
 import signal
+import sys
 import uuid
 from datetime import datetime, timezone
 
 import typer
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.agent.agent import Agent
+from src.agent.engine.context import RunState
+from src.agent.engine.control import EngineAlreadyRunning, EngineHeartbeat, validate_engine_settings
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
+from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.build_info import API_CALL_UNITS_NOTE
 
@@ -185,6 +190,40 @@ def _reopen_run_for_resume(run, max_proposals: int) -> int:
     return max_proposals
 
 
+class _EarlySignal:
+    """A SIGTERM/SIGINT that lands before RunState exists is remembered and
+    replayed into it (spec §8.4 AG-3)."""
+
+    def __init__(self) -> None:
+        self._run_state = None
+        self._fired = False
+
+    def fire(self) -> None:
+        # Only flip the stop flag here. The flush must not run in a
+        # fire-and-forget task: the main loop can return first, and asyncio.run
+        # then cancels the still-pending task mid-await, losing the in-flight
+        # turn's messages. It is awaited in _run_simulation_locked's
+        # finally-block instead (R2).
+        logger.info("Received shutdown signal")
+        if self._run_state is None:
+            self._fired = True
+        else:
+            self._run_state.request_stop("signal")
+
+    def bind(self, run_state) -> None:
+        self._run_state = run_state
+        if self._fired:
+            run_state.request_stop("signal")
+
+
+def _supervisor_shutdown_requested() -> bool:
+    """True when this process is the supervisor and it was already told to shut
+    down before the run began (AG-3). Read through sys.modules so the CLI path
+    never imports the supervisor."""
+    supervisor = sys.modules.get("src.agent.supervisor")
+    return bool(getattr(supervisor, "_shutdown", False))
+
+
 async def _run_simulation(
     max_runtime: int,
     budget: int,
@@ -194,6 +233,79 @@ async def _run_simulation(
     reset_cursors: bool = False,
     all_agents: bool = False,
     max_proposals: int = 0,
+) -> None:
+    """Run one simulation under the engine lock (spec §8.3, B4).
+
+    Order (SA4-17): engine-start setting checks (synchronous), then the signal
+    handlers (synchronous, AG-3), then — as the FIRST await — the engine lock on
+    a dedicated AUTOCOMMIT connection, before the roster read, archiving working
+    memory or opening a run row (SA3-08). A second engine raises
+    ``EngineAlreadyRunning`` with nothing written. Then ``RunState`` and the
+    heartbeat task (state ``starting``) are created and injected into the
+    engine; the heartbeat learns the run id once the run row exists.
+
+    ``--no-db`` and ``--mock`` runs take no lock and start no heartbeat: they
+    must not need Postgres, and a mock run must not look like a live engine.
+    """
+    settings = get_settings()
+    validate_engine_settings(settings)
+    early = _EarlySignal()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, early.fire)
+    locking = not (no_db or mock)
+    lock = None
+    if locking:
+        lock = SessionAdvisoryLock(settings.database_url, ENGINE_LOCK_KEY)
+        if not await lock.acquire():
+            await lock.release()
+            raise EngineAlreadyRunning(
+                "another simulation engine holds the engine lock — nothing was started"
+            )
+    run_state = RunState()
+    early.bind(run_state)
+    if _supervisor_shutdown_requested():
+        run_state.request_stop("signal")
+    heartbeat = None
+    hb_engine = None
+    if locking:
+        hb_engine = create_async_engine(
+            settings.database_url, pool_size=1, max_overflow=0, pool_pre_ping=True,
+        )
+        heartbeat = EngineHeartbeat(
+            lock=lock, run_state=run_state,
+            session_factory=async_sessionmaker(hb_engine, expire_on_commit=False),
+        )
+        heartbeat.tick_detail = {
+            "fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals,
+        }
+        heartbeat.start()
+    try:
+        await _run_simulation_locked(
+            max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals,
+            run_state=run_state, heartbeat=heartbeat,
+        )
+    finally:
+        if heartbeat is not None:
+            await heartbeat.stop()
+        if hb_engine is not None:
+            await hb_engine.dispose()
+        if lock is not None:
+            await lock.release()
+
+
+async def _run_simulation_locked(
+    max_runtime: int,
+    budget: int,
+    mock: bool,
+    no_db: bool,
+    fresh: bool,
+    reset_cursors: bool = False,
+    all_agents: bool = False,
+    max_proposals: int = 0,
+    *,
+    run_state: RunState,
+    heartbeat: EngineHeartbeat | None,
 ) -> None:
     settings = get_settings()
 
@@ -354,6 +466,8 @@ async def _run_simulation(
                     await db.commit()
                     simulation_run_id = run.id
                     logger.info("Created new simulation run %s", simulation_run_id)
+        if heartbeat is not None:
+            heartbeat.set_run_id(simulation_run_id)
 
     # Create simulation engine
     runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
@@ -375,21 +489,9 @@ async def _run_simulation(
         # this run — see SimulationEngine._restore_slack_state.
         fresh_start=fresh,
         max_proposals=max_proposals,
+        run_state=run_state,
+        heartbeat=heartbeat,
     )
-
-    # Handle shutdown signals
-    loop = asyncio.get_event_loop()
-
-    def shutdown():
-        # Only flip the stop flag here. The flush must not run in a
-        # fire-and-forget task: the main loop can return first, and asyncio.run
-        # then cancels the still-pending task mid-await, losing the in-flight
-        # turn's messages. It is awaited in the finally-block below instead (R2).
-        logger.info("Received shutdown signal")
-        sim_engine.request_stop("signal")
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown)
 
     try:
         if budget > 0:

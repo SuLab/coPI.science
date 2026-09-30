@@ -119,6 +119,7 @@ async def test_a_drained_proposal_target_records_target_drained(monkeypatch, tmp
 
 
 def test_the_signal_and_start_failure_paths_pass_their_reasons():
-    src = inspect.getsource(agent_main._run_simulation)
-    assert 'sim_engine.request_stop("signal")' in src
-    assert 'sim_engine.request_stop("start_failed")' in src
+    assert 'self._run_state.request_stop("signal")' in inspect.getsource(agent_main._EarlySignal)
+    assert 'sim_engine.request_stop("start_failed")' in inspect.getsource(
+        agent_main._run_simulation_locked
+    )
