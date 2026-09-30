@@ -149,12 +149,13 @@ _UNIT_CLASSES: dict[str, type] = {
 #: Owner-API names two units define under the same name (``headlines.enqueue()``,
 #: ``memory.enqueue()``) and owner-API names that were never engine members
 #: (the verdict-ledger port, ``bind_ledger``, ``rehydrate``, ``seed_cursor``,
-#: ``drop_pending``). Nothing reaches them as
+#: ``drop_pending``, ``channel_id_for``). Nothing reaches them as
 #: engine.<name>; callers use engine.<unit>.<name>.
 _NOT_FORWARDED = frozenset({
     "enqueue", "bind_ledger", "rehydrate", "held_for", "is_announced", "mark_announced",
     "patch_pending_summary", "unannounced_thread_ids",
     "mark_closed", "restore_prior", "activate_thread", "seed_cursor", "drop_pending",
+    "channel_id_for",
 })
 
 

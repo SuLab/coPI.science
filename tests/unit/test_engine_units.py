@@ -212,11 +212,20 @@ def test_every_self_name_in_a_unit_resolves():
     for holder, cls in sim._UNIT_CLASSES.items():
         tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
         known = set(vars(cls)) | set(cls.OWNED_STATE)
-        known |= {
-            n.attr for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-            and n.value.id == "self" and isinstance(n.ctx, (ast.Store, ast.Del))
-        }
+        # Holders and ports are the attributes __init__ binds. A store anywhere
+        # else would create a silent shadow attribute on the unit, so it does not
+        # count as a definition.
+        init = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "__init__"),
+            None,
+        )
+        if init is not None:
+            known |= {
+                n.attr for n in ast.walk(init)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "self" and isinstance(n.ctx, (ast.Store, ast.Del))
+            }
         for n in ast.walk(tree):
             if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
                     and n.value.id == "self" and isinstance(n.ctx, ast.Load)

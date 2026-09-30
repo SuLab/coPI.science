@@ -276,7 +276,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` §1;
   `tests/unit/test_claude_md_disclosure_sync.py` is now the drift alarm.)
   As of the 2026-08-21 manager-PI-controls cycle
-  (`SimulationEngine._post_assessment_summary`, defined in `src/agent/engine/headlines.py:96`), a HELD
+  (`Headlines._post_assessment_summary`, defined in `src/agent/engine/headlines.py:96`), a HELD
   verdict — pass or fail alike — does additionally trigger one genuinely top-level post,
   written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
   headline line (PI/lab name, `company_or_project`, `recommendation`,
