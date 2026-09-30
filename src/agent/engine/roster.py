@@ -11,6 +11,8 @@ from src.agent.agent import Agent
 from src.agent.engine import constants, deps
 from src.agent.engine.constants import ROSTER_POLL_INTERVAL
 from src.agent.engine.context import EngineContext, RejectionCounts, via
+from src.agent.engine.helpers import star_role
+from src.agent.roles import role_problem
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 from src.services.cohorts import compute_gates, summarise_gates
 
@@ -18,6 +20,20 @@ if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
 
 logger = logging.getLogger("src.agent.simulation")
+
+
+def _role_available(aid: str, role: str, problems: dict[str, str | None]) -> bool:
+    """Whether ``role`` may run (spec §8.5, fail closed); logs why not.
+    ``problems`` caches ``role_problem`` so a poll reads each manifest once."""
+    if role not in problems:
+        problems[role] = role_problem(role)
+    if problems[role] is not None:
+        logger.error(
+            "[roster] %s: role %r is not available (%s) — keeping it off the roster",
+            aid, role, problems[role],
+        )
+        return False
+    return True
 
 
 class Roster:
@@ -150,9 +166,14 @@ class Roster:
             # desired). Must run even when to_add/to_remove are empty, or a role
             # reassignment on a running agent is invisible until the next add/remove.
             role_changed = False
+            # One manifest read per role per poll (spec §8.5).
+            problems: dict[str, str | None] = {}
             for aid, agent in self.agents.items():
                 r = desired.get(aid)
-                if r is not None and getattr(r, "role", "pi_lab") != agent.role:
+                if (
+                    r is not None and r.role != agent.role
+                    and _role_available(aid, r.role, problems)
+                ):
                     logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
                     agent.role = r.role
                     role_changed = True
@@ -201,7 +222,10 @@ class Roster:
 
             current = set(self.agents)
             to_remove = current - set(desired)
-            to_add = set(desired) - current
+            to_add = {
+                aid for aid in set(desired) - current
+                if _role_available(aid, desired[aid].role, problems)
+            }
             if not to_remove and not to_add:
                 # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
                 # refreshing the directory (step 4), so after this line the
@@ -339,7 +363,7 @@ class Roster:
         violations: list[str] = []
         reported_pairs: set[frozenset[str]] = set()
         for agent_id, agent in self.agents.items():
-            if agent.role != "pi_lab":
+            if star_role(agent.role) != "spoke":
                 continue
             gate = agent.allowed_sender_ids
             if gate is None:
@@ -350,9 +374,9 @@ class Roster:
                 other = self.agents.get(other_id)
                 if other is None or other_id == agent_id:
                     continue
-                if other.role == "scout_hub":
+                if star_role(other.role) == "hub":
                     has_hub = True
-                elif other.role == "pi_lab":
+                elif star_role(other.role) == "spoke":
                     pair = frozenset((agent_id, other_id))
                     if pair not in reported_pairs:
                         reported_pairs.add(pair)

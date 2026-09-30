@@ -1,12 +1,22 @@
 """Pure engine helpers: the verdict record, the in-doubt headline sentinel and the
 small functions the units share."""
 
-from typing import NamedTuple
+from collections.abc import Mapping
+from typing import Any, NamedTuple
 
+from src.agent.role_capabilities import star_role
 from src.agent.thread_guidance import CONCLUDE
 from src.models import AgentMessage
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.llm import is_truncated_stop
+
+
+def hub_agent(agents: Mapping[str, Any]) -> Any:
+    """The live hub agent (star_topology_role == "hub"), or None."""
+    for agent in agents.values():
+        if star_role(agent.role) == "hub":
+            return agent
+    return None
 
 
 def _thread_phase_label(thread_phase: str) -> str:

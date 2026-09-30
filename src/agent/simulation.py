@@ -100,6 +100,8 @@ from src.agent.engine.sidecar import (  # re-exported
 )
 # isort: on
 from src.agent.message_log import MessageLog
+from src.agent.prompt_snapshot import PromptSnapshot
+from src.agent.role_capabilities import capabilities_for
 from src.agent.specialists import (
     domain_flatness_warning,
     signal_mix_report,
@@ -185,6 +187,7 @@ class SimulationEngine:
         max_proposals: int = 0,
         run_state: RunState | None = None,
         heartbeat: EngineHeartbeat | None = None,
+        prompt_snapshot: PromptSnapshot | None = None,
     ):
         self.ctx = EngineContext(
             agents={a.agent_id: a for a in agents},
@@ -196,6 +199,7 @@ class SimulationEngine:
         )
         self.run_state = run_state if run_state is not None else RunState()
         self.heartbeat = heartbeat
+        self.prompt_snapshot = prompt_snapshot
         if self.heartbeat is not None:
             self.heartbeat.set_circuit_source(
                 lambda: self.ctx.circuit.is_open(deps.time.time())
@@ -237,7 +241,7 @@ class SimulationEngine:
         self.message_log.set_bot_name_map(self._bot_name_to_id)
         self.run_announcer = RunAnnouncer(
             self.ctx, slack_io=self.slack_io, channel_directory=self.channel_directory,
-            scheduler=self.scheduler,
+            scheduler=self.scheduler, snapshot=prompt_snapshot,
         )
         self.threads = Threads(
             self.ctx, headlines=self.headlines, memory=self.memory, verdicts=self.verdicts,
@@ -354,6 +358,7 @@ class SimulationEngine:
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
+        await self.run_announcer.record_loaded_stamps()
 
         # Resume only: recover lab pitches the previous process left without a
         # reply because it stopped in the tick they were posted. Placed AFTER the
@@ -396,7 +401,11 @@ class SimulationEngine:
         here must not abort startup.
         """
         since = deps.time.time() - REBUILD_WINDOW_S
-        for hub in [a for a in self.agents.values() if a.role == "scout_hub"]:
+        for hub in [
+            a for a in self.agents.values()
+            if (caps := capabilities_for(a.role)) is not None
+            and caps.auto_activates_on_lab_posts
+        ]:
             try:
                 await self._phase1_channel_discovery(hub)
                 activated = self._auto_activate_lab_posts(hub, since=since)

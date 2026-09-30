@@ -47,7 +47,7 @@ from sqlalchemy import Integer, case, column, func, select, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.roles import PromptSetStamp, prompt_set_stamp
+from src.agent.roles import PromptSetStamp, available_roles, prompt_set_stamp
 from src.agent.specialists import VERDICT_SIGNALS
 from src.models import (
     AgentMessage,
@@ -89,8 +89,12 @@ class RunOverview:
     planned_seconds: int | None
     rubric_version: str
     rubric_content_hash: str
-    hub_prompt_stamp: PromptSetStamp
-    pi_prompt_stamp: PromptSetStamp
+    #: On-disk stamps as the WEB process sees them now, one per available role.
+    prompt_stamps: dict[str, PromptSetStamp]
+    #: What the engine loaded: the last ``config['loaded_stamps']`` entry, or,
+    #: for a run opened before Phase 2, the opening keys (SA6-10).
+    engine_loaded: dict[str, Any] | None
+    engine_loaded_label: str
     build_info: BuildInfo
     #: ``SimulationRun.config["run_start_announcement"]`` verbatim (see
     #: ``SimulationEngine._record_run_start_announcement``): ``{"at", "text",
@@ -350,6 +354,18 @@ async def run_overview(db: AsyncSession, run_id: uuid.UUID) -> RunOverview:
     max_runtime = config.get("max_runtime")
     planned_seconds = int(max_runtime) * 60 if max_runtime else None
 
+    history = config.get("loaded_stamps") or []
+    if history:
+        engine_loaded = history[-1]
+        engine_loaded_label = f"engine loaded (start {history[-1].get('started_at', '?')})"
+    else:
+        engine_loaded = {
+            "rubric_version": config.get("rubric_version"),
+            "rubric_content_hash": config.get("rubric_content_hash"),
+            "prompt_stamps": config.get("prompt_stamps") or {},
+        }
+        engine_loaded_label = "opening (no per-start history)"
+
     return RunOverview(
         run_id=run.id,
         status=run.status,
@@ -361,8 +377,9 @@ async def run_overview(db: AsyncSession, run_id: uuid.UUID) -> RunOverview:
         planned_seconds=planned_seconds,
         rubric_version=RUBRIC_VERSION,
         rubric_content_hash=RUBRIC_CONTENT_HASH,
-        hub_prompt_stamp=prompt_set_stamp("scout_hub"),
-        pi_prompt_stamp=prompt_set_stamp("pi_lab"),
+        prompt_stamps={role: prompt_set_stamp(role) for role in available_roles()},
+        engine_loaded=engine_loaded,
+        engine_loaded_label=engine_loaded_label,
         build_info=get_build_info(),
         run_start_announcement=config.get("run_start_announcement"),
     )

@@ -917,7 +917,8 @@ class ReplyLane:
                 # exist. Hub-only: a lab's empty replies strand the
                 # interview too, but the lab never owed the verdict and
                 # this table records lost assessments.
-                if agent.role == "scout_hub":
+                caps = capabilities_for(agent.role)
+                if caps is not None and caps.captures_verdicts:
                     message_ordinal = thread.message_count + 1
                     thread_phase, _, _ = phase4_guidance(
                         agent.role, message_ordinal
@@ -1020,7 +1021,8 @@ class ReplyLane:
         # deleted) never produces a phantom row with no corresponding
         # Slack message. A pi_lab reply never carries a sidecar, so this
         # is a no-op for every non-hub agent.
-        if agent.role == "scout_hub":
+        caps = capabilities_for(agent.role)
+        if caps is not None and caps.captures_verdicts:
             await self._capture_hub_assessment(
                 agent, thread, raw_response, posted,
                 closes_thread=closes_thread,
@@ -1080,7 +1082,10 @@ class ReplyLane:
             # Outcome 2 is explicitly "close gracefully, emit no sidecar", and
             # most interviews are meant to end there. Only a close that leaves no
             # verdict AND was not the hub's own decline is anomalous.
-            if agent.role != "scout_hub" and thread.thread_id not in self._assessed_threads:
+            caps = capabilities_for(agent.role)
+            if not (caps is not None and caps.captures_verdicts) and (
+                thread.thread_id not in self._assessed_threads
+            ):
                 await self._record_assessment_drop(
                     agent.agent_id,
                     "closed_before_verdict",

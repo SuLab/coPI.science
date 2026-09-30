@@ -37,8 +37,9 @@ def test_pi_lab_strings_are_byte_identical_to_the_pinned_snapshot():
     )
 
 
-def test_unknown_role_falls_back_to_pi_lab():
-    assert phase4_guidance("nonexistent", 5) == phase4_guidance("pi_lab", 5)
+def test_unknown_role_raises():
+    with pytest.raises(KeyError):
+        phase4_guidance("nonexistent", 5)
 
 
 def test_scout_hub_never_asks_for_a_collaboration_proposal():

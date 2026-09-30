@@ -32,6 +32,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.role_capabilities import spoke_role_names, star_role
 from src.models import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_CREATED,
@@ -88,7 +89,8 @@ async def ensure_star_spokes(
     """
     agents = (await db.execute(select(AgentRegistry))).scalars().all()
 
-    hubs = [a for a in agents if a.role == "scout_hub"]
+    spokes = spoke_role_names()
+    hubs = [a for a in agents if star_role(a.role) == "hub"]
     if len(hubs) != 1:
         raise ValueError(
             f"expected exactly one scout_hub agent, found {len(hubs)} "
@@ -100,9 +102,9 @@ async def ensure_star_spokes(
     eligible = {
         a.agent_id
         for a in agents
-        if a.role == "pi_lab" and a.status not in _SKIPPED_STATUSES
+        if a.role in spokes and a.status not in _SKIPPED_STATUSES
     }
-    all_lab_slugs = {a.agent_id for a in agents if a.role == "pi_lab"}
+    all_lab_slugs = {a.agent_id for a in agents if a.role in spokes}
 
     report = StarSpokeReport(applied=apply)
     if only is not None:

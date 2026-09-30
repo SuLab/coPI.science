@@ -121,3 +121,22 @@ async def test_a_stop_requested_before_start_ends_the_run_with_the_final_flush(m
     assert run_state.running is False
     await sim.stop()
     assert True in finals
+
+
+@pytest.mark.asyncio
+async def test_drift_is_checked_every_drift_interval_and_carried_in_the_detail():
+    calls = []
+
+    def _drift():
+        calls.append(1)
+        return {"prompt_drift": {"pi_lab": {"loaded": "a", "on_disk": "b"}},
+                "rubric": {"loaded": "r", "on_disk": "r"}}
+
+    hb = EngineHeartbeat(lock=_Lock(), run_state=RunState(), session_factory=None, drift_interval=60.0)
+    hb.set_drift_source(_drift)
+    await hb.tick(now=0.0)
+    await hb.tick(now=30.0)
+    await hb.tick(now=61.0)
+    assert len(calls) == 2
+    assert hb.extra_detail()["prompt_drift"] == {"pi_lab": {"loaded": "a", "on_disk": "b"}}
+    assert hb.extra_detail()["rubric"] == {"loaded": "r", "on_disk": "r"}

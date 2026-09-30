@@ -19,6 +19,7 @@ from src.config import get_settings
 from src.models import AdminAuditEvent, AppSetting, SimulationCommand, SimulationRun, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services import display_format as fmt
+from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH
 from src.services.headline_claims import held_headline_counts
 from src.services.runs import latest_run_id
 from src.services.simulation_control import (
@@ -175,6 +176,7 @@ async def _simulation_context(
         error=error,
         template_error=template_error,
         tick_at_display=tick_at_display,
+        web_rubric_hash=RUBRIC_CONTENT_HASH,
         **live_tab,
     )
 

@@ -62,8 +62,9 @@ async def test_run_overview_reads_run_fields_and_process_stamps(db_session):
 
     assert overview.rubric_version == RUBRIC_VERSION
     assert overview.rubric_content_hash == RUBRIC_CONTENT_HASH
-    assert overview.hub_prompt_stamp == prompt_set_stamp("scout_hub")
-    assert overview.pi_prompt_stamp == prompt_set_stamp("pi_lab")
+    assert overview.prompt_stamps["scout_hub"] == prompt_set_stamp("scout_hub")
+    assert overview.prompt_stamps["pi_lab"] == prompt_set_stamp("pi_lab")
+    assert overview.engine_loaded_label == "opening (no per-start history)"
     assert overview.build_info == get_build_info()
 
 

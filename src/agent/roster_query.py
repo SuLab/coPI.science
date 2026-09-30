@@ -12,6 +12,7 @@ carry no user by design and are exempt.
 from sqlalchemy import or_, select
 from sqlalchemy.sql import Select
 
+from src.agent.role_capabilities import roles_requiring_user
 from src.models import AgentRegistry
 
 
@@ -27,7 +28,7 @@ def active_roster_select() -> Select:
         .where(
             AgentRegistry.status == "active",
             or_(
-                AgentRegistry.role != "pi_lab",
+                AgentRegistry.role.notin_(roles_requiring_user()),
                 AgentRegistry.user_id.isnot(None),
             ),
         )

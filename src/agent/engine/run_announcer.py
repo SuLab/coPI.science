@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING
 
 from src.agent.engine import deps
 from src.agent.engine.context import EngineContext, via
-from src.agent.roles import prompt_set_stamp
+from src.agent.engine.helpers import hub_agent
+from src.agent.role_capabilities import ROLE_CAPABILITIES, capabilities_for
+from src.agent.roles import PromptSetStamp, prompt_set_stamp
 from src.agent.run_marker import (
     parse_announce_channels,
     render_run_start_announcement,
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
     from src.agent.engine.scheduler import Scheduler
     from src.agent.engine.slack_io import SlackIO
+    from src.agent.prompt_snapshot import PromptSnapshot
 
 logger = logging.getLogger("src.agent.simulation")
 
@@ -37,7 +40,7 @@ class RunAnnouncer:
     max_runtime_minutes = via("_scheduler")
     _next_poll_client = via("_slack_io")
 
-    OWNED_STATE: tuple[str, ...] = ()
+    OWNED_STATE: tuple[str, ...] = ("_snapshot",)
 
     def __init__(
         self,
@@ -46,11 +49,47 @@ class RunAnnouncer:
         slack_io: SlackIO,
         channel_directory: ChannelDirectory,
         scheduler: Scheduler,
+        snapshot: PromptSnapshot | None = None,
     ) -> None:
         self.ctx = ctx
+        self._snapshot = snapshot
         self._slack_io = slack_io
         self._channel_directory = channel_directory
         self._scheduler = scheduler
+
+    def _prompt_stamps(self) -> dict[str, PromptSetStamp]:
+        """Each role's prompt-set stamp: as loaded at start when the engine was
+        given a snapshot, else read from disk (spec §8.6)."""
+        if self._snapshot is not None:
+            return dict(self._snapshot.stamps)
+        return {role: prompt_set_stamp(role) for role in ROLE_CAPABILITIES}
+
+    async def record_loaded_stamps(self) -> None:
+        """Append what this start loaded to ``run.config['loaded_stamps']``
+        (spec §8.6, SA4-28/SA5-03) — every start, resumes included. The opening
+        provenance (``rubric_version``/``rubric_content_hash``/``prompt_stamps``)
+        is never overwritten. Best-effort and never raises."""
+        if not self.session_factory or not self.simulation_run_id or self._snapshot is None:
+            return
+        try:
+            async with self.session_factory() as db:
+                run = await db.get(SimulationRun, self.simulation_run_id)
+                if run is None:
+                    return
+                history = list((run.config or {}).get("loaded_stamps") or [])
+                history.append({
+                    "started_at": deps.datetime.now(UTC).isoformat(),
+                    "rubric_version": self._snapshot.rubric.version,
+                    "rubric_content_hash": self._snapshot.rubric.content_hash,
+                    "prompt_stamps": self._snapshot.stamps_json(),
+                })
+                run.config = {**(run.config or {}), "loaded_stamps": history}
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — provenance is advisory
+            logger.warning(
+                "Could not record the loaded prompt stamps on run %s: %s",
+                self.simulation_run_id, exc,
+            )
 
     def _run_start_announcement_values(self) -> dict[str, str]:
         """The 12 template placeholders (run_marker.ANNOUNCEMENT_VALUE_KEYS).
@@ -62,8 +101,13 @@ class RunAnnouncer:
         """
         started = self._start_time or deps.datetime.now(UTC)
         build = deps.get_build_info()
-        hub_stamp = prompt_set_stamp("scout_hub")
-        pi_stamp = prompt_set_stamp("pi_lab")
+        stamps = self._prompt_stamps()
+        hub_stamp = next(
+            s for r, s in stamps.items() if capabilities_for(r).star_topology_role == "hub"
+        )
+        pi_stamp = next(
+            s for r, s in stamps.items() if capabilities_for(r).star_topology_role == "spoke"
+        )
         if build.dirty_files is None:
             dirty = "dirty state unknown"
         elif build.dirty_files == 0:
@@ -158,9 +202,7 @@ class RunAnnouncer:
                 logger.info("Run-start announcement disabled (no channels configured)")
                 return
 
-            hub = next(
-                (a for a in self.agents.values() if a.role == "scout_hub"), None
-            )
+            hub = hub_agent(self.agents)
             client = self.slack_clients.get(hub.agent_id) if hub else None
             if not client or not client.is_connected:
                 fallback = self._next_poll_client()

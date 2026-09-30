@@ -273,6 +273,7 @@ EXPECTED_STATE_OWNER: dict[str, str] = {
     "_cohort_gate_active": "roster", "_cohort_preflight_error": "roster",
     "_cohort_log_signature": "roster", "_cohort_tags_stripped": "roster",
     "_fresh_start": "rebuild", "_reset_cursors": "rebuild",
+    "_snapshot": "run_announcer",
 }
 #: Members whose name differs on the owner (spec §7.1 table, this plan's Reference section).
 RENAMED = {"_rehydrate_assessed_threads": "rehydrate", "_agent_locks": "agent_locks",

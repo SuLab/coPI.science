@@ -85,6 +85,13 @@ def roles_requiring_user() -> tuple[str, ...]:
     return tuple(sorted(n for n, c in ROLE_CAPABILITIES.items() if c.requires_linked_user))
 
 
+def star_role(role: str | None) -> str:
+    """The role's star-topology place: ``spoke``, ``hub`` or ``none`` (also for
+    a role with no registry entry)."""
+    caps = capabilities_for(role)
+    return caps.star_topology_role if caps else "none"
+
+
 def requires_linked_user(role: str | None) -> bool:
     caps = capabilities_for(role)
     return caps is not None and caps.requires_linked_user

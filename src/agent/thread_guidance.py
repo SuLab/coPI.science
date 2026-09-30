@@ -24,6 +24,8 @@ diff whenever `_PI_LAB`'s strings change.
 
 from __future__ import annotations
 
+from src.agent.role_capabilities import ROLE_CAPABILITIES
+
 EXPLORE = "EXPLORE"
 DECIDE = "DECIDE"
 CONCLUDE = "MUST CONCLUDE"
@@ -199,14 +201,13 @@ _SCOUT_HUB = {
     ),
 }
 
-_BY_ROLE = {"pi_lab": _PI_LAB, "scout_hub": _SCOUT_HUB}
+GUIDANCE_SETS = {"pi_lab": _PI_LAB, "scout_hub": _SCOUT_HUB}
 
 
 def phase4_guidance(role: str, message_count: int) -> tuple[str, str, str]:
     """Return ``(thread_phase, phase_guidance, instructions)`` for ``role``.
 
-    An unknown role degrades to ``pi_lab`` — the same "absence of overrides is
-    pi_lab" rule src/agent/roles.py uses for prompt resolution.
+    An unknown role raises: the roster never runs one (spec §8.5).
     """
     if message_count <= 4:
         phase = EXPLORE
@@ -214,5 +215,5 @@ def phase4_guidance(role: str, message_count: int) -> tuple[str, str, str]:
         phase = DECIDE
     else:
         phase = CONCLUDE
-    guidance, instructions = _BY_ROLE.get(role, _PI_LAB)[phase]
+    guidance, instructions = GUIDANCE_SETS[ROLE_CAPABILITIES[role].guidance_set][phase]
     return phase, guidance, instructions

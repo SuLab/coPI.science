@@ -21,6 +21,9 @@ from src.agent.agent import Agent
 from src.agent.engine.context import RunState
 from src.agent.engine.control import EngineAlreadyRunning, EngineHeartbeat, validate_engine_settings
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
+from src.agent.prompt_snapshot import PromptSnapshot
+from src.agent.prompt_snapshot import install as install_prompt_snapshot
+from src.agent.roles import role_problem
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
@@ -340,6 +343,13 @@ async def _run_simulation_locked(
         Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
         for r in _rows
     ]
+    # An agent whose role is unknown or whose manifest is invalid is skipped, never
+    # run as pi_lab (spec §8.5).
+    invalid = {a.role: role_problem(a.role) for a in agents}
+    invalid = {role: problem for role, problem in invalid.items() if problem}
+    for role, problem in invalid.items():
+        logger.error("Skipping agents with role %r: %s (spec §8.5)", role, problem)
+    agents = [a for a in agents if a.role not in invalid]
     roster_tokens = {r.agent_id: r.slack_bot_token for r in _rows}
 
     if not agents:
@@ -356,6 +366,14 @@ async def _run_simulation_locked(
         "all statuses (--all-agents)" if all_agents
         else "status='active', pi_lab linked to a user",
     )
+
+    # Everything the prompt readers need, loaded once for this run (spec §8.6): a
+    # mid-run edit of a prompt, persona, role.toml or the rubric file cannot
+    # change the next turn; the heartbeat reports it as drift instead.
+    snapshot = PromptSnapshot.load()
+    install_prompt_snapshot(snapshot)
+    if heartbeat is not None:
+        heartbeat.set_drift_source(snapshot.disk_drift)
 
     # Resolve whether Slack is enabled. --mock forces it off; an explicit
     # SLACK_ENABLED env setting wins next; otherwise auto-detect from whether
@@ -440,6 +458,7 @@ async def _run_simulation_locked(
             "active_thread_threshold": settings.active_thread_threshold,
             "max_thread_messages": settings.max_thread_messages,
             "max_proposals": max_proposals,
+            "prompt_stamps": snapshot.stamps_json(),
         }
 
         if fresh:
@@ -491,6 +510,7 @@ async def _run_simulation_locked(
         max_proposals=max_proposals,
         run_state=run_state,
         heartbeat=heartbeat,
+        prompt_snapshot=snapshot,
     )
 
     try:
@@ -563,6 +583,7 @@ async def _run_simulation_locked(
             {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
              for a in agents},
         )
+        install_prompt_snapshot(None)
 
 
 if __name__ == "__main__":

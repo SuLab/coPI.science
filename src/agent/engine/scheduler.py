@@ -11,6 +11,7 @@ from src.agent.agent import Agent
 from src.agent.engine import deps
 from src.agent.engine.constants import _UNSET
 from src.agent.engine.context import EngineContext, via
+from src.agent.role_capabilities import capabilities_for
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -120,7 +121,8 @@ class Scheduler:
         benched the hub for 161 turns in run 4f1e8395.
         """
         settings = deps.get_settings()
-        if agent.role == "scout_hub":
+        caps = capabilities_for(agent.role)
+        if caps is not None and caps.rate_model == "hub_ceiling":
             return settings.hub_llm_calls_per_window
         return self._calls_per_load(agent) * self._agent_load(agent)
 

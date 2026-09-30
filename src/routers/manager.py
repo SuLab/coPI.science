@@ -48,6 +48,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.role_capabilities import requires_linked_user, roles_requiring_user
 from src.database import get_db
 from src.dependencies import get_review_user, get_staff_user
 from src.models import (
@@ -526,7 +527,11 @@ async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegist
             select(AgentRegistry).where(AgentRegistry.user_id == user_id)
         )
     ).scalar_one_or_none()
-    if agent is None or agent.status != "pending" or agent.role != "pi_lab":
+    if (
+        agent is None
+        or agent.status != "pending"
+        or not requires_linked_user(agent.role)
+    ):
         raise HTTPException(status_code=404, detail="No pending agent for this PI")
     return agent
 
@@ -604,7 +609,7 @@ async def manager_slack_bots(
         await db.execute(
             select(AgentRegistry, User)
             .outerjoin(User, User.id == AgentRegistry.user_id)
-            .where(AgentRegistry.role == "pi_lab")
+            .where(AgentRegistry.role.in_(roles_requiring_user()))
             .order_by(AgentRegistry.status, AgentRegistry.bot_name)
         )
     ).all()

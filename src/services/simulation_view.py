@@ -10,6 +10,7 @@ from fastapi import Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.role_capabilities import hub_role_names, star_role
 from src.models import (
     AgentRegistry,
     LlmCallLog,
@@ -493,7 +494,9 @@ async def live_tab_context(
 
     hub_agent_id = (
         await db.execute(
-            select(AgentRegistry.agent_id).where(AgentRegistry.role == "scout_hub").limit(1)
+            select(AgentRegistry.agent_id)
+            .where(AgentRegistry.role.in_(hub_role_names()))
+            .limit(1)
         )
     ).scalar_one_or_none()
     burn_points = await hub_lab_burn(db, run_id, hub_agent_id) if hub_agent_id else []
@@ -509,7 +512,9 @@ async def live_tab_context(
     run_facts = {"status": overview.status, "started": fmt.timestamp(overview.started_at), "ended": fmt.timestamp(overview.ended_at),
                  "elapsed": fmt.duration(overview.elapsed_seconds), "total_api_calls": fmt.count(overview.total_api_calls),
                  "total_messages": fmt.count(overview.total_messages), "announcement": overview.run_start_announcement}
-    process_facts = {"build": overview.build_info, "hub": overview.hub_prompt_stamp, "pi": overview.pi_prompt_stamp,
+    process_facts = {"build": overview.build_info, "prompts": overview.prompt_stamps,
+                     "role_labels": {r: ("Hub" if star_role(r) == "hub" else "PI") for r in overview.prompt_stamps},
+                     "engine_loaded": overview.engine_loaded, "engine_loaded_label": overview.engine_loaded_label,
                      "rubric_version": overview.rubric_version, "rubric_hash": overview.rubric_content_hash}
 
     return {
