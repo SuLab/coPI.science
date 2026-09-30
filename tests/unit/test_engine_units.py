@@ -112,9 +112,7 @@ def test_headlines_and_verdicts_are_units_joined_by_the_ledger():
     assert sim._UNIT_CLASSES["headlines"] is Headlines
     assert sim._UNIT_CLASSES["verdicts"] is Verdicts
     assert eng.headlines._ledger is eng.verdicts
-    held = _HeldVerdict(ordinal=3, final=False, slack_ts="1.1")
-    eng._assessed_threads["t1"] = held
-    assert eng.verdicts.held_for("t1") is held
+    eng._assessed_threads["t1"] = _HeldVerdict(ordinal=3, final=False, slack_ts="1.1")
     assert eng.verdicts.assessed_thread_ids() == ["t1"]
     assert not eng.headlines.is_announced("t1")
     eng.headlines.mark_announced("t1")

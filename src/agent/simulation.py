@@ -152,7 +152,7 @@ _UNIT_CLASSES: dict[str, type] = {
 #: ``drop_pending``, ``channel_id_for``). Nothing reaches them as
 #: engine.<name>; callers use engine.<unit>.<name>.
 _NOT_FORWARDED = frozenset({
-    "enqueue", "bind_ledger", "rehydrate", "held_for", "is_announced", "mark_announced",
+    "enqueue", "bind_ledger", "rehydrate", "is_announced", "mark_announced",
     "patch_pending_summary", "assessed_thread_ids",
     "mark_closed", "restore_prior", "activate_thread", "seed_cursor", "drop_pending",
     "channel_id_for",

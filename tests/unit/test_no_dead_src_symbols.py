@@ -131,6 +131,27 @@ ALLOWLIST: dict[str, str] = {
         "No CSV export exists in src/ any more (git grep -i csv, 2026-09-25); used only by tests/unit/test_validators.py. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
+    # Phase 2 (docs/plans/2026-09-29-audit-remediation-phase-2.md) lands some helpers
+    # a task before their caller. Each entry names the task that brings the caller;
+    # that task removes the entry (the stale-entry test fails until it does).
+    "src.agent.engine.headlines:build_finalize_announcer": (
+        "Built in Phase 2 Task 9; its caller, the supervisor's Finalize run routine, "
+        "arrives in Phase 2 Task 12, which removes this entry."
+    ),
+    "src.services.simulation_control:panel_state": (
+        "Built in Phase 2 Task 5; its caller, the admin simulation page's context, "
+        "arrives in Phase 2 Task 13, which removes this entry."
+    ),
+    "src.services.advisory_locks:SessionAdvisoryLock.backend_pid": (
+        "Diagnostic accessor: the backend pid holding the session lock, read by "
+        "tests/integration/test_engine_liveness.py to prove liveness follows the "
+        "lock-holding connection. No production reader is planned."
+    ),
+    "src.services.advisory_locks:entity_key_sql": (
+        "Per-entity advisory lock keys, built in Phase 2 Task 4; consumed by Phase 3's "
+        "provision and corpus locks (docs/plans/2026-09-29-audit-remediation-phase-3-web-scripts.md), "
+        "which remove this entry."
+    ),
 }
 
 

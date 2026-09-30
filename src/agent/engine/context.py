@@ -25,7 +25,6 @@ from src.agent.message_log import MessageLog
 
 if TYPE_CHECKING:
     from src.agent.agent import Agent
-    from src.agent.engine.helpers import _HeldVerdict
 
 
 class _Via:
@@ -164,8 +163,6 @@ class VerdictLedgerPort(Protocol):
     ``Verdicts`` implements it. The announce ledger itself lives in ``Headlines``
     (``is_announced`` / ``mark_announced``, spec §8.2).
     """
-
-    def held_for(self, thread_id: str) -> _HeldVerdict | None: ...
 
     def patch_pending_summary(self, thread_id: str, posted_at: datetime) -> None: ...
 

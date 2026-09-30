@@ -1658,10 +1658,6 @@ class Verdicts:
 
     # --- VerdictLedgerPort (spec §7.2 rule 2): what Headlines may know --------
 
-    def held_for(self, thread_id: str) -> _HeldVerdict | None:
-        """The verdict ``thread_id`` holds, if any."""
-        return self._assessed_threads.get(thread_id)
-
     def patch_pending_summary(self, thread_id: str, posted_at: datetime) -> None:
         """Stamp every still-queued row of ``thread_id`` so a later flush does not
         write NULL over a headline that is already public."""

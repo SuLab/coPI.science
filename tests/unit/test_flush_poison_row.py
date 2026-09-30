@@ -24,10 +24,12 @@ import logging
 import time as _real_time
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
+from src.models import OpportunityAssessment
 
 POISON = "poison"
 
@@ -55,70 +57,134 @@ class _Clock:
 
 
 class _FakeResult:
-    """Just enough of a Result for `_flush_persisted`'s run-stats refresh."""
+    """A Result: the value an INSERT ... RETURNING produced, or no row at all.
+
+    A SELECT against the fake always finds nothing, which is what every caller
+    here expects: `_flush_persisted`'s run-stats refresh finds no run, and no
+    test gives two assessment rows the same thread, so `_upsert_in` never
+    reaches its conflict branch.
+    """
+
+    def __init__(self, value=None):
+        self._value = value
 
     def scalar_one_or_none(self):
-        return None
+        return self._value
 
     def scalar_one(self):
-        return 0
+        return 0 if self._value is None else self._value
+
+    def scalar(self):
+        return self._value
+
+    def one_or_none(self):
+        return None
+
+    def first(self):
+        return None
 
 
 class _FakeNested:
-    """A savepoint. Releasing it flushes, exactly like the real thing."""
+    """A savepoint. Releasing it flushes, exactly like the real thing; a failure
+    inside it rolls back only what was written since it began."""
 
     def __init__(self, session):
         self._s = session
+        self._mark = 0
 
     async def __aenter__(self):
         self._s.savepoints += 1
+        self._mark = len(self._s.staged)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         if exc_type is not None:
             self._s.pending.clear()
+            del self._s.staged[self._mark:]
             return False
-        self._s._release()
+        self._s._send()
         return False
 
 
 class _FakeSession:
-    def __init__(self, store, savepoint_log, first_commit_error=None):
+    """One transaction. A poison row is refused when it reaches the database —
+    at the statement, flush or commit that sends it — and only a commit makes
+    what was sent durable (`store`).
+
+    ``batch_error``, when set, is raised by this session's FIRST write of any
+    kind, the way a pool-checkout timeout surfaces on the first statement and a
+    refused batch fails before anything in it lands.
+    """
+
+    def __init__(self, store, savepoint_log, batch_error=None):
         self.store = store
-        self.pending: list = []
+        self.pending: list = []  # added, not yet sent
+        self.staged: list = []  # sent, not yet committed
         self.savepoints = 0
         self.commits = 0
-        self._first_commit_error = first_commit_error
+        self._batch_error = batch_error
         self._savepoint_log = savepoint_log
+
+    def _maybe_fail_batch(self):
+        if self._batch_error is not None:
+            err, self._batch_error = self._batch_error, None
+            self.pending.clear()
+            self.staged.clear()
+            raise err
 
     def add(self, obj):
         self.pending.append(obj)
 
     async def execute(self, stmt):
-        # `_flush_persisted` inserts through a Core statement rather than the
-        # ORM. `Insert.values([...])` keeps the dicts verbatim on
-        # `_multi_values`, so the fake can see exactly what would be written.
-        for group in getattr(stmt, "_multi_values", ()):
-            self.pending.extend(group)
-        return _FakeResult()
+        self._maybe_fail_batch()
+        if getattr(stmt, "is_select", False):
+            return _FakeResult()
+        if not getattr(stmt, "is_insert", False):
+            raise NotImplementedError(f"the fake session cannot execute {stmt!r}")
+        multi = getattr(stmt, "_multi_values", ())
+        if multi:
+            # `_flush_persisted` inserts through a Core statement rather than the
+            # ORM. `Insert.values([...])` keeps the dicts verbatim on
+            # `_multi_values`, so the fake can see exactly what would be written.
+            for group in multi:
+                self.pending.extend(group)
+            self._send()
+            return _FakeResult()
+        if stmt.table.name == OpportunityAssessment.__tablename__:
+            # `_upsert_in`'s INSERT ... ON CONFLICT DO NOTHING RETURNING id: the
+            # bound parameters are the row. No conflict is possible here (see
+            # `_FakeResult`), so the row is inserted and its id returned.
+            params = stmt.compile(dialect=postgresql.dialect()).params
+            self.pending.append(OpportunityAssessment(**params))
+            self._send()
+            return _FakeResult(params["id"])
+        raise NotImplementedError(f"the fake session cannot execute {stmt!r}")
+
+    async def flush(self):
+        self._maybe_fail_batch()
+        self._send()
 
     async def commit(self):
         self.commits += 1
-        if self._first_commit_error is not None and self.commits == 1:
-            err, self._first_commit_error = self._first_commit_error, None
-            self.pending.clear()
-            raise err
-        self._release()
+        self._maybe_fail_batch()
+        try:
+            self._send()
+        except Exception:
+            self.staged.clear()
+            raise
+        self.store.extend(self.staged)
+        self.staged.clear()
 
     async def rollback(self):
         self.pending.clear()
+        self.staged.clear()
 
-    def _release(self):
+    def _send(self):
         bad = [o for o in self.pending if _is_poison(o)]
         if bad:
             self.pending.clear()
             raise IntegrityError("INSERT", {}, Exception("null value in column"))
-        self.store.extend(self.pending)
+        self.staged.extend(self.pending)
         self.pending.clear()
 
     def begin_nested(self):
@@ -129,6 +195,9 @@ class _FakeSession:
         return self
 
     async def __aexit__(self, *exc):
+        # Closing a session rolls back whatever it did not commit.
+        self.pending.clear()
+        self.staged.clear()
         return False
 
 
@@ -149,17 +218,17 @@ class _FakeFactory:
     did NOT reuse the one whose commit failed.
     """
 
-    def __init__(self, store, *, first_commit_error=None):
+    def __init__(self, store, *, batch_error=None):
         self.store = store
         self.sessions: list[_FakeSession] = []
         self.savepoint_log: list[int] = []
-        self._first_commit_error = first_commit_error
+        self._batch_error = batch_error
 
     def __call__(self):
         # Only the FIRST session gets the batch error; the recovery session must
         # be able to make progress.
-        err = self._first_commit_error if not self.sessions else None
-        s = _FakeSession(self.store, self.savepoint_log, first_commit_error=err)
+        err = self._batch_error if not self.sessions else None
+        s = _FakeSession(self.store, self.savepoint_log, batch_error=err)
         self.sessions.append(s)
         return s
 
@@ -182,7 +251,7 @@ def _log_entry(agent_id: str) -> dict:
 
 async def test_one_bad_row_does_not_lose_the_batch():
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("null value in column")))
     eng = _engine(factory)
     eng._llm_log_buffer = [_log_entry("a"), _log_entry(POISON), _log_entry("b")]
@@ -201,7 +270,7 @@ async def test_one_bad_row_does_not_lose_the_batch():
 async def test_the_per_row_fallback_opens_a_new_session():
     """Trap 2. The failed session is already closed and rolled back."""
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("null value in column")))
     eng = _engine(factory)
     eng._llm_log_buffer = [_log_entry("a"), _log_entry(POISON)]
@@ -226,7 +295,7 @@ async def test_a_pool_timeout_does_not_trigger_the_per_row_fallback():
     gate to `except Exception` (which is the harmful "obvious" fix) turns it red.
     """
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=OperationalError(
+    factory = _FakeFactory(store, batch_error=OperationalError(
         "SELECT 1", {}, Exception("QueuePool limit ... connection timed out")))
     eng = _engine(factory)
     rows = [_log_entry("a"), _log_entry("b")]
@@ -247,7 +316,7 @@ async def test_a_pool_timeout_does_not_trigger_the_per_row_fallback():
 async def test_a_failed_shutdown_flush_says_lost_not_requeued(caplog):
     """`stop()` makes exactly ONE final attempt, so "re-queued for retry" lies."""
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=OperationalError(
+    factory = _FakeFactory(store, batch_error=OperationalError(
         "SELECT 1", {}, Exception("QueuePool limit ... connection timed out")))
     eng = _engine(factory)
     eng._llm_log_buffer = [_log_entry("a"), _log_entry("b")]
@@ -268,7 +337,7 @@ async def test_a_failed_shutdown_flush_says_lost_not_requeued(caplog):
 async def test_the_assessment_flusher_isolates_its_poison_row():
     """The row that is the actual product of the pipeline gets the same treatment."""
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("value too long for type character varying")))
     eng = _engine(factory)
     eng._pending_assessments = [
@@ -293,7 +362,7 @@ async def test_the_message_flusher_isolates_its_poison_row(monkeypatch):
     from src.agent.message_log import LogEntry
 
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("value too long for type character varying")))
     eng = _engine(factory)
     eng._pending_persist = [
@@ -319,7 +388,7 @@ async def test_a_per_row_pass_that_exhausts_its_deadline_requeues_the_rest(
     import src.agent.engine.deps as sim
 
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("null value in column")))
     eng = _engine(factory)
     eng._llm_log_buffer = [_log_entry(str(i)) for i in range(4)]
@@ -421,7 +490,7 @@ def _verdict_row(agent_id: str, **over) -> dict:
 
 async def test_an_assessment_lost_to_per_row_recovery_leaves_a_drop():
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("value too long for type character varying")))
     eng = _engine(factory)
     eng._pending_assessments = [
@@ -459,7 +528,7 @@ async def test_an_assessment_lost_to_per_row_recovery_leaves_a_drop():
 async def test_the_other_flushers_do_not_write_assessment_drops():
     """A message or an LLM-log row is not a verdict; only assessments get drops."""
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("null value in column")))
     eng = _engine(factory)
     eng._llm_log_buffer = [_log_entry("a"), _log_entry(POISON)]
@@ -472,7 +541,7 @@ async def test_the_other_flushers_do_not_write_assessment_drops():
 async def test_a_failing_drop_write_does_not_raise_into_the_flush(caplog):
     """Best-effort, and loudly so — the flush must finish either way."""
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("value too long")))
     eng = _engine(factory)
 
@@ -545,7 +614,7 @@ async def test_a_malformed_row_does_not_abort_the_rest_of_the_flush():
     one because the second row aborted the loop.
     """
     store: list = []
-    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+    factory = _FakeFactory(store, batch_error=IntegrityError(
         "INSERT", {}, Exception("value too long")))
     eng = _engine(factory)
     eng._pending_assessments = [

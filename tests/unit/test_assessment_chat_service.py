@@ -174,7 +174,7 @@ def test_turn_payload_flags_a_changed_record_and_the_window():
         id="t1", question="Q", answer_text="A", answer_segments=None, citations=None,
         allowed_links=None, status="complete", stop_reason="end_turn", refusal_category=None,
         error_code=None, served_by_model=MODEL, fallback_used=False,
-        record_sha256_12="aaaaaaaaaaaa",
+        record_sha256_12="aaaaaaaaaaaa", verdict_revision=1,
         created_at=datetime(2026, 9, 24, 10, 0, tzinfo=UTC), completed_at=None,
     )
     same = chat.turn_payload(row, current_sha="aaaaaaaaaaaa", in_window=True)
