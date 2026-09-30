@@ -37,11 +37,15 @@ of a thread is rendered. A post that raises with no Slack response keeps its
 claim and is reported IN DOUBT; it is never re-posted until an operator checks
 Slack and runs `--release-in-doubt`.
 
-**Liveness.** Writes (`--apply`, `--release-in-doubt`) are refused while
-/admin/simulation reads `running`, `stopping` or `starting`, whichever run the
-engine serves (a `starting` row names no run). The run row's own `status` is not
-trusted: a SIGKILLed run stays `running`. `--run-crashed` overrides the refusal
-once the operator has confirmed the engine process is gone.
+**Engine lock.** Every write (`--apply`, `--finalize --apply`,
+`--release-in-doubt`) holds the engine's advisory lock
+(`ENGINE_LOCK_KEY`) for the whole run, so no engine can start or resume while
+this script posts, and it is refused (exit 2) while an engine, or another run of
+this script, holds it. The lock is released on every exit path and dies with the
+connection, so a SIGKILLed engine frees it at once: the status row, which a CLI
+engine leaves at `stopping` and a crash leaves at `running`, is no longer
+consulted. The dry run and `--list-in-doubt` take no lock. `--run-crashed` is
+kept only so old invocations still parse; it overrides nothing.
 
 **Selection follows how the run ended.** A run with `held_at`
 (held open interviews) gets headlines only for interviews that ENDED (a
@@ -96,6 +100,7 @@ from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.slack_client import AgentSlackClient
 from src.config import get_settings
 from src.models import AgentChannel, AgentRegistry, OpportunityAssessment, SimulationRun
+from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
 from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.headline_claims import (
@@ -106,7 +111,6 @@ from src.services.headline_claims import (
     release_claim,
 )
 from src.services.interview_state import ended_thread_ids
-from src.services.simulation_control import derive_panel_state, read_status
 from src.services.slack_tokens import env_token, is_valid_token
 
 logger = logging.getLogger("backfill_assessment_headlines")
@@ -121,9 +125,6 @@ STAMPED = "stamped"
 FAILED = "failed"
 IN_DOUBT = "in_doubt"      # claimed, the post raised with no Slack response
 UNCLAIMED = "unclaimed"    # another poster holds or posted this thread
-
-#: Panel states in which an engine may be announcing headlines right now.
-LIVE_ENGINE_STATES = frozenset({"running", "stopping", "starting"})
 
 
 def select_rows_needing_headline(
@@ -307,16 +308,18 @@ def filter_by_hold(rows, *, held: bool, finalize: bool, ended: set[str]):
     return kept, skipped
 
 
-async def engine_live_refusal(db, *, run_crashed: bool) -> str | None:
-    """Why a write must not run now, or None."""
-    state = derive_panel_state(await read_status(db), datetime.now(UTC))
-    if state in LIVE_ENGINE_STATES and not run_crashed:
-        return (
-            f"refusing to write: /admin/simulation reads {state!r}, so an engine may be "
-            "announcing headlines right now (whichever run it serves; a 'starting' row "
-            "names none). Stop it first, or pass --run-crashed once you have confirmed "
-            "the engine process is gone."
-        )
+async def acquire_apply_lock(database_url: str) -> SessionAdvisoryLock | None:
+    """Hold the engine lock for a whole write run (spec P0-08, Phase 2), so no
+    engine can start or resume while this script posts, finalizes or releases
+    claims. Returns None when an engine (or another run of this script) holds it."""
+    lock = SessionAdvisoryLock(database_url, ENGINE_LOCK_KEY)
+    try:
+        if await lock.acquire():
+            return lock
+    except BaseException:
+        await lock.release()
+        raise
+    await lock.release()
     return None
 
 
@@ -536,20 +539,43 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--run-crashed", action="store_true",
-        help="Override the live-engine refusal once you have confirmed the engine "
-             "process is gone (a SIGKILLed engine's status row reads live for up to "
-             "two minutes).",
+        help="Deprecated no-op, accepted so old invocations still parse. Writes are "
+             "gated on the engine lock, which a dead engine releases at once and "
+             "which nothing overrides.",
     )
     return ap
 
 
-async def run_repair(args, factory, *, make_client=None) -> int:
+async def run_repair(
+    args, factory, *, make_client=None, lock_url: str | None = None,
+) -> int:
     """The whole script, given parsed ``args`` and a session factory.
 
     ``make_client(agent_id)`` builds the posting client (tests pass a fake);
     by default a real AgentSlackClient from the agent's stored or env token.
-    Exit codes: 0 success, 1 a post FAILED or is IN DOUBT, 2 refused.
+    ``lock_url`` is the database URL the engine lock connects to (default: the
+    settings URL). A write mode holds the engine lock for the whole run and
+    releases it on every exit path.
+    Exit codes: 0 success, 1 a post FAILED or is IN DOUBT, 2 refused (an engine
+    holds the lock, or the run is unknown).
     """
+    apply_lock = None
+    if (args.apply or args.release_in_doubt) and not args.list_in_doubt:
+        apply_lock = await acquire_apply_lock(lock_url or get_settings().database_url)
+        if apply_lock is None:
+            logger.error(
+                "refusing to write: a simulation engine holds the engine lock "
+                "(stop the engine first; --run-crashed does not override this)"
+            )
+            return 2
+    try:
+        return await _repair_body(args, factory, make_client=make_client)
+    finally:
+        if apply_lock is not None:
+            await apply_lock.release()
+
+
+async def _repair_body(args, factory, *, make_client) -> int:
     run_id = uuid.UUID(args.run)
     assessment_ids = (
         [uuid.UUID(a) for a in args.assessment_ids] if args.assessment_ids else None
@@ -565,11 +591,6 @@ async def run_repair(args, factory, *, make_client=None) -> int:
                 )
             logger.info("%d in-doubt claim(s) for run %s", len(rows), run_id)
             return 0
-        if args.apply or args.release_in_doubt:
-            refusal = await engine_live_refusal(db, run_crashed=args.run_crashed)
-            if refusal:
-                logger.error(refusal)
-                return 2
         run = await db.get(SimulationRun, run_id)
         if run is None:
             logger.error("no simulation run %s", run_id)
