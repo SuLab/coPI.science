@@ -40,6 +40,10 @@ build
 # competing lockfile; requirements.lock is the only one the image installs.
 uv.lock
 .playwright-mcp
+# Host-built stylesheet — the css stage compiles this fresh, never trust a stale host build
+static/css
+# Tailwind standalone binary cache (scripts/build-css.sh); the css stage downloads its own
+.cache
 copi.egg-info
 .superpowers
 **/.env*

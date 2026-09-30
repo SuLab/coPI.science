@@ -1,5 +1,10 @@
 # `tests/e2e` — browser flows (Task 12)
 
+> Layout/responsiveness across viewports is covered by a separate, self-hosting
+> Playwright tier in `tests/responsive/` (it starts its own uvicorn against the
+> testcontainers database and runs inside `./scripts/ci.sh`); this directory is the
+> HTTP-replay tier for user flows.
+
 Covers `.notes/full-system-test-plan.md` §"Task 12". Two things live here:
 
 - **`test_browser_flows.py`** — `FLOWS`, a machine-readable transcript of each
