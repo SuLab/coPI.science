@@ -29,9 +29,9 @@ from src.services.corpus import (
     resolve_corpus,
 )
 from src.services.jhu_rules import (
+    clear_provisional_tenure_start,
     derive_employment_start,
     derive_start_from_papers,
-    clear_provisional_tenure_start,
     get_tenure_start,
     set_provisional_tenure_start,
     set_tenure_start,
