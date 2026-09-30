@@ -800,10 +800,11 @@ class TestGracefulShutdown:
 
         await engine.stop()
 
-        # forced final stats refresh, and `final=True` — the shutdown flush is
-        # the LAST attempt at this buffer, so a failure there must report LOST
-        # rather than "re-queued for retry" (A3.4).
-        assert flushed == [(True, True)]
+        # An ordinary flush ahead of the headline sweep (spec §8.4 S1-10), then
+        # the forced final stats refresh with `final=True` — the shutdown flush
+        # is the LAST attempt at this buffer, so a failure there must report
+        # LOST rather than "re-queued for retry" (A3.4).
+        assert flushed == [(False, False), (True, True)]
         assert engine._pending_persist == []
         assert engine._running is False
 

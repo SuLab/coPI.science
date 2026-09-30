@@ -21,7 +21,8 @@ async def test_consults_from_before_a_restart_count_even_when_memory_holds_one(e
         for domain in ("clinical", "regulatory"):
             db.add(SpecialistConsult(simulation_run_id=run.id, agent_id="blackbird",
                                      subject_agent_id="gordy", thread_id="t1", domain=domain,
-                                     question="q", truncated=False))
+                                     question="q", verdict_signal="caution",
+                                     confidence="moderate", raw_opinion="r", truncated=False))
         await db.commit()
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     sim = SimulationEngine(agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},
@@ -54,7 +55,8 @@ async def test_a_seed_that_adds_nothing_does_not_arm_the_floor(engine):
         await db.flush()
         db.add(SpecialistConsult(simulation_run_id=run.id, agent_id="blackbird",
                                  subject_agent_id="gordy", thread_id="t1", domain="clinical",
-                                 question="q", truncated=False))
+                                 question="q", verdict_signal="caution",
+                                 confidence="moderate", raw_opinion="r", truncated=False))
         await db.commit()
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     sim = SimulationEngine(agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},

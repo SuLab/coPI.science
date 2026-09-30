@@ -455,11 +455,12 @@ class Panel:
             )
             return
         self._consults_seeded.add(key)
-        held = self._specialist_consults.setdefault(key, set())
-        new = set(domains) - held
+        # No empty entry for a read that found nothing: other lanes arm the
+        # floor off ``bool(self._specialist_consults)``.
+        new = set(domains) - self._specialist_consults.get(key, set())
         if not new:
             return
-        held.update(new)
+        self._specialist_consults.setdefault(key, set()).update(new)
         if thread is not None:
             thread.floor_armed = True
         logger.info(

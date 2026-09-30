@@ -58,6 +58,10 @@ METHOD_SCOPES = {
     "conversations.create (public)": "channels:manage",
     "conversations.join": "channels:join",
     "conversations.history (public)": "channels:history",
+    # The post landed check (spec §8.4 AG-6) reads a reply's thread; replies and
+    # pitches post only to public channels:
+    # https://docs.slack.dev/reference/methods/conversations.replies
+    "conversations.replies (public)": "channels:history",
     # collab_private history: nothing reads it any more, but the scope stays in
     # the manifest so every provisioned app keeps the same scope set.
     "conversations.history (private)": "groups:history",

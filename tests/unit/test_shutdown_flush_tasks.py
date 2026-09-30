@@ -76,9 +76,11 @@ def test_a_spawned_flush_is_awaited_before_shutdown_completes():
 
     asyncio.run(_main())
 
-    # "committed" BEFORE "nothing-to-flush": the gather sits ahead of stop()'s
-    # own final flush, which by then has an empty buffer to look at.
-    assert events == ["start", "committed", "nothing-to-flush"], (
+    # stop()'s first flush (ahead of the headline sweep, spec §8.4 S1-10) finds
+    # the batch already taken by the spawned task. "committed" comes BEFORE the
+    # last "nothing-to-flush": the gather sits ahead of stop()'s own final
+    # flush, which by then has an empty buffer to look at.
+    assert events == ["start", "nothing-to-flush", "committed", "nothing-to-flush"], (
         "the spawned flush was cancelled mid-commit at shutdown — its batch was "
         f"already out of the buffer, so those rows are gone: {events}"
     )
@@ -87,10 +89,10 @@ def test_a_spawned_flush_is_awaited_before_shutdown_completes():
 def test_a_flush_spawned_by_the_shutdown_memory_drain_is_also_awaited():
     """Why the gather cannot sit at the TOP of `stop()`.
 
-    `stop()`'s first act is `_drain_memory_events`, which makes real LLM calls
-    and can therefore push the buffer past the threshold and spawn a NEW flush
-    task. Gathering before that runs would re-introduce exactly the orphan this
-    fixes.
+    `stop()` runs `_drain_memory_events` after its first flushes and the
+    headline sweep (spec §8.4 S1-10). The drain makes real LLM calls and can
+    therefore push the buffer past the threshold and spawn a NEW flush task.
+    Gathering before the drain would re-introduce exactly the orphan this fixes.
     """
     events: list[str] = []
 
@@ -112,7 +114,9 @@ def test_a_flush_spawned_by_the_shutdown_memory_drain_is_also_awaited():
 
     asyncio.run(_main())
 
-    assert events == ["start", "committed", "nothing-to-flush"], (
+    # The leading "nothing-to-flush" is stop()'s first flush, which runs before
+    # the drain has spawned anything.
+    assert events == ["nothing-to-flush", "start", "committed", "nothing-to-flush"], (
         "a flush spawned by stop()'s own memory drain was left orphaned: "
         f"{events}"
     )
@@ -165,6 +169,7 @@ async def test_a_failing_flush_task_does_not_abort_the_rest_of_stop():
     eng = _engine()
     eng._llm_log_flush_size = 1
     seen: list[str] = []
+    attempts = {"n": 0}
 
     async def _boom(*, final=False):
         batch = eng._llm_log_buffer[:]
@@ -173,8 +178,10 @@ async def test_a_failing_flush_task_does_not_abort_the_rest_of_stop():
             seen.append("final-saw-nothing")
             return
         seen.append("attempt")
+        attempts["n"] += 1
+        first = attempts["n"] == 1
         await asyncio.sleep(0)
-        if len(seen) == 1:
+        if first:
             # Same re-queue-in-front contract as the real flusher. The real one
             # swallows its own exception; this stub lets the FIRST attempt (the
             # spawned task) raise, which is what `gather` has to tolerate.
@@ -193,7 +200,12 @@ async def test_a_failing_flush_task_does_not_abort_the_rest_of_stop():
 
     await eng.stop()
 
-    assert seen == ["attempt", "attempt", "recovered", "assessments"], (
+    # The first "assessments"/"final-saw-nothing" pair is stop()'s first flush
+    # (spec §8.4 S1-10), which runs while the spawned task holds the batch.
+    assert seen == [
+        "attempt", "assessments", "final-saw-nothing",
+        "attempt", "recovered", "assessments",
+    ], (
         "expected: the spawned task failed and re-queued, the final flush "
         "retried it, and stop() still reached the assessment flush. Got: "
         f"{seen}"
