@@ -1,0 +1,27 @@
+"""Spec §7.4: run_profile_pipeline is split into step functions in the same module,
+and append_job_progress lives in a module grant_enrichment can import without a cycle."""
+
+import ast
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def test_append_job_progress_moved_and_is_the_same_function():
+    from src.services import job_progress, profile_pipeline
+
+    assert profile_pipeline.append_job_progress is job_progress.append_job_progress
+
+
+def test_enrichment_modules_do_not_import_the_pipeline():
+    for rel in ("src/services/grant_enrichment.py", "src/services/industry_evidence.py"):
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert "src.services.profile_pipeline" not in mods, rel
+
+
+def test_no_pipeline_function_exceeds_the_size_gate():
+    tree = ast.parse((ROOT / "src/services/profile_pipeline.py").read_text(encoding="utf-8"))
+    long = [n.name for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.end_lineno - n.lineno + 1 > 200]
+    assert long == []

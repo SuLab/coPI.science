@@ -27,7 +27,7 @@ from src.services.industry_sources.uspto_inventor import (
     fetch_jhu_applications,
 )
 from src.services.jhu_rules import get_tenure_start
-from src.services.profile_pipeline import append_job_progress
+from src.services.job_progress import append_job_progress
 from src.services.pubmed import fetch_pubmed_records
 
 logger = logging.getLogger(__name__)

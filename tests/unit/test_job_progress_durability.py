@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from src.models import Job
-from src.services.profile_pipeline import append_job_progress
+from src.services.job_progress import append_job_progress
 from tests import factories
 
 pytestmark = pytest.mark.integration
