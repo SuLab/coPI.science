@@ -75,7 +75,7 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
-    "src.main:AgentBadgeMiddleware.dispatch": (
+    "src.main:PostHogContextMiddleware.dispatch": (
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
@@ -126,9 +126,10 @@ ALLOWLIST: dict[str, str] = {
         "Test-support cache reset, used only by tests/unit/test_patents.py. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
-    "src.services.pi_inbox:web_pi_user_id": (
-        "No caller anywhere, tests included (git grep, 2026-09-25). "
-        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
+    "src.agent.ids:mint_local_ts": (
+        "Used only by tests/unit/test_ids.py since its one production caller, "
+        "src/services/pi_inbox.py, was retired with the proposal flow. "
+        "Kept: the process-wide default minter is still claimed by set_default_writer_id."
     ),
     "src.services.validators:csv_safe_cell": (
         "No CSV export exists in src/ any more (git grep -i csv, 2026-09-25); used only by tests/unit/test_validators.py. "
@@ -418,7 +419,7 @@ def _describe(result: ScanResult, key: str) -> str:
 ENTRY_POINTS: frozenset[str] = frozenset(
     {
         "src.main:OriginGuardMiddleware.dispatch",
-        "src.main:AgentBadgeMiddleware.dispatch",
+        "src.main:PostHogContextMiddleware.dispatch",
     }
 )
 

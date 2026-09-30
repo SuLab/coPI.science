@@ -93,7 +93,7 @@ def _record_start(monkeypatch, eng, calls):
         calls.append(name)
 
     for name in (
-        "_persist_seeded_channels", "_sync_private_channels_from_db", "_rebuild_state_from_db",
+        "_persist_seeded_channels", "_rebuild_state_from_db",
         "_restore_slack_state", "_rebuild_agent_state", "_rehydrate_assessed_threads",
         "_recompute_allowed_sender_ids", "_record_topology_snapshot", "_announce_run_start",
         "_run_main_loop",
@@ -101,7 +101,7 @@ def _record_start(monkeypatch, eng, calls):
         monkeypatch.setattr(eng, name, lambda *a, _n=name, **k: _rec_async(_n), raising=False)
     for name in (
         "_ensure_seeded_channels", "_ensure_assessments_summary_channel",
-        "_rewind_cursors_for_private_channels", "refresh_lab_directories",
+        "refresh_lab_directories",
     ):
         monkeypatch.setattr(eng, name, lambda *a, _n=name, **k: calls.append(_n), raising=False)
     monkeypatch.setattr(eng, "_validate_star_topology", lambda: calls.append("_validate") or [])

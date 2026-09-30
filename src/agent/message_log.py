@@ -58,7 +58,7 @@ class LogEntry:
     # pre-existing caller wants and gets by leaving this unset. It is set
     # explicitly only for a message that is NOT conversation:
     # PHASE_PANEL_NOTE. Restored from the row on every DB-origin ingest path
-    # (`_rebuild_state_from_db`, `_poll_inbound_from_db`) so the exclusions
+    # (`_rebuild_state_from_db`) so the exclusions
     # below survive a restart.
     phase: str | None = None
 
@@ -84,8 +84,8 @@ def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bo
       disabled, or ``cohort_default_policy="open"`` and the agent is uncohorted);
     - the author is a **human** — keyed on ``is_bot``, *not* on
       ``sender_agent_id is None``. ``agent_messages.agent_id`` is nullable, so a
-      bot-authored row written with a NULL agent_id ingests through
-      ``_poll_inbound_from_db`` as ``sender_agent_id=None`` and would otherwise
+      bot-authored row written with a NULL agent_id restores through
+      ``_rebuild_state_from_db`` as ``sender_agent_id=None`` and would otherwise
       pass the gate as a human;
     - the entry is in a ``collab_private`` channel — a PI explicitly paired those
       two agents via the reopen flow, and an admin-level grouping must not veto an
@@ -390,7 +390,7 @@ class MessageLog:
         in ts order. The sort is stable, so entries sharing a posted_at keep
         their insertion order. The root is pinned first regardless: it is the
         thread's parent by definition, even if a reply carries an earlier
-        posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
+        posted_at (a writer's clock can run behind the engine's).
 
         Panel notes are dropped (PHASE_PANEL_NOTE). This is THE read that
         becomes an agent's prompt (``_reply_to_thread`` -> ``thread_history``
@@ -603,9 +603,8 @@ class MessageLog:
         ``_entry_allowed`` entirely and would otherwise let a human row through
         unconditionally. There is no PI-bot interaction surface left for a
         human reply to set ``has_pending_reply`` or (via ``_reply_to_thread``'s
-        message-count recompute) shift a thread's ordinal (2026-08-12 removal cycle). This closes the loop
-        ``post_agent_message``/``reopen_proposal`` (via
-        ``src/services/pi_inbox.py::record_pi_message``) used to feed.
+        message-count recompute) shift a thread's ordinal (2026-08-12 removal cycle; the web
+        writer that produced such rows was retired with the proposal flow).
         """
         for entry in self._by_thread.get(thread_ts, []):
             if is_panel_note(entry):

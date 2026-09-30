@@ -179,34 +179,6 @@ async def test_a_decided_thread_is_not_reopened_by_a_rebuild(db_session):
     assert root_ts in eng._closed_thread_ids
 
 
-async def test_a_second_rebuild_does_not_duplicate_restored_proposals(db_session):
-    """`pending_proposals` is a list and step 3 appends to it without clearing.
-
-    Every unreviewed entry blocks the owning agent, so a duplicated one is not
-    cosmetic: it survives the single pop that reviewing it performs.
-    """
-    run = await factories.make_simulation_run(db_session)
-    td = await factories.make_thread_decision(
-        db_session, run=run, thread_id="1500.000100", channel="general",
-        agent_a="su", agent_b="wiseman", outcome="proposal",
-        summary_text="a shared aim",
-    )
-    await db_session.flush()
-
-    eng = _engine_for(db_session, run.id)
-    await eng._rebuild_state_from_db()
-    await eng._rebuild_agent_state()
-
-    su = eng.agents["su"]
-    assert [p.thread_id for p in su.state.pending_proposals] == [td.thread_id]
-
-    await eng._rebuild_agent_state()
-    assert [p.thread_id for p in su.state.pending_proposals] == [td.thread_id], (
-        "a second rebuild duplicated the restored proposal: "
-        f"{[p.thread_id for p in su.state.pending_proposals]}"
-    )
-
-
 async def test_a_second_rebuild_does_not_duplicate_prior_thread_context(db_session):
     """`_prior_threads` is the Phase 5 dedup context, and step 1 appends to it.
 
@@ -337,7 +309,7 @@ async def test_the_rebuild_counts_api_calls_not_rows(db_session, monkeypatch):
 async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkeypatch):
     """Step 4b clears each agent's ledger before repopulating it.
 
-    Same idempotency concern the pending_proposals and _prior_threads rebuilds above
+    Same idempotency concern the _prior_threads rebuild above
     document, applied to the sliding-window ledger: a plain, unguarded append would
     duplicate every in-window entry on a second rebuild call and could throttle an
     agent that is not actually over its allowance. Only one call site exists today
@@ -398,48 +370,6 @@ async def test_the_rebuild_ignores_another_runs_thread_decisions(db_session):
     )
 
 
-async def test_the_rebuild_ignores_another_runs_proposals(db_session):
-    """A prior run's unreviewed proposal must not bench a fresh run's agent,
-    and a prior run's collab_private proposal must not pre-finalize a
-    same-named private channel (audit F3)."""
-    run = await factories.make_simulation_run(db_session)
-    other = await factories.make_simulation_run(db_session)
-    await factories.make_thread_decision(
-        db_session, run=other, thread_id="8888.000100", channel="general",
-        agent_a="su", agent_b="wiseman", outcome="proposal",
-    )
-    await factories.make_thread_decision(
-        db_session, run=other, thread_id="8888.000200", channel="prv-su-wiseman",
-        agent_a="su", agent_b="wiseman", outcome="proposal",
-        origin_visibility="collab_private",
-    )
-    await db_session.flush()
-
-    eng = _engine_for(db_session, run.id)
-    await eng._rebuild_state_from_db()
-    await eng._rebuild_agent_state()
-
-    assert eng.agents["su"].state.pending_proposals == []
-    assert eng.agents["wiseman"].state.pending_proposals == []
-    assert "prv-su-wiseman" not in eng._finalized_private_channels
-
-
-async def test_the_rebuild_still_loads_this_runs_proposals(db_session):
-    """Positive control for the new filter."""
-    run = await factories.make_simulation_run(db_session)
-    await factories.make_thread_decision(
-        db_session, run=run, thread_id="6666.000100", channel="general",
-        agent_a="su", agent_b="wiseman", outcome="proposal",
-    )
-    await db_session.flush()
-
-    eng = _engine_for(db_session, run.id)
-    await eng._rebuild_state_from_db()
-    await eng._rebuild_agent_state()
-
-    assert [p.thread_id for p in eng.agents["su"].state.pending_proposals] == ["6666.000100"]
-
-
 async def test_a_thread_with_no_root_in_the_log_is_evicted_not_replied(
     db_session, monkeypatch
 ):
@@ -483,3 +413,36 @@ async def test_a_thread_with_no_root_in_the_log_is_evicted_not_replied(
     assert orphan_root in eng._closed_thread_ids, (
         "eviction must pin the id closed or Phase 3 re-activates it next tick"
     )
+
+
+async def test_a_resume_over_legacy_proposal_rows_restores_threads_only(db_session):
+    """Legacy outcome='proposal' decisions, their ProposalReview rows and a
+    collab_private decision are read as closed threads and nothing else — the open
+    thread still comes back, and no proposal state exists to restore."""
+    from src.models import ProposalReview
+
+    run = await factories.make_simulation_run(db_session)
+    open_ts = await _stored_thread(db_session, run, replies=2)
+    pi = await factories.make_user(db_session)
+    legacy = await factories.make_thread_decision(
+        db_session, run=run, thread_id="6666.000100", channel="general",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+        summary_text="legacy proposal",
+    )
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id="6666.000200", channel="prv-su-wiseman",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+        origin_visibility="collab_private",
+    )
+    db_session.add(ProposalReview(
+        thread_decision_id=legacy.id, agent_id="su", user_id=pi.id, rating=2,
+    ))
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert list(eng.agents["su"].state.active_threads) == [open_ts]
+    assert {"6666.000100", "6666.000200"} <= eng._closed_thread_ids
+    assert not hasattr(eng.agents["su"].state, "pending_proposals")

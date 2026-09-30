@@ -23,7 +23,6 @@ import pytest
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
-from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests.fakes import FakeSlackClient
 
 CH_NAME = "general"
@@ -88,25 +87,6 @@ async def test_a_failed_history_fetch_does_not_leave_the_cursor_at_zero():
     assert len(eng.message_log) == 0, (
         "the first poll re-imported the back catalogue: "
         f"{[e.content for e in eng.message_log._entries]}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_private_channel_with_no_member_bot_does_not_leave_the_cursor_at_zero():
-    """The third path to a "0" cursor, which the earlier write-up missed."""
-    client = _Client(agent_id="wang")
-    eng = _engine({"wang": client})
-    eng._channel_id_map = {"priv-x": "G_priv_x"}
-    eng._channel_visibility = {"priv-x": VISIBILITY_COLLAB_PRIVATE}
-    # A member bot that is not among the connected clients: _client_for_channel
-    # returns None and the seed used to `continue`.
-    eng._private_channel_members["G_priv_x"] = {"absent"}
-
-    await eng._seed_slack_cursors_without_ingest()
-
-    assert eng._poll_cursors.get("G_priv_x", "0") != "0", (
-        "a private channel with no connected member bot kept a 0 cursor, so "
-        "the first tick that DOES have a member bot re-imports all of it"
     )
 
 

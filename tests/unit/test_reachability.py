@@ -113,8 +113,8 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
     # unauthenticated inventory of every path and form field back on the public
     # internet — see test_public_routes.py::test_the_openapi_schema_is_not_public.
     #
-    # /api/health is no longer allowlisted here (issue #25 P1, badge-middleware
-    # short-circuit): AgentBadgeMiddleware.dispatch now compares request.url.path
+    # /api/health is no longer allowlisted here (issue #25 P1, middleware
+    # short-circuit): PostHogContextMiddleware.dispatch compares request.url.path
     # against the literal string "/api/health", which makes src_referenced_paths()
     # pick it up as src/-referenced — genuinely so, not a false positive.
     ("GET", "/admin"): (

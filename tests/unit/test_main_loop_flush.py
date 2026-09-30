@@ -54,8 +54,7 @@ def _instrument(eng, monkeypatch):
     async def _noop(*a, **kw):
         return None
 
-    for name in ("_poll_slack_for_bot_messages", "_poll_inbound_from_db",
-                 "_sync_private_channels_from_db", "_sync_roster_from_db"):
+    for name in ("_poll_slack_for_bot_messages", "_sync_roster_from_db"):
         monkeypatch.setattr(eng, name, _noop)
     monkeypatch.setattr(eng, "_sync_profiles_from_disk", lambda *a, **kw: None)
 

@@ -33,8 +33,9 @@ BOT_SCOPES = [
     "channels:manage",    # conversations.create
     "channels:read",      # conversations.list
     "chat:write",         # chat.postMessage / chat.delete
-    # History and replies in collab_private channels, which the engine still polls
-    # (_sync_private_channels_from_db). Listing private channels would also need
+    # History and replies in collab_private channels. Nothing reads private channels
+    # any more (the private-channel sync was retired); the scope stays so every app
+    # manifest keeps the same scope set. Listing private channels would also need
     # groups:read, and no caller lists them:
     # https://docs.slack.dev/reference/scopes/groups.read
     "groups:history",

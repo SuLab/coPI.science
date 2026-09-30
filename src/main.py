@@ -1,20 +1,17 @@
 """FastAPI application factory for CoPI/LabAgent."""
 
 import logging
-import uuid
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import PlainTextResponse
 
 from src.agent.ids import WRITER_WEB, set_default_writer_id
 from src.config import get_settings
-from src.database import get_session_factory
 from src.routers import (
     admin,
     agent_page,
@@ -146,7 +143,7 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
     Added LAST in create_app(), because Starlette's ``add_middleware``
     *prepends*: last added is outermost. Outermost is both correct and cheaper
     here — this reads headers only and needs no session, so it refuses before
-    AgentBadgeMiddleware opens a connection and runs its per-agent COUNTs.
+    the session is decoded or any route runs.
 
     Not affected, verified rather than assumed: the ORCID callback is a GET;
     there is no inbound Slack POST route; ``POST /api/proposal-vote`` takes a
@@ -226,92 +223,21 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class AgentBadgeMiddleware(BaseHTTPMiddleware):
-    """Inject unreviewed proposal count into request.state for nav badge."""
+class PostHogContextMiddleware(BaseHTTPMiddleware):
+    """Put the PostHog project key on ``request.state`` for ``templates/base.html``.
+
+    ``base.html`` renders the PostHog snippet only when
+    ``request.state.posthog_api_key`` is truthy, and nothing else sets it.
+
+    Asset and health probes render no page, so they skip the settings read —
+    nginx has no ``location /static`` block, so every asset reaches uvicorn.
+    """
 
     async def dispatch(self, request: Request, call_next):
-        # Asset and health probes carry no nav and need no badge; without this
-        # guard every /static request with a session cookie ran the per-agent
-        # COUNT queries below (issue #25 P1 — nginx has no location /static
-        # block, so they all reach uvicorn).
         path = request.url.path
         if path.startswith("/static/") or path == "/api/health":
             return await call_next(request)
         request.state.posthog_api_key = get_settings().posthog_api_key
-        request.state.agent_badge_count = 0
-        user_id_str = request.session.get("user_id") if "session" in request.scope else None
-        if user_id_str:
-            try:
-                from src.models import (
-                    AgentDelegate,
-                    AgentRegistry,
-                    ProposalReview,
-                    ThreadDecision,
-                    User,
-                )
-                session_factory = get_session_factory()
-                async with session_factory() as db:
-                    uid = uuid.UUID(user_id_str)
-
-                    # Honor the impersonate cookie only for admins — it is an
-                    # unsigned client cookie, so without this gate any logged-in
-                    # user could read another user's badge count (SEC-12). This
-                    # mirrors the is_admin check in get_current_user. The extra
-                    # query runs only when the cookie is actually present.
-                    impersonate_id = request.cookies.get("copi-impersonate")
-                    if impersonate_id:
-                        is_admin = await db.scalar(
-                            select(User.is_admin).where(User.id == uid)
-                        )
-                        if is_admin:
-                            try:
-                                uid = uuid.UUID(impersonate_id)
-                            except ValueError:
-                                pass
-
-                    # Get all agent_ids the user has access to (own + delegated)
-                    own_result = await db.execute(
-                        select(AgentRegistry.agent_id).where(
-                            AgentRegistry.user_id == uid,
-                            AgentRegistry.status == "active",
-                        )
-                    )
-                    delegated_result = await db.execute(
-                        select(AgentRegistry.agent_id)
-                        .join(AgentDelegate, AgentDelegate.agent_registry_id == AgentRegistry.id)
-                        .where(
-                            AgentDelegate.user_id == uid,
-                            AgentRegistry.status == "active",
-                        )
-                    )
-                    agent_ids = [r[0] for r in own_result] + [r[0] for r in delegated_result]
-
-                    if agent_ids:
-                        badge_count = 0
-                        for aid in agent_ids:
-                            total_result = await db.execute(
-                                select(func.count(ThreadDecision.id)).where(
-                                    ThreadDecision.outcome == "proposal",
-                                    (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
-                                )
-                            )
-                            total = total_result.scalar() or 0
-                            reviewed_result = await db.execute(
-                                select(func.count(ProposalReview.id)).where(
-                                    ProposalReview.agent_id == aid
-                                )
-                            )
-                            reviewed = reviewed_result.scalar() or 0
-                            badge_count += max(0, total - reviewed)
-                        request.state.agent_badge_count = badge_count
-            except Exception as exc:
-                # Deliberately swallowed: this middleware only computes a nav
-                # badge count, and no page should 500 because a count failed.
-                # But it is LOGGED — the last bare `except Exception: pass` in
-                # src/ hid a dead import in invite.py for an unknown length of
-                # time (the delegate Slack sync never ran once), so a silent
-                # swallow here would hide a broken query just as well.
-                logger.warning("Badge-count middleware failed, continuing: %s", exc)
         return await call_next(request)
 
 
@@ -360,8 +286,9 @@ def create_app() -> FastAPI:
     # to be registered in both routers' template setup.
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
 
-    # Agent badge middleware (added first so it runs inside session middleware)
-    application.add_middleware(AgentBadgeMiddleware)
+    # PostHog context (added first, so it runs innermost, inside the session
+    # middleware).
+    application.add_middleware(PostHogContextMiddleware)
 
     # Session middleware (signed cookies via itsdangerous)
     application.add_middleware(
@@ -376,7 +303,7 @@ def create_app() -> FastAPI:
     # CSRF guard. Added LAST, so it is the OUTERMOST middleware: Starlette's
     # add_middleware prepends. It reads headers only and needs no session, so
     # running it outside SessionMiddleware is both correct and cheaper — a
-    # forged POST is refused before AgentBadgeMiddleware opens a connection.
+    # forged POST is refused before the session middleware decodes a cookie.
     #
     # Outermost is a REQUIREMENT, not a preference, and no request-level
     # assertion can see it (a refused request never modifies the session, so

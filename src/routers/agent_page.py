@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 import uuid
 from datetime import UTC
 
@@ -10,7 +9,6 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select, tuple_
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,10 +18,7 @@ from src.models import (
     AgentDelegate,
     AgentMessage,
     AgentRegistry,
-    LlmCallLog,
-    ProposalReview,
     ResearcherProfile,
-    ThreadDecision,
     User,
 )
 from src.services.agent_identity import derive_agent_identity
@@ -63,41 +58,6 @@ async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
         )
     )
     return sorted({r[0] for r in ch_rows} | {"general"})
-
-
-def _extract_proposal_title(text: str | None) -> str:
-    """Best-effort one-line title for a proposal summary.
-
-    Proposal summaries open with a ":memo: Summary" header in many shapes
-    (``:memo: Summary``, ``:memo: **Summary**``, ``:memo: **Summary — Foo**``,
-    ``Summary:`` …). Strip that boilerplate so the dashboard shows the real
-    subject — the title following a ``Summary —`` separator, or the first real
-    content line — instead of the literal ":memo: Summary".
-    """
-    if not text:
-        return "Collaboration Proposal"
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Drop a leading :memo: / 📝 marker, a markdown heading prefix, and
-        # surrounding bold markers.
-        line = re.sub(r"^\s*(?::memo:|📝)\s*", "", line)
-        line = re.sub(r"^#+\s*", "", line)
-        line = line.replace("**", "").strip()
-        if not line:
-            continue
-        # If this is the "Summary" header, use any title that follows a
-        # separator on the same line; otherwise treat the header as noise and
-        # keep scanning for the first real content line.
-        m = re.match(r"(?i)^summary\b\s*[—–\-:+.]*\s*(.*)$", line)
-        if m:
-            rest = m.group(1).strip()
-            if rest and re.search(r"\w", rest):
-                return rest[:120]
-            continue
-        return line[:120]
-    return "Collaboration Proposal"
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -147,8 +107,8 @@ async def agent_landing(
     all_agents.extend(delegated_agents)
 
     # Auto-redirect if exactly one agent and it can reach the dashboard.
-    # Inactive agents are included: their owner can still review existing
-    # proposals (the dashboard itself gates reopen + active-only settings).
+    # Inactive agents are included: their owner can still see the read-only
+    # dashboard (the dashboard template gates the active-only settings).
     if len(all_agents) == 1 and all_agents[0].status in ("active", "inactive"):
         return RedirectResponse(
             url=f"/agent/{all_agents[0].agent_id}/dashboard", status_code=302
@@ -202,13 +162,12 @@ async def agent_dashboard(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Agent dashboard — shows stats, proposals, and settings.
+    """Agent dashboard — stats, delegates and settings.
 
-    Inactive agents are allowed in (read + rate existing proposals only): they
-    are parked from simulation runs but their owner should still be able to
-    review proposals generated before inactivation. ``pending``/``suspended``
-    agents stay gated out. The reopen action and the active-only settings are
-    gated separately (see ``reopen_proposal`` and the dashboard template).
+    Inactive agents are allowed in (read-only): they are parked from
+    simulation runs but their owner can still see the dashboard.
+    ``pending``/``suspended`` agents stay gated out. The active-only settings
+    are gated in the template.
     """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
@@ -234,75 +193,6 @@ async def agent_dashboard(
         )
     )
     threads_count = threads_count_result.scalar() or 0
-
-    # Proposals where this agent is involved
-    proposals_result = await db.execute(
-        select(ThreadDecision)
-        .where(
-            ThreadDecision.outcome == "proposal",
-            (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
-        )
-        .order_by(ThreadDecision.decided_at.desc())
-    )
-    proposals = proposals_result.scalars().all()
-
-    # Get existing reviews by this agent
-    reviewed_ids_result = await db.execute(
-        select(ProposalReview.thread_decision_id).where(
-            ProposalReview.agent_id == aid
-        )
-    )
-    reviewed_ids = {r[0] for r in reviewed_ids_result}
-
-    # Separate into reviewed and unreviewed
-    unreviewed = []
-    reviewed = []
-    for p in proposals:
-        other = p.agent_b if p.agent_a == aid else p.agent_a
-        title = _extract_proposal_title(p.summary_text)
-        entry = {"proposal": p, "other_agent": other, "title": title}
-        if p.id in reviewed_ids:
-            rev_result = await db.execute(
-                select(ProposalReview).where(
-                    ProposalReview.thread_decision_id == p.id,
-                    ProposalReview.agent_id == aid,
-                )
-            )
-            entry["review"] = rev_result.scalar_one_or_none()
-            reviewed.append(entry)
-        else:
-            # Fetch discussion: one entry per actual Slack message in this thread.
-            # LlmCallLog logs every API call; tool-use chains produce multiple entries
-            # per turn with empty/partial response_text. Fix: filter blanks, then
-            # collapse consecutive same-agent entries (keep the last/fullest one).
-            disc_result = await db.execute(
-                select(LlmCallLog.agent_id, LlmCallLog.response_text, LlmCallLog.created_at)
-                .where(
-                    LlmCallLog.channel == p.channel,
-                    LlmCallLog.phase == "thread_reply",
-                    LlmCallLog.agent_id.in_([p.agent_a, p.agent_b]),
-                    LlmCallLog.created_at <= p.decided_at,
-                    func.length(LlmCallLog.response_text) > 10,
-                )
-                .order_by(LlmCallLog.created_at.asc())
-            )
-            raw_msgs = [
-                {
-                    "agent_id": r[0],
-                    "text": re.sub(r"</?slack_message>", "", r[1]).strip(),
-                    "ts": r[2].isoformat(),
-                }
-                for r in disc_result
-                if r[1] and r[1].strip()
-            ]
-            deduped: list[dict] = []
-            for msg in raw_msgs:
-                if deduped and deduped[-1]["agent_id"] == msg["agent_id"]:
-                    deduped[-1] = msg
-                else:
-                    deduped.append(msg)
-            entry["discussion"] = deduped
-            unreviewed.append(entry)
 
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
@@ -359,9 +249,6 @@ async def agent_dashboard(
             is_owner=is_owner,
             posts_count=posts_count,
             threads_count=threads_count,
-            proposals_total=len(proposals),
-            unreviewed=unreviewed,
-            reviewed=reviewed,
             slack_invite_url=SLACK_INVITE_URL,
             slack_error=slack_error,
             delegates=delegates,
@@ -426,327 +313,6 @@ async def request_agent(
 
 
 # --------------------------------------------------------------------------
-# Proposal review
-# --------------------------------------------------------------------------
-
-# The one IntegrityError the two proposal routes answer as a redirect: a second
-# review/reopen for the same (decision, agent) losing the race to the first.
-_REVIEW_UNIQUE_CONSTRAINT = "uq_proposal_reviews_decision_agent"
-
-
-def _constraint_name(exc: IntegrityError) -> str | None:
-    """The server-reported constraint name behind ``exc``, if the driver carries one."""
-    orig = exc.orig
-    for candidate in (getattr(orig, "__cause__", None), orig):
-        name = getattr(candidate, "constraint_name", None)
-        if name:
-            return name
-    return None
-
-
-async def _refuse_integrity_error(
-    db: AsyncSession, exc: IntegrityError, action: str, decision_id: uuid.UUID, agent_id: str,
-) -> HTTPException:
-    """Roll back and answer 500 for an integrity failure that is NOT the lost race.
-
-    Logged by constraint name only, then raised as a plain 500: letting the
-    ``IntegrityError`` itself escape would put its SQL parameters (the PI's
-    guidance text, names) into the server's traceback log. Callers pass the
-    route's ``agent_id`` path parameter, never an ORM attribute: the failed flush
-    has expired every loaded object, and reading one here would try to reload it
-    inside the dead transaction.
-    """
-    await db.rollback()
-    logger.error(
-        "%s of decision %s by agent %s failed on constraint %s; rolled back",
-        action, decision_id, agent_id, _constraint_name(exc) or "<unnamed>",
-    )
-    return HTTPException(status_code=500, detail="Internal Server Error")
-
-
-def _is_lost_review_race(exc: IntegrityError) -> bool:
-    """True only when ``exc`` is a violation of ``uq_proposal_reviews_decision_agent``.
-
-    Under the asyncpg dialect, ``exc.orig`` is SQLAlchemy's DBAPI adapter
-    exception, raised ``from`` the asyncpg exception, which carries the
-    server-reported ``constraint_name``. The message text is the fallback for a
-    driver error that carries no name. Any other integrity failure (an FK
-    violation, an ``agent_messages`` collision) is not a lost race and must not
-    be answered as success.
-    """
-    name = _constraint_name(exc)
-    if name:
-        return name == _REVIEW_UNIQUE_CONSTRAINT
-    return _REVIEW_UNIQUE_CONSTRAINT in str(exc.orig)
-
-
-@router.post("/{agent_id}/proposals/{thread_decision_id}/review")
-async def review_proposal(
-    agent_id: str,
-    thread_decision_id: uuid.UUID,
-    request: Request,
-    rating: int = Form(...),
-    comment: str = Form(""),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Rate a proposal (1-4).
-
-    Allowed for both ``active`` and ``inactive`` agents — rating is passive
-    (it only records a ``ProposalReview`` row, no Slack side effects), so an
-    inactive agent's owner can still review proposals generated before the
-    agent was parked.
-    """
-    if rating < 1 or rating > 4:
-        raise HTTPException(status_code=400, detail="Rating must be 1-4")
-
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-
-    if agent.user_id is None:
-        # Orphaned agent (deletion audit F9): save would build
-        # ResearcherProfile(user_id=None) and review/reopen would build
-        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
-        # replaying a POST as a redirect would just hide the state.
-        raise HTTPException(
-            status_code=409,
-            detail="This lab is no longer linked to a PI account",
-        )
-
-    if agent.status not in ("active", "inactive"):
-        raise HTTPException(status_code=403, detail="Agent is not active")
-
-    td_result = await db.execute(
-        select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
-    )
-    td = td_result.scalar_one_or_none()
-    if not td:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    if agent.agent_id not in (td.agent_a, td.agent_b):
-        raise HTTPException(status_code=403, detail="Not your proposal")
-    if td.outcome != "proposal":
-        # A 'no_proposal'/'timeout' decision has nothing to rate.
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    # A review is terminal per (decision, agent). A sequential duplicate (stale
-    # page, Back button) is answered exactly like a lost race below: a redirect
-    # to the dashboard, which already shows the recorded review.
-    existing = await db.execute(
-        select(ProposalReview).where(
-            ProposalReview.thread_decision_id == thread_decision_id,
-            ProposalReview.agent_id == agent.agent_id,
-        )
-    )
-    if existing.scalar_one_or_none():
-        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-    review = ProposalReview(
-        thread_decision_id=thread_decision_id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,  # Always the PI
-        delegate_user_id=current_user.id if not is_owner else None,
-        reviewed_by_user_id=current_user.id,
-        rating=rating,
-        comment=comment.strip() or None,
-        submitted_via="web",
-    )
-    db.add(review)
-
-    try:
-        # Record engagement and mark any outstanding email notification as
-        # responded. These run inside the same try as the commit — and MUST,
-        # because their SELECTs trigger SQLAlchemy's autoflush of the pending
-        # ProposalReview insert above, so on a lost race the IntegrityError
-        # can surface here rather than at the explicit commit() below.
-        from src.services.email_notifications import mark_notification_responded, record_engagement
-        await record_engagement(current_user.id, db)
-        await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
-
-        await db.commit()
-    except IntegrityError as exc:
-        if not _is_lost_review_race(exc):
-            raise await _refuse_integrity_error(
-                db, exc, "Review", thread_decision_id, agent_id
-            ) from None
-        logger.warning(
-            "Lost the race on %s for decision %s, agent %s: another review or "
-            "reopen committed first; this request's rating was discarded",
-            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent_id,
-        )
-        # Lost the race on uq_proposal_reviews_decision_agent (double-click,
-        # two tabs): a review for this decision+agent now exists. The
-        # rollback also discards THIS request's record_engagement /
-        # mark_notification_responded writes — correct, because the winning
-        # racer performed its own. The loser redirects like the winner and like
-        # the SELECT guard above answers a sequential duplicate.
-        await db.rollback()
-        return RedirectResponse(
-            url=f"/agent/{agent_id}/dashboard", status_code=302
-        )
-
-    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-
-@router.post("/{agent_id}/proposals/{thread_decision_id}/reopen")
-async def reopen_proposal(
-    agent_id: str,
-    thread_decision_id: uuid.UUID,
-    request: Request,
-    guidance: str = Form(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Record the PI's guidance on a proposal and mark it reopened.
-
-    The guidance is written into the proposal's origin thread's DB inbox —
-    visible on the read-only ``/conversations`` page — and a rating=0
-    ``ProposalReview`` is filed so the dashboard stops treating the proposal as
-    unreviewed. Nothing re-engages the bot: the 2026-08-12 PI-interaction
-    removal cycle deleted both the Slack post this route used to make (a bot
-    token no longer changes what happens here) and the engine-side consumers
-    that would have treated the posted text as authoritative
-    (``has_pi_directive``/``pi_priority``/``pi_context`` are gone from
-    ``src/agent/state.py``; the guidance can never set a bot's pending state
-    (``MessageLog.has_new_reply_from_other`` filters human rows
-    unconditionally; the scheduler has no reactive-priority tier for it to
-    reach), and it can never activate a new thread either
-    (``SimulationEngine._phase3_activate_threads`` filters human rows before
-    acting on them) — see ``src/agent/message_log.py`` /
-    ``src/agent/simulation.py``). This route
-    never creates a NEW collab_private channel either: the engine-side
-    private-channel collaboration/refinement flow
-    (``src/services/private_channels.py``) was deleted in the same audit wave
-    (fix 9 — "private-channel collaboration is out"; see
-    docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8/§15).
-    See specs/pi-interaction.md §"PI Reopens a Proposal" and
-    specs/privacy-and-channel-visibility.md §Migration Rule for the
-    now-inapplicable design intent those specs still describe.
-    """
-    guidance = guidance.strip()
-    if not guidance:
-        raise HTTPException(status_code=400, detail="Guidance text is required")
-
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-
-    if agent.user_id is None:
-        # Orphaned agent (deletion audit F9): save would build
-        # ResearcherProfile(user_id=None) and review/reopen would build
-        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
-        # replaying a POST as a redirect would just hide the state.
-        raise HTTPException(
-            status_code=409,
-            detail="This lab is no longer linked to a PI account",
-        )
-
-    # Blocked while the agent is inactive, matching every other write path that
-    # touches a live agent's workspace. Reactivate the agent to reopen
-    # proposals for further discussion. (Unlike `review`, this requires
-    # status == 'active'.)
-    if agent.status != "active":
-        raise HTTPException(
-            status_code=403,
-            detail="This agent is inactive. Reactivate it to reopen proposals "
-            "for further discussion.",
-        )
-
-    td_result = await db.execute(
-        select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
-    )
-    td = td_result.scalar_one_or_none()
-    if not td:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    if agent.agent_id not in (td.agent_a, td.agent_b):
-        raise HTTPException(status_code=403, detail="Not your proposal")
-    if td.outcome != "proposal":
-        # A 'no_proposal'/'timeout' decision has nothing to reopen.
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    # Idempotency guard. A proposal is reopened at most once per agent: the
-    # dashboard hides the reopen form once a review/reopen exists, but a stale
-    # page or the browser Back button can replay this POST. Without a guard the
-    # replay would re-post the guidance into the origin thread a second time. A
-    # reopen writes a rating=0 ProposalReview in the same commit as its post, so
-    # the presence of *any* review by this agent means the proposal was already
-    # acted on — treat the resubmission as a no-op and redirect without
-    # writing a second inbox row.
-    already_reviewed = (await db.execute(
-        select(ProposalReview).where(
-            ProposalReview.thread_decision_id == thread_decision_id,
-            ProposalReview.agent_id == agent.agent_id,
-        )
-    )).scalar_one_or_none()
-    if already_reviewed is not None:
-        logger.info(
-            "Ignoring duplicate reopen of proposal %s by %s "
-            "(existing review id=%s, refined_in_channel=%s)",
-            td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
-        )
-        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-    # Post the guidance directly into the origin thread's DB inbox. This is
-    # the only path now: no Slack post (removed 2026-08-12 — the engine has no
-    # PI-bot interaction surface left for it to reach), and no collab_private
-    # migration branch, regardless of td.origin_visibility -- see the
-    # docstring above for why.
-    from src.services.pi_inbox import get_latest_run_id, record_pi_message
-    run_id = await get_latest_run_id(db)
-    if run_id:
-        await record_pi_message(
-            db, run_id=run_id, channel_name=td.channel,
-            content=f"PI guidance from {current_user.name}: {guidance}",
-            sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
-        )
-
-    # Added unconditionally: the guard above already returned if a review
-    # exists, so on a concurrent reopen this insert is what collides on
-    # uq_proposal_reviews_decision_agent, and the loser's rollback below takes
-    # its inbox row with it.
-    review = ProposalReview(
-        thread_decision_id=thread_decision_id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,  # Always the PI
-        delegate_user_id=current_user.id if not is_owner else None,
-        reviewed_by_user_id=current_user.id,
-        rating=0,  # 0 = reopened with guidance, not a rating
-        comment=f"[Reopened] {guidance[:500]}",
-        submitted_via="web",
-    )
-    db.add(review)
-
-    try:
-        # Inside the try for the same reason as in review_proposal: these
-        # helpers' SELECTs autoflush the pending inserts, so a lost race can
-        # raise here rather than at commit().
-        from src.services.email_notifications import mark_notification_responded, record_engagement
-        await record_engagement(current_user.id, db)
-        await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
-
-        await db.commit()
-    except IntegrityError as exc:
-        if not _is_lost_review_race(exc):
-            raise await _refuse_integrity_error(
-                db, exc, "Reopen", thread_decision_id, agent_id
-            ) from None
-        # Lost the race to another review or reopen by this agent (double-click,
-        # two tabs, or a rating submitted at the same moment): the winner's row
-        # is committed, and the rollback discards this request's inbox row and
-        # therefore the PI's guidance. The WARNING is the only record of that.
-        logger.warning(
-            "Lost the race on %s for decision %s, agent %s: another review or "
-            "reopen committed first; this request's reopen guidance was discarded",
-            _REVIEW_UNIQUE_CONSTRAINT, thread_decision_id, agent_id,
-        )
-        await db.rollback()
-        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-    # Logged only once the commit has landed, so it never reports guidance a
-    # rollback discarded.
-    if run_id:
-        logger.info("Reopen guidance for %s written to DB inbox", td.thread_id)
-
-    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-
-# --------------------------------------------------------------------------
 # Conversations (DB-inbox messaging; Slack-independent)
 # --------------------------------------------------------------------------
 
@@ -767,14 +333,14 @@ async def agent_conversations(
     See specs/local-db-conversations.md.
     """
     from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.pi_inbox import get_latest_run_id
+    from src.services.runs import latest_run_id
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         return RedirectResponse(url="/agent", status_code=302)
     aid = agent.agent_id
 
-    run_id = await get_latest_run_id(db)
+    run_id = await latest_run_id(db)
     channels: list[str] = []
     messages: list[dict] = []
     if run_id:
@@ -895,14 +461,14 @@ async def agent_thread_replies(
     parity.
     """
     from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.pi_inbox import get_latest_run_id
+    from src.services.runs import latest_run_id
 
     agent, _is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         raise HTTPException(status_code=404)
     aid = agent.agent_id
 
-    run_id = await get_latest_run_id(db)
+    run_id = await latest_run_id(db)
     if not run_id:
         raise HTTPException(status_code=404)
 
@@ -1056,8 +622,7 @@ async def save_public_profile(
 
     if agent.user_id is None:
         # Orphaned agent (deletion audit F9): save would build
-        # ResearcherProfile(user_id=None) and review/reopen would build
-        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
+        # ResearcherProfile(user_id=None), a NOT NULL column. Refuse loudly;
         # replaying a POST as a redirect would just hide the state.
         raise HTTPException(
             status_code=409,

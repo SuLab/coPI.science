@@ -7,14 +7,12 @@ See specs/local-db-conversations.md.
 
 import asyncio
 import time
-from datetime import timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from src.agent.message_log import LogEntry
 from src.agent.simulation import (
-    PI_INBOX_LOOKBACK_S,
     REBUILD_WINDOW_S,
     SimulationEngine,
 )
@@ -145,7 +143,6 @@ async def test_concurrent_writers_both_persist_at_the_same_instant(db_session, m
         TsMinter,
         set_default_writer_id,
     )
-    from src.services.pi_inbox import record_pi_message
 
     run = await factories.make_simulation_run(db_session)
 
@@ -165,102 +162,22 @@ async def test_concurrent_writers_both_persist_at_the_same_instant(db_session, m
     )]
     await engine._flush_persisted()
 
-    # The web app's writer, minting at the same frozen instant.
-    pi_msg = await record_pi_message(
-        db_session, run_id=run.id, channel_name="general",
-        content="PI: please pivot to aging biology", sender_name="Dr Human (PI)",
-    )
-    await db_session.flush()
+    # The web process's writer slot, minting at the same frozen instant.
+    from src.agent.ids import mint_local_ts
 
-    assert pi_msg.message_ts != bot_ts
+    web_ts = mint_local_ts()
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, channel_name="general",
+        message_ts=web_ts, content="PI: please pivot to aging biology",
+        is_bot=False, posted_at=float(web_ts),
+    )
+
+    assert web_ts != bot_ts
     rows = (await db_session.execute(select(AgentMessage).where(
         AgentMessage.simulation_run_id == run.id,
     ))).scalars().all()
     contents = {r.content for r in rows}
     assert contents == {"BOT MESSAGE", "PI: please pivot to aging biology"}
-
-
-# ---------------------------------------------------------------
-# H2 — the inbox pollers must not skip a row that committed below the cursor
-# (the stamp is written at row creation, so a late-committing PI row lands below
-# a cursor already advanced past it).
-# ---------------------------------------------------------------
-
-async def test_inbound_poller_ingests_pi_row_committed_below_cursor(db_session):
-    run = await factories.make_simulation_run(db_session)
-    engine = _engine_for(db_session, run.id)
-    # A PI row whose stamp is *below* the cursor but within the lookback window —
-    # the H2 race. The old `> cursor` filter skipped it forever.
-    below_ts = "1700000150.000000"
-    row = await factories.make_agent_message(
-        db_session, run=run, agent_id=None, is_bot=False,
-        channel_id="local:general", channel_name="general",
-        message_ts=below_ts, posted_at=float(below_ts),
-        content="late-committed PI message", sender_name="PI",
-    )
-    await db_session.refresh(row)
-    # The cursor has already advanced (engine flushed its own later message).
-    # Derived from the row's own created_at so the assertion doesn't depend on
-    # this process's clock matching the DB server's — the point of R3.
-    engine._pi_inbox_cursor = row.created_at + timedelta(seconds=50)
-
-    await engine._poll_inbound_from_db()
-
-    entry = engine.message_log.get_entry(below_ts)
-    assert entry is not None
-    assert entry.content == "late-committed PI message"
-
-
-async def test_inbound_poller_skips_row_older_than_lookback(db_session):
-    # Bounds the re-scan: a row far below the lookback floor is not re-queried.
-    run = await factories.make_simulation_run(db_session)
-    engine = _engine_for(db_session, run.id)
-    ancient_ts = "1700000000.000000"
-    row = await factories.make_agent_message(
-        db_session, run=run, agent_id=None, is_bot=False,
-        channel_id="local:general", channel_name="general",
-        message_ts=ancient_ts, posted_at=float(ancient_ts),
-        content="ancient", sender_name="PI",
-    )
-    await db_session.refresh(row)
-    engine._pi_inbox_cursor = row.created_at + timedelta(
-        seconds=PI_INBOX_LOOKBACK_S + 100
-    )
-    await engine._poll_inbound_from_db()
-    assert engine.message_log.get_entry(ancient_ts) is None
-
-
-async def test_inbound_poller_delivers_a_row_from_a_skewed_writer_clock(db_session):
-    # R3: a writer whose clock is far behind the engine's stamps posted_at well
-    # below the cursor. Paging over created_at (the DB server's clock) delivers
-    # it anyway; the old posted_at cursor dropped it silently and forever.
-    run = await factories.make_simulation_run(db_session)
-    engine = _engine_for(db_session, run.id)
-
-    recent = await factories.make_agent_message(
-        db_session, run=run, agent_id="su", is_bot=True,
-        channel_id="local:general", channel_name="general",
-        message_ts="1700009000.000000", posted_at=1700009000.0,
-        content="engine post", sender_name="SuBot",
-    )
-    await db_session.refresh(recent)
-    engine._pi_inbox_cursor = recent.created_at
-
-    skewed_ts = "1600000000.000000"  # ~3 years of clock skew
-    skewed = await factories.make_agent_message(
-        db_session, run=run, agent_id=None, is_bot=False,
-        channel_id="local:general", channel_name="general",
-        message_ts=skewed_ts, posted_at=float(skewed_ts),
-        content="PI message from a skewed host", sender_name="PI",
-    )
-    await db_session.refresh(skewed)
-    assert skewed.posted_at < engine._pi_inbox_cursor.timestamp() - PI_INBOX_LOOKBACK_S
-
-    await engine._poll_inbound_from_db()
-
-    entry = engine.message_log.get_entry(skewed_ts)
-    assert entry is not None
-    assert entry.content == "PI message from a skewed host"
 
 
 # ---------------------------------------------------------------

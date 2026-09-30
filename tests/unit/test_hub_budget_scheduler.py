@@ -67,8 +67,6 @@ def _engine(agent_ids, budget_cap=0):
 # loop-level test stubs the lot and keeps only the scheduling behaviour.
 _TICK_IO = (
     "_poll_slack_for_bot_messages",
-    "_poll_inbound_from_db",
-    "_sync_private_channels_from_db",
     "_sync_roster_from_db",
     "_flush_persisted",
     "_flush_llm_logs",

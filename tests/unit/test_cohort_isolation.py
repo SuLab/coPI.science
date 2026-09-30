@@ -757,7 +757,7 @@ class TestReadPathInventory:
 
 class TestDbPrimaryPaths:
     def test_ingestion_is_complete_while_reads_are_filtered(self):
-        """_poll_inbound_from_db feeds a log shared by every agent. The shared log
+        """The DB rebuild feeds a log shared by every agent. The shared log
         must stay complete; only the per-agent read is filtered."""
         log = MessageLog()
         log.append(_post("1", "general", "wiseman", "WisemanBot", "a"))
@@ -774,7 +774,7 @@ class TestDbPrimaryPaths:
         assert len(gated) == 1 and len(ungated) == 2
 
     def test_null_agent_id_bot_row_does_not_leak(self):
-        """The shape _poll_inbound_from_db produces from a nullable agent_id."""
+        """The shape the DB rebuild produces from a nullable agent_id."""
         log = MessageLog()
         log.append(_post("1", "general", None, "bot", "unattributable", is_bot=True))
         got = log.get_new_top_level_posts(

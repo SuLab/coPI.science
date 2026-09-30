@@ -71,11 +71,6 @@
                     <a href="/agent" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium relative
                         {% if active_page == 'agent' %}text-indigo-600 font-semibold{% endif %}">
                         My Agent
-                        {% if request.state.agent_badge_count is defined and request.state.agent_badge_count > 0 %}
-                        <span class="absolute -top-1 -right-1 bg-amber-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                            {{ request.state.agent_badge_count }}
-                        </span>
-                        {% endif %}
                     </a>
                     {% endif %}
                     {% if current_user.is_admin and not impersonation_banner %}

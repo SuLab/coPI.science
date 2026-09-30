@@ -140,10 +140,9 @@ async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
     ``proposal_reviews`` reads were the exception until 2026-08-28 and are now
     filtered too.
 
-    ONE read was not run-scoped and had to be fixed alongside this, or "delete
-    nothing" would be strictly worse than the bug: see
-    ``SimulationEngine._sync_private_channels_from_db``, which without its run
-    filter would hand a brand-new run every previous run's private channels.
+    ONE read was not run-scoped and had to be fixed alongside this: the
+    private-channel sync, since retired, which without its run filter handed a
+    brand-new run every previous run's private channels.
 
     Working memory is handled by the caller: ``--fresh`` archives
     ``profiles/memory/*`` to ``profiles/memory/archive/<stamp>/`` (see

@@ -405,8 +405,8 @@ async def _load_posting_tokens(db) -> dict[str, str]:
 
 async def _load_channel_id_map(db, run_id: uuid.UUID) -> dict[str, str]:
     """``channel_name`` -> ``channel_id`` for this run, mirroring the engine's
-    own ``self._channel_id_map`` (``SimulationEngine._sync_private_channels_from_db``
-    and its seeded-channel counterpart) — used only to resolve a permalink
+    own ``self._channel_id_map`` (``SimulationEngine._persist_seeded_channels``
+    and ``_rebuild_state_from_db``) — used only to resolve a permalink
     for the row's own interview channel, never to post to it.
     """
     rows = (await db.execute(

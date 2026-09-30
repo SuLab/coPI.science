@@ -45,11 +45,11 @@ from src.models import (
     Job,
     LlmCallLog,
     OpportunityAssessment,
+    ProposalReview,
     ResearcherProfile,
     SimulationCommand,
     SimulationProcessStatus,
     SimulationRun,
-    ThreadDecision,
     User,
 )
 from src.services import display_format as fmt
@@ -672,13 +672,34 @@ async def admin_discussions(
             if not d or not d.summary_text:
                 continue
             proposals.append({
+                "decision_id": d.id,
                 "channel": t["channel_name"],
                 "agent_a": d.agent_a,
                 "agent_b": d.agent_b,
                 "outcome": d.outcome,
                 "date": d.decided_at.strftime("%Y-%m-%d %H:%M UTC"),
                 "summary": d.summary_text.strip(),
+                "reviews": [],
             })
+
+        # Historical PI reviews of legacy proposals. The review routes are
+        # retired and the discussions page no longer shows them, so the export
+        # is the only place these rows stay readable. One query for the whole
+        # export.
+        by_decision = {p["decision_id"]: p for p in proposals}
+        if by_decision:
+            review_rows = (await db.execute(
+                select(ProposalReview)
+                .where(ProposalReview.thread_decision_id.in_(list(by_decision)))
+                .order_by(ProposalReview.reviewed_at)
+            )).scalars().all()
+            for rev in review_rows:
+                by_decision[rev.thread_decision_id]["reviews"].append({
+                    "agent_id": rev.agent_id,
+                    "rating": rev.rating,
+                    "comment": rev.comment,
+                    "date": rev.reviewed_at.strftime("%Y-%m-%d %H:%M UTC"),
+                })
 
         if export == "html":
             return templates.TemplateResponse(
@@ -700,6 +721,14 @@ async def admin_discussions(
             lines.append("")
             lines.append(p["summary"])
             lines.append("")
+            if p["reviews"]:
+                lines.append("PI reviews:")
+                for r in p["reviews"]:
+                    comment = f' — "{r["comment"]}"' if r["comment"] else ""
+                    lines.append(
+                        f"- {r['agent_id'].capitalize()}Bot's PI: {r['rating']}/4{comment} ({r['date']})"
+                    )
+                lines.append("")
         if not lines:
             lines.append("No proposals found with current filters.")
         return PlainTextResponse(
@@ -782,26 +811,6 @@ async def admin_agents(
         a.agent_id for a in agents if token_for_agent_row(a)
     }
 
-    # Count unreviewed proposals per agent
-    from src.models import ProposalReview
-    proposal_counts: dict[str, int] = {}
-    review_counts: dict[str, int] = {}
-    for agent in agents:
-        aid = agent.agent_id
-        total_result = await db.execute(
-            select(func.count(ThreadDecision.id)).where(
-                ThreadDecision.outcome == "proposal",
-                (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
-            )
-        )
-        proposal_counts[aid] = total_result.scalar() or 0
-        rev_result = await db.execute(
-            select(func.count(ProposalReview.id)).where(
-                ProposalReview.agent_id == aid,
-            )
-        )
-        review_counts[aid] = rev_result.scalar() or 0
-
     pending = [a for a in agents if a.status == "pending"]
     active = [a for a in agents if a.status == "active"]
     suspended = [a for a in agents if a.status == "suspended"]
@@ -821,8 +830,6 @@ async def admin_agents(
             user_map=user_map,
             all_users=all_users,
             env_token_agents=env_token_agents,
-            proposal_counts=proposal_counts,
-            review_counts=review_counts,
         ),
     )
 

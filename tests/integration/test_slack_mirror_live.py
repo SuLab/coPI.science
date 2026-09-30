@@ -24,6 +24,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import ThreadNotFound
 from src.models import (
@@ -42,6 +43,29 @@ pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
 AGENTS = ("su", "cravatt", "wiseman")
 POST_GAP = 1.1
+
+
+async def _ingest_from_db(eng) -> None:
+    """Append this run's agent_messages rows the engine has not seen to its log.
+
+    Stands in for the retired DB inbound poll: these tests pin the mirror mapping
+    and thread ordering over rows another process wrote.
+    """
+    async with eng.session_factory() as db:
+        rows = (await db.execute(
+            select(AgentMessage)
+            .where(AgentMessage.simulation_run_id == eng.simulation_run_id)
+            .order_by(AgentMessage.created_at.asc())
+        )).scalars().all()
+    for r in rows:
+        if not r.message_ts or eng.message_log.get_entry(r.message_ts):
+            continue
+        eng.message_log.append(LogEntry(
+            ts=r.message_ts, channel=r.channel_name, sender_agent_id=r.agent_id,
+            sender_name=r.sender_name or ("PI" if not r.is_bot else r.agent_id or "bot"),
+            content=r.content or "", thread_ts=r.thread_ts, posted_at=r.posted_at or 0.0,
+            is_bot=r.is_bot, visibility=r.visibility, phase=r.phase,
+        ))
 
 
 @pytest.fixture
@@ -183,7 +207,7 @@ async def test_a_db_origin_root_never_produces_a_phantom_slack_thread(slack_engi
     await _write_row(factory, run_id, agent_id="su", sender_name="SuProbeBot",
                      content="db-origin root", message_ts=canonical, posted_at=9000.0001,
                      channel_name=name, channel_id=cid)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
     assert eng._slack_parent_ts(canonical) is None, (
         "a canonical id with no slack_ts must not be offered to Slack"
     )
@@ -312,11 +336,11 @@ async def test_thread_history_is_ordered_by_posted_at_not_insertion(slack_engine
     await _write_row(factory, run_id, agent_id="cravatt", sender_name="CravattProbeBot",
                      content="second reply", message_ts="9200.000200", posted_at=9200.0002,
                      channel_name=name, channel_id=cid, thread_ts=root.message_ts)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
     await _write_row(factory, run_id, agent_id="wiseman", sender_name="WisemanProbeBot",
                      content="first reply", message_ts="9200.000100", posted_at=9200.0001,
                      channel_name=name, channel_id=cid, thread_ts=root.message_ts)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     hist = [e.content for e in eng.message_log.get_thread_history(root.message_ts)]
     assert hist == ["root", "first reply", "second reply"], (

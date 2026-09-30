@@ -58,9 +58,8 @@ METHOD_SCOPES = {
     "conversations.create (public)": "channels:manage",
     "conversations.join": "channels:join",
     "conversations.history (public)": "channels:history",
-    # The engine still reads collab_private channels: _sync_private_channels_from_db
-    # (src/agent/simulation.py) loads the ones the web-UI reopen flow created, and the
-    # main-loop poll covers "seeded channels plus any collab_private channels tracked".
+    # collab_private history: nothing reads it any more, but the scope stays in
+    # the manifest so every provisioned app keeps the same scope set.
     "conversations.history (private)": "groups:history",
     "users.info": "users:read",
     "users.lookupByEmail": "users:read.email",

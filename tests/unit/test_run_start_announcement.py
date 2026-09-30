@@ -217,7 +217,7 @@ async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp
         eng, _ = _engine(monkeypatch, tmp_path)
         eng._fresh_start = fresh
         for name in (
-            "_persist_seeded_channels", "_sync_private_channels_from_db",
+            "_persist_seeded_channels",
             "_rebuild_state_from_db", "_restore_slack_state",
             "_rebuild_agent_state", "_rehydrate_assessed_threads",
             "_recompute_allowed_sender_ids", "_record_topology_snapshot",
@@ -226,7 +226,7 @@ async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp
             monkeypatch.setattr(eng, name, _rec(name)[0])
         for name in (
             "_ensure_seeded_channels", "_ensure_assessments_summary_channel",
-            "_rewind_cursors_for_private_channels", "refresh_lab_directories",
+            "refresh_lab_directories",
         ):
             monkeypatch.setattr(eng, name, _rec(name)[1])
         monkeypatch.setattr(eng, "_validate_star_topology", _rec("_validate", [])[1])

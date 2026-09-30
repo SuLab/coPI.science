@@ -923,24 +923,6 @@ async def build_discussions_view(
             "decision": decision,
         })
 
-    # Get proposal reviews
-    from src.models import ProposalReview as PR
-    reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
-    if not show_all_runs:
-        reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
-    reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
-    all_reviews = reviews_result.scalars().all()
-    reviews_by_decision: dict[str, list] = {}
-    for rev in all_reviews:
-        reviews_by_decision.setdefault(str(rev.thread_decision_id), []).append(rev)
-
-    # Attach reviews to threads
-    for t in threads:
-        if t["decision"]:
-            t["reviews"] = reviews_by_decision.get(str(t["decision"].id), [])
-        else:
-            t["reviews"] = []
-
     # Add orphaned decisions (thread_decisions with no matching root post in
     # agent_messages). Iterating decision_map, not all_decisions, gives each
     # orphan its LAST decision, the same rule the root-post loop applies; a
@@ -960,7 +942,6 @@ async def build_discussions_view(
                 "replier": replier,
                 "status": td.outcome,
                 "decision": td,
-                "reviews": reviews_by_decision.get(str(td.id), []),
             })
             known_thread_ids.add(td.thread_id)
             available_channels.add(td.channel)

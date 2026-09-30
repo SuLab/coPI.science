@@ -1,5 +1,5 @@
 {# Shared discussions threads body: summary cards' companion thread table,
-   plus the per-thread detail row (decision summary + PI reviews + the
+   plus the per-thread detail row (decision summary + the
    specialist panel). Rendered by both the admin discussions page and the
    manager discussions page.
 
@@ -63,12 +63,12 @@
 
                `has_detail` also fixes a live defect it replaces: the row used
                to be clickable whenever `t.decision` existed, while the detail
-               <tr> only existed when that decision carried summary_text or
-               reviews. A decision with neither left an onclick whose
+               <tr> only existed when that decision carried summary_text.
+               A decision without one left an onclick whose
                getElementById returns null — a JS error on click, and nothing
                opening. Both now key off the same expression. #}
             {% set panel = (panel_by_thread or {}).get(t.message_ts) %}
-            {% set has_decision_detail = t.decision and (t.decision.summary_text or t.reviews) %}
+            {% set has_decision_detail = t.decision and t.decision.summary_text %}
             {% set has_detail = has_decision_detail or panel %}
             <tr class="hover:bg-gray-50 {% if has_detail %}cursor-pointer{% endif %}"
                 {% if has_detail %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
@@ -139,21 +139,6 @@
                 <td colspan="7" class="px-6 py-4 bg-gray-50">
                     {% if has_decision_detail and t.decision.summary_text %}
                     <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | e }}"></div>
-                    {% endif %}
-                    {% if t.reviews %}
-                    <div class="border-t border-gray-200 pt-3 mt-3">
-                        <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">PI Reviews</h4>
-                        {% for rev in t.reviews %}
-                        <div class="flex items-start gap-3 mb-2 text-sm">
-                            <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">{{ rev.rating }}/4</span>
-                            <span class="font-medium text-gray-700">{{ rev.agent_id | capitalize }}Bot's PI</span>
-                            {% if rev.comment %}
-                            <span class="text-gray-500 italic">"{{ rev.comment }}"</span>
-                            {% endif %}
-                            <span class="text-xs text-gray-400">{{ rev.reviewed_at.strftime('%b %d %H:%M') }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
                     {% endif %}
                     {# The specialist panel, from specialist_consults only. No
                        tool chips and no retro parse of llm_call_logs here —

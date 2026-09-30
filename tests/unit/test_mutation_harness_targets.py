@@ -34,7 +34,6 @@ VACUITY_TIERS = (
     "vac_c2",
     "vac_i21",
     "vac_i28",
-    "vac_i29",
     "vac_i24b",
 )
 

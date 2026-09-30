@@ -59,30 +59,3 @@ async def test_public_profile_save_refuses_not_500(client, db_session):
     )
     assert r.status_code == 409
 
-
-async def test_review_refuses_not_500(client, db_session):
-    # No ThreadDecision is seeded on purpose: the orphan guard sits directly
-    # after get_agent_with_access, BEFORE the proposal lookup, so the 409 must
-    # fire without ever touching the proposal. A 404 here means the guard is
-    # in the wrong place.
-    import uuid as _uuid
-
-    delegate, agent = await _orphan_with_delegate(db_session)
-    r = await client.post(
-        f"/agent/{agent.agent_id}/proposals/{_uuid.uuid4()}/review",
-        headers=_auth(delegate.id),
-        data={"rating": "4"},
-    )
-    assert r.status_code == 409
-
-
-async def test_reopen_refuses_not_500(client, db_session):
-    import uuid as _uuid
-
-    delegate, agent = await _orphan_with_delegate(db_session)
-    r = await client.post(
-        f"/agent/{agent.agent_id}/proposals/{_uuid.uuid4()}/reopen",
-        headers=_auth(delegate.id),
-        data={"guidance": "please reconsider"},
-    )
-    assert r.status_code == 409

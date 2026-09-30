@@ -242,60 +242,6 @@ async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack
 # --- T9.4: private-channel polling needs a member bot -----------------------------------
 
 
-async def test_a_private_channel_is_polled_only_by_a_member_bot(cohort_engine, slack_clients):
-    """`_client_for_channel` picks a bot that is actually in the channel. A non-member
-    gets channel_not_found, so a wrong pick silently loses every message in the channel.
-
-    Control: after inviting the second bot, its client does read it.
-    """
-    eng, factory, run_id, name, cid = cohort_engine
-    su, wiseman = slack_clients["su"], slack_clients["wiseman"]
-
-    priv = create_private_channel(su, f"t-priv-poll-{uuid.uuid4().hex[:6]}")
-    assert priv and priv.get("id"), priv
-    pname, pcid = priv["name"], priv["id"]
-    try:
-        eng._channel_id_map[pname] = pcid
-        eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
-
-        su.post_message(pcid, "members only")
-        time.sleep(POST_GAP)
-        assert wiseman.poll_channel_messages(pcid, oldest="0") == [], (
-            "a non-member read the private channel"
-        )
-
-        # Documented behaviour worth pinning: _client_for_channel keys ONLY on
-        # _private_channel_members, never on _channel_visibility. With the membership
-        # map empty it hands back the fallback even for a channel marked private, and
-        # that fallback then fails with channel_not_found on every poll tick. The real
-        # path (_sync_private_channels_from_db) populates both maps together, so this
-        # is a fail-soft rather than a defect — but the docstring's "returns None if
-        # the channel is private and no connected member is available" is only true
-        # once the map has been loaded.
-        assert eng._client_for_channel(pcid, wiseman) is wiseman
-
-        # With membership known, the member bot is chosen.
-        eng._private_channel_members[pcid] = ["su"]
-        chosen = eng._client_for_channel(pcid, wiseman)
-        assert chosen is not None, "no member bot was found for a channel su is in"
-        assert "members only" in [
-            m.get("text") for m in chosen.poll_channel_messages(pcid, oldest="0")
-        ], "the chosen client cannot read the channel it was chosen for"
-
-        # And a private channel whose only member is disconnected yields None, so the
-        # caller skips it rather than erroring every tick.
-        eng._private_channel_members[pcid] = ["nobody"]
-        assert eng._client_for_channel(pcid, wiseman) is None
-
-        # Control: invite wiseman and it can read it too.
-        invite(su, pcid, [wiseman._bot_user_id])
-        assert "members only" in [
-            m.get("text") for m in wiseman.poll_channel_messages(pcid, oldest="0")
-        ]
-    finally:
-        su._call_with_retry(su._client.conversations_archive, channel=pcid)
-
-
 async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, slack_clients):
     """§7 end to end with the mirror on: two agents in DIFFERENT cohorts, maximally
     gated, still converse in the channel the PI made for them — and the messages are

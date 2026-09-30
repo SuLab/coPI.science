@@ -55,8 +55,7 @@ def _engine(monkeypatch, tmp_path, agents):
         return 0
 
     for name in (
-        "_poll_slack_for_bot_messages", "_poll_inbound_from_db",
-        "_sync_private_channels_from_db", "_sync_roster_from_db", "_poll_control_plane",
+        "_poll_slack_for_bot_messages", "_sync_roster_from_db", "_poll_control_plane",
         "_drain_and_flush", "_sleep",
     ):
         monkeypatch.setattr(eng, name, _noop, raising=False)

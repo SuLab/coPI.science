@@ -130,9 +130,9 @@ class AgentMessage(Base):
     __table_args__ = (
         UniqueConstraint("simulation_run_id", "message_ts", name="uq_agent_messages_run_ts"),
         Index("ix_agent_messages_run_posted", "simulation_run_id", "posted_at"),
-        # Backs the inbound poller's cursor, which pages over created_at (the DB
-        # server's clock) rather than the writer-clock-derived posted_at. See
-        # SimulationEngine._poll_inbound_from_db / PI_INBOX_LOOKBACK_S (R3).
+        # Pages over created_at (the DB server's clock). Its reader, the engine's
+        # DB inbound poller, was retired; the index stays with the table (no
+        # destructive migrations).
         Index("ix_agent_messages_run_created", "simulation_run_id", "created_at"),
         Index(
             "ix_agent_messages_run_channel_posted",

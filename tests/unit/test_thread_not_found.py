@@ -15,7 +15,7 @@ from slack_sdk.errors import SlackApiError
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
-from src.agent.state import ProposalRef, ThreadState
+from src.agent.state import ThreadState
 
 
 def _slack_error(error_code: str) -> SlackApiError:
@@ -94,13 +94,8 @@ class TestEvictDeadThread:
             ag.state.active_threads[dead_ts] = ThreadState(
                 thread_id=dead_ts, channel="single-cell-omics", other_agent_id="other",
             )
-            ag.state.pending_proposals.append(ProposalRef(
-                thread_id=dead_ts, channel="single-cell-omics",
-                other_agent_id="other", summary_text="x", proposed_at=0.0,
-            ))
 
         engine = SimulationEngine(agents=[a, b], slack_clients={})
-        engine._poll_cursors[f"proposal_thread:{dead_ts}"] = "1.0"
         engine._closed_thread_ids.add(dead_ts)
         return engine, dead_ts, a, b
 
@@ -111,9 +106,7 @@ class TestEvictDeadThread:
 
         for ag in (a, b):
             assert dead_ts not in ag.state.active_threads
-            assert not any(p.thread_id == dead_ts for p in ag.state.pending_proposals)
 
-        assert f"proposal_thread:{dead_ts}" not in engine._poll_cursors
         # Eviction is additive: it removes per-agent state but never un-closes a thread
         assert dead_ts in engine._closed_thread_ids
 
@@ -124,4 +117,3 @@ class TestEvictDeadThread:
         await engine._evict_dead_thread("9999999999.999999")
         for ag in (a, b):
             assert len(ag.state.active_threads) == 1
-            assert len(ag.state.pending_proposals) == 1

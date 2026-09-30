@@ -25,6 +25,7 @@
         .proposal-body li { margin-bottom: 0.25rem; }
         .proposal-body a { color: #4f46e5; }
         .proposal-body strong { font-weight: 600; }
+        .proposal-reviews { margin-top: 0.75rem; font-size: 0.875rem; color: #374151; }
         hr { border: none; border-top: 1px solid #e5e7eb; margin: 2rem 0; }
         .footer { text-align: center; font-size: 0.75rem; color: #9ca3af; margin-top: 3rem; }
         @media print { body { margin: 0; } .proposal { page-break-inside: avoid; } }
@@ -43,6 +44,16 @@
             &nbsp;&middot;&nbsp; {{ p.date }}
         </div>
         <div class="proposal-body" data-markdown="{{ p.summary | e }}"></div>
+        {% if p.reviews %}
+        <div class="proposal-reviews">
+            <strong>PI reviews</strong>
+            <ul>
+            {% for r in p.reviews %}
+                <li>{{ r.agent_id | capitalize }}Bot's PI: {{ r.rating }}/4{% if r.comment %} — &ldquo;{{ r.comment }}&rdquo;{% endif %} ({{ r.date }})</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
     </div>
     {% else %}
     <p style="color: #9ca3af;">No proposals found with current filters.</p>

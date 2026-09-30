@@ -83,24 +83,11 @@ class ThreadState:
 
 
 @dataclass
-class ProposalRef:
-    """A collaboration proposal awaiting PI review."""
-
-    thread_id: str
-    channel: str
-    other_agent_id: str
-    summary_text: str  # the :memo: Summary content
-    proposed_at: float
-    reviewed: bool = False
-
-
-@dataclass
 class AgentState:
     """Full mutable state for one agent during a simulation."""
 
     active_threads: dict[str, ThreadState] = field(default_factory=dict)  # thread_id -> ThreadState
     subscribed_channels: set[str] = field(default_factory=set)
-    pending_proposals: list[ProposalRef] = field(default_factory=list)
     # Anchored at CONSTRUCTION, not at the epoch, and not by the caller.
     #
     # `SimulationEngine._select_agent` weights on

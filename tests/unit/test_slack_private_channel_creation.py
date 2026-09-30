@@ -31,9 +31,3 @@ class TestCreateChannel:
         # Slack-off channels use the DB-native 'local:' id scheme.
         assert ch["id"] == "local:general"
 
-
-class TestImports:
-    def test_reopen_endpoint_imports(self):
-        """Sanity: the endpoint module still imports cleanly now that its
-        docstring no longer references the deleted migration service."""
-        from src.routers.agent_page import reopen_proposal  # noqa: F401

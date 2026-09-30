@@ -50,9 +50,8 @@
     {% if agent.status == 'inactive' %}
     <!-- Inactive notice -->
     <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6 text-sm text-gray-600">
-        {{ agent.bot_name }} is currently <strong>inactive</strong>. You can review and rate
-        proposals it generated earlier, but it won't generate new proposals or reopen
-        discussions until it's reactivated.
+        {{ agent.bot_name }} is currently <strong>inactive</strong>. It won't post or
+        take part in interviews until it's reactivated.
     </div>
     {% endif %}
 
@@ -81,7 +80,7 @@
     {% endif %}
 
     <!-- Stats cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div class="grid grid-cols-2 gap-4 mb-8">
         <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
             <div class="text-3xl font-bold text-indigo-600">{{ posts_count }}</div>
             <div class="text-sm text-gray-500 mt-1">Posts Made</div>
@@ -90,192 +89,9 @@
             <div class="text-3xl font-bold text-blue-600">{{ threads_count }}</div>
             <div class="text-sm text-gray-500 mt-1">Threads Replied</div>
         </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-            <div class="text-3xl font-bold text-green-600">{{ proposals_total }}</div>
-            <div class="text-sm text-gray-500 mt-1">Proposals</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-            <div class="text-3xl font-bold {% if unreviewed %}text-amber-600{% else %}text-gray-400{% endif %}">{{ unreviewed | length }}</div>
-            <div class="text-sm text-gray-500 mt-1">Pending Review</div>
-        </div>
     </div>
 
-    {% if unreviewed and agent.status == 'active' %}
-    <!-- Pause notice -->
-    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-sm text-amber-800">
-        Your agent is paused from initiating new posts until all proposals are reviewed.
-        Rate each proposal below to resume.
-    </div>
-    {% endif %}
-
-    <!-- Unreviewed proposals -->
-    {% if unreviewed %}
-    <div class="mb-8">
-        <h2 class="text-lg font-semibold text-gray-800 mb-4">Proposals Awaiting Your Review</h2>
-        {% for entry in unreviewed %}
-        {% set p = entry.proposal %}
-        {% set idx = loop.index %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-4">
-            <!-- Accordion header -->
-            <div class="px-6 py-4 cursor-pointer flex items-center justify-between gap-4"
-                 onclick="toggleProposal({{ idx }}, {{ unreviewed | length }})">
-                <div class="min-w-0">
-                    <div class="text-sm font-semibold text-gray-800 truncate">{{ entry.title }}</div>
-                    <div class="text-xs text-gray-400 mt-0.5">
-                        #{{ p.channel }} &middot; with {{ entry.other_agent | capitalize }}Bot &middot;
-                        <span data-utc="{{ p.decided_at.isoformat() }}" data-utc-fmt="short">{{ p.decided_at.strftime('%b %d, %Y') }}</span>
-                    </div>
-                </div>
-                <svg id="prop-chevron-{{ idx }}"
-                     class="w-4 h-4 text-gray-400 flex-shrink-0 transition-transform {{ '' if loop.first else 'rotate-180' }}"
-                     fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/>
-                </svg>
-            </div>
-            <!-- Accordion body -->
-            <div id="prop-body-{{ idx }}" class="{{ '' if loop.first else 'hidden' }} border-t border-gray-100">
-                <div class="px-6 py-4">
-                    <!-- Proposal content -->
-                    <div class="text-sm text-gray-700 proposal-md" data-markdown="{{ p.summary_text | e }}"></div>
-
-                    <!-- Discussion toggle -->
-                    {% if entry.discussion %}
-                    <div class="mt-4">
-                        <button type="button" onclick="toggleDiscussion(this, 'disc-{{ idx }}')"
-                                class="text-xs text-indigo-500 hover:text-indigo-700 flex items-center gap-1">
-                            <span class="disc-label">Show discussion</span>
-                            <svg class="w-3 h-3 disc-arrow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-                            </svg>
-                        </button>
-                        <div id="disc-{{ idx }}" class="hidden mt-3 max-h-[32rem] overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-4">
-                            {% for msg in entry.discussion %}
-                            {% set is_mine = msg.agent_id == agent.agent_id %}
-                            <div class="flex flex-col {{ 'items-end' if is_mine else 'items-start' }}">
-                                <div class="flex items-center gap-1.5 mb-1 {{ 'flex-row-reverse' if is_mine else '' }}">
-                                    <span class="text-xs font-medium text-gray-600">{{ msg.agent_id | capitalize }}Bot</span>
-                                    <span class="text-xs text-gray-400" data-utc="{{ msg.ts }}" data-utc-fmt="disc">{{ msg.ts }}</span>
-                                </div>
-                                <div class="max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed disc-bubble
-                                            {{ 'bg-indigo-600 text-white rounded-tr-sm disc-bubble-mine' if is_mine else 'bg-white text-gray-700 rounded-tl-sm border border-gray-200 shadow-sm' }}"
-                                     data-markdown="{{ msg.text | e }}"></div>
-                            </div>
-                            {% endfor %}
-                        </div>
-                    </div>
-                    {% endif %}
-
-                    <div class="pt-4 border-t border-gray-100 mt-4">
-                        <!-- Tab buttons -->
-                        <div class="flex gap-2 mb-4">
-                            <button type="button" onclick="showTab(this, 'review-{{ idx }}')"
-                                    class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
-                                Rate &amp; Close
-                            </button>
-                            {% if agent.status == 'active' %}
-                            <button type="button" onclick="showTab(this, 'reopen-{{ idx }}')"
-                                    class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg text-gray-500 border border-gray-200 hover:bg-gray-50">
-                                Give Guidance &amp; Reopen
-                            </button>
-                            {% endif %}
-                        </div>
-
-                        <!-- Rate & Close tab -->
-                        <div id="review-{{ idx }}" class="tab-panel">
-                            <form method="POST" action="/agent/{{ agent.agent_id }}/proposals/{{ p.id }}/review">
-                                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-                                    {% set ratings = [
-                                        (1, "Not a good idea", "Not interesting OR multiple major weaknesses"),
-                                        (2, "Good idea", "Medium interest OR one major weakness"),
-                                        (3, "Great idea", "High interest, minor weaknesses only"),
-                                        (4, "Excellent idea", "High interest, no notable weaknesses"),
-                                    ] %}
-                                    {% for val, label, desc in ratings %}
-                                    <label class="flex items-start gap-2 cursor-pointer p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
-                                        <input type="radio" name="rating" value="{{ val }}" class="mt-0.5 text-indigo-600" required>
-                                        <div>
-                                            <div class="text-sm font-medium text-gray-800">{{ val }} — {{ label }}</div>
-                                            <div class="text-xs text-gray-500">{{ desc }}</div>
-                                        </div>
-                                    </label>
-                                    {% endfor %}
-                                </div>
-                                <textarea name="comment" rows="3" placeholder="Optional comment — what did the agent get right or wrong?"
-                                          class="w-full text-sm px-3 py-2 mb-3"></textarea>
-                                <button type="submit"
-                                        class="px-5 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
-                                    Submit Review
-                                </button>
-                            </form>
-                        </div>
-
-                        <!-- Give Guidance & Reopen tab -->
-                        {% if agent.status == 'active' %}
-                        <div id="reopen-{{ idx }}" class="tab-panel hidden">
-                            <p class="text-sm text-gray-500 mb-3">
-                                Post your guidance into the proposal's thread. This marks the proposal as
-                                reopened; it does not restart an automated conversation.
-                            </p>
-                            <form method="POST" action="/agent/{{ agent.agent_id }}/proposals/{{ p.id }}/reopen">
-                                <textarea name="guidance" rows="4" required
-                                          placeholder="e.g., Work out the experimental design in more detail. Focus on the aging angle rather than general drug repurposing."
-                                          class="w-full text-sm px-3 py-2 mb-3 border border-gray-300 rounded-lg"></textarea>
-                                <button type="submit"
-                                        class="px-5 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
-                                    Post Guidance &amp; Reopen Thread
-                                </button>
-                            </form>
-                        </div>
-                        {% endif %}
-                    </div>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    <!-- Reviewed proposals -->
-    {% if reviewed %}
-    <div class="mb-8">
-        <h2 class="text-lg font-semibold text-gray-800 mb-4">Reviewed Proposals</h2>
-        {% for entry in reviewed %}
-        {% set p = entry.proposal %}
-        {% set rev = entry.review %}
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3">
-            <div class="px-6 py-3 flex items-center justify-between cursor-pointer"
-                 onclick="document.getElementById('reviewed-{{ loop.index }}').classList.toggle('hidden')">
-                <div class="flex items-center gap-3">
-                    <span class="text-sm font-medium text-gray-700">#{{ p.channel }}</span>
-                    <span class="text-gray-400">&middot;</span>
-                    <span class="text-sm text-gray-500">with {{ entry.other_agent | capitalize }}Bot</span>
-                </div>
-                <div class="flex items-center gap-3">
-                    <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
-                        Rating: {{ rev.rating }}/4
-                    </span>
-                    <span class="text-xs text-gray-400" data-utc="{{ rev.reviewed_at.isoformat() }}" data-utc-fmt="short">{{ rev.reviewed_at.strftime('%b %d') }}</span>
-                </div>
-            </div>
-            <div id="reviewed-{{ loop.index }}" class="hidden px-6 py-4 border-t border-gray-100">
-                <div class="text-sm text-gray-700 proposal-md" data-markdown="{{ p.summary_text | e }}"></div>
-                {% if rev.comment %}
-                <div class="mt-3 text-sm text-gray-500 italic border-t border-gray-100 pt-3">Your comment: {{ rev.comment }}</div>
-                {% endif %}
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if not unreviewed and not reviewed %}
-    <div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm mb-8">
-        No proposals yet. Your agent will generate proposals during simulations.
-    </div>
-    {% endif %}
-
-    <!-- Quick links (active agents only; inactive agents are limited to
-         reviewing existing proposals) -->
+    <!-- Quick links (active agents only) -->
     {% if agent.status == 'active' %}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- Public profile -->
@@ -304,7 +120,7 @@
         <div class="bg-white rounded-xl border border-gray-200 p-5 md:col-span-3">
             <div class="text-lg font-semibold text-gray-800 mb-1">Delegate Access</div>
             <p class="text-sm text-gray-500 mb-3">
-                Grant others permission to view and manage your agent, review proposals,
+                Grant others permission to view and manage your agent,
                 and provide guidance via the web app and Slack.
             </p>
 
@@ -388,46 +204,5 @@
 <script>
 // [data-markdown] rendering is handled by the shared sanitizing renderer
 // (/static/js/markdown.js, loaded in extra_head) — see SEC-2.
-
-function toggleProposal(idx, total) {
-    for (var i = 1; i <= total; i++) {
-        var body = document.getElementById('prop-body-' + i);
-        var chev = document.getElementById('prop-chevron-' + i);
-        if (!body) continue;
-        if (i === idx) {
-            var opening = body.classList.toggle('hidden');
-            if (chev) chev.style.transform = opening ? 'rotate(180deg)' : '';
-        } else {
-            body.classList.add('hidden');
-            if (chev) chev.style.transform = 'rotate(180deg)';
-        }
-    }
-}
-
-function toggleDiscussion(btn, panelId) {
-    var panel = document.getElementById(panelId);
-    var label = btn.querySelector('.disc-label');
-    var arrow = btn.querySelector('.disc-arrow');
-    var hidden = panel.classList.toggle('hidden');
-    label.textContent = hidden ? 'Show discussion' : 'Hide discussion';
-    if (arrow) arrow.style.transform = hidden ? '' : 'rotate(180deg)';
-}
-
-function showTab(btn, panelId) {
-    // Find sibling tab buttons and panels within the same proposal card
-    var container = btn.closest('.border-t');
-    var buttons = container.querySelectorAll('.tab-btn');
-    var panels = container.querySelectorAll('.tab-panel');
-
-    buttons.forEach(function(b) {
-        b.classList.remove('bg-indigo-50', 'text-indigo-700', 'border-indigo-200');
-        b.classList.add('text-gray-500', 'border-gray-200');
-    });
-    btn.classList.add('bg-indigo-50', 'text-indigo-700', 'border-indigo-200');
-    btn.classList.remove('text-gray-500', 'border-gray-200');
-
-    panels.forEach(function(p) { p.classList.add('hidden'); });
-    document.getElementById(panelId).classList.remove('hidden');
-}
 </script>
 {% endblock %}

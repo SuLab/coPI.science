@@ -70,9 +70,9 @@
 #
 # MEASURED 2026-08-04, offline tiers only, no credentials present:
 #
-#   killed 6/6 real mutants        M4, M5 (worker); M7 (graph); M8, M9 (onboarding);
-#                                  M10 (agentpage)
-#   inert controls 4/4 survived    M12c, M12e, M12f, M12g
+#   killed 5/5 real mutants        M4, M5 (worker); M7 (graph); M8, M9 (onboarding)
+#   inert controls 3/3 survived    M12c, M12e, M12f
+#   (M10/M12g/agentpage and M20/vac_i29 retired with the proposal routes, R-01, 2026-09-29)
 #   9 skipped for credentials      orcid: M12a, M1, M1b
 #                                  pubmed: M12b, M2, M3
 #                                  pipeline: M12d, M6, M6b
@@ -255,23 +255,20 @@ declare -A TIER_SELECT=(
   [pipeline]="tests/integration/test_profile_pipeline_live.py -k test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works"
   [graph]="tests/integration/test_public_graph.py"
   [onboarding]="tests/integration/test_onboarding_flow.py"
-  [agentpage]="tests/integration/test_agent_page.py"
   [vac_i20]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller"
   [vac_i23_route]="'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]'"
   [vac_i23_pass]="'tests/unit/test_specialist_floor.py::test_floor_arithmetic[pass-armed-exempt]'"
   [vac_c2]="tests/unit/test_consult_accounting.py::test_a_consults_own_truncation_retry_is_booked"
   [vac_i21]="tests/unit/test_roles.py::test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar"
   [vac_i28]="tests/unit/test_delegates.py::TestDelegateInvitation::test_default_status"
-  [vac_i29]="tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500"
   [vac_i24b]="tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered"
-  [vacuity]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]' 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[pass-armed-exempt]' tests/unit/test_consult_accounting.py::test_a_consults_own_truncation_retry_is_booked tests/unit/test_roles.py::test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar tests/unit/test_delegates.py::TestDelegateInvitation::test_default_status tests/integration/test_concurrent_web_writes.py::test_concurrent_proposal_reviews_do_not_500 tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered"
+  [vacuity]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]' 'tests/unit/test_specialist_floor.py::test_floor_arithmetic[pass-armed-exempt]' tests/unit/test_consult_accounting.py::test_a_consults_own_truncation_retry_is_booked tests/unit/test_roles.py::test_conclude_prompt_asks_for_the_inline_verdict_and_keeps_scores_in_the_sidecar tests/unit/test_delegates.py::TestDelegateInvitation::test_default_status tests/integration/test_cohort_admin.py::test_pi_facing_thread_view_is_never_cohort_filtered"
 )
 declare -A TIER_CREDS=(
   [orcid]="live"       [pubmed_tool]="live"  [pubmed_doi]="live"  [pubmed_both]="live"
   [worker]=""          [pipeline]="live+llm" [graph]=""           [onboarding]=""
-  [agentpage]=""
   [vac_i20]=""         [vac_i23_route]=""    [vac_i23_pass]=""    [vac_c2]=""
-  [vac_i21]=""         [vac_i28]=""          [vac_i29]=""         [vac_i24b]=""
+  [vac_i21]=""         [vac_i28]=""          [vac_i24b]=""
   [vacuity]=""
 )
 
@@ -317,9 +314,6 @@ MUTANTS=(
 "onboarding~~src/dependencies.py~~    # Impersonation: admin can view as another user~~    # Impersonation [INERT EDIT]: an admin can view the site as another user~~M12f INERT comment — MUST SURVIVE"
 "onboarding~~src/dependencies.py~~    if impersonate_id and session_user.is_admin:~~    if impersonate_id:~~M8 copi-impersonate is honoured for non-admins — any logged-in user can become any other user"
 'onboarding~~src/services/profile_export.py~~    path = PROFILES_DIR / f"{agent_id}.md"~~    if profile.private_profile_md:\n        lines.append(profile.private_profile_md)\n    path = PROFILES_DIR / f"{agent_id}.md"~~M9 the PUBLIC profile export appends private_profile_md'
-# --- agent page (T8) -------------------------------------------------------------------
-'agentpage~~src/routers/agent_page.py~~            "Ignoring duplicate reopen of proposal %s by %s "~~            "Ignoring a duplicate reopen of proposal %s by %s "~~M12g INERT log string — MUST SURVIVE'
-"agentpage~~src/routers/agent_page.py~~    if already_reviewed is not None:~~    if False:~~M10 the reopen idempotency guard is gone, so a replayed POST migrates the thread twice"
 # --- vacuity (RCA §8 cause 3): the killing mutation of every test fixed for vacuity ----
 # Each real mutant is judged against ONLY its fixed test's node (see the header). M13 is
 # the shared inert control, run against the union of those nodes.
@@ -330,7 +324,6 @@ MUTANTS=(
 "vac_c2~~src/agent/tools.py~~            on_retry=on_api_call,~~            on_retry=None,~~M17 C2/R3 a consult's own max_tokens retry is not booked as an API call"
 'vac_i21~~prompts/roles/scout_hub/phase4-thread-reply.md~~Only your inline verdict also appears in `<slack_message>`~~None of it may appear anywhere in `<slack_message>`~~M18 I21/E7 the phase-4 prompt forbids the inline verdict again (the pre-df4d975 sentence)'
 'vac_i28~~src/models/delegate.py~~String(20), nullable=False, default="pending"~~String(20), nullable=False, default="accepted"~~M19 I28/E14 a new delegate invitation defaults to accepted'
-'vac_i29~~src/routers/agent_page.py~~        # the SELECT guard above answers a sequential duplicate.\n        await db.rollback()\n        return RedirectResponse(\n            url=f"/agent/{agent_id}/dashboard", status_code=302\n        )~~        # the SELECT guard above answers a sequential duplicate.\n        await db.rollback()\n        from fastapi.responses import Response\n        return Response(status_code=500)~~M20 I29/R2 review_proposal answers a lost race with a 500'
 "vac_i24b~~src/services/directory.py~~    root_posts = roots_result.scalars().all()~~    root_posts = []~~M21 I24b/R1 the discussions view lists no threads"
 )
 

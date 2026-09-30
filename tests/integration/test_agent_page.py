@@ -1,6 +1,6 @@
-"""Live integration tests for the agent page — all 14 endpoints of routers/agent_page.py.
+"""Live integration tests for the agent page — all 12 endpoints of routers/agent_page.py.
 
-Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
+Real ASGI requests, real Postgres, real Jinja templates, real invitation
 flows.
 
 Nothing external is real: Slack (`slack_sdk.WebClient` and the copy bound inside
@@ -32,13 +32,9 @@ from sqlalchemy import select
 
 from src.config import get_settings
 from src.models import (
-    VISIBILITY_COLLAB_PRIVATE,
-    AgentChannel,
     AgentDelegate,
-    AgentMessage,
     AgentRegistry,
     DelegateInvitation,
-    ProposalReview,
     ResearcherProfile,
 )
 from src.services.slack_tokens import is_valid_token
@@ -64,8 +60,7 @@ class _SlackRecorder:
 
     Unstubbed methods raise: a route that starts talking to Slack where these
     tests assert it must not will blow up rather than silently succeed against
-    a permissive Mock. `calls` is asserted to be empty in the reopen tests —
-    that is the "never make a live Slack call" constraint, enforced.
+    a permissive Mock.
     """
 
     def __init__(self):
@@ -104,9 +99,7 @@ def slack(monkeypatch) -> _SlackRecorder:
     rec = _SlackRecorder()
     factory = lambda *a, **kw: _FakeWebClient(rec, **kw)  # noqa: E731
     monkeypatch.setattr("slack_sdk.WebClient", factory)
-    # AgentSlackClient bound WebClient at import time, so patch that name too —
-    # it is the one `reopen_proposal`'s real-Slack branch used to post guidance
-    # (that branch is gone — see section 2).
+    # AgentSlackClient bound WebClient at import time, so patch that name too.
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
     # services/slack_web.py is the web layer's Slack boundary and binds WebClient
     # at import time as well. Patching only `slack_sdk.WebClient` would leave the
@@ -278,20 +271,6 @@ async def delegated(client, db_session, world):
     return SimpleNamespace(user=delegate, row=row, pending_invitation=pending)
 
 
-async def _private_channels(db) -> list[AgentChannel]:
-    return list((await db.execute(
-        select(AgentChannel)
-        .where(AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE)
-        .order_by(AgentChannel.channel_name)
-    )).scalars().all())
-
-
-async def _reviews(db, agent_id: str) -> list[ProposalReview]:
-    return list((await db.execute(
-        select(ProposalReview).where(ProposalReview.agent_id == agent_id)
-    )).scalars().all())
-
-
 # ===========================================================================
 # 1. Self-service signup  (POST /agent/request)
 # ===========================================================================
@@ -394,254 +373,6 @@ async def test_signup_twice_does_not_create_a_second_agent(client, db_session):
 
 
 # ===========================================================================
-# 2. The reopen-proposal route
-#
-# Fix 9 (2026-08-12 final audit wave, "private-channel collaboration is out"):
-# reopen used to migrate a public-origin proposal thread into a NEW
-# collab_private channel by default (enable_private_refinement=True) before
-# posting the PI's guidance there. The engine-side private-channel
-# collaboration/refinement flow was deleted (design doc §8 — no agent
-# converses inside a collab_private channel anymore; only a scout_hub agent
-# replies to anything, hub-and-spoke only), so a freshly migrated channel
-# would be a dead room nothing ever posts in again. reopen no longer creates
-# ANY private channel: it always posts the PI's guidance directly into the
-# proposal's origin thread's DB inbox, regardless of that thread's visibility.
-# `enable_private_refinement` and the migration service it gated
-# (`src/services/private_channels.py`) were both removed outright in the
-# 2026-08-12 removal-cycle consolidation sweep, once no caller — including the
-# inbound-email reply path, `src/services/email_inbound.py`, whose own
-# human-PI-interaction surface is separately retired — read the setting any
-# longer. The Slack-post branch itself (posting the guidance into Slack when
-# the agent had a bot token) was removed in the same removal cycle's final
-# wave: there is no PI-bot interaction surface left for a bot to re-engage
-# through, so the DB inbox is now the only path, unconditionally.
-# ===========================================================================
-
-
-async def _reopen(client, world, td, user, guidance="Push on the shared assay."):
-    return await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{td.id}/reopen",
-        data={"guidance": guidance},
-        headers=_auth(user.id),
-    )
-
-
-async def _inbox_messages(db, td) -> list[AgentMessage]:
-    """PI-authored (agent_id IS NULL) messages reopen wrote into the origin thread."""
-    return list((await db.execute(
-        select(AgentMessage).where(
-            AgentMessage.thread_ts == td.thread_id,
-            AgentMessage.agent_id.is_(None),
-        )
-    )).scalars().all())
-
-
-async def test_reopen_never_creates_a_collab_private_channel(
-    client, db_session, world, slack
-):
-    """Pin fix 9 directly: no collab_private channel, ever — guidance goes
-    straight into the origin thread's DB inbox instead (the route has had no
-    Slack path since b40d04a, so no Slack call either)."""
-    r = await _reopen(client, world, world.td, world.pi)
-    assert r.status_code == 302, r.text
-    assert await _private_channels(db_session) == [], (
-        "reopen must never create a collab_private channel"
-    )
-    inbox = await _inbox_messages(db_session, world.td)
-    assert len(inbox) == 1
-    assert "Push on the shared assay." in inbox[0].content
-    assert slack.calls == []
-
-
-async def test_reopening_the_same_proposal_twice_is_idempotent(
-    client, db_session, world, slack
-):
-    """The idempotency guard in reopen_proposal (stale page / Back-button replay).
-
-    Control: a *different* proposal is not deduped, so "still one review" cannot
-    be satisfied by a reopen that silently stopped working.
-    """
-    r1 = await _reopen(client, world, world.td, world.pi)
-    assert r1.status_code == 302, r1.text
-    assert len(await _inbox_messages(db_session, world.td)) == 1
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-
-    # --- the replay -------------------------------------------------------
-    r2 = await _reopen(client, world, world.td, world.pi, guidance="Second submit.")
-    assert r2.status_code == 302
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1, (
-        "the reopen idempotency guard did not hold — the replay wrote a second review"
-    )
-    assert len(await _inbox_messages(db_session, world.td)) == 1, (
-        "the replay must not post a second time"
-    )
-
-    # --- control: a different proposal is not deduped ---------------------
-    td2 = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
-        channel="proteomics", outcome="proposal", summary_text="Summary — A second idea",
-    )
-    await db_session.flush()
-    r3 = await _reopen(client, world, td2, world.pi, guidance="Different proposal.")
-    assert r3.status_code == 302
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 2
-    assert len(await _inbox_messages(db_session, td2)) == 1
-
-    assert await _private_channels(db_session) == []
-    assert slack.calls == [], f"the reopen route called Slack: {slack.methods}"
-
-
-async def test_reopen_records_a_rating_zero_review_carrying_the_guidance(
-    client, db_session, world
-):
-    """The row the idempotency guard keys on. If reopen stopped writing it, the
-    guard would silently stop working — so pin its shape."""
-    assert await _reviews(db_session, OWNER_AGENT) == []
-    r = await _reopen(client, world, world.td, world.pi, guidance="Narrow the aims.")
-    assert r.status_code == 302
-
-    review = (await _reviews(db_session, OWNER_AGENT))[0]
-    assert review.rating == 0
-    assert review.comment == "[Reopened] Narrow the aims."
-    assert review.user_id == world.pi.id
-    assert review.delegate_user_id is None
-    assert review.submitted_via == "web"
-
-
-async def test_reopen_rejects_empty_guidance(client, db_session, world, slack):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/reopen",
-        data={"guidance": "   "},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 400
-    assert await _private_channels(db_session) == []
-    assert slack.calls == []
-
-    # Control: real guidance on the same proposal succeeds and lands in the inbox.
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _inbox_messages(db_session, world.td)) == 1
-    assert await _private_channels(db_session) == []
-
-
-async def test_reopen_is_blocked_while_the_agent_is_inactive(client, db_session, world):
-    world.agent.status = "inactive"
-    await db_session.flush()
-    r = await _reopen(client, world, world.td, world.pi)
-    assert r.status_code == 403
-    assert "inactive" in r.json()["detail"].lower()
-    assert await _private_channels(db_session) == []
-
-    # Control: reactivating the same agent lets the same request through.
-    world.agent.status = "active"
-    await db_session.flush()
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _inbox_messages(db_session, world.td)) == 1
-    assert await _private_channels(db_session) == []
-
-
-async def test_reopen_refuses_a_proposal_the_agent_is_not_part_of(
-    client, db_session, world
-):
-    foreign = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OTHER_AGENT, agent_b=THIRD_AGENT,
-        channel="metabolomics", outcome="proposal",
-    )
-    await db_session.flush()
-    r = await _reopen(client, world, foreign, world.pi)
-    assert r.status_code == 403
-    assert await _private_channels(db_session) == []
-
-    # Control: the same PI, same route, on a proposal that *is* theirs.
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _inbox_messages(db_session, world.td)) == 1
-    assert await _private_channels(db_session) == []
-
-
-async def test_reopening_an_already_private_threads_posts_there_directly(
-    client, db_session, world, slack
-):
-    """The `origin_visibility != 'public'` case is no longer special-cased: an
-    existing (legacy) private thread is reopened exactly like a public one —
-    guidance posted straight into it. There is no NEW private-channel creation
-    left to gate on visibility, so nothing is refused here anymore."""
-    already_private = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
-        channel="priv-existing", outcome="proposal",
-        origin_visibility=VISIBILITY_COLLAB_PRIVATE,
-    )
-    await db_session.flush()
-    r = await _reopen(client, world, already_private, world.pi)
-    assert r.status_code == 302
-    assert await _private_channels(db_session) == [], (
-        "reopen must never create a NEW collab_private channel"
-    )
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-    inbox = await _inbox_messages(db_session, already_private)
-    assert len(inbox) == 1
-    assert inbox[0].channel_name == "priv-existing"
-    assert slack.calls == []
-
-
-
-# ===========================================================================
-# 3. Proposal review
-# ===========================================================================
-
-
-async def test_a_pi_review_is_recorded_and_cannot_be_submitted_twice(
-    client, db_session, world
-):
-    url = f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/review"
-    r = await client.post(url, data={"rating": "3", "comment": " solid "},
-                          headers=_auth(world.pi.id))
-    assert r.status_code == 302
-    review = (await _reviews(db_session, OWNER_AGENT))[0]
-    assert review.rating == 3
-    assert review.comment == "solid"
-    assert review.user_id == world.pi.id
-    assert review.delegate_user_id is None
-    assert review.reviewed_by_user_id == world.pi.id
-
-    r2 = await client.post(url, data={"rating": "4"}, headers=_auth(world.pi.id))
-    assert r2.status_code == 302
-    assert r2.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-
-    # Control: a second proposal is still reviewable, so the redirect is the
-    # already-reviewed guard rather than a route that broke after one write.
-    td2 = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
-        channel="general", outcome="proposal",
-    )
-    await db_session.flush()
-    r3 = await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{td2.id}/review",
-        data={"rating": "2"}, headers=_auth(world.pi.id),
-    )
-    assert r3.status_code == 302
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 2
-
-
-@pytest.mark.parametrize("rating", ["0", "5"])
-async def test_review_rejects_out_of_range_ratings(client, db_session, world, rating):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/review",
-        data={"rating": rating}, headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 400
-    assert await _reviews(db_session, OWNER_AGENT) == []
-
-    # Control: an in-range rating on the same proposal is accepted.
-    ok = await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/review",
-        data={"rating": "1"}, headers=_auth(world.pi.id),
-    )
-    assert ok.status_code == 302
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-
-
-# ===========================================================================
 # 4. Delegates: add, act, remove
 # ===========================================================================
 
@@ -720,28 +451,6 @@ async def test_accepting_an_invitation_creates_the_delegation(
     r = await client.get("/agent", headers=_auth(delegated.user.id))
     assert r.status_code == 302
     assert r.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
-
-
-async def test_a_delegate_can_review_a_proposal_and_a_stranger_cannot(
-    client, db_session, world, delegated
-):
-    url = f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/review"
-
-    denied = await client.post(url, data={"rating": "4"},
-                               headers=_auth(world.stranger.id))
-    assert denied.status_code == 403
-    assert await _reviews(db_session, OWNER_AGENT) == []
-
-    allowed = await client.post(url, data={"rating": "4", "comment": "go"},
-                                headers=_auth(delegated.user.id))
-    assert allowed.status_code == 302
-    review = (await _reviews(db_session, OWNER_AGENT))[0]
-    assert review.rating == 4
-    # Attribution: the review belongs to the PI, the delegate is recorded
-    # alongside (specs/web-delegates.md §Changes to ProposalReview).
-    assert review.user_id == world.pi.id
-    assert review.delegate_user_id == delegated.user.id
-    assert review.reviewed_by_user_id == delegated.user.id
 
 
 async def test_removing_a_delegate_revokes_their_access(
@@ -851,11 +560,8 @@ async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
 # ===========================================================================
 
 
-async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_proposal(
-    client, db_session, world
-):
-    """agent_dashboard's three queries and _extract_proposal_title, through the
-    real template."""
+async def test_the_dashboard_counts_only_this_agents_activity(client, db_session, world):
+    """agent_dashboard's two counting queries, through the real template."""
     await factories.make_agent_message(
         db_session, run=world.run, agent_id=OWNER_AGENT, phase="new_post"
     )
@@ -873,23 +579,6 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     assert page.status_code == 200
     assert re.search(r'text-indigo-600">\s*1\s*<', page.text), "posts_count was not 1"
     assert re.search(r'text-blue-600">\s*1\s*<', page.text), "threads_count was not 1"
-
-    # The proposal's *title* is the subject, not the ":memo: **Summary — …**"
-    # boilerplate (the raw summary is still rendered inside the panel).
-    titles = re.findall(r'text-gray-800 truncate">\s*([^<]*?)\s*<', page.text)
-    assert titles == ["A shared assay platform"], titles
-    # Unreviewed → the "agent is paused" banner is shown.
-    assert "paused from initiating new posts" in page.text
-
-    # Reviewing moves it out of the unreviewed list (the other half).
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/review",
-        data={"rating": "4"}, headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-    page2 = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
-    assert "paused from initiating new posts" not in page2.text
-    assert "A shared assay platform" in page2.text
 
 
 async def test_env_bot_tokens_never_reach_the_delegate_lookup(
@@ -962,7 +651,7 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
 
 
 # ===========================================================================
-# 6. Authorization, all 14 endpoints
+# 6. Authorization, all 12 endpoints
 # ===========================================================================
 
 
@@ -990,10 +679,6 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
        {"research_summary": "s", "techniques": "a,b", "keywords": "k"}),
-    Ep("POST", "/agent/{agent_id}/proposals/{thread_decision_id}/review",
-       "/agent/{agent}/proposals/{td}/review", {"rating": "3"}),
-    Ep("POST", "/agent/{agent_id}/proposals/{thread_decision_id}/reopen",
-       "/agent/{agent}/proposals/{td}/reopen", {"guidance": "refine the aims"}),
     Ep("POST", "/agent/{agent_id}/delegates/connect-slack",
        "/agent/{agent}/delegates/connect-slack"),
     Ep("POST", "/agent/{agent_id}/delegates/invite", "/agent/{agent}/delegates/invite",
@@ -1026,7 +711,7 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 14
+    assert len(ENDPOINTS) == 12
 
 
 def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:
@@ -1046,7 +731,7 @@ async def thread_root(db_session, world) -> str:
 
     Not folded into `world` itself: the dashboard test asserts an exact count
     of OWNER_AGENT's `AgentMessage` rows (e.g.
-    test_the_dashboard_counts_only_this_agents_activity_and_titles_the_proposal),
+    test_the_dashboard_counts_only_this_agents_activity),
     so a message seeded into the shared fixture would silently change what it
     is counting. Without a
     ts that actually resolves, the owner's positive-control request would 404
@@ -1132,6 +817,28 @@ async def test_an_unknown_agent_id_is_a_404_not_a_403(client, world):
     assert ok.status_code == 200
 
 
+async def test_the_proposal_review_routes_are_retired(client, world):
+    """The review and reopen routes no longer exist, for the owner too."""
+    for action, data in (("review", {"rating": "4"}), ("reopen", {"guidance": "x"})):
+        r = await client.post(
+            f"/agent/{OWNER_AGENT}/proposals/{world.td.id}/{action}",
+            data=data, headers=_auth(world.pi.id),
+        )
+        assert r.status_code in (404, 405), (action, r.status_code)
+
+
+async def test_the_dashboard_shows_no_proposal_sections(client, world):
+    """The dashboard keeps its stats and settings but lists no proposals, even
+    when a legacy outcome='proposal' decision exists for the agent."""
+    page = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
+    assert page.status_code == 200
+    for retired in ("Proposals Awaiting Your Review", "Reviewed Proposals",
+                    "Pending Review", "paused from initiating new posts",
+                    "/proposals/"):
+        assert retired not in page.text, retired
+    assert "Posts Made" in page.text and "Threads Replied" in page.text
+
+
 async def test_a_pending_agent_cannot_reach_the_dashboard(client, db_session, world):
     world.agent.status = "pending"
     await db_session.flush()
@@ -1139,7 +846,7 @@ async def test_a_pending_agent_cannot_reach_the_dashboard(client, db_session, wo
     assert r.status_code == 302 and r.headers["location"] == "/agent"
 
     # Control: active reaches it. (inactive is allowed in too — the dashboard
-    # gates the reopen action separately, see agent_dashboard's docstring.)
+    # gates the active-only settings in the template.)
     world.agent.status = "inactive"
     await db_session.flush()
     assert (await client.get(f"/agent/{OWNER_AGENT}/dashboard",

@@ -351,98 +351,6 @@ class TestSyncProfilesFromDisk:
 
 
 # ---------------------------------------------------------------
-# _rewind_cursors_for_private_channels — rewind tightly, never into
-# settled sibling channels (the overshoot bug).
-# ---------------------------------------------------------------
-
-class TestRewindCursorsForPrivateChannels:
-    def _engine(self):
-        from src.agent.agent import Agent
-        su = Agent("su", "SuBot", "Andrew Su")
-        lairson = Agent("lairson", "LairsonBot", "Brian Lairson")
-        engine = SimulationEngine(agents=[su, lairson], slack_clients={})
-        return engine, su, lairson
-
-    def _add_channel(self, engine, name, cid, members, msgs):
-        """msgs: list of (posted_at, sender_agent_id)."""
-        from src.agent.message_log import LogEntry
-        engine._channel_id_map[name] = cid
-        engine._private_channel_members[cid] = set(members)
-        for posted_at, sender in msgs:
-            engine.message_log.append(LogEntry(
-                ts=f"{posted_at:.6f}", channel=name, sender_agent_id=sender,
-                sender_name=sender, content="x", thread_ts=None,
-                posted_at=posted_at, is_bot=True,
-            ))
-
-    def test_does_not_rewind_into_settled_sibling_channel(self):
-        import time
-        engine, su, lairson = self._engine()
-        now = time.time()
-        # Fresh channel: su posted the handover 1h ago, lairson hasn't replied.
-        self._add_channel(engine, "june", "CJUN", ["su", "lairson"],
-                           [(now - 3600, "su")])
-        # Stale sibling: a finished refinement from ~60 days ago.
-        old = now - 60 * 86400
-        self._add_channel(engine, "april", "CAPR", ["su", "lairson"],
-                           [(old, "su"), (old + 100, "lairson"), (old + 200, "su")])
-        su.state.last_seen_cursor = now
-        lairson.state.last_seen_cursor = now
-
-        engine._rewind_cursors_for_private_channels()
-
-        # lairson is rewound only into the FRESH channel (just before the
-        # handover), never back to April.
-        assert abs(lairson.state.last_seen_cursor - (now - 3600 - 0.001)) < 0.01
-        assert lairson.state.last_seen_cursor > old + 1000
-        # su authored the only fresh message and April is settled → no rewind.
-        assert su.state.last_seen_cursor == now
-
-    def test_rewinds_to_unacted_reply_for_ongoing_refinement(self):
-        import time
-        engine, su, lairson = self._engine()
-        now = time.time()
-        # su handover, then lairson's refinement reply 30m ago (unacted by su).
-        self._add_channel(engine, "june", "CJUN", ["su", "lairson"],
-                           [(now - 3600, "su"), (now - 1800, "lairson")])
-        su.state.last_seen_cursor = now
-        lairson.state.last_seen_cursor = now
-
-        engine._rewind_cursors_for_private_channels()
-
-        # su rewinds just before lairson's reply (not back to the handover).
-        assert abs(su.state.last_seen_cursor - (now - 1800 - 0.001)) < 0.01
-        # lairson posted last → caught up → not rewound.
-        assert lairson.state.last_seen_cursor == now
-
-    def test_cursor_only_moves_backward(self):
-        import time
-        engine, su, lairson = self._engine()
-        now = time.time()
-        self._add_channel(engine, "june", "CJUN", ["su", "lairson"],
-                           [(now - 3600, "su")])
-        # lairson's cursor is already far in the past — rewind must not drag it
-        # forward to the (more recent) target.
-        lairson.state.last_seen_cursor = now - 10 * 86400
-        su.state.last_seen_cursor = now
-
-        engine._rewind_cursors_for_private_channels()
-        assert lairson.state.last_seen_cursor == now - 10 * 86400
-
-    def test_noop_when_channel_has_no_messages_yet(self):
-        import time
-        engine, su, lairson = self._engine()
-        now = time.time()
-        engine._channel_id_map["june"] = "CJUN"
-        engine._private_channel_members["CJUN"] = {"su", "lairson"}
-        su.state.last_seen_cursor = now
-        lairson.state.last_seen_cursor = now
-        engine._rewind_cursors_for_private_channels()
-        assert su.state.last_seen_cursor == now
-        assert lairson.state.last_seen_cursor == now
-
-
-# ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
 
@@ -1213,9 +1121,9 @@ class TestPhase4ReplySuppression:
 
 # ---------------------------------------------------------------
 # The pending/reactive-priority trigger loop closed 2026-08-12
-# (PI-interaction removal cycle). The surviving `is_bot=False` producer
-# (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
-# a human-authored row that the DB-inbound poller ingests into the shared
+# (PI-interaction removal cycle). The `is_bot=False` producer
+# (the web writer, since retired) wrote a human-authored row that the
+# engine's DB-inbound poller (also retired) ingested into the shared
 # MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
 # the reply lane's ungated call, `_pending_reply_pairs`) would have treated
 # that row as "a new reply from the other participant" — setting

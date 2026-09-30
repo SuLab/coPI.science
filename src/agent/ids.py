@@ -103,10 +103,9 @@ class TsMinter:
 
 
 # Process-wide default minter for writers that don't own a SimulationEngine
-# instance — the PI web inbox (src/services/pi_inbox.py). Each *process* must
-# claim its writer id at startup
-# via set_default_writer_id(); the default below is the web app, the most
-# common host for this minter. See WRITER_* above.
+# instance. Its only such writer, the PI web inbox, was retired; each *process*
+# still must claim its writer id at startup via set_default_writer_id(); the
+# default below is the web app. See WRITER_* above.
 _default = TsMinter(WRITER_WEB)
 
 

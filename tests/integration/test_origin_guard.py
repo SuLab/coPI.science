@@ -233,15 +233,9 @@ def test_the_guard_is_the_outermost_middleware():
     ``create_app()``. So the invariant needs a direct look at the stack.
 
     Why outermost is the requirement and not a preference: everything the guard
-    is in front of costs something on a request it is going to refuse. In
-    particular ``AgentBadgeMiddleware`` (src/main.py) opens its own database
-    session and runs an own-agents SELECT, a delegated-agents JOIN, and a
-    ThreadDecision/ProposalReview COUNT pair PER agent — for any request
-    carrying a session cookie. A demoted guard therefore turns every forged
-    cross-site POST into an unauthenticated database-load amplifier: the
-    attacker still cannot change anything, but they can make each refused
-    request cost several queries. Refusing on headers alone, before any of that
-    is constructed, is the point.
+    is in front of costs something on a request it is going to refuse — the
+    session cookie is decoded and a route handler may open a database session.
+    Refusing on headers alone, before any of that is constructed, is the point.
 
     ``user_middleware`` is in outermost-to-innermost order (Starlette's
     ``build_middleware_stack`` wraps in reverse), and ``add_middleware``

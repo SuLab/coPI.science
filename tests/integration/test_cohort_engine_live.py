@@ -5,8 +5,8 @@ engine methods against a real database with real rows committed, because that is
 where the DB-primary conversation interface and the cohort gate actually meet:
 
 - `_recompute_allowed_sender_ids` issuing real SQL against cohort_memberships
-- `_poll_inbound_from_db` ingesting real agent_messages rows written by "another
-  process", then a gated read filtering them per agent
+- agent_messages rows written by "another process", appended to the log, then a
+  gated read filtering them per agent
 - `_rebuild_state_from_db` + `_rebuild_agent_state` reconstructing threads on a
   *resumed* run and the first recompute grandfathering them (v2 §8)
 - `_record_topology_snapshot` actually writing a row — it is wrapped in try/except,
@@ -26,6 +26,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport
 from src.models import (
@@ -110,6 +111,30 @@ def _engine(factory, run_id, agent_ids=AGENT_IDS, roles=None):
     # asserting on the persisted row would silently pass on an empty result.
     eng.message_log.set_persist_callback(eng._enqueue_persist)
     return eng
+
+
+async def _ingest_from_db(eng) -> None:
+    """Append this run's agent_messages rows the engine has not seen to its log.
+
+    Stands in for the retired DB inbound poll: these tests pin the gated READS over
+    rows another process wrote, which the rebuild path still produces on a resume;
+    they never pinned the poller itself.
+    """
+    async with eng.session_factory() as db:
+        rows = (await db.execute(
+            select(AgentMessage)
+            .where(AgentMessage.simulation_run_id == eng.simulation_run_id)
+            .order_by(AgentMessage.created_at.asc())
+        )).scalars().all()
+    for r in rows:
+        if not r.message_ts or eng.message_log.get_entry(r.message_ts):
+            continue
+        eng.message_log.append(LogEntry(
+            ts=r.message_ts, channel=r.channel_name, sender_agent_id=r.agent_id,
+            sender_name=r.sender_name or ("PI" if not r.is_bot else r.agent_id or "bot"),
+            content=r.content or "", thread_ts=r.thread_ts, posted_at=r.posted_at or 0.0,
+            is_bot=r.is_bot, visibility=r.visibility, phase=r.phase,
+        ))
 
 
 def _cfg(monkeypatch, *, enabled=True, policy="isolated", delay=0.0):
@@ -381,7 +406,7 @@ async def test_db_ingestion_is_complete_and_reads_are_per_agent(live, monkeypatc
                          content="from a human", message_ts="1000.0003",
                          posted_at=1000.0003, is_bot=False)
 
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     # Shared log is complete — ingestion is never gated (v2 §6.2).
     assert len(eng.message_log) == 3, "ingestion must not drop anything"
@@ -415,7 +440,7 @@ async def test_null_agent_id_bot_row_from_the_db_does_not_leak(live, monkeypatch
     await _write_message(factory, run_id, agent_id=None, sender_name="bot",
                          content="unattributable bot row", message_ts="1000.0009",
                          posted_at=1000.0009, is_bot=True)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
     assert len(eng.message_log) == 1, "the row is still ingested"
 
     su = eng.agents["su"]
@@ -440,7 +465,7 @@ async def test_private_channel_message_from_a_non_mate_is_visible(live, monkeypa
         posted_at=1000.0011, channel_name="collab-priv-su-cravatt",
         visibility=VISIBILITY_COLLAB_PRIVATE,
     )
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {"collab-priv-su-cravatt"}
@@ -626,7 +651,7 @@ async def test_hub_auto_activation_does_not_activate_from_a_non_cohort_post(live
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="we have a screen hit worth talking about",
                          message_ts="1000.0071", posted_at=1000.0071)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     hub = eng.agents["blackbird"]
     hub.state.subscribed_channels = {"general"}
@@ -651,7 +676,7 @@ async def test_hub_auto_activation_does_activate_for_a_cohort_mate(live, monkeyp
     await _write_message(factory, run_id, agent_id="su", sender_name="SuBot",
                          content="we have a screen hit worth talking about",
                          message_ts="1000.0072", posted_at=1000.0072)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     hub = eng.agents["blackbird"]
     hub.state.subscribed_channels = {"general"}
@@ -672,7 +697,7 @@ async def test_phase3_does_not_activate_a_thread_from_a_non_cohort_tag(live, mon
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="hey @SuBot want to work together?",
                          message_ts="1000.0051", posted_at=1000.0051)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {"general"}
@@ -695,7 +720,7 @@ async def test_phase3_does_activate_for_a_cohort_mate(live, monkeypatch):
     await _write_message(factory, run_id, agent_id="wiseman", sender_name="WisemanBot",
                          content="hey @SuBot want to work together?",
                          message_ts="1000.0061", posted_at=1000.0061)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {"general"}
@@ -757,7 +782,7 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
                          content="a reply that deserves an answer",
                          message_ts="1000.0072", posted_at=1000.0072,
                          thread_ts="1000.0071")
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {"general"}
@@ -1015,7 +1040,7 @@ async def test_filtering_is_forward_only(live, monkeypatch):
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="BEFORE the membership change",
                          message_ts="2000.0001", posted_at=2000.0001)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
     assert len(eng.message_log) == 1, "ingestion is never gated"
     assert eng.message_log.get_new_top_level_posts(
         since=0, channels={"general"}, exclude_agent_id="su",
@@ -1040,7 +1065,7 @@ async def test_filtering_is_forward_only(live, monkeypatch):
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="AFTER the membership change",
                          message_ts="2001.0001", posted_at=2001.0001)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
     visible = eng.message_log.get_new_top_level_posts(
         since=su.state.last_seen_cursor, channels={"general"},
         exclude_agent_id="su", allowed_sender_ids=su.allowed_sender_ids,
@@ -1070,7 +1095,7 @@ async def test_a_rewound_cursor_does_replay_and_the_gate_still_applies(live, mon
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="suppressed at first", message_ts="2100.0001",
                          posted_at=2100.0001)
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     def _read(since):
         return [e.content for e in eng.message_log.get_new_top_level_posts(
@@ -1124,7 +1149,7 @@ async def test_private_exemption_holds_for_every_write_path(live, monkeypatch):
                          channel_id=f"local:{priv}",
                          visibility=VISIBILITY_COLLAB_PRIVATE)
     await eng._flush_persisted()
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {priv}
@@ -1244,7 +1269,7 @@ async def test_grandfathered_thread_still_concludes(live, monkeypatch):
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
                          content="a reply", message_ts="4000.0002",
                          posted_at=4000.0002, thread_ts="4000.0001")
-    await eng._poll_inbound_from_db()
+    await _ingest_from_db(eng)
 
     su = eng.agents["su"]
     su.state.subscribed_channels = {"general"}
