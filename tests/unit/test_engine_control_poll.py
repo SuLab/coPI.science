@@ -186,3 +186,34 @@ async def test_a_service_error_is_swallowed_and_logged(
         r.levelno == logging.WARNING and "control" in r.getMessage().lower()
         for r in caplog.records
     )
+
+
+async def test_a_hold_open_stop_requests_operator_hold(monkeypatch, tmp_path, engine):
+    eng = _engine(monkeypatch, tmp_path)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _seed_run(factory)
+    eng.session_factory = factory
+    eng.simulation_run_id = run_id
+    stop_calls: list[str] = []
+    monkeypatch.setattr(
+        eng, "request_stop", lambda reason="operator": stop_calls.append(reason),
+    )
+    async with factory() as db:
+        cmd = SimulationCommand(command="stop", payload={"hold_open": True})
+        db.add(cmd)
+        await db.commit()
+        cmd_id = cmd.id
+    try:
+        await eng._poll_control_plane(now=1e9)
+        assert stop_calls == ["operator_hold"]
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            assert row.status == "done"
+            assert row.result == f"run {run_id} (hold open interviews)"
+    finally:
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            if row is not None:
+                await db.delete(row)
+                await db.commit()
+        await _cleanup(factory, run_id)

@@ -1392,10 +1392,15 @@ class SimulationEngine:
             async with self.session_factory() as db:
                 cmd = await claim_pending(db, command="stop")
                 if cmd is not None:
+                    hold = bool((cmd.payload or {}).get("hold_open"))
                     await finish_command(
-                        db, cmd.id, status="done", result=f"run {self.simulation_run_id}",
+                        db, cmd.id, status="done",
+                        result=(
+                            f"run {self.simulation_run_id} (hold open interviews)"
+                            if hold else f"run {self.simulation_run_id}"
+                        ),
                     )
-                    self.request_stop("operator")
+                    self.request_stop("operator_hold" if hold else "operator")
                     await upsert_status(
                         db, state="stopping",
                         simulation_run_id=self.simulation_run_id, detail=detail,

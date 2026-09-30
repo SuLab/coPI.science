@@ -25,7 +25,8 @@ class SimulationCommand(Base):
     command: Mapped[str] = mapped_column(
         Enum("start", "stop", name="sim_command_enum"), nullable=False
     )
-    #: start: {"fresh": bool, "max_runtime": int, "max_proposals": int}. stop: none.
+    #: start: {"fresh": bool, "max_runtime": int, "max_proposals": int}. stop: None for the default Stop, or {"hold_open": true}
+    #: for "Stop — hold open interviews".
     payload: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     status: Mapped[str] = mapped_column(
         Enum("pending", "done", "failed", "stale", name="sim_command_status_enum"),

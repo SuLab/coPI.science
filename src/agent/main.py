@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 app = typer.Typer()
 
 
+class RunFinalized(RuntimeError):
+    """The latest run was finalized: its owed headlines were released and it is
+    closed for good. Start a fresh run instead. Raised out of `_run_simulation`,
+    so the supervisor records the start as `failed` with this message and the
+    CLI exits with it."""
+
+
 @app.command()
 def main(
     max_runtime: int = typer.Option(0, "--max-runtime", help="Max runtime in minutes (0 = run until stopped)"),
@@ -151,6 +158,52 @@ async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
         await db.commit()
         logger.info("Created new simulation run %s", run.id)
         return run.id
+
+
+def _reopen_run_for_resume(run, max_proposals: int) -> int:
+    """Reopen ``run`` (the latest `SimulationRun`) for a resume and return the
+    ``max_proposals`` the resumed engine enforces.
+
+    Raises `RunFinalized` for a finalized run. Clears ``held_at``: a resume hands
+    a held run's open interviews back to the engine. Everything else is the
+    resume bookkeeping as it always was: the mixed-rubric warning,
+    ``status``/``ended_at``, and ``max_proposals`` inherited from the stored
+    config and restamped into it.
+    """
+    if run.finalized_at is not None:
+        raise RunFinalized(
+            f"run {run.id} was finalized at {run.finalized_at.isoformat()} and "
+            "cannot be resumed — start a fresh run"
+        )
+    stamped_hash = (run.config or {}).get("rubric_content_hash")
+    if stamped_hash and stamped_hash != RUBRIC_CONTENT_HASH:
+        logger.warning(
+            "Resuming run %s, which opened under rubric %s (%s); "
+            "this process loaded %s (%s). Per-assessment stamps "
+            "remain authoritative.",
+            run.id,
+            (run.config or {}).get("rubric_version"),
+            stamped_hash,
+            RUBRIC_VERSION,
+            RUBRIC_CONTENT_HASH,
+        )
+    run.status = "running"
+    run.ended_at = None
+    run.held_at = None
+    if max_proposals == 0:
+        inherited_max_proposals = int((run.config or {}).get("max_proposals", 0))
+        if inherited_max_proposals:
+            logger.info(
+                "Resume did not pass --max-proposals; inheriting %d from run %s's stored config",
+                inherited_max_proposals,
+                run.id,
+            )
+        max_proposals = inherited_max_proposals
+    # Restamp so the persisted config matches what will actually be enforced
+    # (the Live tab reads this column) — reassign rather than mutate in place so
+    # SQLAlchemy's JSON change-tracking picks it up.
+    run.config = {**(run.config or {}), "max_proposals": max_proposals}
+    return max_proposals
 
 
 async def _run_simulation(
@@ -311,35 +364,8 @@ async def _run_simulation(
                 existing_run = result.scalar_one_or_none()
 
                 if existing_run:
-                    stamped_hash = (existing_run.config or {}).get("rubric_content_hash")
-                    if stamped_hash and stamped_hash != RUBRIC_CONTENT_HASH:
-                        logger.warning(
-                            "Resuming run %s, which opened under rubric %s (%s); "
-                            "this process loaded %s (%s). Per-assessment stamps "
-                            "remain authoritative.",
-                            existing_run.id,
-                            (existing_run.config or {}).get("rubric_version"),
-                            stamped_hash,
-                            RUBRIC_VERSION,
-                            RUBRIC_CONTENT_HASH,
-                        )
                     simulation_run_id = existing_run.id
-                    existing_run.status = "running"
-                    existing_run.ended_at = None
-                    if max_proposals == 0:
-                        inherited_max_proposals = int((existing_run.config or {}).get("max_proposals", 0))
-                        if inherited_max_proposals:
-                            logger.info(
-                                "Resume did not pass --max-proposals; inheriting %d from run %s's stored config",
-                                inherited_max_proposals,
-                                simulation_run_id,
-                            )
-                        max_proposals = inherited_max_proposals
-                    # Restamp so the persisted config matches what will actually
-                    # be enforced (the Live tab reads this column) — reassign
-                    # rather than mutate in place so SQLAlchemy's JSON
-                    # change-tracking picks it up.
-                    existing_run.config = {**(existing_run.config or {}), "max_proposals": max_proposals}
+                    max_proposals = _reopen_run_for_resume(existing_run, max_proposals)
                     await db.commit()
                     logger.info("Resuming simulation run %s", simulation_run_id)
                 else:
