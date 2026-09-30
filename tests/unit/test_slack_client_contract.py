@@ -38,9 +38,8 @@ from src.agent.slack_client import (
 from tests.fakes import RecordingSlackClient, _SlackResponse, slack_error
 
 
-def _client(fake, *, visibility_lookup=None) -> AgentSlackClient:
-    c = AgentSlackClient(agent_id="su", bot_token="xoxb-test",
-                         visibility_lookup=visibility_lookup)
+def _client(fake) -> AgentSlackClient:
+    c = AgentSlackClient(agent_id="su", bot_token="xoxb-test")
     c._client = fake              # the seam connect() would fill
     c._bot_user_id = "U_SU"
     c._channel_name_to_id = {"general": "C_GENERAL"}
@@ -230,36 +229,6 @@ def test_autojoin_runs_for_a_public_channel():
     fake = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
     _client(fake).post_message("general", "hi")
     assert fake.calls_to("conversations_join") == [{"channel": "C_GENERAL"}]
-
-
-def test_autojoin_is_skipped_for_a_known_private_channel():
-    """A bot cannot self-join a private channel; trying hides an invite-path bug behind
-    a swallowed error.
-
-    Control: the same client with the same lookup returning 'public' DOES join, so this
-    is about the visibility branch and not about autojoin being dead.
-    """
-    fake = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
-    c = _client(fake, visibility_lookup=lambda cid: "collab_private")
-    c.post_message("C_PRIV", "hi")
-    assert fake.calls_to("conversations_join") == []
-
-    fake2 = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
-    c2 = _client(fake2, visibility_lookup=lambda cid: "public")
-    c2.post_message("C_PUB", "hi")
-    assert fake2.calls_to("conversations_join") == [{"channel": "C_PUB"}]
-
-
-def test_a_raising_visibility_lookup_fails_open_to_public():
-    """Documented behaviour: a bad lookup must not break Slack calls."""
-    fake = RecordingSlackClient(responses={"chat_postMessage": {"ok": True, "ts": "1.1"}})
-
-    def _boom(_cid):
-        raise RuntimeError("lookup exploded")
-
-    c = _client(fake, visibility_lookup=_boom)
-    assert c.post_message("C_X", "hi") is not None
-    assert fake.calls_to("conversations_join") == [{"channel": "C_X"}]
 
 
 def test_a_failing_autojoin_does_not_stop_the_post():
@@ -1047,3 +1016,15 @@ def test_get_permalink_returns_none_when_disconnected():
     client = AgentSlackClient(agent_id="hub", bot_token="xoxb-x")
     # client._client is None by default (not connected)
     assert client.get_permalink("C1", "123.000") is None
+
+
+def test_the_client_has_no_private_channel_gate():
+    """No caller ever passed a visibility lookup, so every gate took the public
+    branch; the gates and the exception they could raise are gone."""
+    import inspect
+
+    import src.agent.slack_client as sc
+
+    assert "visibility_lookup" not in inspect.signature(AgentSlackClient.__init__).parameters
+    assert not hasattr(AgentSlackClient, "_is_private_channel")
+    assert not hasattr(sc, "BotNotInvitedToPrivateChannel")

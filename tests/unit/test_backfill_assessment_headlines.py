@@ -3,12 +3,8 @@ docs/plans/2026-08-29-assessment-headline-delivery-plan.md).
 
 Pure-function tests only — no database. ``select_rows_needing_headline`` is
 exercised against ``types.SimpleNamespace`` stand-ins for
-``OpportunityAssessment`` rows, exactly as
-``tests/unit/test_backfill_dropped_verdicts.py`` exercises
-``scripts/backfill_dropped_verdicts.py``'s own pure helpers — see that file
-for the house pattern this one follows (including proof that
-``from scripts.x import y`` works under this repo's pytest config with no
-``scripts/__init__.py``). ``apply_headline_repairs``/``exit_code_for`` are
+``OpportunityAssessment`` rows (``from scripts.x import y`` works under this
+repo's pytest config with no ``scripts/__init__.py``). ``apply_headline_repairs``/``exit_code_for`` are
 also dependency-free aside from a caller-supplied Slack client, so the
 safety-critical post/stamp behaviours are exercised
 here too, against ``tests/fakes.py::FakeSlackClient`` — no live database, no

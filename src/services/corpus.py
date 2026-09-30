@@ -10,7 +10,7 @@ and nothing else was ever asked. Stages here:
   S4  PubMed name+affiliation search (only when an institution is known)
 
 Identity gates, per the 2026-08-13 rehearsal's matcher (ported from
-``scripts/generate_sparsedata_user.py``): every record must carry the PI as a
+the retired sparse-data seeding script): every record must carry the PI as a
 named INDIVIDUAL author (surname + forename discrimination — "R Lara Green" is
 not "Rachel Green"); S4-only candidates, and bare-initial matches with no
 S1/S3 anchor, additionally need the PI's OWN affiliation to match the searched
@@ -66,7 +66,7 @@ EXCLUDED_TYPES = {
     "biography",
 }
 
-# --- ported matcher (scripts/generate_sparsedata_user.py, validated in the
+# --- ported matcher (from the retired sparse-data seeding script, validated in the
 # --- 2026-08-13 backfill rehearsal: 0.13% attribution error over 1,599 adds)
 
 INSTITUTION_STOPWORDS: frozenset[str] = frozenset({

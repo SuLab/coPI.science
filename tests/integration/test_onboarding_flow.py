@@ -1,7 +1,7 @@
 """The first-run experience: onboarding, profile and settings.
 
-Thirteen HTTP endpoints across ``src/routers/onboarding.py`` (3),
-``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (4) had no direct
+Ten HTTP endpoints across ``src/routers/onboarding.py`` (3),
+``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (1) had no direct
 coverage, and ``src/services/profile_export.py`` had no test referencing it at all.
 
 (It was seventeen until ``POST /onboarding/complete`` and ``GET /onboarding/done``
@@ -27,20 +27,18 @@ is paired with the same request producing the effect it is supposed to produce.
 
 import base64
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
-from itsdangerous import TimestampSigner, URLSafeTimedSerializer
+from itsdangerous import TimestampSigner
 from sqlalchemy import func, select
 
 from src.config import get_settings
 from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_PI,
-    EmailEngagementTracker,
     EmailNotificationPreference,
     Job,
     ProfileRevision,
@@ -52,7 +50,6 @@ from src.routers import onboarding as onboarding_router
 from src.routers import profile as profile_router
 from src.routers import settings as settings_router
 from src.services import profile_export
-from src.services.email_notifications import _generate_unsubscribe_token
 from src.services.tenure_scope import scope_for_export
 from tests import factories
 
@@ -103,8 +100,8 @@ def welcome_emails(monkeypatch):
 
     import src.services.email as email_mod
 
-    def _record(to_email, name=None, *, user_id=None, force=False):
-        sent.append({"to": to_email, "name": name, "user_id": user_id})
+    def _record(to_email, name=None, *, force=False):
+        sent.append({"to": to_email, "name": name})
         return True
 
     monkeypatch.setattr(email_mod, "send_welcome_email", _record)
@@ -203,7 +200,7 @@ async def _prefs(db, uid) -> dict:
 
 
 async def _snapshot(db, uid):
-    """Everything the 11 session-authenticated endpoints between them can change.
+    """Everything the 10 session-authenticated endpoints between them can change.
 
     One tuple, so a single equality covers "this endpoint touched the victim in
     any way at all" without the sweep needing per-endpoint knowledge.
@@ -222,42 +219,6 @@ async def _snapshot(db, uid):
     )))
 
 
-# --- rendered-settings readers ---------------------------------------------
-
-
-def _toggle(html: str, key: str) -> str:
-    m = re.search(rf'name="{key}_on" id="{key}_on" value="(\d)"', html)
-    assert m, f"no {key} toggle rendered on the settings page"
-    return m.group(1)
-
-
-def _frequency(html: str, key: str) -> str:
-    parts = html.split(f'name="{key}_frequency"', 1)
-    assert len(parts) == 2, f"no {key} frequency select rendered on the settings page"
-    m = re.search(r'value="([a-z_]+)" selected', parts[1].split("</select>", 1)[0])
-    assert m, f"no option selected for {key}_frequency"
-    return m.group(1)
-
-
-ALL_OFF = {
-    "proposal_review_on": "0",
-    "status_overview_on": "0",
-    "new_proposal_on": "0",
-    "news_updates_on": "0",
-}
-
-
-def _all_on(review="daily", overview="monthly") -> dict:
-    return {
-        "proposal_review_on": "1",
-        "proposal_review_frequency": review,
-        "status_overview_on": "1",
-        "status_overview_frequency": overview,
-        "new_proposal_on": "1",
-        "news_updates_on": "1",
-    }
-
-
 # ---------------------------------------------------------------------------
 # the endpoint inventory — the list the authorization sweeps iterate
 # ---------------------------------------------------------------------------
@@ -268,7 +229,6 @@ class Ep:
     method: str
     path: str
     build_data: Callable | None = None
-    auth: str = "session"  # "session" | "token" (unsubscribe links carry no session)
     onboarding_complete: bool = True  # state the actor needs for this route to render
 
     @property
@@ -300,34 +260,30 @@ ENDPOINTS: list[Ep] = [
     Ep("POST", "/profile/refresh", lambda u: {}),
     Ep("GET", "/profile/delete-account"),
     Ep("POST", "/profile/delete-account", lambda u: {"confirm": "delete"}),
-    # --- src/routers/settings.py (4) ---
+    # --- src/routers/settings.py (1) ---
     Ep("GET", "/settings"),
-    Ep("POST", "/settings/save", lambda u: _all_on()),
-    Ep("GET", "/settings/unsubscribe/{token}", auth="token"),
-    Ep("POST", "/settings/unsubscribe/{token}", auth="token"),
 ]
 
 _ID = {e: e.label for e in ENDPOINTS}
 
 
-async def _send(client, ep: Ep, actor, headers: dict, token: str | None = None):
+async def _send(client, ep: Ep, actor, headers: dict):
     """Fire ``ep`` as ``actor`` would. Empty headers means genuinely logged out."""
     if "Cookie" not in headers:
         # httpx keeps a cookie jar; a Set-Cookie from an earlier authenticated
         # request in the same test would otherwise silently log this one in.
         client.cookies.clear()
-    path = ep.path.replace("{token}", token or "no-token")
     if ep.method == "GET":
-        return await client.get(path, headers=headers)
+        return await client.get(ep.path, headers=headers)
     data = ep.build_data(actor) if ep.build_data else None
-    return await client.post(path, data=data, headers=headers)
+    return await client.post(ep.path, data=data, headers=headers)
 
 
 def test_the_endpoint_inventory_is_the_whole_first_run_surface():
     """The sweeps below are only as complete as this list.
 
     Read the routes off the three routers rather than trusting a hand-count, so
-    a 14th endpoint fails here loudly instead of quietly escaping the
+    an 11th endpoint fails here loudly instead of quietly escaping the
     authorization sweeps.
     """
     live = set()
@@ -347,14 +303,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
         f"missing from the tests: {sorted(live - declared)}; "
         f"no longer in the code: {sorted(declared - live)}"
     )
-    assert len(ENDPOINTS) == 13
-
-    # The two exemptions below are asserted, not assumed: unsubscribe links are
-    # clicked from an email client with no session.
-    assert {e.label for e in ENDPOINTS if e.auth == "token"} == {
-        "GET /settings/unsubscribe/{token}",
-        "POST /settings/unsubscribe/{token}",
-    }
+    assert len(ENDPOINTS) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -1043,197 +992,6 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
 
 
 # ---------------------------------------------------------------------------
-# 4. src/routers/settings.py
-# ---------------------------------------------------------------------------
-
-
-async def test_every_setting_persists_and_is_reflected_on_the_next_request(
-    client, db_session
-):
-    u = await factories.make_user(db_session)
-    await db_session.flush()
-    h = _auth(u.id)
-
-    # The GET before any POST shows CATEGORY_DEFAULTS.
-    r = await client.get("/settings", headers=h)
-    assert r.status_code == 200
-    assert _toggle(r.text, "proposal_review") == "1"
-    assert _frequency(r.text, "proposal_review") == "weekly"
-    assert _toggle(r.text, "status_overview") == "1"
-    assert _toggle(r.text, "new_proposal") == "0"
-    assert _toggle(r.text, "news_updates") == "1"
-
-    # Turn everything on, with non-default frequencies.
-    r = await client.post("/settings/save", headers=h, data=_all_on("daily", "monthly"))
-    assert r.status_code == 302 and r.headers["location"] == "/settings?saved=1"
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "daily"
-    prefs = await _prefs(db_session, u.id)
-    assert prefs["status_overview"] == (True, "monthly")
-    assert prefs["new_proposal"][0] is True
-    assert prefs["news_updates"][0] is True
-
-    r = await client.get("/settings", headers=h)
-    assert _frequency(r.text, "proposal_review") == "daily"
-    assert _frequency(r.text, "status_overview") == "monthly"
-    for key in ("proposal_review", "status_overview", "new_proposal", "news_updates"):
-        assert _toggle(r.text, key) == "1", key
-
-    # Control for the above: turning everything off must also round-trip, so
-    # "reflected on the next request" is not satisfied by a page hard-coded on.
-    r = await client.post("/settings/save", headers=h, data=ALL_OFF)
-    assert r.status_code == 302
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "off"
-    prefs = await _prefs(db_session, u.id)
-    assert prefs["status_overview"] == (False, "off")
-    assert prefs["new_proposal"][0] is False
-    assert prefs["news_updates"][0] is False
-
-    r = await client.get("/settings", headers=h)
-    for key in ("proposal_review", "status_overview", "new_proposal", "news_updates"):
-        assert _toggle(r.text, key) == "0", key
-
-
-async def test_the_settings_page_reads_defaults_without_inserting_rows(client, db_session):
-    """The GET is documented as insert-free; the POST is what materialises rows."""
-    u = await factories.make_user(db_session)
-    await db_session.flush()
-    h = _auth(u.id)
-
-    assert (await client.get("/settings", headers=h)).status_code == 200
-    assert await _prefs(db_session, u.id) == {}, "the settings GET inserted preference rows"
-
-    # control
-    assert (await client.post("/settings/save", headers=h, data=ALL_OFF)).status_code == 302
-    assert set(await _prefs(db_session, u.id)) == {
-        "status_overview",
-        "new_proposal",
-        "news_updates",
-    }
-
-
-async def test_an_invalid_review_frequency_falls_back_to_weekly(client, db_session):
-    u = await factories.make_user(db_session)
-    await db_session.flush()
-    h = _auth(u.id)
-
-    await client.post(
-        "/settings/save",
-        headers=h,
-        data={**ALL_OFF, "proposal_review_on": "1", "proposal_review_frequency": "hourly"},
-    )
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "weekly"
-
-    # control: a valid value is stored as given, not coerced.
-    await client.post(
-        "/settings/save",
-        headers=h,
-        data={**ALL_OFF, "proposal_review_on": "1", "proposal_review_frequency": "biweekly"},
-    )
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "biweekly"
-
-
-async def test_re_enabling_review_emails_clears_a_system_pause(client, db_session):
-    u = await factories.make_user(
-        db_session, email_notification_frequency="off",
-        email_notifications_paused_by_system=True,
-    )
-    await db_session.flush()
-    h = _auth(u.id)
-
-    # control first: staying off leaves the pause in place.
-    await client.post("/settings/save", headers=h, data=ALL_OFF)
-    assert (await _user_row(db_session, u.id))["email_notifications_paused_by_system"] is True
-
-    await client.post(
-        "/settings/save",
-        headers=h,
-        data={**ALL_OFF, "proposal_review_on": "1", "proposal_review_frequency": "weekly"},
-    )
-    assert (await _user_row(db_session, u.id))["email_notifications_paused_by_system"] is False
-
-
-async def test_changing_the_review_frequency_resets_the_missed_counter(client, db_session):
-    u = await factories.make_user(db_session, email_notification_frequency="weekly")
-    db_session.add(EmailEngagementTracker(user_id=u.id, consecutive_missed=3))
-    await db_session.flush()
-    h = _auth(u.id)
-
-    async def missed():
-        return (
-            await db_session.execute(
-                select(EmailEngagementTracker.consecutive_missed).where(
-                    EmailEngagementTracker.user_id == u.id
-                )
-            )
-        ).scalar_one()
-
-    # control: re-saving the same frequency must not reset it.
-    await client.post(
-        "/settings/save",
-        headers=h,
-        data={**ALL_OFF, "proposal_review_on": "1", "proposal_review_frequency": "weekly"},
-    )
-    assert await missed() == 3
-
-    await client.post(
-        "/settings/save",
-        headers=h,
-        data={**ALL_OFF, "proposal_review_on": "1", "proposal_review_frequency": "daily"},
-    )
-    assert await missed() == 0
-
-
-async def test_the_unsubscribe_get_is_read_only_and_the_post_performs_it(client, db_session):
-    """Email-security scanners fetch every link; the GET must not mutate."""
-    u = await factories.make_user(db_session, email_notification_frequency="weekly")
-    await db_session.flush()
-    token = _generate_unsubscribe_token(str(u.id))
-
-    r = await client.get(f"/settings/unsubscribe/{token}")
-    assert r.status_code == 200
-    assert "Invalid or expired" not in r.text
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "weekly", (
-        "the unsubscribe GET unsubscribed the user"
-    )
-
-    # control: the POST does what the GET refused to.
-    r = await client.post(f"/settings/unsubscribe/{token}")
-    assert r.status_code == 200
-    assert (await _user_row(db_session, u.id))["email_notification_frequency"] == "off"
-
-
-async def test_an_unsubscribe_token_only_affects_the_user_it_was_minted_for(
-    client, db_session
-):
-    a = await factories.make_user(db_session, email_notification_frequency="weekly")
-    b = await factories.make_user(db_session, email_notification_frequency="weekly")
-    await db_session.flush()
-
-    r = await client.post(f"/settings/unsubscribe/{_generate_unsubscribe_token(str(a.id))}")
-    assert r.status_code == 200
-    assert (await _user_row(db_session, a.id))["email_notification_frequency"] == "off"
-    assert (await _user_row(db_session, b.id))["email_notification_frequency"] == "weekly"
-
-    # control: b's own token turns b off, so "b untouched" is not just an
-    # endpoint that never works.
-    await client.post(f"/settings/unsubscribe/{_generate_unsubscribe_token(str(b.id))}")
-    assert (await _user_row(db_session, b.id))["email_notification_frequency"] == "off"
-
-
-async def test_unsubscribe_handles_a_token_for_a_user_that_no_longer_exists(
-    client, db_session
-):
-    ghost = await factories.make_user(db_session)
-    token = _generate_unsubscribe_token(str(ghost.id))
-    await db_session.delete(ghost)
-    await db_session.flush()
-
-    assert "User not found" in (await client.get(f"/settings/unsubscribe/{token}")).text
-    r = await client.post(f"/settings/unsubscribe/{token}")
-    assert r.status_code == 404 and "User not found" in r.text
-
-
-# ---------------------------------------------------------------------------
 # 5. authorization, asserted per endpoint
 # ---------------------------------------------------------------------------
 
@@ -1259,24 +1017,16 @@ async def test_every_endpoint_that_needs_a_session_redirects_a_logged_out_caller
     )
     await factories.make_profile(db_session, user=u)
     await db_session.flush()
-    token = _generate_unsubscribe_token(str(u.id))
 
     before = await _snapshot(db_session, u.id)
-    logged_out = await _send(client, ep, u, {}, token=token)
+    logged_out = await _send(client, ep, u, {})
     after_anonymous = await _snapshot(db_session, u.id)
-
-    if ep.auth == "token":
-        # Documented exemption: unsubscribe links are clicked from an email
-        # client. Their protection is the signed token, tested in the next sweep.
-        assert logged_out.status_code == 200, ep.label
-        assert (await _send(client, ep, u, _auth(u.id), token=token)).status_code == 200
-        return
 
     assert logged_out.status_code == 302, f"{ep.label} served a logged-out caller"
     assert logged_out.headers["location"].startswith("/login"), ep.label
     assert after_anonymous == before, f"{ep.label} acted on behalf of a logged-out caller"
 
-    logged_in = await _send(client, ep, u, _auth(u.id), token=token)
+    logged_in = await _send(client, ep, u, _auth(u.id))
     after_session = await _snapshot(db_session, u.id)
     if ep.method == "POST":
         assert after_session != before, (
@@ -1302,9 +1052,6 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     asserts it DOES land on the victim — so a renamed or removed cookie could
     not make the negative half pass vacuously.
 
-    For the two unsubscribe endpoints, which carry no session at all, the
-    cross-user question is instead whether the attacker can mint a token for the
-    victim; three forgeries are tried and the genuine token is the control.
     """
     victim = await factories.make_user(
         db_session,
@@ -1349,36 +1096,6 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
 
     victim_before = await _snapshot(db_session, victim.id)
     attacker_before = await _snapshot(db_session, attacker.id)
-
-    if ep.auth == "token":
-        secret = get_settings().secret_key
-        forgeries = {
-            "the bare user id": str(victim.id),
-            "a token signed with another secret": URLSafeTimedSerializer(
-                "not-the-real-secret", salt="unsubscribe"
-            ).dumps(str(victim.id)),
-            "a token signed with the wrong salt": URLSafeTimedSerializer(
-                secret, salt="not-unsubscribe"
-            ).dumps(str(victim.id)),
-        }
-        for how, tok in forgeries.items():
-            r = await _send(client, ep, victim, _auth(attacker.id), token=tok)
-            assert "Invalid or expired" in r.text, f"{ep.label} accepted {how}"
-            assert await _snapshot(db_session, victim.id) == victim_before, (
-                f"{ep.label} let {how} change another user's settings"
-            )
-
-        # CONTROL — the genuine token is accepted, so the rejections above are
-        # about the signature and not about a route that rejects everything.
-        genuine = _generate_unsubscribe_token(str(victim.id))
-        r = await _send(client, ep, victim, {}, token=genuine)
-        assert r.status_code == 200 and "Invalid or expired" not in r.text
-        after = await _snapshot(db_session, victim.id)
-        if ep.method == "GET":
-            assert after == victim_before, "the unsubscribe GET is supposed to be read-only"
-        else:
-            assert after != victim_before, "the genuine token did nothing"
-        return
 
     r = await _send(client, ep, attacker, _auth_as(attacker.id, victim.id))
     assert r.status_code in (200, 302), f"{ep.label} errored for the attacker: {r.status_code}"

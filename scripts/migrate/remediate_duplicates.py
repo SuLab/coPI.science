@@ -40,8 +40,8 @@ Deleting a row destroys conversation history; the DB is the durable store from
 0019 on, so a dropped message is unrecoverable. Renumbering a ``message_ts``
 that is a real Slack timestamp destroys the only record of that timestamp while
 the ``slack_ts`` column does not yet exist (0018), which is the same
-timestamp-fabrication mistake ``scripts/backfill_slack_ts.py`` was written to
-undo. So neither action is safe in general, and the tool decides per group:
+timestamp-fabrication mistake the (since retired) Slack-mapping repair script was
+written to undo. So neither action is safe in general, and the tool decides per group:
 
 * A group whose rows are **payload-identical** (equal on every column except
   ``id`` and ``created_at``) is one message logged twice. The extra rows carry
@@ -151,8 +151,7 @@ TS_SHAPE = re.compile(r"\A[0-9]{1,19}\.[0-9]{6}\Z")
 #: Channel ids for channels that exist only in the DB. ``SimulationEngine``
 #: writes ``f"local:{channel}"`` when there is no Slack channel to mirror into,
 #: so a row with this prefix was never posted to Slack and its ``message_ts``
-#: cannot be a Slack timestamp. Same predicate ``scripts/backfill_slack_ts.py``
-#: uses to skip rows it must not ask Slack about.
+#: cannot be a Slack timestamp.
 LOCAL_CHANNEL_PREFIX = "local:"
 
 #: Columns that do NOT count as payload when deciding whether two rows are the
@@ -387,9 +386,9 @@ def classify_origin(row: MessageRow, *, has_slack_columns: bool, writer_slots: d
     # 5. Writer-slot residue. This is the ONLY signal available at 0018 for a
     #    locally minted id that also carries a real Slack channel id -- a PI
     #    message written through the web inbox, or an agent post whose Slack
-    #    mirror failed (both called out in scripts/backfill_slack_ts.py). It is a
-    #    judgement call: a random Slack ts lands in one of the four claimed slots
-    #    about 4% of the time.
+    #    mirror failed. It is a judgement
+    #    call: a random Slack ts lands in one of the four claimed slots about 4% of
+    #    the time.
     residue = us % modulus
     if residue in writer_slots:
         return Origin(
@@ -414,8 +413,8 @@ def renumber_verdict(row: MessageRow, origin: Origin, *, has_slack_columns: bool
     if origin.verdict == ORIGIN_LOCAL_PRESUMED:
         return RENUMBER_SAFE, (
             "presumed locally minted from its writer slot; if that presumption is "
-            "wrong the cost is a lost Slack-mirror mapping, recoverable with "
-            "scripts/backfill_slack_ts.py"
+            "wrong the cost is a lost Slack-mirror mapping, recoverable only by "
+            "asking Slack (conversations.history / conversations.replies)"
         )
     if origin.verdict == ORIGIN_SLACK_CONFIRMED:
         # slack_ts is a separate column from 0019 on, so the Slack timestamp
@@ -620,8 +619,7 @@ def needs_human_advice(group: DuplicateGroup) -> list[str]:
         "  What to check, in order:",
         f"    1. Ask Slack which of these rows is real. For each row's channel_id, "
         f"call conversations.history / conversations.replies with "
-        f"latest=oldest={group.message_ts} inclusive=true (scripts/backfill_slack_ts.py "
-        "does exactly this lookup, and a thread reply MUST be looked up with "
+        f"latest=oldest={group.message_ts} inclusive=true (a thread reply MUST be looked up with "
         "conversations.replies — history does not return replies).",
         "    2. At most one row can be the message Slack actually holds at that ts. "
         "Any row Slack does not confirm has a fabricated or mis-copied ts.",

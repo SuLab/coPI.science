@@ -9,14 +9,13 @@ One trap the offline contract tests surfaced first: `post_message` runs the text
 Every live assertion here uses plain prose for that reason.
 """
 
-import os
 import re
 import time
 import uuid
 
 import pytest
 
-from src.agent.slack_client import BotNotInvitedToPrivateChannel, ThreadNotFound
+from src.agent.slack_client import ThreadNotFound
 from tests.slack_live_support import create_private_channel, invite, thread_replies
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
@@ -387,7 +386,7 @@ def private_channel(slack_clients):
 
 def test_private_channel_invite_and_membership(slack_clients, private_channel):
     """A bot cannot self-join a private channel — it must be invited. That distinction
-    is exactly what _is_private_channel exists to protect."""
+    is why private channels are invited into, never self-joined."""
     name, cid = private_channel
     su, cravatt = slack_clients["su"], slack_clients["cravatt"]
 
@@ -420,34 +419,3 @@ def test_private_channels_are_excluded_from_the_public_listing(
     assert name not in slack_list_all_channels(su, include_private=False), (
         "a private channel leaked into the public listing"
     )
-
-
-def test_a_non_member_bot_posting_to_a_private_channel_is_reported(
-    slack_clients, private_channel
-):
-    """With a visibility_lookup that knows the channel is private, the client must
-    raise BotNotInvitedToPrivateChannel rather than swallow the error — the point is
-    that an invite-path bug stays visible.
-    """
-    name, cid = private_channel
-    from src.agent.slack_client import AgentSlackClient
-
-    tok = os.environ["SLACK_TEST_BOT_TOKEN_WISEMAN"]
-    w = AgentSlackClient(agent_id="wiseman", bot_token=tok,
-                         visibility_lookup=lambda c: "collab_private")
-    assert w.connect() is True
-    with pytest.raises(BotNotInvitedToPrivateChannel):
-        w.post_message(cid, "I was never invited")
-
-
-def test_a_non_member_bot_without_the_lookup_degrades_quietly(slack_clients, private_channel):
-    """Control for the test above: the raise is conditional on the visibility lookup.
-    Without it the client cannot tell a private channel from a deleted one, and
-    returning None is the right degradation."""
-    name, cid = private_channel
-    from src.agent.slack_client import AgentSlackClient
-
-    tok = os.environ["SLACK_TEST_BOT_TOKEN_WISEMAN"]
-    w = AgentSlackClient(agent_id="wiseman", bot_token=tok)   # no visibility_lookup
-    assert w.connect() is True
-    assert w.post_message(cid, "still not invited") is None

@@ -150,7 +150,7 @@ stay comparable. A version bump also requires the outgoing document's entry in
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
-(`_sidecar_refusal`, `src/agent/simulation.py:5303`): emitting one IS the hub
+(`_sidecar_refusal`, `src/agent/simulation.py:5049`): emitting one IS the hub
 saying "this is my verdict", so `_capture_hub_assessment` stores it whether or
 not the reply ends the interview. The only refusal left is a re-capture —
 `duplicate_thread_verdict`, for a turn already stored, for anything after a

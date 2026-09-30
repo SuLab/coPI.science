@@ -137,7 +137,7 @@ def _client_for_key(api_key: str) -> anthropic.Anthropic:
     ``asyncio.to_thread`` concurrency.
 
     Also the one place the request timeout is set, so every call in the process
-    inherits it — including ``email_inbound.classify_reply``, which used to make
+    inherits it — including the retired inbound-email reply classifier, which used to make
     its own untimed request. See CLIENT_READ_TIMEOUT_SECONDS for why 300, and
     NONSTREAMING_MAX_TOKENS for what setting any timeout at all costs us."""
     return anthropic.Anthropic(
@@ -277,9 +277,9 @@ _api_executor: ThreadPoolExecutor | None = None
 def _get_api_executor() -> ThreadPoolExecutor:
     """The API thread pool, created on first use.
 
-    LAZILY, because the web tier imports this module too (``synthesize_profile``,
-    ``email_inbound.classify_reply``) and most of those processes never make an
-    LLM call — 12 idle threads per uvicorn worker would be a cost for nothing.
+    LAZILY, because the web tier imports this module too (``synthesize_profile``)
+    and most of those processes never make an LLM call — 12 idle threads per
+    uvicorn worker would be a cost for nothing.
 
     Never shut down, deliberately, and that CHANGES SHUTDOWN ORDERING: the
     default executor is drained by ``loop.shutdown_default_executor()`` inside

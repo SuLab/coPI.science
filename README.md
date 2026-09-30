@@ -1,36 +1,30 @@
-# CoPI / LabAgent
+# CoPI / Blackbird
 
-A Slack-based system where each academic research lab has an AI agent that
-discovers collaboration opportunities, shares resources, and explores research
-synergies with other lab agents in natural language. Promising ideas are
-escalated to PIs for human input.
+BlackbirdBot (the `scout_hub` agent) interviews one PI's lab agent at a time, in
+Slack threads, to assess ideas for Blackbird Laboratories' incubation-grant or equity
+funding. Each verdict is scored against `prompts/rubric/blackbird-rubric.toml`; the
+hub's role prompt is `prompts/roles/scout_hub/agent-system.md`. Lab agents
+(`pi_lab`) pitch their lab's work from a profile built from ORCID and PubMed.
 
-Currently piloting with 14+ labs at Scripps Research, with multi-institution
-expansion in progress. See `labbot-spec.md` for the full system specification
-and `specs/` for component-level designs.
+`labbot-spec.md` describes the earlier lab-to-lab collaboration product and is kept
+for history only; none of that product runs on this branch.
 
 ## Architecture
 
-- **Web app** (`src/main.py`) — FastAPI app for PI onboarding, profile
-  review/editing, admin dashboard, and email-reply intake.
-- **Worker** (`src/worker/main.py`) — background jobs: profile generation
-  (ORCID/PubMed/lab page → LLM synthesis), FOA ingestion, email notifications.
-- **Agent simulation** (`src/agent/main.py`) — autonomous turn-based agent
-  loop that posts into Slack channels, replies in threads, and DMs PIs.
-- **Postgres** — authoritative store for users, profiles, agent registry,
-  channels, message log, proposals, and migrations (`alembic/`).
-- **Profiles on disk** — `profiles/public/`, `profiles/private/`,
-  `profiles/memory/` mirror DB state for agent consumption.
-
-Cross-cutting:
-
-- `src/services/llm.py` — Anthropic Claude client wrapper.
-- `src/services/orcid.py`, `pubmed.py`, `profile_pipeline.py` — profile
-  generation inputs.
-- `src/agent/grantbot.py` + `funding_rules.py` — GrantBot posts relevant
-  NIH/NSF FOAs into `#funding-opportunities`.
-- `src/services/private_channels.py` — public-thread → `collab_private`
-  channel migration when PI input enters a discussion.
+- **Web app** (`src/main.py`) — FastAPI: PI onboarding and profile editing, the agent
+  page, staff pages (`/admin`, `/manager`, `/reviews`), assessment detail and chat,
+  and the read-only public collaboration graph.
+- **Worker** (`src/worker/main.py`) — background jobs: profile generation (ORCID +
+  corpus resolution + LLM synthesis), grant and industry enrichment, review-bot
+  analysis.
+- **Agent simulation** (`src/agent/supervisor.py` → `src/agent/main.py` →
+  `src/agent/simulation.py`) — the turn-based engine: lab pitches, hub interviews,
+  specialist consults, verdict capture and `#assessments-summary` headlines. Started
+  and stopped from `/admin/simulation`.
+- **Postgres** — the authoritative store (users, profiles, agent registry, message
+  log, assessments, reviews); migrations in `alembic/`.
+- **Profiles on disk** — `profiles/public/` and `profiles/memory/` hold the exported
+  profile each lab agent reads and its working memory.
 
 ## Running locally
 
@@ -82,8 +76,7 @@ DC="docker compose -f docker-compose.prod.yml"
 # Resume an existing run:
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 
-# Fresh run (wipes agent_messages/agent_channels/pi_dm_messages; keeps
-# proposals, reviews and opportunity_assessments):
+# Fresh run: a new simulation_run_id isolates it; nothing is deleted (rows accumulate across runs).
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh
 ```
 
@@ -123,35 +116,26 @@ is baked into the image at build time**, so any code change needs
 
 ## Adding new PIs
 
-1. Add ORCID IDs to `new_orcids.txt`, then
-   `docker compose exec app python -m src.cli seed-profiles --file new_orcids.txt`.
-2. Add an `AgentRegistry` row (`agent_id` = lowercase last name, `bot_name` =
-   `{LastName}Bot`, `status='pending'`). For last-name collisions, prefix with
-   the first initial (e.g., `pwu` / `PWuBot`).
-3. Create a Slack bot token per agent and add to env config.
-4. Add to `PILOT_LABS` in `src/agent/simulation.py` and restart the
-   simulation.
+See `docs/operations/pis-and-access.md` (manager Add-PI, activation, Slack tokens).
 
 ## Repository layout
 
 ```
-src/agent/        agent loop, Slack client, tools, GrantBot, pi_handler
-src/routers/      FastAPI routes (auth, onboarding, profile, admin, …)
-src/services/     LLM, ORCID/PubMed, profile pipeline, email, grants
+src/agent/        simulation engine, roles, tools, specialists, Slack transport
+src/routers/      FastAPI routes (auth, onboarding, profile, agent, admin, manager, reviews)
+src/services/     LLM, ORCID/PubMed/corpus, profile pipeline, rubric, assessments
 src/worker/       background job runner
 src/models/       SQLAlchemy models
 alembic/          DB migrations
-prompts/          agent and pipeline prompt templates
-profiles/         exported public / private / memory markdown per agent
-specs/            component specifications
+prompts/          role prompts, specialist personas, rubric
+profiles/         exported public profiles and working memory per agent
+docs/             operations runbook, plans, specs, audits
 tests/            pytest suite
 ```
 
 ## Specs
 
-- `labbot-spec.md` — top-level system spec
-- `specs/agent-system.md` — agent loop, tools, Slack manifest
-- `specs/privacy-and-channel-visibility.md` — channel classes, migration
-  rule, trust boundary
-- `AGENT.md` — agent-authoring notes
+- `docs/specs/` — current designs (for example `docs/specs/2026-08-07-hub-lab-flow.md`)
+- `docs/operations/` — the operator runbook indexed from `CLAUDE.md`
+- `labbot-spec.md` — historical: the retired collaboration product
 - `CLAUDE.md` — developer instructions for Claude Code sessions

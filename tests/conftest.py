@@ -158,8 +158,7 @@ async def client_without_origin(asgi_app):
     httpx merges client-level headers into every request and offers no way to
     *remove* one per-request, so "what happens with no Origin at all" needs its
     own client rather than an override. Used by
-    tests/integration/test_origin_guard.py, and by anything else that needs to
-    speak as a non-browser caller (RFC 8058 one-click unsubscribe).
+    tests/integration/test_origin_guard.py.
     """
     transport = ASGITransport(app=asgi_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
@@ -216,11 +215,10 @@ def slack_pi_user_id() -> str:
     return os.environ.get("SLACK_TEST_PI_USER_ID", "")
 
 
-def _make_slack_client(agent_id: str, token: str, visibility_lookup=None):
+def _make_slack_client(agent_id: str, token: str):
     from src.agent.slack_client import AgentSlackClient
 
-    c = AgentSlackClient(agent_id=agent_id, bot_token=token,
-                         visibility_lookup=visibility_lookup)
+    c = AgentSlackClient(agent_id=agent_id, bot_token=token)
     assert c.connect() is True, f"[{agent_id}] auth.test failed — token dead or revoked"
     return c
 

@@ -160,10 +160,7 @@ the command Phase 0a exists to make safe.
 
 Notes:
 - All 9 existing rows get `content = ''` (content was never stored pre-`0019`). Since
-  Phase 6 starts `--fresh`, do **not** bother with
-  `scripts/backfill_slack_history_to_db.py`.
-- Do not run `scripts/backfill_slack_ts.py` — it is Slack-side and irrelevant once
-  Slack is off.
+  Phase 6 starts `--fresh`, there is nothing to backfill.
 - Rebuild after: `$COMPOSE up -d --build blackbird-app worker grantbot`.
 
 ---
@@ -224,11 +221,9 @@ What DB-only gives you, all verified in the branch source:
 - Every agent gets a `NullTransport`; no Slack API calls are made.
 - The 7 seeded channels become `local:{name}`, all `public`.
 - GrantBot writes funding posts directly to `agent_messages`.
-- PIs read and write through the new web inbox: `GET /agent/{id}/conversations`,
-  `POST /agent/{id}/message`, `POST /agent/{id}/dm`, backed by `src/services/pi_inbox.py`.
-
-The web inbox is the newest surface on the branch. Exercise it with a real PI login
-before you tell any PI it is their interface.
+- PIs read conversations on the web (`GET /agent/{id}/conversations`); the write
+  routes (`/message`, `/dm`) and the inbox service behind them were retired
+  2026-09-29.
 
 ---
 
@@ -343,7 +338,7 @@ with a small budget and count how often the hub is at its thread cap.
 | | Risk | Disposition |
 |---|---|---|
 | A4 | Gate is behaviour, not access control | **Closed** by Slack-off (Phase 4). Re-enabling Slack reopens it. |
-| A6 | `collab_private` channels bypass the gate entirely (spec §7, by design) | Bounded: only a PI reopening a proposal creates one, and `--fresh` removes the legacy PI↔PI threads that could seed a PI↔PI private channel. Re-check if you ever import history. |
+| A6 | `collab_private` channels bypass the gate entirely (spec §7, by design) | Bounded: no code path creates one now (proposal reopening was retired 2026-09-29). Re-check if you ever import history. |
 | A1 | Onboarding a PI before cohorting it | Mitigated by `policy=isolated` (new agent is silent, not global). Make "create the cohort" a step in the onboarding checklist. |
 | — | Gate suppression is forward-only (spec §6.3) | Adding an agent to a cohort does not replay the backlog it missed. Cursors have moved on. Expected behaviour; tell operators. |
 | — | Slack workspace `blackbird-copi` keeps 7 provisioned bots that will go idle | Harmless. Do not revoke tokens — you will want them if you ever re-enable Slack. |

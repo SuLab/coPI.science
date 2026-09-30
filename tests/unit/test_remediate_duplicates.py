@@ -224,7 +224,7 @@ class TestRenumberVerdict:
             make_row(), rd.Origin(rd.ORIGIN_LOCAL_PRESUMED, ""), has_slack_columns=False
         )
         assert verdict == rd.RENUMBER_SAFE
-        assert "backfill_slack_ts" in reason
+        assert "asking Slack" in reason
 
     def test_confirmed_slack_is_safe_at_0019_because_slack_ts_holds_the_timestamp(self):
         verdict, reason = rd.renumber_verdict(

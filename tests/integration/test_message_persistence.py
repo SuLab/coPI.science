@@ -298,8 +298,8 @@ async def test_rebuild_never_infers_a_slack_ts_from_the_channel_id(db_session):
     too — a PI message written through the web inbox resolves channel_id from the
     agent_channels row, and so does an agent post whose mirror failed. Inferring
     hands _slack_parent_ts a canonical id Slack never issued, which then goes out
-    as a chat.postMessage thread_ts and orphans the reply. Legacy rows are
-    repaired by scripts/backfill_slack_ts.py, which asks Slack instead of guessing.
+    as a chat.postMessage thread_ts and orphans the reply. Legacy rows stay
+    NULL rather than guessed.
     """
     run = await factories.make_simulation_run(db_session)
     # Exactly the shape that used to be mis-inferred: web-written PI message,

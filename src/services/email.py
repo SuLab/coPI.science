@@ -169,12 +169,11 @@ def send_delegate_invitation(
         return False
 
 
-def build_welcome_email(to_email: str, name: str | None = None, user_id: str | None = None):
+def build_welcome_email(to_email: str, name: str | None = None):
     """Build the 'Welcome to CoPI' email as a MIME message.
 
     Returns ``(subject, MIMEMultipart)``. The agent screenshot is embedded
-    inline via a Content-ID reference so the email is self-contained. When
-    ``user_id`` is provided, a working unsubscribe link is included.
+    inline via a Content-ID reference so the email is self-contained.
     """
     import email.mime.image
     import email.mime.multipart
@@ -187,14 +186,6 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
     agent_url = f"{base}/agent"
     profile_url = f"{base}/profile"
     settings_url = f"{base}/settings"
-
-    unsubscribe_url = None
-    if user_id:
-        from src.services.email_notifications import _generate_unsubscribe_token
-        unsubscribe_url = f"{base}/settings/unsubscribe/{_generate_unsubscribe_token(str(user_id))}"
-
-    # Plain-text unsubscribe snippet (omitted when no user_id is available).
-    unsub_text = f"Unsubscribe from CoPI emails: {unsubscribe_url}" if unsubscribe_url else ""
 
     greeting_name = (name or "").strip().split(" ")[0] if name else ""
     greeting = f"Hi {greeting_name}," if greeting_name else "Hi there,"
@@ -227,7 +218,7 @@ FINDING YOUR WAY AROUND
 - My Profile ({profile_url}) — review and edit the research profile your
   agent uses to represent you.
 - My Agent ({agent_url}) — request your agent and manage it.
-- Settings ({settings_url}) — choose which emails you receive and how often.
+- Settings ({settings_url}) — your account.
 
 HOW SCREENING WORKS
 When your agent pitches an idea, BlackbirdBot opens an interview thread
@@ -239,10 +230,6 @@ may route the idea toward incubation funding.
 
 Welcome aboard,
 The CoPI team — Scripps Research
-
----
-Manage email preferences: {settings_url}
-{unsub_text}
 """
 
     html_body = email_shell_open() + f"""
@@ -309,7 +296,7 @@ Manage email preferences: {settings_url}
                     <a href="{settings_url}" style="color: #4f46e5; text-decoration: none;">Settings</a>
                 </td>
                 <td style="padding: 8px 0 8px 16px; color: #374151; line-height: 1.6; border-top: 1px solid #f3f4f6;">
-                    Choose which emails you receive and how often.
+                    Your account.
                 </td>
             </tr>
         </table>
@@ -333,7 +320,7 @@ Manage email preferences: {settings_url}
                 may route the idea toward incubation funding.
             </p>
         </div>
-    </div>""" + email_shell_close(settings_url, unsubscribe_url)
+    </div>""" + email_shell_close()
 
     msg = email.mime.multipart.MIMEMultipart("related")
     msg["From"] = settings.ses_sender_email
@@ -361,12 +348,10 @@ def send_welcome_email(
     to_email: str,
     name: str | None = None,
     *,
-    user_id: str | None = None,
     force: bool = False,
 ) -> bool:
     """Send the 'Welcome to CoPI' email via AWS SES. Returns True on success.
 
-    ``user_id`` enables a working unsubscribe link.
     ``force=True`` skips the outbound allowlist (admin/test sends only).
     """
     from src.config import get_settings
@@ -376,7 +361,7 @@ def send_welcome_email(
         logger.info("Welcome email to %s suppressed by outbound allowlist", to_email)
         return False
 
-    _, msg = build_welcome_email(to_email, name, user_id=user_id)
+    _, msg = build_welcome_email(to_email, name)
 
     try:
         import boto3

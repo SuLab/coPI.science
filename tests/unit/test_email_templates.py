@@ -5,11 +5,6 @@ All CoPI emails wrap their content between ``email_shell_open()`` and
 footer. The footer tagline reads "... SU LAB, Scripps Research".
 """
 
-import types
-import uuid
-
-import pytest
-
 from src.services.email import (
     FOOTER_TAGLINE,
     build_welcome_email,
@@ -58,14 +53,23 @@ def test_shell_close_without_links_is_tagline_only():
 
 
 def test_welcome_email_uses_shared_footer():
-    _, msg = build_welcome_email(
-        "pi@example.com", name="Dr. Example", user_id=str(uuid.uuid4())
-    )
+    _, msg = build_welcome_email("pi@example.com", name="Dr. Example")
     html = _html_part(msg)
+    text = next(
+        p.get_payload(decode=True).decode("utf-8")
+        for p in msg.walk()
+        if p.get_content_type() == "text/plain"
+    )
     assert html.lstrip().startswith('<div style="font-family')
     assert html.count(FOOTER_TAGLINE) == 1
-    assert "Manage email preferences" in html
-    assert ">Unsubscribe</a>" in html
+    # The preference controls and the unsubscribe link left with PI
+    # notification email, so the welcome email no longer points at them.
+    assert "Manage email preferences" not in html
+    assert "emails you receive" not in html
+    assert "emails you receive" not in text
+    assert ">Unsubscribe</a>" not in html
+    assert "/settings/unsubscribe/" not in html
+    assert "/settings/unsubscribe/" not in text
 
 
 def test_delegate_invitation_uses_shared_branding(monkeypatch):
@@ -136,43 +140,3 @@ def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
         assert "\n" not in captured["subject"] and "\r" not in captured["subject"]
     finally:
         get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
-async def test_new_proposal_email_uses_shared_footer(monkeypatch):
-    """A DB-backed notification email also renders the shared footer."""
-    import src.services.email_notifications as en
-
-    captured = {}
-
-    def _fake_send(to, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
-        captured["html"] = html_body
-        return True
-
-    monkeypatch.setattr(en, "_send_html_email", _fake_send)
-
-    class _FakeDB:
-        def add(self, _obj):
-            pass
-
-        async def flush(self):
-            pass
-
-    user = types.SimpleNamespace(id=uuid.uuid4(), email="pi@example.com")
-    agent = types.SimpleNamespace(id=uuid.uuid4(), agent_id="su", bot_name="SuBot")
-    td = types.SimpleNamespace(
-        id=uuid.uuid4(),
-        agent_a="su",
-        agent_b="lotz",
-        summary_text="Joint study of X and Y.",
-        channel="drug-repurposing",
-    )
-
-    await en._send_new_proposal_email(user, td, agent, "LotzBot", _FakeDB())
-
-    html = captured["html"]
-    assert html.lstrip().startswith('<div style="font-family')
-    assert html.count(FOOTER_TAGLINE) == 1
-    assert "Manage email preferences" in html
-    assert ">Unsubscribe</a>" in html
-    assert "/settings/unsubscribe/" in html

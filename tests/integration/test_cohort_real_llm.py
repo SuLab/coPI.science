@@ -79,7 +79,7 @@ async def _call(system_prompt, messages, model=None):
     return await llm.generate_agent_response(
         system_prompt=system_prompt,
         messages=messages,
-        model=model or settings.llm_agent_model_sonnet,
+        model=model or settings.llm_agent_model,
         max_tokens=MAX_TOKENS,
         log_meta={"agent_id": "su", "phase": "real_llm_audit"},
     )

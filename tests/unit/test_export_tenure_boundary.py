@@ -39,8 +39,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # what produced six of the eight misses.
 _ALLOWED_PRODUCERS = {"scoped_publications_for_export", "scope_for_export"}
 
-# The exact call sites this task converted. A ninth caller — or the loss of
-# one of these eight — must fail this test loudly rather than silently
+# The exact call sites this task converted. A seventh caller — or the loss of
+# one of these six — must fail this test loudly rather than silently
 # widening or narrowing the audited set.
 _EXPECTED_CALL_SITES = {
     ("src", "routers", "agent_page.py"),
@@ -49,8 +49,6 @@ _EXPECTED_CALL_SITES = {
     ("src", "services", "profile_pipeline.py"),
     ("src", "services", "profile_edit.py"),
     ("scripts", "audit_pub_dois.py"),
-    ("scripts", "backfill_agents.py"),
-    ("scripts", "generate_sparsedata_user.py"),
 }
 
 

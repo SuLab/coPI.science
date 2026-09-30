@@ -31,7 +31,7 @@ def _maybe_send_welcome(user: User, was_complete: bool) -> None:
     if was_complete or not user.email:
         return
     from src.services.email import send_welcome_email
-    send_welcome_email(user.email, name=user.name, user_id=str(user.id))
+    send_welcome_email(user.email, name=user.name)
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:

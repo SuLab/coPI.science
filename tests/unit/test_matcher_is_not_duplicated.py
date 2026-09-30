@@ -1,12 +1,11 @@
 """No module may carry its own copy of the PI author/affiliation matcher.
 
 The 2026-09-22 audit's D2/D12 defects had already been "fixed" once — in
-``src/services/corpus.py`` — while ``scripts/generate_sparsedata_user.py``
+``src/services/corpus.py`` — while a since-retired seeding script
 kept private copies of ``_author_first_name_matches``, ``_aff_match``,
 ``_distinctive_aff_tokens`` and ``INSTITUTION_STOPWORDS`` with the OLD
-behaviour. That script seeded 56 of the 73 production PIs and is still
-runnable, so re-running it would have reintroduced every defect the service
-fix removed.
+behaviour. That script seeded 56 of the 73 production PIs, so re-running it would have
+reintroduced every defect the service fix removed.
 
 A second copy is invisible to the tests that pin the first one, which is why
 this is a tripwire rather than a comment. The rule: exactly ONE definition of
@@ -62,7 +61,7 @@ def test_the_matcher_has_exactly_one_definition_per_name():
         "these files redefine matcher internals instead of importing them "
         f"from src/services/corpus.py: {offenders}. A private copy does not "
         "get fixed when the service does — that is exactly how the D2/D12 "
-        "defects survived in scripts/generate_sparsedata_user.py."
+        "defects survived in the retired seeding script."
     )
 
 

@@ -41,22 +41,6 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The session cookie, spelled the same way create_app() configures it below.
 SESSION_COOKIE = "copi-session"
 
-#: Path prefixes whose POST is issued by a machine that cannot send an Origin.
-#:
-#: RFC 8058 one-click unsubscribe: src/services/email_notifications.py sets
-#: ``List-Unsubscribe-Post: List-Unsubscribe=One-Click``, and the matching POST
-#: to src/routers/settings.py's ``/settings/unsubscribe/{token}`` is issued
-#: SERVER-SIDE by Gmail / Apple / Yahoo — no Origin, no Referer, no cookies.
-#: Refusing it breaks one-click unsubscribe and with it bulk-sender compliance.
-#: src/routers/auth.py already carries the same path as a non-browser exemption
-#: (``_POST_LOGIN_DENY_PREFIXES``).
-#:
-#: The exemption is conditional on the request carrying NO session cookie (see
-#: below), so it cannot be repurposed as a CSRF gadget: a real provider's
-#: one-click POST has no cookies for us, and a forged one from a sibling tab
-#: necessarily does.
-ORIGINLESS_POST_PREFIXES = ("/settings/unsubscribe/",)
-
 #: Ports a URL of that scheme omits by default. An origin does not include its
 #: default port (RFC 6454 §4), so both sides are normalised against this.
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -146,8 +130,7 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
     the session is decoded or any route runs.
 
     Not affected, verified rather than assumed: the ORCID callback is a GET;
-    there is no inbound Slack POST route; ``POST /api/proposal-vote`` takes a
-    JSON body and there is no CORSMiddleware, so it was already preflight-bound.
+    there is no inbound Slack POST route, and there is no CORSMiddleware.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -155,8 +138,6 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if path.startswith(ORIGINLESS_POST_PREFIXES) and SESSION_COOKIE not in request.cookies:
-            return await call_next(request)
 
         expected = normalized_origin(get_settings().base_url)
         origin_raw = request.headers.get("origin")

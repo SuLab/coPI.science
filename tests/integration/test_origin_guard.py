@@ -23,11 +23,8 @@ from http.cookies import SimpleCookie
 from urllib.parse import urlsplit
 
 import pytest
-from sqlalchemy import select
 
 from src.config import get_settings
-from src.models import User
-from src.services.email_notifications import _generate_unsubscribe_token
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -173,50 +170,11 @@ async def test_a_get_needs_no_origin(client_without_origin):
         assert r.status_code != 403, f"GET {path} was refused ({r.status_code})"
 
 
-async def test_one_click_unsubscribe_still_works_without_an_origin(
-    client_without_origin, db_session
-):
-    """RFC 8058. src/services/email_notifications.py sets
-    ``List-Unsubscribe-Post: List-Unsubscribe=One-Click``, and the matching POST
-    is issued **server-side by Gmail / Apple / Yahoo**, with no Origin and no
-    Referer. A guard that exempted nothing would break one-click unsubscribe and
-    bulk-sender compliance — src/routers/auth.py already treats this same path
-    as a non-browser exemption (``_POST_LOGIN_DENY_PREFIXES``).
-    """
-    user = await factories.make_user(db_session, email_notification_frequency="weekly")
-    await db_session.flush()
-    token = _generate_unsubscribe_token(str(user.id))
-
-    r = await client_without_origin.post(f"/settings/unsubscribe/{token}")
-    assert r.status_code == 200, r.text
-    assert (
-        await db_session.scalar(
-            select(User.email_notification_frequency).where(User.id == user.id)
-        )
-        == "off"
-    )
-
-
-async def test_the_unsubscribe_exemption_requires_no_session_cookie(
-    client_without_origin, db_session
-):
-    """The exemption is gated on the request carrying no session, so it cannot
-    be turned into a CSRF gadget. A real mail provider's one-click POST has no
-    cookies for us; a forged one from a sibling tab necessarily does."""
-    user = await factories.make_user(db_session, email_notification_frequency="weekly")
-    await db_session.flush()
-    token = _generate_unsubscribe_token(str(user.id))
-
-    r = await client_without_origin.post(
-        f"/settings/unsubscribe/{token}", headers=auth_headers(user.id)
-    )
-    assert r.status_code == 403, r.text
-    assert (
-        await db_session.scalar(
-            select(User.email_notification_frequency).where(User.id == user.id)
-        )
-        == "weekly"
-    ), "a cookie-bearing cross-site POST unsubscribed the victim"
+async def test_no_path_is_exempt_from_the_origin_check(client_without_origin):
+    """A cookie-less POST with no Origin is refused on every path, including the
+    one that used to carry the one-click-unsubscribe exemption."""
+    r = await client_without_origin.post("/settings/unsubscribe/some-token")
+    assert r.status_code == 403
 
 
 def test_the_guard_is_the_outermost_middleware():

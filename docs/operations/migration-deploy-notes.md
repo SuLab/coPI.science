@@ -151,7 +151,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > database `select(SpecialistConsult)` at `src/services/assessment_detail.py`
 > — read by both assessment detail pages, admin's and manager's — raises
 > `UndefinedColumn`, and on the engine side `_record_specialist_consult`'s
-> INSERT (`src/agent/simulation.py:5597`) names all four, so every
+> INSERT (`src/agent/simulation.py:5783`) names all four, so every
 > `specialist_consults` write fails too. (The discussions panel cards at
 > `src/services/thread_panel.py` select an explicit column list that named
 > none of the four when this box was written; it now names `read_state`, so that
@@ -727,9 +727,8 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > * **Two behaviour fixes ride along.** An owed `#assessments-summary`
 >   headline (`_announce_owed_headline`) now prints the row's STORED band and
 >   score instead of recomputing them from the live weights, and
->   `scripts/backfill_dropped_verdicts.py` refuses a run whose rubric stamp
->   weighs the dimensions differently from the live document
->   (`--allow-rubric-drift` overrides) — it scores with the live weights.
+>   the dropped-verdicts backfill script (retired 2026-09-29) refused a run whose
+>   rubric stamp weighed the dimensions differently from the live document.
 >
 >     DC="docker compose -f docker-compose.prod.yml"
 >     for s in blackbird-app worker agent; do

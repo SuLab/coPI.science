@@ -66,9 +66,9 @@
 #     traffic can pause is not a script's call, and a half-stopped deployment is
 #     worse than a refused one. It checks that nothing is holding a lock and tells
 #     you what to stop. (The containers it starts are one-off and --rm.)
-#   * It does not run scripts/backfill_slack_ts.py. That one talks to Slack, needs a
-#     valid bot token in every affected channel, and its output needs a human to
-#     read. It is step 8 of the runbook, after this script.
+#   * It does not repair the Slack mirror mapping of pre-0019 rows. The script that
+#     did (step 8 of the runbook) was retired 2026-09-29; such rows keep a NULL
+#     slack_ts.
 #   * It does not resolve duplicate (simulation_run_id, message_ts) rows. That is
 #     scripts/migrate/remediate_duplicates.py, which refuses the ambiguous cases on
 #     purpose. This script tells you to run it and stops.
@@ -595,11 +595,9 @@ echo " MIGRATION COMPLETE AND VERIFIED $PRE_STAMP -> $TARGET"
 [ -n "$BACKUP_FILE" ] && echo " backup: $BACKUP_FILE"
 echo
 echo " STILL TO DO, in this order (docs/production-migration.md steps 8-10):"
-echo "   8. Repair the Slack mirror mapping on legacy rows (only needed if this chain"
-echo "      created agent_messages.content; a later start can skip it):"
-echo "        ${DC[*]} run --rm --no-deps -T $SVC python scripts/backfill_slack_ts.py          # report first"
-echo "        ${DC[*]} run --rm --no-deps -T $SVC python scripts/backfill_slack_ts.py --apply"
-echo "      Read its output. Exit 2 means rows were UNVERIFIED, not absent."
+echo "   8. (Retired 2026-09-29.) The Slack mirror mapping repair for chains that"
+echo "      created agent_messages.content is no longer shipped; pre-0019 rows keep a"
+echo "      NULL slack_ts, which the engine treats as 'not on Slack'."
 echo "   9. Serve the new code on the migrated schema:"
 echo "        ${DC[*]} up -d $SVC worker"
 if [ "$AGENT_IS_SUPERVISOR" -eq 1 ]; then

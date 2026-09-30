@@ -249,9 +249,6 @@ async def run_worker():
         await requeue_stale_processing_jobs(db, older_than_seconds=0)
     last_stale_check = asyncio.get_event_loop().time()
 
-    last_notification_check = 0.0
-    last_inbound_check = 0.0
-
     while not _shutdown:
         try:
             async with session_factory() as db:
@@ -264,36 +261,7 @@ async def run_worker():
                 # No jobs, sleep before polling again
                 await asyncio.sleep(settings.worker_poll_interval)
 
-            # Email notification check (throttled)
             now = asyncio.get_event_loop().time()
-            if now - last_notification_check >= settings.notification_check_interval:
-                last_notification_check = now
-                try:
-                    from src.services.email_notifications import (
-                        check_and_send_new_proposal_emails,
-                        check_and_send_notifications,
-                        check_and_send_status_overviews,
-                    )
-                    sent = await check_and_send_notifications(session_factory)
-                    if sent:
-                        logger.info("Sent %d proposal notification email(s)", sent)
-                    new_proposals = await check_and_send_new_proposal_emails(session_factory)
-                    if new_proposals:
-                        logger.info("Sent %d new-proposal email(s)", new_proposals)
-                    overviews = await check_and_send_status_overviews(session_factory)
-                    if overviews:
-                        logger.info("Sent %d status-overview email(s)", overviews)
-                except Exception as exc:
-                    logger.error("Notification check error: %s", exc, exc_info=True)
-
-            # Inbound email check (throttled, opt-in)
-            if settings.enable_inbound_email and now - last_inbound_check >= settings.inbound_poll_interval:
-                last_inbound_check = now
-                try:
-                    from src.services.email_inbound import poll_inbound_emails
-                    await poll_inbound_emails(session_factory)
-                except Exception as exc:
-                    logger.error("Inbound email check error: %s", exc, exc_info=True)
 
             # Stale-processing sweep (throttled).
             if now - last_stale_check >= STALE_CHECK_INTERVAL_SECONDS:

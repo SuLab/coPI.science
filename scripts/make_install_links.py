@@ -15,7 +15,7 @@ through an SSH tunnel). This script instead reuses the web flow that the admin
 so the links work from any browser. No callback server runs here: the already
 deployed web app receives the redirect and stores the token on the
 ``AgentRegistry`` row directly (the DB is authoritative), which also means there
-is no ``.env`` write and no ``backfill_agent_tokens.py`` step afterwards.
+is no ``.env`` write and no import step afterwards.
 
 Each call creates a real Slack app and persists a ``SlackAppProvision`` bridge
 row keyed by a random ``state``; re-running for the same agent drops that

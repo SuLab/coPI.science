@@ -69,7 +69,7 @@ def test_rejects_open_redirects_and_junk(target):
         "/login/start",
         "/auth/callback",
         "/logout",                  # session flow (and POST-only, so not a GET page)
-        "/settings/unsubscribe/sometoken",  # state-mutating GET link
+        "/settings/unsubscribe/sometoken",  # retired link: not a registered page any more
     ],
 )
 def test_rejects_nonpages_and_sensitive_endpoints(target):

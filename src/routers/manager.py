@@ -290,8 +290,7 @@ async def manager_create_pi(
     Job, a PENDING (inert) AgentRegistry row and the employment-derived JHU
     tenure entry, in ONE commit — so the worker can never claim the job
     before the agent row exists (the ordering gap that silently skipped
-    exports/revisions for seeded PIs; scripts/backfill_agents.py repairs it
-    after the fact). The pending row is provisioned and activated in a
+    exports/revisions for seeded PIs). The pending row is provisioned and activated in a
     separate step (/admin/agents, or this router's /slack/provision and
     /activate routes), never here (D7: the row belongs to the new PI, never
     the manager)."""

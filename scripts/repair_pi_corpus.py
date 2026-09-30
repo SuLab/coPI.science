@@ -7,9 +7,8 @@ Preview by default; ``--apply`` is required for any write. Mirrors
 
 The evidence step is NOT optional: ``publications`` stores no ``pub_types``
 and no author list, so every stored PMID in scope is refetched from PubMed
-before any removal/addition decision is made (D8, plan Task 3). Do not model
-this on ``scripts/generate_sparsedata_user.py`` — that script bulk-deletes a
-PI's corpus before re-inserting; this one never bulk-deletes and never
+before any removal/addition decision is made (D8, plan Task 3). Unlike the retired sparse-data seeding script, which bulk-deleted a PI's corpus
+before re-inserting, this one never bulk-deletes and never
 removes a row without printing its evidence first.
 
 Removal set (automatic, still gated on --apply):

@@ -27,8 +27,8 @@ from src.models import (
     CohortMembership,
     SimulationRun,
 )
-from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
-from tests.slack_live_support import create_private_channel, invite, thread_replies
+from src.visibility import VISIBILITY_PUBLIC
+from tests.slack_live_support import thread_replies
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -237,71 +237,3 @@ async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack
     assert "wrapping up" in [m.get("text") for m in replies], (
         "the grandfathered thread's concluding reply never reached Slack"
     )
-
-
-# --- T9.4: private-channel polling needs a member bot -----------------------------------
-
-
-async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, slack_clients):
-    """§7 end to end with the mirror on: two agents in DIFFERENT cohorts, maximally
-    gated, still converse in the channel the PI made for them — and the messages are
-    really in Slack.
-
-    Control: the same two agents' public traffic IS filtered from each other's reads, so
-    the private result cannot be explained by the gate being off.
-    """
-    eng, factory, run_id, name, cid = cohort_engine
-    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
-    await eng._recompute_allowed_sender_ids()
-    assert eng.agents["su"].allowed_sender_ids == {"su"}
-    assert eng.agents["cravatt"].allowed_sender_ids == {"cravatt"}
-
-    su, cravatt = slack_clients["su"], slack_clients["cravatt"]
-    priv = create_private_channel(su, f"t-priv-exempt-{uuid.uuid4().hex[:6]}")
-    assert priv and priv.get("id"), priv
-    pname, pcid = priv["name"], priv["id"]
-    try:
-        invite(su, pcid, [cravatt._bot_user_id])
-        eng._channel_id_map[pname] = pcid
-        eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
-        # cravatt posts to this channel by NAME below, and create_private_channel caches
-        # the id in no client. Without the shared cache, cravatt's
-        # _resolve_channel_id falls back to list_channels() — which lists
-        # public channels only — and the raw name is handed to
-        # chat.postMessage. The engine shares the map for exactly this reason
-        # in production (_sync_private_channels_from_db / cache_channel_ids).
-        for c in slack_clients.values():
-            c.cache_channel_ids({pname: pcid})
-        for a in eng.agents.values():
-            a.state.subscribed_channels.add(pname)
-
-        await eng._post_message("cravatt", pname, "private: my angle")
-        time.sleep(POST_GAP)
-        await eng._post_message("su", name, "public: my angle")
-        time.sleep(POST_GAP)
-        await eng._flush_persisted()
-
-        # Persisted with the right visibility, and really in Slack.
-        async with factory() as db:
-            byname = {r.channel_name: r for r in (await db.execute(select(AgentMessage)
-                      .where(AgentMessage.simulation_run_id == run_id))).scalars().all()}
-        assert byname[pname].visibility == VISIBILITY_COLLAB_PRIVATE
-        assert byname[name].visibility == VISIBILITY_PUBLIC
-        assert "private: my angle" in [
-            m.get("text") for m in su.poll_channel_messages(pcid, oldest="0")]
-
-        # su is maximally gated yet sees cravatt's private-channel message.
-        sua = eng.agents["su"]
-        seen = {e.content for e in eng.message_log.get_new_top_level_posts(
-            since=0, channels={pname}, exclude_agent_id="su",
-            allowed_sender_ids=sua.allowed_sender_ids)}
-        assert seen == {"private: my angle"}, seen
-
-        # Control: cravatt does NOT see su's public post.
-        cra = eng.agents["cravatt"]
-        pub = [e.content for e in eng.message_log.get_new_top_level_posts(
-            since=0, channels={name}, exclude_agent_id="cravatt",
-            allowed_sender_ids=cra.allowed_sender_ids)]
-        assert pub == [], f"control leg failed: the gate is not filtering public: {pub}"
-    finally:
-        su._call_with_retry(su._client.conversations_archive, channel=pcid)

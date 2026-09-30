@@ -86,8 +86,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Prefer the mounted project root over any baked-in copy of `src` in
-# site-packages (the image installs src/ non-editable) — same guard
-# scripts/backfill_dropped_verdicts.py uses.
+# site-packages (the image installs src/ non-editable).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import func, select, update

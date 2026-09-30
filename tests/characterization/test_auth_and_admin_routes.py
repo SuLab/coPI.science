@@ -157,12 +157,6 @@ async def test_invite_invalid_token_renders_error_200(client):
     assert "text/html" in r.headers["content-type"]
 
 
-async def test_unsubscribe_invalid_token_renders_error_200(client):
-    r = await client.get("/settings/unsubscribe/bogus-token")
-    assert r.status_code == 200
-    assert "text/html" in r.headers["content-type"]
-
-
 # --- /admin/discussions: nullable agent_id on Slack-imported posts ------------
 
 

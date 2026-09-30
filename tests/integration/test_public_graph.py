@@ -30,7 +30,6 @@ therefore deliberately not exercised here.
 import itertools
 import json
 import re
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -88,8 +87,6 @@ ALL_PUBLIC_ROUTES = [
     ("GET", "/scripps-graph"),
     ("GET", "/schultz-alumni-pilot"),
     ("GET", "/schultz-group-alumni"),
-    ("POST", "/api/proposal-vote"),
-    ("POST", "/api/proposal-vote/{vote_id}/details"),
 ]
 
 # Three real Schultz-pilot ORCIDs paired with agent_ids that are also in the
@@ -122,9 +119,8 @@ async def _get(client, path, **kwargs):
 
 
 def _ip_headers() -> dict:
-    """A unique client IP per call, so the module-global rate limiter in
-    public.py (30 proposal votes/min, per IP, per process) cannot
-    make one test's result depend on how many tests ran before it."""
+    """A unique client IP per call, so no per-IP state can make one test's
+    result depend on how many tests ran before it."""
     return {"X-Real-IP": f"198.51.100.{next(_seq) % 254 + 1}"}
 
 
@@ -528,21 +524,6 @@ async def _exercise(client, method, path, ctx):
     if path == "/access-pending/email":
         return await client.post(path, data={"email": "sweep@example.edu"},
                                  headers=_ip_headers())
-    if path == "/api/proposal-vote":
-        # Aimed straight at the private decision: the endpoint must neither accept
-        # the vote nor echo anything about the row back.
-        return await client.post(
-            path,
-            json={"decision_id": str(ctx["private_id"]), "vote": "up",
-                  "voter_token": "sweep-tok"},
-            headers=_ip_headers(),
-        )
-    if path == "/api/proposal-vote/{vote_id}/details":
-        return await client.post(
-            f"/api/proposal-vote/{ctx['vote_id']}/details",
-            json={"details": "sweep", "voter_token": "sweep-tok"},
-            headers=_ip_headers(),
-        )
     assert method == "GET", f"no request builder for {method} {path}"
     return await _get(client, path, headers=_ip_headers())
 
@@ -553,29 +534,16 @@ async def _exercise(client, method, path, ctx):
 async def test_every_public_route_withholds_collab_private_content(
     client, db_session, roster, run, method, path
 ):
-    """The same private proposal, held against all nine public endpoints.
+    """The same private proposal, held against all seven public endpoints.
 
     The four graph routes carry a positive control (the public proposal renders).
-    The other five render no message content at all by design, so their control is
+    The other three render no message content at all by design, so their control is
     different in kind but not weaker: the test asserts, by direct query in the same
     transaction, that the private row WAS present and visible while the request ran.
     Without that leg a fixture that silently failed to seed would score green here.
     """
     private_rows = await _seed_every_window(db_session, run)
-    public_decision = (await db_session.execute(
-        text(
-            "SELECT id FROM thread_decisions "
-            "WHERE summary_text = :s AND origin_visibility = 'public' LIMIT 1"
-        ),
-        {"s": PUBLIC_SUMMARY},
-    )).scalar_one()
-    created = await client.post(
-        "/api/proposal-vote",
-        json={"decision_id": str(public_decision), "vote": "up", "voter_token": "sweep-tok"},
-        headers=_ip_headers(),
-    )
-    assert created.status_code == 200, f"could not seed a vote to exercise: {created.text}"
-    ctx = {"private_id": private_rows[0].id, "vote_id": created.json()["id"]}
+    ctx = {"private_id": private_rows[0].id}
 
     # Control for every case: the private content really is in the database, in
     # this transaction, right now.
@@ -609,15 +577,6 @@ async def test_every_public_route_withholds_collab_private_content(
             f"control leg failed: {path} rendered no public proposal either"
         )
 
-    if path == "/api/proposal-vote":
-        # This endpoint renders no content, so "the marker is absent" is true of it
-        # no matter what. What it CAN leak is existence: a 200 tells an anonymous
-        # caller that the private proposal id is real. Only a 404 withholds that.
-        assert r.status_code == 404, (
-            f"the vote endpoint answered {r.status_code} for a collab_private "
-            "proposal; anything but 404 confirms the private row exists"
-        )
-
 
 def test_the_privacy_sweep_covers_every_public_route():
     """A new endpoint in public.py must be visibly absent, not silently uncovered.
@@ -648,58 +607,6 @@ def test_the_privacy_sweep_covers_every_public_route():
         "the content-rendering classification was emptied or expanded without "
         "updating this pin"
     )
-
-
-async def test_the_vote_endpoint_refuses_a_private_proposal_but_accepts_a_public_one(
-    client, db_session, run
-):
-    """Both legs in one test. The characterization suite pins each half separately;
-    a 404-for-everything endpoint satisfies the private half on its own, so the two
-    are asserted together here.
-
-    Catches: deleting ``AND origin_visibility = 'public'`` from the vote lookup,
-    which would both write rows for private proposals and confirm their existence.
-    """
-    private = await factories.make_thread_decision(
-        db_session, run=run, outcome="proposal", origin_visibility="collab_private",
-        summary_text=PRIVATE_SUMMARY,
-    )
-    public = await factories.make_thread_decision(
-        db_session, run=run, outcome="proposal", origin_visibility="public",
-        summary_text=PUBLIC_SUMMARY,
-    )
-    await db_session.flush()
-
-    refused = await client.post(
-        "/api/proposal-vote",
-        json={"decision_id": str(private.id), "vote": "up", "voter_token": "vote-tok"},
-        headers=_ip_headers(),
-    )
-    assert refused.status_code == 404, (
-        f"a collab_private proposal was votable: {refused.status_code} {refused.text[:300]}"
-    )
-    assert PRIVATE_SUMMARY not in refused.text
-    assert str(private.id) not in refused.text, (
-        "the 404 body echoed the private decision id back"
-    )
-
-    accepted = await client.post(
-        "/api/proposal-vote",
-        json={"decision_id": str(public.id), "vote": "up", "voter_token": "vote-tok"},
-        headers=_ip_headers(),
-    )
-    assert accepted.status_code == 200, (
-        "control leg failed: the endpoint refuses public proposals too, so the 404 "
-        f"above says nothing about visibility ({accepted.status_code} {accepted.text[:300]})"
-    )
-    assert uuid.UUID(accepted.json()["id"])
-
-    # And nothing was written for the private one.
-    votes = (await db_session.execute(
-        text("SELECT count(*) FROM proposal_votes WHERE thread_decision_id = :d"),
-        {"d": str(private.id)},
-    )).scalar_one()
-    assert votes == 0, "a vote row was persisted against a collab_private proposal"
 
 
 async def test_a_private_decision_on_a_public_post_still_does_not_render(
@@ -757,3 +664,16 @@ def test_the_declared_windows_do_not_overlap_or_invert():
     assert JUNE_POST_START <= SCHULTZ_PILOT_START
     assert JUNE_POST_START <= SCHULTZ_GROUP_START
     assert CABO_END <= SCHULTZ_PILOT_START, "the Cabo and June windows overlap"
+
+
+async def test_the_vote_endpoints_are_retired(client):
+    """The graph is a read-only archive."""
+    for path in ("/api/proposal-vote", "/api/proposal-vote/00000000-0000-0000-0000-000000000000/details"):
+        r = await client.post(path, json={})
+        assert r.status_code in (404, 405), (path, r.status_code)
+
+
+async def test_the_graph_page_carries_no_vote_ui(client, roster, run):
+    r = await _get(client, "/cabo-graph")
+    assert r.status_code == 200
+    assert "vote-btn" not in r.text and "/api/proposal-vote" not in r.text

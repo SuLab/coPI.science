@@ -1,11 +1,9 @@
 """Derive an agent's (agent_id, bot_name) pair from a PI's display name.
 
 Moved out of ``src/routers/agent_page.py`` so the manager Add-PI flow can mint
-agents through the same logic as self-service signup. Two divergent copies
-still live in scripts (``scripts/backfill_agents.py`` rebuilds bot names with
-``.capitalize()`` → ``MccarthyBot``; ``scripts/generate_sparsedata_user.py``
-has its own tiers) — this module is the web-facing truth: display casing is
-preserved (``McCarthyBot``).
+agents through the same logic as self-service signup. It is the only copy
+(the two script copies were retired): display casing is preserved
+(``McCarthyBot``).
 """
 
 import logging
@@ -17,7 +15,7 @@ from src.models import AgentRegistry
 
 logger = logging.getLogger(__name__)
 
-# Numeric tier bound, matching scripts/backfill_agents.py's range(2, 20).
+# Numeric tier bound: suffixes 2..19.
 _NUMERIC_TIER_MAX = 20
 
 

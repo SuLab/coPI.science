@@ -33,13 +33,11 @@ ORCID_SCOPE = "/authenticate"
 POST_LOGIN_KEY = "post_login_redirect"
 
 # GET routes that resolve fine but must never be a post-login destination:
-# the auth/session flow itself, and state-mutating GET links (e.g. the
-# one-click unsubscribe). Matched as path prefixes.
+# the auth/session flow itself. Matched as path prefixes.
 _POST_LOGIN_DENY_PREFIXES = (
     "/login",
     "/logout",
     "/auth/",
-    "/settings/unsubscribe/",
 )
 
 

@@ -18,8 +18,7 @@ How it works
 4. Prints authorize URLs — a workspace admin clicks each one in a browser
 5. Each click redirects back here; the code is exchanged for an xoxb- token
 6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>; the closing
-   message prints the scripts/backfill_agent_tokens.py command that copies them
-   into the DB
+   message says how they reach the engine
 
 Prerequisites (one-time, done by a workspace admin in a browser)
 -----------------------------------------------------------------
@@ -577,16 +576,13 @@ def main():
             STATE_FILE.unlink()
         # Two stacks share this host: always -f docker-compose.prod.yml; the unprefixed agent-run container is org1's, never stop or remove it.
         console.print("[green]All done![/green]")
-        console.print("Import the tokens into AgentRegistry (the DB column is authoritative):")
         console.print(
-            "  docker compose -f docker-compose.prod.yml run --rm --no-deps -T "
-            "blackbird-app python scripts/backfill_agent_tokens.py --dry-run"
+            "The tokens are in .env. The engine reads SLACK_BOT_TOKEN_<AGENT_ID> as a "
+            "fallback whenever an agent's AgentRegistry.slack_bot_token is empty, once the "
+            "agent service is recreated: $DC up -d --force-recreate agent (only with no "
+            "live run on /admin/simulation). To make a token authoritative in the DB "
+            "instead, paste it into the agent's approval form on /admin/agents/<id>."
         )
-        console.print(
-            "  docker compose -f docker-compose.prod.yml run --rm --no-deps -T "
-            "blackbird-app python scripts/backfill_agent_tokens.py"
-        )
-        console.print("No restart: the running simulation's roster sync picks up the tokens within ~30s.")
 
 
 if __name__ == "__main__":

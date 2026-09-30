@@ -3,8 +3,8 @@ over the legacy ``.env`` / ``config.get_slack_tokens()`` mechanism.
 
 Tokens moved into the DB so newly-activated agents go live without a process
 restart (the lru_cached ``Settings`` is frozen at startup). ``.env`` is kept as a
-read fallback and as the source ``scripts/backfill_agent_tokens.py`` imports from
-after each bulk ``scripts/provision_slack_bots.py`` run.
+read fallback (``env_token``), which is how tokens written by a bulk
+``scripts/provision_slack_bots.py`` run reach the engine.
 """
 
 import logging

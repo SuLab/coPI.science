@@ -145,14 +145,10 @@ NON_SECRET_STR_FIELDS = {
     "base_url",
     "aws_region",
     "ses_sender_email",
-    "ses_reply_domain",
-    "ses_inbound_s3_bucket",
-    "ses_inbound_s3_prefix",
     "outbound_email_allowlist",
     "llm_profile_model",
     "llm_agent_model",
     "llm_agent_model_opus",
-    "llm_agent_model_sonnet",
     "llm_review_model",
     "llm_assessment_chat_model",
     # Channel names for the run-start announcement — public channel names,
@@ -247,3 +243,11 @@ def test_both_repr_and_str_route_through_repr_args(render):
     assert "sup3rs3cr3t" not in out
     assert "***REDACTED***" in out
     assert "http" in out or "postgres" in out  # control: something is still rendered
+
+
+def test_the_inbound_email_settings_are_retired():
+    """The inbound poller and its classifier model knob are gone."""
+    for name in ("enable_inbound_email", "inbound_poll_interval",
+                 "ses_inbound_s3_bucket", "ses_inbound_s3_prefix",
+                 "llm_agent_model_sonnet"):
+        assert name not in Settings.model_fields, name

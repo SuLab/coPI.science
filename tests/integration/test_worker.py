@@ -638,9 +638,6 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
     monkeypatch.setattr(worker_main, "get_settings", lambda: SimpleNamespace(
         database_url=pg_url,
         worker_poll_interval=0.05,
-        notification_check_interval=10**9,
-        enable_inbound_email=False,
-        inbound_poll_interval=10**9,
     ))
 
     worker_main._shutdown = False
@@ -668,6 +665,40 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
     )
     assert await wk.profile_count(uid_good) == 1
     assert await wk.profile_count(uid_bad) == 0
+
+
+async def test_the_stale_sweep_still_runs_without_the_notification_block(
+    engine, pg_url, monkeypatch
+):
+    """The stale-processing sweep reads `now` in the loop; it must keep firing on
+    its own cadence. Claiming is stubbed to an empty queue so jobs left in the
+    shared table by other tests are never picked up."""
+    sweeps: list[None] = []
+
+    async def _requeue(db, older_than_seconds=None):
+        sweeps.append(None)
+        return 0
+
+    async def _no_job(db):
+        return None
+
+    monkeypatch.setattr(worker_main, "requeue_stale_processing_jobs", _requeue)
+    monkeypatch.setattr(worker_main, "claim_job", _no_job)
+    monkeypatch.setattr(worker_main, "STALE_CHECK_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(worker_main, "get_settings", lambda: SimpleNamespace(
+        database_url=pg_url, worker_poll_interval=0.01,
+    ))
+    worker_main._shutdown = False
+    task = asyncio.create_task(worker_main.run_worker())
+    try:
+        for _ in range(200):
+            if len(sweeps) >= 3:   # 1 boot sweep + at least 2 loop sweeps
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        worker_main._shutdown = True
+        await asyncio.wait_for(task, timeout=5)
+    assert len(sweeps) >= 3, sweeps
 
 
 # ---------------------------------------------------------------------------

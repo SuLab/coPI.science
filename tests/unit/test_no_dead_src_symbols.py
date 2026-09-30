@@ -107,7 +107,7 @@ ALLOWLIST: dict[str, str] = {
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
     "src.agent.simulation:_extract_json": (
-        "Used only by tests; scripts/generate_sparsedata_user.py imports the different src.services.llm._extract_json. "
+        "Used only by tests. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
     "src.routers.profile:_parse_list": (

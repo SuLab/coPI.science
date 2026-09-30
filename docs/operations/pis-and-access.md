@@ -19,14 +19,13 @@ create the User, enqueue the `generate_profile` job, mint a **pending**
 and record the ORCID-employment-derived JHU tenure start. The atomicity is
 deliberate: the job and the agent row commit together, so the worker can never
 run the pipeline before the row exists — the old seed-then-create-row order
-lost the markdown export and revision every time (that is what
-`scripts/backfill_agents.py` repairs). The profile job runs the **corpus
+lost the markdown export and revision every time. The profile job runs the **corpus
 pipeline** (`src/services/corpus.py`: ORCID + OpenAlex + PubMed-by-ORCID +
 name-affiliation search, identity-gated, consortium-excluded, year-ranked,
 50-cap last) and the synthesis/export are tenure-filtered
-(`src/services/jhu_rules.py`; per-user `app_settings` keys, legacy agent_id
-map still read as fallback — `scripts/migrate_tenure_map.py` migrates the 62
-curated entries). A wrong or missing tenure year is correctable on the manager
+(`src/services/jhu_rules.py`; per-user `app_settings` keys, with the legacy
+agent_id map still read as fallback — its 62 curated entries were migrated in
+2026-08). A wrong or missing tenure year is correctable on the manager
 Edit Profile form ("JHU tenure start"). A corpus-stage failure FAILS the job
 (retry ×3, waiting 4 then 16 minutes between attempts → dead, visible on /admin/jobs, the PI detail page and, with a Try Again button, the PI's onboarding page) instead of
 storing a thin ORCID-only profile. A tenure year derived from papers after an ORCID failure or with an incomplete corpus is kept provisionally (app_settings key `jhu_tenure_provisional:{user_id}`), so later profile edits export with the same scoping as the pipeline; the next healthy run replaces or deletes it. Every enqueue goes through `src/services/profile_jobs.py`, so a double click or Add-PI followed by an approval runs one pipeline, not two. **Activation is gated**: `admin_approve_agent`
@@ -91,15 +90,12 @@ The web service has no `./data` mount, so the one-off binds one. The host script
 refuses a roster older than 1 h unless given `--allow-stale-roster`: re-export
 rather than provision from a stale roster.
 
-The host script writes tokens to `.env` as `SLACK_BOT_TOKEN_<AGENT_ID>`; import
-them into the DB column with a one-off container, not `exec` (a long-running
-container's environment dates from its creation, so it cannot see keys added
-since). Preview first, then import:
-
-```bash
-docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py --dry-run
-docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_agent_tokens.py
-```
+The host script writes tokens to `.env` as `SLACK_BOT_TOKEN_<AGENT_ID>`. The engine
+reads that key as a fallback whenever the agent's `AgentRegistry.slack_bot_token` is
+empty, once the agent service is recreated (`$DC up -d --force-recreate agent`, only
+with no live run: a long-running container's environment dates from its creation). To
+make a token authoritative in the DB, paste it into the agent's approval form on
+`/admin/agents/<id>`. (The one-off importer script was retired 2026-09-29.)
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
 authoritative.)
@@ -134,10 +130,9 @@ Three operator consequences, in order of how much they will cost you:
 2. **`curl -X POST` against the app now needs `-H "Origin: $BASE_URL"`.** Any
    script, health check or one-off `curl` that POSTs will 403 without it.
    `Sec-Fetch-Site: same-origin` works as an alternative (it is a forbidden
-   header name, so a browser will not let a page forge one). The single
-   exemption is `POST /settings/unsubscribe/{token}` (RFC 8058 one-click
-   unsubscribe, issued server-side by Gmail/Apple/Yahoo), and only when the
-   request carries **no** session cookie.
+   header name, so a browser will not let a page forge one). There is no
+   exemption: the one-click unsubscribe route that had one was retired with PI
+   notification email (R-02, 2026-09-29).
 3. **`/docs`, `/redoc` and `/openapi.json` now 404**, not 401 — `create_app`
    passes `docs_url=None, redoc_url=None, openapi_url=None`, unregistering the
    routes. They were publishing the whole route inventory to anonymous callers.

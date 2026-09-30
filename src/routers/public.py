@@ -1,39 +1,28 @@
-"""Public-facing routes: root redirect, access-pending, and the proposal-vote/graph pages."""
+"""Public-facing routes: root redirect, access-pending, and the collaboration-graph pages (read-only)."""
 
 import asyncio
-import json
 import logging
 import re
 import secrets
 import time
 import unicodedata
-import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User
-from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
+from src.models import User
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
-
-# Per-IP throttle for the anonymous proposal-feedback endpoints (defense in
-# depth behind the nginx edge limits). Generous enough for a human clicking
-# through the graph, tight enough to blunt scripted vote-spam (SEC-7).
-_vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
-
 
 def _graph_csp(nonce: str) -> str:
     """Content-Security-Policy for the standalone collaboration-graph pages.
@@ -867,150 +856,3 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
             "since_label": "during June 5 – June 10, 2026",
         },
     )
-
-
-# ---------------------------------------------------------------------------
-# Public proposal feedback (no login). Captures lightweight "Great idea" / "Pass"
-# votes — plus optional free-text — on the proposal shown when a graph edge is
-# clicked. A browser-stored ``voter_token`` lets a visitor change their vote and
-# attach details to the same row; see src/models/proposal_vote.py.
-# ---------------------------------------------------------------------------
-
-
-class ProposalVoteIn(BaseModel):
-    decision_id: uuid.UUID
-    vote: str  # "up" (Great idea) | "down" (Pass)
-    voter_token: str | None = None
-    details: str | None = None
-
-
-class ProposalVoteDetailsIn(BaseModel):
-    details: str | None = None
-    voter_token: str | None = None
-
-
-def _clean_token(token: str | None) -> str | None:
-    return (token or "").strip()[:64] or None
-
-
-def _clean_details(details: str | None) -> str | None:
-    return (details or "").strip()[:4000] or None
-
-
-@router.post("/api/proposal-vote")
-async def submit_proposal_vote(
-    request: Request, payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
-):
-    """Record (or update) an anonymous vote on a proposal. Returns the vote id."""
-    if not _vote_limiter.allow(client_ip(request)):
-        raise HTTPException(status_code=429, detail="too many requests")
-
-    if payload.vote not in (VOTE_UP, VOTE_DOWN):
-        raise HTTPException(status_code=422, detail="vote must be 'up' or 'down'")
-
-    # Require a browser token: without one, every request inserts a fresh row
-    # (the unique (decision, token) constraint can't dedup NULL tokens), which
-    # is an unbounded-storage vector on this public endpoint (SEC-7).
-    token = _clean_token(payload.voter_token)
-    if token is None:
-        raise HTTPException(status_code=422, detail="voter_token required")
-
-    # Only allow votes on proposals that are actually shown on the public graph
-    # (the same outcome/visibility predicate _build_graph_payload uses). This
-    # keeps the endpoint from writing rows for — or confirming the existence of —
-    # private or non-proposal thread_decisions.
-    decision = (
-        await db.execute(
-            text(
-                "SELECT thread_id, agent_a, agent_b FROM thread_decisions "
-                "WHERE id = :id "
-                "  AND outcome = 'proposal' "
-                "  AND origin_visibility = 'public'"
-            ),
-            {"id": str(payload.decision_id)},
-        )
-    ).first()
-    if decision is None:
-        raise HTTPException(status_code=404, detail="unknown proposal")
-
-    details = _clean_details(payload.details)
-
-    # One vote per (proposal, browser token): update in place if they revote.
-    existing = None
-    if token:
-        existing = (
-            await db.execute(
-                select(ProposalVote).where(
-                    ProposalVote.thread_decision_id == payload.decision_id,
-                    ProposalVote.voter_token == token,
-                )
-            )
-        ).scalar_one_or_none()
-
-    if existing is not None:
-        existing.vote = payload.vote
-        if details:
-            existing.details = details
-        vote_obj = existing
-    else:
-        vote_obj = ProposalVote(
-            thread_decision_id=payload.decision_id,
-            thread_id=decision.thread_id,
-            agent_a=decision.agent_a,
-            agent_b=decision.agent_b,
-            vote=payload.vote,
-            details=details,
-            voter_token=token,
-        )
-        db.add(vote_obj)
-
-    try:
-        await db.commit()
-    except IntegrityError:
-        # Lost a race on the unique (decision, token) constraint — fetch & update.
-        await db.rollback()
-        vote_obj = (
-            await db.execute(
-                select(ProposalVote).where(
-                    ProposalVote.thread_decision_id == payload.decision_id,
-                    ProposalVote.voter_token == token,
-                )
-            )
-        ).scalar_one()
-        vote_obj.vote = payload.vote
-        if details:
-            vote_obj.details = details
-        await db.commit()
-
-    await db.refresh(vote_obj)
-    return {"id": str(vote_obj.id)}
-
-
-@router.post("/api/proposal-vote/{vote_id}/details")
-async def update_proposal_vote_details(
-    request: Request,
-    vote_id: uuid.UUID,
-    payload: ProposalVoteDetailsIn,
-    db: AsyncSession = Depends(get_db),
-):
-    """Attach / update the optional free-text details on an existing vote."""
-    if not _vote_limiter.allow(client_ip(request)):
-        raise HTTPException(status_code=429, detail="too many requests")
-
-    vote_obj = (
-        await db.execute(select(ProposalVote).where(ProposalVote.id == vote_id))
-    ).scalar_one_or_none()
-    if vote_obj is None:
-        raise HTTPException(status_code=404, detail="unknown vote")
-
-    # Light ownership check: if the row has a token, the caller must supply the
-    # matching one. A caller that simply omits `voter_token` gets `token is
-    # None`, which must NOT satisfy the check — omitting it is not a way to
-    # bypass ownership on a row that has a token.
-    token = _clean_token(payload.voter_token)
-    if vote_obj.voter_token and vote_obj.voter_token != token:
-        raise HTTPException(status_code=403, detail="token mismatch")
-
-    vote_obj.details = _clean_details(payload.details)
-    await db.commit()
-    return {"ok": True}

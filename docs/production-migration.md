@@ -460,7 +460,7 @@ Consequences you should expect, and which are already handled in the code:
 - Preflight check 11 splits legacy rows into **Slack-recoverable** and **permanently
   unrecoverable**. Read that number before the window so nobody is surprised by it after.
 
-Step 8 recovers what Slack still has.
+Those rows are not recovered from Slack any more (Step 8).
 
 ---
 
@@ -468,24 +468,9 @@ Step 8 recovers what Slack still has.
 
 ### Step 8 — repair the Slack mirror mapping
 
-Only needed when the chain created `agent_messages.content` (a start at or below 0018).
-
-```bash
-docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_slack_ts.py          # report
-docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/backfill_slack_ts.py --apply  # write
-```
-
-This asks Slack which timestamps actually exist and writes only confirmed ones. Rows Slack
-does not recognise are left `NULL`, which is now the truthful value — the code no longer
-*infers* the mapping, because inferring fabricated timestamps that were then handed to
-`chat.postMessage` as a `thread_ts`.
-
-It needs a valid bot token in every affected channel. It is read-only against Slack, only
-ever writes `slack_ts`, and is safe to re-run.
-
-**Exit 2 means some rows were UNVERIFIED — not that they were absent.** Unverified means
-Slack did not answer for them (rate limit, token missing from that channel, channel
-archived). Re-run once the cause is fixed. Do not read exit 2 as "done".
+Retired 2026-09-29 (spec R-04). The script that asked Slack which timestamps exist is no
+longer shipped; rows from a chain that created `agent_messages.content` keep a `NULL`
+`slack_ts`, which the engine treats as "not on Slack". Nothing to do here.
 
 ### Step 9 — deploy the application code, then restart
 
@@ -633,7 +618,6 @@ partial state to repair.
 | Preflight | `scripts/migrate/preflight.py` — `0` ok · `1` blocked · `2` warnings |
 | Postflight | `scripts/migrate/postflight.py` — `0` verified · non-zero: do not deploy |
 | Duplicates | `scripts/migrate/remediate_duplicates.py` — `0` clean · `1` remain · `2` found (dry run) · `3` operational · `64` usage |
-| Slack mapping | `scripts/backfill_slack_ts.py` — `0` all verified · `2` some UNVERIFIED |
 | Lock wait | `ALEMBIC_LOCK_TIMEOUT_MS`, default `10000` ms |
 | Backup dir | `MIGRATE_BACKUP_DIR`, default `backups/` (gitignored), mounted at `/app/backups` |
 | Services | `MIGRATE_SERVICE` (default `blackbird-app`), `MIGRATE_PG_SERVICE` (default `postgres`) |

@@ -11,10 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
-# Stock development secret. It signs BOTH session cookies (src/main.py) and
-# unsubscribe tokens (src/services/email_notifications.py), so shipping it to a
-# real deployment yields forgeable admin sessions and unsubscribe links. The
-# validator below refuses to start with it (or an empty value) outside dev.
+# Stock development secret. It signs session cookies (src/main.py), so shipping
+# it to a real deployment yields forgeable admin sessions. The validator below
+# refuses to start with it (or an empty value) outside dev.
 INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
 
 # ENVIRONMENT values treated as non-production (the insecure default secret is
@@ -159,17 +158,8 @@ class Settings(BaseSettings):
     # AWS SES
     aws_region: str = "us-east-2"
     ses_sender_email: str = "noreply@copi.science"
-    ses_reply_domain: str = "reply.copi.science"
-    ses_inbound_s3_bucket: str = "copi-inbound-email"
-    ses_inbound_s3_prefix: str = "inbound/"
     # Comma-separated recipient allowlist. Empty = send to everyone.
     outbound_email_allowlist: str = ""
-    # When False, the worker skips inbound S3 polling (avoids log spam if S3 isn't set up).
-    enable_inbound_email: bool = False
-
-    # Email notification scheduling
-    notification_check_interval: int = 300  # seconds (5 minutes)
-    inbound_poll_interval: int = 60  # seconds
 
     # Slack bot tokens — one per agent
     slack_bot_token_su: str = ""
@@ -324,7 +314,6 @@ class Settings(BaseSettings):
     llm_profile_model: str = "claude-opus-5"
     llm_agent_model: str = "claude-sonnet-5"
     llm_agent_model_opus: str = "claude-opus-5"
-    llm_agent_model_sonnet: str = "claude-sonnet-5"
     llm_review_model: str = "claude-opus-5"  # review bot, worker-side
 
     # Assessment chat (docs/specs/2026-09-24-assessment-chat-design.md §10.1). The
@@ -496,8 +485,8 @@ class Settings(BaseSettings):
     def _guard_secret_key(self) -> "Settings":
         """Fail fast when the insecure default secret would be used in prod.
 
-        The default (or an empty) SECRET_KEY signs forgeable session cookies and
-        unsubscribe tokens. Outside a development environment this raises at
+        The default (or an empty) SECRET_KEY signs forgeable session cookies.
+        Outside a development environment this raises at
         startup so a misconfigured deploy never comes up; in development it is
         tolerated with a warning so local runs stay friction-free.
         """
