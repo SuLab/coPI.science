@@ -32,6 +32,16 @@ from tests.integration.test_hub_assessment_capture_gate import _delete_run, _hub
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _lock_on_the_test_database(pg_url, monkeypatch):
+    """Write modes take the engine lock on ``get_settings().database_url`` unless
+    given ``lock_url``; point every call in this module at the test database."""
+    import scripts.backfill_assessment_headlines as script
+
+    real = script.acquire_apply_lock
+    monkeypatch.setattr(script, "acquire_apply_lock", lambda _url: real(pg_url))
+
+
 @pytest.fixture
 async def factory(engine):
     f = async_sessionmaker(engine, expire_on_commit=False)
