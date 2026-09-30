@@ -108,3 +108,18 @@ async def test_fetch_jhu_industry_trials_response_shape_flows_into_evidence_from
         studies = await ctgov.fetch_jhu_industry_trials("Someone MD")
     items = [item for study_ in studies for item in evidence_from_study(study_, 2018, {"lymphoma"})]
     assert len(items) == 1 and items[0].kind == "trial_industry_collab"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_uspto_404_is_no_applications(monkeypatch):
+    """ODP answers 404 for a query with no matches; that is an empty result, not
+    three failures and a dead job."""
+    from src.services.industry_sources import uspto_inventor
+
+    monkeypatch.setattr(
+        "src.services.industry_sources.uspto_inventor.get_settings",
+        lambda: type("S", (), {"uspto_api_key": "k"})(),
+    )
+    respx.post(uspto_inventor.SEARCH_URL).mock(return_value=httpx.Response(404, json={"error": "none"}))
+    assert await uspto_inventor.fetch_jhu_applications("Jane Wang") == []

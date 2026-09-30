@@ -5,13 +5,16 @@ import logging
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
+from src.services.profile_edit import parse_expected_version, write_profile_text_fields
+from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -104,12 +107,7 @@ async def onboarding_start(
         and not current_user.is_manager
         and not current_user.is_reviewer
     ):
-        job = Job(
-            type="generate_profile",
-            user_id=current_user.id,
-            payload={"user_id": str(current_user.id), "orcid": current_user.orcid},
-        )
-        db.add(job)
+        job = await enqueue_profile_job_if_absent(db, current_user)
         await db.commit()
         logger.info("Auto-enqueued generate_profile for user %s on /onboarding", current_user.id)
 
@@ -141,6 +139,7 @@ async def save_profile(
     disease_areas: str = Form(""),
     key_targets: str = Form(""),
     keywords: str = Form(""),
+    profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),
 ):
@@ -161,12 +160,8 @@ async def save_profile(
     if not is_valid_email(email_clean):
         return RedirectResponse(url="/onboarding?error=invalid_email", status_code=302)
     if email_clean != (current_user.email or ""):
-        existing = await db.execute(
-            select(User).where(User.email == email_clean, User.id != current_user.id)
-        )
-        if existing.scalar_one_or_none():
+        if not await assign_user_email(db, current_user, email_clean):
             return RedirectResponse(url="/onboarding?error=email_taken", status_code=302)
-        current_user.email = email_clean
 
     def parse_list(val: str) -> list[str]:
         return [s.strip() for s in val.split(",") if s.strip()]
@@ -184,17 +179,17 @@ async def save_profile(
         # FROM-clause entry for table researcher_profiles").
         await db.flush()
 
-    profile.research_summary = research_summary
-    profile.techniques = parse_list(techniques)
-    profile.experimental_models = parse_list(experimental_models)
-    profile.disease_areas = parse_list(disease_areas)
-    profile.key_targets = parse_list(key_targets)
-    profile.keywords = parse_list(keywords)
-    # SQL-side increment: the Python read-modify-write lost updates when two
-    # writers raced (issue #22 C1). Nothing below reads profile_version, so the
-    # expiry the expression assignment causes needs no refresh here.
-    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
-
+    written = await write_profile_text_fields(db, profile, {
+        "research_summary": research_summary,
+        "techniques": parse_list(techniques),
+        "experimental_models": parse_list(experimental_models),
+        "disease_areas": parse_list(disease_areas),
+        "key_targets": parse_list(key_targets),
+        "keywords": parse_list(keywords),
+    }, parse_expected_version(profile_version))
+    if not written:
+        await db.rollback()
+        return RedirectResponse(url="/onboarding?error=profile_changed", status_code=302)
     await db.commit()
 
     # Look up agent_id (gates file export and revision)
@@ -271,11 +266,6 @@ async def retry_pipeline(
     for a manager (F8). Narrowing only the GET left the pipeline one form
     POST away.
     """
-    job = Job(
-        type="generate_profile",
-        user_id=current_user.id,
-        payload={"user_id": str(current_user.id), "orcid": current_user.orcid},
-    )
-    db.add(job)
+    await enqueue_profile_job_if_absent(db, current_user)
     await db.commit()
     return RedirectResponse(url="/onboarding", status_code=302)

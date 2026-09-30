@@ -105,6 +105,7 @@
             {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
             {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
             {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
+            {% elif request.query_params.get('error') == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -151,6 +152,7 @@
     <!-- Edit profile -->
     {% if effective_user.is_staff %}
     <form method="post" action="/manager/pis/{{ target_user.id }}/profile" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <input type="hidden" name="profile_version" value="{{ profile.profile_version if profile else '' }}">
         <h2 class="text-lg font-semibold text-gray-800 mb-4">Edit Profile</h2>
         <div class="grid grid-cols-1 gap-4 mb-5">
             <div>

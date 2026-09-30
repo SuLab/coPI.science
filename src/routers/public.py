@@ -453,7 +453,7 @@ async def access_pending_email(
     email: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Capture an email for a pending-access user who didn't share one via ORCID."""
+    """Record an address a pending-access user typed (users.contact_email_unverified; never users.email)."""
     pending_info = request.session.get("pending_access") or {}
     user_id = pending_info.get("user_id")
     if not user_id:
@@ -477,7 +477,10 @@ async def access_pending_email(
     result = await db.execute(select(User).where(User.id == _uuid.UUID(user_id)))
     user = result.scalar_one_or_none()
     if user and not user.email:
-        user.email = email_clean
+        # Unverified by construction (anyone holding this browser session can
+        # type any address), so it lands in its own column for admins to see
+        # and is never copied to users.email.
+        user.contact_email_unverified = email_clean
         await db.commit()
         pending_info["email"] = email_clean
         request.session["pending_access"] = pending_info

@@ -19,7 +19,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
@@ -31,7 +31,9 @@ from src.services.corpus import (
 from src.services.jhu_rules import (
     derive_employment_start,
     derive_start_from_papers,
+    clear_provisional_tenure_start,
     get_tenure_start,
+    set_provisional_tenure_start,
     set_tenure_start,
     tenure_filter,
 )
@@ -183,13 +185,15 @@ async def run_profile_pipeline(
     # failure before this point runs, and a failed job's writes never commit
     # (process_job rolls back before its failure bookkeeping). Two cases
     # return normally without that guarantee, and in both a paper-derived year
-    # is used for this run's filtering but NOT stored — get_tenure_start
-    # prefers a stored year on every later run, so a wrong one never
-    # self-corrects:
+    # is used for this run's filtering and kept only PROVISIONALLY (later
+    # exports scope by it; the next run replaces or deletes it) — never
+    # recorded, because get_tenure_start prefers a recorded year on every later
+    # run, so a wrong one would never self-correct:
     # * step 1 failed, so ORCID employment was never consulted and would
     #   outlive ORCID's recovery (D8);
     # * the corpus has ``permanently_dropped`` records (a per-item 4xx or an
     #   unreadable body), any of which could be the earliest Hopkins paper.
+    provisional_written = False
     tenure_start = await get_tenure_start(
         db, user_id, agent_id=agent_reg.agent_id if agent_reg else None
     )
@@ -220,15 +224,17 @@ async def run_profile_pipeline(
             unrecorded_because = None
         if tenure_start is not None and unrecorded_because is not None:
             logger.warning(
-                "JHU tenure start %s for %s derived from papers (%s); using it "
-                "for this run only, not recording it",
+                "JHU tenure start %s for %s derived from papers (%s); used for this "
+                "run and kept provisionally for later exports, not recorded",
                 tenure_start, orcid_id, unrecorded_because,
             )
             update_progress(
                 "tenure_derived",
-                f"JHU tenure start {tenure_start} used for this run only "
-                f"({unrecorded_because}; not recorded).",
+                f"JHU tenure start {tenure_start} used for this run and kept "
+                f"provisionally ({unrecorded_because}; not recorded).",
             )
+            await set_provisional_tenure_start(db, user_id, tenure_start)
+            provisional_written = True
         elif tenure_start is not None:
             await set_tenure_start(
                 user_id, tenure_start, "earliest_hopkins_paper", db=db
@@ -238,6 +244,10 @@ async def run_profile_pipeline(
                 f"JHU tenure start {tenure_start} "
                 "(earliest Hopkins-affiliated paper).",
             )
+    if not provisional_written:
+        # A provisional year never outlives a run that did not write one, so a
+        # healthy run exports exactly as before.
+        await clear_provisional_tenure_start(db, user_id)
     if tenure_start is None:
         update_progress(
             "tenure_unknown",
@@ -422,6 +432,9 @@ async def run_profile_pipeline(
         profile = ResearcherProfile(user_id=user_id)
         db.add(profile)
         await db.flush()
+    # The version this run read. Step 9 writes the synthesized text only if it
+    # still holds: a human edit committed while the run synthesized wins.
+    loaded_version = profile.profile_version or 0
 
     # Step 7: LLM Synthesis
     update_progress("step7", "Synthesizing profile with AI...")
@@ -476,11 +489,9 @@ async def run_profile_pipeline(
     #     lets the exception reach process_job, which retries up to
     #     Job.max_attempts (default 3) — three more full LLM+NCBI runs for a
     #     formatting miss the retry above already tried to fix — and then sets
-    #     status='dead'. templates/onboarding/profile_review.html keys its "Try
-    #     Again" control on job_status == 'failed', which src/worker/main.py never
-    #     assigns (on failure it only ever writes 'pending' or 'dead'), so a dead job falls
-    #     through to that template's `elif profile` branch and the PI is shown the
-    #     review form with empty fields and no explanation. Raising would also
+    #     status='dead'. templates/onboarding/profile_review.html now offers
+    #     "Try Again" for a dead job, but three full re-runs for a formatting
+    #     miss are still waste. Raising would also
     #     skip the markdown export and create_revision below, costing the
     #     audit trail.
     #   * Storing nothing is indistinguishable from "the pipeline never ran" and
@@ -537,66 +548,87 @@ async def run_profile_pipeline(
                 f"the new synthesis {reason}.",
             )
         else:
-            profile.research_summary = synthesized.get("research_summary", "")
-            profile.techniques = synthesized.get("techniques", [])
-            profile.experimental_models = synthesized.get("experimental_models", [])
-            profile.disease_areas = synthesized.get("disease_areas", [])
-            profile.key_targets = synthesized.get("key_targets", [])
-            profile.keywords = synthesized.get("keywords", [])
-            profile.synthesis_validated = validated
-            profile.evidence_pmid_count = evidence_pmid_count
-            profile.evidence_pub_count = evidence_pub_count
-            # SQL-side increment: the Python read-modify-write lost updates when
-            # two writers raced (issue #22 C1) — worst at this pipeline site,
-            # which holds the row across dozens of awaits between load and write.
-            profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
-            profile.profile_generated_at = datetime.now(UTC)
-
-            # The expression assignment EXPIRES profile_version, and the log line
-            # below reads it — in an async session a lazy re-load raises
-            # MissingGreenlet. Flush so the UPDATE lands, then load the new value
-            # explicitly. (`profile` is always persistent here: step 6 flushes a
-            # freshly created row, so the expression renders as an UPDATE, never
-            # as an INSERT that could not reference its own target table.)
+            # This run's other writes (grant titles, abstracts hash, publications,
+            # methods text) are stored whatever happens to the text below.
             await db.flush()
-            await db.refresh(profile, ["profile_version"])
+            # SQL-side increment (the Python read-modify-write lost updates when
+            # two writers raced), and conditional on the version step 6 read: an
+            # edit a human committed while this run synthesized wins, and the
+            # run keeps the human's text.
+            result = await db.execute(
+                update(ResearcherProfile)
+                .where(
+                    ResearcherProfile.id == profile.id,
+                    ResearcherProfile.profile_version == loaded_version,
+                )
+                .values(
+                    research_summary=synthesized.get("research_summary", ""),
+                    techniques=synthesized.get("techniques", []),
+                    experimental_models=synthesized.get("experimental_models", []),
+                    disease_areas=synthesized.get("disease_areas", []),
+                    key_targets=synthesized.get("key_targets", []),
+                    keywords=synthesized.get("keywords", []),
+                    synthesis_validated=validated,
+                    evidence_pmid_count=evidence_pmid_count,
+                    evidence_pub_count=evidence_pub_count,
+                    profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1,
+                    profile_generated_at=datetime.now(UTC),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            # Load the row as it now stands (the UPDATE bypassed the session, and
+            # the log lines below read profile_version: a lazy re-load would
+            # raise MissingGreenlet in an async session).
+            await db.refresh(profile)
+            if not result.rowcount:
+                logger.warning(
+                    "Kept the edit made to %s's profile while this run synthesized "
+                    "(version %d at step 6, %d now); stored publications and grants only",
+                    user.name, loaded_version, profile.profile_version,
+                )
+                update_progress(
+                    "concurrent_edit_kept",
+                    f"Kept the profile edit saved while this ran (version "
+                    f"{profile.profile_version}); publications and grants were updated.",
+                )
 
-            if not validated:
-                logger.error(
-                    "Stored an UNVALIDATED profile for %s (version %d): failed "
-                    "_validate_profile on both attempts. Marked "
-                    "synthesis_validated=False for regeneration.",
-                    user.name, profile.profile_version,
-                )
-                update_progress(
-                    "unvalidated",
-                    "The generated profile did not meet the quality checks "
-                    "(150-250 word summary, 3+ techniques, 1+ disease area). "
-                    "It was saved as a draft for you to edit.",
-                )
-            if evidence_pub_count == 0:
-                # Nothing the researcher wrote reached the prompt, so whatever the
-                # model produced came from its own priors plus a name and a
-                # department. It is stored (a PubMed outage must not stop a PI
-                # being onboarded, and some researchers really have no indexed
-                # papers) but it is no longer indistinguishable from a real one.
-                found = (
-                    "an unknown number of"
-                    if evidence_pmid_count is None
-                    else str(evidence_pmid_count)
-                )
-                logger.error(
-                    "Stored an UNGROUNDED profile for %s: 0 publication abstracts "
-                    "reached the synthesis prompt (%s publication IDs in hand, "
-                    "evidence_state=%s)",
-                    user.name, found, profile.evidence_state,
-                )
-                update_progress(
-                    "ungrounded",
-                    f"No publication abstracts reached the profile synthesis "
-                    f"({found} publication IDs were found): "
-                    f"{profile.evidence_state}.",
-                )
+            if result.rowcount:
+                if not validated:
+                    logger.error(
+                        "Stored an UNVALIDATED profile for %s (version %d): failed "
+                        "_validate_profile on both attempts. Marked "
+                        "synthesis_validated=False for regeneration.",
+                        user.name, profile.profile_version,
+                    )
+                    update_progress(
+                        "unvalidated",
+                        "The generated profile did not meet the quality checks "
+                        "(150-250 word summary, 3+ techniques, 1+ disease area). "
+                        "It was saved as a draft for you to edit.",
+                    )
+                if evidence_pub_count == 0:
+                    # Nothing the researcher wrote reached the prompt, so whatever the
+                    # model produced came from its own priors plus a name and a
+                    # department. It is stored (a PubMed outage must not stop a PI
+                    # being onboarded, and some researchers really have no indexed
+                    # papers) but it is no longer indistinguishable from a real one.
+                    found = (
+                        "an unknown number of"
+                        if evidence_pmid_count is None
+                        else str(evidence_pmid_count)
+                    )
+                    logger.error(
+                        "Stored an UNGROUNDED profile for %s: 0 publication abstracts "
+                        "reached the synthesis prompt (%s publication IDs in hand, "
+                        "evidence_state=%s)",
+                        user.name, found, profile.evidence_state,
+                    )
+                    update_progress(
+                        "ungrounded",
+                        f"No publication abstracts reached the profile synthesis "
+                        f"({found} publication IDs were found): "
+                        f"{profile.evidence_state}.",
+                    )
 
     await db.flush()
 
@@ -617,6 +649,12 @@ async def run_profile_pipeline(
         raise ValueError(
             f"User {user.id} was deleted mid-pipeline; aborting before export"
         )
+
+    # Re-read what the export will render: a human edit committed after step 6
+    # must reach the persona file in BOTH branches, the kept-edit branch above
+    # and the keep-stored branch that never wrote the text at all.
+    await db.refresh(profile)
+    await db.refresh(user)
 
     # Export to markdown for agent consumption (include publications).
     # The export list is tenure-filtered EXPLICITLY (JHU R2's export rule):

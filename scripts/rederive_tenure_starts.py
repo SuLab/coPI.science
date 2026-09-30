@@ -113,6 +113,7 @@ from src.services.jhu_rules import (  # noqa: E402
     derive_start_from_papers,
 )
 from src.services.orcid import fetch_orcid_profile  # noqa: E402
+from src.services.profile_jobs import enqueue_profile_job_if_absent  # noqa: E402
 from src.services.profile_pipeline import CORPUS_CAP  # noqa: E402
 
 PAPER_SOURCE = "earliest_hopkins_paper"
@@ -460,13 +461,19 @@ async def run(
                 f"{c.user_id}  {c.name}  {c.orcid}  NOTE a generate_profile job is "
                 "processing on the old year; queued a new one behind it"
             )
-        db.add(
-            Job(
-                type="generate_profile",
-                user_id=c.user_id,
-                payload={"user_id": str(c.user_id), "orcid": c.orcid},
+            # The one deliberate direct construction left: the helper would
+            # return the processing job.
+            db.add(
+                Job(
+                    type="generate_profile",
+                    user_id=c.user_id,
+                    payload={"user_id": str(c.user_id), "orcid": c.orcid},
+                )
             )
-        )
+        else:
+            user = await db.get(User, c.user_id)
+            if user is None or await enqueue_profile_job_if_absent(db, user) is None:
+                continue
         queued += 1
     await db.commit()
     print(

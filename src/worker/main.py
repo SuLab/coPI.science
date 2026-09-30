@@ -11,7 +11,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
@@ -38,7 +38,12 @@ async def claim_job(db: AsyncSession) -> Job | None:
     """Atomically claim the next pending job."""
     result = await db.execute(
         select(Job)
-        .where(Job.status == "pending", Job.attempts < Job.max_attempts)
+        .where(
+            Job.status == "pending",
+            Job.attempts < Job.max_attempts,
+            # A job re-queued after a failure waits out its backoff.
+            or_(Job.not_before.is_(None), Job.not_before <= func.now()),
+        )
         .order_by(Job.enqueued_at)
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -70,6 +75,18 @@ STALE_PROCESSING_SECONDS = 1800
 
 #: How often `run_worker` re-checks (it also checks once at boot with 0).
 STALE_CHECK_INTERVAL_SECONDS = 60
+
+#: Retry backoff: a job that failed and will be retried is not claimable again
+#: for `retry_delay(attempts)` — 4 minutes after the first failure, 16 after the
+#: second. The third failure is dead. An immediate retry used to spend all three
+#: attempts inside one upstream outage.
+RETRY_BACKOFF_BASE = timedelta(minutes=4)
+RETRY_BACKOFF_FACTOR = 4
+
+
+def retry_delay(attempts: int) -> timedelta:
+    """How long a job that has failed ``attempts`` times waits before its next claim."""
+    return RETRY_BACKOFF_BASE * (RETRY_BACKOFF_FACTOR ** max(attempts - 1, 0))
 
 
 async def requeue_stale_processing_jobs(
@@ -200,7 +217,12 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                 job.status = "dead"
                 logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
             else:
-                job.status = "pending"  # Will be retried
+                job.status = "pending"  # Will be retried after the backoff
+                job.not_before = func.now() + retry_delay(job.attempts)
+                logger.info(
+                    "Job %s will be retried after %s (attempt %d of %d failed)",
+                    job_id, retry_delay(job.attempts), job.attempts, job.max_attempts,
+                )
 
             job.completed_at = datetime.now(timezone.utc)
             try:

@@ -7,16 +7,57 @@ schema change."""
 import re
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import ResearcherProfile, User
 from src.services.jhu_rules import set_tenure_start
+from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
 
 
 def _parse_list(val: str) -> list[str]:
     return [s.strip() for s in val.split(",") if s.strip()]
+
+
+def parse_expected_version(raw: str | None) -> int | None:
+    """A form's hidden ``profile_version``, or None when the post carried none
+    (a page rendered before the field existed, or a scripted post), which saves
+    without the check, as before."""
+    text = (raw or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+async def write_profile_text_fields(
+    db: AsyncSession, profile: ResearcherProfile, fields: dict, expected_version: int | None,
+) -> bool:
+    """Write edited profile fields and bump ``profile_version``.
+
+    With ``expected_version`` this is ``UPDATE ... WHERE id = :id AND
+    profile_version = :expected``: if a regeneration or another edit bumped the
+    version since the form was rendered, nothing is written and this returns
+    False; the caller rolls back and asks the user to reload. Without it, the
+    ORM write as before. The SQL-side increment is kept either way (the Python
+    read-modify-write lost updates when two writers raced). The caller commits.
+    """
+    if expected_version is None:
+        for key, value in fields.items():
+            setattr(profile, key, value)
+        profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
+        return True
+    result = await db.execute(
+        update(ResearcherProfile)
+        .where(
+            ResearcherProfile.id == profile.id,
+            ResearcherProfile.profile_version == expected_version,
+        )
+        .values(**fields, profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1)
+        .execution_options(synchronize_session=False)
+    )
+    if not result.rowcount:
+        return False
+    await db.refresh(profile)
+    return True
 
 
 async def apply_profile_edits(
@@ -25,6 +66,7 @@ async def apply_profile_edits(
     research_summary: str, techniques: str, experimental_models: str,
     disease_areas: str, key_targets: str, keywords: str,
     jhu_tenure_start: str | None = None,
+    expected_profile_version: int | None = None,
 ) -> str | None:
     # Optional JHU tenure-start correction (manager form only; the PI's own
     # /profile/save never sends the field). Blank = leave unchanged.
@@ -38,17 +80,10 @@ async def apply_profile_edits(
 
     email_clean = (email or "").strip().lower()
     if email_clean != (target_user.email or ""):
-        if email_clean:
-            if not is_valid_email(email_clean):
-                return "invalid_email"
-            existing = await db.execute(
-                select(User).where(
-                    User.email == email_clean, User.id != target_user.id
-                )
-            )
-            if existing.scalar_one_or_none():
-                return "email_taken"
-        target_user.email = email_clean or None
+        if email_clean and not is_valid_email(email_clean):
+            return "invalid_email"
+        if not await assign_user_email(db, target_user, email_clean or None):
+            return "email_taken"
 
     if name:
         target_user.name = name
@@ -69,16 +104,18 @@ async def apply_profile_edits(
         # VALUES, which cannot reference its own target table.
         await db.flush()
 
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
-    # SQL-side increment (matches onboarding.py's own fix for issue #22 C1) —
-    # nothing below reads profile_version, so the expiry this expression
-    # assignment causes needs no refresh here.
-    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
+    written = await write_profile_text_fields(db, profile, {
+        "research_summary": research_summary,
+        "techniques": _parse_list(techniques),
+        "experimental_models": _parse_list(experimental_models),
+        "disease_areas": _parse_list(disease_areas),
+        "key_targets": _parse_list(key_targets),
+        "keywords": _parse_list(keywords),
+    }, expected_profile_version)
+    if not written:
+        # A regeneration or another edit saved first: keep theirs.
+        await db.rollback()
+        return "profile_changed"
 
     await db.commit()
 

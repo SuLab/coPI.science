@@ -40,7 +40,7 @@
             {% for u in pending %}
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium">{{ u.name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ u.email or '—' }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{% if u.email %}{{ u.email }}{% elif u.contact_email_unverified %}{{ u.contact_email_unverified }} <span class="text-xs text-amber-700">(unverified)</span>{% else %}—{% endif %}</td>
                 <td class="px-4 py-3 text-sm font-mono text-xs">
                     <a href="https://orcid.org/{{ u.orcid }}" target="_blank" class="text-indigo-600 hover:underline">{{ u.orcid }}</a>
                 </td>

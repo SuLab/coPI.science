@@ -71,6 +71,7 @@ from src.services.directory import (
 from src.services.jhu_rules import get_tenure_start
 from src.services.llm import is_truncated_stop
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
+from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.prose_citations import (
     markdown_with_citation_links,
     plain_with_citation_links,
@@ -1411,13 +1412,7 @@ async def admin_approve_access(
         select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
     )
     if profile_result.scalar_one_or_none() is None:
-        db.add(
-            Job(
-                type="generate_profile",
-                user_id=user.id,
-                payload={"user_id": str(user.id), "orcid": user.orcid},
-            )
-        )
+        await enqueue_profile_job_if_absent(db, user)
 
     await db.commit()
     logger.info("Admin %s approved access for user %s", current_user.name, user.id)
@@ -1477,13 +1472,7 @@ async def admin_allowlist_add(
             select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
         )
         if profile_result.scalar_one_or_none() is None:
-            db.add(
-                Job(
-                    type="generate_profile",
-                    user_id=user.id,
-                    payload={"user_id": str(user.id), "orcid": user.orcid},
-                )
-            )
+            await enqueue_profile_job_if_absent(db, user)
 
     await db.commit()
     return RedirectResponse(url="/admin/access-requests", status_code=302)

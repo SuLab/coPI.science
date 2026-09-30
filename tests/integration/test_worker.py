@@ -50,6 +50,16 @@ pytestmark = pytest.mark.integration
 TAG = "t5_worker"
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """Every retry below is claimable at once. A failed job waits `retry_delay`
+    (4 min, then 16) before `claim_job` may take it again; these tests are about
+    attempts, dead-lettering and ordering, not the clock, so the base delay is
+    zero here. `test_a_failed_job_backs_off_4_then_16_minutes_then_dies` restores
+    the real one."""
+    monkeypatch.setattr(worker_main, "RETRY_BACKOFF_BASE", timedelta(0))
+
+
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
@@ -1175,3 +1185,46 @@ async def test_worker_dispatches_review_feedback_analysis(wk, monkeypatch):
     assert seen["payload"]["assessment_id"] == str(aid)
     state = await wk.job_state(jid)
     assert state.status == "completed"
+
+
+async def test_a_failed_job_backs_off_4_then_16_minutes_then_dies(wk, monkeypatch):
+    """After failure 1 the job cannot be claimed before not_before (4 min), after
+    failure 2 it waits 16 min, and failure 3 is dead as before."""
+    monkeypatch.setattr(worker_main, "RETRY_BACKOFF_BASE", timedelta(minutes=4))
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid, max_attempts=3)
+
+    async def always_fails(user_id, db, job=None):
+        raise RuntimeError("upstream 503")
+
+    monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)
+
+    async def wait_minutes():
+        async with wk.factory() as db:
+            return await db.scalar(text(
+                "SELECT extract(epoch FROM not_before - now()) / 60 FROM jobs WHERE id = :j"
+            ), {"j": jid})
+
+    async def make_due():
+        async with wk.factory() as db:
+            await db.execute(text(
+                "UPDATE jobs SET not_before = now() - interval '1 second' WHERE id = :j"
+            ), {"j": jid})
+            await db.commit()
+
+    assert (await _one_round(wk.factory)).id == jid
+    assert (await wk.job_state(jid)).status == "pending"
+    assert 3.5 < await wait_minutes() <= 4.0
+    assert await _one_round(wk.factory) is None, "not claimable before not_before"
+
+    await make_due()
+    assert (await _one_round(wk.factory)).id == jid
+    assert 15.5 < await wait_minutes() <= 16.0
+
+    await make_due()
+    assert (await _one_round(wk.factory)).id == jid
+    state = await wk.job_state(jid)
+    assert (state.status, state.attempts) == ("dead", 3)
+    assert await _one_round(wk.factory) is None
+    assert worker_main.retry_delay(1) == timedelta(minutes=4)
+    assert worker_main.retry_delay(2) == timedelta(minutes=16)

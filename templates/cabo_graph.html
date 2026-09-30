@@ -678,6 +678,11 @@
       return e === undefined ? "" : e;
     });
   }
+  // "~" means "approximately" in proposal text; without this marked pairs tildes
+  // into <del> spans (the same override static/js/markdown.js applies).
+  if (window.marked && typeof marked.use === "function") {
+    marked.use({ tokenizer: { del() { return undefined; } } });
+  }
   if (window.marked) marked.setOptions({ gfm: true, breaks: true });
   if (window.DOMPurify) {
     // Open proposal links in a new tab without leaking the referrer.

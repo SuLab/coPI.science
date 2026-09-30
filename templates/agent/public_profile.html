@@ -28,8 +28,15 @@
     </div>
     {% endif %}
 
+    {% if request.query_params.get('error') == 'profile_changed' %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-6 text-sm text-red-800">
+        This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
+    </div>
+    {% endif %}
+
     {% if editing %}
     <form method="POST" action="/agent/{{ agent.agent_id }}/public-profile/save" id="profile-form">
+        <input type="hidden" name="profile_version" value="{{ profile.profile_version if profile else '' }}">
 
         {% if profile %}
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">

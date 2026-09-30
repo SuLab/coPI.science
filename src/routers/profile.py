@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
-from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.user import USER_ROLE_ADMIN
-from src.services.profile_edit import apply_profile_edits
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
 
@@ -141,6 +142,7 @@ async def profile_save(
     disease_areas: str = Form(""),
     key_targets: str = Form(""),
     keywords: str = Form(""),
+    profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),
 ):
@@ -160,6 +162,7 @@ async def profile_save(
         research_summary=research_summary, techniques=techniques,
         experimental_models=experimental_models, disease_areas=disease_areas,
         key_targets=key_targets, keywords=keywords,
+        expected_profile_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)
@@ -178,12 +181,7 @@ async def profile_refresh(
     fires the same ORCID/PubMed generate_profile pipeline that F8 kept off
     manager accounts on the onboarding side.
     """
-    job = Job(
-        type="generate_profile",
-        user_id=current_user.id,
-        payload={"user_id": str(current_user.id), "orcid": current_user.orcid},
-    )
-    db.add(job)
+    await enqueue_profile_job_if_absent(db, current_user)
     await db.commit()
     return RedirectResponse(url="/profile?refreshing=1", status_code=302)
 
