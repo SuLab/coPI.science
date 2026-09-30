@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,10 +30,10 @@ from src.services.atomic_write import atomic_write_text
 from src.services.profile_export import export_profile_to_markdown
 from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
+from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
 # See src/agent/agent.py's PROFILES_DIR — same setting, same default. None by
 # default, resolved lazily via _profiles_dir() — see agent.py's own accessor

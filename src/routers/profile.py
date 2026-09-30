@@ -5,7 +5,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,10 +15,10 @@ from src.models import Job, Publication, ResearcherProfile, User
 from src.services.account_deletion import agent_blocking_account_delete
 from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
+from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:

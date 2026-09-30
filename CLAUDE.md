@@ -29,6 +29,26 @@ it. Add a fresh scratch DB with
 suites distinct names so they do not migrate each other's schema mid-run. Never
 point `TEST_DATABASE_URL` at `copi`, the dev database.
 
+## Stylesheet build (Tailwind v4, compiled — no CDN)
+
+`templates/` use a compiled Tailwind v4 stylesheet at `static/css/app.min.css`
+(gitignored). Source is `assets/css/app.css`; the build is the pinned standalone
+`tailwindcss-linux-x64` binary (version + sha256 in `scripts/build-css.sh` and the
+Dockerfile `css` stage, checked equal by `tests/unit/test_static_assets.py`).
+
+- **Host / dev:** run `scripts/build-css.sh` after any template change and before
+  `./scripts/ci.sh`. The Playwright tier `tests/responsive/` **fails** (does not skip)
+  when the file is missing. The dev compose bind mount (`.:/app`) shadows the image's
+  copy with this host build.
+- **Prod:** the Dockerfile compiles the CSS in a `css` stage and copies it into the
+  runtime image, so `./scripts/redeploy.sh` + `docker compose $C --profile agent build
+  agent` are the deploy steps — nothing to run on the host.
+- `cabo_graph.html` is the one template still on the Play CDN (excluded from the
+  responsive work); every other template must not reference `cdn.tailwindcss.com`.
+- Tailwind class names must be complete literal tokens in templates (the compiler
+  scans `templates/`); `{% set cls = {'ok': 'text-green-600'}[state] %}`, never
+  `text-{{ color }}-600`. `templates/_components.html` holds the shared macros.
+
 ## Compose file set (read this before any `docker compose` command)
 
 **Production is `docker-compose.prod.yml` + `docker-compose.override.yml`. Always pass

@@ -79,6 +79,11 @@ MUST_EXCLUDE = [
     "docs/plans/2026-09-02-close-issues-20-27-evidence/issues/issue_27.md",
     "docs/plans/2026-09-04-decisions/task-8.md",
     "docs/superpowers/plans/2026-08-04-cohort-branch-repairs.md",
+    # Host-built stylesheet (scripts/build-css.sh) and the Tailwind binary
+    # cache — the css Dockerfile stage always compiles its own, a stale host
+    # build must never win.
+    "static/css/app.min.css",
+    ".cache/tailwindcss/tailwindcss-v4.3.3",
 ]
 
 # Paths the running app/worker/agent/grantbot reads from the tree at runtime —
@@ -100,6 +105,8 @@ MUST_NOT_EXCLUDE = [
     "scripts/build_cabo_sankey.py",
     "requirements.lock",
     "pyproject.toml",
+    "assets/css/app.css",
+    "static/js/markdown.js",
 ]
 
 
