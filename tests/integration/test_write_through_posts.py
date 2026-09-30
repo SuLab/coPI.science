@@ -40,9 +40,15 @@ def _engine(monkeypatch, tmp_path, factory, run_id):
     monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
     agents = [Agent("wang", "WangBot", "Wang"), Agent("gordy", "GordyBot", "Gordy")]
     clients = {a.agent_id: FakeSlackClient(agent_id=a.agent_id) for a in agents}
-    return SimulationEngine(
+    # One workspace hands out distinct timestamps; each fake counts from the same
+    # base, so offset the second bot's counter.
+    clients["gordy"]._ts += 1_000
+    eng = SimulationEngine(
         agents=agents, slack_clients=clients, session_factory=factory, simulation_run_id=run_id,
     )
+    # start() registers this hook; these tests drive _post_message without start().
+    eng.message_log.set_persist_callback(eng._enqueue_persist)
+    return eng
 
 
 async def _contents(factory, run_id):

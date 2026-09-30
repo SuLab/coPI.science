@@ -854,7 +854,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > is not: every `select` of `Job`, `User`, `OpportunityAssessment` or
 > `SimulationRun` raises `UndefinedColumn` — every page, the worker's claim loop,
 > and the engine's best-effort writes, which swallow it into ERROR lines while
-> Slack keeps looking normal. Design: `docs/specs/2026-09-29-audit-remediation-design.md` §5, §10.1.
+> Slack keeps looking normal. Design: the 2026-09-29 audit-remediation spec (kept uncommitted by decision), §5 and §10.1.
 >
 > **The worker must be idle** (no `processing` row) when `--apply` runs: the old
 > worker holds its transaction across a whole pipeline run, and `ALTER TABLE jobs`

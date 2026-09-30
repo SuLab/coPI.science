@@ -50,16 +50,19 @@ async def assign_user_email(db: AsyncSession, user: User, email: str | None) -> 
     # Flush everything else pending OUTSIDE the savepoint, so a rollback below
     # discards only this assignment.
     await db.flush()
+    # Read before the savepoint: its rollback expires the user's attributes, and a
+    # lazy load of an expired attribute is not allowed under asyncio.
+    user_id = user.id
     try:
         async with db.begin_nested():
             user.email = email
             await db.flush()
     except IntegrityError:
         logger.warning(
-            "Refused an email for user %s: another session took the address first", user.id,
+            "Refused an email for user %s: another session took the address first", user_id,
         )
-        # The savepoint rollback expired the attribute; reload it so callers can
-        # read user.email without a lazy load.
-        await db.refresh(user, ["email"])
+        # The savepoint rollback expired the user's attributes; reload them all so
+        # callers (and a retry) can read the object without a lazy load.
+        await db.refresh(user)
         return False
     return True

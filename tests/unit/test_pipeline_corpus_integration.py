@@ -275,7 +275,7 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
     )
     details = [p["detail"] for p in job.payload.get("progress", [])]
     assert any(
-        "JHU tenure start 2015 used for this run only" in d
+        "JHU tenure start 2015 used for this run and kept provisionally" in d
         and "not recorded" in d
         for d in details
     ), details
@@ -310,7 +310,7 @@ async def test_an_incomplete_corpus_persists_no_paper_derived_tenure_start(
     assert row is None, "no app_settings row may be written from an incomplete corpus"
     details = [p["detail"] for p in job.payload.get("progress", [])]
     assert any(
-        "JHU tenure start 2015 used for this run only" in d
+        "JHU tenure start 2015 used for this run and kept provisionally" in d
         and "corpus incomplete: 1 records could not be fetched" in d
         and "not recorded" in d
         for d in details

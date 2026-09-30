@@ -1,6 +1,6 @@
 """Slack client per agent — Web API only (no Socket Mode).
 
-Uses conversations.history and conversations.replies for polling,
+Uses conversations.history for polling,
 chat.postMessage for posting.
 
 **Every Slack Web API call this module makes goes through one chokepoint**,
@@ -432,7 +432,7 @@ class AgentSlackClient:
         """Follow ``response_metadata.next_cursor`` to the end and return every item.
 
         Every cursor-paginated endpoint this client touches goes through here:
-        conversations.list, conversations.history and conversations.replies.
+        conversations.list and conversations.history.
         (users.list and conversations.members are cursor-paginated too but this
         codebase never calls them outside test teardown.)
 

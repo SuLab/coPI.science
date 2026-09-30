@@ -273,10 +273,11 @@ def test_seed_profile_duplicate_orcid_does_not_create_a_second_user(db, runner, 
     assert len(db(_mine)) == 2
     assert orcid_stub.calls == [dup, fresh]
 
-    # Characterization: the *job* is re-enqueued on every run even for an existing
-    # user. That is how the command doubles as "regenerate this one PI".
+    # Re-seeding an existing user still asks for a regeneration, but through
+    # enqueue_profile_job_if_absent: while the first job is pending the second run
+    # reuses it, so a pending profile job is never doubled.
     user = db(lambda s: _user_by_orcid(s, dup))
-    assert len(db(lambda s: _jobs_for(s, user.id))) == 2
+    assert len(db(lambda s: _jobs_for(s, user.id))) == 1
 
 
 def test_seed_profile_no_pipeline_skips_the_job_but_still_creates_the_user(
@@ -631,7 +632,7 @@ def test_regenerate_profiles_enqueues_exactly_one_job_per_eligible_user(db, runn
     all_users = db(_all_user_ids)
 
     result = _ok(runner.invoke(cli_app, ["regenerate-profiles"]))
-    assert f"Enqueued {len(all_users)} profile regeneration jobs." in result.output
+    assert f"{len(all_users)} profile regeneration job(s) queued or already pending." in result.output
 
     after_jobs = db(_all_job_ids)
     new_ids = after_jobs - before_jobs

@@ -1093,6 +1093,7 @@ class SimulationEngine:
         standing up the whole startup sequence.
         """
         turn_count = 0
+        stalled = False
         consecutive_idle = 0
         while self._running and self.is_within_time_limit and not self._proposal_target_drained():
             # EVERY exit from this iteration runs `_drain_and_flush`, which is
@@ -1188,7 +1189,10 @@ class SimulationEngine:
                     reason = self._terminal_stall_reason()
                     if reason is not None:
                         logger.info("No eligible agent: %s. Stopping.", reason)
-                        self.request_stop("stall")
+                        # Recorded after the loop, not here: request_stop() clears
+                        # _running, which would skip this tick's memory drain in
+                        # the finally below.
+                        stalled = True
                         break
                     if reply_lane_did_work:
                         # The reply lane made a real LLM call this tick even
@@ -1254,7 +1258,10 @@ class SimulationEngine:
             finally:
                 await self._drain_and_flush()
 
-        if self._running:
+        if stalled:
+            # A terminal stall is a failure end (a HOLD), never a natural one.
+            self.request_stop("stall")
+        elif self._running:
             # The loop condition ended the run while nothing asked it to stop:
             # max runtime or a drained proposal target — a natural end, which
             # finalizes the run (spec P0-04, B19). `_proposal_target_drained()`
@@ -3073,7 +3080,7 @@ class SimulationEngine:
         """Remove a thread_id from every agent's in-memory state.
 
         Fires when Slack reports the parent message no longer exists (via
-        ThreadNotFound from conversations.replies or a silent thread_ts drop
+        ThreadNotFound or a silent thread_ts drop
         on chat.postMessage). Without eviction the same dead thread gets
         re-polled and replied-to forever, producing noisy error logs and —
         worse — cascading top-level posts.

@@ -28,7 +28,7 @@ SLACK_API = "https://slack.com/api"
 # bot only when it is REINSTALLED; an installed app keeps the grant it was installed
 # with.
 BOT_SCOPES = [
-    "channels:history",   # conversations.history / conversations.replies
+    "channels:history",   # conversations.history
     "channels:join",      # conversations.join
     "channels:manage",    # conversations.create
     "channels:read",      # conversations.list

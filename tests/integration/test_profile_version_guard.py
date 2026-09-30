@@ -27,6 +27,11 @@ async def _pi(db_session, n):
     user = await factories.make_user(db_session, email=f"p015-{n}@example.org")
     await factories.make_profile(db_session, user=user, research_summary="Stored.", profile_version=3)
     agent = await factories.make_agent(db_session, user=user, agent_id=f"p015agent{n}")
+    # Committed (a savepoint release in the test session) so a refused save's
+    # rollback in the route discards only the save, not the seeded rows.
+    await db_session.commit()
+    await db_session.refresh(user)
+    await db_session.refresh(agent)
     return user, agent
 
 
@@ -63,9 +68,10 @@ async def test_a_stale_form_is_refused(client, db_session, export_dir, route):
         )
     else:
         path, data, actor = _routes(user, agent)[route]
+    user_id = user.id  # the refused save's rollback expires the shared session's objects
     resp = await client.post(path, data={**data, "profile_version": "2"}, headers=auth_headers(actor))
     assert resp.status_code == 302 and "profile_changed" in resp.headers["location"]
-    profile = await _profile(db_session, user.id)
+    profile = await _profile(db_session, user_id)
     assert (profile.research_summary, profile.profile_version) == ("Stored.", 3)
 
 

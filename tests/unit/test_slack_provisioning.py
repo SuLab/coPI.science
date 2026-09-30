@@ -62,7 +62,6 @@ METHOD_SCOPES = {
     # (src/agent/simulation.py) loads the ones the web-UI reopen flow created, and the
     # main-loop poll covers "seeded channels plus any collab_private channels tracked".
     "conversations.history (private)": "groups:history",
-    "conversations.replies (public)": "channels:history",
     "users.info": "users:read",
     "users.lookupByEmail": "users:read.email",
 }
