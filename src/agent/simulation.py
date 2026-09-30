@@ -163,6 +163,13 @@ _ROW_LEVEL_DB_ERRORS = (IntegrityError, DataError)
 #: are re-queued, not dropped.
 PER_ROW_RECOVERY_DEADLINE_S = 30.0
 
+#: Rows per INSERT statement in `_flush_persisted`. The agent_messages upsert
+#: binds 17 parameters per row and asyncpg refuses a statement past 32,767, so
+#: an unchunked flush of 1,928+ rows raised InterfaceError, which is not a
+#: row-level error: the whole batch re-queued and failed identically forever.
+#: 500 rows is 8,500 binds.
+PERSIST_UPSERT_CHUNK_ROWS = 500
+
 
 #: How many REAL API calls one ``llm_call_logs`` row represents.
 #:
@@ -432,11 +439,10 @@ class SimulationEngine:
         self._reset_cursors = reset_cursors
         # True only for `--fresh`, which has just minted a new run with no
         # agent_messages/agent_channels rows of its own (it deletes nothing —
-        # see main._open_fresh_run). The engine has to KNOW that, because the
-        # new run id is only one of the ways prior state is kept out:
-        # the Slack transport still holds every message the workspace ever saw,
-        # and both the startup reconcile and the live poller will happily
-        # re-import it. See _restore_slack_state.
+        # see main._open_fresh_run). Read by `start()`: only a resume runs the
+        # hub's reply-less-pitch recovery, and only a fresh run announces
+        # itself. Both kinds of start seed the Slack poll cursors past the
+        # history already on the transport (see _restore_slack_state).
         self._fresh_start = fresh_start
         # When False, the local DB is the sole conversation store and no Slack
         # API calls are made (transports are NullTransport). Drives the roster
@@ -631,6 +637,12 @@ class SimulationEngine:
         # agent_messages once per main-loop tick. This makes the DB the primary
         # conversation store. See specs/local-db-conversations.md.
         self._pending_persist: list[LogEntry] = []
+        # Serializes `_flush_persisted`. A caller that arrives while a flush is
+        # in flight waits for it, then flushes whatever is left. The write-through
+        # in `_post_message` flushes from inside reply turns while the main loop
+        # and `stop()` flush too, and without this two flushes could run per-row
+        # recovery over overlapping re-queues at once.
+        self._persist_flush_lock = asyncio.Lock()
         # DB persistence buffer for OpportunityAssessment rows that failed
         # their first write attempt (e.g. a pool-checkout timeout) — queued
         # here by _persist_assessment instead of being dropped, and drained by
@@ -680,10 +692,6 @@ class SimulationEngine:
         # interface, private-channel handover) enter the simulation. See
         # _poll_inbound_from_db.
         self._pi_inbox_cursor: datetime = EPOCH_UTC
-        # Slack ts values already represented in the DB (canonical id may differ
-        # if a DB-origin message was later mirrored to Slack). Lets the Slack
-        # reconcile skip a message it already has. See _rebuild_state_from_slack.
-        self._known_slack_ts: set[str] = set()
         # Wall-clock of the last run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
         # _flush_persisted (B1). `total_messages` is a display counter;
@@ -890,10 +898,11 @@ class SimulationEngine:
         # them too — otherwise the handover message wouldn't land in the
         # message log until the first per-turn poll tick.
         await self._sync_private_channels_from_db()
-        # The DB is the primary conversation store. Register the persist hook,
-        # hydrate the log from the DB, then (only when Slack is connected)
-        # reconcile with Slack history, and finally reconstruct per-agent state
-        # from the combined log. This whole sequence runs with Slack fully off.
+        # The DB is the primary conversation store and the only one a restart
+        # restores. Register the persist hook, hydrate the log from the DB, park
+        # the Slack poll cursors past the history already on the transport, then
+        # reconstruct per-agent state from the log. This whole sequence runs with
+        # Slack fully off.
         self.message_log.set_persist_callback(self._enqueue_persist)
         await self._rebuild_state_from_db()
         await self._restore_slack_state()
@@ -938,6 +947,14 @@ class SimulationEngine:
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
 
+        # Resume only: recover lab pitches the previous process left without a
+        # reply because it stopped in the tick they were posted. Placed AFTER the
+        # cohort gate and the star-topology validation above, so the one-shot
+        # applies the same gates Phase 3 does. A fresh start has nothing to
+        # recover, and its hub keeps subscribing at its first post-lane turn.
+        if not self._fresh_start:
+            await self._recover_reply_less_pitches()
+
         # Announce the run boundary in Slack — fresh runs only (a resume is
         # not a new experiment), and only after validation so a run that
         # fails startup is never announced. Best-effort: see
@@ -954,6 +971,38 @@ class SimulationEngine:
         # which is the belief that let the roster-add path ship without one.
 
         await self._run_main_loop()
+
+    async def _recover_reply_less_pitches(self) -> None:
+        """Resume-only one-shot: open interviews on lab pitches a stop orphaned.
+
+        A lab can still pitch in the tick a Stop lands, and on the resume the
+        hub's Phase-3 scan starts from the rebuilt ``last_seen_cursor`` — already
+        past that pitch — so it would never be interviewed. For each hub this
+        runs Phase 1 (its ``subscribed_channels`` is empty at startup) and then
+        the Phase-3 auto-activation over the run's last ``REBUILD_WINDOW_S``,
+        with every Phase-3 gate.
+
+        ``last_seen_cursor`` is left at its rebuilt value on purpose:
+        ``_pending_reply_pairs`` reads it, and moving it back would make the hub
+        reply again to threads it has already answered. Never raises: a failure
+        here must not abort startup.
+        """
+        since = time.time() - REBUILD_WINDOW_S
+        for hub in [a for a in self.agents.values() if a.role == "scout_hub"]:
+            try:
+                await self._phase1_channel_discovery(hub)
+                activated = self._auto_activate_lab_posts(hub, since=since)
+                if activated:
+                    logger.info(
+                        "[%s] Resume: activated %d reply-less lab pitch(es) from the "
+                        "run's last %d days",
+                        hub.agent_id, activated, REBUILD_WINDOW_S // 86400,
+                    )
+            except Exception:
+                logger.exception(
+                    "[%s] Resume: recovering reply-less lab pitches failed; startup "
+                    "continues", hub.agent_id,
+                )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -2117,44 +2166,59 @@ class SimulationEngine:
         # INV-E structural note 4, a separate, separately-recomputed
         # consumer of role knowledge).
         if agent.role == "scout_hub":
-            new_posts = self.message_log.get_new_top_level_posts(
-                since=cursor,
-                channels=agent.state.subscribed_channels,
-                exclude_agent_id=agent.agent_id,
-                allowed_sender_ids=agent.allowed_sender_ids,
-            )
-            for entry in new_posts:
-                if not entry.is_bot:
-                    continue
-                # Private channels are flat — no thread activation.
-                if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
-                    continue
-                thread_id = entry.thread_ts or entry.ts
-                if thread_id in agent.state.active_threads:
-                    continue
-                if thread_id in self._closed_thread_ids:
-                    continue
-                # Check thread participation rules
-                allowed = self.message_log.get_thread_allowed_agents(thread_id)
-                if allowed and agent.agent_id not in allowed:
-                    continue
-                other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
-                if other_id and other_id != agent.agent_id:
-                    agent.state.active_threads[thread_id] = ThreadState(
-                        thread_id=thread_id,
-                        channel=entry.channel,
-                        other_agent_id=other_id,
-                        message_count=self.message_log.get_thread_message_count(thread_id),
-                        has_pending_reply=True,
-                        # Initial seed for the monotonic latch — see
-                        # ThreadState.floor_armed and the latch at the top of
-                        # _reply_to_thread.
-                        floor_armed=bool(self._specialist_consults),
-                    )
-                    logger.info(
-                        "[%s] Phase 3: Auto-activated interview thread %s (lab post by %s)",
-                        agent.agent_id, thread_id, other_id,
-                    )
+            self._auto_activate_lab_posts(agent, since=cursor)
+
+    def _auto_activate_lab_posts(self, agent: Agent, since: float) -> int:
+        """Open an interview thread on every new lab top-level post after ``since``.
+
+        The hub's half of Phase 3, extracted so the resume one-shot
+        (`_recover_reply_less_pitches`) applies exactly the same gates: human
+        rows, the agent's cohort gate (`allowed_sender_ids`), collab_private
+        channels, closed threads, already-active threads and
+        `get_thread_allowed_agents`. Returns how many threads it activated.
+        The caller decides which agents are hubs.
+        """
+        activated = 0
+        new_posts = self.message_log.get_new_top_level_posts(
+            since=since,
+            channels=agent.state.subscribed_channels,
+            exclude_agent_id=agent.agent_id,
+            allowed_sender_ids=agent.allowed_sender_ids,
+        )
+        for entry in new_posts:
+            if not entry.is_bot:
+                continue
+            # Private channels are flat — no thread activation.
+            if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                continue
+            thread_id = entry.thread_ts or entry.ts
+            if thread_id in agent.state.active_threads:
+                continue
+            if thread_id in self._closed_thread_ids:
+                continue
+            # Check thread participation rules
+            allowed = self.message_log.get_thread_allowed_agents(thread_id)
+            if allowed and agent.agent_id not in allowed:
+                continue
+            other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
+            if other_id and other_id != agent.agent_id:
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=entry.channel,
+                    other_agent_id=other_id,
+                    message_count=self.message_log.get_thread_message_count(thread_id),
+                    has_pending_reply=True,
+                    # Initial seed for the monotonic latch — see
+                    # ThreadState.floor_armed and the latch at the top of
+                    # _reply_to_thread.
+                    floor_armed=bool(self._specialist_consults),
+                )
+                activated += 1
+                logger.info(
+                    "[%s] Phase 3: Auto-activated interview thread %s (lab post by %s)",
+                    agent.agent_id, thread_id, other_id,
+                )
+        return activated
 
     # ------------------------------------------------------------------
     # Phase 4: Reply to a single thread
@@ -6881,8 +6945,8 @@ class SimulationEngine:
         # turned into five messages left four of them in Slack with no row at all,
         # and named the row's slack_ts after the *tail* — so _slack_parent_ts
         # threaded replies onto a fragment, posted_at took the tail's clock, and the
-        # next restart's _rebuild_state_from_slack re-ingested the unrecorded head
-        # chunks as brand-new inbound messages. The mirror is only in bijection with
+        # retired Slack reconcile re-ingested the unrecorded head chunks on the next
+        # restart as brand-new inbound messages. The mirror is only in bijection with
         # Slack if the row count matches the message count.
         mirrored = self._mirrored_messages(result, text, slack_parent)
 
@@ -6946,6 +7010,13 @@ class SimulationEngine:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
+        # Write-through: the post is not done until its rows are in the database,
+        # because a restart restores from the database only. Serialized with every
+        # other flush by `_persist_flush_lock`. A failed flush re-queues the
+        # entries exactly as the per-tick flush does, and the post still counts as
+        # posted: it is on Slack.
+        if self.session_factory and self.simulation_run_id:
+            await self._flush_persisted()
         return root_ts
 
     @staticmethod
@@ -7171,7 +7242,7 @@ class SimulationEngine:
         Loads message bodies (available since migration 0019) via the
         callback-bypassing path so restored rows aren't re-persisted. Seeds the
         mint_ts high-water mark and, for rows that were mirrored to Slack, the
-        Slack poll cursors so a later Slack reconcile only fetches newer messages.
+        Slack poll cursors.
         See specs/local-db-conversations.md.
         """
         if not self.session_factory or not self.simulation_run_id:
@@ -7244,14 +7315,11 @@ class SimulationEngine:
             loaded += 1
             if entry.posted_at > max_posted:
                 max_posted = entry.posted_at
-            # Track the Slack mapping so the reconcile can dedup, and advance
-            # the Slack poll cursor so it only fetches genuinely newer messages.
-            if r.slack_ts:
-                self._known_slack_ts.add(r.slack_ts)
-                if r.slack_channel_id:
-                    cur = self._poll_cursors.get(r.slack_channel_id, "0")
-                    if r.slack_ts > cur:
-                        self._poll_cursors[r.slack_channel_id] = r.slack_ts
+            # Advance the Slack poll cursor past every stored mirrored message.
+            if r.slack_ts and r.slack_channel_id:
+                cur = self._poll_cursors.get(r.slack_channel_id, "0")
+                if r.slack_ts > cur:
+                    self._poll_cursors[r.slack_channel_id] = r.slack_ts
         self._ts_minter.seed_floor(max_posted)
         # Start the inbox poller past everything already in the DB so it only
         # picks up genuinely new web-written PI messages. Taken from MAX over the
@@ -7391,151 +7459,158 @@ class SimulationEngine:
         Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
         alongside legacy rows, transitional double-writes, and repeated restarts.
         Drops the buffer when there is no DB so it can't grow unbounded.
+
+        Serialized by `_persist_flush_lock`: a second caller waits for the flush
+        in flight, then flushes what is left. The rows go out in chunks of
+        `PERSIST_UPSERT_CHUNK_ROWS`, all in one session and transaction, so the
+        commit is still all-or-nothing and per-row recovery is unchanged.
         """
-        if not self._pending_persist:
-            return
-        if not self.session_factory or not self.simulation_run_id:
-            self._pending_persist.clear()
-            return
-        entries = self._pending_persist
-        self._pending_persist = []
-        # Dedup by canonical id within the batch — a single ON CONFLICT statement
-        # cannot touch the same row twice.
-        by_ts: dict[str, dict] = {}
-        # The LogEntry each row came from, so a per-row recovery can re-queue the
-        # ENTRIES (which is what `_pending_persist` holds) for the rows it did
-        # not manage to write.
-        by_entry: dict[str, LogEntry] = {}
-        for e in entries:
-            if not e.ts:
-                continue
-            channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
-            by_entry[e.ts] = e
-            by_ts[e.ts] = {
-                "simulation_run_id": self.simulation_run_id,
-                "agent_id": e.sender_agent_id,
-                "channel_id": channel_id,
-                "channel_name": e.channel,
-                "message_ts": e.ts,
-                "message_length": len(e.content or ""),
-                "thread_ts": e.thread_ts,
-                # The entry's own phase wins when it has one; otherwise the
-                # shape decides, exactly as it always has. Only a panel note
-                # sets it (PHASE_PANEL_NOTE — see _post_panel_note), and this is
-                # the write that makes the staff pages agree with the engine
-                # for free: src/services/directory.py's discussions listing
-                # already keys its roots on phase == 'new_post' and its reply
-                # counts on phase == 'thread_reply', so a third value is
-                # excluded from both with no query change.
-                "phase": e.phase or ("thread_reply" if e.thread_ts else "new_post"),
-                "visibility": e.visibility,
-                "content": e.content or "",
-                "sender_name": e.sender_name or "",
-                "is_bot": e.is_bot,
-                "posted_at": e.posted_at,
-                "slack_ts": e.slack_ts,
-                "slack_channel_id": e.slack_channel_id,
-                # The root's *Slack* ts, not the canonical thread_ts — they differ
-                # whenever the thread started Slack-off. Only meaningful when this
-                # entry is itself on Slack. See _slack_parent_ts.
-                "slack_thread_ts": e.slack_thread_ts if e.slack_ts else None,
-            }
-        rows = list(by_ts.values())
-        if not rows:
-            return
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import or_
-        from sqlalchemy import select as sa_select
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        async with self._persist_flush_lock:
+            if not self._pending_persist:
+                return
+            if not self.session_factory or not self.simulation_run_id:
+                self._pending_persist.clear()
+                return
+            entries = self._pending_persist
+            self._pending_persist = []
+            # Dedup by canonical id within the batch — a single ON CONFLICT statement
+            # cannot touch the same row twice.
+            by_ts: dict[str, dict] = {}
+            # The LogEntry each row came from, so a per-row recovery can re-queue the
+            # ENTRIES (which is what `_pending_persist` holds) for the rows it did
+            # not manage to write.
+            by_entry: dict[str, LogEntry] = {}
+            for e in entries:
+                if not e.ts:
+                    continue
+                channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
+                by_entry[e.ts] = e
+                by_ts[e.ts] = {
+                    "simulation_run_id": self.simulation_run_id,
+                    "agent_id": e.sender_agent_id,
+                    "channel_id": channel_id,
+                    "channel_name": e.channel,
+                    "message_ts": e.ts,
+                    "message_length": len(e.content or ""),
+                    "thread_ts": e.thread_ts,
+                    # The entry's own phase wins when it has one; otherwise the
+                    # shape decides, exactly as it always has. Only a panel note
+                    # sets it (PHASE_PANEL_NOTE — see _post_panel_note), and this is
+                    # the write that makes the staff pages agree with the engine
+                    # for free: src/services/directory.py's discussions listing
+                    # already keys its roots on phase == 'new_post' and its reply
+                    # counts on phase == 'thread_reply', so a third value is
+                    # excluded from both with no query change.
+                    "phase": e.phase or ("thread_reply" if e.thread_ts else "new_post"),
+                    "visibility": e.visibility,
+                    "content": e.content or "",
+                    "sender_name": e.sender_name or "",
+                    "is_bot": e.is_bot,
+                    "posted_at": e.posted_at,
+                    "slack_ts": e.slack_ts,
+                    "slack_channel_id": e.slack_channel_id,
+                    # The root's *Slack* ts, not the canonical thread_ts — they differ
+                    # whenever the thread started Slack-off. Only meaningful when this
+                    # entry is itself on Slack. See _slack_parent_ts.
+                    "slack_thread_ts": e.slack_thread_ts if e.slack_ts else None,
+                }
+            rows = list(by_ts.values())
+            if not rows:
+                return
+            from sqlalchemy import func as sa_func
+            from sqlalchemy import or_
+            from sqlalchemy import select as sa_select
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-        def _upsert(batch: list[dict]):
-            stmt = pg_insert(AgentMessage.__table__).values(batch)
-            return stmt.on_conflict_do_update(
-                constraint="uq_agent_messages_run_ts",
-                set_={
-                    "content": stmt.excluded.content,
-                    "sender_name": stmt.excluded.sender_name,
-                    "is_bot": stmt.excluded.is_bot,
-                    "posted_at": stmt.excluded.posted_at,
-                    "message_length": stmt.excluded.message_length,
-                    "visibility": stmt.excluded.visibility,
-                    "thread_ts": stmt.excluded.thread_ts,
-                    "channel_id": stmt.excluded.channel_id,
-                    "channel_name": stmt.excluded.channel_name,
-                    "agent_id": stmt.excluded.agent_id,
-                    "slack_ts": stmt.excluded.slack_ts,
-                    "slack_channel_id": stmt.excluded.slack_channel_id,
-                    "slack_thread_ts": stmt.excluded.slack_thread_ts,
-                },
-                # M1a guard: never let a bot message clobber an existing human
-                # (PI) row on a cross-process canonical-id collision. Allow the
-                # update only when the existing row is itself a bot row, or the
-                # incoming row is human (re-flush of an ingested PI message /
-                # slack mirror). A blocked conflict is left untouched, like
-                # DO NOTHING for that row. See PR #19 review M1.
-                where=or_(
-                    AgentMessage.__table__.c.is_bot.is_(True),
-                    stmt.excluded.is_bot.is_(False),
-                ),
-            )
-
-        try:
-            async with self.session_factory() as db:
-                await db.execute(_upsert(rows))
-                # Refresh the run's counters at most every
-                # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
-                # at scale — B1). The bulk upsert can't cheaply tell inserts from
-                # updates, so total_messages is a recomputed count; slight
-                # staleness between refreshes is fine for a display counter.
-                # `total_api_calls`, set below, is NOT merely cosmetic any
-                # more — its units changed on 2026-08-22; see the comment there.
-                now = time.time()
-                if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
-                    self._last_run_stats_update = now
-                    run = (await db.execute(
-                        sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
-                    )).scalar_one_or_none()
-                    if run:
-                        total = (await db.execute(
-                            sa_select(sa_func.count(AgentMessage.id)).where(
-                                AgentMessage.simulation_run_id == self.simulation_run_id
-                            )
-                        )).scalar_one()
-                        run.total_messages = total
-                        # UNITS: real API CALLS, not turns, since 2026-08-22 —
-                        # `api_call_count` books tool rounds and retries too, so
-                        # this column is NOT comparable with any earlier run.
-                        # The old per-turn figure is `COUNT(*)` over
-                        # `llm_call_logs` for the same run. See `_unbooked_calls`.
-                        run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
-                await db.commit()
-        except Exception as exc:
-            # Re-queue the failed batch instead of dropping it. The DB is now the
-            # source of truth for conversations, so a silently-dropped flush is
-            # unrecoverable — a restart rebuilds from the DB and these messages
-            # would be gone for good. New entries may have been enqueued while we
-            # were awaiting the (failed) commit; put the failed batch back in
-            # front to preserve chronological order for the next flush attempt.
-            #
-            # ONE bad row used to take every good row beside it, forever: the
-            # re-queued batch fails identically on the next attempt. If (and only
-            # if) the error names a ROW rather than the pool or the connection,
-            # retry them individually so the poison row is the only casualty.
-            requeue = rows
-            if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
-                async def _one(db, row):
-                    await db.execute(_upsert([row]))
-
-                _written, _lost, requeue = await self._recover_rows_individually(
-                    rows, _one, what="message",
+            def _upsert(batch: list[dict]):
+                stmt = pg_insert(AgentMessage.__table__).values(batch)
+                return stmt.on_conflict_do_update(
+                    constraint="uq_agent_messages_run_ts",
+                    set_={
+                        "content": stmt.excluded.content,
+                        "sender_name": stmt.excluded.sender_name,
+                        "is_bot": stmt.excluded.is_bot,
+                        "posted_at": stmt.excluded.posted_at,
+                        "message_length": stmt.excluded.message_length,
+                        "visibility": stmt.excluded.visibility,
+                        "thread_ts": stmt.excluded.thread_ts,
+                        "channel_id": stmt.excluded.channel_id,
+                        "channel_name": stmt.excluded.channel_name,
+                        "agent_id": stmt.excluded.agent_id,
+                        "slack_ts": stmt.excluded.slack_ts,
+                        "slack_channel_id": stmt.excluded.slack_channel_id,
+                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
+                    },
+                    # M1a guard: never let a bot message clobber an existing human
+                    # (PI) row on a cross-process canonical-id collision. Allow the
+                    # update only when the existing row is itself a bot row, or the
+                    # incoming row is human (re-flush of an ingested PI message /
+                    # slack mirror). A blocked conflict is left untouched, like
+                    # DO NOTHING for that row. See PR #19 review M1.
+                    where=or_(
+                        AgentMessage.__table__.c.is_bot.is_(True),
+                        stmt.excluded.is_bot.is_(False),
+                    ),
                 )
-            if self._report_flush_failure(
-                what="message", requeue=requeue, exc=exc, final=final,
-                log=logger.warning,
-            ):
-                self._pending_persist[0:0] = [
-                    by_entry[r["message_ts"]] for r in requeue
-                ]
+
+            try:
+                async with self.session_factory() as db:
+                    for start in range(0, len(rows), PERSIST_UPSERT_CHUNK_ROWS):
+                        await db.execute(_upsert(rows[start:start + PERSIST_UPSERT_CHUNK_ROWS]))
+                    # Refresh the run's counters at most every
+                    # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
+                    # at scale — B1). The bulk upsert can't cheaply tell inserts from
+                    # updates, so total_messages is a recomputed count; slight
+                    # staleness between refreshes is fine for a display counter.
+                    # `total_api_calls`, set below, is NOT merely cosmetic any
+                    # more — its units changed on 2026-08-22; see the comment there.
+                    now = time.time()
+                    if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
+                        self._last_run_stats_update = now
+                        run = (await db.execute(
+                            sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
+                        )).scalar_one_or_none()
+                        if run:
+                            total = (await db.execute(
+                                sa_select(sa_func.count(AgentMessage.id)).where(
+                                    AgentMessage.simulation_run_id == self.simulation_run_id
+                                )
+                            )).scalar_one()
+                            run.total_messages = total
+                            # UNITS: real API CALLS, not turns, since 2026-08-22 —
+                            # `api_call_count` books tool rounds and retries too, so
+                            # this column is NOT comparable with any earlier run.
+                            # The old per-turn figure is `COUNT(*)` over
+                            # `llm_call_logs` for the same run. See `_unbooked_calls`.
+                            run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
+                    await db.commit()
+            except Exception as exc:
+                # Re-queue the failed batch instead of dropping it. The DB is now the
+                # source of truth for conversations, so a silently-dropped flush is
+                # unrecoverable — a restart rebuilds from the DB and these messages
+                # would be gone for good. New entries may have been enqueued while we
+                # were awaiting the (failed) commit; put the failed batch back in
+                # front to preserve chronological order for the next flush attempt.
+                #
+                # ONE bad row used to take every good row beside it, forever: the
+                # re-queued batch fails identically on the next attempt. If (and only
+                # if) the error names a ROW rather than the pool or the connection,
+                # retry them individually so the poison row is the only casualty.
+                requeue = rows
+                if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
+                    async def _one(db, row):
+                        await db.execute(_upsert([row]))
+
+                    _written, _lost, requeue = await self._recover_rows_individually(
+                        rows, _one, what="message",
+                    )
+                if self._report_flush_failure(
+                    what="message", requeue=requeue, exc=exc, final=final,
+                    log=logger.warning,
+                ):
+                    self._pending_persist[0:0] = [
+                        by_entry[r["message_ts"]] for r in requeue
+                    ]
 
     async def _flush_pending_assessments(self, *, final: bool = False) -> None:
         """Retry OpportunityAssessment rows queued by _persist_assessment.
@@ -7671,61 +7746,40 @@ class SimulationEngine:
         self._pending_persist.append(entry)
 
     async def _restore_slack_state(self) -> None:
-        """Decide what a startup does with the history already on Slack.
+        """Park the Slack poll cursors past the history already on the transport.
 
-        A resumed run reconciles it (that is how a restart recovers its own
-        in-flight interviews). A `--fresh` run must NOT: `main.py` has just
-        opened a NEW `simulation_run_id`, so this run's `agent_messages` are
-        empty by construction (it deletes nothing — see `main._open_fresh_run`),
-        and re-importing the same conversations from the transport files every
-        one of them under the new run id — measured on
-        run 8b64a0e0, where `--fresh` wiped the tables and then appended 914
-        messages across 86 threads, so 916 of that run's 1354 rows were
-        actually posted before it began (oldest eight days earlier). Three of
-        the seven hub interviews that resurrected refused twice on their first
-        turn and were abandoned. See
-        docs/audits/2026-08-22-run-8b64a0e0/README.md finding M2.
+        Every start does this — fresh and resumed alike. A resume used to
+        reconcile Slack history into the log instead; that pass re-imported
+        other runs' conversations and every other bot's messages into this run,
+        so a restart now restores from the database only, and the engine's own
+        posts reach it write-through (`_post_message`). What a restart can no
+        longer recover — Slack-native messages posted while the engine was down
+        — is accepted.
 
-        Skipping the reconcile is NOT sufficient on its own, which is why this
-        is a branch and not an early return in the caller. The live poller
-        bounds itself with a DIFFERENT cursor map (`_poll_cursors`, defaulting
-        to "0"), and on a fresh run nothing populates it —
-        `_rebuild_state_from_db` seeds it per stored row and there are no
-        stored rows. Left alone it would re-ingest the identical history on the
-        first poll tick, just less visibly. So a fresh start still has to walk
-        Slack once to establish a baseline; it simply records where history
-        ENDS instead of what it contains.
-
-        `agent.state.last_seen_cursor` deliberately needs no equivalent
-        treatment: it bounds scans over the in-memory MessageLog, which a fresh
-        start leaves empty, and every entry appended during the run carries a
-        current timestamp well above its 0.0 default.
+        The cursor seed is still needed on a resume: `_rebuild_state_from_db`
+        only advances cursors for channels with stored mirrored rows, and the
+        live poller defaults every other channel to "0".
         """
-        if self._fresh_start:
-            await self._seed_slack_cursors_without_ingest()
-        else:
-            await self._rebuild_state_from_slack()
+        await self._seed_slack_cursors_without_ingest()
 
     async def _seed_slack_cursors_without_ingest(self) -> None:
         """Advance the Slack poll cursors past all existing history, ingesting none.
 
-        The fresh-start half of `_restore_slack_state`. Reads the same channels
-        the reconcile and the live poller read, and for each one moves
+        What `_restore_slack_state` runs on every start, fresh or resumed. Reads
+        the channels the live poller reads, and for each one moves
         `_poll_cursors` to the newest timestamp present, so the first poll tick
-        asks Slack only for messages this run itself produced.
+        asks Slack only for messages posted after this start.
 
-        The cursor is the ONLY thing standing between a fresh run and the whole
-        back catalogue: `_poll_slack_for_bot_messages` dedups against
-        `message_log.get_entry(ts)`, which a fresh start leaves empty, so it
-        would re-append every message it fetched. `_known_slack_ts` is
-        deliberately NOT seeded here — its only readers are inside
-        `_rebuild_state_from_slack`, which this branch exists to skip.
+        The cursor is the ONLY thing standing between a start and the whole back
+        catalogue: `_poll_slack_for_bot_messages` dedups against
+        `message_log.get_entry(ts)`, which holds only this run's stored rows, so
+        it would re-append every other message it fetched.
 
-        Channel history is top-level-only, so a pre-run THREAD REPLY can carry a
-        ts above the cursor this leaves. That is safe rather than lucky: the
-        live poller reads the same top-level-only endpoint, and the only code
-        that fetches replies works from a thread the run is already tracking —
-        of which a fresh start has none.
+        Channel history is top-level-only, so a pre-start THREAD REPLY can carry
+        a ts above the cursor this leaves. Nothing reads it: the live poller uses
+        the same top-level-only endpoint, and no code fetches thread replies
+        since the Slack reconcile was retired — a Slack-native reply posted while
+        the engine was down is not recovered.
 
         **No channel this pass touches may end with a "0" cursor**, and there are
         three ways it used to:
@@ -7753,7 +7807,7 @@ class SimulationEngine:
         # poller, which does use `_next_poll_client`, kept polling happily.
         default_client = self._next_poll_client()
         if not default_client:
-            logger.info("No Slack client available — skipping fresh-start cursor seed")
+            logger.info("No Slack client available — skipping the start-up cursor seed")
             return
 
         polled_ids = {
@@ -7776,7 +7830,7 @@ class SimulationEngine:
             client = self._client_for_channel(ch_id, default_client)
             if client is None:
                 logger.warning(
-                    "Fresh-start cursor seed: no connected member bot for "
+                    "Start-up cursor seed: no connected member bot for "
                     "private channel #%s — parking its cursor at the wall clock "
                     "rather than 0", ch_name,
                 )
@@ -7787,7 +7841,7 @@ class SimulationEngine:
                 messages = await client.aget_full_channel_history(ch_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Fresh-start cursor seed failed for #%s: %s", ch_name, exc,
+                    "Start-up cursor seed failed for #%s: %s", ch_name, exc,
                 )
                 _fallback(ch_id)
                 unreadable += 1
@@ -7812,162 +7866,16 @@ class SimulationEngine:
                 _fallback(ch_id)
                 unreadable += 1
         logger.info(
-            "--fresh: ignoring %d pre-existing Slack message(s) across %d "
+            "Start-up cursor seed: ignoring %d pre-existing Slack message(s) across %d "
             "channel(s); poll cursors advanced to the current head "
             "(%d channel(s) unreadable or empty, parked at the wall clock)",
             skipped, channels, unreadable,
         )
 
-    async def _rebuild_state_from_slack(self) -> None:
-        """Reconcile the MessageLog with Slack history (Slack-on only).
-
-        The DB is the primary store (_rebuild_state_from_db); this pass only
-        adds messages that exist on Slack but not yet in the log — via the
-        idempotent append, which also persists them to the DB.
-
-        Reached via `_restore_slack_state`, which is what decides a resumed run
-        wants this and a `--fresh` run does not.
-        """
-        # `_next_poll_client()` for the same reason as the fresh-start seed: the
-        # old `next(iter(...))` skipped the whole reconcile whenever the first
-        # client in the dict happened to be disconnected, and a restart that
-        # skips the reconcile cannot recover its own in-flight interviews.
-        default_client = self._next_poll_client()
-        if not default_client:
-            logger.info("No Slack client available — skipping Slack reconcile")
-            return
-
-        # Build a mapping of bot_user_id -> agent_id
-        bot_uid_to_agent: dict[str, str] = {}
-        for aid, c in self.slack_clients.items():
-            if c.bot_user_id:
-                bot_uid_to_agent[c.bot_user_id] = aid
-
-        # 1. Poll full Slack history for seeded channels + any known
-        # collab_private channels. Same filter as the live-poll loop.
-        polled_ids = {
-            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in SEEDED_CHANNELS
-            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
-        }
-        total_messages = 0
-        total_threads = 0
-        for ch_name, ch_id in polled_ids.items():
-            ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
-            # Route per-channel: private channels need a member bot.
-            client = self._client_for_channel(ch_id, default_client)
-            if client is None:
-                logger.debug(
-                    "Skipping rebuild for private channel #%s — no connected member bot",
-                    ch_name,
-                )
-                continue
-            messages = await client.aget_full_channel_history(ch_id)
-            for msg in messages:
-                ts = msg.get("ts", "")
-                # Run-start markers are never ingested (see the matching skip
-                # in _poll_slack_for_bot_messages). Recording the ts in
-                # _known_slack_ts and advancing the cursor mirrors what the
-                # loop does for a dedup hit; skipping the root also skips its
-                # reply_count branch, so replies under a marker (human
-                # comments, split-continuation chunks) never ingest either.
-                if is_run_start_marker(msg.get("text")):
-                    if ts:
-                        self._known_slack_ts.add(ts)
-                        self._poll_cursors[ch_id] = ts
-                    continue
-                user_id = msg.get("user", "")
-                bot_id = msg.get("bot_id")
-                is_bot = bool(bot_id) or msg.get("subtype") == "bot_message"
-
-                # Determine sender agent ID for bot messages
-                sender_agent_id = None
-                if is_bot and user_id:
-                    sender_agent_id = bot_uid_to_agent.get(user_id)
-
-                # Skip messages already represented in the DB (dedup a message
-                # that was DB-origin then mirrored to Slack, whose canonical id
-                # differs from this Slack ts).
-                if ts and ts in self._known_slack_ts:
-                    if ts:
-                        self._poll_cursors[ch_id] = ts
-                    continue
-                sender_name = msg.get("username", "") or user_id
-                # `thread_ts` is already normalised: Slack marks a parent that has
-                # replies with thread_ts == ts, and the transport nulls that at ingest
-                # for every inbound path (see slack_client.normalize_inbound_message).
-                # The rule used to live here and *only* here, which is why the live
-                # poller ingested roots as replies to themselves.
-                entry = LogEntry(
-                    ts=ts,
-                    channel=ch_name,
-                    sender_agent_id=sender_agent_id,
-                    sender_name=sender_name,
-                    content=msg.get("text", ""),
-                    thread_ts=msg.get("thread_ts"),
-                    posted_at=float(ts) if ts else 0.0,
-                    is_bot=is_bot,
-                    visibility=ch_visibility,
-                    slack_ts=ts or None,
-                    slack_channel_id=ch_id,
-                    # Slack-origin: canonical id == Slack ts, so the thread
-                    # parent needs no translation.
-                    slack_thread_ts=msg.get("thread_ts"),
-                )
-                if self.message_log.append(entry):
-                    total_messages += 1
-                if ts:
-                    self._known_slack_ts.add(ts)
-
-                # Update poll cursor to latest
-                if ts:
-                    self._poll_cursors[ch_id] = ts
-
-                # If this message has thread replies, fetch them
-                reply_count = msg.get("reply_count", 0)
-                if reply_count > 0:
-                    try:
-                        replies = await client.aget_all_thread_replies(ch_id, ts)
-                    except ThreadNotFound:
-                        continue
-                    total_threads += 1
-                    for reply in replies:
-                        rts = reply.get("ts", "")
-                        if rts == ts:
-                            continue  # skip parent (already added)
-                        if rts and rts in self._known_slack_ts:
-                            continue
-                        r_user_id = reply.get("user", "")
-                        r_is_bot = bool(reply.get("bot_id")) or reply.get("subtype") == "bot_message"
-                        r_agent_id = bot_uid_to_agent.get(r_user_id) if r_is_bot else None
-                        r_entry = LogEntry(
-                            ts=rts,
-                            channel=ch_name,
-                            sender_agent_id=r_agent_id,
-                            sender_name=reply.get("username", "") or r_user_id,
-                            content=reply.get("text", ""),
-                            thread_ts=ts,
-                            posted_at=float(rts) if rts else 0.0,
-                            is_bot=r_is_bot,
-                            visibility=ch_visibility,
-                            slack_ts=rts or None,
-                            slack_channel_id=ch_id,
-                            slack_thread_ts=ts,  # Slack-origin: canonical == Slack ts
-                        )
-                        if self.message_log.append(r_entry):
-                            total_messages += 1
-                        if rts:
-                            self._known_slack_ts.add(rts)
-
-        logger.info(
-            "Slack reconcile: appended %d messages across %d channels, %d threads",
-            total_messages, len(polled_ids), total_threads,
-        )
-
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
-        Runs after both the DB rebuild and the optional Slack reconcile, so it
+        Runs after the DB rebuild, so it
         behaves identically with Slack on or off. Reads only self.message_log,
         thread_decisions, proposal_reviews and llm_call_logs — no Slack calls.
         """

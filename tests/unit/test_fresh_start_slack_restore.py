@@ -13,14 +13,11 @@ The root cause was a split brain: `--fresh` was implemented entirely in
 while `SimulationEngine.start()` called `_rebuild_state_from_slack()`
 unconditionally. The engine was never told the run was fresh.
 
-The second test here is the one that matters. Skipping the reconcile alone does
-NOT fix the bug, because the live poller reads a SEPARATE cursor map
-(`_poll_cursors`, defaulting to "0" — `simulation.py`'s
-`_poll_slack_for_bot_messages`) which on a fresh run is populated by nothing:
-`_rebuild_state_from_db` seeds it per stored row, and a fresh run has no stored
-rows. A fix that only gates the reconcile call therefore just defers the same
-re-ingestion to the first poll tick, where it is harder to see. That is the
-naive fix, and `test_fresh_start_poller_ignores_pre_existing_history` fails on it.
+The second test here is the one that matters for `--fresh`: skipping the reconcile
+alone did NOT fix the bug, because the live poller reads a SEPARATE cursor map
+(`_poll_cursors`, defaulting to "0") that a fresh run populates with nothing.
+A RESUME now takes the same cursor-seeding path: the Slack reconcile is gone and
+the database is the only thing a restart restores.
 """
 import pytest
 
@@ -111,14 +108,18 @@ async def test_fresh_start_is_a_no_op_with_slack_disabled():
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_run_still_reconciles_slack_history():
-    """The other direction: resume must keep working. Without this, a fix that
-    disables the reconcile outright would pass both tests above and silently
-    destroy every restart's ability to recover its own in-flight threads.
-    """
+async def test_a_resumed_run_ingests_nothing_from_slack():
+    """A resume rebuilds from the DATABASE only. Slack history is never reconciled
+    into the log (the reconcile re-imported every other bot's messages and, across
+    runs, other runs' threads), and the live poller starts past it instead of
+    re-importing it on the first tick."""
     eng = _engine(fresh_start=False)
 
     await eng._restore_slack_state()
+    assert len(eng.message_log) == 0
 
-    contents = sorted(e.content for e in eng.message_log._entries)
-    assert contents == ["a pitch from a previous run", "and the hub's reply to it"], contents
+    eng._last_channel_poll = 0.0  # defeat the poll interval guard
+    await eng._poll_slack_for_bot_messages()
+    assert len(eng.message_log) == 0, (
+        f"resume ingested Slack history: {[e.content for e in eng.message_log._entries]}"
+    )

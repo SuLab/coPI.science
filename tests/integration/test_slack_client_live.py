@@ -17,7 +17,7 @@ import uuid
 import pytest
 
 from src.agent.slack_client import BotNotInvitedToPrivateChannel, ThreadNotFound
-from tests.slack_live_support import create_private_channel, invite
+from tests.slack_live_support import create_private_channel, invite, thread_replies
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -37,7 +37,7 @@ def _post(client, channel, text, thread_ts=None):
 
 def test_connect_and_identity(slack_client_su, slack_pi_user_id):
     assert slack_client_su.is_connected is True
-    uid = slack_client_su.bot_user_id
+    uid = slack_client_su._bot_user_id
     assert uid and uid.startswith("U"), uid
     assert slack_client_su.is_bot_user(uid) is True
     # Control: a human is not a bot. Without it, an is_bot_user that returned True
@@ -197,7 +197,7 @@ def test_post_thread_and_history_round_trip(slack_client_su, slack_probe_channel
         f"the reply appeared at top level — it was not threaded. history={texts}"
     )
 
-    replies = slack_client_su.get_all_thread_replies(cid, root["ts"])
+    replies = thread_replies(slack_client_su, cid, root["ts"])
     assert "reply from the probe" in [m.get("text") for m in replies]
     assert len(slack_client_su.get_full_channel_history(cid)) >= 1
 
@@ -258,7 +258,7 @@ def _texts_in(client, cid) -> list[str]:
     for msg in client.get_full_channel_history(cid):
         out.append(msg.get("text") or "")
         if msg.get("reply_count"):
-            for r in client.get_all_thread_replies(cid, msg["ts"]):
+            for r in thread_replies(client, cid, msg["ts"]):
                 if r.get("ts") != msg.get("ts"):
                     out.append(r.get("text") or "")
     return out
@@ -334,7 +334,7 @@ def test_an_over_limit_reply_keeps_every_chunk_in_the_caller_s_thread(
     assert all(p["thread_ts"] == root["ts"] for p in posted), (
         f"a reply chunk left the thread: {[p['thread_ts'] for p in posted]}"
     )
-    replies = slack_client_su.get_all_thread_replies(cid, root["ts"])
+    replies = thread_replies(slack_client_su, cid, root["ts"])
     assert len([r for r in replies if r["ts"] != root["ts"]]) == len(posted)
 
 
@@ -393,7 +393,7 @@ def test_private_channel_invite_and_membership(slack_clients, private_channel):
 
     # Before the invite, cravatt cannot read it.
     assert cravatt.poll_channel_messages(cid, oldest="0") == []
-    invite(su, cid, [cravatt.bot_user_id])
+    invite(su, cid, [cravatt._bot_user_id])
     _post(su, cid, "after the invite")
     assert "after the invite" in [
         m.get("text") for m in cravatt.poll_channel_messages(cid, oldest="0")

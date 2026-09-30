@@ -394,10 +394,6 @@ class FakeSlackClient:
     def is_connected(self) -> bool:
         return True
 
-    @property
-    def bot_user_id(self) -> str | None:
-        return self._bot_user_id
-
     def _next_ts(self) -> str:
         self._ts += 1
         return f"{self._ts}.000000"
@@ -423,14 +419,8 @@ class FakeSlackClient:
     def get_full_channel_history(self, channel_id: str, *_a, **_kw) -> list:
         return list(self.channel_history.get(channel_id, []))
 
-    def get_all_thread_replies(self, channel_id: str, thread_ts: str, *_a, **_kw) -> list:
-        return []
-
     async def aget_full_channel_history(self, *args, **kwargs) -> list:
         return await asyncio.to_thread(self.get_full_channel_history, *args, **kwargs)
-
-    async def aget_all_thread_replies(self, *args, **kwargs) -> list:
-        return await asyncio.to_thread(self.get_all_thread_replies, *args, **kwargs)
 
     # Async twins — the engine now awaits these, off the loop thread, exactly
     # like the real AgentSlackClient (src/agent/slack_client.py). Kept here so

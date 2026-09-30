@@ -186,6 +186,15 @@ class OpportunityAssessment(Base):
     summary_posted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # A headline poster's claim (migration 0053), set by
+    # `src/services/headline_claims.py` immediately before the post and kept
+    # after it. Claimed and not posted for more than IN_DOUBT_AFTER is "in doubt":
+    # the post may or may not have reached Slack, so nothing re-posts it until an
+    # operator releases it (`scripts/backfill_assessment_headlines.py
+    # --release-in-doubt`). NULL means nobody ever tried; never backfilled.
+    summary_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never

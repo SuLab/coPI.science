@@ -25,6 +25,7 @@ from src.models import (
     SimulationRun,
 )
 from src.visibility import VISIBILITY_PUBLIC
+from tests.slack_live_support import thread_replies
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -93,8 +94,8 @@ async def _rows(factory, run_id):
 
 
 async def test_a_restart_rebuilds_the_log_without_duplicating_it(lifecycle):
-    """Two rebuild paths run at startup — the DB rebuild and the Slack reconcile — and
-    both append to the same log. `>0` would hide the failure that matters, so the count
+    """The DB rebuild is the only thing a restart restores; the cursor seed after it
+    must not append anything. `>0` would hide the failure that matters, so the count
     is asserted exactly.
     """
     build, factory, run_id, name, cid, _ = lifecycle
@@ -108,7 +109,7 @@ async def test_a_restart_rebuilds_the_log_without_duplicating_it(lifecycle):
 
     eng2 = build(slack_on=True)
     await eng2._rebuild_state_from_db()
-    await eng2._rebuild_state_from_slack()
+    await eng2._restore_slack_state()
 
     contents = sorted(e.content for e in eng2.message_log.get_new_top_level_posts(
         since=0, channels={name}, exclude_agent_id="wiseman", allowed_sender_ids=None))
@@ -141,12 +142,12 @@ async def test_a_restart_restores_the_slack_mapping(lifecycle):
                              thread_ts=root.message_ts)
     time.sleep(POST_GAP)
     await eng2._flush_persisted()
-    live = eng2.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
+    live = thread_replies(eng2.slack_clients["su"], cid, root.slack_ts)
     assert "reply after restart" in [m.get("text") for m in live]
 
 
 async def test_a_restart_does_not_repost_to_slack(lifecycle):
-    """A reconcile that re-posted restored messages would double every message in the
+    """A restart that re-posted restored messages would double every message in the
     channel — visible to the humans reading it, and invisible in our DB."""
     build, factory, run_id, name, cid, slack_clients = lifecycle
     eng1 = build(slack_on=True)
@@ -157,7 +158,7 @@ async def test_a_restart_does_not_repost_to_slack(lifecycle):
 
     eng2 = build(slack_on=True)
     await eng2._rebuild_state_from_db()
-    await eng2._rebuild_state_from_slack()
+    await eng2._restore_slack_state()
     time.sleep(POST_GAP)
 
     after = slack_clients["su"].poll_channel_messages(cid, oldest="0")

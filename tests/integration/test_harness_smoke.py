@@ -71,7 +71,10 @@ async def test_container_is_migrated(engine):
         # 0052 opportunity_assessments.dimension_rationales (the hub's
         #      one-sentence reason per dimension score, scout_hub 1.9.0;
         #      app-only, never published to #assessments-summary)
-        assert v == "0052"
+        # 0053 jobs.not_before / users.contact_email_unverified /
+        #      opportunity_assessments.summary_claimed_at /
+        #      simulation_runs.finalized_at + held_at (audit remediation Phase 0a)
+        assert v == "0053"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

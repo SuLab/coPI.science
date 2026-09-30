@@ -63,6 +63,15 @@ class SimulationRun(Base):
     #: `src/agent/simulation.py` for the engine-side half of this note.
     total_api_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: Set when the run's owed headlines were released and the run closed for
+    #: good (migration 0053): a natural end (max runtime, drained proposal
+    #: target) or `scripts/backfill_assessment_headlines.py --finalize`.
+    #: `src/agent/main.py` refuses to resume a finalized run.
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Set when the run ended holding the headlines of interviews still open:
+    #: "Stop - hold open interviews", a terminal stall, an escaped exception or a
+    #: start() failure. Cleared by a resume and by a finalize.
+    held_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     messages: Mapped[list["AgentMessage"]] = relationship(

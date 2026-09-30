@@ -36,3 +36,24 @@ def invite(client, cid: str, uids) -> None:
     """
     for uid in uids:
         client._api("conversations_invite", channel=cid, users=uid)
+
+
+def thread_replies(client, cid: str, thread_ts: str) -> list[dict]:
+    """Every message of thread `thread_ts` (parent first), read straight off Slack.
+
+    The engine no longer fetches thread replies, so the client has no method for it;
+    the live tier still reads them to check what the mirror posted. Raises
+    `ThreadNotFound` for an id Slack never issued, as the retired client method did.
+    """
+    from slack_sdk.errors import SlackApiError
+
+    from src.agent.slack_client import ThreadNotFound
+
+    try:
+        return client._conversation_messages(client._paginate(
+            "conversations_replies", "messages", channel=cid, ts=thread_ts,
+        ))
+    except SlackApiError as exc:
+        if exc.response.get("error") == "thread_not_found":
+            raise ThreadNotFound(cid, thread_ts, "thread_not_found") from exc
+        raise

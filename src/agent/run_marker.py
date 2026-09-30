@@ -5,14 +5,13 @@ The engine posts one marker per configured channel when a --fresh run starts
 dependency-light (no models, no DB) so the ingest paths can import the
 predicate and unit tests need nothing but a tmp dir.
 
-THE PREFIX IS LOAD-BEARING. Both Slack-ingest paths
-(_poll_slack_for_bot_messages and _rebuild_state_from_slack in
-src/agent/simulation.py) drop any message matching is_run_start_marker so the
-engine's own markers are never mirrored into agent_messages — without that, the
-first restart of a fresh run would re-ingest the marker as a bot post
-(_known_slack_ts is seeded from stored rows only). Changing the prefix orphans
-every marker already posted: they would start being ingested on the next
-resume. Do not change it casually; if it must change, keep the old prefix
+THE PREFIX IS LOAD-BEARING. The live Slack poller
+(_poll_slack_for_bot_messages in src/agent/simulation.py) drops any message
+matching is_run_start_marker so the engine's own markers are never mirrored into
+agent_messages — without that, the first poll tick of a fresh run would ingest
+the marker as a bot post (it is posted AFTER the cursor seed). Changing the
+prefix orphans every marker already posted: the poller would start ingesting
+them. Do not change it casually; if it must change, keep the old prefix
 recognized alongside the new one.
 
 The prefix is PREPENDED BY CODE, never part of the template, so operator

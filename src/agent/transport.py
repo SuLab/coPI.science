@@ -36,8 +36,6 @@ class Transport(Protocol):
     def connect(self) -> bool: ...
     @property
     def is_connected(self) -> bool: ...
-    @property
-    def bot_user_id(self) -> str | None: ...
     def is_bot_user(self, user_id: str) -> bool: ...
 
     # Outbound
@@ -55,6 +53,10 @@ class Transport(Protocol):
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None: ...
     def create_channel(self, name: str) -> dict | None: ...
     def join_channel(self, channel_id: str) -> None: ...
+    # The engine awaits this form (``_phase1_channel_discovery``); the real
+    # client runs ``join_channel`` off the loop thread. Part of the contract:
+    # a transport without it crashes every Slack-off post turn in Phase 1.
+    async def ajoin_channel(self, channel_id: str) -> None: ...
     # Must be complete or raise: a backend that returns a *subset* of the workspace
     # as if it were the whole makes the engine re-create channels that already
     # exist. ``AgentSlackClient`` raises ``SlackListingIncomplete``; callers that
@@ -76,10 +78,9 @@ class Transport(Protocol):
     # reply to itself and ``MessageLog.get_new_top_level_posts`` drops it, so the post
     # never surfaces to any reader of that method (e.g. the hub's Phase 3
     # auto-activation scan). ``AgentSlackClient`` applies this in
-    # ``normalize_inbound_message`` — one place, for all three inbound methods.
+    # ``normalize_inbound_message`` — one place, for both inbound methods.
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]: ...
     def get_full_channel_history(self, channel_id: str) -> list[dict[str, Any]]: ...
-    def get_all_thread_replies(self, channel_id: str, thread_ts: str) -> list[dict[str, Any]]: ...
 
 
 class NullTransport:
@@ -106,10 +107,6 @@ class NullTransport:
     def is_connected(self) -> bool:
         return False
 
-    @property
-    def bot_user_id(self) -> str | None:
-        return None
-
     def is_bot_user(self, user_id: str) -> bool:
         return False
 
@@ -121,6 +118,9 @@ class NullTransport:
         return {"id": f"local:{name}", "name": name}
 
     def join_channel(self, channel_id: str) -> None:
+        return None
+
+    async def ajoin_channel(self, channel_id: str) -> None:
         return None
 
     def list_channels(self, *, exclude_archived: bool = False) -> dict[str, str]:
@@ -138,7 +138,4 @@ class NullTransport:
         return []
 
     def get_full_channel_history(self, channel_id: str) -> list[dict[str, Any]]:
-        return []
-
-    def get_all_thread_replies(self, channel_id: str, thread_ts: str) -> list[dict[str, Any]]:
         return []

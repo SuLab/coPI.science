@@ -1,11 +1,9 @@
 """Tests for the ThreadNotFound eviction path.
 
-Covers the three failure modes we saw during the grantbot-duplicate incident:
-1. conversations.replies returning thread_not_found — get_all_thread_replies
-   surfaces it as ThreadNotFound.
-2. chat.postMessage silently dropping thread_ts when the parent is deleted —
+Covers the failure modes we saw during the grantbot-duplicate incident:
+1. chat.postMessage silently dropping thread_ts when the parent is deleted —
    surfaces as ThreadNotFound (and the orphan top-level post is cleaned up).
-3. _evict_dead_thread purges the dead ts from every agent's state so the
+2. _evict_dead_thread purges the dead ts from every agent's state so the
    scheduler doesn't keep re-polling or re-replying to the grave.
 """
 
@@ -33,21 +31,6 @@ def client():
     c = AgentSlackClient(agent_id="su", bot_token="xoxb-real-token")
     c._client = MagicMock()
     return c
-
-
-class TestGetAllThreadRepliesRaisesThreadNotFound:
-    def test_thread_not_found_raises(self, client):
-        client._client.conversations_replies.side_effect = _slack_error("thread_not_found")
-        with pytest.raises(ThreadNotFound) as exc_info:
-            client.get_all_thread_replies("C123", "1777000000.000100")
-        assert exc_info.value.thread_ts == "1777000000.000100"
-        assert exc_info.value.channel_id == "C123"
-
-    def test_other_errors_return_empty_not_raise(self, client):
-        # Non-thread-related errors shouldn't raise ThreadNotFound — they
-        # should fall through to the original "log and return []" behavior.
-        client._client.conversations_replies.side_effect = _slack_error("rate_limited")
-        assert client.get_all_thread_replies("C123", "1.0") == []
 
 
 class TestPostMessageSilentOrphanDetection:

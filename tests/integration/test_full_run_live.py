@@ -83,6 +83,7 @@ from src.models import (
     ThreadDecision,
 )
 from src.visibility import VISIBILITY_PUBLIC
+from tests.slack_live_support import thread_replies
 
 pytestmark = [
     pytest.mark.integration,
@@ -631,7 +632,7 @@ def _slack_snapshot(ctx) -> dict[str, tuple[str, str | None]]:
         if not msg.get("reply_count"):
             continue
         try:
-            replies = client.get_all_thread_replies(ctx.channel_id, ts)
+            replies = thread_replies(client, ctx.channel_id, ts)
         except ThreadNotFound:
             continue
         for r in replies:
@@ -925,8 +926,8 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
     canonical id, and every earlier chunk existed in Slack with no `agent_messages` row.
     The consequences went past a missing row — `slack_ts` named the *tail*, so
     `_slack_parent_ts` threaded replies onto a fragment, `posted_at = float(ts)` took the
-    tail's clock, and the next restart's `_rebuild_state_from_slack` saw the unrecorded
-    head chunks as brand-new inbound messages and ingested them.
+    tail's clock, and the Slack reconcile a restart then ran (since retired) saw the
+    unrecorded head chunks as brand-new inbound messages and ingested them.
 
     Phase 4 replies are generated with `max_tokens=16000` (raised from 1500,
     then 2500, then 4000, then 10000, then 16000, so a scout_hub CONCLUDE reply's
@@ -1012,13 +1013,13 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
        request_stop)`; the same wiring is installed here and a real `SIGTERM` is delivered
        to this process while a turn is in flight. The loop finishes the turn, flushes, and
        returns — it is not cancelled.
-    2. **`stop()`'s flush is load-bearing.** A message is posted after the loop has
-       exited: it reaches Slack synchronously but lives only in `_pending_persist`. The
-       negative control asserts it is NOT yet in Postgres — that is exactly what
-       `docker rm -f` (SIGKILL) destroys — and then that `stop()` recovers it.
+    2. **Posts are write-through.** A message posted after the loop has exited is
+       already in Postgres when `_post_message` returns — what `docker rm -f` (SIGKILL)
+       used to destroy from `_pending_persist` is durable before the post counts — and
+       `stop()` still flushes whatever else is buffered.
     3. **Resume neither loses nor duplicates.** A second engine takes the same
-       `simulation_run_id`, rebuilds from the DB, reconciles against Slack, and runs more
-       turns. Every ts from before the restart must still be there, with unchanged
+       `simulation_run_id`, rebuilds from the DB (there is no Slack reconcile), and runs
+       more turns. Every ts from before the restart must still be there, with unchanged
        content, exactly once; no Slack message may be ingested twice under a second
        canonical id; and the two stores must still be in bijection at the end.
     """
@@ -1064,26 +1065,20 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
     )
     buffered_at_exit = len(eng1._pending_persist)
 
-    # Claim 2: what SIGKILL would have destroyed.
-    marker = f"post-signal, pre-flush {uuid.uuid4().hex[:8]}"
+    # Claim 2: a post is durable when _post_message returns (write-through).
+    marker = f"post-signal write-through {uuid.uuid4().hex[:8]}"
     await eng1._post_message("su", ctx.channel, marker)
     time.sleep(POST_GAP)
-    assert eng1._pending_persist, "the post did not buffer, so the control is vacuous"
-    pre_flush = await _db_snapshot(ctx)
-    assert marker not in [r.content for r in pre_flush.values()], (
-        "the message was already durable, so this control cannot show what the "
-        "shutdown flush saves"
+    assert not eng1._pending_persist, "the post is still buffered: write-through did not run"
+    durable = await _db_snapshot(ctx)
+    assert marker in [r.content for r in durable.values()], (
+        "the post returned before its row reached Postgres"
     )
     slack_now = _slack_snapshot(ctx)
     assert any(marker in t for t, _ in slack_now.values()), (
         "the message never reached Slack either, so nothing was at risk"
     )
     await eng1.stop()
-    after_flush = await _db_snapshot(ctx)
-    assert marker in [r.content for r in after_flush.values()], (
-        "stop() did not flush the buffered message — a graceful shutdown loses the "
-        "in-flight turn, which is the whole reason CLAUDE.md forbids `docker rm -f`"
-    )
 
     db_a = await _db_snapshot(ctx)
     decided_a = {d.thread_id for d in await _decisions(ctx)}
@@ -1139,9 +1134,8 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
 
     # Claim 3a: resume reconstructed exactly what was stored — no loss, no phantoms.
     # The one permitted extra is a >4000-char split fragment: it is in Slack with no row,
-    # so `_rebuild_state_from_slack` legitimately treats it as a message the DB is missing
-    # and ingests it. That is the compounding cost of the split defect (each restart turns
-    # the unrecorded head chunks into first-class messages), not a rebuild bug.
+    # so a rebuild that did ingest it would be right to. The tolerance is kept as a bound,
+    # not an expectation: the resume no longer reads Slack.
     assert rebuilt, f"resume never reached the rebuild snapshot point. {where}"
     missing = set(db_a) - rebuilt["log"]
     invented = rebuilt["log"] - set(db_a)

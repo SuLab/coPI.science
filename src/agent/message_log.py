@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # succeeds (src/agent/simulation.py::_post_panel_note). It is a real message on
 # the transport and a real `agent_messages` row, so it lives in this log like
 # any other post: that is what keeps the append idempotency, the Slack-mirror
-# dedup (`_known_slack_ts`) and the DB persist callback working for it.
+# dedup and the DB persist callback working for it.
 #
 # It is NOT conversation. Agents must never see it — not in a thread history,
 # not as a trigger to reply, not in a message count, not in a memory synthesis

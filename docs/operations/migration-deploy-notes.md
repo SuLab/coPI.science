@@ -842,3 +842,41 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > Rollback: redeploy the `rollback-pre-0052` images and revert the commit. The
 > column is harmless to old code; `alembic downgrade 0051` drops it and every
 > rationale in it.
+
+> **Deploy order for `0053_remediation_phase0a_columns` — migrate BEFORE the new
+> code serves, with the WORKER IDLE, and rebuild the AGENT image in the same
+> deploy.** `0053` adds five nullable columns and backfills none of them:
+> `jobs.not_before` (retry backoff), `users.contact_email_unverified` (the
+> pending-access page's address, never copied to `users.email`),
+> `opportunity_assessments.summary_claimed_at` (headline claims) and
+> `simulation_runs.finalized_at` / `held_at` (end-reason classes). *Old code
+> on the new schema* is safe: nothing old reads them. *New code on the old schema*
+> is not: every `select` of `Job`, `User`, `OpportunityAssessment` or
+> `SimulationRun` raises `UndefinedColumn` — every page, the worker's claim loop,
+> and the engine's best-effort writes, which swallow it into ERROR lines while
+> Slack keeps looking normal. Design: `docs/specs/2026-09-29-audit-remediation-design.md` §5, §10.1.
+>
+> **The worker must be idle** (no `processing` row) when `--apply` runs: the old
+> worker holds its transaction across a whole pipeline run, and `ALTER TABLE jobs`
+> would wait on it past the chain's 10 s `lock_timeout` and roll the whole chain
+> back. Check with
+> `$DC exec -T postgres psql -U copi -d copi -c "select count(*) from jobs where status='processing'"`
+> (must print 0), or stop the worker for the migration (`$DC stop worker`; the
+> `up -d` below brings it back).
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0053
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0053)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> No prompt or rubric file changes in this deploy, so no fresh-run requirement.
+> Rollback: redeploy the `rollback-pre-0053` images; the columns are harmless to
+> old code, and `alembic downgrade 0052` drops them (and every claim, hold and
+> finalize stamp in them).

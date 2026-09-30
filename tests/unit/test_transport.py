@@ -25,7 +25,6 @@ class TestNullTransport:
         t = NullTransport("su")
         # is_connected=False makes the engine's guards take the no-op path.
         assert t.is_connected is False
-        assert t.bot_user_id is None
         assert t.connect() is True  # usable, just not Slack-backed
 
     def test_outbound_posts_are_noops(self):
@@ -42,7 +41,6 @@ class TestNullTransport:
         t = NullTransport("su")
         assert t.poll_channel_messages("local:general") == []
         assert t.get_full_channel_history("local:general") == []
-        assert t.get_all_thread_replies("local:general", "1.0") == []
 
     def test_slack_client_conforms_to_protocol(self):
         # The real client must structurally satisfy the same Protocol.
@@ -169,10 +167,6 @@ class _SplittingTransport:
     def is_connected(self) -> bool:
         return True
 
-    @property
-    def bot_user_id(self) -> str | None:
-        return "U_SU"
-
     def post_message(self, channel, text, thread_ts=None):
         self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
         posted = []
@@ -290,3 +284,33 @@ class TestPostResultContract:
         assert rows[0].slack_ts is None and rows[0].slack_channel_id is None
         assert rows[0].content == "written with slack off"
         assert float(rows[0].ts) > 0
+
+
+class TestSlackOffPostTurn:
+    """Every Slack-off post turn raised AttributeError in Phase 1, because
+    NullTransport had no ajoin_channel, and never reached Phase 5."""
+
+    def test_null_transport_has_an_async_no_op_join(self):
+        assert asyncio.run(NullTransport("su").ajoin_channel("local:general")) is None
+
+    def test_a_slack_off_post_turn_reaches_phase5(self, monkeypatch, tmp_path):
+        from src.agent.agent import Agent
+
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+        lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+        eng = SimulationEngine(
+            agents=[lab], slack_clients={"wang": NullTransport("wang")}, slack_enabled=False,
+        )
+        eng._ensure_seeded_channels()  # Slack off: local: ids for every seeded channel
+        reached: list[str] = []
+
+        async def phase5(agent):
+            reached.append(agent.agent_id)
+
+        monkeypatch.setattr(eng, "_phase5_new_post", phase5)
+        lab.state.last_phase5_action_time = 0.0
+
+        asyncio.run(eng._run_post_turn(lab))
+
+        assert reached == ["wang"]
+        assert "general" in lab.state.subscribed_channels
