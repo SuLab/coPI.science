@@ -201,15 +201,28 @@
         <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
         <p class="text-base text-gray-700 max-w-[68ch] mb-3">
             Sends a graceful stop to the live engine. Refused unless the panel currently
-            reads Running.
+            reads Running. <strong>Stop</strong> announces every owed headline, open
+            interviews included, as it always has. <strong>Stop — hold open
+            interviews</strong> announces only interviews that have ended; the others
+            wait for a resume or a finalize.
         </p>
-        <form action="/admin/simulation/stop" method="post">
-            <button type="submit"
-                    class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
-                    {% if panel_state != 'running' %}disabled{% endif %}>
-                Stop
-            </button>
-        </form>
+        <div class="flex flex-wrap gap-3">
+            <form action="/admin/simulation/stop" method="post">
+                <button type="submit"
+                        class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
+                        {% if panel_state != 'running' %}disabled{% endif %}>
+                    Stop
+                </button>
+            </form>
+            <form action="/admin/simulation/stop" method="post">
+                <input type="hidden" name="hold_open" value="1">
+                <button type="submit"
+                        class="inline-flex items-center px-4 py-2 rounded-md border border-red-600 text-red-700 text-base font-medium hover:bg-red-50 disabled:opacity-50"
+                        {% if panel_state != 'running' %}disabled{% endif %}>
+                    Stop — hold open interviews
+                </button>
+            </form>
+        </div>
     </div>
 </div>
 </section>

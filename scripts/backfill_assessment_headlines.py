@@ -3,8 +3,8 @@
 Repairs the loss described in
 docs/audits/2026-08-29-lost-assessment-headlines/README.md: an interview that
 ended by the `max_thread_messages` timeout (or by abandonment, or by the run's
-own shutdown) held a verdict nobody announced, and before 2026-08-29 nothing
-looked. The assessment rows are intact; only the public headline is missing.
+own shutdown) held a verdict nobody announced. The assessment rows are intact;
+only the public headline is missing.
 
 DRY RUN BY DEFAULT. `--apply` is required to post anything or write anything,
 because a headline is a public Slack message that cannot be retracted.
@@ -15,10 +15,40 @@ because a headline is a public Slack message that cannot be retracted.
     # post them
     python scripts/backfill_assessment_headlines.py --run <uuid> --apply
 
+    # post every owed headline, open interviews included, and close the run
+    # (a finalized run cannot be resumed)
+    python scripts/backfill_assessment_headlines.py --run <uuid> --finalize --apply
+
+    # claims whose post may or may not have reached Slack
+    python scripts/backfill_assessment_headlines.py --run <uuid> --list-in-doubt
+    # after checking the channel: make them postable again
+    python scripts/backfill_assessment_headlines.py --run <uuid> --release-in-doubt <id> [<id> ...]
+
     # a headline IS already in Slack but the row predates 0041: record that
     # fact without posting a duplicate
     python scripts/backfill_assessment_headlines.py --run <uuid> \\
         --assessment <uuid> --stamp-only --apply
+
+**Claims.** Every post claims its thread first
+(`src/services/headline_claims.py`) — the same protocol the engine uses — so this
+script and a running engine can never both post one interview. A thread any of
+whose rows is already claimed or posted is skipped, and only the NEWEST owed row
+of a thread is rendered. A post that raises with no Slack response keeps its
+claim and is reported IN DOUBT; it is never re-posted until an operator checks
+Slack and runs `--release-in-doubt`.
+
+**Liveness.** Writes (`--apply`, `--release-in-doubt`) are refused while
+/admin/simulation reads `running`, `stopping` or `starting`, whichever run the
+engine serves (a `starting` row names no run). The run row's own `status` is not
+trusted: a SIGKILLed run stays `running`. `--run-crashed` overrides the refusal
+once the operator has confirmed the engine process is gone.
+
+**Selection follows how the run ended.** A run with `held_at`
+(held open interviews) gets headlines only for interviews that ENDED (a
+ThreadDecision exists), unless `--finalize`; any other run gets every owed
+interview, as before. `--finalize` posts every owed interview and then sets
+`simulation_runs.finalized_at` and clears `held_at`; it is allowed on an
+already-finalized run, to post the headlines its finalize logged as LOST.
 
 **The headline's band/score come from THIS ROW'S OWN stored
 `weighted_score`/`band`** (`render_assessment_headline`'s `score`/`band`
@@ -42,12 +72,6 @@ misreported by any rubric revision. A row with NO stamp at all
 stamping regime) is NOT drift either way: there is nothing to compare
 against, so it is posted like any other owed row (see
 `select_rows_needing_headline`).
-
-Never posts a row whose `summary_posted_at` is already set (migration 0041 —
-deliberately never backfilled, so a pre-0041 row reads NULL even when its
-headline is already in Slack; that gap is exactly what `--stamp-only` is for).
-A post that fails leaves that row's `summary_posted_at` untouched so a later
-run can retry it. Exits 0 only if every intended post succeeded.
 """
 
 from __future__ import annotations
@@ -66,15 +90,24 @@ from pathlib import Path
 # scripts/backfill_dropped_verdicts.py uses.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.slack_client import AgentSlackClient
 from src.config import get_settings
-from src.models import AgentChannel, AgentRegistry, OpportunityAssessment
+from src.models import AgentChannel, AgentRegistry, OpportunityAssessment, SimulationRun
 from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+from src.services.headline_claims import (
+    claim_row,
+    claim_thread,
+    list_in_doubt,
+    mark_posted,
+    release_claim,
+)
+from src.services.interview_state import ended_thread_ids
+from src.services.simulation_control import derive_panel_state, read_status
 from src.services.slack_tokens import env_token, is_valid_token
 
 logger = logging.getLogger("backfill_assessment_headlines")
@@ -87,6 +120,11 @@ WOULD_STAMP = "would_stamp"
 POSTED = "posted"
 STAMPED = "stamped"
 FAILED = "failed"
+IN_DOUBT = "in_doubt"      # claimed, the post raised with no Slack response
+UNCLAIMED = "unclaimed"    # another poster holds or posted this thread
+
+#: Panel states in which an engine may be announcing headlines right now.
+LIVE_ENGINE_STATES = frozenset({"running", "stopping", "starting"})
 
 
 def select_rows_needing_headline(
@@ -216,8 +254,111 @@ def apply_headline_repairs(
 
 def exit_code_for(results: list[tuple[object, str, str]]) -> int:
     """0 if every intended post/stamp succeeded (or nothing was attempted —
-    dry run, or an empty selection), 1 if any row's outcome was ``FAILED``."""
-    return 1 if any(outcome == FAILED for _, _, outcome in results) else 0
+    dry run, an empty selection, or rows another poster holds), 1 if any row
+    FAILED or is IN DOUBT."""
+    return 1 if any(outcome in (FAILED, IN_DOUBT) for _, _, outcome in results) else 0
+
+
+def newest_owed_per_thread(rows):
+    """Split ``rows`` into (candidates, [(row, why_skipped), ...]) by interview.
+
+    A thread any of whose rows is already posted or claimed is skipped whole —
+    the claim would refuse it anyway, and saying so here makes the dry run
+    honest. Otherwise only the thread's NEWEST row is a candidate:
+    the newest verdict is the interview's verdict. NULL-thread rows cannot be
+    grouped and stand alone.
+    """
+    by_thread: dict[str, list] = {}
+    candidates, skipped = [], []
+    for row in rows:
+        if row.thread_id is None:
+            if row.summary_posted_at is None and row.summary_claimed_at is None:
+                candidates.append(row)
+            else:
+                skipped.append((row, "already announced or claimed"))
+            continue
+        by_thread.setdefault(row.thread_id, []).append(row)
+    for thread_rows in by_thread.values():
+        if any(r.summary_posted_at is not None or r.summary_claimed_at is not None
+               for r in thread_rows):
+            skipped.extend(
+                (r, "its interview is already announced, or claimed by another poster")
+                for r in thread_rows
+            )
+            continue
+        newest = max(thread_rows, key=lambda r: r.created_at)
+        candidates.append(newest)
+        skipped.extend((r, "an older verdict of the same interview") for r in thread_rows
+                       if r is not newest)
+    return candidates, skipped
+
+
+def filter_by_hold(rows, *, held: bool, finalize: bool, ended: set[str]):
+    """A held run posts only ENDED interviews unless ``finalize``.
+    A row with no thread counts as ended: no interview can still change it, and
+    the Phase 2 held count classes it the same way."""
+    if not held or finalize:
+        return list(rows), []
+    kept, skipped = [], []
+    for row in rows:
+        if row.thread_id is None or row.thread_id in ended:
+            kept.append(row)
+        else:
+            skipped.append((row, "held run: the interview is still open (--finalize releases it)"))
+    return kept, skipped
+
+
+async def engine_live_refusal(db, *, run_crashed: bool) -> str | None:
+    """Why a write must not run now, or None."""
+    state = derive_panel_state(await read_status(db), datetime.now(UTC))
+    if state in LIVE_ENGINE_STATES and not run_crashed:
+        return (
+            f"refusing to write: /admin/simulation reads {state!r}, so an engine may be "
+            "announcing headlines right now (whichever run it serves; a 'starting' row "
+            "names none). Stop it first, or pass --run-crashed once you have confirmed "
+            "the engine process is gone."
+        )
+    return None
+
+
+async def post_with_claims(rows_and_texts, *, factory, client_for):
+    """Claim, post and settle each ``(row, text)`` in order, each write in its own
+    short transaction. Returns ``(row, text, outcome)`` triples."""
+    results = []
+    for row, text in rows_and_texts:
+        async with factory() as db:
+            ids = (
+                await claim_thread(db, row.simulation_run_id, row.thread_id)
+                if row.thread_id is not None
+                else await claim_row(db, row.id)
+            )
+        if not ids:
+            results.append((row, text, UNCLAIMED))
+            continue
+        client = client_for(getattr(row, "agent_id", None))
+        if client is None:
+            async with factory() as db:
+                await release_claim(db, ids)
+            results.append((row, text, FAILED))
+            continue
+        try:
+            result = client.post_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+        except Exception:
+            logger.exception(
+                "IN DOUBT: the headline for assessment %s (%s) raised with no Slack "
+                "response; its claim is kept — check the channel, then "
+                "--release-in-doubt %s if it did not post",
+                row.id, getattr(row, "subject_agent_id", "?"), row.id,
+            )
+            results.append((row, text, IN_DOUBT))
+            continue
+        async with factory() as db:
+            if result:
+                await mark_posted(db, ids)
+            else:
+                await release_claim(db, ids)
+        results.append((row, text, POSTED if result else FAILED))
+    return results
 
 
 async def _load_rows(
@@ -244,7 +385,7 @@ async def _load_pi_labels(db) -> dict[str, str]:
 
 async def _load_posting_tokens(db) -> dict[str, str]:
     """``agent_id`` -> a usable bot token, mirroring the roster-load fallback
-    in ``src/agent/main.py``/``scripts/backfill_slack_history_to_db.py``:
+    in ``src/agent/main.py``:
     prefer the DB column, fall back to an env-provided token for the same
     agent id.
     """
@@ -374,115 +515,188 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "operator to double-check) happens before posting. Has no "
              "effect with --stamp-only, which never consults rubric drift.",
     )
+    ap.add_argument(
+        "--finalize", action="store_true",
+        help="Post EVERY owed interview's headline, open interviews of a held run "
+             "included, then set simulation_runs.finalized_at and clear held_at: the "
+             "run can no longer be resumed. Allowed on an already-finalized run. "
+             "Needs --apply to write anything.",
+    )
+    ap.add_argument(
+        "--list-in-doubt", action="store_true",
+        help="List claims older than 10 minutes whose post never recorded — the "
+             "headline may or may not be in Slack. Writes nothing.",
+    )
+    ap.add_argument(
+        "--release-in-doubt", nargs="+", default=None, metavar="ID",
+        help="Clear these in-doubt claims after you have checked the channel and "
+             "the headline is NOT there, so a later --apply posts it.",
+    )
+    ap.add_argument(
+        "--run-crashed", action="store_true",
+        help="Override the live-engine refusal once you have confirmed the engine "
+             "process is gone (a SIGKILLed engine's status row reads live for up to "
+             "two minutes).",
+    )
     return ap
 
 
-async def main() -> int:
-    ap = _build_arg_parser()
-    args = ap.parse_args()
+async def run_repair(args, factory, *, make_client=None) -> int:
+    """The whole script, given parsed ``args`` and a session factory.
+
+    ``make_client(agent_id)`` builds the posting client (tests pass a fake);
+    by default a real AgentSlackClient from the agent's stored or env token.
+    Exit codes: 0 success, 1 a post FAILED or is IN DOUBT, 2 refused.
+    """
     run_id = uuid.UUID(args.run)
     assessment_ids = (
         [uuid.UUID(a) for a in args.assessment_ids] if args.assessment_ids else None
     )
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-
     async with factory() as db:
+        if args.list_in_doubt:
+            rows = await list_in_doubt(db, run_id)
+            for row in rows:
+                logger.info(
+                    "IN DOUBT %s (thread %s, %s): claimed %s, never recorded as posted",
+                    row.id, row.thread_id, row.subject_agent_id, row.summary_claimed_at,
+                )
+            logger.info("%d in-doubt claim(s) for run %s", len(rows), run_id)
+            return 0
+        if args.apply or args.release_in_doubt:
+            refusal = await engine_live_refusal(db, run_crashed=args.run_crashed)
+            if refusal:
+                logger.error(refusal)
+                return 2
+        run = await db.get(SimulationRun, run_id)
+        if run is None:
+            logger.error("no simulation run %s", run_id)
+            return 2
+        if args.release_in_doubt:
+            wanted = {uuid.UUID(a) for a in args.release_in_doubt}
+            in_doubt = {row.id for row in await list_in_doubt(db, run_id)}
+            for rid in sorted(wanted - in_doubt, key=str):
+                logger.error("NOT IN DOUBT %s: no claim older than 10 minutes to release", rid)
+            releasable = sorted(wanted & in_doubt, key=str)
+            await release_claim(db, releasable)
+            logger.info("released %d in-doubt claim(s)", len(releasable))
+            return 1 if wanted - in_doubt else 0
+
         rows = await _load_rows(db, run_id, assessment_ids)
         logger.info("found %d assessment row(s) for run %s", len(rows), run_id)
-
-        to_post, skip_pairs = select_rows_needing_headline(
-            rows,
-            live_rubric_hash=RUBRIC_CONTENT_HASH,
-            allow_rubric_drift=args.allow_rubric_drift,
-            for_stamp_only=args.stamp_only,
+        held = run.held_at is not None
+        ended = (
+            await ended_thread_ids(db, run_id)
+            if held and not args.finalize and not args.stamp_only else set()
         )
-
-        skipped_count = len(skip_pairs)
-        for row, why in skip_pairs:
-            logger.info("SKIP %s (%s): %s", row.id, row.subject_agent_id, why)
-
-        if not to_post:
-            logger.info("nothing owed a headline for this selection")
-            await engine.dispose()
-            return 0
-
         pi_labels = await _load_pi_labels(db)
         channel_id_map = await _load_channel_id_map(db, run_id)
-        # agent_id -> token, NOT keyed by the verdict's subject — the posting
-        # identity is the verdict's AUTHOR (row.agent_id, normally
-        # "blackbird"), never the PI it assessed.
-        tokens = await _load_posting_tokens(db)
-        clients: dict[str, AgentSlackClient | None] = {}
+        tokens = await _load_posting_tokens(db) if make_client is None else {}
 
-        def _client_for(agent_id: str | None) -> AgentSlackClient | None:
-            """Lazily connect (and cache) one client per authoring agent_id.
+    clients: dict[str, object | None] = {}
 
-            Connecting is a read-only Slack call (auth.test) and is attempted
-            regardless of --apply so a dry-run preview can show a real
-            permalink — it is the post itself that is gated on --apply, not
-            the connection.
-            """
-            if not agent_id:
-                return None
-            if agent_id in clients:
-                return clients[agent_id]
+    def _client_for(agent_id: str | None):
+        """Lazily build (and cache) one client per AUTHORING agent_id — the
+        verdict's author (normally "blackbird"), never the PI it assessed.
+        Connecting is read-only (auth.test), so a dry run can show permalinks."""
+        if not agent_id:
+            return None
+        if agent_id in clients:
+            return clients[agent_id]
+        if make_client is not None:
+            client = make_client(agent_id)
+        else:
             token = tokens.get(agent_id)
             client = AgentSlackClient(agent_id=agent_id, bot_token=token) if token else None
             if client is not None and not client.connect():
                 client = None
-            clients[agent_id] = client
-            return client
+        clients[agent_id] = client
+        return client
 
-        rows_and_texts: list[tuple[OpportunityAssessment, str]] = []
-        for row in to_post:
-            client = _client_for(row.agent_id)
-            permalink = _resolve_permalink(row, client, channel_id_map)
-            text = _render_for(row, pi_labels, permalink)
-            rows_and_texts.append((row, text))
-
-        results = apply_headline_repairs(
-            rows_and_texts,
-            client_for=_client_for,
-            apply=args.apply,
-            stamp_only=args.stamp_only,
+    if args.stamp_only:
+        to_stamp, skip_pairs = select_rows_needing_headline(
+            rows, live_rubric_hash=RUBRIC_CONTENT_HASH,
+            allow_rubric_drift=args.allow_rubric_drift, for_stamp_only=True,
         )
+        rows_and_texts = [(row, _render_for(row, pi_labels, None)) for row in to_stamp]
+        results = apply_headline_repairs(
+            rows_and_texts, client_for=_client_for, apply=args.apply, stamp_only=True,
+        )
+        if args.apply and any(outcome == STAMPED for _, _, outcome in results):
+            async with factory() as db:
+                for row, _text, outcome in results:
+                    if outcome == STAMPED:
+                        await db.execute(
+                            update(OpportunityAssessment)
+                            .where(OpportunityAssessment.id == row.id)
+                            .values(summary_posted_at=row.summary_posted_at)
+                        )
+                await db.commit()
+    else:
+        candidates, thread_skips = newest_owed_per_thread(rows)
+        candidates, hold_skips = filter_by_hold(
+            candidates, held=held, finalize=args.finalize, ended=ended,
+        )
+        to_post, drift_skips = select_rows_needing_headline(
+            candidates, live_rubric_hash=RUBRIC_CONTENT_HASH,
+            allow_rubric_drift=args.allow_rubric_drift,
+        )
+        skip_pairs = [*thread_skips, *hold_skips, *drift_skips]
+        rows_and_texts = [
+            (row, _render_for(row, pi_labels, _resolve_permalink(
+                row, _client_for(row.agent_id), channel_id_map,
+            )))
+            for row in to_post
+        ]
+        if args.apply:
+            results = await post_with_claims(
+                rows_and_texts, factory=factory, client_for=_client_for,
+            )
+        else:
+            results = [(row, text, WOULD_POST) for row, text in rows_and_texts]
 
-        posted = stamped = failed = 0
-        for row, text, outcome in results:
-            note = _rubric_note(row, RUBRIC_VERSION, RUBRIC_CONTENT_HASH)
-            if outcome == WOULD_POST:
-                logger.info(
-                    "WOULD POST %s (%s) [%s]: %s", row.id, row.subject_agent_id, note, text,
-                )
-            elif outcome == WOULD_STAMP:
-                logger.info(
-                    "WOULD STAMP %s (%s) [%s]: %s", row.id, row.subject_agent_id, note, text,
-                )
-            elif outcome == POSTED:
-                logger.info("POSTED %s (%s): %s", row.id, row.subject_agent_id, text)
-                posted += 1
-            elif outcome == STAMPED:
-                logger.info("STAMPED %s (%s): %s", row.id, row.subject_agent_id, text)
-                stamped += 1
-            else:
-                logger.error(
-                    "FAILED to post/stamp %s (%s)", row.id, row.subject_agent_id,
-                )
-                failed += 1
+    for row, why in skip_pairs:
+        logger.info("SKIP %s (%s): %s", row.id, row.subject_agent_id, why)
+    tally = {POSTED: 0, STAMPED: 0, FAILED: 0, IN_DOUBT: 0, UNCLAIMED: 0}
+    for row, text, outcome in results:
+        note = _rubric_note(row, RUBRIC_VERSION, RUBRIC_CONTENT_HASH)
+        if outcome in (WOULD_POST, WOULD_STAMP):
+            logger.info(
+                "%s %s (%s) [%s]: %s",
+                "WOULD POST" if outcome == WOULD_POST else "WOULD STAMP",
+                row.id, row.subject_agent_id, note, text,
+            )
+            continue
+        tally[outcome] += 1
+        log = logger.error if outcome in (FAILED, IN_DOUBT) else logger.info
+        log("%s %s (%s): %s", outcome.upper(), row.id, row.subject_agent_id, text)
 
-        if args.apply and (posted or stamped):
+    if args.finalize and args.apply:
+        async with factory() as db:
+            await db.execute(
+                update(SimulationRun)
+                .where(SimulationRun.id == run_id)
+                .values(finalized_at=func.coalesce(SimulationRun.finalized_at, func.now()),
+                        held_at=None)
+            )
             await db.commit()
-
-    await engine.dispose()
+        logger.info("run %s finalized: it can no longer be resumed", run_id)
 
     logger.info(
-        "done: %d posted, %d stamped, %d skipped, %d failed",
-        posted, stamped, skipped_count, failed,
+        "done: %d posted, %d stamped, %d skipped, %d unclaimed, %d in doubt, %d failed",
+        tally[POSTED], tally[STAMPED], len(skip_pairs), tally[UNCLAIMED],
+        tally[IN_DOUBT], tally[FAILED],
     )
     return exit_code_for(results)
+
+
+async def main() -> int:
+    args = _build_arg_parser().parse_args()
+    engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+    try:
+        return await run_repair(args, async_sessionmaker(engine, expire_on_commit=False))
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":

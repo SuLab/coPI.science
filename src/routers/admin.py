@@ -2702,10 +2702,17 @@ async def admin_simulation_start(
 @router.post("/simulation/stop")
 async def admin_simulation_stop(
     request: Request,
+    hold_open: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
     """Enqueue a `stop` command.
+
+    ``hold_open=1`` is "Stop — hold open interviews": the same `stop` command
+    with payload ``{"hold_open": true}``, which makes the engine end the run as
+    a hold — only interviews that have ended get their headline, the rest wait
+    for a resume or a finalize. The default Stop's payload stays None and its
+    behaviour is unchanged.
 
     Refused when the panel does not currently read `running` — the same
     predicate the supervisor itself uses (src/agent/supervisor.py) to decide
@@ -2722,8 +2729,11 @@ async def admin_simulation_stop(
         return RedirectResponse(
             url=f"/admin/simulation?error={quote('Nothing is running.')}", status_code=302
         )
+    payload = {"hold_open": True} if hold_open == "1" else None
     try:
-        await enqueue_command(db, command="stop", payload=None, requested_by_user_id=current_user.id)
+        await enqueue_command(
+            db, command="stop", payload=payload, requested_by_user_id=current_user.id,
+        )
     except IntegrityError:
         await db.rollback()
         return RedirectResponse(
@@ -2731,9 +2741,10 @@ async def admin_simulation_stop(
             status_code=302,
         )
     await record_audit(
-        db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=None
+        db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=payload
     )
-    return RedirectResponse(url=f"/admin/simulation?msg={quote('Stop requested.')}", status_code=302)
+    message = "Stop (hold open interviews) requested." if payload else "Stop requested."
+    return RedirectResponse(url=f"/admin/simulation?msg={quote(message)}", status_code=302)
 
 
 @router.post("/simulation/announce-settings")

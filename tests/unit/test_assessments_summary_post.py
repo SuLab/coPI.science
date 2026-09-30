@@ -452,6 +452,11 @@ class _FakeScalars:
     def first(self):
         return self._row
 
+    def all(self):
+        # The engine claims the owed row (an UPDATE ... RETURNING read with
+        # .scalars().all()) before posting — spec P0-08.
+        return [self._row]
+
 
 class _FakeResult:
     def __init__(self, row):

@@ -792,3 +792,33 @@ async def test_live_tab_latency_and_progress_render_with_real_data(client, db_se
     assert "Internal Server Error" not in html
     assert "P50 (ms)" in html and '<td class="sc-num">2</td>' in html   # n, thousands-separated cells elsewhere
     assert '<div class="sc-tile-value">107%</div>' in html and "overran the limit" in html
+
+
+async def test_hold_stop_enqueues_a_hold_open_payload_and_the_default_stays_none(
+    client, db_session,
+):
+    admin = await _admin(db_session, "sim-admin-c3@example.org")
+    db_session.add(SimulationProcessStatus(id=1, state="running"))
+    await db_session.commit()
+
+    resp = await client.post(
+        "/admin/simulation/stop", data={"hold_open": "1"}, headers=auth_headers(admin.id),
+    )
+    assert resp.status_code in (302, 303)
+    cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
+    assert (cmd.command, cmd.payload) == ("stop", {"hold_open": True})
+
+    await db_session.delete(cmd)
+    await db_session.commit()
+    await client.post("/admin/simulation/stop", headers=auth_headers(admin.id))
+    cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
+    assert cmd.payload is None, "the default Stop is unchanged"
+
+
+async def test_the_page_offers_both_stop_buttons(client, db_session):
+    admin = await _admin(db_session, "sim-admin-c4@example.org")
+    db_session.add(SimulationProcessStatus(id=1, state="running"))
+    await db_session.commit()
+    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    assert "Stop — hold open interviews" in resp.text
+    assert 'name="hold_open" value="1"' in resp.text
