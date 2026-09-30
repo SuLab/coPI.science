@@ -7,6 +7,7 @@ messages=, [tools=])`` returning an object with ``.content`` (blocks exposing
 ``.stop_reason``, ``.usage.input_tokens/.output_tokens`` and the optional
 ``.usage.output_tokens_details.thinking_tokens``. Install via
 ``monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)``.
+``with_options(**kw)`` returns the same fake and records ``kw`` on ``options_calls``.
 
 It also mirrors the one thing the real client REFUSES: a non-streaming request
 whose ``max_tokens`` implies more than 10 minutes of generation. See
@@ -333,7 +334,19 @@ class FakeAnthropic:
         self.default_text = default_text
         self.latency = latency
         self.calls: list[dict] = []
+        # Every `with_options(...)` kwargs, in call order. See with_options.
+        self.options_calls: list[dict] = []
         self.messages = _Messages(self)
+
+    def with_options(self, **options: Any) -> "FakeAnthropic":
+        """``anthropic.Anthropic.with_options`` (both pinned SDKs have it, C25).
+
+        Returns this same fake, so a request made through the copy is still
+        recorded on ``calls``; ``options_calls`` records each call's options so
+        a test can assert what a call site asked for (spec §11).
+        """
+        self.options_calls.append(dict(options))
+        return self
 
     def _next(self, kwargs: dict) -> _Message:
         r: Any = self._responses.pop(0) if self._responses else self.default_text
