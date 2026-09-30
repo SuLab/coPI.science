@@ -706,7 +706,7 @@ async def test_matrix_save_is_one_transaction(client, db_session, admin, roster)
 
     from src.routers import admin as admin_mod
 
-    src = inspect.getsource(admin_mod.admin_cohort_topology_save)
+    src = inspect.getsource(admin_mod.cohorts.admin_cohort_topology_save)
     assert src.count("await db.commit()") == 1, (
         "the matrix save must commit exactly once; a per-row commit exposes an "
         "empty-topology window to a concurrent gate recompute"

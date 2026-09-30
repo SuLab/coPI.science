@@ -111,7 +111,7 @@
                     {{ log.phase }}
                 </span>
                 {# The consult's verdict signal, parsed server-side in
-                   admin_llm_calls (src/routers/admin.py). Without it the only way
+                   admin_llm_calls (src/routers/admin/runs.py). Without it the only way
                    to see whether a specialist blocked something was to open the row
                    and read the JSON. An unreadable reply degrades to "gap", the
                    same way the engine's own parse does — never to "adequate".
@@ -151,7 +151,7 @@
                    have call_stats NULL and render exactly as before.
 
                    `truncated_stop` is src/services/llm.py's `is_truncated_stop`,
-                   registered as a Jinja test in src/routers/admin.py. This test used
+                   registered as a Jinja test in src/routers/admin/_common.py. This test used
                    to be `equalto 'max_tokens'` inline, which made a `refusal`
                    truncation — the classifier cutting the generation rather than the
                    ceiling — render as a COMPLETE turn on the page an operator opens

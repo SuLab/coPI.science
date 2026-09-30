@@ -424,7 +424,7 @@ def test_the_page_reads_the_truncation_predicate_rather_than_a_copy_of_it():
     template text: a template can name a test that was never registered, and
     that failure is a silently empty selection rather than an error.
     """
-    from src.routers.admin import templates as admin_templates
+    from src.routers.admin._common import templates as admin_templates
     from src.services.llm import is_truncated_stop
 
     assert admin_templates.env.tests.get("truncated_stop") is is_truncated_stop

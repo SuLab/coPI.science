@@ -2,7 +2,7 @@
 
 Every function here is a plain async query (or a handful of them) scoped to
 ONE ``simulation_run_id`` and returning a frozen dataclass defined in this
-module — the control panel route (src/routers/admin.py) renders these, this module
+module — the control panel route (src/routers/admin/simulation.py) renders these, this module
 never touches ``Request``/Jinja/HTTP. Nothing here is dependency-heavy: the
 rubric stamp, the prompt-set stamp and the build info are all read the same
 way ``src/agent/main.py``'s startup banner reads them, so the Live tab's

@@ -83,6 +83,8 @@ EXCEPTIONS: dict[str, str] = {
     "tests/unit/test_reply_lane.py::test_reply_lane_never_touches_the_skip_streak":
         "source-inspection test re-targeted to ReplyLane, and it now also inspects the split helper "
         "_activate_threads_for_all_agents that took part of _dispatch_reply_lane's body (§7.6)",
+    "tests/unit/test_directory_assessments.py::test_the_view_returns_no_new_top_level_context_key":
+        "source-inspection test re-targeted to the module that now holds admin_assessments (§7.6)",
 }
 
 

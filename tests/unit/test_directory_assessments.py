@@ -580,7 +580,7 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
     # `assessments_limit` and friends are passed as `key=view["key"]`, so the
     # key's own name appears in the source either way.
     admin_src = (
-        pathlib.Path(__file__).resolve().parents[2] / "src" / "routers" / "admin.py"
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "routers" / "admin" / "assessments.py"
     ).read_text()
     handler = admin_src[admin_src.index("async def admin_assessments") :]
     handler = handler[: handler.index("\n@router.")]

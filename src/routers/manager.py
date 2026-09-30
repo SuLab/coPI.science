@@ -96,13 +96,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_review_user)])
 templates = Jinja2Templates(directory="templates")
 
-# See src/routers/admin.py's identical registration: both routers include the
+# See src/routers/admin/_common.py's identical registration: both routers include the
 # same `_assessments_body.html`/`_assessment_detail_body.html` partials, and
 # each `Jinja2Templates` instance keeps its own globals.
 templates.env.globals["key_point_sections"] = key_point_sections
 
 # Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). See the
-# identical registration in src/routers/admin.py for why it is a global and
+# identical registration in src/routers/admin/_common.py for why it is a global and
 # why it has to be done twice: each router owns its own Jinja2Templates
 # instance, so registering on one leaves the other 500ing on UndefinedError.
 templates.env.globals["md_citations"] = markdown_with_citation_links

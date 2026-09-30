@@ -54,7 +54,7 @@ HISTORICAL_VERDICT_SIGNALS: frozenset[str] = frozenset({"caution", "clear"})
 #: What a RETRO reader accepts — `parse_opinion(..., allow_historical=True)`
 #: and nothing else. The union exists because `parse_opinion` runs over STORED
 #: text on two read paths: `admin_llm_calls` re-parses every `consult_*`
-#: response on the LLM-calls page (src/routers/admin.py), and
+#: response on the LLM-calls page (src/routers/admin/runs.py), and
 #: `assessment_detail.consult_opinion_from_result` re-parses the tool log for
 #: every interview that predates `specialist_consults`. Accepting only the live
 #: three THERE would re-render the entire pre-rename corpus as the default
@@ -389,7 +389,7 @@ def parse_opinion(
     Reads against ``VERDICT_SIGNALS`` BY DEFAULT, and only a caller that opts
     in with ``allow_historical=True`` also accepts ``caution``/``clear``. Two
     callers do, both of them re-parsing STORED text — ``admin_llm_calls``
-    (src/routers/admin.py) and ``consult_opinion_from_result``
+    (src/routers/admin/runs.py) and ``consult_opinion_from_result``
     (src/services/assessment_detail.py) — because a stored pre-rename reply
     saying ``caution`` WAS read, and re-parsing it into the default would
     rewrite the whole pre-2026-08-28 corpus on every page view. The LIVE consult

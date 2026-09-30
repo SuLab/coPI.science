@@ -832,7 +832,7 @@ async def test_matrix_save_writes_memberships_atomically(live, monkeypatch):
 
     from src.routers import admin
 
-    src = inspect.getsource(admin.admin_cohort_topology_save)
+    src = inspect.getsource(admin.cohorts.admin_cohort_topology_save)
     # Exactly one commit, and it is the last statement of the write path.
     assert src.count("await db.commit()") == 1, (
         "the matrix save must commit exactly once; a mid-loop commit exposes an "

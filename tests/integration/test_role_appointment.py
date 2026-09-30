@@ -119,7 +119,7 @@ async def test_the_last_admin_guard_fires_when_the_target_is_the_only_admin(db_s
     """
     from fastapi import HTTPException
 
-    from src.routers.admin import admin_set_user_role
+    from src.routers.admin.users import admin_set_user_role
 
     sole_admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     actor = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
@@ -160,7 +160,7 @@ async def test_the_last_admin_guard_counts_only_admins_who_can_log_in(
     """
     from fastapi import HTTPException
 
-    from src.routers.admin import admin_set_user_role
+    from src.routers.admin.users import admin_set_user_role
 
     await factories.make_user(
         db_session, user_role=USER_ROLE_ADMIN, access_status=other_admin_access

@@ -75,7 +75,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >   `src/services/assessment_detail.py:1306` and `select(SpecialistConsult)` at
 >   `:1718`;
 > * `/admin/activity/{run_id}/llm-calls` raises — `select(LlmCallLog)` at
->   `src/routers/admin.py:488`;
+>   `src/routers/admin/runs.py:105`;
 > * on the engine side the LLM-log writer (`simulation.py:8398`) and the consult
 >   writer (`:5597`) name the new columns in their INSERTs, so every
 >   `llm_call_logs` flush and every `specialist_consults` row fails — the flush
@@ -377,7 +377,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >   approve/disapprove 500s out of the route handler. Loud, not silent.
 > * pre-`0045`: the new code **maps `llm_call_logs.thread_phase` and
 >   `.message_ordinal`**, so `/admin/activity/{run_id}/llm-calls`
->   (`select(LlmCallLog)`, `src/routers/admin.py`) and the
+>   (`select(LlmCallLog)`, `src/routers/admin/runs.py`) and the
 >   `src/services/simulation_stats.py` aggregates raise `UndefinedColumn`, and
 >   on the engine side the `_llm_log_record` INSERT names both columns — so
 >   **every `llm_call_logs` flush of a running simulation fails**, which the

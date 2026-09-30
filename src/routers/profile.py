@@ -224,7 +224,7 @@ async def delete_account(
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
 
     # The same "at least one admin can still log in" invariant the role
-    # route defends (src/routers/admin.py) — deletion is the other door out
+    # route defends (src/routers/admin/users.py) — deletion is the other door out
     # of adminhood, and it had no guard (deletion audit F7).
     if current_user.user_role == USER_ROLE_ADMIN:
         admin_count = await db.scalar(

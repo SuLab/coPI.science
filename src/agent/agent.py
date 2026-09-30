@@ -1,10 +1,10 @@
 """Agent class — holds identity, profiles, and builds prompts for each phase."""
 
 import logging
-import re
 import time
 from pathlib import Path
 
+from src.agent.dois import extract_dois as _extract_dois
 from src.agent.post_types import render_menu
 from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
@@ -22,11 +22,6 @@ PROFILES_DIR = Path("profiles")
 # acyclic — the rubric document is stdlib-parsed data, not agent code.
 _RUBRIC_PLACEHOLDER = "{rubric}"
 
-# Matches a bare DOI. The character class deliberately excludes the delimiters
-# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
-# <https://doi.org/...> links, and the ) ] that close markdown/parentheticals).
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
-
 # Prior-thread dedup lines rendered per partner in the Phase-5 prompt. The
 # in-memory list is capped separately (simulation.PRIOR_THREADS_KEPT_PER_PAIR,
 # 50); this bounds the PROMPT: measured, every summary-carrying close added
@@ -35,14 +30,6 @@ _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
 # recent outcomes plus a count is strictly better dedup context than a
 # 500-line list.
 PRIOR_THREADS_RENDERED_PER_PAIR = 5
-
-
-def _extract_dois(text: str | None) -> set[str]:
-    """Return the set of normalized DOIs found in ``text`` (lowercased)."""
-    out: set[str] = set()
-    for raw in _DOI_RE.findall(text or ""):
-        out.add(raw.rstrip(".,;").lower())
-    return out
 
 
 class Agent:

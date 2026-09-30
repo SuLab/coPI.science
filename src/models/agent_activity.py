@@ -58,7 +58,7 @@ class SimulationRun(Base):
     #: still recoverable for any run as `SELECT COUNT(*) FROM llm_call_logs
     #: WHERE simulation_run_id = <run>` — one `LlmCallLog` row is written per
     #: turn regardless of how many real API calls that turn made. See
-    #: `src/agent/main.py`'s `API_CALL_UNITS_NOTE` (surfaced in the startup
+    #: `src/services/build_info.py`'s `API_CALL_UNITS_NOTE` (surfaced in the startup
     #: banner) and the comment above `RUN_STATS_UPDATE_INTERVAL` in
     #: `src/agent/simulation.py` for the engine-side half of this note.
     total_api_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
