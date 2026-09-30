@@ -549,12 +549,10 @@ async def _run_simulation_locked(
                 if run:
                     run.status = "stopped"
                     run.ended_at = datetime.now(timezone.utc)
-                    # UNITS: real API CALLS, not turns, since 2026-08-22 —
-                    # see API_CALL_UNITS_NOTE above. NOT comparable with any
-                    # earlier run; the old per-turn figure is COUNT(*) over
-                    # llm_call_logs for the same simulation_run_id.
-                    run.total_api_calls = sum(a.api_call_count for a in agents)
-                    run.total_messages = sum(a.message_count for a in agents)
+                    # Totals are written by stop()'s final flush
+                    # (COUNT(agent_messages) and the live api_call_count sum);
+                    # overwriting them here from process-local counters
+                    # undercounted every resumed run (AG-5).
                     await db.commit()
 
         logger.info("Simulation stopped.")

@@ -743,14 +743,10 @@ async def test_another_runs_rows_do_not_satisfy_this_run(engine):
 
 
 @pytest.mark.asyncio
-async def test_in_process_memory_stays_authoritative_when_it_holds_anything(engine):
-    """The fallback is for a map with NOTHING for this interview. A process that
-    recorded one domain and not the rest must keep reporting that gap — the
-    table cannot overrule it, because the same success path writes both and
-    memory can never be behind it.
-
-    ``floor_armed=True`` here because this thread is NOT a restart case: the
-    process has consulted, so the top-of-turn latch would have armed it.
+async def test_db_rows_are_merged_even_when_memory_holds_something(engine):
+    """S2-03: the seed merges the table once per interview per process, whatever
+    memory holds. A process that recorded one domain after a restart must still
+    see the rows committed before it; the merge is additive and arms the floor.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
@@ -768,11 +764,7 @@ async def test_in_process_memory_stays_authoritative_when_it_holds_anything(engi
         )
         rows = await _assessment_rows(factory, run_id)
         assert len(rows) == 1
-        assert rows[0].missing_domains == ["chemistry", "talent", "technologic"], (
-            "the four recorded rows must NOT have been merged into a map that "
-            "already held this interview's own record"
-        )
-        assert sim._consulted_domains("gordy", "t1") == frozenset({"scientific"})
+        assert sim._consulted_domains("gordy", "t1") >= frozenset(_REQUIRED) | {"scientific"}
     finally:
         await _delete_run(factory, run_id)
 

@@ -11,6 +11,7 @@ from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.blackbird_rubric import render_rubric_markdown
+from src.services.fs import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -574,7 +575,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             memory_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_path.write_text(new_memory + "\n", encoding="utf-8")
+            atomic_write_text(memory_path, new_memory + "\n")
             # Best-effort cleanup of the legacy unpartitioned file so subsequent
             # loads go through the new path — only on public writes, and only
             # if we just wrote to the partitioned location.

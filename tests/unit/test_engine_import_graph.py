@@ -253,7 +253,7 @@ EXPECTED_STATE_OWNER: dict[str, str] = {
     "_poll_cursors": "slack_io", "_poll_client_cursor": "slack_io",
     "_last_channel_poll": "slack_io", "_poll_error_last_logged": "slack_io",
     "_ts_minter": "slack_io",
-    "_specialist_consults": "panel", "_consult_signal_counts": "panel",
+    "_specialist_consults": "panel", "_consults_seeded": "panel", "_consult_signal_counts": "panel",
     "_consult_signal_counts_by_domain": "panel", "_panel_notes_posted": "panel",
     "_panel_notes_clipped": "panel", "_panel_note_clip_warned": "panel",
     "_pending_headlines": "headlines", "_in_doubt_headlines": "headlines",
