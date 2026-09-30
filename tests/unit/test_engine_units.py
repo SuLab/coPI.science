@@ -195,6 +195,15 @@ def test_reply_lane_is_a_unit():
     assert eng._reply_sem is eng.reply_lane._reply_sem
 
 
+def test_rebuild_is_a_unit():
+    from src.agent.engine.rebuild import Rebuild
+
+    eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={},
+                           reset_cursors=True, fresh_start=True)
+    assert sim._UNIT_CLASSES["rebuild"] is Rebuild
+    assert eng._fresh_start is True and eng.rebuild._reset_cursors is True
+
+
 def test_every_self_name_in_a_unit_resolves():
     """A moved body's ``self.<name>`` must be an own member, an owned attribute, a
     ``via`` alias, a holder or a port. A missing alias would otherwise only log,

@@ -8,10 +8,15 @@ stopping, restarting).
   imports (`src/services/assessment_detail.py` is one), needs
   `$DC --profile agent build agent` before it runs. Tell the user when a change
   affects the running agent process.
-- Many tests read engine source text with `inspect.getsource(...)` and assert that a
-  substring is present or absent, and that text includes comments and docstrings.
-  Before editing inside a `SimulationEngine` method, `grep -rn getsource tests/`
-  for it.
+- Engine methods live in `src/agent/engine/<unit>.py` (spec §7.1 of
+  `docs/specs/2026-09-29-audit-remediation-design.md`); `SimulationEngine` in
+  `src/agent/simulation.py` is the orchestrator and forwards `engine.<name>` to the
+  owning unit. Units log as `src.agent.simulation`, and tests patch
+  `src.agent.engine.deps.*` / `src.agent.engine.constants.*`. Many tests read engine
+  source with `inspect.getsource(...)` and assert that a substring is present or
+  absent, comments and docstrings included: before editing an engine method,
+  `grep -rn getsource tests/` for it. `tests/unit/test_engine_import_graph.py` pins
+  which unit may use which.
 - `thread_guidance.py`'s `pi_lab` strings are pinned by
   `tests/characterization/__snapshots__/test_agent_turn_gm.ambr`. Do not reword
   them to make a test pass, and never run `pytest --snapshot-update`.

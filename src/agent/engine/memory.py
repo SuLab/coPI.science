@@ -54,6 +54,11 @@ class Memory:
         """
         self._pending_memory_events.append(event)
 
+    def drop_pending(self) -> None:
+        """Discard every queued working-memory update (spec §7.2 rule 1); ``stop()``
+        calls it after the bounded shutdown drain, having logged what is dropped."""
+        self._pending_memory_events.clear()
+
     async def _drain_memory_events(self, limit: int | None = None) -> int:
         """Run queued working-memory updates, strictly FIFO, one at a time.
 

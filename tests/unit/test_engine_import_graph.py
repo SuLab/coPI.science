@@ -336,3 +336,72 @@ def test_owned_state_matches_each_unit_init():
         deps = {a for a in stored if a == "ctx" or a.lstrip("_") in ALLOWED or a in (
             "_run_state", "_ledger", "_on_thread_gone", "_strip_disallowed_tags", "_rejection_counts")}
         assert stored - deps == set(cls.OWNED_STATE), (holder, stored - deps, cls.OWNED_STATE)
+
+
+ORCHESTRATOR = {"__init__", "start", "_run_main_loop", "_drain_and_flush", "stop", "_sleep",
+                "_idle_backoff", "_terminal_stall_reason", "_rehydrate_assessed_threads",
+                "_record_run_end_state", "_recover_reply_less_pitches",
+                "__getattr__", "__setattr__", "__delattr__"}
+ALL_UNITS = {"persistence", "llm_log", "channel_directory", "slack_io", "panel", "headlines",
+             "verdicts", "threads", "memory", "reply_lane", "post_lane", "scheduler", "control",
+             "roster", "rebuild", "run_announcer"}
+
+
+def test_every_unit_is_wired_and_the_orchestrator_is_only_wiring():
+    import types
+
+    import src.agent.simulation as sim
+
+    assert set(sim._UNIT_CLASSES) == ALL_UNITS
+    members = {
+        n for n, v in vars(sim.SimulationEngine).items()
+        if isinstance(v, (types.FunctionType, staticmethod, classmethod, property))
+    }
+    assert members == ORCHESTRATOR, sorted(members ^ ORCHESTRATOR)
+
+
+SHARED_STATE_OWNERS = {
+    "_closed_thread_ids": "threads",
+    "_pending_headlines": "headlines",
+    "_pending_memory_events": "memory",
+    "_prior_threads": "threads",
+    "_poll_cursors": "slack_io",
+    "_assessed_threads": "verdicts",
+}
+MUTATING_METHODS = {
+    "add", "discard", "remove", "pop", "popitem", "clear", "update",
+    "append", "appendleft", "extend", "insert", "setdefault",
+}
+
+
+def test_shared_state_is_changed_only_by_its_owner():
+    """Spec §7.2 rule 1: other units change these six only through the owner's
+    methods (``mark_closed``, ``restore_prior``, ``enqueue``, ``drop_pending``,
+    ``seed_cursor``, ``mark_announced``). ``via`` would let any unit write through, so
+    this pins it. The orchestrator (``simulation.py``) is scanned too."""
+    offenders = []
+    for path in [*sorted(ENGINE.glob("*.py")), SIMULATION]:
+        unit = path.stem
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            touched = None
+            if isinstance(node, (ast.Assign, ast.Delete)):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            else:
+                targets = []
+            for target in targets:
+                base = target.value if isinstance(target, ast.Subscript) else target
+                if isinstance(base, ast.Attribute) and base.attr in SHARED_STATE_OWNERS:
+                    touched = base.attr
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in MUTATING_METHODS
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr in SHARED_STATE_OWNERS
+            ):
+                touched = node.func.value.attr
+            if touched and SHARED_STATE_OWNERS[touched] != unit:
+                offenders.append(f"{path}:{node.lineno} changes {touched}")
+    assert not offenders, offenders
