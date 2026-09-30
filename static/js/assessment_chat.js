@@ -507,8 +507,11 @@
     renderSources(container, turn, turnKey);
   }
 
-  function turnNode(turn, windowStart) {
+  function turnNode(turn, windowStart, revisionStart) {
     const wrap = el("section", "space-y-2");
+    if (revisionStart) {
+      wrap.appendChild(el("p", "text-sm font-medium text-amber-800", "Verdict updated after this point"));
+    }
     if (windowStart) {
       wrap.appendChild(el("p", "text-sm italic text-gray-600", "Earlier turns are no longer part of the conversation the model sees."));
     }
@@ -548,7 +551,9 @@
       return (t.status === "complete" || t.status === "truncated") && !t.in_window;
     });
     state.turns.forEach(function (turn, i) {
-      els.log.appendChild(turnNode(turn, olderLeftOut && i === firstIn));
+      const prev = i > 0 ? state.turns[i - 1] : null;
+      const revisionStart = prev !== null && (prev.verdict_revision || 1) !== (turn.verdict_revision || 1);
+      els.log.appendChild(turnNode(turn, olderLeftOut && i === firstIn, revisionStart));
     });
     els.starters.hidden = state.turns.length > 0;
     els.notice.hidden = !(state.limits && state.limits.verdict_may_change);
