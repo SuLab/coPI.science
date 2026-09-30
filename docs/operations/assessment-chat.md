@@ -94,3 +94,8 @@ and get short, cited, streamed answers from `claude-opus-5-5`
 **Tildes render literally** (2026-09-29, P0-12): the chat's private marked instance
 disables GFM strikethrough like the detail pages do, so "~30%" is not turned into a
 deleted span.
+
+**Verdict revisions (B6).** A turn records the verdict revision it was asked against.
+When the hub updates the verdict, earlier turns stay visible below a "Verdict updated after
+this point" divider but leave replay and the turn cap; turns from before `0054` (NULL)
+count as revision 1, so their conversations continue unchanged.

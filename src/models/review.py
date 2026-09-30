@@ -7,15 +7,10 @@ A-2, A-3):
 
 * ``AssessmentReview``, ``AssessmentReviewEvent`` and
   ``AssessmentReviewAssignment`` all CASCADE off ``opportunity_assessments``
-  (A-1). The engine's ``_retire_superseded_verdict`` hard-DELETEs a stored
-  provisional verdict when a later sidecar supersedes it, minutes apart,
-  mid-run — RESTRICT would make that delete raise (swallowed, logged, and
-  leaving two rows for one interview, breaking the one-row invariant), and
-  SET NULL would orphan a review with nothing to render it against. CASCADE
-  means a human's review on a provisional row can be silently lost to
-  supersession; that is accepted as the least-bad of the three options
-  (H-5), and an engine re-point to the surviving row is the optional
-  follow-up A-1 also names.
+  (A-1). Since migration 0055 a later verdict supersedes the stored one IN
+  PLACE (``Verdicts.upsert``: one row per interview), so supersession deletes
+  nothing and a review survives it; the CASCADE now fires only when a whole
+  row is deleted (the duplicate-merge script re-points children first).
 * Because assessments CASCADE from ``simulation_runs`` (A-2), and the
   standing "never DELETE from simulation_runs" archive rule already treats
   that as a database-level red line, this table set now also stands behind

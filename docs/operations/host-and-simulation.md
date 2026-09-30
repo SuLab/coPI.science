@@ -172,6 +172,42 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
 - **Slack-off runs work end to end** (NEW-1): `NullTransport.ajoin_channel` exists, so
   labs reach Phase 5 in DB-only runs, which the local rehearsal before a deploy needs.
 
+### Engine lock, heartbeat and Finalize run
+
+- **One engine at a time.** The engine takes a Postgres advisory lock
+  (`ENGINE_LOCK_KEY`, `src/services/advisory_locks.py`) on a dedicated connection before it
+  writes anything. A second engine, from the CLI or the supervisor, raises
+  `EngineAlreadyRunning` and exits without touching the run. The lock frees the instant its
+  holder dies, so the panel trusts the lock, not the status row, for "is an engine up".
+- **Panel states:** `not_deployed` (no status row), `idle`, `starting`, `running`,
+  `stopping` and `unresponsive`. `unresponsive` means the lock is held but the heartbeat
+  (every 30 s, on its own connection) is older than 120 s; Stop still reaches it. A fresh
+  `running` row with no lock holder (an old lock-less engine, or one that crashed within
+  120 s) reads `idle`: Stop answers "Nothing is running." and Start is refused only while a
+  start is pending.
+- **Stops are claimed only by the engine's control poll** (every `CONTROL_POLL_INTERVAL`,
+  30 s), so a stop lands on the same tick as before; the heartbeat task never claims a
+  command. A stop still pending after a run, and a Finalize run stop pending at boot, is
+  settled by the supervisor (`_settle_pending_stops`): a Finalize run runs
+  `HeadlineAnnouncer.finalize` under the engine lock, any other stop finishes "run already
+  stopped" if no engine holds the lock.
+- **Finalize run** is the button on a stopped run's `/admin/activity/<id>` page
+  (`POST /admin/simulation/finalize-run`). It announces the owed headlines of that run,
+  then sets `finalized_at`. A live engine fails the command ("Finalize run applies to a
+  stopped run"). After a finalized run the Start form forces Fresh.
+- **A lost lock connection** ends the run with the HOLD reason `lock_lost`: only ended
+  interviews are announced and the run is marked held.
+- **Circuit breaker.** Repeated model-call failures across interviews open an engine-wide
+  breaker; `/admin/simulation` shows "LLM calls paused" and calls resume after ten minutes.
+  A single interview whose replies keep failing with non-transient errors while other calls
+  succeed is abandoned with an `assessment_drops` row of reason `reply_failed`.
+- **`MAX_THREAD_MESSAGES` other than 12** makes the engine refuse to start
+  (`EngineConfigError`): the phase guidance's CONCLUDE turn is written for 12.
+- **Prompt snapshot.** `PromptSnapshot` (`src/agent/prompt_snapshot.py`) loads prompts,
+  personas, manifests and the rubric once per start; the heartbeat checks the disk every
+  minute and the panel shows "Prompt set changed on disk — restart to apply". Each start
+  appends a `loaded_stamps` entry to the run's config.
+
 > ⚠️ **As of 2026-08-22 every one of those numbers counts REAL API CALLS, where
 > it used to count turns — and none of them has been re-tuned.**
 > `Agent.record_api_call` booked six unreserved sites (besides the two reserved
@@ -244,10 +280,10 @@ DC="docker compose -f docker-compose.prod.yml"
 #    nothing on the common path and is free insurance against the tail.
 #
 #    Verify it worked by the LOG LINE, not the exit code: "Simulation
-#    stopping..." is logged by `SimulationEngine.stop()` as its LAST statement,
-#    after the bounded memory drain, after `_flush_tasks` are gathered, and
-#    after all three `final=True` flushes. If you see it, the buffers are on
-#    disk.
+#    stopping..." is logged by `SimulationEngine.stop()` after the headline
+#    sweep, the bounded memory drain, the gathered `_flush_tasks` and every
+#    `final=True` flush (messages, LLM logs, thread decisions, verdicts); only
+#    the heartbeat cancel follows it. If you see it, the buffers are on disk.
 #
 #    Exit 137 no longer implies a lost flush (corrected 2026-08-22). Two other
 #    changes moved that: `_drain_and_flush` now runs in the main loop's

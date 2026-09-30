@@ -89,10 +89,12 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 - The agent image bakes `src/` in; only `profiles/`, `prompts/` and `data/` are mounted.
   Any change under `src/agent/`, or to anything it imports, needs the agent image
   rebuilt, and the startup banner confirms which code is running.
-- `prompts/roles/**` is read on every use, so an edit reaches a RUNNING agent
-  immediately. Confirm `/admin/simulation` shows no live run before landing a prompt
-  change. `prompts/rubric/blackbird-rubric.toml` is parsed once at import, so a rubric
-  edit needs a restart.
+- The engine loads the prompt set, the specialist personas, each `role.toml` and the
+  rubric ONCE per start (`src/agent/prompt_snapshot.py`). An edit under `prompts/` does
+  not reach a running agent: `/admin/simulation` shows "Prompt set changed on disk —
+  restart to apply", and the edit applies at the next start (a restart needs no live
+  run, but start FRESH after a version bump). The web app still reads prompts per
+  request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
@@ -115,6 +117,15 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   exception or a failed start also holds. A natural end (max runtime, a drained
   `--max-proposals`) announces everything and FINALIZES the run, which can never be
   resumed. Detail: `docs/operations/host-and-simulation.md`.
+- One engine at a time: the engine holds a Postgres advisory lock on a dedicated
+  connection (`src/services/advisory_locks.py`). A second engine, CLI or supervisor,
+  raises `EngineAlreadyRunning` before writing anything. The panel's liveness comes from
+  that lock; "Unresponsive" means the lock is held but the heartbeat is stale, and Stop
+  still reaches it.
+- **Finalize run** (the button on a stopped run's `/admin/activity/<id>` page) announces
+  the run's owed headlines, then sets `finalized_at`; a finalized run can never be
+  resumed and the Start form forces Fresh. The supervisor runs it under the engine lock
+  when no engine is alive.
 - A resume (the CLI default, or the Start form with its default-checked "Fresh run" box
   cleared) restores from the database only (nothing is re-read from Slack), clears a held
   run's hold, and has the hub interview lab pitches the stop left unanswered. It
@@ -150,6 +161,10 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 - Delete a user only through `src/services/user_deletion.py::delete_user_account`,
   never `db.delete(user)`: a raw delete leaves the PI's agent running.
 - The `AgentRegistry` table is the single source of truth for the agent roster.
+- An `AgentRegistry.role` must have an entry in `src/agent/role_capabilities.py`; an
+  agent with an unknown role, or a role whose `role.toml` fails strict validation, is
+  skipped by the engine (it used to run as pi_lab). `scripts/migrate/preflight.py`
+  BLOCKs on such a role.
 
 ## Data you must not destroy
 

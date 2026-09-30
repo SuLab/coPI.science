@@ -80,8 +80,9 @@ dedupes against PENDING jobs only — a `processing` job has already
 snapshotted its rows and cannot cover feedback written while it waits on the
 model. The handler stamps `consumed_at` with a content-conditional UPDATE, so
 a row edited or deleted mid-call is left for the job the edit already
-enqueued (one WARNING names the count). `_retire_superseded_verdict`
-re-points queued job payloads along with the four review tables. The worker
+enqueued (one WARNING names the count). Since migration `0055` a superseding
+verdict updates the interview's row in place, so reviews, status events,
+assignments and queued job payloads never move. The worker
 requeues every `processing` row at boot and any older than 30 minutes every
 60 s (`requeue_stale_processing_jobs`, `src/worker/main.py`); exhausted ones
 go `dead`. The worker's `stop_grace_period: 330s` (working-tree compose edit,
@@ -98,7 +99,8 @@ abandoned row from one a concurrently running second worker is still
 handling — so an ad-hoc second worker would have its live job requeued out
 from under it and processed twice.
 
-**Editing the rubric takes effect on restart, not on rebuild.** `prompts/` is
+**Editing the rubric takes effect on restart, not on rebuild** (and so does any other
+`prompts/` edit, for the agent: it snapshots them once per start). `prompts/` is
 bind-mounted into `blackbird-app` and `agent`, the two services that read it as a
 *rendered* document, so a document edit needs no image build there. It is also now
 bind-mounted read-only into `worker` (2026-08-28, for the review bot above), but that
@@ -157,9 +159,19 @@ not the reply ends the interview. The only refusal left is a re-capture —
 verdict whose reply CLOSED the interview, or for the same ordinal captured twice
 — and every refusal is recorded in `assessment_drops`, carrying the model's
 `raw_verdict` with it, rather than logged and forgotten. A non-terminal sidecar
-is stored as PROVISIONAL and superseded by any later one: last write wins, and
-`_retire_superseded_verdict` removes the earlier row (leaving a
-`duplicate_thread_verdict` drop as its trace) so the one-row invariant still holds.
+is stored as PROVISIONAL and superseded by any later one: last write wins.
+
+**The store is one row per `(simulation_run_id, thread_id)`** (unique constraint since
+`0055`; NULL threads never conflict). `Verdicts.upsert` updates that row in place, so
+human reviews, status events, assignments and assessment-chat turns stay attached.
+`verdict_revision` counts supersessions (NULL on a pre-`0054` row reads as 1),
+`verdict_ordinal` is the thread ordinal of the verdict that wrote the row, and
+`verdict_write_id` identifies the write. A queued write carrying a lower ordinal than the
+landed row, and the verdict a newer one displaces, are each kept as a
+`duplicate_thread_verdict` drop with their `raw_verdict`. After a resume the held verdict
+is rehydrated with ordinal 0, not the stored ordinal: `message_count` is rebuilt from the
+history, so a stored ordinal above it would refuse the interview's later legitimate
+verdict. The stale-ordinal rule applies only to rows this process landed.
 
 `premature_sidecar` is therefore **HISTORICAL ONLY as of 2026-08-22** — no new
 rows carry it. It used to mean "a sidecar arrived on a turn that neither
@@ -326,8 +338,8 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   retracted when the row it described is superseded moments later. So a provisional verdict
   is stored, visible to staff, and logged as `Provisional verdict stored ... no
   #assessments-summary headline until the interview concludes` — announced only when a
-  terminal reply arrives. `announced` carries forward across supersession for the same
-  reason. A dropped
+  terminal reply arrives. The announce ledger (`summary_claimed_at`, `summary_posted_at`) lives on the
+  interview's one row, so it survives a supersession for the same reason. A dropped
   or refused sidecar (an `AssessmentDrop` row, never an `opportunity_assessments` row) never
   posts (design D14), and a Slack failure in the post/permalink step is caught and logged,
   never raised into the calling turn (design D16) — see
@@ -434,3 +446,22 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   so `π-π stacking` reached the model as "SCOPE: searched titles for stacking." with
   `broadened` False — a term silently deleted and the note saying nothing had happened,
   which is the same class of damage the transliteration exists to prevent.
+
+**Headline ledger and claims.** A headline posts at most once per interview. The engine
+(`HeadlineAnnouncer`, `src/agent/engine/headlines.py`) and
+`scripts/backfill_assessment_headlines.py` both claim the row (`summary_claimed_at`)
+before posting and stamp `summary_posted_at` after. A transport error with no Slack
+response leaves the claim IN DOUBT (claimed, not posted, older than 10 minutes): nothing
+re-posts it. List such rows with `--list-in-doubt`, check `#assessments-summary`, and
+release a headline that did not post with `--release-in-doubt <id>`. Every write mode of
+the script holds the engine lock, so it cannot run beside an engine. **Finalize run** on
+the admin page runs the same announcer for a stopped run.
+
+**Drop vocabulary.** `assessment_drops.reason` includes `reply_failed`: an interview
+abandoned after repeated non-transient model errors. `reply_failed` and `empty_reply`
+are the two reasons that do not get a concluding reply.
+
+**Prompts are snapshotted per start.** The engine does not re-read `prompts/roles/**`
+or the rubric while it runs (`src/agent/prompt_snapshot.py`); a disk edit shows as a
+banner on `/admin/simulation` and applies at the next start. The web app and the
+worker still read per use.

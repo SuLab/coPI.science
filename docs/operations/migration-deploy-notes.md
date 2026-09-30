@@ -665,7 +665,9 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `$DC --profile agent build agent` before the new code runs.
 >
 > The converse, which these docs had never said outright: an edit under
-> **`prompts/roles/**`** reaches a RUNNING agent with no build and no
+> (Superseded by Phase 2: the engine now snapshots `prompts/` once per start, see
+> `src/agent/prompt_snapshot.py`; the text below records the earlier behaviour.)
+> **`prompts/roles/**`** reached a RUNNING agent with no build and no
 > restart, version bump included. `Agent._load_prompt` → `_load_file` does a
 > `read_text()` **per use**, and `prompt_set_stamp` re-reads `role.toml` the
 > same way. **`prompts/rubric/blackbird-rubric.toml` is the exception** and
@@ -907,3 +909,20 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > old agent must not run once `0055` is applied. The new agent's
 > `ON CONFLICT (simulation_run_id, thread_id)` requires the constraint, so the
 > new agent must not run before it. Downgrade drops the constraint only.
+
+> **Phase 2 sequence (`0054` → merge → `0055`).** No live run from before step 1 until step
+> 6 has finished: an old engine against the new constraint, or a new web app against an
+> engine with no lock, is unsafe. Before starting, confirm the production `.env` does not
+> set `max_thread_messages` to anything but 12 and that
+> `SELECT DISTINCT role FROM agents` returns only roles in `ROLE_CAPABILITIES`
+> (the table is `agents`; `scripts/migrate/preflight.py` checks it).
+>
+> 1. `pg_dump` of `copi` (`run_migration.sh` only dumps at `--apply`), and confirm no live
+>    run on `/admin/simulation` AND with `docker ps`.
+> 2. `./scripts/migrate/run_migration.sh --target 0054`: rehearse, then `--apply`.
+> 3. `scripts/migrate/merge_duplicate_assessments.py --database-url ...` (dry run by
+>    default), then again with `--apply`.
+> 4. `./scripts/migrate/run_migration.sh`: rehearse, then `--apply`, for `0055`. Its
+>    live-run precheck is a backstop; the confirmation in step 1 is the control.
+> 5. `$DC up -d blackbird-app worker`.
+> 6. `$DC up -d agent`.

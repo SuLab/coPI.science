@@ -623,12 +623,12 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
 
     assessment = await _load_assessment(db, assessment_id)
     if assessment is None:
-        # The engine's supersession re-point (`_retire_superseded_verdict`)
-        # rewrites this job's payload to the replacement id in the SAME
-        # transaction that deletes the retired row. If that landed between
-        # the worker's job fetch and this lookup, the in-memory payload is
-        # stale — re-read it once before concluding there is nothing to do
-        # (the D3 residual in docs/audits/2026-09-02-review-pipeline/README.md).
+        # A row can vanish between the worker's job fetch and this lookup:
+        # the duplicate-merge script re-points a job's payload to the kept id in
+        # the same transaction that deletes an older row (the engine itself now
+        # supersedes in place). Re-read the payload once before concluding
+        # there is nothing to do (the D3 residual in
+        # docs/audits/2026-09-02-review-pipeline/README.md).
         # Best-effort: the jobs row itself can vanish at any await (user
         # deletion cascades it), in which case the refresh raises and the
         # original miss stands.

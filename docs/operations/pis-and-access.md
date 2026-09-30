@@ -146,6 +146,13 @@ Every refusal logs one WARNING naming the method, path, received origin,
 `Sec-Fetch-Site` and the expected origin — grep for `Refused cross-site` first
 when a form stops working after a deploy.
 
+## Agent roles
+
+An `AgentRegistry.role` (table `agents`) must have an entry in
+`src/agent/role_capabilities.py`; an agent with an unknown role, or a role whose `role.toml`
+fails strict validation, is skipped by the engine (it used to run as pi_lab).
+`scripts/migrate/preflight.py` BLOCKs on such a role (`check_agent_roles`).
+
 ## Account Types (PI / manager / admin / reviewer)
 
 **`users.user_role` is the single source of truth**, with values `pi`, `manager`,
