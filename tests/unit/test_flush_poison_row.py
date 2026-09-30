@@ -357,7 +357,12 @@ def test_no_flusher_falls_back_on_a_bare_exception(flusher):
     import inspect
     import textwrap
 
-    src = textwrap.dedent(inspect.getsource(getattr(SimulationEngine, flusher)))
+    import src.agent.simulation as sim
+
+    owner = next(
+        c for c in (SimulationEngine, *sim._UNIT_CLASSES.values()) if flusher in vars(c)
+    )
+    src = textwrap.dedent(inspect.getsource(getattr(owner, flusher)))
     tree = ast.parse(src)
 
     calls = [

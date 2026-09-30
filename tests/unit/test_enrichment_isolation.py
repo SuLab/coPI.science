@@ -7,6 +7,7 @@ from pathlib import Path
 FORBIDDEN = {"src.services.industry_score", "src.services.industry_evidence", "src.services.industry_sources"}
 CONSUMERS = [
     "src/services/profile_export.py", "src/services/profile_pipeline.py", "src/agent/simulation.py",
+    *sorted(str(p) for p in Path("src/agent/engine").glob("*.py")),
     "src/agent/tools.py", "src/agent/thread_guidance.py", "src/agent/specialists.py", "src/services/review_bot.py",
 ]
 

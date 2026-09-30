@@ -34,7 +34,7 @@ LLM_PY = ROOT / "src/services/llm.py"
 ONBOARDING_PY = ROOT / "src/routers/onboarding.py"
 EMAIL_PY = ROOT / "src/services/email.py"
 AGENT_PY = ROOT / "src/agent/agent.py"
-SIMULATION_PY = ROOT / "src/agent/simulation.py"
+SIMULATION_PY = ROOT / "src/agent/engine/memory.py"
 
 # The Output Format headers from the (also-deleted) private-profile-synthesis.md
 # contract. Kept only as a defensive phrase guard against these specific retired

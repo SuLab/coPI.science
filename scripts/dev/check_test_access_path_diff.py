@@ -45,6 +45,9 @@ ENGINE_MODULE_PREFIX = "src.agent.engine"
 
 #: "<path>::<qualname>" -> reviewed reason. Filled by the Phase 1 tasks that need it.
 EXCEPTIONS: dict[str, str] = {
+    "tests/unit/test_no_dead_src_symbols.py::<module>":
+        "ALLOWLIST keys follow symbols the leaf moves re-home (a moved name is re-exported, "
+        "so its old dead-code entry goes)",
     "tests/integration/test_slack_cohort_live.py::cohort_engine":
         "patches a seam name and a patched constant: two module objects (§7.6)",
     "tests/integration/test_full_run_live.py::full_run":
@@ -56,6 +59,13 @@ EXCEPTIONS: dict[str, str] = {
     "tests/unit/test_simulation_logic.py::test_prior_threads_per_pair_storage_is_capped":
         "reads a constant off the simulation module and patches a seam name on deps: "
         "two module objects (§7.6)",
+    "tests/unit/test_flush_poison_row.py::test_no_flusher_falls_back_on_a_bare_exception":
+        "source-inspection test re-targeted to the flusher's owning unit; assertions unchanged (§7.6)",
+    "tests/unit/test_enrichment_isolation.py::<module>":
+        "the engine now spans src/agent/engine/*.py; the import ban must keep covering all of it "
+        "(§7.6 source-inspection)",
+    "tests/unit/test_no_collaboration_residue.py::<module>":
+        "the phrase guard follows _update_agent_memory into engine/memory.py (§7.6 source-inspection)",
 }
 
 

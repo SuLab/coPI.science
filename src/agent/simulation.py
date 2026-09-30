@@ -12,7 +12,11 @@ from typing import Any
 from src.agent.agent import Agent
 from src.agent.end_reasons import FINALIZE, HOLD, TODAY, end_reason_class
 from src.agent.engine import constants, deps
+from src.agent.engine.channel_directory import ChannelDirectory
 from src.agent.engine.context import EngineContext, RunState, _Via
+from src.agent.engine.control import Control
+from src.agent.engine.memory import Memory
+from src.agent.engine.persistence import Persistence
 
 # isort: off
 from src.agent.engine.constants import (  # re-exported: tests and scripts import these from here
@@ -94,7 +98,7 @@ from src.agent.run_marker import (
     parse_announce_channels,
     render_run_start_announcement,
 )
-from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
+from src.agent.slack_client import ThreadNotFound
 from src.agent.specialists import (
     clip_question,
     clip_rate_warning,
@@ -108,7 +112,6 @@ from src.agent.state import ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
 from src.models import (
-    AgentChannel,
     AgentMessage,
     AssessmentDrop,
     AssessmentReview,
@@ -165,7 +168,12 @@ _CONTEXT_FORWARD: dict[str, tuple[str, str]] = {
 
 #: Engine attribute -> unit class, one entry per unit. Each unit that moves out of
 #: SimulationEngine is added here and constructed in SimulationEngine.__init__.
-_UNIT_CLASSES: dict[str, type] = {}
+_UNIT_CLASSES: dict[str, type] = {
+    "persistence": Persistence,
+    "channel_directory": ChannelDirectory,
+    "memory": Memory,
+    "control": Control,
+}
 
 #: Owner-API names two units define under the same name (``headlines.enqueue()``,
 #: ``memory.enqueue()``). They were never engine members, so nothing reaches them as
@@ -207,8 +215,11 @@ class SimulationEngine:
             slack_enabled=slack_enabled,
         )
         self.run_state = RunState()
-        # Resolved through the facade until ChannelDirectory owns the map.
-        self.ctx.channel_id_resolver = lambda name: self._channel_id_map.get(name)
+        self.persistence = Persistence(self.ctx)
+        self.channel_directory = ChannelDirectory(self.ctx)
+        self.ctx.channel_id_resolver = self.channel_directory.channel_id_for
+        self.memory = Memory(self.ctx)
+        self.control = Control(self.ctx, run_state=self.run_state)
         self.max_runtime_minutes = max_runtime_minutes
         # 0 = off. When >0, the engine stops opening NEW pitches once this many
         # top-level posts exist this run, then ends the run when every opened
@@ -297,15 +308,6 @@ class SimulationEngine:
         # `_on_flush_done`, so the set does not grow for the run's life.
         self._flush_tasks: set[asyncio.Task] = set()
 
-        # Channel ID map (populated during setup)
-        self._channel_id_map: dict[str, str] = {}  # name -> id
-        # Channel visibility map (populated from agent_channels.visibility
-        # during setup; defaults to 'public' for any name not present). Used
-        # by G1 prompt scoping and G3 dedup filtering.
-        self._channel_visibility: dict[str, str] = {}  # name -> 'public' | 'collab_private'
-
-        # Assessments-summary channel ID (hub-only, created separately from SEEDED_CHANNELS)
-        self._assessments_summary_channel_id: str | None = None
 
         # Slack poll cursor: channel_id -> latest ts seen
         self._poll_cursors: dict[str, str] = {}
@@ -398,21 +400,7 @@ class SimulationEngine:
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
-        # Last wall-clock time the control plane was polled (claim a pending
-        # stop command, refresh the heartbeat row). See _poll_control_plane.
-        self._last_control_poll: float = 0.0
 
-        # DB persistence buffer for the message log. MessageLog.append fires a
-        # sync callback that enqueues here; _flush_persisted() batch-writes to
-        # agent_messages once per main-loop tick. This makes the DB the primary
-        # conversation store. See specs/local-db-conversations.md.
-        self._pending_persist: list[LogEntry] = []
-        # Serializes `_flush_persisted`. A caller that arrives while a flush is
-        # in flight waits for it, then flushes whatever is left. The write-through
-        # in `_post_message` flushes from inside reply turns while the main loop
-        # and `stop()` flush too, and without this two flushes could run per-row
-        # recovery over overlapping re-queues at once.
-        self._persist_flush_lock = asyncio.Lock()
         # DB persistence buffer for OpportunityAssessment rows that failed
         # their first write attempt (e.g. a pool-checkout timeout) — queued
         # here by _persist_assessment instead of being dropped, and drained by
@@ -421,20 +409,6 @@ class SimulationEngine:
         # stop()), so the shutdown flush covers the last assessment of a run
         # too. This table is the actual product of the screening pipeline.
         self._pending_assessments: list[dict] = []
-        # Working-memory events deferred from _close_thread. The close used
-        # to run its two _update_agent_memory LLM calls inside the thread
-        # lock + BOTH agents' locks + a reply-lane semaphore slot; in the
-        # star topology every close shares the hub's agent lock, so closes
-        # serialized on two LLM calls each and blocked semaphore slots for
-        # the duration (docs/audits/2026-08-21-perf-memory-race, finding 1).
-        # Queued here and drained OUTSIDE the dispatch fan-out, one event at
-        # a time — sequential draining is what preserves the lost-update
-        # guarantee the agent lock used to provide for these calls: no two
-        # updates for one agent can interleave, and each reads the memory
-        # text its predecessor wrote. Entries are (agent_id, event,
-        # visibility, channel_id); agent_id (not the Agent object) because a
-        # roster sync can rebuild the object between enqueue and drain.
-        self._pending_memory_events: list[tuple[str, str, str, str | None]] = []
         # Interviews that ENDED holding a verdict nobody announced. TWO things
         # put a thread here and they are not the same failure: the interview
         # ended without a concluding reply at all, or a concluding reply landed
@@ -454,23 +428,11 @@ class SimulationEngine:
         # in-doubt claim, or the repair script): not posted here, and not LOST
         # either, since `--apply` would skip them too.
         self._unclaimed_headlines: list[str] = []
-        # Guards against two drains running at once (main loop vs stop(), or
-        # a future second call site): concurrent drains would pop same-agent
-        # events into overlapping LLM calls — exactly the lost update this
-        # queue exists to prevent.
-        self._memory_drain_lock = asyncio.Lock()
         # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
         # writer slot so its ids can never collide with the web app's or
         # GrantBot's, which mint into the same agent_messages table from other
         # processes (R1). See mint_ts and src/agent/ids.py.
         self._ts_minter = TsMinter(WRITER_ENGINE)
-        # Wall-clock of the last run-stats refresh (total_messages /
-        # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
-        # _flush_persisted (B1). `total_messages` is a display counter;
-        # `total_api_calls` stopped being one on 2026-08-22, when its UNITS
-        # changed from turns to real API calls — see the module comment on
-        # RUN_STATS_UPDATE_INTERVAL.
-        self._last_run_stats_update: float = 0.0
         # Bounds concurrent reply-lane tasks PROCESS-WIDE. Constructed once,
         # here, and never re-constructed per call/per turn — the whole reason
         # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
@@ -1061,77 +1023,6 @@ class SimulationEngine:
         # interview most needs it.
         if self._pending_headlines:
             await self._drain_pending_headlines()
-
-    async def _poll_control_plane(self, now: float) -> None:
-        """Claim a pending operator `stop` command and refresh the heartbeat.
-
-        Gated on its own `_last_control_poll`/`CONTROL_POLL_INTERVAL`, the same
-        way `_sync_roster_from_db` gates on `_last_roster_poll`/
-        `ROSTER_POLL_INTERVAL` — the caller (`_run_main_loop`) invokes this
-        every tick and the cadence lives here, not at the call site.
-
-        The whole body sits in one try/except: this is a support surface for
-        `/admin/simulation`, not the simulation itself, so a DB hiccup here
-        must cost at most one missed heartbeat, never the run.
-
-        With no pending `stop`, upserts state "running" with a `detail` snapshot
-        (`tick_at`, per-agent `active_threads`/`calls_in_window`/`api_calls`/
-        `messages`, and `roster_size`) so a human watching `/admin/simulation`
-        can see the engine is alive and how loaded it is. A pending `stop` is
-        claimed, marked done, and turned into a real `request_stop()` — then the
-        heartbeat is upserted as "stopping" instead, so the state row reflects
-        the shutdown that is now underway rather than lagging a tick behind it.
-        """
-        if not self.session_factory:
-            return
-        if now - self._last_control_poll < CONTROL_POLL_INTERVAL:
-            return
-        self._last_control_poll = now
-
-        try:
-            from src.services.simulation_control import (
-                claim_pending,
-                finish_command,
-                upsert_status,
-            )
-
-            detail = {
-                "tick_at": deps.datetime.now(UTC).isoformat(),
-                "agents": {
-                    aid: {
-                        "active_threads": len(a.state.active_threads),
-                        "calls_in_window": len(a.state.call_times),
-                        "api_calls": a.api_call_count,
-                        "messages": a.message_count,
-                    }
-                    for aid, a in self.agents.items()
-                },
-                "roster_size": len(self.agents),
-            }
-
-            async with self.session_factory() as db:
-                cmd = await claim_pending(db, command="stop")
-                if cmd is not None:
-                    hold = bool((cmd.payload or {}).get("hold_open"))
-                    await finish_command(
-                        db, cmd.id, status="done",
-                        result=(
-                            f"run {self.simulation_run_id} (hold open interviews)"
-                            if hold else f"run {self.simulation_run_id}"
-                        ),
-                    )
-                    self.request_stop("operator_hold" if hold else "operator")
-                    await upsert_status(
-                        db, state="stopping",
-                        simulation_run_id=self.simulation_run_id, detail=detail,
-                    )
-                else:
-                    await upsert_status(
-                        db, state="running",
-                        simulation_run_id=self.simulation_run_id, detail=detail,
-                    )
-        except Exception as exc:
-            logger.warning("[control] poll failed: %s", exc)
 
     async def _sleep(self, delay: float) -> None:
         """Sleep for ``delay`` seconds, returning early once a stop is requested.
@@ -2825,16 +2716,6 @@ class SimulationEngine:
                     "Evicted dead thread %s from %d agent(s)' state",
                     thread_id, evicted_from,
                 )
-
-    def _resolve_channel_visibility(self, channel_name: str) -> str:
-        """Look up the visibility class of a channel by its name.
-
-        Backed by an in-memory map (``self._channel_visibility``) populated
-        alongside ``self._channel_id_map`` at rebuild/bootstrap time. Defaults
-        to VISIBILITY_PUBLIC when the channel is not tracked (e.g., seeded
-        channels before their AgentChannel row is created).
-        """
-        return self._channel_visibility.get(channel_name, VISIBILITY_PUBLIC)
 
     def _get_prior_threads_for_agent(
         self,
@@ -6388,16 +6269,6 @@ class SimulationEngine:
     # Slack Polling (PI messages)
     # ------------------------------------------------------------------
 
-    def _client_for_channel(self, channel_id: str, fallback):
-        """Return the Slack client to poll ``channel_id`` with: always ``fallback``.
-
-        Collab_private channels once routed through a member bot here. Nothing
-        creates or tracks private channels any more, so every channel is read
-        through the caller's round-robin client. Callers still treat ``None``
-        as "skip this channel", which this never returns.
-        """
-        return fallback
-
     def _next_poll_client(self):
         """Round-robin a connected Slack client for shared-token polling."""
         connected = [
@@ -6807,137 +6678,6 @@ class SimulationEngine:
     # Setup helpers
     # ------------------------------------------------------------------
 
-    def _ensure_seeded_channels(self) -> None:
-        """Create any missing seeded channels and join relevant bots."""
-        client = next(iter(self.slack_clients.values()), None)
-        if not client or not client.is_connected:
-            # Slack off — channels are DB-native with stable local: ids that
-            # can't collide with Slack C…/G… ids. See specs/local-db-conversations.md.
-            self._channel_id_map = {ch: f"local:{ch}" for ch in constants.SEEDED_CHANNELS}
-            # All seeded channels are public.
-            self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in constants.SEEDED_CHANNELS}
-            return
-
-        # A *complete* listing, or none. list_channels raises rather than hand back a
-        # subset that looks whole, because the subset is what made this method
-        # re-create channels the workspace already had: conversations.create answers
-        # name_taken, create_channel used to return None, and the channel ended up
-        # with no id in _channel_id_map at all — after which every post to it was
-        # addressed by name and Slack answered not_in_channel. Demonstrated on a real
-        # workspace: #all-copi-test exists as C0BM57CG4HJ and the engine mapped it to
-        # None. With an incomplete listing we adopt what we saw and create nothing,
-        # since "absent from this listing" no longer means "absent from Slack".
-        listing_complete = True
-        try:
-            existing = client.list_channels()
-        except SlackListingIncomplete as exc:
-            listing_complete = False
-            existing = {ch["name"]: ch["id"] for ch in exc.partial}
-            logger.error(
-                "Channel discovery is incomplete (%s) — adopting the %d channel(s) "
-                "seen and creating none, so a channel Slack already has is not "
-                "duplicated", exc.reason, len(existing),
-            )
-
-        # Create missing seeded channels
-        if listing_complete:
-            for ch_name in constants.SEEDED_CHANNELS:
-                if ch_name not in existing:
-                    logger.info("Creating seeded channel #%s", ch_name)
-                    ch_data = client.create_channel(ch_name)
-                    if ch_data:
-                        existing[ch_name] = ch_data.get("id", "")
-
-        self._channel_id_map = dict(existing)
-        # Seeded channels are always 'public'. Agent-created channels (including
-        # future collab_private channels) populate their own entries when the
-        # agent_channels rows are loaded during engine-state rebuild.
-        for ch_name in existing:
-            self._channel_visibility.setdefault(ch_name, VISIBILITY_PUBLIC)
-
-        # Join the first (polling) client to ALL seeded channels so it can poll them
-        for ch_name, ch_id in existing.items():
-            if ch_name in constants.SEEDED_CHANNELS:
-                client.join_channel(ch_id)
-
-        # Share channel map across all clients
-        for c in self.slack_clients.values():
-            c.cache_channel_ids(existing)
-
-    def _ensure_assessments_summary_channel(self) -> None:
-        """Create (or adopt) the hub's one-way assessments-summary channel
-        and join only the hub to it — never added to SEEDED_CHANNELS, so it
-        never enters Phase-1 discovery or the poller's scope (design D11).
-        """
-        hub = next(
-            (a for a in self.agents.values() if a.role == "scout_hub"), None
-        )
-        if hub is None:
-            return
-        client = self.slack_clients.get(hub.agent_id)
-        if not client or not client.is_connected:
-            self._assessments_summary_channel_id = f"local:{ASSESSMENTS_SUMMARY_CHANNEL}"
-            self._channel_id_map[ASSESSMENTS_SUMMARY_CHANNEL] = self._assessments_summary_channel_id
-            return
-
-        try:
-            existing = client.list_channels()
-        except SlackListingIncomplete:
-            # Same caution as _ensure_seeded_channels: an incomplete listing
-            # must not risk creating a duplicate channel.
-            return
-
-        ch_id = existing.get(ASSESSMENTS_SUMMARY_CHANNEL)
-        if ch_id is None:
-            ch_data = client.create_channel(ASSESSMENTS_SUMMARY_CHANNEL)
-            ch_id = ch_data.get("id") if ch_data else None
-        if not ch_id:
-            return
-
-        self._assessments_summary_channel_id = ch_id
-        self._channel_id_map[ASSESSMENTS_SUMMARY_CHANNEL] = ch_id
-        client.join_channel(ch_id)
-
-    async def _persist_seeded_channels(self) -> None:
-        """Record seeded channels in agent_channels for this run (idempotent).
-
-        Keeps channel existence in the DB so the workspace is reconstructable
-        without Slack (and so the admin UI can count channels). Uses the current
-        _channel_id_map (Slack ids when on, local: ids when off).
-        """
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        from sqlalchemy import select as sa_select
-
-        from src.agent.channels import record_channel_created
-        try:
-            async with self.session_factory() as db:
-                existing_names = set(
-                    (await db.execute(
-                        sa_select(AgentChannel.channel_name).where(
-                            AgentChannel.simulation_run_id == self.simulation_run_id
-                        )
-                    )).scalars().all()
-                )
-                created = 0
-                for ch_name in constants.SEEDED_CHANNELS:
-                    if ch_name in existing_names:
-                        continue
-                    await record_channel_created(
-                        db,
-                        simulation_run_id=self.simulation_run_id,
-                        channel_id=self._channel_id_map.get(ch_name, f"local:{ch_name}"),
-                        channel_name=ch_name,
-                        channel_type="thematic",
-                        created_by_agent="system",
-                    )
-                    created += 1
-                if created:
-                    await db.commit()
-                    logger.info("Persisted %d seeded channels to agent_channels", created)
-        except Exception as exc:
-            logger.warning("Failed to persist seeded channels: %s", exc)
-
     def _build_lab_directories(self) -> None:
         """Build a condensed publications directory for each agent (excluding their own lab)."""
         lab_pubs: dict[str, list[str]] = {}
@@ -7064,265 +6804,6 @@ class SimulationEngine:
                     self._poll_cursors[r.slack_channel_id] = r.slack_ts
         self._ts_minter.seed_floor(max_posted)
         logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
-
-    async def _recover_rows_individually(
-        self, rows: list, apply_one, *, what: str,
-    ) -> tuple[int, list, list]:
-        """Re-attempt a failed batch ONE ROW AT A TIME, isolating the poison row.
-
-        Returns ``(written, lost, unattempted)``:
-
-        - ``written``   — rows now durably in the database;
-        - ``lost``      — ``(row, exception)`` pairs that failed on their own,
-          with nothing else to blame; retrying these forever would fail the whole
-          batch forever, so the caller drops them (loudly) rather than
-          re-queueing. The exception rides along so a caller can record WHY —
-          `_flush_pending_assessments` writes it into an ``AssessmentDrop``;
-        - ``unattempted`` — rows the deadline (or a failure of the recovery pass
-          itself) stopped us writing; the caller re-queues these.
-
-        Two things here are not incidental:
-
-        - **A NEW session.** In all three flushers the ``except`` sits OUTSIDE
-          ``async with self.session_factory() as db:``, so by the time we get
-          here that session is closed and rolled back. Reusing it would raise
-          ``PendingRollbackError`` on the first row and lose the remainder — the
-          exact loss this is supposed to prevent.
-        - **A savepoint per row.** ``begin_nested`` means one row's failure rolls
-          back to the savepoint instead of poisoning the whole transaction, so
-          the rows after it still commit.
-
-        Callers must gate entry on ``_ROW_LEVEL_DB_ERRORS`` — see that constant.
-        """
-        lost: list = []
-        ok: list = []
-        unattempted: list = []
-        deadline = deps.time.monotonic() + PER_ROW_RECOVERY_DEADLINE_S
-        try:
-            async with self.session_factory() as db:
-                for i, row in enumerate(rows):
-                    if deps.time.monotonic() >= deadline:
-                        unattempted = list(rows[i:])
-                        logger.error(
-                            "Per-row recovery of %s hit its %.0fs deadline; "
-                            "re-queueing the %d row(s) not attempted",
-                            what, PER_ROW_RECOVERY_DEADLINE_S, len(unattempted),
-                        )
-                        break
-                    try:
-                        async with db.begin_nested():
-                            await apply_one(db, row)
-                        ok.append(row)
-                    except Exception as row_exc:  # noqa: BLE001
-                        lost.append((row, row_exc))
-                        logger.error(
-                            "DROPPING one un-writable %s row: %s", what, row_exc,
-                        )
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            # The recovery pass itself died, so nothing it "accepted" is durable.
-            logger.error(
-                "Per-row recovery of %s failed outright (%s); re-queueing "
-                "%d row(s)", what, exc, len(ok) + len(unattempted),
-            )
-            return 0, lost, ok + unattempted
-        if ok:
-            logger.warning(
-                "Per-row recovery of %s salvaged %d of %d row(s)",
-                what, len(ok), len(rows),
-            )
-        return len(ok), lost, unattempted
-
-    def _report_flush_failure(
-        self, *, what: str, requeue: list, exc: object, final: bool, log,
-        exc_info: bool = False,
-    ) -> bool:
-        """Say what actually happens to ``requeue`` — and say LOST when it is lost.
-
-        ``stop()`` makes exactly ONE final attempt at each buffer, so "re-queued
-        for retry" is a false statement on that path: nothing will ever drain the
-        buffer again. Returns True when the caller should re-queue.
-
-        ``log`` is the caller's chosen level for the recoverable case (an
-        ``opportunity_assessments`` row is the product of the pipeline and stays
-        at ERROR where the other two are WARNING); the LOST case is ERROR for
-        everyone, because nothing is recoverable about it.
-        """
-        if not requeue:
-            return False
-        if final:
-            logger.error(
-                "SHUTDOWN FLUSH FAILED: %d %s row(s) LOST — this was the final "
-                "attempt and nothing will retry them: %s",
-                len(requeue), what, exc, exc_info=exc_info,
-            )
-            return False
-        log(
-            "Failed to flush %d %s row(s), re-queued for retry: %s",
-            len(requeue), what, exc, exc_info=exc_info,
-        )
-        return True
-
-    async def _flush_persisted(
-        self, force_stats: bool = False, *, final: bool = False,
-    ) -> None:
-        """Batch-upsert buffered message-log entries into agent_messages.
-
-        Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
-        alongside legacy rows, transitional double-writes, and repeated restarts.
-        Drops the buffer when there is no DB so it can't grow unbounded.
-
-        Serialized by `_persist_flush_lock`: a second caller waits for the flush
-        in flight, then flushes what is left. The rows go out in chunks of
-        `PERSIST_UPSERT_CHUNK_ROWS`, all in one session and transaction, so the
-        commit is still all-or-nothing and per-row recovery is unchanged.
-        """
-        async with self._persist_flush_lock:
-            if not self._pending_persist:
-                return
-            if not self.session_factory or not self.simulation_run_id:
-                self._pending_persist.clear()
-                return
-            entries = self._pending_persist
-            self._pending_persist = []
-            # Dedup by canonical id within the batch — a single ON CONFLICT statement
-            # cannot touch the same row twice.
-            by_ts: dict[str, dict] = {}
-            # The LogEntry each row came from, so a per-row recovery can re-queue the
-            # ENTRIES (which is what `_pending_persist` holds) for the rows it did
-            # not manage to write.
-            by_entry: dict[str, LogEntry] = {}
-            for e in entries:
-                if not e.ts:
-                    continue
-                channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
-                by_entry[e.ts] = e
-                by_ts[e.ts] = {
-                    "simulation_run_id": self.simulation_run_id,
-                    "agent_id": e.sender_agent_id,
-                    "channel_id": channel_id,
-                    "channel_name": e.channel,
-                    "message_ts": e.ts,
-                    "message_length": len(e.content or ""),
-                    "thread_ts": e.thread_ts,
-                    # The entry's own phase wins when it has one; otherwise the
-                    # shape decides, exactly as it always has. Only a panel note
-                    # sets it (PHASE_PANEL_NOTE — see _post_panel_note), and this is
-                    # the write that makes the staff pages agree with the engine
-                    # for free: src/services/directory.py's discussions listing
-                    # already keys its roots on phase == 'new_post' and its reply
-                    # counts on phase == 'thread_reply', so a third value is
-                    # excluded from both with no query change.
-                    "phase": e.phase or ("thread_reply" if e.thread_ts else "new_post"),
-                    "visibility": e.visibility,
-                    "content": e.content or "",
-                    "sender_name": e.sender_name or "",
-                    "is_bot": e.is_bot,
-                    "posted_at": e.posted_at,
-                    "slack_ts": e.slack_ts,
-                    "slack_channel_id": e.slack_channel_id,
-                    # The root's *Slack* ts, not the canonical thread_ts — they differ
-                    # whenever the thread started Slack-off. Only meaningful when this
-                    # entry is itself on Slack. See _slack_parent_ts.
-                    "slack_thread_ts": e.slack_thread_ts if e.slack_ts else None,
-                }
-            rows = list(by_ts.values())
-            if not rows:
-                return
-            from sqlalchemy import func as sa_func
-            from sqlalchemy import or_
-            from sqlalchemy import select as sa_select
-            from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-            def _upsert(batch: list[dict]):
-                stmt = pg_insert(AgentMessage.__table__).values(batch)
-                return stmt.on_conflict_do_update(
-                    constraint="uq_agent_messages_run_ts",
-                    set_={
-                        "content": stmt.excluded.content,
-                        "sender_name": stmt.excluded.sender_name,
-                        "is_bot": stmt.excluded.is_bot,
-                        "posted_at": stmt.excluded.posted_at,
-                        "message_length": stmt.excluded.message_length,
-                        "visibility": stmt.excluded.visibility,
-                        "thread_ts": stmt.excluded.thread_ts,
-                        "channel_id": stmt.excluded.channel_id,
-                        "channel_name": stmt.excluded.channel_name,
-                        "agent_id": stmt.excluded.agent_id,
-                        "slack_ts": stmt.excluded.slack_ts,
-                        "slack_channel_id": stmt.excluded.slack_channel_id,
-                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
-                    },
-                    # M1a guard: never let a bot message clobber an existing human
-                    # (PI) row on a cross-process canonical-id collision. Allow the
-                    # update only when the existing row is itself a bot row, or the
-                    # incoming row is human (re-flush of an ingested PI message /
-                    # slack mirror). A blocked conflict is left untouched, like
-                    # DO NOTHING for that row. See PR #19 review M1.
-                    where=or_(
-                        AgentMessage.__table__.c.is_bot.is_(True),
-                        stmt.excluded.is_bot.is_(False),
-                    ),
-                )
-
-            try:
-                async with self.session_factory() as db:
-                    for start in range(0, len(rows), PERSIST_UPSERT_CHUNK_ROWS):
-                        await db.execute(_upsert(rows[start:start + PERSIST_UPSERT_CHUNK_ROWS]))
-                    # Refresh the run's counters at most every
-                    # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
-                    # at scale — B1). The bulk upsert can't cheaply tell inserts from
-                    # updates, so total_messages is a recomputed count; slight
-                    # staleness between refreshes is fine for a display counter.
-                    # `total_api_calls`, set below, is NOT merely cosmetic any
-                    # more — its units changed on 2026-08-22; see the comment there.
-                    now = deps.time.time()
-                    if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
-                        self._last_run_stats_update = now
-                        run = (await db.execute(
-                            sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
-                        )).scalar_one_or_none()
-                        if run:
-                            total = (await db.execute(
-                                sa_select(sa_func.count(AgentMessage.id)).where(
-                                    AgentMessage.simulation_run_id == self.simulation_run_id
-                                )
-                            )).scalar_one()
-                            run.total_messages = total
-                            # UNITS: real API CALLS, not turns, since 2026-08-22 —
-                            # `api_call_count` books tool rounds and retries too, so
-                            # this column is NOT comparable with any earlier run.
-                            # The old per-turn figure is `COUNT(*)` over
-                            # `llm_call_logs` for the same run. See `_unbooked_calls`.
-                            run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
-                    await db.commit()
-            except Exception as exc:
-                # Re-queue the failed batch instead of dropping it. The DB is now the
-                # source of truth for conversations, so a silently-dropped flush is
-                # unrecoverable — a restart rebuilds from the DB and these messages
-                # would be gone for good. New entries may have been enqueued while we
-                # were awaiting the (failed) commit; put the failed batch back in
-                # front to preserve chronological order for the next flush attempt.
-                #
-                # ONE bad row used to take every good row beside it, forever: the
-                # re-queued batch fails identically on the next attempt. If (and only
-                # if) the error names a ROW rather than the pool or the connection,
-                # retry them individually so the poison row is the only casualty.
-                requeue = rows
-                if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
-                    async def _one(db, row):
-                        await db.execute(_upsert([row]))
-
-                    _written, _lost, requeue = await self._recover_rows_individually(
-                        rows, _one, what="message",
-                    )
-                if self._report_flush_failure(
-                    what="message", requeue=requeue, exc=exc, final=final,
-                    log=logger.warning,
-                ):
-                    self._pending_persist[0:0] = [
-                        by_entry[r["message_ts"]] for r in requeue
-                    ]
 
     async def _flush_pending_assessments(self, *, final: bool = False) -> None:
         """Retry OpportunityAssessment rows queued by _persist_assessment.
@@ -7452,10 +6933,6 @@ class SimulationEngine:
                 thread_id, slack_ts, drop_exc,
                 exc_info=True,
             )
-
-    def _enqueue_persist(self, entry: LogEntry) -> None:
-        """MessageLog persist callback — buffer a new entry for the next flush."""
-        self._pending_persist.append(entry)
 
     async def _restore_slack_state(self) -> None:
         """Park the Slack poll cursors past the history already on the transport.
@@ -8474,190 +7951,6 @@ class SimulationEngine:
                 )
         except Exception as exc:
             logger.warning("[cohort] topology snapshot failed: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Post-simulation
-    # ------------------------------------------------------------------
-
-    async def _drain_memory_events(self, limit: int | None = None) -> int:
-        """Run queued working-memory updates, strictly FIFO, one at a time.
-
-        Called from the main loop after the reply-lane dispatch and from
-        stop() (bounded). Sequential draining under the drain lock is what
-        preserves the lost-update guarantee for same-agent updates: each one
-        reads the memory text its predecessor wrote. Agents are resolved by
-        id at drain time — the roster can change (or an Agent object be
-        rebuilt by _sync_roster_from_db) between enqueue and drain, and a
-        stale reference would write memory for an object the engine no
-        longer owns. _update_agent_memory never raises, so one bad event
-        cannot wedge the queue.
-        """
-        drained = 0
-        async with self._memory_drain_lock:
-            while self._pending_memory_events:
-                if limit is not None and drained >= limit:
-                    break
-                agent_id, event, visibility, channel_id = (
-                    self._pending_memory_events.pop(0)
-                )
-                agent = self.agents.get(agent_id)
-                if agent is None:
-                    logger.info(
-                        "[memory] dropping queued memory event for %s — no "
-                        "longer on the roster", agent_id,
-                    )
-                    drained += 1
-                    continue
-                await self._update_agent_memory(
-                    agent, event, visibility, channel_id
-                )
-                drained += 1
-        return drained
-
-    async def _update_agent_memory(
-        self,
-        agent: Agent,
-        event: str,
-        visibility: str = VISIBILITY_PUBLIC,
-        channel_id: str | None = None,
-    ) -> None:
-        """Incrementally update an agent's working memory after a significant event.
-
-        Triggered by thread closure, via the _pending_memory_events queue
-        (_close_thread enqueues; _drain_memory_events is the only caller).
-
-        visibility/channel_id: controls which memory segment is updated and
-            which subset of the message log is used as synthesis context, per
-            G2. v1 callers always pass public (the default); the
-            thread-closure path will pass the thread's visibility once
-            private-channel migration lands.
-        """
-        try:
-            # Gather recent activity for context — filter the message log to
-            # entries with matching visibility. Public syntheses never see
-            # private-channel messages, and vice-versa. See §G2.
-            agent_entries = [
-                e for e in self.message_log._entries
-                if e.sender_agent_id == agent.agent_id
-                and e.visibility == visibility
-                # A panel note is the hub's own bookkeeping, not something it
-                # said. Left in, it would feed its own consult log back into
-                # its working memory — the one place a synthesis could quietly
-                # re-derive panel opinion into text every later prompt reads.
-                and not is_panel_note(e)
-            ]
-            messages_text = "\n".join(
-                f"[#{e.channel}] {e.content[:200]}"
-                for e in agent_entries[-20:]
-            ) if agent_entries else "(no recent messages)"
-
-            system_prompt = agent.build_thread_reply_system_prompt(
-                visibility=visibility, channel_id=channel_id,
-            )
-            messages = [
-                {
-                    "role": "user",
-                    "content": f"""Update your working memory. The event that triggered this update:
-{event}
-
-Your recent messages for context:
-{messages_text}
-
-Your current working memory:
-{agent.working_memory or "(empty)"}
-
-Write the complete updated working memory. Incorporate the new event, keep existing
-entries that are still relevant, and remove anything outdated. Summarize:
-(a) Ideas pitched and their screening status (what the hub asked for, conditions
-    it named)
-(b) Feedback or directions from your PI (if any)
-(c) Current priorities
-
-Keep it concise — under 300 words.""",
-                }
-            ]
-
-            agent.record_api_call()
-            # See `_was_truncated`; same collection idiom as the two sites above.
-            stop_reasons: list[str] = []
-            response = await deps.generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                # 1800. Was 800, then 1100 on a tokenizer estimate for the
-                # Sonnet 5 migration — but measured output on Sonnet 5 is
-                # 715-1295 tokens (run 2026-08-19 14:45), so 1100 truncated.
-                # Thinking is disabled here, so this is tokenizer growth plus
-                # a more verbose model, not thinking sharing the budget.
-                #
-                # 2600, up from 1800, on 2026-08-21. `call_stats` (migration
-                # 0032) makes per-call output measurable, and over run 076e80b6
-                # the largest memory update returned 1646 output tokens — 91% of
-                # 1800, against the 715-1295 band this ceiling was sized to. A
-                # truncated memory write is quiet damage: the only guard below
-                # is "empty or blank", so a half-written summary is stored as
-                # the working memory and carried into every later turn with
-                # nothing in the logs to say the file is short. A ceiling is not
-                # a spend — the prompt still asks for under 300 words.
-                max_tokens=2600,
-                log_meta={"agent_id": agent.agent_id, "phase": "memory"},
-                on_retry=agent.record_api_call,
-                on_stop_reason=stop_reasons.append,
-            )
-            if _was_truncated(stop_reasons):
-                # REFUSED outright — the strictest of the three answers, because
-                # this is the only site with something GOOD already in place. The
-                # guard below is "empty or blank", which a half-sentence sails
-                # past, so a truncated synthesis replaced the agent's working
-                # memory and was then carried into every later prompt with
-                # nothing in the logs to say the file had shrunk. Measured in run
-                # 8b64a0e0: a complete 1,977-character memory replaced by a
-                # 1,437-character one, twice (the file on disk and a
-                # `profile_revisions` row). A stale memory is strictly better
-                # than a truncated one; the next trigger writes a fresh one.
-                logger.warning(
-                    "[%s] Memory update: response was TRUNCATED (%s) — keeping "
-                    "the existing working memory rather than overwriting it "
-                    "with a partial synthesis",
-                    agent.agent_id, ", ".join(stop_reasons) or "?",
-                )
-                return
-            if not response or not response.strip():
-                logger.warning("[%s] Memory update: empty response", agent.agent_id)
-                return
-            agent.update_working_memory_file(
-                response, visibility=visibility, channel_id=channel_id,
-            )
-            logger.info(
-                "[%s] Working memory updated (visibility=%s, trigger: %s)",
-                agent.agent_id, visibility, event[:60],
-            )
-
-            # Record revision
-            if self.session_factory:
-                try:
-                    from sqlalchemy import select as sa_sel
-
-                    from src.models import AgentRegistry
-                    from src.services.profile_versioning import create_revision
-                    async with self.session_factory() as db:
-                        agent_reg = (await db.execute(
-                            sa_sel(AgentRegistry)
-                            .where(AgentRegistry.agent_id == agent.agent_id)
-                        )).scalar_one_or_none()
-                        if agent_reg:
-                            await create_revision(
-                                db,
-                                agent_registry_id=agent_reg.id,
-                                profile_type="memory",
-                                content=response,
-                                mechanism="agent",
-                                change_summary=event[:200],
-                            )
-                            await db.commit()
-                except Exception as rev_exc:
-                    logger.warning("[%s] Profile revision failed: %s", agent.agent_id, rev_exc)
-        except Exception as exc:
-            logger.error("[%s] Working memory update failed: %s", agent.agent_id, exc)
 
 
 def _build_forward_map() -> dict[str, tuple[str, str]]:
