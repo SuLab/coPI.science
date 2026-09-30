@@ -344,9 +344,9 @@ class AssessmentDrop(Base):
     The counterpart to the table above, and the reason it exists: every way an
     assessment can be lost is silent.
 
-    For every reason except ``empty_reply``, the concluding reply has already
-    been posted to Slack and the thread closes normally; for ``empty_reply``
-    nothing was posted at all — the turns themselves failed. Either way the
+    For every reason except ``empty_reply`` and ``reply_failed``, the concluding
+    reply has already been posted to Slack and the thread closes normally; for
+    those two nothing was posted at all — the turns themselves failed. Either way the
     only trace is one WARNING line in a container log nobody is tailing — so an
     empty /admin/assessments page is indistinguishable from "no ideas screened
     yet".
@@ -398,6 +398,11 @@ class AssessmentDrop(Base):
         Slack for the failing turns. Recorded at any ordinal, hub-only. Added
         2026-08-21 after run 076e80b6 measured 13 empty replies in 90 minutes
         and stranded a thread at message count 2.
+      * ``reply_failed``         — the interview was ABANDONED after two
+        consecutive non-transient model errors (BadRequest, Authentication,
+        PermissionDenied, NotFound) on this thread while other model calls
+        succeeded (spec §8.4 S1-04). Nothing was posted for those turns.
+        Recorded only for a role that captures verdicts. Added in Phase 2.
       * ``unwritable_row``       — a stored assessment row that the database
         refused even ALONE, during ``_recover_rows_individually``'s per-row
         retry after the whole batch it belonged to failed

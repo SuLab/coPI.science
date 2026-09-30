@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.agent.post_types import DEFAULT_POST_TYPES, PostTypeSpec, parse_post_types
+from src.agent.role_capabilities import ROLE_CAPABILITIES
 from src.agent.tool_definitions import TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,22 @@ def available_roles() -> list[str]:
     ``prompts/roles/``. ``pi_lab`` is listed even if its directory does not exist
     (it is the absence of overrides, see ``resolve_prompt_path``) and always comes
     first so callers (e.g. the admin `<select>`) get a stable, predictable order.
+    Only roles valid on both counts (registry entry and manifest, spec §8.5) are
+    returned.
     """
     names = [DEFAULT_ROLE]
     if ROLES_DIR.is_dir():
         names += sorted(
             p.name for p in ROLES_DIR.iterdir() if p.is_dir() and p.name != DEFAULT_ROLE
         )
-    return names
+    valid: list[str] = []
+    for name in names:
+        problem = role_problem(name)
+        if problem is None:
+            valid.append(name)
+        else:
+            logger.error("[roles] %s is not an available role: %s", name, problem)
+    return valid
 
 
 def resolve_prompt_path(role: str, filename: str) -> Path:
@@ -78,64 +88,99 @@ def _known_tool_names() -> set[str]:
     return {t["name"] for t in TOOL_DEFINITIONS}
 
 
-def load_role(name: str) -> RoleSpec:
-    """Load a role manifest. Never raises: a bad manifest degrades to defaults.
+class RoleManifestError(ValueError):
+    """A ``role.toml`` that does not match the manifest schema (spec §8.5)."""
 
-    - no role.toml            -> DEFAULT_TOOLS, label == name
-    - malformed TOML          -> log ERROR, DEFAULT_TOOLS, label == name
-    - tool not in the codebase -> log WARNING, drop it
+
+_MANIFEST_KEYS = frozenset({"version", "label", "tools", "post_types", "calls_per_load_per_window"})
+_POST_TYPE_KEYS = frozenset({"name", "targets"})
+
+
+def _validate_manifest(name: str, data: dict) -> None:
+    """The EXISTING schema, strictly (no new keys are asked for)."""
+    unknown = set(data) - _MANIFEST_KEYS
+    if unknown:
+        raise RoleManifestError(f"{name}: unknown key(s) {sorted(unknown)} in role.toml")
+    for key in ("version", "label"):
+        if key in data and not isinstance(data[key], str):
+            raise RoleManifestError(f"{name}: {key} must be a string")
+    tools = data.get("tools")
+    if tools is not None:
+        if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+            raise RoleManifestError(f"{name}: tools must be a list of tool names")
+        unknown_tools = set(tools) - _known_tool_names()
+        if unknown_tools:
+            raise RoleManifestError(f"{name}: unknown tool(s) {sorted(unknown_tools)}")
+    rate = data.get("calls_per_load_per_window")
+    if rate is not None and not (isinstance(rate, int) and not isinstance(rate, bool) and rate > 0):
+        raise RoleManifestError(f"{name}: calls_per_load_per_window must be a positive int")
+    post_types = data.get("post_types")
+    if post_types is not None:
+        if not isinstance(post_types, list):
+            raise RoleManifestError(f"{name}: post_types must be a list of tables")
+        for entry in post_types:
+            if not isinstance(entry, dict) or set(entry) - _POST_TYPE_KEYS:
+                raise RoleManifestError(f"{name}: post_types entries take only name and targets")
+            if not isinstance(entry.get("name"), str) or not entry["name"]:
+                raise RoleManifestError(f"{name}: a post_types entry has no name")
+            targets = entry.get("targets")
+            if targets is not None and (
+                not isinstance(targets, list) or not all(isinstance(x, str) for x in targets)
+            ):
+                raise RoleManifestError(f"{name}: post_types targets must be a list of role names")
+
+
+def load_role(name: str) -> RoleSpec:
+    """Load and strictly validate a role manifest (spec §8.5).
+
+    A missing ``role.toml`` still yields the defaults; malformed TOML, an unknown
+    key, a bad type or an unknown tool raise ``RoleManifestError``. Both shipped
+    manifests validate unchanged and load to the same ``RoleSpec`` as before
+    (``tests/unit/test_role_capabilities.py``). Inside the engine, reads go
+    through the start-time snapshot (``prompt_snapshot.role_spec``), so a
+    mid-run manifest edit cannot raise here or change tools and post types.
     """
     manifest = ROLES_DIR / name / "role.toml"
     if not manifest.is_file():
         return RoleSpec(name=name, label=name, tools=DEFAULT_TOOLS)
     try:
         data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError) as exc:
-        logger.error("[roles] %s: malformed role.toml (%s) — using defaults", name, exc)
-        return RoleSpec(name=name, label=name, tools=DEFAULT_TOOLS)
-
-    label = str(data.get("label", name))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+        raise RoleManifestError(f"{name}: malformed role.toml ({exc})") from exc
+    _validate_manifest(name, data)
     declared = data.get("tools")
-    if declared is None:
-        tools = DEFAULT_TOOLS
-    else:
-        known = _known_tool_names()
-        kept = set()
-        for t in declared:
-            if t in known:
-                kept.add(t)
-            else:
-                logger.warning("[roles] %s: unknown tool %r in role.toml — dropped", name, t)
-        tools = frozenset(kept)
-    rate = data.get("calls_per_load_per_window")
-    if rate is not None and not (
-        isinstance(rate, int) and not isinstance(rate, bool) and rate > 0
-    ):
-        logger.warning(
-            "[roles] %s: calls_per_load_per_window must be a positive int, "
-            "got %r — ignored", name, rate,
-        )
-        rate = None
-    post_types = parse_post_types(data.get("post_types"), role=name)
     return RoleSpec(
-        name=name, label=label, tools=tools,
-        calls_per_load_per_window=rate, post_types=post_types,
+        name=name,
+        label=str(data.get("label", name)),
+        tools=DEFAULT_TOOLS if declared is None else frozenset(declared),
+        calls_per_load_per_window=data.get("calls_per_load_per_window"),
+        post_types=parse_post_types(data.get("post_types"), role=name),
     )
 
 
-#: The prompt files a role actually composes, per Agent._load_prompt's call
-#: sites (src/agent/agent.py:289/:314/:404/:493). scout_hub deliberately
-#: omits phase5-new-post.md: the hub is reply-only (post_types = [] in its
-#: role.toml, and the engine hard-gates Phase 5 for it), so that file is never
-#: composed for the hub and a pi-side edit to it must not move the hub's hash.
+def role_problem(name: str) -> str | None:
+    """Why ``name`` is not a usable role, or None (spec §8.5, fail closed): no
+    ``ROLE_CAPABILITIES`` entry, a manifest that fails validation, or an entry
+    that contradicts its manifest."""
+    caps = ROLE_CAPABILITIES.get(name)
+    if caps is None:
+        return f"role {name!r} has no ROLE_CAPABILITIES entry"
+    try:
+        spec = load_role(name)
+    except RoleManifestError as exc:
+        return str(exc)
+    if not caps.posts_new_threads and spec.post_types:
+        return f"{name}: posts_new_threads is false but role.toml declares post types"
+    if caps.posts_new_threads and not spec.post_types:
+        return f"{name}: posts_new_threads is true but role.toml declares no post types"
+    return None
+
+
+#: The prompt files each role composes — derived from the capability registry
+#: (spec §8.5), where the tuples moved verbatim; kept under this name for its
+#: readers. ``prompt_set_stamp`` hashes the same files in the same order.
 ROLE_PROMPT_FILES: dict[str, tuple[str, ...]] = {
-    "pi_lab": (
-        "agent-system.md", "identity.md",
-        "phase4-thread-reply.md", "phase5-new-post.md",
-    ),
-    "scout_hub": (
-        "agent-system.md", "identity.md", "phase4-thread-reply.md",
-    ),
+    name: caps.prompt_files for name, caps in ROLE_CAPABILITIES.items()
 }
 
 

@@ -124,7 +124,7 @@ async def test_every_loop_exit_flushes_its_buffers(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_reply_lane_continue_also_flushes(monkeypatch):
-    """The OTHER `continue`: the reply lane spent, no post-lane agent was eligible.
+    """The OTHER `continue`: the reply lane did work, no post-lane agent was eligible.
 
     This branch does not even sleep, so a hub that only ever replies rode it
     every tick for the life of the run.
@@ -137,8 +137,10 @@ async def test_the_reply_lane_continue_also_flushes(monkeypatch):
     dispatched = []
 
     async def _reply_lane():
-        # Real SPEND, which is what `reply_lane_did_work` measures.
+        # A reply call that returned: `reply_lane_did_work` counts
+        # `ctx.circuit.success_seq`, which `_note_reply_success` bumps.
         agent.api_call_count += 1
+        eng.ctx.circuit.record_success()
         dispatched.append(1)
         if len(dispatched) >= ticks:
             eng._running = False

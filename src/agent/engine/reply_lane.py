@@ -7,12 +7,15 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+import anthropic
+
 from src.agent.agent import Agent
 from src.agent.engine import deps
 from src.agent.engine.constants import TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, RunState, via
 from src.agent.engine.helpers import _thread_phase_label, _was_truncated
 from src.agent.engine.sidecar import _extract_slack_message, _reply_closes_thread
+from src.agent.role_capabilities import capabilities_for
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
@@ -28,6 +31,20 @@ if TYPE_CHECKING:
     from src.agent.engine.verdicts import Verdicts
 
 logger = logging.getLogger("src.agent.simulation")
+
+_NON_TRANSIENT_ERRORS = (
+    anthropic.BadRequestError,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    anthropic.NotFoundError,
+)
+REPLY_BACKOFF_BASE_S = 60.0
+REPLY_BACKOFF_CAP_S = 1800.0
+
+
+def reply_backoff_seconds(failures: int) -> float:
+    """``min(60 s x 4^(n-1), 1,800 s)`` for the n-th consecutive failure."""
+    return min(REPLY_BACKOFF_BASE_S * 4 ** (failures - 1), REPLY_BACKOFF_CAP_S)
 
 
 class ReplyLane:
@@ -113,6 +130,9 @@ class ReplyLane:
         2-strike empty-response backoff gets a fresh attempt at the new
         content, mirroring the old `_phase4_reply_threads` selection half.
         """
+        now = deps.time.time()
+        if self.ctx.circuit.is_open(now):
+            return []
         pairs: list[tuple[Agent, ThreadState]] = []
         for agent in self.agents.values():
             for thread in list(agent.state.active_threads.values()):
@@ -126,7 +146,7 @@ class ReplyLane:
                 )
                 if has_new:
                     thread.empty_response_count = 0
-                if has_new or thread.has_pending_reply:
+                if (has_new or thread.has_pending_reply) and thread.retry_after <= now:
                     pairs.append((agent, thread))
         return pairs
 
@@ -533,12 +553,71 @@ class ReplyLane:
                 agent, thread, system_prompt, messages, tool_executor,
                 reply_thread_phase, reply_message_ordinal, stop_reasons, settings,
             )
+        except Exception as exc:  # noqa: BLE001 — S1-04: back off, never spin
+            await self._note_reply_failure(agent, thread, exc)
+            return
+        self._note_reply_success(thread)
+        try:
             await self._handle_reply_response(agent, thread, raw_response, stop_reasons)
         except Exception as exc:
             logger.error(
                 "[%s] Phase 4 reply to thread %s failed: %s",
                 agent.agent_id, thread.thread_id, exc,
             )
+
+    def _note_reply_success(self, thread: ThreadState) -> None:
+        thread.failed_call_count = 0
+        thread.retry_after = 0.0
+        thread.nontransient_streak = 0
+        self.ctx.circuit.record_success()
+
+    async def _note_reply_failure(self, agent: Agent, thread: ThreadState, exc: Exception) -> None:
+        """S1-04. ``has_pending_reply`` stays True (the dispatch set it) and the
+        thread backs off. Every exception class backs off; only two consecutive
+        failures of the four non-transient classes on THIS thread, while some
+        other call succeeded in between and the breaker is closed, abandon it.
+        RateLimit, InternalServer (500/503/504), APITimeout, APIConnection and
+        Overloaded (529) are examples of the "back off only" set, not an
+        allowlist (C25)."""
+        now = deps.time.time()
+        logger.error(
+            "[%s] Phase 4 reply to thread %s failed: %s",
+            agent.agent_id, thread.thread_id, exc,
+        )
+        thread.failed_call_count += 1
+        thread.retry_after = now + reply_backoff_seconds(thread.failed_call_count)
+        circuit = self.ctx.circuit
+        if isinstance(exc, _NON_TRANSIENT_ERRORS):
+            if thread.nontransient_streak == 0:
+                thread.nontransient_mark = circuit.success_seq
+            thread.nontransient_streak += 1
+        else:
+            thread.nontransient_streak = 0
+        circuit.record_failure(thread.thread_id, now)
+        if (
+            thread.nontransient_streak >= 2
+            and circuit.success_seq > thread.nontransient_mark
+            and not circuit.is_open(now)
+        ):
+            thread.has_pending_reply = False
+            logger.warning(
+                "[%s] Abandoning thread %s after %d consecutive %s failures while "
+                "other model calls succeed",
+                agent.agent_id, thread.thread_id, thread.nontransient_streak,
+                type(exc).__name__,
+            )
+            caps = capabilities_for(agent.role)
+            if caps is not None and caps.captures_verdicts:
+                await self._verdicts._record_assessment_drop(
+                    agent.agent_id, "reply_failed",
+                    subject_agent_id=thread.other_agent_id,
+                    thread_id=thread.thread_id,
+                    detail=(
+                        f"interview abandoned after {thread.nontransient_streak} "
+                        f"consecutive non-transient model errors ({type(exc).__name__}) "
+                        f"at ordinal {thread.message_count + 1}"
+                    ),
+                )
 
     async def _reply_preflight(
         self, agent: Agent, thread: ThreadState, settings: Any

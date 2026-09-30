@@ -661,11 +661,23 @@ class TestUnretryableWriteFailuresAreLoud:
 
         monkeypatch.setattr(engine, "_update_agent_memory", _noop_memory_update)
 
+        # S1-12: the first failure is loud (ERROR + traceback) but not a loss —
+        # the row is queued for the next flush. It is LOST only when the final
+        # shutdown flush cannot write it either.
         with caplog.at_level("ERROR"):
             await engine._close_thread(agent, thread, "no_proposal")
 
-        assert "LOST" in caplog.text
+        assert "queued for retry" in caplog.text
+        assert "LOST" not in caplog.text
         assert any(r.exc_info for r in caplog.records)
+        assert [r["thread_id"] for r in engine.threads._pending_decisions] == ["t1"]
+
+        caplog.clear()
+        with caplog.at_level("ERROR"):
+            await engine.threads.flush_pending_decisions(final=True)
+
+        assert "LOST 1 thread decision(s) at shutdown (threads: t1)" in caplog.text
+        assert engine.threads._pending_decisions == []
 
 
 # ---------------------------------------------------------------

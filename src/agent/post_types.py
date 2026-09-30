@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from src.agent.role_capabilities import ROLE_CAPABILITIES, hub_role_names
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +51,9 @@ CANONICAL: dict[str, PostTypeSpec] = {
             "Offer one of your OWN lab's ideas for screening — something that might "
             "be patentable, fundable, or commercializable. Not a collaboration "
             "proposal, and never a suggestion that two other labs should talk.",
-            targets=frozenset({"scout_hub"}),
+            # The hub roles of the capability registry: today exactly the same set,
+            # so the rendered menu is byte-identical (C27).
+            targets=frozenset(hub_role_names()),
         ),
     )
 }
@@ -73,15 +77,11 @@ DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
     CANONICAL["pitch"],
 )
 
-# Roles a `targets` entry may name. Hardcoded rather than sourced from
-# roles.available_roles() — not to dodge an import cycle (available_roles()
-# only lists a directory, so importing it would not actually create one), but
-# because this module is dependency-free by design (no src.models, no DB, no
-# Agent import — see the module docstring) so it stays unit-testable with no
-# filesystem or database at all. The cost: this constant does not know about a
-# role directory added after this list was last updated, which is exactly the
-# case the WARNING below is worded to describe.
-_KNOWN_ROLES: frozenset[str] = frozenset({"pi_lab", "scout_hub"})
+# Roles a `targets` entry may name: the registry's roles, imported from the
+# dependency-free ``role_capabilities`` (not ``roles.available_roles()``:
+# ``roles`` imports this module). The same two roles as before, so the WARNING
+# below behaves as it did.
+_KNOWN_ROLES: frozenset[str] = frozenset(ROLE_CAPABILITIES)
 
 
 def parse_post_types(raw: object, *, role: str) -> tuple[PostTypeSpec, ...]:

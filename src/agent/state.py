@@ -26,6 +26,17 @@ class ThreadState:
     # post writes no log row and so never advances message_count toward the
     # max_thread_messages close either.
     suppressed_post_count: int = 0
+    # S1-04: consecutive reply LLM calls on this thread that raised, and the
+    # wall-clock time before which `_pending_reply_pairs` skips it
+    # (60 s x 4^(n-1), capped at 30 min). Zero on the normal path.
+    failed_call_count: int = 0
+    retry_after: float = 0.0
+    # Consecutive NON-TRANSIENT failures (BadRequest, Authentication,
+    # PermissionDenied, NotFound) on this thread, and the breaker's success
+    # counter when the streak began: a thread is abandoned only after two such
+    # failures while some other model call succeeded in between.
+    nontransient_streak: int = 0
+    nontransient_mark: int = 0
     # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
     # the owning agent (membership changed, or — on every resumed run — the DB
     # state rebuild reconstructed the thread before the first gate recompute).

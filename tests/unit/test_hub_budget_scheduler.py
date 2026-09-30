@@ -442,12 +442,12 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
     pair recurs every tick — composed with that first fix, that spun
     the main loop at native tick speed forever (measured ~2,800
     iterations/s), never sleeping and never yielding to the periodic
-    flushes. The current code replaces the attempt count with a SPEND comparison
-    (total ``api_call_count`` across the roster, before vs. after the
-    dispatch call — mirroring what ``_run_post_turn`` already does with
-    ``api_calls_before``), so the tests below simulate spend explicitly by
-    bumping an agent's ``api_call_count`` inside the dispatch stub, and a new
-    test pins the zero-spend case directly.
+    flushes. The current code replaces the attempt count with the number of
+    reply calls that RETURNED without raising (``ctx.circuit.success_seq``,
+    before vs. after the dispatch call — S1-04), which on a healthy tick equals
+    the spend. The tests below simulate a successful call explicitly inside the
+    dispatch stub (``api_call_count`` bumped and ``circuit.record_success()``),
+    and a separate test pins the zero-spend case directly.
     """
 
     async def test_no_idle_sleep_when_reply_lane_spent_but_no_agent_was_eligible(
@@ -465,7 +465,10 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
 
         async def _dispatch():
             ticks["n"] += 1
-            eng.agents["hub"].api_call_count += 1  # a real LLM call happened
+            # A real reply call that returned: it spends a call and records a
+            # success, exactly as `_generate_reply` + `_note_reply_success` do.
+            eng.agents["hub"].api_call_count += 1
+            eng.ctx.circuit.record_success()
             if ticks["n"] >= 3:
                 eng._running = False
             return 2  # attempted count, kept only as a log/metric value
@@ -495,7 +498,10 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
 
         async def _dispatch():
             ticks["n"] += 1
-            eng.agents["hub"].api_call_count += 1  # a real LLM call happened
+            # A real reply call that returned: it spends a call and records a
+            # success, exactly as `_generate_reply` + `_note_reply_success` do.
+            eng.agents["hub"].api_call_count += 1
+            eng.ctx.circuit.record_success()
             if ticks["n"] >= 3:
                 eng._running = False
             return 1

@@ -1,7 +1,9 @@
 import logging
 
+import pytest
+
 from src.agent import roles
-from src.agent.roles import DEFAULT_TOOLS, RoleSpec, load_role
+from src.agent.roles import DEFAULT_TOOLS, RoleManifestError, RoleSpec, load_role
 
 
 def _write_role(tmp_path, monkeypatch, name, toml_text):
@@ -64,24 +66,21 @@ def test_manifest_sets_label_and_tool_allow_list(tmp_path, monkeypatch):
     assert "retrieve_profile" in spec.tools
 
 
-def test_unknown_tool_is_dropped_and_logged(tmp_path, monkeypatch, caplog):
+def test_unknown_tool_raises(tmp_path, monkeypatch):
+    """Spec §8.5 strict validation: an unknown tool is a manifest error."""
     _write_role(
         tmp_path, monkeypatch, "weird",
         'tools = ["retrieve_profile", "does_not_exist"]\n',
     )
-    with caplog.at_level(logging.WARNING):
-        spec = load_role("weird")
-    assert "does_not_exist" not in spec.tools
-    assert "retrieve_profile" in spec.tools
-    assert any("does_not_exist" in r.message for r in caplog.records)
+    with pytest.raises(RoleManifestError, match="does_not_exist"):
+        load_role("weird")
 
 
-def test_malformed_toml_falls_back_to_defaults(tmp_path, monkeypatch, caplog):
+def test_malformed_toml_raises(tmp_path, monkeypatch):
+    """Spec §8.5 strict validation: malformed TOML is a manifest error."""
     _write_role(tmp_path, monkeypatch, "broken", "tools = [not valid toml")
-    with caplog.at_level(logging.ERROR):
-        spec = load_role("broken")
-    assert spec.tools == DEFAULT_TOOLS
-    assert spec.label == "broken"
+    with pytest.raises(RoleManifestError, match="malformed"):
+        load_role("broken")
 
 
 # ----------------------------------------------------------------------
@@ -177,25 +176,24 @@ def test_role_rate_override_defaults_to_none(tmp_path, monkeypatch):
     assert load_role("scout_hub").calls_per_load_per_window is None
 
 
-def test_role_rate_override_rejects_non_positive(tmp_path, monkeypatch, caplog):
+def test_role_rate_override_rejects_non_positive_raises(tmp_path, monkeypatch):
+    """Spec §8.5 strict validation: a non-positive override is a manifest error."""
     _write_role(
         tmp_path, monkeypatch, "scout_hub",
         'label = "Scout Hub"\ncalls_per_load_per_window = 0\n',
     )
-    with caplog.at_level(logging.WARNING):
-        spec = load_role("scout_hub")
-    assert spec.calls_per_load_per_window is None
-    assert "calls_per_load_per_window" in caplog.text
+    with pytest.raises(RoleManifestError, match="calls_per_load_per_window"):
+        load_role("scout_hub")
 
 
-def test_role_rate_override_rejects_non_int(tmp_path, monkeypatch, caplog):
+def test_role_rate_override_rejects_non_int_raises(tmp_path, monkeypatch):
+    """Spec §8.5 strict validation: a non-int override is a manifest error."""
     _write_role(
         tmp_path, monkeypatch, "scout_hub",
         'label = "Scout Hub"\ncalls_per_load_per_window = "lots"\n',
     )
-    with caplog.at_level(logging.WARNING):
-        spec = load_role("scout_hub")
-    assert spec.calls_per_load_per_window is None
+    with pytest.raises(RoleManifestError, match="calls_per_load_per_window"):
+        load_role("scout_hub")
 
 
 def test_missing_manifest_yields_no_rate_override(tmp_path, monkeypatch):
@@ -496,11 +494,12 @@ def test_manifest_unknown_post_type_is_dropped(tmp_path, monkeypatch, caplog):
     assert "nonsense" in caplog.text
 
 
-def test_malformed_toml_still_yields_default_post_types(tmp_path, monkeypatch):
-    from src.agent.post_types import DEFAULT_POST_TYPES
-
+def test_malformed_toml_for_post_types_raises(tmp_path, monkeypatch):
+    """Spec §8.5 strict validation: malformed TOML no longer degrades to the
+    default post types."""
     _write_role(tmp_path, monkeypatch, "broken", "label = = =\n")
-    assert load_role("broken").post_types == DEFAULT_POST_TYPES
+    with pytest.raises(RoleManifestError):
+        load_role("broken")
 
 
 def test_scout_hub_declares_no_post_types():

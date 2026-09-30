@@ -151,6 +151,17 @@ class Persistence:
         )
         return True
 
+    async def flush_before_dependent(self) -> bool:
+        """S2-06: flush buffered message rows (under the P0-01 flush lock) before a
+        write that depends on them — a ThreadDecision or a verdict. True when
+        nothing is left buffered, so every reply row the dependent write refers
+        to is in the database; False means the caller queues its write and the
+        next successful flush drains it. Always True without a database."""
+        if not self.session_factory or not self.simulation_run_id:
+            return True
+        await self._flush_persisted()
+        return not self._pending_persist
+
     async def _flush_persisted(
         self, force_stats: bool = False, *, final: bool = False,
     ) -> None:

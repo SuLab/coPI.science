@@ -260,6 +260,7 @@ EXPECTED_STATE_OWNER: dict[str, str] = {
     "_unclaimed_headlines": "headlines", "_announced": "headlines",
     "_assessed_threads": "verdicts", "_pending_assessments": "verdicts",
     "_closed_thread_ids": "threads", "_prior_threads": "threads",
+    "_pending_decisions": "threads",
     "_pending_memory_events": "memory", "_memory_drain_lock": "memory",
     "_reply_in_flight": "reply_lane", "_reply_sem": "reply_lane",
     "max_proposals": "post_lane", "_proposals_posted": "post_lane",

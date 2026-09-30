@@ -233,6 +233,8 @@ class Scheduler:
         sliding-window rate limit, the per-agent `turn_delay_seconds`
         cooldown, and not already `in_flight`.
         """
+        if self.ctx.circuit.is_open(deps.time.time()):
+            return None
         now = deps.time.time()
         candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
         if not candidates:

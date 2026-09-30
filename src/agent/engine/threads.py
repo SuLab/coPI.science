@@ -18,6 +18,7 @@ from src.models.agent_activity import VISIBILITY_PUBLIC
 if TYPE_CHECKING:
     from src.agent.engine.headlines import Headlines
     from src.agent.engine.memory import Memory
+    from src.agent.engine.persistence import Persistence
     from src.agent.engine.verdicts import Verdicts
 
 logger = logging.getLogger("src.agent.simulation")
@@ -31,8 +32,9 @@ class Threads:
     session_factory = via("ctx")
     simulation_run_id = via("ctx")
     _assessed_threads = via("_verdicts")
+    flush_before_dependent = via("_persistence")
 
-    OWNED_STATE: tuple[str, ...] = ("_closed_thread_ids", "_prior_threads")
+    OWNED_STATE: tuple[str, ...] = ("_closed_thread_ids", "_prior_threads", "_pending_decisions")
 
     def __init__(
         self,
@@ -41,8 +43,10 @@ class Threads:
         headlines: Headlines,
         memory: Memory,
         verdicts: Verdicts,
+        persistence: Persistence,
     ) -> None:
         self.ctx = ctx
+        self._persistence = persistence
         self._headlines = headlines
         self._memory = memory
         self._verdicts = verdicts
@@ -52,6 +56,11 @@ class Threads:
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
+
+        # ThreadDecision rows not yet written (S2-06, S1-12): waiting on their
+        # thread's message rows, or a failed write. Drained by
+        # `flush_pending_decisions`.
+        self._pending_decisions: list[dict] = []
 
     def mark_closed(self, *thread_ids: str) -> None:
         """Record threads as closed (spec §7.2 rule 1). Insert-only: nothing un-closes
@@ -152,35 +161,16 @@ class Threads:
 
             # Log to DB
             if self.session_factory and self.simulation_run_id:
-                try:
-                    async with self.session_factory() as db:
-                        decision = ThreadDecision(
-                            simulation_run_id=self.simulation_run_id,
-                            thread_id=thread.thread_id,
-                            channel=thread.channel,
-                            agent_a=agent.agent_id,
-                            agent_b=thread.other_agent_id,
-                            outcome=outcome,
-                            summary_text=summary_text,
-                            closed_by_role=closed_by_role,
-                        )
-                        db.add(decision)
-                        await db.commit()
-                except Exception as exc:
-                    # No natural retry buffer for a ThreadDecision (unlike
-                    # _flush_persisted/_flush_llm_logs, there is no accumulating
-                    # list this row is drained from — it is written once, right
-                    # here) and the in-memory thread state above has already moved
-                    # to "closed" either way, so requeueing would mean inventing a
-                    # queue purpose-built for this call site. Make the loss
-                    # unmistakable instead: ERROR + a full traceback, up from the
-                    # WARNING this used to log.
-                    logger.error(
-                        "[%s] Failed to log thread decision for %s (outcome=%s): "
-                        "%s — LOST, this write will never be retried",
-                        agent.agent_id, thread.thread_id, outcome, exc,
-                        exc_info=True,
-                    )
+                await self._record_decision(agent.agent_id, {
+                    "simulation_run_id": self.simulation_run_id,
+                    "thread_id": thread.thread_id,
+                    "channel": thread.channel,
+                    "agent_a": agent.agent_id,
+                    "agent_b": thread.other_agent_id,
+                    "outcome": outcome,
+                    "summary_text": summary_text,
+                    "closed_by_role": closed_by_role,
+                })
 
             logger.info(
                 "[%s] Thread %s closed: %s",
@@ -220,6 +210,64 @@ class Threads:
                 already_announced=self._headlines.is_announced(thread.thread_id),
             ):
                 self._headlines.enqueue(thread.thread_id)
+
+    async def _write_decision(self, row: dict) -> None:
+        async with self.ctx.session_factory() as db:
+            db.add(ThreadDecision(**row))
+            await db.commit()
+
+    async def _record_decision(self, agent_id: str, row: dict) -> None:
+        """Write a ThreadDecision after its thread's message rows are durable
+        (S2-06); on a flush that left rows behind, or a failed write, queue it
+        for the next flush instead of losing it (S1-12)."""
+        if not await self.flush_before_dependent():
+            self._pending_decisions.append(row)
+            logger.warning(
+                "[%s] Thread decision for %s queued: its message rows are not "
+                "flushed yet (S2-06)", agent_id, row["thread_id"],
+            )
+            return
+        try:
+            await self._write_decision(row)
+        except Exception as exc:  # noqa: BLE001 — queued, retried by the next flush
+            self._pending_decisions.append(row)
+            logger.error(
+                "[%s] Failed to log thread decision for %s (outcome=%s): %s — "
+                "queued for retry", agent_id, row["thread_id"], row["outcome"], exc,
+                exc_info=True,
+            )
+
+    async def flush_pending_decisions(self, *, final: bool = False) -> None:
+        """Retry queued ThreadDecisions after their messages flushed (S1-12).
+        ``final=True`` is the last attempt at shutdown: it writes even behind an
+        unflushed message buffer (the rows would otherwise be lost for good) and
+        logs any that still fail as LOST with their thread ids."""
+        if not self._pending_decisions:
+            return
+        if not final and not await self.flush_before_dependent():
+            return
+        rows, self._pending_decisions = self._pending_decisions, []
+        failed: list[dict] = []
+        last_exc: Exception | None = None
+        for row in rows:
+            try:
+                await self._write_decision(row)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(row)
+                last_exc = exc
+        if not failed:
+            logger.info("Flushed %d queued thread decision(s) to DB", len(rows))
+            return
+        if final:
+            logger.error(
+                "LOST %d thread decision(s) at shutdown (threads: %s): %s",
+                len(failed), ", ".join(r["thread_id"] for r in failed), last_exc,
+            )
+        else:
+            self._pending_decisions[0:0] = failed
+            logger.warning(
+                "%d thread decision(s) still failing; re-queued: %s", len(failed), last_exc,
+            )
 
     async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.

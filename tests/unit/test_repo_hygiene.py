@@ -193,10 +193,41 @@ def test_no_src_path_can_construct_a_proposal_outcome():
     )
 
 
+# `_close_thread` hands its row to `_record_decision`, which writes it through
+# `_write_decision` at once or queues it on `_pending_decisions` for
+# `flush_pending_decisions` to write later (S2-06, S1-12). The row is built in
+# `_close_thread` and never rebuilt, so `_write_decision` may construct the model
+# as long as nothing else can reach that path.
+_DECISION_WRITE_PATH = {
+    "_write_decision": {"_record_decision", "flush_pending_decisions"},
+    "_record_decision": {"_close_thread"},
+    "_pending_decisions": {"__init__", "_record_decision", "flush_pending_decisions"},
+}
+
+
+def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
+    """Map each node id to the name of the innermost function holding it."""
+    owner: dict[int, str] = {}
+
+    def _visit(node: ast.AST, fn: str | None) -> None:
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            fn = node.name
+        if fn is not None:
+            owner[id(node)] = fn
+        for child in ast.iter_child_nodes(node):
+            _visit(child, fn)
+
+    _visit(tree, None)
+    return owner
+
+
 def test_close_thread_is_the_only_thread_decision_constructor_in_src():
-    """The other half of the proof above, over all of `src/`."""
+    """The other half of the proof above, over all of `src/`: every
+    `ThreadDecision(...)` is either inside `_close_thread` or in `_write_decision`,
+    whose rows only ever come from `_close_thread`."""
     tree = ast.parse(THREADS.read_text(encoding="utf-8"))
-    lo, hi = _function_range(tree, "_close_thread")
+    ranges = {name: _function_range(tree, name) for name in ("_close_thread", "_write_decision")}
+    threads_rel = THREADS.relative_to(ROOT).as_posix()
 
     sites: list[str] = []
     for path in sorted((ROOT / "src").rglob("*.py")):
@@ -205,7 +236,9 @@ def test_close_thread_is_the_only_thread_decision_constructor_in_src():
             if not isinstance(node, ast.Call) or _callee_name(node.func) != "ThreadDecision":
                 continue
             rel = path.relative_to(ROOT).as_posix()
-            inside = rel == THREADS.relative_to(ROOT).as_posix() and lo <= node.lineno <= hi
+            inside = rel == threads_rel and any(
+                lo <= node.lineno <= hi for lo, hi in ranges.values()
+            )
             if not inside:
                 sites.append(f"{rel}:{node.lineno}")
 
@@ -213,4 +246,52 @@ def test_close_thread_is_the_only_thread_decision_constructor_in_src():
         f"ThreadDecision is constructed outside _close_thread at {sites} — the "
         "outcome-literal assertion in this module only covers _close_thread's call "
         "sites, so it no longer proves 'proposal' is unreachable"
+    )
+
+
+def test_the_decision_write_path_only_carries_close_threads_rows():
+    """`_write_decision` builds a ThreadDecision from a row dict, so the proof above
+    holds only if every row it writes is one `_close_thread` built with its own
+    `outcome` parameter. Pin that: each name on the write path is touched only by
+    its expected functions, anywhere in `src/`, and `_close_thread` passes
+    `"outcome": outcome` to `_record_decision`."""
+    touched: dict[str, set[str]] = {name: set() for name in _DECISION_WRITE_PATH}
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        node_tree = ast.parse(path.read_text(encoding="utf-8"))
+        owner = _enclosing_functions(node_tree)
+        rel = path.relative_to(ROOT).as_posix()
+        for node in ast.walk(node_tree):
+            name = node.attr if isinstance(node, ast.Attribute) else (
+                node.id if isinstance(node, ast.Name) else None
+            )
+            if name in touched:
+                fn = owner.get(id(node), "<module>")
+                touched[name].add(fn if path == THREADS else f"{rel}:{fn}")
+
+    for name, allowed in _DECISION_WRITE_PATH.items():
+        assert touched[name] <= allowed, (
+            f"{name} is now reached from {sorted(touched[name] - allowed)}; the "
+            "ThreadDecision rows it carries may no longer all come from _close_thread"
+        )
+
+    tree = ast.parse(THREADS.read_text(encoding="utf-8"))
+    close = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_close_thread"
+    )
+    assert "outcome" in [a.arg for a in close.args.args]
+    records = [
+        n for n in ast.walk(close)
+        if isinstance(n, ast.Call) and _callee_name(n.func) == "_record_decision"
+    ]
+    assert len(records) == 1, "expected exactly one _record_decision call in _close_thread"
+    (row,) = [a for a in records[0].args if isinstance(a, ast.Dict)]
+    outcome = [
+        v for k, v in zip(row.keys, row.values, strict=True)
+        if isinstance(k, ast.Constant) and k.value == "outcome"
+    ]
+    assert len(outcome) == 1 and isinstance(outcome[0], ast.Name) and outcome[0].id == "outcome", (
+        "_close_thread no longer passes its own `outcome` parameter as the row's "
+        "outcome, so the literal enumeration over _close_thread call sites no longer "
+        "covers what the decision write path stores"
     )

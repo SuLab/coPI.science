@@ -97,12 +97,17 @@
                         &mdash; the verdict was fully formed but the database
                         refused to store it, even individually after the batch it
                         belonged to failed. This row is its only surviving trace.
+                    {% elif reason == 'reply_failed' %}
+                        &mdash; the model call for this interview's reply failed twice in a
+                        row with an error specific to the request, while other calls
+                        succeeded, so the interview was abandoned. Nothing was posted for
+                        these turns.
                     {% endif %}
                 </li>
                 {% endfor %}
             </ul>
             <div class="mt-2 text-xs text-amber-700">
-                Except for <code>empty_reply</code>, the Slack reply for each of
+                Except for <code>empty_reply</code> and <code>reply_failed</code>, the Slack reply for each of
                 these was posted normally &mdash; only the machine-readable verdict
                 was lost. None of them can be recovered from a later turn.
             </div>

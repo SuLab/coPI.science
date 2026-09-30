@@ -134,9 +134,13 @@ ALLOWLIST: dict[str, str] = {
     # Phase 2 (docs/plans/2026-09-29-audit-remediation-phase-2.md) lands some helpers
     # a task before their caller. Each entry names the task that brings the caller;
     # that task removes the entry (the stale-entry test fails until it does).
-    "src.agent.engine.control:EngineHeartbeat.set_circuit_source": (
-        "Built in Phase 2 Task 11; its caller, SimulationEngine.__init__ wiring the "
-        "circuit breaker, arrives in Phase 2 Task 15, which removes this entry."
+    "src.agent.role_capabilities:spoke_role_names": (
+        "Registry accessor (Phase 2 Task 24, spec 8.5); the role-literal call sites "
+        "that will read it are not migrated yet."
+    ),
+    "src.agent.role_capabilities:roles_requiring_user": (
+        "Registry accessor (Phase 2 Task 24, spec 8.5); the role-literal call sites "
+        "that will read it are not migrated yet."
     ),
     "src.agent.engine.control:EngineHeartbeat.set_drift_source": (
         "Built in Phase 2 Task 11; its caller, main's PromptSnapshot wiring, "

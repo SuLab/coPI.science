@@ -196,6 +196,10 @@ class SimulationEngine:
         )
         self.run_state = run_state if run_state is not None else RunState()
         self.heartbeat = heartbeat
+        if self.heartbeat is not None:
+            self.heartbeat.set_circuit_source(
+                lambda: self.ctx.circuit.is_open(deps.time.time())
+            )
         self.persistence = Persistence(self.ctx)
         self.channel_directory = ChannelDirectory(self.ctx)
         self.ctx.channel_id_resolver = self.channel_directory.channel_id_for
@@ -237,6 +241,7 @@ class SimulationEngine:
         )
         self.threads = Threads(
             self.ctx, headlines=self.headlines, memory=self.memory, verdicts=self.verdicts,
+            persistence=self.persistence,
         )
         self.post_lane = PostLane(
             self.ctx, scheduler=self.scheduler, roster=self.roster, threads=self.threads,
@@ -519,32 +524,21 @@ class SimulationEngine:
                 # surface rather than repeat one swallowed ERROR per tick forever
                 # while no interview progresses.
                 #
-                # "Did work" for the backoff below must reflect actual SPEND, not
-                # attempts: `_dispatch_reply_lane`'s
-                # return counts pairs ATTEMPTED, including ones the reservation
-                # limiter deferred with zero LLM calls and `has_pending_reply`
-                # left True — so the identical pair recurs every tick. Driving
-                # the backoff off the attempt count alone spun the main loop at
-                # native tick speed (measured ~2,800 iterations/s) whenever a
-                # pending pair was rate-limited: never sleeping, never yielding
-                # to _flush_persisted/_flush_llm_logs/_flush_pending_assessments,
-                # and hammering the per-tick Slack poll and roster sync every
-                # iteration. Comparing the
-                # roster's total `api_call_count` across the call — mirroring
-                # what `_run_post_turn` already does with `api_calls_before` —
-                # answers "did anything actually get spent", not "was anything
-                # attempted".
-                calls_before_reply_lane = sum(
-                    a.api_call_count for a in self.agents.values()
-                )
+                # 'Did work' for the backoff below counts reply calls that RETURNED
+                # without raising (S1-04, FA1-R1) — including ones that came back
+                # empty or whose post was suppressed — so on a healthy tick it
+                # equals the old `api_call_count` delta. A rate-limited deferral
+                # makes no call and does not count, which keeps the loop from
+                # spinning; a call that raised no longer counts either, so a
+                # failing API backs off instead of retrying every tick.
+                successes_before_reply_lane = self.ctx.circuit.success_seq
                 reply_lane_count = await self._dispatch_reply_lane()
                 if reply_lane_count:
                     logger.debug(
                         "[reply-lane] serviced %d pair(s) this tick", reply_lane_count
                     )
                 reply_lane_did_work = (
-                    sum(a.api_call_count for a in self.agents.values())
-                    > calls_before_reply_lane
+                    self.ctx.circuit.success_seq > successes_before_reply_lane
                 )
 
                 # Select agent (post lane — paced, one at a time)
@@ -684,16 +678,21 @@ class SimulationEngine:
         same queue. The FLUSHES still run — they are cheap DB writes, and
         skipping them is the data loss this method exists to prevent.
         """
-        if self._pending_memory_events and self._running:
+        if (
+            self._pending_memory_events
+            and self._running
+            and not self.ctx.circuit.is_open(deps.time.time())
+        ):
             await self._drain_memory_events()
 
-        # Flush buffered message-log entries + LLM logs + any assessment
-        # rows that failed their first write.
-        await self._flush_persisted()
-        if self._llm_log_buffer:
-            await self._flush_llm_logs()
-        if self._pending_assessments:
-            await self._flush_pending_assessments()
+        # S2-06 order: messages, then the decisions and verdicts that refer to
+        # them, then the LLM call logs.
+        await self.persistence._flush_persisted()
+        await self.threads.flush_pending_decisions()
+        if self.verdicts._pending_assessments:
+            await self.verdicts._flush_pending_assessments()
+        if self.llm_log._llm_log_buffer:
+            await self.llm_log._flush_llm_logs()
 
         # AFTER the flushes, never before: a verdict that failed its first write
         # is on `_pending_assessments`, and `_announce_owed_headline` reads the

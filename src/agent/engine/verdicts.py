@@ -106,6 +106,7 @@ class Verdicts:
     _specialist_floor_gap = via("_panel")
     _recover_rows_individually = via("_persistence")
     _report_flush_failure = via("_persistence")
+    flush_before_dependent = via("_persistence")
 
     OWNED_STATE: tuple[str, ...] = ("_assessed_threads", "_pending_assessments", "_landed_write_ids")
 
@@ -514,6 +515,18 @@ class Verdicts:
         thread_id = assessment_kwargs.get("thread_id")
         if thread_id is not None:
             await self._prune_queued_for_thread(agent_id, thread_id)
+        if not await self.flush_before_dependent():
+            # S2-06: never commit a verdict ahead of the reply row it came from.
+            self._pending_assessments.append({
+                **assessment_kwargs,
+                "verdict_write_id": write_id,
+                "verdict_ordinal": ordinal,
+            })
+            logger.warning(
+                "[%s] Verdict for thread %s queued until its reply row is flushed",
+                agent_id, thread_id,
+            )
+            return True, None
         try:
             result = await self.upsert(thread, assessment_kwargs, write_id, ordinal)
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
@@ -1489,9 +1502,9 @@ class Verdicts:
         also be a decision to destroy it.
 
         Best-effort in exactly the same sense as ``_persist_assessment``: for
-        every reason except ``empty_reply`` the concluding reply is already in
-        Slack by the time any of these fire; for ``empty_reply`` nothing was
-        ever generated or posted. Either way nothing here may raise, and a
+        every reason except ``empty_reply`` and ``reply_failed`` the concluding
+        reply is already in Slack by the time any of these fire; for those two
+        nothing was ever generated or posted. Either way nothing here may raise, and a
         DB-less engine is a silent no-op.
 
         This exists because every loss path is otherwise invisible — one WARNING
@@ -1548,6 +1561,8 @@ class Verdicts:
             return
         if not self.session_factory or not self.simulation_run_id:
             self._pending_assessments.clear()
+            return
+        if not final and not await self.flush_before_dependent():
             return
         rows = self._pending_assessments
         self._pending_assessments = []

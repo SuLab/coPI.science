@@ -14,6 +14,7 @@ reach the one owner.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -63,6 +64,44 @@ class _Via:
 def via(holder: str, name: str | None = None) -> Any:
     """Declare that ``self.<attr>`` means ``self.<holder>.<name or attr>`` (see ``_Via``)."""
     return _Via(holder, name)
+
+
+class LlmCircuitBreaker:
+    """Engine-wide pause after systemic model-call failures (spec §8.4 S1-04).
+
+    Three consecutive reply-call failures, of any exception class, across at
+    least two distinct threads open the breaker for ``pause_s``: every LLM call
+    path checks ``is_open`` (reply lane, post lane, memory drain). Covers
+    account-level failures (auth, permission, billing) whose status code is not
+    assumed. ``success_seq`` counts successful reply calls; the main loop uses
+    it for ``reply_lane_did_work`` and the reply lane for the "while other
+    calls succeed" abandonment rule."""
+
+    def __init__(self, *, threshold: int = 3, min_threads: int = 2, pause_s: float = 600.0) -> None:
+        self._threshold = threshold
+        self._min_threads = min_threads
+        self._pause_s = pause_s
+        self._streak: list[str] = []
+        self._open_until = 0.0
+        self.success_seq = 0
+
+    def record_success(self) -> None:
+        self._streak.clear()
+        self.success_seq += 1
+
+    def record_failure(self, key: str, now: float) -> None:
+        self._streak.append(key)
+        if len(self._streak) >= self._threshold and len(set(self._streak)) >= self._min_threads:
+            self._open_until = now + self._pause_s
+            self._streak.clear()
+            logging.getLogger("src.agent.simulation").error(
+                "LLM circuit breaker OPEN for %.0f s: %d consecutive model-call "
+                "failures across at least %d threads", self._pause_s,
+                self._threshold, self._min_threads,
+            )
+
+    def is_open(self, now: float) -> bool:
+        return now < self._open_until
 
 
 class EngineContext:
@@ -119,6 +158,8 @@ class EngineContext:
         self.thread_locks = LockRegistry()
         self.agent_locks = LockRegistry()
         self.channel_id_resolver: Callable[[str], str | None] = lambda _name: None
+        # Engine-wide LLM circuit breaker (S1-04): failures only.
+        self.circuit = LlmCircuitBreaker()
 
 
 class RunState:
