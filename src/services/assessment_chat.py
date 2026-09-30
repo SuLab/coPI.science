@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
 from src.database import get_session_factory
-from src.models import AssessmentChatTurn, AssessmentChatUsage, SimulationRun
+from src.models import AssessmentChatTurn, AssessmentChatUsage, OpportunityAssessment, SimulationRun
 from src.models.assessment_chat import (
     CHAT_REPLAYABLE_STATUSES,
     CHAT_STATUS_FAILED,
@@ -304,6 +304,7 @@ def turn_payload(row: Any, *, current_sha: str | None, in_window: bool) -> dict[
         "served_by_model": row.served_by_model,
         "fallback_used": bool(row.fallback_used),
         "in_window": in_window,
+        "verdict_revision": row.verdict_revision or 1,
         "record_changed": current_sha is not None and row.record_sha256_12 != current_sha,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "completed_at": row.completed_at.isoformat() if row.completed_at else None,
@@ -395,8 +396,9 @@ async def spend_24h(db: AsyncSession, *, user_id: uuid.UUID | None = None) -> De
 
 
 async def verdict_may_change(db: AsyncSession, assessment: Any) -> bool:
-    """True while the engine can still supersede — and so delete — this row (F10,
-    SB-10): its headline has not been announced, and its run is either still
+    """True while the engine can still supersede this row's verdict in place (F10,
+    SB-10; §8.1) — earlier questions then stay visible but stop being used as
+    context: its headline has not been announced, and its run is either still
     `running` or is the run `src/agent/main.py` would resume on the next restart —
     the LATEST run by `started_at`, whatever that run's own `status` says. A
     stopped run that is not the latest can never be resumed and so can never
@@ -412,6 +414,24 @@ async def verdict_may_change(db: AsyncSession, assessment: Any) -> bool:
         select(SimulationRun.id).order_by(SimulationRun.started_at.desc()).limit(1)
     )
     return latest_id == assessment.simulation_run_id
+
+
+async def _assessment_revision(db: AsyncSession, assessment_id: uuid.UUID) -> int:
+    """The assessment's current verdict revision, COALESCE(verdict_revision, 1)."""
+    value = await db.scalar(
+        select(func.coalesce(OpportunityAssessment.verdict_revision, 1)).where(
+            OpportunityAssessment.id == assessment_id
+        )
+    )
+    return int(value or 1)
+
+
+def current_revision_turns(turns: list[Any], revision: int) -> list[Any]:
+    """The turns asked against ``revision`` (B6). Both sides coalesce NULL to 1,
+    so a conversation whose turns predate 0054 keeps its whole history, and turns
+    of an earlier revision drop out of replay and the cap — as they did when a
+    superseded row and its turns were deleted (spec §8.1)."""
+    return [t for t in turns if (t.verdict_revision or 1) == revision]
 
 
 async def _conversation(
@@ -464,6 +484,7 @@ def _new_rows(
     record_sha: str,
     prompt_sha: str,
     created_at: datetime,
+    verdict_revision: int,
 ) -> tuple[AssessmentChatTurn, AssessmentChatUsage]:
     turn = AssessmentChatTurn(
         id=uuid.uuid4(),
@@ -478,6 +499,7 @@ def _new_rows(
         record_sha256_12=record_sha,
         prompt_sha256_12=prompt_sha,
         created_at=created_at,
+        verdict_revision=verdict_revision,
     )
     usage = AssessmentChatUsage(
         id=uuid.uuid4(),
@@ -509,9 +531,10 @@ async def _refuse_over_caps(
     db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID, tier: str
 ) -> list[AssessmentChatTurn]:
     """Raise for a full conversation (409) or a used-up daily question count (429);
-    otherwise return the conversation, oldest first."""
+    otherwise return the conversation's current-revision turns, oldest first."""
     settings = get_settings()
     turns = await _conversation(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    turns = current_revision_turns(turns, await _assessment_revision(db, assessment_id))
     if len(turns) >= settings.assessment_chat_max_turns:
         raise ChatError(409, "conversation_full")
     used, oldest = await _questions_in_window(db, user_id=user_id)
@@ -601,6 +624,7 @@ async def prepare_turn(
         raise ChatError(429, "daily_spend_limit")
     if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
         raise ChatError(429, "global_spend_limit")
+    revision = await _assessment_revision(db, assessment_id)
     created_at = datetime.now(UTC)
     turn, usage = _new_rows(
         assessment_id=assessment_id,
@@ -611,6 +635,7 @@ async def prepare_turn(
         record_sha=record.sha256_12,
         prompt_sha=prompt_sha,
         created_at=created_at,
+        verdict_revision=revision,
     )
     try:
         # A SAVEPOINT, so the one-in-flight IntegrityError rolls back only these two
@@ -810,9 +835,12 @@ async def _persist(
                             .execution_options(populate_existing=True)
                         )
                     ).scalar_one()
-                    conversation = await _conversation(
-                        db, assessment_id=prepared.assessment_id, user_id=prepared.user_id,
-                        tier=prepared.tier,
+                    conversation = current_revision_turns(
+                        await _conversation(
+                            db, assessment_id=prepared.assessment_id,
+                            user_id=prepared.user_id, tier=prepared.tier,
+                        ),
+                        await _assessment_revision(db, prepared.assessment_id),
                     )
                     in_window = row.id in {t.id for t in replay_window(conversation)}
                     payload = {
@@ -951,9 +979,11 @@ async def list_history(
         return None
     record, assessment = loaded
     turns = await _conversation(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
-    window = {turn.id for turn in replay_window(turns)}
+    revision = await _assessment_revision(db, assessment_id)
+    window = {turn.id for turn in replay_window(current_revision_turns(turns, revision))}
     return {
         "tier": tier,
+        "verdict_revision": revision,
         "turns": [
             turn_payload(turn, current_sha=record.sha256_12, in_window=turn.id in window)
             for turn in turns
