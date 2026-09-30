@@ -50,9 +50,9 @@ def test_extracts_the_sidecar_verdict():
 def test_action_json_still_wins_the_action_parse():
     """The sidecar is bare JSON precisely so the LAST ```json``` fence stays the
     action. If this breaks, every scout_hub post silently becomes a no-op."""
-    from src.agent.simulation import SimulationEngine
+    from src.agent.engine.post_lane import PostLane
 
-    data, body = SimulationEngine._parse_phase5_response(None, _RESPONSE)
+    data, body = PostLane._parse_phase5_response(None, _RESPONSE)
     assert data["action"] == "new_post"
     assert data["post_type"] == "opportunity_assessment"
     assert ":mag:" in body
@@ -154,9 +154,9 @@ def test_fenced_sidecar_does_not_hijack_the_action_parse():
     ``channel`` fell back to "general", and post_type came back empty, so
     persistence never fired for a named-PI assessment that posted into the
     workspace's broadest channel."""
-    from src.agent.simulation import SimulationEngine
+    from src.agent.engine.post_lane import PostLane
 
-    data, body = SimulationEngine._parse_phase5_response(None, _RESPONSE_FENCED_SIDECAR)
+    data, body = PostLane._parse_phase5_response(None, _RESPONSE_FENCED_SIDECAR)
 
     # The real action wins, not the verdict dict.
     assert data["action"] == "new_post"

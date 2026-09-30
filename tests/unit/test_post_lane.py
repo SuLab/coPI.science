@@ -18,6 +18,7 @@ import time as _time
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.engine.post_lane import PostLane
 from src.agent.simulation import SimulationEngine
 from tests.fakes import FakeSlackClient
 
@@ -28,7 +29,7 @@ def test_run_post_turn_never_touches_the_reply_lane():
     3/4 at all any more."""
     import inspect
 
-    src = inspect.getsource(SimulationEngine._run_post_turn)
+    src = inspect.getsource(PostLane._run_post_turn)
     assert "_phase3_activate_threads(" not in src
     assert "_phase4_reply_threads(" not in src
     assert "_service_reply(" not in src

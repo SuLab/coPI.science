@@ -25,6 +25,7 @@ import inspect
 import types
 
 from src.agent.agent import Agent
+from src.agent.engine.post_lane import PostLane
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from tests.fakes import FakeSlackClient
@@ -136,7 +137,7 @@ def test_scout_hub_gate_is_the_first_check_in_phase5_new_post():
     `_phase5_new_post`'s own source as the check that runs before
     ``get_settings()`` — i.e. before any other work — not merely somewhere in
     the function."""
-    src = inspect.getsource(SimulationEngine._phase5_new_post)
+    src = inspect.getsource(PostLane._phase5_new_post)
     gate_pos = src.find('agent.role == "scout_hub"')
     settings_pos = src.find("get_settings()")
     assert gate_pos != -1, "no scout_hub role check found in _phase5_new_post"

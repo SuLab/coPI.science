@@ -6,8 +6,9 @@ import pytest
 
 from src.agent import agent as agent_module
 from src.agent.agent import Agent
+from src.agent.engine.threads import Threads
 from src.agent.message_log import LogEntry
-from src.agent.simulation import SimulationEngine, _visibility_permits
+from src.agent.simulation import _visibility_permits
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 # ---------------------------------------------------------------------------
@@ -35,9 +36,9 @@ class TestVisibilityPermits:
 class TestPriorThreadsFilter:
     """Construct a bare engine (bypassing __init__) and exercise the filter."""
 
-    def _engine_with_threads(self, prior_threads: dict) -> SimulationEngine:
+    def _engine_with_threads(self, prior_threads: dict) -> Threads:
         # Bypass the heavy constructor — we only need _prior_threads for this.
-        engine = SimulationEngine.__new__(SimulationEngine)
+        engine = Threads.__new__(Threads)
         engine._prior_threads = prior_threads
         return engine
 

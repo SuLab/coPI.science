@@ -36,6 +36,7 @@ import time
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.engine.post_lane import PostLane
 from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
@@ -98,7 +99,7 @@ def test_run_post_turn_never_touches_the_cursor():
     import inspect
 
     assert "agent.state.last_seen_cursor" not in inspect.getsource(
-        SimulationEngine._run_post_turn
+        PostLane._run_post_turn
     )
 
 

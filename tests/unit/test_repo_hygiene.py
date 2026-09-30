@@ -32,6 +32,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SIMULATION = ROOT / "src/agent/simulation.py"
+ENGINE_SOURCES = [SIMULATION, *sorted((ROOT / "src/agent/engine").glob("*.py"))]
+THREADS = ROOT / "src/agent/engine/threads.py"
 
 # The only two outcomes any live code path produces. Not a wish-list: both are
 # driven for real by tests/integration/test_proposal_review.py.
@@ -163,9 +165,9 @@ def test_no_src_path_can_construct_a_proposal_outcome():
     (without which a new constructor elsewhere could reintroduce the row while
     this test stayed green).
     """
-    tree = ast.parse(SIMULATION.read_text(encoding="utf-8"))
-
-    calls = _close_thread_calls(tree)
+    calls = [
+        c for p in ENGINE_SOURCES for c in _close_thread_calls(ast.parse(p.read_text(encoding="utf-8")))
+    ]
     # The def itself is not a call, so a bare `assert calls` also pins that the
     # call sites were not all deleted out from under this test.
     assert calls, f"no _close_thread call sites found in {SIMULATION.name}"
@@ -193,7 +195,7 @@ def test_no_src_path_can_construct_a_proposal_outcome():
 
 def test_close_thread_is_the_only_thread_decision_constructor_in_src():
     """The other half of the proof above, over all of `src/`."""
-    tree = ast.parse(SIMULATION.read_text(encoding="utf-8"))
+    tree = ast.parse(THREADS.read_text(encoding="utf-8"))
     lo, hi = _function_range(tree, "_close_thread")
 
     sites: list[str] = []
@@ -203,7 +205,7 @@ def test_close_thread_is_the_only_thread_decision_constructor_in_src():
             if not isinstance(node, ast.Call) or _callee_name(node.func) != "ThreadDecision":
                 continue
             rel = path.relative_to(ROOT).as_posix()
-            inside = rel == SIMULATION.relative_to(ROOT).as_posix() and lo <= node.lineno <= hi
+            inside = rel == THREADS.relative_to(ROOT).as_posix() and lo <= node.lineno <= hi
             if not inside:
                 sites.append(f"{rel}:{node.lineno}")
 

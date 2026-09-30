@@ -66,6 +66,23 @@ EXCEPTIONS: dict[str, str] = {
         "(§7.6 source-inspection)",
     "tests/unit/test_no_collaboration_residue.py::<module>":
         "the phrase guard follows _update_agent_memory into engine/memory.py (§7.6 source-inspection)",
+    "tests/unit/test_repo_hygiene.py::<module>":
+        "source-inspection test re-targeted to the engine package: _close_thread now lives in engine/threads.py, its callers in the lanes (§7.6)",
+    "tests/unit/test_repo_hygiene.py::test_no_src_path_can_construct_a_proposal_outcome":
+        "source-inspection test re-targeted to the engine package: _close_thread now lives in engine/threads.py, its callers in the lanes (§7.6)",
+    "tests/unit/test_repo_hygiene.py::test_close_thread_is_the_only_thread_decision_constructor_in_src":
+        "source-inspection test re-targeted to the engine package: _close_thread now lives in engine/threads.py, its callers in the lanes (§7.6)",
+    "tests/unit/test_privacy_scoping.py::TestPriorThreadsFilter._engine_with_threads":
+        "hand-built engine: builds the owning unit bare instead (§7.6)",
+    "tests/characterization/test_parser_outcomes_gm.py::test_phase5_parse_outcomes_are_todays":
+        "hand-built engine: builds the owning unit (PostLane) bare instead; the asserted values are unchanged (§7.6)",
+    "tests/unit/test_reply_lane.py::test_no_call_site_bypasses_acquire_all":
+        "lock-order guard re-targeted to walk src/agent/engine/** plus the orchestrator, with a non-vacuity assertion (spec §7.6)",
+    "tests/unit/test_reply_lane.py::test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope":
+        "lock-order guard re-targeted to walk src/agent/engine/** plus the orchestrator, with a non-vacuity assertion (spec §7.6)",
+    "tests/unit/test_reply_lane.py::test_reply_lane_never_touches_the_skip_streak":
+        "source-inspection test re-targeted to ReplyLane, and it now also inspects the split helper "
+        "_activate_threads_for_all_agents that took part of _dispatch_reply_lane's body (§7.6)",
 }
 
 

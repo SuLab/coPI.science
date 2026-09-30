@@ -14,6 +14,7 @@ import pytest
 from src.agent import simulation as sim
 from src.agent.agent import Agent
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
+from src.agent.engine.post_lane import PostLane
 from src.agent.prompt_safety import delimit
 from src.agent.state import ThreadState
 from tests.fakes import FakeSlackClient
@@ -101,7 +102,7 @@ PHASE5_CASES = {
 
 @pytest.mark.parametrize("label", sorted(PHASE5_CASES))
 def test_phase5_parse_outcomes_are_todays(label):
-    engine = sim.SimulationEngine.__new__(sim.SimulationEngine)
+    engine = PostLane.__new__(PostLane)
     response, expected = PHASE5_CASES[label]
     assert engine._parse_phase5_response(response) == expected
 

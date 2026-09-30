@@ -26,6 +26,7 @@ import uuid
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.engine.reply_lane import ReplyLane
 from src.agent.message_log import LogEntry, MessageLog, _entry_allowed
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
@@ -934,7 +935,7 @@ class TestGrandfathering:
         open and entitled to finish (§8). Pinned on the call site,
         `_pending_reply_pairs`, the reply lane's selection function (it and
         `_service_reply` replaced `_phase4_reply_threads`)."""
-        src = inspect.getsource(SimulationEngine._pending_reply_pairs)
+        src = inspect.getsource(ReplyLane._pending_reply_pairs)
         assert "allowed_sender_ids=None" in src
         assert "entitled to conclude" in src
 

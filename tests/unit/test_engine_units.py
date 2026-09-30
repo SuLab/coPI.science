@@ -156,6 +156,45 @@ def test_run_announcer_is_a_unit():
     assert eng.run_announcer.max_runtime_minutes == eng.max_runtime_minutes
 
 
+def test_threads_is_a_unit_with_the_rule_1_owner_api():
+    from src.agent.engine.constants import PRIOR_THREADS_KEPT_PER_PAIR
+    from src.agent.engine.threads import Threads
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["threads"] is Threads
+    eng.threads.mark_closed("a", "b")
+    assert {"a", "b"} <= eng._closed_thread_ids
+    for i in range(PRIOR_THREADS_KEPT_PER_PAIR + 2):
+        eng.threads.restore_prior(("su", "wu"), {"channel": "c", "outcome": str(i), "summary": None})
+    kept = eng._prior_threads[("su", "wu")]
+    assert len(kept) == PRIOR_THREADS_KEPT_PER_PAIR and kept[-1]["outcome"] == str(PRIOR_THREADS_KEPT_PER_PAIR + 1)
+    t = eng.threads.activate_thread(
+        eng.agents["su"], "9.1", channel="general", other_agent_id="wu",
+        message_count=2, has_pending_reply=True, floor_armed=False,
+    )
+    assert eng.agents["su"].state.active_threads["9.1"] is t
+    assert (t.message_count, t.has_pending_reply, t.floor_armed) == (2, True, False)
+
+
+def test_post_lane_is_a_unit():
+    from src.agent.engine.post_lane import PostLane
+
+    eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={}, max_proposals=4)
+    assert sim._UNIT_CLASSES["post_lane"] is PostLane
+    assert eng.post_lane.max_proposals == 4
+    assert eng.post_lane._strip_disallowed_tags.__self__ is eng.roster
+
+
+def test_reply_lane_is_a_unit():
+    from src.agent.engine.reply_lane import ReplyLane
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["reply_lane"] is ReplyLane
+    eng._running = True
+    assert eng.reply_lane._running is True
+    assert eng._reply_sem is eng.reply_lane._reply_sem
+
+
 def test_every_self_name_in_a_unit_resolves():
     """A moved body's ``self.<name>`` must be an own member, an owned attribute, a
     ``via`` alias, a holder or a port. A missing alias would otherwise only log,

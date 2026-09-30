@@ -21,6 +21,7 @@ import uuid
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.engine.reply_lane import ReplyLane
 from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
@@ -320,10 +321,13 @@ def test_reply_lane_never_touches_the_skip_streak():
     import inspect
 
     assert "consecutive_phase5_skips =" not in inspect.getsource(
-        SimulationEngine._service_reply
+        ReplyLane._service_reply
     )
     assert "consecutive_phase5_skips =" not in inspect.getsource(
-        SimulationEngine._dispatch_reply_lane
+        ReplyLane._dispatch_reply_lane
+    )
+    assert "consecutive_phase5_skips =" not in inspect.getsource(
+        ReplyLane._activate_threads_for_all_agents
     )
 
 
@@ -748,9 +752,14 @@ def test_no_call_site_bypasses_acquire_all():
     `test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope`
     below for that.
     """
-    import inspect
+    import pathlib
 
-    src = inspect.getsource(SimulationEngine)
+    root = pathlib.Path(__file__).resolve().parents[2] / "src" / "agent"
+    src = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in [root / "simulation.py", *sorted((root / "engine").glob("*.py"))]
+    )
+    assert "acquire_all(" in src, "no lock acquisition found: the guard would pass vacuously"
     assert "_agent_locks.get(" not in src, (
         "a call site is bypassing acquire_all for _agent_locks"
     )
@@ -784,17 +793,13 @@ def test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope():
     exact snippet in isolation reports one violation.
     """
     import ast
-    import inspect
+    import pathlib
 
-    import src.agent.simulation as sim_module
-
-    source = inspect.getsource(sim_module)
-    tree = ast.parse(source)
-
-    class_node = next(
-        n for n in tree.body
-        if isinstance(n, ast.ClassDef) and n.name == "SimulationEngine"
-    )
+    root = pathlib.Path(__file__).resolve().parents[2] / "src" / "agent"
+    class_nodes = []
+    for path in [root / "simulation.py", *sorted((root / "engine").glob("*.py"))]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        class_nodes += [n for n in tree.body if isinstance(n, ast.ClassDef)]
 
     def _lock_calls(node, calls, top):
         # Do NOT descend into a nested function's body when collecting for
@@ -839,9 +844,15 @@ def test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope():
             ):
                 _check_scope(child, f"{path}.{child.name}")
 
-    for item in class_node.body:
-        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
-            _check_scope(item, item.name)
+    scopes_with_locks = 0
+    for class_node in class_nodes:
+        for item in class_node.body:
+            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                probe: list[tuple[int, str]] = []
+                _lock_calls(item, probe, top=True)
+                scopes_with_locks += bool(probe)
+                _check_scope(item, f"{class_node.name}.{item.name}")
+    assert scopes_with_locks > 0, "no lock acquisition found: the guard would pass vacuously"
 
     assert not violations, "\n".join(violations)
 
