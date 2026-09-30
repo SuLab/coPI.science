@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from src.agent.agent import Agent
 from src.agent.engine.constants import PRIOR_THREADS_KEPT_PER_PAIR
 from src.agent.engine.context import EngineContext, via
+from src.agent.engine.headlines import should_announce
 from src.agent.engine.helpers import _visibility_permits
 from src.agent.prompt_safety import delimit
 from src.agent.state import ThreadState
@@ -214,8 +215,10 @@ class Threads:
             # last moment anything knows the interview ended — before 2026-08-29
             # nothing looked, and production lost two headlines (slusher,
             # rothstein) exactly here. QUEUE only: see `_pending_headlines`.
-            held = self._assessed_threads.get(thread.thread_id)
-            if held is not None and not held.announced:
+            if thread.thread_id in self._assessed_threads and should_announce(
+                trigger="thread-close",
+                already_announced=self._headlines.is_announced(thread.thread_id),
+            ):
                 self._headlines.enqueue(thread.thread_id)
 
     async def _evict_dead_thread(self, thread_id: str) -> None:

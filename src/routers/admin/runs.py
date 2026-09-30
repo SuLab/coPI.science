@@ -13,6 +13,7 @@ from src.dependencies import get_admin_user
 from src.models import LlmCallLog, SimulationRun, User
 from src.routers.admin._common import _template_context, router, templates
 from src.services.directory import build_run_detail, list_runs_overview
+from src.services.headline_claims import held_headline_counts, list_in_doubt
 
 
 @router.get("/activity", response_class=HTMLResponse)
@@ -53,6 +54,10 @@ async def admin_activity_detail(
     detail = await build_run_detail(db, run_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    held_counts = (
+        await held_headline_counts(db, run_id) if detail["run"].status == "stopped" else None
+    )
+    in_doubt = await list_in_doubt(db, run_id)
 
     return templates.TemplateResponse(
         request,
@@ -66,6 +71,10 @@ async def admin_activity_detail(
             channels=detail["channels"],
             agent_stats=detail["agent_stats"],
             channel_stats=detail["channel_stats"],
+            held_counts=held_counts,
+            in_doubt=in_doubt,
+            msg=request.query_params.get("msg"),
+            error=request.query_params.get("error"),
         ),
     )
 

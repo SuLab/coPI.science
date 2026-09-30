@@ -119,21 +119,15 @@ class _HeldVerdict(NamedTuple):
     logging; since §8.1 the row is found by (run, thread). ``revision`` is the
     row's ``verdict_revision`` (1 for a first verdict or a pre-0054 row).
 
-    ``announced`` records whether this verdict already produced an
-    ``#assessments-summary`` headline. Deliberately separate from ``final``: a
-    CONCLUDE-ordinal reply is terminal enough to ANNOUNCE, but not enough to
-    freeze the thread, because ``thread_guidance`` renders CONCLUDE for every
-    ordinal above 11 — so a longer interview gets a run of concluding turns and
-    the last of them is still the verdict of record. Conflating the two blocks
-    that supersession. And because a headline is a public Slack post that cannot
-    be retracted, a superseded verdict that was already announced does not get
-    announced again: the row changes, the channel keeps the first word.
+    Whether an interview's headline is public lives in the headlines ledger
+    (``headlines.is_announced``, spec §8.2), not here. A CONCLUDE-ordinal reply
+    is terminal enough to ANNOUNCE but not to freeze the thread (``final``),
+    because ``thread_guidance`` renders CONCLUDE for every ordinal above 11.
     """
 
     ordinal: int
     final: bool
     slack_ts: str | None
-    announced: bool = False
     revision: int = 1
 
 

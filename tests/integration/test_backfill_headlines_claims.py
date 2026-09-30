@@ -14,6 +14,7 @@ from scripts.backfill_assessment_headlines import (
     UNCLAIMED,
     _build_arg_parser,
     engine_live_refusal,
+    newest_owed_per_thread,
     run_repair,
 )
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
@@ -161,22 +162,52 @@ async def test_the_engine_sweep_and_the_script_concurrently_post_once(factory):
         await _delete_run(factory, run_id)
 
 
+async def _supersede_in_place(factory, row_id, project):
+    """What the engine's upsert does to a landed row (migration 0055, one row per
+    run and thread): the verdict columns change, the announcement stamps stay."""
+    async with factory() as db:
+        await db.execute(
+            update(OpportunityAssessment).where(OpportunityAssessment.id == row_id)
+            .values(company_or_project=project, verdict_revision=2)
+        )
+        await db.commit()
+
+
 async def test_a_thread_with_a_posted_row_is_never_reposted_and_the_newest_row_renders(factory):
     run_id = await _new_run(factory)
     try:
-        await _owed(factory, run_id, "t-posted", posted=True)
-        await _owed(factory, run_id, "t-posted")
-        now = datetime.now(UTC)
-        await _owed(factory, run_id, "t-two", project="Older Co", created_at=now - timedelta(minutes=5))
-        await _owed(factory, run_id, "t-two", project="Newest Co", created_at=now)
+        posted_id = await _owed(factory, run_id, "t-posted", posted=True)
+        await _supersede_in_place(factory, posted_id, "Replacement Co")
+        owed_id = await _owed(factory, run_id, "t-two", project="Older Co")
+        await _supersede_in_place(factory, owed_id, "Newest Co")
         client = FakeSlackClient(agent_id="blackbird")
         assert await run_repair(
             _args("--run", str(run_id), "--apply"), factory, make_client=lambda a: client,
         ) == 0
         [text_posted] = _posts(client)
         assert "Newest Co" in text_posted and "Older Co" not in text_posted
+        assert "Replacement Co" not in text_posted
     finally:
         await _delete_run(factory, run_id)
+
+
+def test_the_picker_skips_a_posted_thread_whole_and_takes_the_newest_row():
+    """The script's per-thread picker, on rows the unique (run, thread) index no
+    longer lets the table hold together: it still guards any such set."""
+    now = datetime.now(UTC)
+
+    def row(thread_id, project, *, minutes_ago=0, posted=False):
+        return OpportunityAssessment(
+            thread_id=thread_id, company_or_project=project,
+            created_at=now - timedelta(minutes=minutes_ago),
+            summary_posted_at=now if posted else None, summary_claimed_at=None,
+        )
+
+    rows = [row("t-posted", "Posted Co", minutes_ago=9, posted=True), row("t-posted", "Later Co"),
+            row("t-two", "Older Co", minutes_ago=5), row("t-two", "Newest Co")]
+    candidates, skipped = newest_owed_per_thread(rows)
+    assert [r.company_or_project for r in candidates] == ["Newest Co"]
+    assert sorted(r.company_or_project for r, _why in skipped) == ["Later Co", "Older Co", "Posted Co"]
 
 
 async def test_a_null_thread_row_is_claimed_by_id(factory):

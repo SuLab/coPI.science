@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import uuid
 from datetime import UTC, datetime
 from urllib.parse import quote
 
@@ -18,9 +19,13 @@ from src.config import get_settings
 from src.models import AdminAuditEvent, AppSetting, SimulationCommand, SimulationRun, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services import display_format as fmt
+from src.services.headline_claims import held_headline_counts
+from src.services.runs import latest_run_id
 from src.services.simulation_control import (
     derive_panel_state,
+    engine_alive,
     enqueue_command,
+    is_finalize_stop,
     read_status,
     record_audit,
 )
@@ -115,6 +120,11 @@ async def _simulation_context(
     latest_run = (
         await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()).limit(1))
     ).scalar_one_or_none()
+    # Held headlines of a stopped run (spec §8.2): owed, never claimed.
+    held_counts = None
+    if latest_run is not None and latest_run.status == "stopped":
+        held_counts = await held_headline_counts(db, latest_run.id)
+    latest_finalized = latest_run is not None and latest_run.finalized_at is not None
 
     channels_kv = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
     channels_default = get_settings().run_start_announce_channels
@@ -152,6 +162,8 @@ async def _simulation_context(
         panel_state=panel_state,
         status_row=status_row,
         latest_run=latest_run,
+        held_counts=held_counts,
+        latest_finalized=latest_finalized,
         pending_commands=pending_commands,
         pending_start=pending_start,
         recent_commands=recent_commands,
@@ -229,6 +241,26 @@ async def admin_simulation_start(
             url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
             status_code=302,
         )
+    pending_stop = (
+        await db.execute(
+            select(SimulationCommand).where(
+                SimulationCommand.status == "pending",
+                SimulationCommand.command == "stop",
+            )
+        )
+    ).scalar_one_or_none()
+    if pending_stop is not None and is_finalize_stop(pending_stop):
+        # The finalize would stamp the run a start is about to resume or replace.
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('A Finalize run is pending; start after it finishes.')}",
+            status_code=302,
+        )
+    latest_id = await latest_run_id(db)
+    latest = await db.get(SimulationRun, latest_id) if latest_id is not None else None
+    if latest is not None and latest.finalized_at is not None:
+        # A finalized run refuses a resume (RunFinalized); the form forces Fresh
+        # and so does the route, so the operator never queues a doomed start.
+        fresh = True
     payload = {"fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals}
     try:
         await enqueue_command(
@@ -247,6 +279,55 @@ async def admin_simulation_start(
         url=f"/admin/simulation?msg={quote('Start requested.')}", status_code=302
     )
 
+
+_RUN_ID_FORM = Form(...)
+
+
+@router.post("/simulation/finalize-run")
+async def admin_simulation_finalize_run(
+    request: Request,
+    run_id: uuid.UUID = _RUN_ID_FORM,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Enqueue Finalize run for a stopped run (spec §8.2, B19): a `stop`
+    command carrying `{"finalize": true, "run_id": ...}`, the existing enum
+    value, so no enum migration. Refused while an engine holds the lock or a
+    start is pending; a live engine would only fail it. With no engine alive the
+    supervisor claims it and runs the finalize routine under the engine lock."""
+    def _refuse(message: str):
+        return RedirectResponse(
+            url=f"/admin/activity/{run_id}?error={quote(message)}", status_code=302,
+        )
+
+    if await engine_alive(db):
+        return _refuse("An engine is running — Finalize run applies to a stopped run.")
+    pending_start = (
+        await db.execute(
+            select(SimulationCommand).where(
+                SimulationCommand.status == "pending", SimulationCommand.command == "start",
+            )
+        )
+    ).scalar_one_or_none()
+    if pending_start is not None:
+        return _refuse("A start is pending — wait for it before finalizing.")
+    run = await db.get(SimulationRun, run_id)
+    if run is None or run.status != "stopped" or run.finalized_at is not None:
+        return _refuse("Only a stopped run that is not already finalized can be finalized.")
+    payload = {"finalize": True, "run_id": str(run_id)}
+    try:
+        await enqueue_command(
+            db, command="stop", payload=payload, requested_by_user_id=current_user.id,
+        )
+    except IntegrityError:
+        await db.rollback()
+        return _refuse("A stop is already pending.")
+    await record_audit(
+        db, action="simulation_finalize_requested", actor_user_id=current_user.id, payload=payload,
+    )
+    return RedirectResponse(
+        url=f"/admin/activity/{run_id}?msg={quote('Finalize run requested.')}", status_code=302,
+    )
 
 
 @router.post("/simulation/stop")

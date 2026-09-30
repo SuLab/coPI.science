@@ -309,7 +309,7 @@ async def test_a_non_closing_decide_reply_is_stored_as_provisional_on_the_real_p
         assert rows[0].subject_agent_id == "gordy"
         assert await _drops(factory, run_id) == []
         assert thread.status != "closed", "an ordinary DECIDE reply does not close"
-        assert sim._assessed_threads["t1"].announced is False, (
+        assert sim.headlines.is_announced("t1") is False, (
             "a provisional verdict is stored for staff but not announced"
         )
     finally:
@@ -675,7 +675,7 @@ async def test_a_supersession_leaves_other_threads_queued_verdicts_alone(engine)
     }
     sim._pending_assessments.append(other_run_row)
     sim._assessed_threads["t1"] = _HeldVerdict(
-        ordinal=0, final=False, slack_ts=None, announced=False,
+        ordinal=0, final=False, slack_ts=None,
     )
     try:
         thread.message_count += 2
@@ -762,7 +762,7 @@ async def test_assessed_threads_is_rehydrated_after_a_restart(engine):
         held = sim._assessed_threads["t-open"]
         assert held.ordinal == 0
         assert held.final is False
-        assert held.announced is False
+        assert sim.headlines.is_announced("t-open") is False
         assert held.slack_ts == "1.1"
         assert sim._assessed_threads["t-closed"].final is True, (
             "a thread with a ThreadDecision is closed; nothing may supersede it"

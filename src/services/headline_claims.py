@@ -132,3 +132,32 @@ async def list_in_doubt(db: AsyncSession, run_id: uuid.UUID) -> list[Opportunity
         )
         .order_by(OpportunityAssessment.summary_claimed_at)
     )).scalars().all())
+
+
+async def held_headline_counts(db, run_id) -> tuple[int, int]:
+    """Owed, never-claimed headlines of a run as ``(open, ended)`` (spec §8.2):
+    rows with ``summary_claimed_at IS NULL AND summary_posted_at IS NULL``,
+    split by whether their interview ended (a ``ThreadDecision`` exists, the
+    one ``interview_ended`` predicate). A NULL-thread row has no interview left
+    to wait for and counts as ended. Counts rows, not threads, so it matches the
+    repair script's own preview."""
+    from sqlalchemy import and_
+
+    from src.models import ThreadDecision
+
+    ended = exists().where(and_(
+        ThreadDecision.simulation_run_id == OpportunityAssessment.simulation_run_id,
+        ThreadDecision.thread_id == OpportunityAssessment.thread_id,
+    ))
+    is_ended = (OpportunityAssessment.thread_id.is_(None)) | ended
+    row = (await db.execute(
+        select(
+            func.count().filter(~is_ended),
+            func.count().filter(is_ended),
+        ).where(
+            OpportunityAssessment.simulation_run_id == run_id,
+            OpportunityAssessment.summary_claimed_at.is_(None),
+            OpportunityAssessment.summary_posted_at.is_(None),
+        )
+    )).one()
+    return int(row[0]), int(row[1])

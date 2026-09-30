@@ -160,6 +160,12 @@
         <a class="text-indigo-700 hover:underline" href="/admin/activity/{{ latest_run.id }}">{{ latest_run.id }}</a>
         — {{ latest_run.status }}, started {{ latest_run.started_at | ts }}
     </p>
+    {% if held_counts is not none %}
+    <p class="mt-1 text-base text-gray-700">
+        Held headlines for this stopped run: {{ held_counts[0] }} open interviews, {{ held_counts[1] }} ended
+        — waiting on <a class="text-indigo-700 hover:underline" href="/admin/activity/{{ latest_run.id }}">Finalize run</a> or a resume.
+    </p>
+    {% endif %}
     {% endif %}
 </div>
 </section>
@@ -175,10 +181,18 @@
         </p>
         {% endif %}
         <form action="/admin/simulation/start" method="post" class="space-y-3">
+            {% if latest_finalized %}
+            <input type="hidden" name="fresh" value="true">
+            <label class="flex items-center gap-2 text-base text-gray-700">
+                <input type="checkbox" checked disabled class="rounded border-gray-300">
+                Fresh run (required: the latest run is finalized and cannot be resumed)
+            </label>
+            {% else %}
             <label class="flex items-center gap-2 text-base text-gray-700">
                 <input type="checkbox" name="fresh" value="true" checked class="rounded border-gray-300">
                 Fresh run (mints a new simulation run id — deletes nothing)
             </label>
+            {% endif %}
             <div>
                 <label class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
                 <input type="number" name="max_runtime" value="0" min="0"

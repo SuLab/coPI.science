@@ -217,3 +217,36 @@ async def test_a_hold_open_stop_requests_operator_hold(monkeypatch, tmp_path, en
                 await db.delete(row)
                 await db.commit()
         await _cleanup(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_engine_fails_a_finalize_stop_and_keeps_running(monkeypatch, tmp_path, engine):
+    """Review Focus 3."""
+    from src.services.simulation_control import enqueue_command
+
+    eng = _engine(monkeypatch, tmp_path)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _seed_run(factory)
+    eng.session_factory = factory
+    eng.simulation_run_id = run_id
+    async with factory() as db:
+        cmd = await enqueue_command(db, command="stop",
+                                    payload={"finalize": True, "run_id": str(run_id)},
+                                    requested_by_user_id=None)
+        cmd_id = cmd.id
+    eng.run_state.running = True
+    try:
+        await eng.control._poll_control_plane(10_000.0)
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            assert row.status == "failed"
+            assert row.result == "Finalize run applies to a stopped run"
+        assert eng.run_state.running is True
+        assert not eng.run_state.stop_event.is_set()
+    finally:
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            if row is not None:
+                await db.delete(row)
+                await db.commit()
+        await _cleanup(factory, run_id)

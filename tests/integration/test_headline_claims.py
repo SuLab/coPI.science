@@ -58,13 +58,23 @@ async def factory(engine):
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def test_a_thread_claim_takes_every_unclaimed_row_once(factory):
+async def _supersede_in_place(factory, row_id):
+    """A later verdict of the same interview (migration 0055, one row per run
+    and thread): the engine's upsert rewrites the verdict and keeps the stamps."""
+    async with factory() as db:
+        await db.execute(
+            update(OpportunityAssessment).where(OpportunityAssessment.id == row_id)
+            .values(recommendation="advance", verdict_revision=2)
+        )
+        await db.commit()
+
+
+async def test_a_thread_claim_takes_the_interviews_row_once(factory):
     run_id = await _run(factory)
     try:
         a = await _row(factory, run_id, thread_id="t1")
-        b = await _row(factory, run_id, thread_id="t1")
         async with factory() as db:
-            assert sorted(await claim_thread(db, run_id, "t1")) == sorted([a, b])
+            assert await claim_thread(db, run_id, "t1") == [a]
         async with factory() as db:
             assert await claim_thread(db, run_id, "t1") == []
         assert (await _get(factory, a)).summary_claimed_at is not None
@@ -72,27 +82,28 @@ async def test_a_thread_claim_takes_every_unclaimed_row_once(factory):
         await _drop(factory, run_id)
 
 
-async def test_a_posted_sibling_blocks_the_thread(factory):
-    """SC-2: one posted row and one NULL row — the thread is never re-posted."""
+async def test_a_posted_row_superseded_in_place_blocks_the_thread(factory):
+    """SC-2: a posted verdict replaced by a later one — never re-posted."""
     run_id = await _run(factory)
     try:
-        await _row(factory, run_id, thread_id="t1", posted=True)
-        fresh = await _row(factory, run_id, thread_id="t1")
+        row_id = await _row(factory, run_id, thread_id="t1", posted=True)
+        await _supersede_in_place(factory, row_id)
         async with factory() as db:
             assert await claim_thread(db, run_id, "t1") == []
-        assert (await _get(factory, fresh)).summary_claimed_at is None
+        row = await _get(factory, row_id)
+        assert row.summary_posted_at is not None and row.summary_claimed_at is None
     finally:
         await _drop(factory, run_id)
 
 
-async def test_a_claimed_but_unposted_sibling_blocks_the_thread(factory):
+async def test_a_claimed_but_unposted_row_superseded_in_place_blocks_the_thread(factory):
     """SA5-08: two posters can never claim one thread."""
     run_id = await _run(factory)
     try:
         first = await _row(factory, run_id, thread_id="t1")
         async with factory() as db:
             assert await claim_thread(db, run_id, "t1") == [first]
-        await _row(factory, run_id, thread_id="t1")
+        await _supersede_in_place(factory, first)
         async with factory() as db:
             assert await claim_thread(db, run_id, "t1") == []
     finally:

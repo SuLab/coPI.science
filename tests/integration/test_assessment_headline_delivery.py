@@ -183,7 +183,7 @@ async def test_a_declined_interview_announces_exactly_once(engine, monkeypatch):
     try:
         assert thread.status == "closed"
         assert len(_headlines(client)) == 1, "the ⏸️ reply announced in-turn"
-        assert sim._assessed_threads["t1"].announced is True
+        assert sim.headlines.is_announced("t1") is True
         assert sim._pending_headlines == [], (
             "an already-announced verdict is not queued for a second headline"
         )
@@ -208,8 +208,8 @@ async def test_draining_twice_does_not_post_twice(engine, monkeypatch):
         await sim._drain_pending_headlines()
 
         # Drop the in-memory record BEFORE re-queueing, and do not "tidy" this
-        # line away. The first drain left `_assessed_threads["t1"]` with
-        # `announced=True`, and `_announce_owed_headline` short-circuits on that
+        # line away. The first drain left the ledger with
+        # t1 announced, and `_announce_owed_headline` short-circuits on that
         # before it issues any SQL — so with the record in place the second drain
         # would return without ever touching the database, and this test would
         # pass while the guard it names went completely unexercised. Deleting it
@@ -220,6 +220,7 @@ async def test_draining_twice_does_not_post_twice(engine, monkeypatch):
         # to rebuild from, so the DB predicate is genuinely the only thing
         # standing between a re-queued thread and a second public headline.
         del sim._assessed_threads["t1"]
+        sim.headlines._announced.discard("t1")
         sim._pending_headlines.append("t1")   # simulate a re-queue
         await sim._drain_pending_headlines()
 
@@ -319,7 +320,7 @@ async def test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later(
         assert rows[0].summary_posted_at is None, (
             "a failed post must not be recorded as posted"
         )
-        assert sim._assessed_threads["t1"].announced is False, (
+        assert sim.headlines.is_announced("t1") is False, (
             "announced is reset so the verdict stays discoverable by the "
             "close path, the shutdown sweep, and the repair script"
         )
@@ -408,7 +409,7 @@ async def test_a_slack_refused_headline_is_never_recorded_as_posted(
             "a refused post must never be recorded as posted — a stamp here "
             "hides the verdict from the sweep and from the repair script"
         )
-        assert sim._assessed_threads["t1"].announced is False, (
+        assert sim.headlines.is_announced("t1") is False, (
             "and the held verdict stays discoverable in memory too"
         )
 
@@ -497,7 +498,7 @@ async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
     # walking `created_at` would produce.
     for thread_id in [*already_announced_ids, owed_thread_id]:
         sim._assessed_threads[thread_id] = _HeldVerdict(
-            ordinal=12, final=True, slack_ts=None, announced=False,
+            ordinal=12, final=True, slack_ts=None,
         )
 
     try:
@@ -507,7 +508,7 @@ async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
             "nothing was reported LOST — the DB seed is exact, not bounded "
             "by memory order"
         )
-        assert sim._assessed_threads[owed_thread_id].announced is True, (
+        assert sim.headlines.is_announced(owed_thread_id) is True, (
             "the genuinely owed verdict was announced despite 3 stale "
             "rehydrated entries ahead of it and a bound of 2"
         )
@@ -564,8 +565,8 @@ async def test_rehydration_reads_the_durable_headline_flag(engine, monkeypatch):
 
         await sim._rehydrate_assessed_threads()
 
-        assert sim._assessed_threads["t-announced"].announced is True
-        assert sim._assessed_threads["t-owed"].announced is False
+        assert sim.headlines.is_announced("t-announced") is True
+        assert sim.headlines.is_announced("t-owed") is False
     finally:
         await _delete_run(factory, run_id)
 

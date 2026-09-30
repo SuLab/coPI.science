@@ -224,3 +224,39 @@ async def test_persist_returns_false_none_with_no_db():
     )
     assert held is False
     assert replacement_id is None
+
+async def _no_seed(*_args, **_kwargs):
+    """Stubs out ``_seed_consults_from_db`` on the engine under test.
+
+    That method conditionally opens its OWN session (only when the verdict's
+    recommendation/band owes a panel and nothing is yet recorded — see its
+    docstring), which would otherwise be an extra, hard-to-predict
+    ``session_factory()`` call ahead of the write this module's buffered-
+    replacement test needs to fail on a specific, single call. The verdict
+    fixture below uses a plain "advance" recommendation for the same reason
+    test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_it
+    stubs this out: the claim under test is about the retry/re-point
+    machinery, not the specialist floor.
+    """
+    return None
+
+
+class _FailOnceFactory:
+    """Wraps a real session factory and raises exactly once, on its very next
+    call after being armed — the same "fails the first attempt, then behaves"
+    shape as ``flaky_factory`` in
+    ``test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_
+    it``, but arming is explicit here so the ONE call this module means to
+    fail (the replacement verdict's own write) is unambiguous regardless of
+    how many session-factory calls preceded it.
+    """
+
+    def __init__(self, real_factory):
+        self._real = real_factory
+        self.armed = False
+
+    def __call__(self):
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("pool checkout timed out")
+        return self._real()

@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.agent.agent import Agent
 from src.agent.engine.constants import _ROW_LEVEL_DB_ERRORS
 from src.agent.engine.context import EngineContext, via
+from src.agent.engine.headlines import should_announce
 from src.agent.engine.helpers import _HeldVerdict
 from src.agent.engine.sidecar import (
     _ASSESSMENT_RE,
@@ -93,13 +94,12 @@ _UPSERT_NOT_COPIED = frozenset({
 class Verdicts:
     """The verdict store: what each interview concluded, held or queued for a retry.
 
-    Implements ``VerdictLedgerPort`` (the five ledger methods at the end), the
+    Implements ``VerdictLedgerPort`` (the ledger methods at the end), the
     only view ``Headlines`` has of it.
     """
 
     session_factory = via("ctx")
     simulation_run_id = via("ctx")
-    _post_claimed_headline = via("_headlines")
     _computed_score_and_band = via("_panel")
     _floor_verifiable = via("_panel")
     _seed_consults_from_db = via("_panel")
@@ -232,13 +232,6 @@ class Verdicts:
                         raw_verdict=verdict,
                     )
                     return
-                # Not refused. If the thread ALREADY holds a verdict, then by
-                # construction this one supersedes it: `_sidecar_refusal` is the
-                # only place that decision is made, and the only second verdict
-                # it lets past is one from a strictly later reply that concludes
-                # or closes the interview. Read before the write, because the
-                # write overwrites this slot.
-                superseded = self._assessed_threads.get(thread.thread_id)
                 write_id = uuid.uuid4()
                 ordinal = thread.message_count + 1
                 # The model is asked for `subject_agent_id` in the sidecar,
@@ -257,22 +250,6 @@ class Verdicts:
                     terminal = self._verdict_is_terminal(
                         agent.role, thread, closes_thread=closes_thread,
                     )
-                    # Announce once per interview. `superseded.announced` carries
-                    # forward because the earlier headline is already public and
-                    # unretractable — a second one would describe a row that
-                    # replaced a row nobody knew had been replaced.
-                    already_announced = (
-                        superseded.announced if superseded is not None else False
-                    )
-                    announce = terminal and not already_announced
-                    self._assessed_threads[thread.thread_id] = _HeldVerdict(
-                        ordinal=ordinal,
-                        # `final` is CLOSED, not merely concluding — see
-                        # `_HeldVerdict`. A CONCLUDE ordinal can repeat.
-                        final=closes_thread,
-                        slack_ts=slack_ts,
-                        announced=already_announced or announce,
-                    )
                     # A queued replacement is never claimed at capture (spec
                     # P0-08, SA6-01). With `replacement_id is None` the verdict is
                     # only on `_pending_assessments`, so a by-thread claim here
@@ -283,45 +260,39 @@ class Verdicts:
                     queued_only = replacement_id is None and bool(
                         self.session_factory and self.simulation_run_id
                     )
-                    if announce and queued_only:
-                        self._assessed_threads[thread.thread_id] = (
-                            self._assessed_threads[thread.thread_id]
-                            ._replace(announced=False)
+                    # Announce once per interview, and only a verdict that ends
+                    # it. The ledger carries an earlier announcement forward
+                    # because that headline is already public and unretractable:
+                    # a second one would describe a row that replaced a row
+                    # nobody knew had been replaced. Since a provisional sidecar
+                    # is STORED rather than refused, one interview can hold
+                    # several in turn, and design D14 says a verdict that is not
+                    # final does not post YET.
+                    announce = should_announce(
+                        trigger="capture",
+                        already_announced=self._headlines.is_announced(thread.thread_id),
+                        terminal=terminal, queued=queued_only,
+                    )
+                    self._assessed_threads[thread.thread_id] = _HeldVerdict(
+                        ordinal=ordinal,
+                        # `final` is CLOSED, not merely concluding — see
+                        # `_HeldVerdict`. A CONCLUDE ordinal can repeat.
+                        final=closes_thread,
+                        slack_ts=slack_ts,
+                    )
+                    if announce:
+                        await self._headlines.announce_captured(
+                            agent, thread, verdict, slack_ts,
                         )
+                    elif terminal and queued_only and not self._headlines.is_announced(
+                        thread.thread_id
+                    ):
                         logger.warning(
                             "[%s] The verdict for %s was queued, not committed; its "
                             "#assessments-summary headline waits for the "
                             "interview's close or the shutdown sweep",
                             agent.agent_id, thread.other_agent_id or "?",
                         )
-                    elif announce:
-                        # Announce only a verdict that ends the interview. Since a
-                        # provisional sidecar is now STORED rather than refused, a
-                        # single interview can hold several in turn — and a
-                        # headline is a public Slack post that cannot be
-                        # retracted when the row it described is superseded
-                        # moments later. Design D14 says a verdict that is not
-                        # held never posts; the same logic says a verdict that is
-                        # not final does not post YET.
-                        outcome = await self._post_claimed_headline(
-                            agent, thread, verdict, slack_ts,
-                        )
-                        if outcome == "failed":
-                            # Definitely nothing reached Slack and the claim was
-                            # released: leave the verdict discoverable to the
-                            # close path, the shutdown sweep and the repair
-                            # script. ("in_doubt" and "unclaimed" stay announced:
-                            # re-posting either could duplicate a public post.)
-                            self._assessed_threads[thread.thread_id] = (
-                                self._assessed_threads[thread.thread_id]
-                                ._replace(announced=False)
-                            )
-                            logger.warning(
-                                "[%s] The #assessments-summary headline for %s "
-                                "did not post; the verdict is stored and will be "
-                                "retried when the interview ends",
-                                agent.agent_id, thread.other_agent_id or "?",
-                            )
                     elif not terminal:
                         logger.info(
                             "[%s] Provisional verdict stored for %s (message "
@@ -1419,7 +1390,7 @@ class Verdicts:
           write against the landed row there.
         * ``revision`` is READ from ``verdict_revision``; a pre-0054 row reads
           NULL and so 1.
-        * ``announced`` is READ, not defaulted, from
+        * the headlines ledger is seeded, not defaulted, from
           ``summary_posted_at`` (migration 0041). It used to be hardcoded
           ``False`` with the reasoning that ``True`` "would suppress the
           headline for a verdict stored provisionally before the restart — a
@@ -1478,9 +1449,10 @@ class Verdicts:
                 ordinal=0,
                 final=thread_id in closed_ids,
                 slack_ts=slack_ts,
-                announced=summary_posted_at is not None,
                 revision=verdict_revision or 1,
             )
+            if summary_posted_at is not None:
+                self._headlines.mark_announced(thread_id)
         if rows:
             # `len(rows)` — the number of stored verdicts read — NOT
             # `len(self._assessed_threads)`. The two are equal only while every
@@ -1690,21 +1662,6 @@ class Verdicts:
         """The verdict ``thread_id`` holds, if any."""
         return self._assessed_threads.get(thread_id)
 
-    def is_announced(self, thread_id: str) -> bool:
-        """Whether the verdict ``thread_id`` holds already produced its headline."""
-        held = self._assessed_threads.get(thread_id)
-        return held is not None and held.announced
-
-    def mark_announced(self, thread_id: str, held: _HeldVerdict) -> None:
-        """Record that ``held`` — as the caller read it before posting — was announced.
-
-        Takes the caller's ``held`` rather than re-reading the map: that is what
-        ``_announce_owed_headline`` always wrote, even when a newer verdict replaced
-        the entry during the post (Phase 1 changes no behaviour; Phase 2 §8.2 moves
-        this ledger into Headlines).
-        """
-        self._assessed_threads[thread_id] = held._replace(announced=True)
-
     def patch_pending_summary(self, thread_id: str, posted_at: datetime) -> None:
         """Stamp every still-queued row of ``thread_id`` so a later flush does not
         write NULL over a headline that is already public."""
@@ -1712,9 +1669,6 @@ class Verdicts:
             if queued.get("thread_id") == thread_id:
                 queued["summary_posted_at"] = posted_at
 
-    def unannounced_thread_ids(self) -> list[str]:
-        """Threads whose held verdict has not been announced, in insertion order."""
-        return [
-            thread_id for thread_id, held in self._assessed_threads.items()
-            if not held.announced
-        ]
+    def assessed_thread_ids(self) -> list[str]:
+        """Threads holding a verdict, in insertion order."""
+        return list(self._assessed_threads)

@@ -15,13 +15,44 @@
         </div>
     </div>
 
+    {% if msg %}<div class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-base text-green-800">{{ msg }}</div>{% endif %}
+    {% if error %}<div class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-base text-red-800">{{ error }}</div>{% endif %}
     <!-- Actions -->
-    <div class="mb-6">
+    <div class="mb-6 flex flex-wrap items-center gap-3">
         <a href="/admin/activity/{{ run.id }}/llm-calls"
            class="inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
             View LLM Call Logs
         </a>
+        {% if run.status == 'stopped' and run.finalized_at is none %}
+        <form action="/admin/simulation/finalize-run" method="post">
+            <input type="hidden" name="run_id" value="{{ run.id }}">
+            <button type="submit" class="inline-flex items-center px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
+                Finalize run
+            </button>
+        </form>
+        {% endif %}
+        {% if held_counts is not none %}
+        <p class="text-sm text-gray-700">
+            Held headlines: {{ held_counts[0] }} open interviews, {{ held_counts[1] }} ended
+            — they post on Finalize run or when the run is resumed.
+        </p>
+        {% endif %}
+        {% if run.finalized_at %}
+        <p class="text-sm text-gray-700">Finalized {{ run.finalized_at | ts }} — this run can no longer be resumed.</p>
+        {% endif %}
     </div>
+    {% if in_doubt %}
+    <div class="mb-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        <p class="font-medium">Headlines in doubt ({{ in_doubt | length }})</p>
+        <p>Claimed more than ten minutes ago and never confirmed posted. They are never re-posted automatically:
+        check #assessments-summary, then run
+        <code>scripts/backfill_assessment_headlines.py --run {{ run.id }} --release-in-doubt &lt;id&gt;</code>
+        for any that are not there.</p>
+        <ul class="mt-1 list-disc pl-5">
+            {% for row in in_doubt %}<li><code>{{ row.id }}</code> — thread {{ row.thread_id or '—' }}, claimed {{ row.summary_claimed_at | ts }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
 
     {% include "admin/_run_detail_body.html" %}
 </div>

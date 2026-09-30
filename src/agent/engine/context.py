@@ -161,19 +161,15 @@ class RunState:
 class VerdictLedgerPort(Protocol):
     """What ``Headlines`` needs from the verdict store.
 
-    ``Verdicts`` implements it today; a later change may move the announce ledger
-    into ``Headlines`` itself.
+    ``Verdicts`` implements it. The announce ledger itself lives in ``Headlines``
+    (``is_announced`` / ``mark_announced``, spec §8.2).
     """
 
     def held_for(self, thread_id: str) -> _HeldVerdict | None: ...
 
-    def is_announced(self, thread_id: str) -> bool: ...
-
-    def mark_announced(self, thread_id: str, held: _HeldVerdict) -> None: ...
-
     def patch_pending_summary(self, thread_id: str, posted_at: datetime) -> None: ...
 
-    def unannounced_thread_ids(self) -> list[str]: ...
+    def assessed_thread_ids(self) -> list[str]: ...
 
 
 #: ``SlackIO`` calls this when Slack says a thread is gone (was ``_evict_dead_thread``).

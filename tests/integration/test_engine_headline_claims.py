@@ -63,7 +63,7 @@ async def test_a_transport_error_keeps_the_claim_in_doubt(engine, monkeypatch):
     try:
         [row] = await _assessments(factory, run_id)
         assert row.summary_claimed_at is not None and row.summary_posted_at is None
-        assert sim._assessed_threads["t1"].announced is True, "never retried automatically"
+        assert sim.headlines.is_announced("t1") is True, "never retried automatically"
         assert sim._in_doubt_headlines == ["t1"]
         await sim.stop()
         [row] = await _assessments(factory, run_id)
@@ -96,7 +96,7 @@ async def test_a_definite_failure_releases_the_claim_for_a_later_post(engine, mo
     try:
         [row] = await _assessments(factory, run_id)
         assert row.summary_claimed_at is None and row.summary_posted_at is None
-        assert sim._assessed_threads["t1"].announced is False
+        assert sim.headlines.is_announced("t1") is False
         await sim.stop()
         [row] = await _assessments(factory, run_id)
         assert row.summary_posted_at is not None
@@ -151,7 +151,7 @@ async def _two_verdict_interview(engine, *, first_posted: bool):
                 .values(summary_posted_at=func.now())
             )
             await db.commit()
-        sim._assessed_threads["t1"] = sim._assessed_threads["t1"]._replace(announced=True)
+        sim.headlines.mark_announced("t1")
     thread.message_count = 11
     failing.armed = True
     await sim._capture_hub_assessment(
@@ -167,7 +167,7 @@ async def test_a_failed_first_persist_gives_exactly_one_headline_across_a_resume
     sim, factory, run_id = await _two_verdict_interview(engine, first_posted=False)
     try:
         assert _headlines(sim.slack_clients["blackbird"]) == [], "no post from a queued verdict"
-        assert sim._assessed_threads["t1"].announced is False
+        assert sim.headlines.is_announced("t1") is False
         await sim._flush_pending_assessments()
         await sim.stop()
         assert len(_headlines(sim.slack_clients["blackbird"])) == 1
@@ -184,13 +184,22 @@ async def test_a_failed_first_persist_gives_exactly_one_headline_across_a_resume
 
 
 async def test_a_queued_replacement_inherits_the_posted_stamp(engine):
-    """Review Focus 4: stamps survive retirement onto the queued entry."""
+    """Review Focus 4: the posted stamp survives the queued replacement.
+
+    Supersede is in place (one row per run and thread, migration 0055), so the
+    stamp stays on the landed row and the flush's upsert keeps it (COALESCE)
+    while it applies the replacement verdict."""
     sim, factory, run_id = await _two_verdict_interview(engine, first_posted=True)
     try:
-        assert sim._pending_assessments[0]["summary_posted_at"] is not None
+        [before] = await _assessments(factory, run_id)
+        assert before.summary_posted_at is not None
         await sim._flush_pending_assessments()
+        assert sim._pending_assessments == []
         [row] = await _assessments(factory, run_id)
-        assert row.summary_posted_at is not None
+        assert row.id == before.id
+        assert row.verdict_revision == (before.verdict_revision or 1) + 1, "replacement applied"
+        assert row.summary_posted_at == before.summary_posted_at
+        assert sim.headlines.is_announced("t1") is True
 
         resumed, _ = _hub(factory, run_id)
         _wire_summary_channel(resumed)

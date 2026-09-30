@@ -257,7 +257,7 @@ EXPECTED_STATE_OWNER: dict[str, str] = {
     "_consult_signal_counts_by_domain": "panel", "_panel_notes_posted": "panel",
     "_panel_notes_clipped": "panel", "_panel_note_clip_warned": "panel",
     "_pending_headlines": "headlines", "_in_doubt_headlines": "headlines",
-    "_unclaimed_headlines": "headlines",
+    "_unclaimed_headlines": "headlines", "_announced": "headlines",
     "_assessed_threads": "verdicts", "_pending_assessments": "verdicts",
     "_closed_thread_ids": "threads", "_prior_threads": "threads",
     "_pending_memory_events": "memory", "_memory_drain_lock": "memory",

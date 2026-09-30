@@ -154,7 +154,7 @@ async def test_hold_stop_with_an_unreadable_owed_query_posts_nothing(engine):
         await _seed_owed(factory, run_id, ["t-ended", "t-open"], ended=["t-ended"])
         for thread_id in ("t-ended", "t-open"):
             sim._assessed_threads[thread_id] = _HeldVerdict(
-                ordinal=12, final=False, slack_ts=None, announced=False,
+                ordinal=12, final=False, slack_ts=None,
             )
         failing = _FailOnceFactory(factory)
         sim.session_factory = failing

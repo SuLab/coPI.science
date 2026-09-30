@@ -115,10 +115,10 @@ def test_headlines_and_verdicts_are_units_joined_by_the_ledger():
     held = _HeldVerdict(ordinal=3, final=False, slack_ts="1.1")
     eng._assessed_threads["t1"] = held
     assert eng.verdicts.held_for("t1") is held
-    assert eng.verdicts.unannounced_thread_ids() == ["t1"]
-    eng.verdicts.mark_announced("t1", held)
-    assert eng._assessed_threads["t1"] == held._replace(announced=True)
-    assert eng.verdicts.is_announced("t1") and eng.verdicts.unannounced_thread_ids() == []
+    assert eng.verdicts.assessed_thread_ids() == ["t1"]
+    assert not eng.headlines.is_announced("t1")
+    eng.headlines.mark_announced("t1")
+    assert eng.headlines.is_announced("t1")
     eng._pending_assessments.append({"thread_id": "t1"})
     eng.verdicts.patch_pending_summary("t1", "NOW")
     assert eng._pending_assessments == [{"thread_id": "t1", "summary_posted_at": "NOW"}]

@@ -153,7 +153,7 @@ _UNIT_CLASSES: dict[str, type] = {
 #: engine.<name>; callers use engine.<unit>.<name>.
 _NOT_FORWARDED = frozenset({
     "enqueue", "bind_ledger", "rehydrate", "held_for", "is_announced", "mark_announced",
-    "patch_pending_summary", "unannounced_thread_ids",
+    "patch_pending_summary", "assessed_thread_ids",
     "mark_closed", "restore_prior", "activate_thread", "seed_cursor", "drop_pending",
     "channel_id_for",
 })
@@ -771,7 +771,7 @@ class SimulationEngine:
 
         # Every interview still holding an unannounced verdict is over; announce it
         # now, after the final assessment flush above (Headlines owns the sweep).
-        await self._sweep_owed_headlines_at_shutdown(end_class)
+        await self.headlines.shutdown_sweep(self.run_state.end_reason)
         # AFTER the sweep, whatever it managed (spec P0-04, SA4-04): a finalize
         # stands even when headlines could not post — they were logged LOST with
         # the --finalize repair command above.

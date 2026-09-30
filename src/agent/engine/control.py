@@ -48,6 +48,7 @@ class Control:
         claimed, marked done, and turned into a real `request_stop()` — then the
         heartbeat is upserted as "stopping" instead, so the state row reflects
         the shutdown that is now underway rather than lagging a tick behind it.
+        A `stop` carrying `finalize` is finished `failed` and the run continues.
         """
         if not self.session_factory:
             return
@@ -59,6 +60,7 @@ class Control:
             from src.services.simulation_control import (
                 claim_pending,
                 finish_command,
+                is_finalize_stop,
                 upsert_status,
             )
 
@@ -78,6 +80,14 @@ class Control:
 
             async with self.session_factory() as db:
                 cmd = await claim_pending(db, command="stop")
+                if cmd is not None and is_finalize_stop(cmd):
+                    # Finalize run applies to a STOPPED run (spec §8.2): a live
+                    # engine fails it and keeps running, whatever its run_id.
+                    await finish_command(
+                        db, cmd.id, status="failed",
+                        result="Finalize run applies to a stopped run",
+                    )
+                    cmd = None
                 if cmd is not None:
                     hold = bool((cmd.payload or {}).get("hold_open"))
                     await finish_command(

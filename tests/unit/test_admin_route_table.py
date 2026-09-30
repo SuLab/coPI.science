@@ -26,6 +26,7 @@ EXPECTED_ROUTES = {
     ("GET", "/cohorts/{cohort_id}"), ("POST", "/cohorts/{cohort_id}/delete"),
     ("POST", "/cohorts/{cohort_id}/add-agent"), ("POST", "/cohorts/{cohort_id}/remove-agent"),
     ("GET", "/simulation"), ("POST", "/simulation/start"), ("POST", "/simulation/stop"),
+    ("POST", "/simulation/finalize-run"),
     ("POST", "/simulation/announce-settings"), ("POST", "/simulation/announce-template"),
 }
 
@@ -37,7 +38,7 @@ def _routes():
 
 def test_the_admin_route_set_is_unchanged():
     assert {(m, p) for _i, m, p in _routes()} == EXPECTED_ROUTES
-    assert len(_routes()) == 42
+    assert len(_routes()) == 43
 
 
 def test_literal_routes_are_registered_before_parameterised_siblings():
