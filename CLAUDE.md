@@ -122,8 +122,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   a Slack headline cannot be retracted. Before resuming a run with rows written before
   migration `0041`, stamp or repair them with `scripts/backfill_assessment_headlines.py`
   (the `0041` box in `docs/operations/migration-deploy-notes.md`). The script claims every
-  post, refuses to write while an engine is live (`--run-crashed` overrides once the
-  process is gone), and `--finalize`, `--list-in-doubt` and `--release-in-doubt` release
+  post, refuses to write (exit 2) while an engine holds the engine lock, holding it
+  itself while it writes (`--run-crashed` is a no-op), and `--finalize`, `--list-in-doubt` and `--release-in-doubt` release
   held and in-doubt headlines. Start FRESH after a prompt-set or rubric version bump, or
   one run mixes versions.
 - `--fresh` deletes nothing: the new `simulation_run_id` is the isolation, and rows

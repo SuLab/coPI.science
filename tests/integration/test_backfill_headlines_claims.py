@@ -2,6 +2,7 @@
 refuses a live engine, and selects by how the run ended."""
 import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,7 +14,6 @@ from scripts.backfill_assessment_headlines import (
     POSTED,
     UNCLAIMED,
     _build_arg_parser,
-    engine_live_refusal,
     newest_owed_per_thread,
     run_repair,
 )
@@ -30,6 +30,16 @@ from tests.integration.test_assessment_headline_delivery import _headlines, _wir
 from tests.integration.test_hub_assessment_capture_gate import _delete_run, _hub, _new_run
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _lock_on_the_test_database(pg_url, monkeypatch):
+    """Write modes take the engine lock on ``get_settings().database_url`` unless
+    given ``lock_url``; point every call in this module at the test database."""
+    import scripts.backfill_assessment_headlines as script
+
+    real = script.acquire_apply_lock
+    monkeypatch.setattr(script, "acquire_apply_lock", lambda _url: real(pg_url))
 
 
 @pytest.fixture
@@ -75,36 +85,58 @@ def _posts(client):
     return client.posted_messages.get(ASSESSMENTS_SUMMARY_CHANNEL, [])
 
 
-async def test_a_live_engine_refuses_writes_and_run_crashed_overrides(factory):
-    async with factory() as db:
-        db.add(SimulationProcessStatus(id=1, state="starting"))
-        await db.commit()
+async def test_writes_are_refused_while_an_engine_holds_the_lock(factory, pg_url):
+    from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
+
+    run_id = await _new_run(factory)
     try:
-        async with factory() as db:
-            refusal = await engine_live_refusal(db, run_crashed=False)
-            assert refusal and "starting" in refusal
-            assert await engine_live_refusal(db, run_crashed=True) is None
-        run_id = await _new_run(factory)
+        await _owed(factory, run_id, "t-1")
+        client = FakeSlackClient(agent_id="blackbird")
+        engine_lock = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+        assert await engine_lock.acquire()
         try:
-            await _owed(factory, run_id, "t1")
-            client = FakeSlackClient(agent_id="blackbird")
-            assert await run_repair(
-                _args("--run", str(run_id), "--apply"), factory, make_client=lambda a: client,
-            ) == 2
-            assert _posts(client) == []
             assert await run_repair(
                 _args("--run", str(run_id), "--apply", "--run-crashed"), factory,
-                make_client=lambda a: client,
+                make_client=lambda a: client, lock_url=pg_url,
+            ) == 2
+            assert await run_repair(
+                _args("--run", str(run_id), "--release-in-doubt", str(uuid.uuid4())), factory,
+                make_client=lambda a: client, lock_url=pg_url,
+            ) == 2
+            assert _posts(client) == []
+            # A dry run and --list-in-doubt take no lock.
+            assert await run_repair(
+                _args("--run", str(run_id)), factory,
+                make_client=lambda a: client, lock_url=pg_url,
             ) == 0
-            assert len(_posts(client)) == 1
+            assert await run_repair(
+                _args("--run", str(run_id), "--list-in-doubt"), factory,
+                make_client=lambda a: client, lock_url=pg_url,
+            ) == 0
         finally:
-            await _delete_run(factory, run_id)
+            await engine_lock.release()
+        # A stale status row no longer blocks a write: only the lock does.
+        async with factory() as db:
+            db.add(SimulationProcessStatus(id=1, state="stopping"))
+            await db.commit()
+        assert await run_repair(
+            _args("--run", str(run_id), "--apply"), factory,
+            make_client=lambda a: client, lock_url=pg_url,
+        ) == 0
+        assert len(_posts(client)) == 1
+        # The script released the lock on exit.
+        again = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+        try:
+            assert await again.acquire()
+        finally:
+            await again.release()
     finally:
         async with factory() as db:
             status = await db.get(SimulationProcessStatus, 1)
             if status is not None:
                 await db.delete(status)
                 await db.commit()
+        await _delete_run(factory, run_id)
 
 
 async def test_a_kill_between_claim_and_post_is_listed_in_doubt_and_skipped(factory, caplog):

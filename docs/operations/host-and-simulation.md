@@ -165,8 +165,10 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   (past the 25 cap, no connected hub, Slack off) with the exact repair command; `HELD n`
   names the open interviews a hold kept back. Release held ones with a resume, or with
   `--finalize --apply`, which also finalizes the run.
-- **The script refuses to write** while `/admin/simulation` reads running, stopping or
-  starting; `--run-crashed` overrides once you have confirmed the engine process is gone.
+- **The script refuses to write** (exit 2) while an engine holds the engine advisory lock,
+  and holds that lock itself for the whole write. The status row is not consulted, so a
+  clean CLI exit needs nothing extra and a dead engine frees the lock at once.
+  `--run-crashed` is a deprecated no-op. The dry run and `--list-in-doubt` take no lock.
 - **Slack-off runs work end to end** (NEW-1): `NullTransport.ajoin_channel` exists, so
   labs reach Phase 5 in DB-only runs, which the local rehearsal before a deploy needs.
 
