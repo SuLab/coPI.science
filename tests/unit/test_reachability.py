@@ -978,10 +978,15 @@ def test_static_link_resolution_coverage_is_reported():
     values = link_attr_values()
     resolvable = [v for _, v in values if _normalize_link(v)]
     assert len(values) > 100, f"only {len(values)} href/action attrs found"
-    fraction = len(resolvable) / len(values)
-    assert fraction >= 0.80, (
-        f"only {len(resolvable)}/{len(values)} ({fraction:.0%}) of href/action values "
-        "resolve to a checkable local path — the matcher probably regressed"
+    # Pinned as an absolute count of values the matcher cannot check, not a
+    # fraction: retiring pages removes resolvable links, which moves the fraction
+    # without the matcher changing (the Phase 0b retirements took it from 80.4% to
+    # 79.9% with the same 43 unresolvable values).
+    unresolvable = len(values) - len(resolvable)
+    assert unresolvable <= 43, (
+        f"{unresolvable} of {len(values)} href/action values do not resolve to a "
+        "checkable local path (was 43) — the matcher probably regressed, or a new "
+        "link is built from a variable"
     )
 
 

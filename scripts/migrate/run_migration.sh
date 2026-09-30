@@ -596,7 +596,7 @@ echo " MIGRATION COMPLETE AND VERIFIED $PRE_STAMP -> $TARGET"
 echo
 echo " STILL TO DO, in this order (docs/production-migration.md steps 8-10):"
 echo "   8. (Retired 2026-09-29.) The Slack mirror mapping repair for chains that"
-echo "      created agent_messages.content is no longer shipped; pre-0019 rows keep a"
+echo "      created agent_messages.content is no longer shipped; rows older than that keep a"
 echo "      NULL slack_ts, which the engine treats as 'not on Slack'."
 echo "   9. Serve the new code on the migrated schema:"
 echo "        ${DC[*]} up -d $SVC worker"
