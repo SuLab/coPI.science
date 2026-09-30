@@ -276,3 +276,48 @@ async def test_a_shutdown_request_stops_the_hoisted_drain(monkeypatch):
     assert (counts["persist"], counts["llm"], counts["assess"]) == (1, 1, 1), (
         f"the flushes must still run on the stopping tick: {counts}"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_operator_stop_in_the_stall_tick_keeps_the_operators_class(monkeypatch):
+    """A default Stop that lands in the same tick as a terminal stall stays a
+    TODAY end: the stall is recorded only when nothing else asked to stop."""
+    eng, _agent = _engine(monkeypatch)
+    _instrument(eng, monkeypatch)
+    eng.agents.clear()
+
+    def _select_and_stop():
+        eng.request_stop("operator")
+        return None
+
+    monkeypatch.setattr(eng, "_select_agent", _select_and_stop)
+
+    async def _no_reply_lane():
+        return 0
+
+    monkeypatch.setattr(eng, "_dispatch_reply_lane", _no_reply_lane)
+    await eng._run_main_loop()
+    assert eng._end_reason == "operator"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tick_flush_records_exception(monkeypatch):
+    """An error from the per-tick drain/flush escapes the loop as `exception`,
+    not as main's `start_failed`."""
+    eng, _agent = _engine(monkeypatch)
+    _instrument(eng, monkeypatch)
+
+    async def _boom():
+        raise RuntimeError("flush failed")
+
+    monkeypatch.setattr(eng, "_drain_and_flush", _boom)
+    monkeypatch.setattr(eng, "_select_agent", lambda: None)
+    eng.agents.clear()
+
+    async def _no_reply_lane():
+        return 0
+
+    monkeypatch.setattr(eng, "_dispatch_reply_lane", _no_reply_lane)
+    with pytest.raises(RuntimeError, match="flush failed"):
+        await eng._run_main_loop()
+    assert eng._end_reason == "exception"

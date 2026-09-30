@@ -700,6 +700,10 @@ class SimulationEngine:
         # (spec P0-08): claimed, not posted, never re-posted automatically.
         # stop() reports the ones its own sweep produced as IN DOUBT.
         self._in_doubt_headlines: list[str] = []
+        # Owed headlines whose claim another holder has (an earlier process's
+        # in-doubt claim, or the repair script): not posted here, and not LOST
+        # either, since `--apply` would skip them too.
+        self._unclaimed_headlines: list[str] = []
         # Guards against two drains running at once (main loop vs stop(), or
         # a future second call site): concurrent drains would pop same-agent
         # events into overlapping LLM calls — exactly the lost update this
@@ -1256,19 +1260,27 @@ class SimulationEngine:
                 self.request_stop("exception")
                 raise
             finally:
-                await self._drain_and_flush()
+                try:
+                    await self._drain_and_flush()
+                except Exception:
+                    # Name the real cause: without this, main records the
+                    # escaping error as `start_failed`.
+                    self.request_stop("exception")
+                    raise
 
-        if stalled:
-            # A terminal stall is a failure end (a HOLD), never a natural one.
-            self.request_stop("stall")
-        elif self._running:
-            # The loop condition ended the run while nothing asked it to stop:
-            # max runtime or a drained proposal target — a natural end, which
-            # finalizes the run (spec P0-04, B19). `_proposal_target_drained()`
-            # mutates its streak, so it is not called again to tell them apart.
-            self.request_stop(
-                "time_limit" if not self.is_within_time_limit else "target_drained"
-            )
+        if self._running:
+            # Nothing asked the loop to stop. A terminal stall is a failure end
+            # (a HOLD). Otherwise the loop condition ended the run: max runtime
+            # or a drained proposal target — a natural end, which finalizes it
+            # (spec P0-04, B19). `_proposal_target_drained()` mutates its streak,
+            # so it is not called again to tell them apart. An operator Stop that
+            # landed in the same tick as a stall keeps the operator's choice.
+            if stalled:
+                self.request_stop("stall")
+            else:
+                self.request_stop(
+                    "time_limit" if not self.is_within_time_limit else "target_drained"
+                )
         logger.info(
             "Main loop exited after %d turns (end reason: %s)", turn_count, self._end_reason,
         )
@@ -1599,12 +1611,14 @@ class SimulationEngine:
                     "for it failed", len(self._pending_headlines),
                 )
             in_doubt_before = len(self._in_doubt_headlines)
+            unclaimed_before = len(self._unclaimed_headlines)
             unposted = await self._drain_pending_headlines(
                 limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
             in_doubt = self._in_doubt_headlines[in_doubt_before:]
+            unclaimed = self._unclaimed_headlines[unclaimed_before:]
             over_budget = list(self._pending_headlines)
-            lost_attempted = max(unposted - len(in_doubt), 0)
+            lost_attempted = max(unposted - len(in_doubt) - len(unclaimed), 0)
             repair = (
                 f"python scripts/backfill_assessment_headlines.py --run "
                 f"{self.simulation_run_id} "
@@ -1639,6 +1653,17 @@ class SimulationEngine:
                     "--list-in-doubt, and --release-in-doubt <id>... for any that "
                     "did not post",
                     len(in_doubt), ", ".join(in_doubt), self.simulation_run_id,
+                )
+            if unclaimed:
+                logger.error(
+                    "CLAIMED ELSEWHERE %d #assessments-summary headline(s) at "
+                    "shutdown (threads: %s): another holder's claim (an earlier "
+                    "process's in-doubt post, or the repair script) kept this sweep "
+                    "from posting them. Check the channel, then: python "
+                    "scripts/backfill_assessment_headlines.py --run %s "
+                    "--list-in-doubt, and --release-in-doubt <id>... for any that "
+                    "did not post",
+                    len(unclaimed), ", ".join(unclaimed), self.simulation_run_id,
                 )
             if held_open:
                 logger.warning(
@@ -4572,6 +4597,8 @@ class SimulationEngine:
             score=row.weighted_score, band=row.band,
         )
         if outcome != "posted":
+            if outcome == "unclaimed":
+                self._unclaimed_headlines.append(thread_id)
             if outcome in ("in_doubt", "unclaimed") and held is not None:
                 self._assessed_threads[thread_id] = held._replace(announced=True)
             return False

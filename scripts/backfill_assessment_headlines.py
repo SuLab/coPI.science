@@ -344,11 +344,14 @@ async def post_with_claims(rows_and_texts, *, factory, client_for):
         try:
             result = client.post_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
         except Exception:
+            # Every row the thread claim took, not only the newest: releasing a
+            # subset leaves the thread claimed, and --apply then skips it.
             logger.exception(
                 "IN DOUBT: the headline for assessment %s (%s) raised with no Slack "
                 "response; its claim is kept — check the channel, then "
                 "--release-in-doubt %s if it did not post",
-                row.id, getattr(row, "subject_agent_id", "?"), row.id,
+                row.id, getattr(row, "subject_agent_id", "?"),
+                " ".join(str(i) for i in ids),
             )
             results.append((row, text, IN_DOUBT))
             continue

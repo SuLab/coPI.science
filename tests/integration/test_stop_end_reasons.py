@@ -196,3 +196,33 @@ async def test_a_queued_first_verdict_is_posted_by_the_finalize_sweep(engine):
         assert (await _run_row(factory, run_id)).finalized_at is not None
     finally:
         await _delete_run(factory, run_id)
+
+
+async def test_a_row_claimed_elsewhere_is_not_reported_lost(engine, caplog):
+    """An owed row whose claim another holder has (an earlier process's in-doubt
+    post) is skipped, and the operator is pointed at --list-in-doubt, not told
+    the headline is LOST and to re-post with --apply (which would skip it too)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    sim, factory, run_id = await _engine(engine)
+    try:
+        await _seed_owed(factory, run_id, ["t-claimed", "t-free"])
+        async with factory() as db:
+            await db.execute(
+                update(OpportunityAssessment)
+                .where(OpportunityAssessment.simulation_run_id == run_id,
+                       OpportunityAssessment.thread_id == "t-claimed")
+                .values(summary_claimed_at=datetime.now(UTC) - timedelta(minutes=11))
+            )
+            await db.commit()
+        with caplog.at_level(logging.ERROR, logger="src.agent.simulation"):
+            await sim.stop()
+        assert len(_headlines(sim.slack_clients["blackbird"])) == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not any("LOST" in m for m in errors), errors
+        assert any("CLAIMED ELSEWHERE 1" in m and "t-claimed" in m and "--list-in-doubt" in m
+                   for m in errors), errors
+    finally:
+        await _delete_run(factory, run_id)
