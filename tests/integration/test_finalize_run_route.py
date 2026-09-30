@@ -109,3 +109,24 @@ async def test_start_is_forced_fresh_when_the_latest_run_is_finalized(client, db
     cmd = (await db_session.execute(select(SimulationCommand).where(
         SimulationCommand.command == "start"))).scalar_one()
     assert cmd.payload["fresh"] is True
+
+
+async def test_start_is_refused_while_a_finalize_stop_is_pending(client, db_session, monkeypatch):
+    from urllib.parse import unquote
+
+    import src.routers.admin.simulation as sim_routes
+
+    async def _dead(db):
+        return False
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _dead)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="fin-f@example.org")
+    run = await _stopped_run(db_session)
+    db_session.add(SimulationCommand(command="stop", payload={"finalize": True, "run_id": str(run.id)}))
+    await db_session.commit()
+    resp = await client.post("/admin/simulation/start", data={"max_runtime": "0", "max_proposals": "0"},
+                             headers=auth_headers(admin.id), follow_redirects=False)
+    assert resp.status_code == 302 and "error=" in resp.headers["location"]
+    assert "Finalize run is pending" in unquote(resp.headers["location"])
+    assert (await db_session.execute(select(SimulationCommand).where(
+        SimulationCommand.command == "start"))).scalars().all() == []

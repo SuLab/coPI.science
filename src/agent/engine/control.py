@@ -40,6 +40,28 @@ def validate_engine_settings(settings) -> None:
         )
 
 
+VERDICT_SCHEMA_CONSTRAINT = "uq_opportunity_assessments_run_thread"
+
+
+async def require_verdict_schema(db) -> None:
+    """Refuse an engine start on a schema without migration 0055's
+    ``uq_opportunity_assessments_run_thread``: the verdict upsert's
+    ``ON CONFLICT (simulation_run_id, thread_id)`` needs it, so on 0054 every
+    threaded verdict write would fail. Raises ``EngineConfigError``."""
+    from sqlalchemy import text
+
+    present = await db.scalar(text(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = :name "
+        "AND conrelid = to_regclass('opportunity_assessments'))"
+    ), {"name": VERDICT_SCHEMA_CONSTRAINT})
+    if not present:
+        raise EngineConfigError(
+            f"the database has no {VERDICT_SCHEMA_CONSTRAINT} constraint (migration 0055), "
+            "so every threaded verdict write would fail. Apply the migrations "
+            "(scripts/migrate/run_migration.sh) before starting the engine."
+        )
+
+
 class EngineHeartbeat:
     """The engine's liveness task (spec §8.3).
 

@@ -908,20 +908,23 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > the thread before it deletes the first, which this constraint rejects, so the
 > old agent must not run once `0055` is applied. The new agent's
 > `ON CONFLICT (simulation_run_id, thread_id)` requires the constraint, so the
-> new agent must not run before it. Downgrade drops the constraint only.
+> new agent must not run before it; it refuses to start without it. Downgrade
+> drops the constraint only.
 
 > **Phase 2 sequence (`0054` → merge → `0055`).** No live run from before step 1 until step
 > 6 has finished: an old engine against the new constraint, or a new web app against an
 > engine with no lock, is unsafe. Before starting, confirm the production `.env` does not
 > set `max_thread_messages` to anything but 12 and that
 > `SELECT DISTINCT role FROM agents` returns only roles in `ROLE_CAPABILITIES`
-> (the table is `agents`; `scripts/migrate/preflight.py` checks it).
+> (the table is `agents`; `scripts/migrate/preflight.py` checks it, and BLOCKs on a role
+> whose `role.toml` fails strict validation too).
 >
 > 1. `pg_dump` of `copi` (`run_migration.sh` only dumps at `--apply`), and confirm no live
 >    run on `/admin/simulation` AND with `docker ps`.
 > 2. `./scripts/migrate/run_migration.sh --target 0054`: rehearse, then `--apply`.
 > 3. `scripts/migrate/merge_duplicate_assessments.py --database-url ...` (dry run by
->    default), then again with `--apply`.
+>    default), then again with `--apply`, which holds the engine lock for the whole run
+>    and is refused (exit 75) while anything else holds it.
 > 4. `./scripts/migrate/run_migration.sh`: rehearse, then `--apply`, for `0055`. Its
 >    live-run precheck is a backstop; the confirmation in step 1 is the control.
 > 5. `$DC up -d blackbird-app worker`.

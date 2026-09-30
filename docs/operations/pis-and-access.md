@@ -150,7 +150,8 @@ when a form stops working after a deploy.
 
 An `AgentRegistry.role` (table `agents`) must have an entry in
 `src/agent/role_capabilities.py`; an agent with an unknown role, or a role whose `role.toml`
-fails strict validation, is skipped by the engine (it used to run as pi_lab).
+fails strict validation, is skipped by the engine (it used to run as pi_lab). A running
+agent reassigned to such a role is removed from the live roster at the next roster poll.
 `scripts/migrate/preflight.py` BLOCKs on such a role (`check_agent_roles`).
 
 ## Account Types (PI / manager / admin / reviewer)

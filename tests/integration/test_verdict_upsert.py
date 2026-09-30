@@ -270,3 +270,45 @@ async def test_a_retried_stale_write_records_one_drop(engine):
         assert [d.raw_verdict for d in await _drops(factory, run_id)] == [{"n": 1}]
     finally:
         await _cleanup(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_ack_verdict_superseded_while_queued_is_dropped_once(engine, monkeypatch):
+    """Verdict A's first commit reaches the server but raises, so A is queued with
+    its write id and is also the landed row. Verdict B for the same thread then
+    prunes A from the queue AND supersedes the landed A: one drop, A's."""
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory, run_id, sim = await _setup(engine)
+    real_upsert = sim.verdicts.upsert
+    calls = {"n": 0}
+
+    async def _ack_lost_once(*a, **kw):
+        calls["n"] += 1
+        result = await real_upsert(*a, **kw)
+        if calls["n"] == 1:
+            raise ConnectionResetError("connection reset after COMMIT reached the server")
+        return result
+
+    monkeypatch.setattr(sim.verdicts, "upsert", _ack_lost_once)
+    va = {"subject_agent_id": "gordy", "recommendation": "pass", "scores": {k: 2 for k in RUBRIC_WEIGHTS}}
+    vb = {"subject_agent_id": "gordy", "recommendation": "pursue", "scores": {k: 4 for k in RUBRIC_WEIGHTS}}
+    thread = _thread()
+    try:
+        held, assessment_id = await sim.verdicts._persist_assessment(
+            "blackbird", "c", va, slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        assert held and assessment_id is None
+        assert [r["raw_verdict"] for r in sim.verdicts._pending_assessments] == [va]
+        thread.message_count = 5
+        held, assessment_id = await sim.verdicts._persist_assessment(
+            "blackbird", "c", vb, slack_ts="2.2", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        assert held and assessment_id is not None
+        assert sim.verdicts._pending_assessments == []
+        (row,) = await _rows(factory, run_id)
+        assert row.raw_verdict == vb
+        drops = await _drops(factory, run_id)
+        assert [d.raw_verdict for d in drops] == [va], "exactly one drop per raw verdict"
+    finally:
+        await _cleanup(factory, run_id)

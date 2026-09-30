@@ -195,3 +195,83 @@ async def test_a_decision_waits_while_messages_are_unflushed(engine, monkeypatch
                 ThreadDecision.simulation_run_id == run_id))).scalars().all()) == 1
     finally:
         await _cleanup(factory, run_id)
+
+
+class _AppendDuringFlush:
+    """A session factory whose agent_messages upsert, once it has run and before
+    the commit, calls ``hook``: a concurrent reply pair appending its own row
+    while this flush is inside its DB await."""
+
+    def __init__(self, real, hook):
+        self._real = real
+        self._hook = hook
+
+    def __call__(self):
+        return _HookedSession(self._real(), self._hook)
+
+
+class _HookedSession:
+    def __init__(self, cm, hook):
+        self._cm = cm
+        self._hook = hook
+
+    async def __aenter__(self):
+        self._db = await self._cm.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._cm.__aexit__(*exc)
+
+    async def execute(self, stmt, *a, **kw):
+        result = await self._db.execute(stmt, *a, **kw)
+        table = getattr(stmt, "table", None)
+        if getattr(stmt, "is_insert", False) and getattr(table, "name", None) == "agent_messages":
+            self._hook()
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+@pytest.mark.asyncio
+async def test_a_row_appended_during_the_flush_does_not_queue_the_verdict(engine, monkeypatch):
+    """B24: another reply pair's row arriving mid-flush is not this verdict's
+    reply row, so the verdict upserts at once and its capture-time headline
+    posts; the ThreadDecision is not queued either."""
+    from tests.integration.test_assessment_headline_delivery import (
+        _headlines,
+        _wire_summary_channel,
+    )
+
+    factory, run_id, sim, hub = await _setup(engine)
+    _wire_summary_channel(sim)
+    seq = {"n": 0}
+
+    def _other_pair_appends():
+        seq["n"] += 1
+        sim.ctx.message_log.append(LogEntry(
+            ts=f"other.{seq['n']}", channel="c", sender_agent_id="lab2", sender_name="x",
+            content="another pair's reply", thread_ts="t2", posted_at=100.0 + seq["n"],
+        ))
+
+    sim.ctx.session_factory = _AppendDuringFlush(factory, _other_pair_appends)
+    upserts = []
+    real_upsert = sim.verdicts.upsert
+
+    async def _counted(*a, **kw):
+        upserts.append(1)
+        return await real_upsert(*a, **kw)
+
+    monkeypatch.setattr(sim.verdicts, "upsert", _counted)
+    (thread,) = _arm_replies(sim, hub, monkeypatch, ((1, "t1"),))
+    client = sim.slack_clients["blackbird"]
+    try:
+        await sim.reply_lane._reply_to_thread(hub, thread)
+        assert seq["n"] >= 1, "the hook never ran, so the race was not exercised"
+        assert sim.persistence._pending_persist, "the other pair's row is still buffered"
+        assert upserts == [1], "the verdict upserted immediately"
+        assert sim.verdicts._pending_assessments == []
+        assert sim.threads._pending_decisions == []
+        assert len(_headlines(client)) == 1, "the capture-time headline posted"
+    finally:
+        await _cleanup(factory, run_id)

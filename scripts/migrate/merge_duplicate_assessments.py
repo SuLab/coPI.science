@@ -5,7 +5,10 @@ precheck refuses while any group remains). Dry run by default; ``--apply``
 writes. One short transaction per group, so a failure costs one group, not the
 run. It refuses to run at all while an engine holds the engine lock
 (``simulation_control.engine_alive``): a live engine would be writing verdict
-rows while this tool deletes them.
+rows while this tool deletes them. ``--apply`` itself holds that lock
+(``SessionAdvisoryLock(url, ENGINE_LOCK_KEY)``) for the whole run, so no engine
+can start or resume while it merges, and it is refused if the lock cannot be
+taken. The dry run takes no lock.
 
 For each group, oldest to newest by created_at:
 
@@ -32,7 +35,7 @@ For each group, oldest to newest by created_at:
    tool never deletes ``simulation_runs``.
 
 Exit codes: 0 success (or nothing to do), 1 a group failed, 64 usage error,
-75 an engine is alive. Take an explicit ``pg_dump`` of the database before
+75 an engine is alive (or, for ``--apply``, the engine lock is held). Take an explicit ``pg_dump`` of the database before
 ``--apply`` (spec §12 step 0).
 """
 from __future__ import annotations
@@ -176,7 +179,27 @@ async def _engine_alive(conn) -> bool:
     return await engine_alive(AsyncSession(bind=conn))
 
 
+_REFUSED_ALIVE = ("REFUSED: an engine holds the engine lock. Stop the run and confirm "
+                  "with docker ps that no engine is up, then retry.")
+
+
 async def run(dsn: str, *, apply: bool) -> int:
+    """Dry run, or with ``apply`` merge while holding the engine lock."""
+    if not apply:
+        return await _run(dsn, apply=False)
+    from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
+
+    lock = SessionAdvisoryLock(normalise_dsn(dsn), ENGINE_LOCK_KEY)
+    try:
+        if not await lock.acquire():
+            print(_REFUSED_ALIVE, file=sys.stderr)
+            return EX_ENGINE_ALIVE
+        return await _run(dsn, apply=True)
+    finally:
+        await lock.release()
+
+
+async def _run(dsn: str, *, apply: bool) -> int:
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -184,11 +207,12 @@ async def run(dsn: str, *, apply: bool) -> int:
     failures = 0
     try:
         async with engine.connect() as conn:
-            alive = await _engine_alive(conn)
+            # Under --apply this process holds the lock itself, so the liveness
+            # read would see it; the acquire in run() was that check.
+            alive = False if apply else await _engine_alive(conn)
             await conn.rollback()
             if alive:
-                print("REFUSED: an engine holds the engine lock. Stop the run and confirm "
-                      "with docker ps that no engine is up, then retry.", file=sys.stderr)
+                print(_REFUSED_ALIVE, file=sys.stderr)
                 return EX_ENGINE_ALIVE
             groups = await find_groups(conn)
             await conn.rollback()

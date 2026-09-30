@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -105,6 +106,11 @@ class HeadlineAnnouncer:
       stays, so nothing re-posts it automatically; the operator checks Slack
       and runs ``--release-in-doubt``;
     * ``"skipped"``: the claim found the thread already claimed or posted.
+
+    ``client_for`` and ``summary_channel_id`` may block (the Finalize build
+    connects a client with ``auth.test`` and resolves the channel through
+    ``conversations.list``, which sleeps on a 429), so ``announce`` runs them in
+    a worker thread, off the supervisor's event loop.
     """
 
     def __init__(
@@ -127,8 +133,11 @@ class HeadlineAnnouncer:
         self, inputs: HeadlineInputs, *, trigger: str,
         assessment_id: uuid.UUID | None = None,
     ) -> str:
-        client = self._client_for(inputs.agent_id)
-        channel_id = self._summary_channel_id(client) if client is not None else None
+        client = await asyncio.to_thread(self._client_for, inputs.agent_id)
+        channel_id = (
+            await asyncio.to_thread(self._summary_channel_id, client)
+            if client is not None else None
+        )
         if not channel_id or not client or not client.is_connected:
             logger.warning(
                 "[%s] Skipping #assessments-summary headline for thread %s: "
@@ -333,6 +342,7 @@ class Headlines:
     _assessments_summary_channel_id = via("_channel_directory")
     _channel_id_map = via("_channel_directory")
     _end_reason = via("_run_state", "end_reason")
+    _lock_lost = via("_run_state", "lock_lost")
 
     OWNED_STATE: tuple[str, ...] = (
         "_announced",
@@ -949,19 +959,50 @@ class Headlines:
         """Threads holding a verdict whose headline is not public, in insertion order."""
         return [t for t in self._ledger.assessed_thread_ids() if not self.is_announced(t)]
 
-    async def shutdown_sweep(self, end_reason: str | None) -> None:
+    async def shutdown_sweep(
+        self, end_reason: str | None, *, only: set[str] | None = None,
+    ) -> None:
         """Announce every owed headline at a stop, decided by the end-reason
         class (``should_announce``, trigger ``shutdown``): ``end_reason`` None
-        is the default Stop (TODAY). Never raises."""
-        end_class = end_reason_class(end_reason or "operator")
-        await self._sweep_owed_headlines_at_shutdown(end_class)
+        is the default Stop (TODAY). Never raises.
 
-    async def _sweep_owed_headlines_at_shutdown(self, end_class: str) -> None:
+        ``only`` limits the sweep to those threads: ``stop()``'s second sweep,
+        for verdicts and decisions that landed only in its final flush (a
+        failure path). Headlines the first sweep left queued past its bound stay
+        queued and are not posted by it. After a lost engine lock the sweep posts
+        nothing: another writer may hold the lock, so the owed headlines are
+        left for the repair script."""
+        if self._lock_lost:
+            logger.error(
+                "The engine lock was lost: the shutdown sweep posts no "
+                "#assessments-summary headline, since another engine or the repair "
+                "script may hold the lock now. The owed headlines are left for: "
+                "python scripts/backfill_assessment_headlines.py --run %s --apply "
+                "(ended interviews), or --finalize --apply to release them all",
+                self.simulation_run_id,
+            )
+            return
+        end_class = end_reason_class(end_reason or "operator")
+        if only is None:
+            await self._sweep_owed_headlines_at_shutdown(end_class)
+            return
+        stashed, self._pending_headlines = self._pending_headlines, []
+        try:
+            await self._sweep_owed_headlines_at_shutdown(end_class, only=only)
+        finally:
+            self._pending_headlines.extend(
+                t for t in stashed if t not in self._pending_headlines
+            )
+
+    async def _sweep_owed_headlines_at_shutdown(
+        self, end_class: str, *, only: set[str] | None = None,
+    ) -> None:
         """Announce, at shutdown, the headlines the run still owes (spec §7.1: the
-        shutdown sweep block of ``stop()``). Runs after the final assessment flush;
-        never raises (the block's own except logs), so ``stop()`` always reaches its
-        "Simulation stopping..." line. ``end_class`` is the end-reason class
-        ``stop()`` derived (``src/agent/end_reasons.py``)."""
+        shutdown sweep block of ``stop()``). Runs after the step-1 flushes of
+        ``stop()``; never raises (the block's own except logs), so ``stop()``
+        always reaches its "Simulation stopping..." line. ``end_class`` is the
+        end-reason class ``stop()`` derived (``src/agent/end_reasons.py``);
+        ``only``, when given, restricts it to those threads."""
         # Every interview still holding an unannounced verdict is over: the run
         # is ending, so no later turn will ever conclude or supersede it. This
         # is the last chance to honour D12, and it must run AFTER the assessment
@@ -1019,6 +1060,9 @@ class Headlines:
                 )
             if owed_thread_ids is None:
                 owed_thread_ids = self._unannounced_thread_ids()
+            if only is not None:
+                owed_thread_ids = [t for t in owed_thread_ids if t in only]
+                held_open = [t for t in held_open if t in only]
             for thread_id in owed_thread_ids:
                 if self.is_announced(thread_id):
                     continue

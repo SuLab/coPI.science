@@ -448,14 +448,16 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   which is the same class of damage the transliteration exists to prevent.
 
 **Headline ledger and claims.** A headline posts at most once per interview. The engine
-(`HeadlineAnnouncer`, `src/agent/engine/headlines.py`) and
+(`Headlines._post_claimed_headline`, `src/agent/engine/headlines.py`) and
 `scripts/backfill_assessment_headlines.py` both claim the row (`summary_claimed_at`)
 before posting and stamp `summary_posted_at` after. A transport error with no Slack
 response leaves the claim IN DOUBT (claimed, not posted, older than 10 minutes): nothing
 re-posts it. List such rows with `--list-in-doubt`, check `#assessments-summary`, and
 release a headline that did not post with `--release-in-doubt <id>`. Every write mode of
 the script holds the engine lock, so it cannot run beside an engine. **Finalize run** on
-the admin page runs the same announcer for a stopped run.
+the admin page follows the same claim protocol for a stopped run through
+`HeadlineAnnouncer`, the engine-free announcer the supervisor builds; nothing else uses
+`HeadlineAnnouncer`.
 
 **Drop vocabulary.** `assessment_drops.reason` includes `reply_failed`: an interview
 abandoned after repeated non-transient model errors. `reply_failed` and `empty_reply`

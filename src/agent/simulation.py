@@ -745,6 +745,9 @@ class SimulationEngine:
         (`src/agent/end_reasons.py`): TODAY and FINALIZE announce every owed
         headline (capped at ``HEADLINES_MAX_AT_SHUTDOWN``), HOLD only those of
         ended interviews; HOLD sets ``held_at`` and FINALIZE ``finalized_at``.
+        After a lost engine lock it posts nothing (the repair script owns the
+        owed headlines). When a verdict or decision was still queued at the
+        final flush, the sweep runs again for those threads once it lands.
         """
         self._running = False
         self._stop_event.set()
@@ -804,8 +807,15 @@ class SimulationEngine:
         #    the per-tick path says.
         await self._flush_persisted(force_stats=True, final=True)
         await self._flush_llm_logs(final=True)
-        await self.threads.flush_pending_decisions(final=True)
-        await self._flush_pending_assessments(final=True)
+        late = set(await self.threads.flush_pending_decisions(final=True) or ())
+        late |= set(await self._flush_pending_assessments(final=True) or ())
+        late.discard(None)
+        # 4b. Failure path only: a verdict or decision step 1 could not write
+        #     landed just now, after the sweep read the database. Sweep again
+        #     for those threads (idempotent through the claims and the ledger).
+        #     On the normal path nothing was still queued, so this never runs.
+        if late:
+            await self.headlines.shutdown_sweep(self.run_state.end_reason, only=late)
 
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
         # `clear` share meant the panel could not discriminate; a 48-consult

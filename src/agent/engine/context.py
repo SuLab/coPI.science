@@ -178,6 +178,10 @@ class RunState:
         # request_stop, and read by stop() to choose the shutdown sweep. None
         # means nothing recorded one — stop() then behaves exactly as before.
         self.end_reason: str | None = None
+        # True once the engine lock was lost (`lock_lost`), whatever reason the
+        # precedence kept: the shutdown sweep then posts nothing, because
+        # another writer may hold the lock by the time it runs.
+        self.lock_lost = False
 
     def request_stop(self, reason: str = "operator") -> None:
         """Ask the main loop to exit — safe to call from a signal handler.
@@ -194,6 +198,8 @@ class RunState:
         interpreter may cancel at shutdown (R2).
         """
         self.end_reason = stronger_reason(self.end_reason, reason)
+        if reason == "lock_lost":
+            self.lock_lost = True
         self.running = False
         self.stop_event.set()
 

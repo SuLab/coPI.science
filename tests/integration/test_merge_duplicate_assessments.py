@@ -254,3 +254,47 @@ def test_dry_run_is_the_default():
     mod = _load()
     args = mod.build_arg_parser().parse_args(["--database-url", "postgresql://x/y"])
     assert args.apply is False
+
+
+@pytest.mark.asyncio
+async def test_apply_holds_the_engine_lock_for_the_whole_run(pg_url, monkeypatch):
+    from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
+
+    mod = _load()
+    seen = {}
+
+    async def _groups_while_probing(conn):
+        probe = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+        try:
+            seen["engine_could_start"] = await probe.acquire()
+        finally:
+            await probe.release()
+        return []
+
+    monkeypatch.setattr(mod, "find_groups", _groups_while_probing)
+    assert await mod.run(pg_url, apply=True) == 0
+    assert seen == {"engine_could_start": False}
+    after = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+    try:
+        assert await after.acquire(), "released on exit"
+    finally:
+        await after.release()
+
+
+@pytest.mark.asyncio
+async def test_apply_is_refused_while_the_engine_lock_is_held(pg_url, monkeypatch, capsys):
+    from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
+
+    mod = _load()
+
+    async def _never(conn):
+        raise AssertionError("nothing is read or merged without the lock")
+
+    monkeypatch.setattr(mod, "find_groups", _never)
+    holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+    assert await holder.acquire()
+    try:
+        assert await mod.run(pg_url, apply=True) == mod.EX_ENGINE_ALIVE
+    finally:
+        await holder.release()
+    assert "REFUSED" in capsys.readouterr().err

@@ -129,6 +129,20 @@ class TestSyncRosterFromDb:
         assert "wiseman" not in engine.slack_clients
         assert "wisemanbot" not in engine._bot_name_to_id
 
+    async def test_a_live_agent_reassigned_to_an_invalid_role_is_removed(self, monkeypatch, caplog):
+        """Spec §8.5: an agent whose role is not available is logged and skipped,
+        a running one included; it never keeps running under its old role."""
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su", role="grantbot"), _row("wiseman")],
+                              existing_agents=["su", "wiseman"])
+        with caplog.at_level("INFO", logger="src.agent.simulation"):
+            await engine._sync_roster_from_db()
+        assert set(engine.agents) == {"wiseman"}
+        assert "su" not in engine.slack_clients and "subot" not in engine._bot_name_to_id
+        assert "role 'grantbot' is not available" in caplog.text
+        assert "removing it from the live roster" in caplog.text
+        assert "keeping it off the roster" not in caplog.text
+
     async def test_skips_active_agent_without_token(self, monkeypatch):
         _patch_client(monkeypatch)
         # newly-active but tokenless (DB null) and no env token configured

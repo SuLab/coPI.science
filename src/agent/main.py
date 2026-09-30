@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.agent.agent import Agent
 from src.agent.engine.context import RunState
-from src.agent.engine.control import EngineAlreadyRunning, EngineHeartbeat, validate_engine_settings
+from src.agent.engine.control import (
+    EngineAlreadyRunning,
+    EngineHeartbeat,
+    require_verdict_schema,
+    validate_engine_settings,
+)
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.prompt_snapshot import PromptSnapshot
 from src.agent.prompt_snapshot import install as install_prompt_snapshot
@@ -249,6 +254,10 @@ async def _run_simulation(
 
     ``--no-db`` and ``--mock`` runs take no lock and start no heartbeat: they
     must not need Postgres, and a mock run must not look like a live engine.
+
+    The lock is released on every exit path, including a failed acquire; the
+    heartbeat stop, its engine's dispose and the lock release each run even
+    when an earlier one raises.
     """
     settings = get_settings()
     validate_engine_settings(settings)
@@ -260,41 +269,50 @@ async def _run_simulation(
     lock = None
     if locking:
         lock = SessionAdvisoryLock(settings.database_url, ENGINE_LOCK_KEY)
-        if not await lock.acquire():
+        try:
+            acquired = await lock.acquire()
+        except BaseException:
+            await lock.release()
+            raise
+        if not acquired:
             await lock.release()
             raise EngineAlreadyRunning(
                 "another simulation engine holds the engine lock — nothing was started"
             )
-    run_state = RunState()
-    early.bind(run_state)
-    if _supervisor_shutdown_requested():
-        run_state.request_stop("signal")
     heartbeat = None
     hb_engine = None
-    if locking:
-        hb_engine = create_async_engine(
-            settings.database_url, pool_size=1, max_overflow=0, pool_pre_ping=True,
-        )
-        heartbeat = EngineHeartbeat(
-            lock=lock, run_state=run_state,
-            session_factory=async_sessionmaker(hb_engine, expire_on_commit=False),
-        )
-        heartbeat.tick_detail = {
-            "fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals,
-        }
-        heartbeat.start()
     try:
+        run_state = RunState()
+        early.bind(run_state)
+        if _supervisor_shutdown_requested():
+            run_state.request_stop("signal")
+        if locking:
+            hb_engine = create_async_engine(
+                settings.database_url, pool_size=1, max_overflow=0, pool_pre_ping=True,
+            )
+            heartbeat = EngineHeartbeat(
+                lock=lock, run_state=run_state,
+                session_factory=async_sessionmaker(hb_engine, expire_on_commit=False),
+            )
+            heartbeat.tick_detail = {
+                "fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals,
+            }
+            heartbeat.start()
         await _run_simulation_locked(
             max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals,
             run_state=run_state, heartbeat=heartbeat,
         )
     finally:
-        if heartbeat is not None:
-            await heartbeat.stop()
-        if hb_engine is not None:
-            await hb_engine.dispose()
-        if lock is not None:
-            await lock.release()
+        try:
+            if heartbeat is not None:
+                await heartbeat.stop()
+        finally:
+            try:
+                if hb_engine is not None:
+                    await hb_engine.dispose()
+            finally:
+                if lock is not None:
+                    await lock.release()
 
 
 async def _run_simulation_locked(
@@ -327,6 +345,10 @@ async def _run_simulation_locked(
     try:
         _sf = _asm(_engine, expire_on_commit=False)
         async with _sf() as _db:
+            # Refuse before any write, and before archiving working memory, on a
+            # schema the verdict upsert cannot run on (migration 0055).
+            if not no_db:
+                await require_verdict_schema(_db)
             if all_agents:
                 _stmt = _select(
                     _AR.agent_id, _AR.bot_name, _AR.pi_name,

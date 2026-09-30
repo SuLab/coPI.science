@@ -1476,9 +1476,9 @@ async def run_preflight(args) -> Report:
             lambda: check_legacy_inventory(conn, rev),
         )
 
-        # --- 11b. every agent role has a capability entry (spec §8.5) ------------
+        # --- 11b. every agent role is valid (spec §8.5) ------------
         await report.add_guarded(
-            "Every agent role has a ROLE_CAPABILITIES entry",
+            "Every agent role has a ROLE_CAPABILITIES entry and a valid manifest",
             lambda: check_agent_roles(conn),
         )
 
@@ -2115,19 +2115,25 @@ async def check_legacy_inventory(conn, rev: str | None):
 
 async def check_agent_roles(conn):
     """Phase 2 (spec §8.5, §12): every agent's ``role`` (the ``AgentRegistry``
-    model, table ``agents``) must have a ``ROLE_CAPABILITIES`` entry. Before
-    Phase 2 an unknown role ran as pi_lab; from Phase 2 the engine skips its
-    agents, so this surfaces them first."""
-    title = "Every agent role has a ROLE_CAPABILITIES entry"
+    model, table ``agents``) must have a ``ROLE_CAPABILITIES`` entry and pass
+    ``src.agent.roles.role_problem`` (its manifest validates strictly and agrees
+    with the entry). Before Phase 2 an unknown role ran as pi_lab; from Phase 2
+    the engine skips its agents, so this surfaces them first."""
+    title = "Every agent role has a ROLE_CAPABILITIES entry and a valid manifest"
     if not await table_exists(conn, "agents"):
         return (title, WARN, "the agents table does not exist; nothing to check.", [], {})
     from src.agent.role_capabilities import ROLE_CAPABILITIES  # dependency-free module
+    from src.agent.roles import role_problem
 
     roles = [r["role"] for r in await fetch_all(
         conn, "SELECT DISTINCT role FROM agents ORDER BY role"
     )]
     unknown = [r for r in roles if r not in ROLE_CAPABILITIES]
-    data = {"roles": roles, "unknown": unknown}
+    problems = {
+        r: problem for r in roles if r not in unknown
+        for problem in [role_problem(r)] if problem is not None
+    }
+    data = {"roles": roles, "unknown": unknown, "problems": problems}
     if unknown:
         return (
             title, BLOCK,
@@ -2137,6 +2143,17 @@ async def check_agent_roles(conn):
                 "SELECT agent_id, role, status FROM agents WHERE role NOT IN "
                 f"({', '.join(repr(r) for r in sorted(ROLE_CAPABILITIES))});",
                 "Fix each role on the admin agent page, then re-run this preflight.",
+            ],
+            data,
+        )
+    if problems:
+        return (
+            title, BLOCK,
+            "agents holds role(s) the engine would skip: "
+            + "; ".join(f"{r}: {problem}" for r, problem in problems.items()),
+            [
+                "Fix prompts/roles/<role>/role.toml (or the ROLE_CAPABILITIES entry) "
+                "in the image being deployed, then re-run this preflight.",
             ],
             data,
         )

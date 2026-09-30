@@ -237,15 +237,17 @@ class Threads:
                 exc_info=True,
             )
 
-    async def flush_pending_decisions(self, *, final: bool = False) -> None:
+    async def flush_pending_decisions(self, *, final: bool = False) -> list[str]:
         """Retry queued ThreadDecisions after their messages flushed (S1-12).
         ``final=True`` is the last attempt at shutdown: it writes even behind an
         unflushed message buffer (the rows would otherwise be lost for good) and
-        logs any that still fail as LOST with their thread ids."""
+        logs any that still fail as LOST with their thread ids. Returns the
+        thread ids of the decisions it wrote (``stop()`` sweeps their headlines
+        again)."""
         if not self._pending_decisions:
-            return
+            return []
         if not final and not await self.flush_before_dependent():
-            return
+            return []
         rows, self._pending_decisions = self._pending_decisions, []
         failed: list[dict] = []
         last_exc: Exception | None = None
@@ -257,7 +259,7 @@ class Threads:
                 last_exc = exc
         if not failed:
             logger.info("Flushed %d queued thread decision(s) to DB", len(rows))
-            return
+            return [r["thread_id"] for r in rows]
         if final:
             logger.error(
                 "LOST %d thread decision(s) at shutdown (threads: %s): %s",
@@ -268,6 +270,7 @@ class Threads:
             logger.warning(
                 "%d thread decision(s) still failing; re-queued: %s", len(failed), last_exc,
             )
+        return [r["thread_id"] for r in rows if not any(r is f for f in failed)]
 
     async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.

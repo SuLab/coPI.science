@@ -145,6 +145,7 @@ Why a run ended decides what its shutdown sweep announces (`src/agent/end_reason
 | Stop, SIGTERM | admin Stop; `docker stop -t 420` | every owed headline, open interviews included, capped at 25 | resumable |
 | Stop — hold open interviews | the second admin button | only interviews with a `thread_decisions` row | `held_at` set |
 | stall, escaped exception, failed start | automatic | as the hold | `held_at` set |
+| lost engine lock | automatic | none: the owed headlines are left for the repair script | `held_at` set |
 | natural end | `--max-runtime` reached, `--max-proposals` drained | every owed headline | `finalized_at` set; a resume is refused (`RunFinalized`), start fresh |
 
 The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a natural end.
@@ -165,6 +166,11 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   (past the 25 cap, no connected hub, Slack off) with the exact repair command; `HELD n`
   names the open interviews a hold kept back. Release held ones with a resume, or with
   `--finalize --apply`, which also finalizes the run.
+- **A second sweep, failure path only.** A verdict or thread decision that could not be
+  written before the sweep (its message rows would not flush) is written by `stop()`'s
+  final flush, after the memory drain; the sweep then runs again for those interviews
+  only, so their headlines still post before the process exits. A healthy stop has
+  nothing queued at that point and sweeps once.
 - **The script refuses to write** (exit 2) while an engine holds the engine advisory lock,
   and holds that lock itself for the whole write. The status row is not consulted, so a
   clean CLI exit needs nothing extra and a dead engine frees the lock at once.
@@ -184,7 +190,7 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   (every 30 s, on its own connection) is older than 120 s; Stop still reaches it. A fresh
   `running` row with no lock holder (an old lock-less engine, or one that crashed within
   120 s) reads `idle`: Stop answers "Nothing is running." and Start is refused only while a
-  start is pending.
+  start or a Finalize run stop is pending.
 - **Stops are claimed only by the engine's control poll** (every `CONTROL_POLL_INTERVAL`,
   30 s), so a stop lands on the same tick as before; the heartbeat task never claims a
   command. A stop still pending after a run, and a Finalize run stop pending at boot, is
@@ -194,9 +200,17 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
 - **Finalize run** is the button on a stopped run's `/admin/activity/<id>` page
   (`POST /admin/simulation/finalize-run`). It announces the owed headlines of that run,
   then sets `finalized_at`. A live engine fails the command ("Finalize run applies to a
-  stopped run"). After a finalized run the Start form forces Fresh.
-- **A lost lock connection** ends the run with the HOLD reason `lock_lost`: only ended
-  interviews are announced and the run is marked held.
+  stopped run"). Start is refused while a Finalize run stop is pending ("A Finalize run is
+  pending; start after it finishes."). After a finalized run the Start form forces Fresh.
+- **A lost lock connection** ends the run with the HOLD reason `lock_lost` and the run is
+  marked held. The shutdown sweep then posts NO headline, because another engine or the
+  repair script may hold the lock by then; the ERROR line names the repair command
+  (`scripts/backfill_assessment_headlines.py --run <id> --apply` for ended interviews, or
+  `--finalize --apply` to release them all).
+- **Schema check at start.** The engine refuses to start (before any write or memory
+  archive) on a database without `uq_opportunity_assessments_run_thread` (migration
+  `0055`), since every threaded verdict write would fail there. The supervisor records the
+  start `failed` with the message; apply the migrations and start again.
 - **Circuit breaker.** Repeated model-call failures across interviews open an engine-wide
   breaker; `/admin/simulation` shows "LLM calls paused" and calls resume after ten minutes.
   A single interview whose replies keep failing with non-transient errors while other calls

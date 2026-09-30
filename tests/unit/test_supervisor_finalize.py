@@ -150,3 +150,78 @@ async def test_a_start_claimed_while_an_engine_is_alive_fails(engine, pg_url):
     finally:
         await holder.release()
         await _cleanup(factory, list(seeded.values()), [])
+
+
+@pytest.mark.asyncio
+async def test_a_sigterm_during_the_post_run_settle_reaches_the_supervisor(engine, pg_url, monkeypatch):
+    """Correction 9: after run_fn returns, the supervisor's own handlers are back,
+    so a SIGTERM during the post-run settle (a finalize can post to Slack) sets
+    its shutdown flag instead of landing in the engine's spent handler."""
+    import asyncio
+    import os
+    import signal
+
+    import src.agent.supervisor as sup
+    from tests.unit.test_supervisor import _hook_before_nth_session
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded: dict[str, uuid.UUID] = {}
+    engine_handler_hits: list[int] = []
+
+    async def seed_start():
+        seeded["start"] = await _cmd(factory, "start", {"fresh": True})
+
+    async def run_fn(*a):
+        # What _run_simulation does: the engine installs its own handlers.
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda: engine_handler_hits.append(1))
+
+    real_settle = sup._settle_pending_stops
+    seen: dict[str, bool] = {}
+
+    async def settle(session_factory, database_url, *, finalize_only=False):
+        if finalize_only:
+            return await real_settle(session_factory, database_url, finalize_only=True)
+        os.kill(os.getpid(), signal.SIGTERM)
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if sup._shutdown or engine_handler_hits:
+                break
+        seen["shutdown"] = sup._shutdown
+        return 0
+
+    monkeypatch.setattr(sup, "_settle_pending_stops", settle)
+    loop = asyncio.get_running_loop()
+    # Session 1 is boot's stale, session 2 boot's finalize-only settle.
+    hooked = _hook_before_nth_session(factory, n=3, hook=seed_start)
+    try:
+        await run_supervisor(session_factory=hooked, run_fn=run_fn, poll_seconds=0.01,
+                             database_url=pg_url)
+        assert seen == {"shutdown": True}
+        assert engine_handler_hits == []
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+        sup._shutdown = False
+        await _cleanup(factory, list(seeded.values()), [])
+
+
+@pytest.mark.asyncio
+async def test_a_plain_stop_stays_pending_while_another_session_holds_the_engine_lock(engine, pg_url):
+    """Correction 14: a CLI engine may hold the lock and owns that stop."""
+    from src.agent.supervisor import _settle_pending_stops
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+    assert await holder.acquire()
+    cmd_id = None
+    try:
+        cmd_id = await _cmd(factory, "stop", None)
+        assert await _settle_pending_stops(factory, pg_url) == 0
+        async with factory() as db:
+            cmd = await db.get(SimulationCommand, cmd_id)
+        assert cmd.status == "pending" and cmd.result is None
+    finally:
+        await holder.release()
+        await _cleanup(factory, [cmd_id] if cmd_id else [], [])

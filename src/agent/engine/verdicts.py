@@ -108,7 +108,9 @@ class Verdicts:
     _report_flush_failure = via("_persistence")
     flush_before_dependent = via("_persistence")
 
-    OWNED_STATE: tuple[str, ...] = ("_assessed_threads", "_pending_assessments", "_landed_write_ids")
+    OWNED_STATE: tuple[str, ...] = (
+        "_assessed_threads", "_pending_assessments", "_landed_write_ids", "_pruned_write_ids",
+    )
 
     def __init__(
         self,
@@ -126,6 +128,11 @@ class Verdicts:
         # history, so ordinals from an earlier process are not comparable, and a
         # row an earlier process landed is always superseded, as before 0054.
         self._landed_write_ids: set[uuid.UUID] = set()
+        # Write ids whose verdict `_prune_queued_for_thread` already recorded as
+        # a drop. A queued verdict whose first commit reached the server but
+        # lost its acknowledgement is also the landed row, so the supersede that
+        # follows must not record the same raw verdict a second time.
+        self._pruned_write_ids: set[uuid.UUID] = set()
         self._headlines = headlines
         # Threads whose interview has already produced a verdict, so a second
         # `<assessment_json>` sidecar on the same thread cannot become a second
@@ -566,7 +573,9 @@ class Verdicts:
         """S2-09: a new verdict for a thread first removes any verdict for the
         same thread still on the retry queue, recording each as a
         ``duplicate_thread_verdict`` drop with its raw verdict — even when the
-        new verdict's own write then succeeds (SA3-15)."""
+        new verdict's own write then succeeds (SA3-15). Each pruned write id is
+        remembered, so ``_upsert_in`` does not record it again if that verdict
+        also landed (a lost acknowledgement)."""
         queued = [r for r in self._pending_assessments if r.get("thread_id") == thread_id]
         if not queued:
             return
@@ -584,6 +593,8 @@ class Verdicts:
                 ),
                 raw_verdict=row.get("raw_verdict"),
             )
+            if row.get("verdict_write_id") is not None:
+                self._pruned_write_ids.add(row["verdict_write_id"])
 
     async def _insert_if_absent(self, db, new_id: uuid.UUID, values: dict) -> uuid.UUID | None:
         """``INSERT ... ON CONFLICT (run, thread) DO NOTHING`` at revision 1;
@@ -614,7 +625,9 @@ class Verdicts:
            process wrote: keep the newer verdict and record the incoming one as a
            ``duplicate_thread_verdict`` drop (C23), once. A row an earlier process
            landed is always superseded (ordinals restart on a resume; B25).
-        6. Otherwise record the current verdict as a drop, then UPDATE every
+        6. Otherwise record the current verdict as a drop (unless
+           ``_prune_queued_for_thread`` already recorded that write id: one drop
+           per raw verdict), then UPDATE every
            column a replacement row would carry, ``created_at = now()``,
            revision + 1, and the new write id and ordinal. The announcement
            stamps are kept (COALESCE), so an announced interview stays
@@ -671,12 +684,13 @@ class Verdicts:
         if landed > incoming and current.verdict_write_id in self._landed_write_ids:
             await self._record_stale_once(db, drop_common, values.get("raw_verdict"), incoming, landed)
             return UpsertResult("stale", current.id)
-        db.add(AssessmentDrop(
-            **drop_common,
-            detail=_SUPERSEDE_DETAIL.format(old=landed, new=incoming),
-            raw_verdict=current.raw_verdict,
-        ))
-        await db.flush()
+        if current.verdict_write_id not in self._pruned_write_ids:
+            db.add(AssessmentDrop(
+                **drop_common,
+                detail=_SUPERSEDE_DETAIL.format(old=landed, new=incoming),
+                raw_verdict=current.raw_verdict,
+            ))
+            await db.flush()
         set_ = {k: v for k, v in values.items() if k not in _UPSERT_NOT_COPIED}
         for stamp in ("summary_posted_at", "summary_claimed_at"):
             if values.get(stamp) is not None:
@@ -1538,7 +1552,7 @@ class Verdicts:
                 agent_id, reason, exc, exc_info=True,
             )
 
-    async def _flush_pending_assessments(self, *, final: bool = False) -> None:
+    async def _flush_pending_assessments(self, *, final: bool = False) -> list[str | None]:
         """Retry OpportunityAssessment rows queued by _persist_assessment.
 
         _persist_assessment attempts an immediate write; a failure there
@@ -1556,14 +1570,17 @@ class Verdicts:
         is the actual product of the screening pipeline, so a repeat failure
         here stays at ERROR (louder than _flush_persisted/_flush_llm_logs'
         WARNING on the same kind of retry failure).
+
+        Returns the thread ids of the rows it wrote (``stop()`` sweeps their
+        headlines again).
         """
         if not self._pending_assessments:
-            return
+            return []
         if not self.session_factory or not self.simulation_run_id:
             self._pending_assessments.clear()
-            return
+            return []
         if not final and not await self.flush_before_dependent():
-            return
+            return []
         rows = self._pending_assessments
         self._pending_assessments = []
         try:
@@ -1572,6 +1589,7 @@ class Verdicts:
                     await self._upsert_in(db, row)
                 await db.commit()
             logger.info("Flushed %d queued assessment(s) to DB", len(rows))
+            return [r.get("thread_id") for r in rows]
         except Exception as exc:
             # Same re-queue-in-front reasoning as _flush_persisted: new
             # failures may have been appended to _pending_assessments while
@@ -1582,6 +1600,7 @@ class Verdicts:
             # `_upsert_in` applies the §8.1 protocol per row, so a stale queued
             # verdict becomes a drop instead of an overwrite.
             requeue = rows
+            lost: list = []
             if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
                 async def _one(db, row):
                     await self._upsert_in(db, row)
@@ -1602,6 +1621,10 @@ class Verdicts:
                 log=logger.error, exc_info=True,
             ):
                 self._pending_assessments[0:0] = requeue
+            unwritten = [*requeue, *(row for row, _exc in lost)]
+            return [
+                r.get("thread_id") for r in rows if not any(r is u for u in unwritten)
+            ]
 
     async def _record_unwritable_assessment(
         self, row: dict, exc: BaseException,

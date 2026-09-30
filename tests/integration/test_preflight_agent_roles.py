@@ -34,3 +34,30 @@ async def test_an_unregistered_role_blocks(engine):
             assert status == pf.BLOCK and data["unknown"] == ["grantbot"]
         finally:
             await trans.rollback()
+
+
+@pytest.mark.asyncio
+async def test_a_registered_role_whose_manifest_fails_blocks(engine, monkeypatch):
+    """Manifests are strict since Phase 2: a role the engine would skip blocks too."""
+    import src.agent.roles as roles
+
+    pf = _pf()
+    real = roles.role_problem
+    monkeypatch.setattr(
+        roles, "role_problem",
+        lambda r: "pi_lab: unknown key 'colour' in role.toml" if r == "pi_lab" else real(r),
+    )
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                "INSERT INTO agents(id, agent_id, bot_name, pi_name, role, status, requested_at) "
+                "VALUES (gen_random_uuid(), 'labbot', 'LabBot', 'Lab', 'pi_lab', 'inactive', now())"
+            ))
+            _title, status, detail, _rem, data = await pf.check_agent_roles(conn)
+            assert status == pf.BLOCK
+            assert data["unknown"] == []
+            assert data["problems"] == {"pi_lab": "pi_lab: unknown key 'colour' in role.toml"}
+            assert "unknown key 'colour'" in detail
+        finally:
+            await trans.rollback()

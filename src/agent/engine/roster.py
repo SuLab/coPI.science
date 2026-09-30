@@ -22,15 +22,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("src.agent.simulation")
 
 
-def _role_available(aid: str, role: str, problems: dict[str, str | None]) -> bool:
+def _role_available(
+    aid: str, role: str, problems: dict[str, str | None], *, live: bool = False,
+) -> bool:
     """Whether ``role`` may run (spec §8.5, fail closed); logs why not.
-    ``problems`` caches ``role_problem`` so a poll reads each manifest once."""
+    ``problems`` caches ``role_problem`` so a poll reads each manifest once.
+    ``live`` is an agent already on the roster, which is removed rather than
+    kept off."""
     if role not in problems:
         problems[role] = role_problem(role)
     if problems[role] is not None:
         logger.error(
-            "[roster] %s: role %r is not available (%s) — keeping it off the roster",
+            "[roster] %s: role %r is not available (%s) — %s",
             aid, role, problems[role],
+            "removing it from the live roster" if live else "keeping it off the roster",
         )
         return False
     return True
@@ -162,21 +167,9 @@ class Roster:
 
             desired = {r.agent_id: r for r in rows}
 
-            # Role-diff for surviving agents (agents present in both current and
-            # desired). Must run even when to_add/to_remove are empty, or a role
-            # reassignment on a running agent is invisible until the next add/remove.
-            role_changed = False
             # One manifest read per role per poll (spec §8.5).
             problems: dict[str, str | None] = {}
-            for aid, agent in self.agents.items():
-                r = desired.get(aid)
-                if (
-                    r is not None and r.role != agent.role
-                    and _role_available(aid, r.role, problems)
-                ):
-                    logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
-                    agent.role = r.role
-                    role_changed = True
+            role_changed, role_unavailable = self._apply_role_changes(desired, problems)
 
             # Token-diff for surviving agents. `main.py` admits every active
             # agent to self.agents regardless of token, so an agent provisioned
@@ -190,7 +183,7 @@ class Roster:
             if self.slack_enabled:
                 for aid in self.agents:
                     r = desired.get(aid)
-                    if r is None:
+                    if r is None or aid in role_unavailable:
                         continue
                     # PS-6: resolve exactly as clients are built (main.py's
                     # `_token_for`): the DB token when valid, else the env token.
@@ -221,7 +214,7 @@ class Roster:
                     )
 
             current = set(self.agents)
-            to_remove = current - set(desired)
+            to_remove = (current - set(desired)) | role_unavailable
             to_add = {
                 aid for aid in set(desired) - current
                 if _role_available(aid, desired[aid].role, problems)
@@ -246,7 +239,10 @@ class Roster:
                 )
                 if bot_name:
                     self._bot_name_to_id.pop(bot_name, None)
-                logger.info("[roster] Removed inactive agent %s from live roster", aid)
+                if aid in role_unavailable:
+                    logger.info("[roster] Removed agent %s from live roster (role not available)", aid)
+                else:
+                    logger.info("[roster] Removed inactive agent %s from live roster", aid)
 
             # --- Additions: agent newly active ------------------------------
             for aid in to_add:
@@ -283,6 +279,31 @@ class Roster:
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
+
+    def _apply_role_changes(
+        self, desired: dict, problems: dict[str, str | None],
+    ) -> tuple[bool, set[str]]:
+        """Role-diff for surviving agents (on the roster and still desired).
+        Must run even when nothing is added or removed, or a role reassignment
+        on a running agent is invisible until the next add/remove.
+
+        Returns ``(role_changed, role_unavailable)``: an agent reassigned to a
+        valid role takes it; one reassigned to a role that is not available is
+        returned for removal (spec §8.5: logged and skipped), never left running
+        under its old role."""
+        role_changed = False
+        role_unavailable: set[str] = set()
+        for aid, agent in self.agents.items():
+            r = desired.get(aid)
+            if r is None or r.role == agent.role:
+                continue
+            if not _role_available(aid, r.role, problems, live=True):
+                role_unavailable.add(aid)
+                continue
+            logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
+            agent.role = r.role
+            role_changed = True
+        return role_changed, role_unavailable
 
     def _build_lab_directories(self) -> None:
         """Build a condensed publications directory for each agent (excluding their own lab)."""

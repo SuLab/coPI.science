@@ -34,3 +34,25 @@ def test_the_callers_use_it():
 
     assert "atomic_write_text(" in inspect.getsource(profile_export.export_profile_to_markdown)
     assert "atomic_write_text(" in inspect.getsource(Agent.update_working_memory_file)
+
+
+def test_an_existing_files_mode_is_kept(tmp_path):
+    import stat
+
+    path = tmp_path / "p.md"
+    path.write_text("old", encoding="utf-8")
+    os.chmod(path, 0o640)
+    atomic_write_text(path, "new")
+    assert path.read_text(encoding="utf-8") == "new"
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
+
+
+def test_a_new_file_gets_the_umask_default_not_0600(tmp_path):
+    import stat
+
+    previous = os.umask(0o027)
+    try:
+        atomic_write_text(tmp_path / "n.md", "x")
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(os.stat(tmp_path / "n.md").st_mode) == 0o640
