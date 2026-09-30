@@ -13,6 +13,7 @@ rather than tidiness: ``@dataclass`` resolves its annotations through
 ``sys.modules[cls.__module__]``, and this module defines five dataclasses.
 """
 
+import dataclasses
 import importlib.util
 import json
 import subprocess
@@ -72,7 +73,7 @@ def test_parse_stacks_rejects_empty():
 
 def test_load_config_applies_documented_defaults():
     cfg = cb.load_config({"STACKS": "a:c:d:u"})
-    assert cfg.retention_count == 5
+    assert cfg.retention_count == 3
     assert cfg.retention_unverified == 2
     assert cfg.verify_image == "postgres:15"
     assert cfg.free_space_factor == 7
@@ -919,19 +920,6 @@ def test_heartbeat_mail_still_warns_on_empty_history():
     assert "NO RUNS RECORDED" in body
 
 
-def test_heartbeat_mail_uses_the_newest_of_several_entries_for_staleness():
-    # A stale entry for one stack must not be masked by a fresh entry for another.
-    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
-    history = [
-        {"stack": "copi-python", "started_utc": "2026-08-19T03:15:00Z",
-         "dump_bytes": 1000, "verified": True},
-        {"stack": "copi-blackbird", "started_utc": "2026-08-10T03:15:00Z",
-         "dump_bytes": 1000, "verified": True},
-    ]
-    subject, body = cb.render_heartbeat_mail(history, now)
-    assert "WARNING" not in body  # the newest entry (copi-python) is fresh
-
-
 def test_send_mail_uses_ses_v1_client_and_all_recipients():
     sent = {}
 
@@ -1042,20 +1030,10 @@ def test_prune_refuses_a_stack_dir_outside_backup_root(tmp_path):
     root = tmp_path / "backups"
     (root / "sub").mkdir(parents=True)
     cfg = cb.load_config({"STACKS": "sub:c:copi:copi", "BACKUP_ROOT": str(root)})
-    escaped = cb.Config(
-        stacks=[cb.Stack("..", "c", "copi", "copi")],
-        backup_root=cfg.backup_root,
-        retention_count=cfg.retention_count,
-        retention_unverified=cfg.retention_unverified,
-        verify_image=cfg.verify_image,
-        verify_mem=cfg.verify_mem,
-        verify_timeout_sec=cfg.verify_timeout_sec,
-        free_space_factor=cfg.free_space_factor,
-        offsite_cmd=cfg.offsite_cmd,
-        aws_region=cfg.aws_region,
-        ses_sender_email=cfg.ses_sender_email,
-        mail_to=cfg.mail_to,
-    )
+    # replace() rather than rebuilding field by field: the only thing under test is
+    # the stack name, and a hand-written constructor call breaks every time Config
+    # gains a field, which says nothing about the containment guard.
+    escaped = dataclasses.replace(cfg, stacks=[cb.Stack("..", "c", "copi", "copi")])
     with pytest.raises(cb.ConfigError, match="not a direct child"):
         cb.prune(escaped, dry_run=False)
 
@@ -1076,7 +1054,13 @@ def test_prune_deletes_dump_and_its_sidecar(tmp_path):
         name = f"copi-python_copi_202608{day:02d}T031500Z.dump"
         (stack_dir / name).write_bytes(b"x")
         (stack_dir / f"{name}.json").write_text("{}")
-    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(tmp_path)})
+    cfg = cb.load_config({
+        # Pinned, not inherited: this test is about prune arithmetic, not about what
+        # the shipped RETENTION_COUNT happens to be.
+        "STACKS": "copi-python:c:copi:copi",
+        "BACKUP_ROOT": str(tmp_path),
+        "RETENTION_COUNT": "5",
+    })
     deleted = cb.prune(cfg, dry_run=False)
     assert len(deleted) == 2
     assert len(list(stack_dir.glob("*.dump"))) == 5
@@ -1101,7 +1085,11 @@ def test_prune_dry_run_deletes_nothing(tmp_path):
     stack_dir.mkdir()
     for day in range(1, 8):
         (stack_dir / f"copi-python_copi_202608{day:02d}T031500Z.dump").write_bytes(b"x")
-    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(tmp_path)})
+    cfg = cb.load_config({
+        "STACKS": "copi-python:c:copi:copi",
+        "BACKUP_ROOT": str(tmp_path),
+        "RETENTION_COUNT": "5",
+    })
     planned = cb.prune(cfg, dry_run=True)
     assert len(planned) == 2
     assert len(list(stack_dir.glob("*.dump"))) == 7
@@ -1120,6 +1108,7 @@ def test_prune_excludes_named_stacks(tmp_path):
     cfg = cb.load_config({
         "STACKS": "copi-python:c:copi:copi\ncopi-blackbird:c:copi:copi",
         "BACKUP_ROOT": str(tmp_path),
+        "RETENTION_COUNT": "5",
     })
     deleted = cb.prune(cfg, dry_run=False, exclude_stacks={"copi-python"})
     assert len(list((tmp_path / "copi-python").glob("*.dump"))) == 7, "excluded stack was pruned"
@@ -1237,3 +1226,286 @@ def test_cmd_run_writes_status_json_on_an_unexpected_exception(tmp_path, monkeyp
     status = json.loads((backup_root / "status.json").read_text())
     assert status["ok"] is False
     assert "sweep exploded" in status["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Per-stack preflight, the absolute free-space floor, regression persistence,
+# and config visibility.
+# ---------------------------------------------------------------------------
+
+TWO_STACKS = "copi-python:cpy:copi:copi\ncopi-blackbird:cbb:copi:copi"
+
+
+def _write_dump(root: Path, stack: str, name: str, size: int) -> Path:
+    stack_dir = root / stack
+    stack_dir.mkdir(parents=True, exist_ok=True)
+    path = stack_dir / name
+    path.write_bytes(b"\0" * size)
+    return path
+
+
+def _two_stack_cfg(tmp_path, **overrides):
+    env = {"STACKS": TWO_STACKS, "BACKUP_ROOT": str(tmp_path / "backups")}
+    env.update(overrides)
+    return cb.load_config(env)
+
+
+def _free(n):
+    return lambda _p: SimpleNamespace(total=0, used=0, free=n)
+
+
+def test_last_dump_bytes_is_scoped_to_one_stack(tmp_path):
+    cfg = _two_stack_cfg(tmp_path)
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 900)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 100)
+    assert cb._last_dump_bytes_for(cfg, "copi-python") == 900
+    assert cb._last_dump_bytes_for(cfg, "copi-blackbird") == 100
+    # The global helper still reports the max across stacks — which is precisely what
+    # charged the small stack the large stack's bill before the guard went per-stack.
+    assert cb._last_dump_bytes(cfg) == 900
+
+
+def test_live_db_bytes_for_reads_only_that_stacks_database():
+    cfg = cb.load_config({"STACKS": TWO_STACKS})
+    fake = cb.FakeRunner({"pg_database_size": "4242"})
+    assert cb._live_db_bytes_for(fake, cfg.stacks[0]) == 4242
+    assert len(fake.calls) == 1
+
+
+def test_enough_free_space_honours_the_absolute_floor():
+    # 7 x 10 = 70 is satisfied at 100 free, but a 500-byte floor is not: a tiny stack
+    # must never be cleared to start a restore container on a nearly-full root fs.
+    assert cb.enough_free_space(100, 10, 7) is True
+    assert cb.enough_free_space(100, 10, 7, min_free_bytes=500) is False
+    assert cb.enough_free_space(500, 10, 7, min_free_bytes=500) is True
+
+
+def test_enough_free_space_floor_does_not_rescue_an_unmeasured_demand():
+    # The audit-F3 invariant outranks the floor: unmeasurable demand still fails.
+    assert cb.enough_free_space(10**9, 0, 7, min_free_bytes=1) is False
+
+
+def test_stacks_are_processed_in_ascending_demand_order(tmp_path):
+    cfg = _two_stack_cfg(tmp_path)
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 1000)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 10)
+    assert [s.name for s in cb._ordered_stacks(cfg)] == ["copi-blackbird", "copi-python"]
+
+
+def test_stacks_with_unmeasurable_demand_are_ordered_last(tmp_path):
+    cfg = _two_stack_cfg(tmp_path)
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 1000)
+    assert [s.name for s in cb._ordered_stacks(cfg)] == ["copi-python", "copi-blackbird"]
+
+
+def _patch_dump_and_verify(monkeypatch, dumped):
+    def _fake_dump(runner, cfg_, stack, dest, now):
+        dumped.append(stack.name)
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / f"{stack.name}_copi_20260102T000000Z.dump"
+        path.write_bytes(b"\0" * 10)
+        return cb.DumpResult(path, {"public.users": 3}, "snap", 10, "abc")
+
+    monkeypatch.setattr(cb, "dump_stack", _fake_dump)
+    monkeypatch.setattr(
+        cb, "verify_dump", lambda *a, **k: cb.VerifyResult(True, [], False, 1.0)
+    )
+
+
+def test_preflight_failure_for_one_stack_does_not_skip_the_other(tmp_path, monkeypatch):
+    # The measured 2026-09-15/16 incident: copi-blackbird needed 884MB, ~4GB was free,
+    # and it was skipped anyway because the guard charged it copi-python's demand.
+    cfg = _two_stack_cfg(tmp_path, FREE_SPACE_FACTOR="7", MIN_FREE_BYTES="0")
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 1000)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 10)
+    monkeypatch.setattr(cb.shutil, "disk_usage", _free(100))
+    dumped: list[str] = []
+    _patch_dump_and_verify(monkeypatch, dumped)
+
+    now = datetime(2026, 9, 16, 8, 0, tzinfo=UTC)
+    rc = cb.cmd_run(cfg, cb.FakeRunner(), now, skip_prune=True)
+
+    assert rc == 1                        # the run as a whole is still FAILED
+    assert dumped == ["copi-blackbird"]   # but the stack that fits was backed up
+    status = json.loads((Path(cfg.backup_root) / "status.json").read_text())
+    assert status["stacks"]["copi-blackbird"]["verified"] is True
+    assert status["stacks"]["copi-python"]["verified"] is False
+    assert "preflight" in status["stacks"]["copi-python"]["error"]
+
+
+def test_preflight_free_space_is_remeasured_for_every_stack(tmp_path, monkeypatch):
+    # Stack 1's dump consumes space stack 2 then needs; a hoisted measurement is wrong.
+    cfg = _two_stack_cfg(tmp_path, MIN_FREE_BYTES="0")
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 10)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 10)
+    calls: list[int] = []
+
+    def _counting(_p):
+        calls.append(1)
+        return SimpleNamespace(total=0, used=0, free=10**9)
+
+    monkeypatch.setattr(cb.shutil, "disk_usage", _counting)
+    _patch_dump_and_verify(monkeypatch, [])
+    cb.cmd_run(cfg, cb.FakeRunner(), datetime(2026, 9, 16, 8, 0, tzinfo=UTC), skip_prune=True)
+    assert len(calls) == 2
+
+
+def test_min_free_bytes_floor_rejects_every_stack(tmp_path, monkeypatch):
+    cfg = _two_stack_cfg(tmp_path, FREE_SPACE_FACTOR="7", MIN_FREE_BYTES="1000000")
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 10)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 10)
+    monkeypatch.setattr(cb.shutil, "disk_usage", _free(100))
+    dumped: list[str] = []
+    _patch_dump_and_verify(monkeypatch, dumped)
+
+    rc = cb.cmd_run(cfg, cb.FakeRunner(), datetime(2026, 9, 16, 8, 0, tzinfo=UTC), skip_prune=True)
+    assert rc == 1
+    assert dumped == []
+    status = json.loads((Path(cfg.backup_root) / "status.json").read_text())
+    # Every stack failed preflight, so the top-level "did it even try" reason survives.
+    assert status.get("reason")
+    assert "floor" in status["stacks"]["copi-python"]["error"]
+
+
+def test_build_status_records_the_regressed_map():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    status = cb.build_status([_ok_result()], now, regressed={"copi-python": "rows fell 40%"})
+    assert status["regressed"] == {"copi-python": "rows fell 40%"}
+
+
+def test_build_status_carries_regressed_forward_when_a_run_produces_no_results():
+    # A preflight abort, an unexpected exception, and the signal handler all call
+    # _write_status with results=[]. None of them may erase the evidence flag.
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    previous = {"regressed": {"copi-python": "rows fell 40%"}}
+    status = cb.build_status([], now, previous=previous, reason="insufficient free space")
+    assert status["regressed"] == {"copi-python": "rows fell 40%"}
+
+
+def test_build_status_keeps_regressed_for_a_stack_that_did_not_run_this_time():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    previous = {"regressed": {"copi-blackbird": "rows fell 40%"}}
+    status = cb.build_status([_ok_result("copi-python")], now, previous=previous, regressed={})
+    assert status["regressed"] == {"copi-blackbird": "rows fell 40%"}
+
+
+def test_build_status_clears_regressed_once_the_stack_verifies_clean():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    previous = {"regressed": {"copi-python": "rows fell 40%"}}
+    status = cb.build_status([_ok_result("copi-python")], now, previous=previous, regressed={})
+    assert status["regressed"] == {}
+
+
+def test_prune_excludes_a_stack_regressed_in_the_previous_status(tmp_path, monkeypatch):
+    # Per-stack preflight makes prune reachable on nights the old code aborted before
+    # it. A stack flagged last night must not have its evidence pruned tonight.
+    cfg = _two_stack_cfg(tmp_path)
+    root = Path(cfg.backup_root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "status.json").write_text(json.dumps({"regressed": {"copi-python": "rows fell"}}))
+    monkeypatch.setattr(cb.shutil, "disk_usage", _free(0))
+    captured: dict = {}
+
+    def _fake_prune(cfg_, dry_run, exclude_stacks=None):
+        captured["exclude"] = exclude_stacks
+        return []
+
+    monkeypatch.setattr(cb, "prune", _fake_prune)
+    cb.cmd_run(
+        cfg,
+        cb.FakeRunner({"pg_database_size": "1"}),
+        datetime(2026, 9, 16, 8, 0, tzinfo=UTC),
+        skip_prune=False,
+    )
+    assert "copi-python" in captured["exclude"]
+
+
+def test_heartbeat_mail_warns_when_any_single_stack_is_stale():
+    # The existing behaviour masked this: max() across all entries meant one fresh
+    # stack silenced the alarm for a stack that had not run in nine days.
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    history = [
+        {"stack": "copi-python", "started_utc": "2026-08-19T03:15:00Z",
+         "dump_bytes": 1000, "verified": True},
+        {"stack": "copi-blackbird", "started_utc": "2026-08-10T03:15:00Z",
+         "dump_bytes": 1000, "verified": True},
+    ]
+    _subject, body = cb.render_heartbeat_mail(history, now)
+    assert "WARNING" in body
+    assert "copi-blackbird" in body
+
+
+def test_heartbeat_mail_warns_when_a_configured_stack_has_no_entry_at_all():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    history = [
+        {"stack": "copi-python", "started_utc": "2026-08-19T03:15:00Z",
+         "dump_bytes": 1000, "verified": True},
+    ]
+    _subject, body = cb.render_heartbeat_mail(
+        history, now, stacks=["copi-python", "copi-blackbird"]
+    )
+    assert "WARNING" in body
+    assert "copi-blackbird" in body
+
+
+def test_config_summary_reports_the_effective_values():
+    cfg = cb.load_config({"STACKS": TWO_STACKS, "RETENTION_COUNT": "3"})
+    summary = cb.config_summary(cfg)
+    assert summary["retention_count"] == 3
+    assert summary["offsite_enabled"] is False
+    assert summary["stacks"] == ["copi-python", "copi-blackbird"]
+
+
+def test_config_drift_names_values_that_differ_from_the_shipped_defaults():
+    cfg = cb.load_config({"STACKS": "a:c:d:u", "RETENTION_COUNT": "7"})
+    drift = cb.config_drift(cfg)
+    assert any(d.startswith("RETENTION_COUNT=7") for d in drift)
+
+
+def test_config_drift_is_empty_when_every_value_matches_its_default():
+    assert cb.config_drift(cb.load_config({"STACKS": "a:c:d:u"})) == []
+
+
+def test_status_json_includes_the_effective_config():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    cfg = cb.load_config({"STACKS": TWO_STACKS, "RETENTION_COUNT": "3"})
+    status = cb.build_status([_ok_result()], now, config=cb.config_summary(cfg))
+    assert status["config"]["retention_count"] == 3
+
+
+def test_heartbeat_mail_renders_the_effective_config():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    cfg = cb.load_config({"STACKS": TWO_STACKS, "RETENTION_COUNT": "3"})
+    history = [{"stack": "copi-python", "started_utc": "2026-08-19T03:15:00Z",
+                "dump_bytes": 1000, "verified": True}]
+    _subject, body = cb.render_heartbeat_mail(
+        history, now, stacks=["copi-python"], config=cb.config_summary(cfg)
+    )
+    assert "retention_count" in body
+    assert "3" in body
+
+
+def test_warn_threshold_warns_without_failing_the_stack(tmp_path, monkeypatch):
+    cfg = _two_stack_cfg(
+        tmp_path, FREE_SPACE_FACTOR="7", WARN_SPACE_FACTOR="14", MIN_FREE_BYTES="0"
+    )
+    root = Path(cfg.backup_root)
+    _write_dump(root, "copi-python", "copi-python_copi_20260101T000000Z.dump", 10)
+    _write_dump(root, "copi-blackbird", "copi-blackbird_copi_20260101T000000Z.dump", 10)
+    # 100 free: above the hard 7x10=70, below the soft 14x10=140.
+    monkeypatch.setattr(cb.shutil, "disk_usage", _free(100))
+    dumped: list[str] = []
+    _patch_dump_and_verify(monkeypatch, dumped)
+
+    rc = cb.cmd_run(cfg, cb.FakeRunner(), datetime(2026, 9, 16, 8, 0, tzinfo=UTC), skip_prune=True)
+    assert rc == 0
+    assert sorted(dumped) == ["copi-blackbird", "copi-python"]
+    status = json.loads((Path(cfg.backup_root) / "status.json").read_text())
+    assert status["warnings"]
+    assert any("copi-python" in w for w in status["warnings"])

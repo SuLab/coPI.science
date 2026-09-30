@@ -29,12 +29,19 @@ install -d -m 0700 /var/backups/copi
 # references it, so installing one without the other leaves systemd unable to run
 # the failure handler — the independent alert path that exists precisely for runs
 # that die without executing their own error handling.
+# docker-builder-prune.* is not part of the backup system, but the backup system
+# cannot run without it. The 2026-09-15/16 outage was Docker build cache filling
+# /dev/root until the free-space guard could no longer be satisfied; nothing on this
+# host reclaims that cache, and it regrows with every rebuild. Shipped here so the
+# precondition is versioned and reviewable rather than a hand-made unit on one host.
 for unit in copi-backup.service copi-backup.timer \
             copi-backup-report.service copi-backup-report.timer \
-            copi-backup-failure@.service; do
+            copi-backup-failure@.service \
+            docker-builder-prune.service docker-builder-prune.timer; do
   install -m 0644 "$HERE/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 
 echo "installed. Timers are NOT enabled yet. To enable after the harness passes:"
 echo "  systemctl enable --now copi-backup.timer copi-backup-report.timer"
+echo "  systemctl enable --now docker-builder-prune.timer   # build-cache reclaim"
