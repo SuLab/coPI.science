@@ -381,7 +381,7 @@ async def _run_simulation(
         # then cancels the still-pending task mid-await, losing the in-flight
         # turn's messages. It is awaited in the finally-block below instead (R2).
         logger.info("Received shutdown signal")
-        sim_engine.request_stop()
+        sim_engine.request_stop("signal")
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
@@ -416,6 +416,10 @@ async def _run_simulation(
         await sim_engine.start()
     except Exception:
         logger.exception("Simulation engine raised an exception")
+        # A start() failure HOLDS the run (spec P0-04). An exception that
+        # escaped the main loop was already recorded as "exception", the same
+        # class, which this cannot displace.
+        sim_engine.request_stop("start_failed")
     finally:
         # Durably flush buffered messages/LLM logs before anything else. The DB
         # is the primary conversation store, so anything still in the in-memory

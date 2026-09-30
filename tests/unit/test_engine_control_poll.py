@@ -61,11 +61,12 @@ async def test_a_pending_stop_command_is_claimed_and_requests_stop(
     eng.session_factory = factory
     eng.simulation_run_id = run_id
 
-    # There is no `_stop_requested` attribute anywhere on the engine —
-    # `request_stop` sets `_running`/`_stop_event` instead — so the only way
-    # to observe the call is to record it directly on the instance.
-    stop_calls: list[bool] = []
-    monkeypatch.setattr(eng, "request_stop", lambda: stop_calls.append(True))
+    # request_stop(reason) sets _end_reason/_running/_stop_event; record the
+    # call directly on the instance.
+    stop_calls: list[str] = []
+    monkeypatch.setattr(
+        eng, "request_stop", lambda reason="operator": stop_calls.append(reason),
+    )
 
     async with factory() as db:
         cmd = SimulationCommand(command="stop", payload=None)
@@ -76,7 +77,7 @@ async def test_a_pending_stop_command_is_claimed_and_requests_stop(
     try:
         await eng._poll_control_plane(now=1e9)
 
-        assert stop_calls == [True]
+        assert stop_calls == ["operator"]
 
         async with factory() as db:
             row = await db.get(SimulationCommand, cmd_id)

@@ -15,6 +15,7 @@ from sqlalchemy.exc import DataError, IntegrityError
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL, SEEDED_CHANNELS
+from src.agent.end_reasons import FINALIZE, HOLD, TODAY, end_reason_class, stronger_reason
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.locks import LockRegistry
 from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog, is_panel_note
@@ -82,6 +83,7 @@ from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 from src.services.build_info import get_build_info
 from src.services.cohorts import compute_gates, summarise_gates
+from src.services.interview_state import ended_thread_ids
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
@@ -141,6 +143,24 @@ def _was_truncated(stop_reasons: list[str]) -> bool:
 TRUNCATION_NOTICE = (
     "\n\n_(This reply was cut off before it finished — treat it as incomplete.)_"
 )
+
+
+class _HeadlineInDoubt:
+    """What `_post_assessment_summary` returns when the post raised with no Slack
+    response (spec P0-08): the headline may or may not be in the channel. Falsy,
+    so every `if not posted:` still reads it as "not known to be posted"; the
+    claim-aware caller tests `is HEADLINE_IN_DOUBT` and keeps its claim."""
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "HEADLINE_IN_DOUBT"
+
+
+HEADLINE_IN_DOUBT = _HeadlineInDoubt()
 
 
 #: The DB errors that condemn ONE ROW rather than the connection, the session or
@@ -676,6 +696,10 @@ class SimulationEngine:
         # queued rather than synthesised there (audit finding 1). Drained by
         # `_drain_and_flush` and by `stop()`.
         self._pending_headlines: list[str] = []
+        # Threads whose headline post hit a transport error this process
+        # (spec P0-08): claimed, not posted, never re-posted automatically.
+        # stop() reports the ones its own sweep produced as IN DOUBT.
+        self._in_doubt_headlines: list[str] = []
         # Guards against two drains running at once (main loop vs stop(), or
         # a future second call site): concurrent drains would pop same-agent
         # events into overlapping LLM calls — exactly the lost update this
@@ -704,6 +728,10 @@ class SimulationEngine:
         # the final flush happens well inside the container's stop grace period.
         # See _sleep / request_stop (R2).
         self._stop_event = asyncio.Event()
+        # Why the run is ending (src/agent/end_reasons.py): set only through
+        # request_stop, and read by stop() to choose the shutdown sweep. None
+        # means nothing recorded one — stop() then behaves exactly as before.
+        self._end_reason: str | None = None
 
         # Two-lane concurrent scheduler (docs/specs/2026-08-14-two-lane-
         # concurrent-scheduler-design.md §3). Per-key lock registries, keyed
@@ -1160,6 +1188,7 @@ class SimulationEngine:
                     reason = self._terminal_stall_reason()
                     if reason is not None:
                         logger.info("No eligible agent: %s. Stopping.", reason)
+                        self.request_stop("stall")
                         break
                     if reply_lane_did_work:
                         # The reply lane made a real LLM call this tick even
@@ -1217,10 +1246,25 @@ class SimulationEngine:
                 # stays selectable. Sleeping the loop instead stalled Slack polling, DB
                 # ingestion and every other agent for one agent's cooldown.
                 # See specs/cohort-system-v2.md §10.3.
+            except Exception:
+                # An exception escaping the body ends the run as a HOLD (spec
+                # P0-04): its open interviews' headlines wait for a resume.
+                self.request_stop("exception")
+                raise
             finally:
                 await self._drain_and_flush()
 
-        logger.info("Main loop exited after %d turns", turn_count)
+        if self._running:
+            # The loop condition ended the run while nothing asked it to stop:
+            # max runtime or a drained proposal target — a natural end, which
+            # finalizes the run (spec P0-04, B19). `_proposal_target_drained()`
+            # mutates its streak, so it is not called again to tell them apart.
+            self.request_stop(
+                "time_limit" if not self.is_within_time_limit else "target_drained"
+            )
+        logger.info(
+            "Main loop exited after %d turns (end reason: %s)", turn_count, self._end_reason,
+        )
 
     async def _drain_and_flush(self) -> None:
         """The per-tick durability step: drain queued memory work, then flush.
@@ -1280,15 +1324,21 @@ class SimulationEngine:
         if self._pending_headlines:
             await self._drain_pending_headlines()
 
-    def request_stop(self) -> None:
+    def request_stop(self, reason: str = "operator") -> None:
         """Ask the main loop to exit — safe to call from a signal handler.
 
-        Deliberately does no I/O: it only flips the flag and wakes any in-flight
-        idle-backoff sleep. The flush is done by ``stop()`` on the main
-        coroutine's own path (see src/agent/main.py), so it can be awaited to
-        completion rather than left in a fire-and-forget task that the
+        ``reason`` is one of `src/agent/end_reasons.py`'s vocabulary (a bare call
+        means the operator's default Stop). It is recorded before anything else,
+        so an unknown reason raises ``ValueError`` and changes nothing; a later
+        call can only raise the recorded reason's class.
+
+        Deliberately does no I/O: it only records the reason, flips the flag and
+        wakes any in-flight idle-backoff sleep. The flush is done by ``stop()`` on
+        the main coroutine's own path (see src/agent/main.py), so it can be
+        awaited to completion rather than left in a fire-and-forget task that the
         interpreter may cancel at shutdown (R2).
         """
+        self._end_reason = stronger_reason(self._end_reason, reason)
         self._running = False
         self._stop_event.set()
 
@@ -1345,7 +1395,7 @@ class SimulationEngine:
                     await finish_command(
                         db, cmd.id, status="done", result=f"run {self.simulation_run_id}",
                     )
-                    self.request_stop()
+                    self.request_stop("operator")
                     await upsert_status(
                         db, state="stopping",
                         simulation_run_id=self.simulation_run_id, detail=detail,
@@ -1377,9 +1427,17 @@ class SimulationEngine:
 
         Awaited from the entry point's finally-block so a graceful shutdown
         cannot lose the in-flight turn's messages. Idempotent.
+
+        The headline sweep follows the recorded end-reason class
+        (`src/agent/end_reasons.py`): TODAY and FINALIZE announce every owed
+        headline (capped at ``HEADLINES_MAX_AT_SHUTDOWN``), HOLD only those of
+        ended interviews; HOLD sets ``held_at`` and FINALIZE ``finalized_at``.
         """
         self._running = False
         self._stop_event.set()
+        # Which shutdown sweep this is (spec P0-04, src/agent/end_reasons.py).
+        # Nothing recorded — a direct stop() — behaves exactly as TODAY.
+        end_class = end_reason_class(self._end_reason) if self._end_reason else TODAY
         # Drain a BOUNDED number of queued memory updates BEFORE the log
         # callback is cleared, so their llm_call_logs rows are captured by
         # the flush below. Bounded: each is a real LLM call and the stop
@@ -1463,6 +1521,9 @@ class SimulationEngine:
             # the `0041` box in docs/operations/migration-deploy-notes.md makes running the repair procedure a
             # precondition for resuming such a run.
             owed_thread_ids: list[str] | None = None
+            # Owed interviews a HOLD end keeps back (spec P0-04): no
+            # ThreadDecision, so still open. Announced on a resume or a finalize.
+            held_open: list[str] = []
             if self.session_factory and self.simulation_run_id:
                 from sqlalchemy import select as sa_select
                 try:
@@ -1477,6 +1538,12 @@ class SimulationEngine:
                             )
                             .distinct()
                         )).scalars().all())
+                        if end_class == HOLD and owed_thread_ids:
+                            ended = await ended_thread_ids(
+                                db, self.simulation_run_id, owed_thread_ids,
+                            )
+                            held_open = [t for t in owed_thread_ids if t not in ended]
+                            owed_thread_ids = [t for t in owed_thread_ids if t in ended]
                 except Exception:
                     logger.exception(
                         "Could not read which interviews owe a "
@@ -1486,6 +1553,21 @@ class SimulationEngine:
                         "rehydrated one on a resumed run"
                     )
                     owed_thread_ids = None
+                    held_open = []
+            if owed_thread_ids is None and end_class == HOLD:
+                # Without the database a HOLD cannot tell an ended interview
+                # from an open one, and it must never announce an open one: it
+                # holds every un-announced verdict instead of falling back.
+                held_open = [
+                    thread_id for thread_id, held in self._assessed_threads.items()
+                    if not held.announced
+                ]
+                owed_thread_ids = []
+                logger.error(
+                    "HOLD end with an unreadable owed-headline query: holding all "
+                    "%d un-announced verdict(s) rather than risk announcing an "
+                    "open interview", len(held_open),
+                )
             if owed_thread_ids is None:
                 owed_thread_ids = [
                     thread_id for thread_id, held in self._assessed_threads.items()
@@ -1504,33 +1586,56 @@ class SimulationEngine:
                     "without a concluding reply, or an earlier headline post "
                     "for it failed", len(self._pending_headlines),
                 )
+            in_doubt_before = len(self._in_doubt_headlines)
             unposted = await self._drain_pending_headlines(
                 limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
+            in_doubt = self._in_doubt_headlines[in_doubt_before:]
             over_budget = list(self._pending_headlines)
-            if over_budget or unposted:
+            lost_attempted = max(unposted - len(in_doubt), 0)
+            repair = (
+                f"python scripts/backfill_assessment_headlines.py --run "
+                f"{self.simulation_run_id} "
+                + ("--finalize --apply" if end_class == FINALIZE else "--apply")
+            )
+            if over_budget or lost_attempted:
                 # Say LOST with the count and the ids, the same way the buffer
                 # flushes do: the assessment rows are safe, so this is
-                # recoverable, but only by someone who knows it happened.
-                #
-                # BOTH causes are counted. This used to fire only on the
-                # `HEADLINES_MAX_AT_SHUTDOWN` overflow — but a thread whose post
-                # FAILS is popped and never re-queued, so a Slack outage at
-                # shutdown emptied the queue, left the count at zero, and
-                # produced no aggregate line and no pointer to the repair script
-                # at all: only per-thread logs, for the one failure mode most
-                # likely to hit every thread at once.
+                # recoverable, but only by someone who knows it happened. BOTH
+                # causes are counted — a thread whose post FAILS is popped and
+                # never re-queued, so the overflow alone would read zero for a
+                # Slack outage. In-doubt threads are reported separately below.
                 logger.error(
                     "LOST %d #assessments-summary headline(s) at shutdown "
                     "(%d attempted and not posted, %d never attempted past the "
                     "%d-headline shutdown bound; threads still queued: %s). The "
-                    "assessment rows are safe — re-post with: python "
-                    "scripts/backfill_assessment_headlines.py --run %s --apply",
-                    unposted + len(over_budget),
-                    unposted,
+                    "assessment rows are safe — re-post with: %s",
+                    lost_attempted + len(over_budget),
+                    lost_attempted,
                     len(over_budget),
                     HEADLINES_MAX_AT_SHUTDOWN,
                     ", ".join(over_budget) or "none",
+                    repair,
+                )
+            if in_doubt:
+                logger.error(
+                    "IN DOUBT %d #assessments-summary headline(s) at shutdown "
+                    "(threads: %s): a transport error left no Slack response, so "
+                    "each may or may not be in the channel. Their claims are kept "
+                    "and nothing re-posts them. Check the channel, then: python "
+                    "scripts/backfill_assessment_headlines.py --run %s "
+                    "--list-in-doubt, and --release-in-doubt <id>... for any that "
+                    "did not post",
+                    len(in_doubt), ", ".join(in_doubt), self.simulation_run_id,
+                )
+            if held_open:
+                logger.warning(
+                    "HELD %d open interview(s)' #assessments-summary headline(s) "
+                    "(end reason %s; threads: %s). They post on a resume, or "
+                    "release them with: python "
+                    "scripts/backfill_assessment_headlines.py --run %s --finalize "
+                    "--apply",
+                    len(held_open), self._end_reason, ", ".join(held_open),
                     self.simulation_run_id,
                 )
         except Exception:
@@ -1539,6 +1644,10 @@ class SimulationEngine:
                 "this run can still be repaired with "
                 "scripts/backfill_assessment_headlines.py"
             )
+        # AFTER the sweep, whatever it managed (spec P0-04, SA4-04): a finalize
+        # stands even when headlines could not post — they were logged LOST with
+        # the --finalize repair command above.
+        await self._record_run_end_state(end_class)
 
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
         # `clear` share meant the panel could not discriminate; a 48-consult
@@ -1575,6 +1684,37 @@ class SimulationEngine:
             logger.warning("%s", line)
 
         logger.info("Simulation stopping...")
+
+    async def _record_run_end_state(self, end_class: str) -> None:
+        """Stamp how the run ended on its row (spec P0-04): HOLD sets
+        ``held_at``; FINALIZE sets ``finalized_at`` and clears ``held_at`` (a
+        finalized run cannot be resumed); TODAY writes nothing. Never raises."""
+        if end_class == TODAY or not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import update as sa_update
+
+        values = (
+            {"held_at": sa_func.now()} if end_class == HOLD
+            else {"finalized_at": sa_func.now(), "held_at": None}
+        )
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(SimulationRun)
+                    .where(SimulationRun.id == self.simulation_run_id)
+                    .values(**values)
+                )
+                await db.commit()
+            logger.info(
+                "Run %s ended %s (end reason %s)",
+                self.simulation_run_id, end_class, self._end_reason,
+            )
+        except Exception:
+            logger.exception(
+                "Could not record run %s's end state (%s, end reason %s)",
+                self.simulation_run_id, end_class, self._end_reason,
+            )
 
     # ------------------------------------------------------------------
     # Agent selection (weighted random)
@@ -3675,24 +3815,46 @@ class SimulationEngine:
                         slack_ts=slack_ts,
                         announced=already_announced or announce,
                     )
-                    # Announce only a verdict that ends the interview. Since a
-                    # provisional sidecar is now STORED rather than refused, a
-                    # single interview can hold several in turn — and a headline
-                    # is a public Slack post that cannot be retracted when the
-                    # row it described is superseded moments later. Design D14
-                    # says a verdict that is not held never posts; the same logic
-                    # says a verdict that is not final does not post YET.
-                    if announce:
-                        if await self._post_assessment_summary(
+                    # A queued replacement is never claimed at capture (spec
+                    # P0-08, SA6-01). With `replacement_id is None` the verdict is
+                    # only on `_pending_assessments`, so a by-thread claim here
+                    # would stamp the SUPERSEDED sibling still in the database;
+                    # the retire below deletes that row and its stamp, and a
+                    # resume would announce again. The close path and the stop
+                    # sweep (which runs after the final assessment flush) post it
+                    # once the row exists.
+                    queued_only = replacement_id is None and bool(
+                        self.session_factory and self.simulation_run_id
+                    )
+                    if announce and queued_only:
+                        self._assessed_threads[thread.thread_id] = (
+                            self._assessed_threads[thread.thread_id]
+                            ._replace(announced=False)
+                        )
+                        logger.warning(
+                            "[%s] The verdict for %s was queued, not committed; its "
+                            "#assessments-summary headline waits for the "
+                            "interview's close or the shutdown sweep",
+                            agent.agent_id, thread.other_agent_id or "?",
+                        )
+                    elif announce:
+                        # Announce only a verdict that ends the interview. Since a
+                        # provisional sidecar is now STORED rather than refused, a
+                        # single interview can hold several in turn — and a
+                        # headline is a public Slack post that cannot be
+                        # retracted when the row it described is superseded
+                        # moments later. Design D14 says a verdict that is not
+                        # held never posts; the same logic says a verdict that is
+                        # not final does not post YET.
+                        outcome = await self._post_claimed_headline(
                             agent, thread, verdict, slack_ts,
-                        ):
-                            await self._mark_summary_posted(thread.thread_id)
-                        else:
-                            # Nothing reached Slack. Leave `summary_posted_at`
-                            # NULL so the close path, the shutdown sweep and the
-                            # repair script can all still find this verdict —
-                            # `_HeldVerdict.announced` alone would hide it from
-                            # every one of them.
+                        )
+                        if outcome == "failed":
+                            # Definitely nothing reached Slack and the claim was
+                            # released: leave the verdict discoverable to the
+                            # close path, the shutdown sweep and the repair
+                            # script. ("in_doubt" and "unclaimed" stay announced:
+                            # re-posting either could duplicate a public post.)
                             self._assessed_threads[thread.thread_id] = (
                                 self._assessed_threads[thread.thread_id]
                                 ._replace(announced=False)
@@ -3712,21 +3874,16 @@ class SimulationEngine:
                             thread.message_count + 1,
                         )
                     # Retire the earlier row only once its replacement is
-                    # actually HELD — never leave the interview with neither.
+                    # actually HELD — never leave the interview with neither. The
+                    # retire carries the retired rows' headline stamp and claim
+                    # onto the replacement in the same transaction (spec P0-08),
+                    # so an announced interview stays announced across a restart.
                     if superseded is not None:
                         await self._retire_superseded_verdict(
                             agent.agent_id, thread, superseded,
                             replacement_ordinal=thread.message_count + 1,
                             replacement_id=replacement_id,
                         )
-                        # `announced` carries forward in memory (above) so the
-                        # channel keeps its first word; the COLUMN has to agree
-                        # or the next restart reads NULL off the replacement and
-                        # posts a second headline for the same interview.
-                        # `_mark_summary_posted` keys on the thread, so it lands
-                        # on whichever row now holds it.
-                        if already_announced:
-                            await self._mark_summary_posted(thread.thread_id)
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
                 # _extract_assessment_json found no usable verdict in it —
@@ -3766,12 +3923,13 @@ class SimulationEngine:
     async def _post_assessment_summary(
         self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
         *, score: float | None = None, band: str | None = None,
-    ) -> bool:
+    ) -> bool | _HeadlineInDoubt:
         """Post a headline-only summary of a concluded interview to the
         assessments-summary channel (design D12/D13/D14/D16). Returns True when
         a headline actually reached Slack — the caller stamps
-        `opportunity_assessments.summary_posted_at` on that answer, so a False
-        here must mean nothing was posted. That is why the transport's RETURN
+        `opportunity_assessments.summary_posted_at` on that answer — False when
+        nothing was posted, and the falsy ``HEADLINE_IN_DOUBT`` when the post
+        raised with no Slack response (it may or may not have landed). That is why the transport's RETURN
         VALUE is checked and not just its exceptions: `post_message` swallows a
         refusal and answers `None` rather than raising (see the check below).
         Called from _capture_hub_assessment right after a verdict is HELD —
@@ -3870,7 +4028,20 @@ class SimulationEngine:
                 band=band,
                 elevator_pitch=verdict.get("elevator_pitch"),
             )
-            posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            try:
+                posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            except Exception:
+                # No Slack response at all — a timeout, a reset connection. The
+                # post may or may not have landed, so this is NOT a definite
+                # failure: the claim-aware caller keeps its claim and nothing
+                # re-posts it automatically (spec P0-08). A refusal Slack
+                # answered arrives as a falsy return instead, below.
+                logger.exception(
+                    "[%s] The #assessments-summary headline for thread %s hit a "
+                    "transport error with no Slack response — IN DOUBT",
+                    agent.agent_id, thread.thread_id,
+                )
+                return HEADLINE_IN_DOUBT
             if not posted:
                 # A REFUSED post is not an exception here. `post_message` ends
                 # `if not posted: return None` (src/agent/slack_client.py), and
@@ -3912,16 +4083,98 @@ class SimulationEngine:
             )
             return False
 
-    async def _mark_summary_posted(self, thread_id: str | None) -> None:
+    async def _claim_headline(self, thread_id: str) -> list[uuid.UUID] | None:
+        """Claim this interview's owed rows immediately before posting (P0-08).
+
+        ``None``: there is no database, so nothing to claim — the post goes
+        ahead unclaimed, as a DB-less engine always has. ``[]``: another poster
+        holds or posted it — do not post. A database error propagates to
+        `_post_claimed_headline`, which treats it as a definite failure.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return None
+        from src.services.headline_claims import claim_thread
+
+        async with self.session_factory() as db:
+            return await claim_thread(db, self.simulation_run_id, thread_id)
+
+    async def _release_headline_claim(
+        self, thread_id: str, ids: list[uuid.UUID] | None,
+    ) -> None:
+        """Clear the claim after a DEFINITE failure. Never raises."""
+        if not ids:
+            return
+        from src.services.headline_claims import release_claim
+
+        try:
+            async with self.session_factory() as db:
+                await release_claim(db, ids)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not release the headline claim %s for thread %s: %s — it "
+                "reads as IN DOUBT after 10 minutes; release it with "
+                "scripts/backfill_assessment_headlines.py --release-in-doubt once "
+                "you have checked Slack", ids, thread_id, exc,
+            )
+
+    async def _post_claimed_headline(
+        self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
+        *, score: float | None = None, band: str | None = None,
+    ) -> str:
+        """Claim, post and settle one interview's headline (spec P0-08).
+
+        Returns ``"posted"``; ``"failed"`` (definitely not posted, claim
+        released so a later path may post it); ``"in_doubt"`` (a transport
+        error with no Slack response: the claim is KEPT and nothing re-posts
+        it); or ``"unclaimed"`` (another poster already holds or posted it).
+        """
+        try:
+            ids = await self._claim_headline(thread.thread_id)
+        except Exception as exc:  # noqa: BLE001 — a failed claim must not post
+            # Nothing was claimed and nothing posted: a definite failure, so the
+            # close path, the stop sweep or the repair script can still post it.
+            logger.warning(
+                "[%s] Could not claim the #assessments-summary headline for thread "
+                "%s: %s — not posting it now", agent.agent_id, thread.thread_id, exc,
+            )
+            return "failed"
+        if ids == []:
+            logger.info(
+                "[%s] The #assessments-summary headline for thread %s is already "
+                "claimed or posted elsewhere; not posting it",
+                agent.agent_id, thread.thread_id,
+            )
+            return "unclaimed"
+        outcome = await self._post_assessment_summary(
+            agent, thread, verdict, slack_ts, score=score, band=band,
+        )
+        if outcome is True:
+            await self._mark_summary_posted(thread.thread_id, ids)
+            return "posted"
+        if outcome is HEADLINE_IN_DOUBT:
+            self._in_doubt_headlines.append(thread.thread_id)
+            logger.error(
+                "[%s] IN DOUBT: the #assessments-summary headline for thread %s "
+                "(rows %s) may or may not be in the channel. Its claim is kept and "
+                "nothing re-posts it automatically. Check Slack, then: python "
+                "scripts/backfill_assessment_headlines.py --run %s --list-in-doubt, "
+                "and --release-in-doubt <id>... if it did not post",
+                agent.agent_id, thread.thread_id, ids, self.simulation_run_id,
+            )
+            return "in_doubt"
+        await self._release_headline_claim(thread.thread_id, ids)
+        return "failed"
+
+    async def _mark_summary_posted(
+        self, thread_id: str | None, ids: list[uuid.UUID] | None = None,
+    ) -> None:
         """Record durably that this interview's headline is in Slack.
 
-        Keyed by THREAD, not by row id, for two reasons that both bite in
-        production. `_persist_assessment` returns `None` for a verdict that
-        only reached `_pending_assessments`, so an id is not always available;
-        and `_retire_superseded_verdict` DELETES the row a headline described
-        and replaces it, so an id captured at post time can name a row that no
-        longer exists. The thread is the stable identity of an interview, and
-        the interview is what gets announced once.
+        ``ids`` are the rows this poster claimed (`_claim_headline`, spec
+        P0-08): exactly those are stamped. Without ids — no claim was taken,
+        which only a DB-less engine does — the thread's owed rows are stamped,
+        keyed by THREAD as before: the thread is the stable identity of an
+        interview, and the interview is what gets announced once.
 
         Also patches any copy still queued in `_pending_assessments`, so a row
         that has not landed yet carries the stamp when it does — otherwise the
@@ -3941,19 +4194,24 @@ class SimulationEngine:
             return
         from sqlalchemy import update as sa_update
 
+        from src.services.headline_claims import mark_posted
+
         try:
             async with self.session_factory() as db:
-                await db.execute(
-                    sa_update(OpportunityAssessment)
-                    .where(
-                        OpportunityAssessment.simulation_run_id
-                        == self.simulation_run_id,
-                        OpportunityAssessment.thread_id == thread_id,
-                        OpportunityAssessment.summary_posted_at.is_(None),
+                if ids:
+                    await mark_posted(db, ids)
+                else:
+                    await db.execute(
+                        sa_update(OpportunityAssessment)
+                        .where(
+                            OpportunityAssessment.simulation_run_id
+                            == self.simulation_run_id,
+                            OpportunityAssessment.thread_id == thread_id,
+                            OpportunityAssessment.summary_posted_at.is_(None),
+                        )
+                        .values(summary_posted_at=now)
                     )
-                    .values(summary_posted_at=now)
-                )
-                await db.commit()
+                    await db.commit()
         except Exception as exc:  # noqa: BLE001 — the headline already posted
             logger.warning(
                 "Posted the #assessments-summary headline for thread %s but "
@@ -4294,15 +4552,18 @@ class SimulationEngine:
             "elevator_pitch": row.elevator_pitch,
         }
         # Stored score/band, not a live recomputation: a weights change since
-        # the row was written must not re-band a public headline.
-        posted = await self._post_assessment_summary(
+        # the row was written must not re-band a public headline. Claimed
+        # immediately before the post (spec P0-08), so the repair script and
+        # this path can never both post it.
+        outcome = await self._post_claimed_headline(
             agent, thread, verdict, row.slack_ts,
             score=row.weighted_score, band=row.band,
         )
-        if not posted:
+        if outcome != "posted":
+            if outcome in ("in_doubt", "unclaimed") and held is not None:
+                self._assessed_threads[thread_id] = held._replace(announced=True)
             return False
 
-        await self._mark_summary_posted(thread_id)
         if held is not None:
             self._assessed_threads[thread_id] = held._replace(announced=True)
         # WARNING, not INFO: every rescue means something upstream failed, and
@@ -5158,6 +5419,10 @@ class SimulationEngine:
         two rows mid-transition, the drop would preserve the WRONG verdict, which
         is worse than preserving none because it looks authoritative.
 
+        The retired rows' ``summary_posted_at``/``summary_claimed_at`` are carried
+        onto the replacement (or its queued entry) in the same transaction as the
+        delete, so an announced interview stays announced across a restart.
+
         Best-effort in the same sense as every other write on this path: the
         concluding reply is already in Slack, so nothing here may raise. Two
         honest limits, both logged loudly rather than hidden:
@@ -5239,6 +5504,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import delete as sa_delete
+            from sqlalchemy import func as sa_func
             from sqlalchemy import select as sa_select
             from sqlalchemy import update as sa_update
 
@@ -5294,6 +5560,39 @@ class SimulationEngine:
                             )
                             .values(payload={"assessment_id": str(replacement_id)})
                         )
+                # Stamps survive retirement (spec P0-08): the retired rows may
+                # carry this interview's headline stamp or claim, and deleting
+                # them must not un-announce the interview. Copied onto the
+                # replacement in THIS transaction, COALESCE so a stamp the
+                # replacement already has is never overwritten — or, when the
+                # replacement is still queued, onto its queued entry.
+                retired_posted, retired_claimed = (await db.execute(
+                    sa_select(
+                        sa_func.max(OpportunityAssessment.summary_posted_at),
+                        sa_func.max(OpportunityAssessment.summary_claimed_at),
+                    ).where(*self._superseded_row_filter(agent_id, thread, superseded))
+                )).one()
+                carried = {
+                    key: value for key, value in (
+                        ("summary_posted_at", retired_posted),
+                        ("summary_claimed_at", retired_claimed),
+                    ) if value is not None
+                }
+                if carried and replacement_id is not None:
+                    await db.execute(
+                        sa_update(OpportunityAssessment)
+                        .where(OpportunityAssessment.id == replacement_id)
+                        .values(**{
+                            key: sa_func.coalesce(getattr(OpportunityAssessment, key), value)
+                            for key, value in carried.items()
+                        })
+                    )
+                elif carried:
+                    for queued in self._pending_assessments:
+                        if queued.get("thread_id") == thread.thread_id:
+                            for key, value in carried.items():
+                                if queued.get(key) is None:
+                                    queued[key] = value
                 result = await db.execute(
                     sa_delete(OpportunityAssessment).where(
                         *self._superseded_row_filter(agent_id, thread, superseded)
