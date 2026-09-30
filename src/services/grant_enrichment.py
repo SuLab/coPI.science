@@ -13,6 +13,7 @@ from src.services.grant_resolution import (
     resolve_profile_ids,
 )
 from src.services.jhu_rules import get_tenure_start
+from src.services.job_progress import append_job_progress
 from src.services.nih_reporter import (
     JHU_ORG_EXACT,
     PROJECT_FIELDS,
@@ -20,7 +21,6 @@ from src.services.nih_reporter import (
     publications_for_cores,
     search_projects,
 )
-from src.services.profile_pipeline import append_job_progress
 
 logger = logging.getLogger(__name__)
 
