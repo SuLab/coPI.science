@@ -979,8 +979,8 @@ async def build_discussions_view(
     # Collect available agents from threads.
     #
     # Every add is None-guarded, including the poster's. `agent_id` is nullable
-    # on agent_messages and really is NULL in production: _rebuild_state_from_slack
-    # records a real Slack message whose sender maps to no known bot as
+    # on agent_messages and really is NULL in production: the retired Slack reconcile
+    # (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
     # `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
     # id). This set is sorted() below, so a single None took the whole page down
     # with "'<' not supported between instances of 'NoneType' and 'str'". The
@@ -1102,8 +1102,8 @@ async def build_run_detail(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any
     # Aggregate by channel
     #
     # The agent add is None-guarded: `agent_id` is nullable on agent_messages
-    # and really is NULL in production — _rebuild_state_from_slack records a
-    # real Slack message whose sender maps to no known bot as
+    # and really is NULL in production — the retired Slack reconcile
+    # (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
     # `is_bot=True, agent_id=NULL`. This set is sorted() in the template
     # (activity_detail.html), so an unguarded add of a single None took the
     # whole page down with "'<' not supported between instances of

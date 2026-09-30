@@ -539,10 +539,6 @@ class AgentSlackClient:
     def is_connected(self) -> bool:
         return self._client is not None
 
-    @property
-    def bot_user_id(self) -> str | None:
-        return self._bot_user_id
-
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
@@ -551,7 +547,7 @@ class AgentSlackClient:
     def _conversation_messages(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Drop workspace bookkeeping, normalise what's left, order it oldest-first.
 
-        Ordering belongs here — one place, all three inbound reads — because Slack's page
+        Ordering belongs here — one place, both inbound reads — because Slack's page
         order is not one rule. conversations.history pages *backwards* in time when no
         ``oldest`` is given, and *forwards* from ``oldest`` when one is. Measured against
         the live workspace: five messages, ``oldest`` set to the first and ``limit=2``,
@@ -658,36 +654,6 @@ class AgentSlackClient:
             logger.error("[%s] Failed to get channel history %s: %s", self.agent_id, channel_id, exc)
             return []
         return self._conversation_messages(messages)
-
-    def get_all_thread_replies(
-        self,
-        channel_id: str,
-        thread_ts: str,
-    ) -> list[dict[str, Any]]:
-        """
-        Fetch all replies in a thread (paginated).
-        Returns list including parent message, oldest first.
-        """
-        if not self._client:
-            return []
-        try:
-            return self._conversation_messages(self._paginate(
-                "conversations_replies", "messages",
-                channel=channel_id, ts=thread_ts,
-            ))
-        except SlackListingIncomplete as exc:
-            logger.error(
-                "[%s] Thread %s in %s is INCOMPLETE (%s) — returning the %d reply/ies "
-                "fetched",
-                self.agent_id, thread_ts, channel_id, exc.reason, len(exc.partial),
-            )
-            return self._conversation_messages(exc.partial)
-        except SlackApiError as exc:
-            err = exc.response.get("error")
-            if err == "thread_not_found":
-                raise ThreadNotFound(channel_id, thread_ts, err) from exc
-            logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
-            return []
 
     # ------------------------------------------------------------------
     # User resolution
@@ -1080,9 +1046,6 @@ class AgentSlackClient:
 
     async def aget_full_channel_history(self, *args, **kwargs):
         return await asyncio.to_thread(self.get_full_channel_history, *args, **kwargs)
-
-    async def aget_all_thread_replies(self, *args, **kwargs):
-        return await asyncio.to_thread(self.get_all_thread_replies, *args, **kwargs)
 
     async def ais_bot_user(self, *args, **kwargs) -> bool:
         return await asyncio.to_thread(self.is_bot_user, *args, **kwargs)

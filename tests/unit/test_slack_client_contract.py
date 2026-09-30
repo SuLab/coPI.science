@@ -706,30 +706,16 @@ def test_a_channel_read_never_reports_a_root_as_a_reply_to_itself(read):
     assert by_ts["2.0"]["thread_ts"] == "1.0", "a real reply lost its parent"
 
 
-@pytest.mark.parametrize("read,args", [
-    ("get_all_thread_replies", ("C_GENERAL", "1.0")),
+@pytest.mark.parametrize("read", [
+    "poll_channel_messages", "get_full_channel_history",
 ])
-def test_a_thread_read_never_reports_the_parent_as_a_reply_to_itself(read, args):
-    """conversations.replies returns the parent first, and it carries the same
-    self-referential `thread_ts`. The rule has to hold for all three inbound reads or it
-    is back to being a property of the call site."""
-    fake = SequencedWebClient(sequences={"conversations_replies": [
-        _page("messages", [dict(_ROOT), dict(_REPLY)]),
-    ]})
-    out = getattr(_client(fake), read)(*args)
-    assert out[0]["ts"] == "1.0" and out[0]["thread_ts"] is None
-    assert out[1]["thread_ts"] == "1.0"
-
-
-def test_workspace_bookkeeping_is_dropped_from_every_inbound_read():
+def test_workspace_bookkeeping_is_dropped_from_every_inbound_read(read):
     """`channel_join` and friends are not conversation. Filtering them in only some of
-    the inbound reads (which is what the code once did) leaks them into the thread paths."""
-    fake = SequencedWebClient(sequences={"conversations_replies": [
+    the inbound reads (which is what the code once did) leaks them into the log."""
+    fake = SequencedWebClient(sequences={"conversations_history": [
         _page("messages", [dict(_ROOT), {"ts": "2.5", "subtype": "channel_join"}, dict(_REPLY)]),
     ]})
-    assert [m["ts"] for m in _client(fake).get_all_thread_replies("C_GENERAL", "1.0")] == [
-        "1.0", "2.0",
-    ]
+    assert [m["ts"] for m in getattr(_client(fake), read)("C_GENERAL")] == ["1.0", "2.0"]
 
 
 # ===========================================================================
@@ -830,8 +816,8 @@ def test_a_code_fence_spanning_a_cut_is_closed_and_reopened():
 def test_an_over_limit_post_becomes_several_messages_and_reports_every_one():
     """Slack splits a >4000-char `text` itself and returns only the LAST chunk's ts. A
     client that posts blind therefore records a ts naming the *tail* of its own message
-    and leaves every earlier chunk in Slack with no database row — and on restart
-    `_rebuild_state_from_slack` ingests those as brand-new inbound messages.
+    and leaves every earlier chunk in Slack with no database row — and the live
+    poller ingests those as brand-new inbound messages.
     """
     fake = SequencedWebClient(sequences={"chat_postMessage": [
         {"ok": True, "ts": "1.0", "channel": "C_GENERAL", "message": {}},

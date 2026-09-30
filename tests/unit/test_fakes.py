@@ -78,4 +78,3 @@ def test_fake_slack_records_posts_and_returns_ts():
     assert r1["ts"] != r2["ts"]
     assert slack.posted[0]["text"] == "hello"
     assert slack.posted[1]["thread_ts"] == "1.0"
-    assert slack.bot_user_id == "U_a1"

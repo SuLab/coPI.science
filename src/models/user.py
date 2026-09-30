@@ -30,6 +30,12 @@ class User(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    #: The address a PENDING-access user typed on /access-pending (migration
+    #: 0053). Unverified by construction (anyone holding that browser session can
+    #: type any address), so it is shown to admins on /admin/access-requests and
+    #: never copied to `email`, which delegate-invitation acceptance and
+    #: `users.lookupByEmail` trust.
+    contact_email_unverified: Mapped[str | None] = mapped_column(String(255), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     institution: Mapped[str | None] = mapped_column(String(255), nullable=True)
     department: Mapped[str | None] = mapped_column(String(255), nullable=True)

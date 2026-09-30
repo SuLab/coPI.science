@@ -28,7 +28,7 @@ from src.models import (
     SimulationRun,
 )
 from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
-from tests.slack_live_support import create_private_channel, invite
+from tests.slack_live_support import create_private_channel, invite, thread_replies
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_slack]
 
@@ -233,7 +233,7 @@ async def test_a_cross_cohort_thread_is_grandfathered_and_still_replies_in_slack
     await eng._post_message("su", name, "wrapping up", thread_ts=root.message_ts)
     time.sleep(POST_GAP)
     await eng._flush_persisted()
-    replies = eng.slack_clients["su"].get_all_thread_replies(cid, root.slack_ts)
+    replies = thread_replies(eng.slack_clients["su"], cid, root.slack_ts)
     assert "wrapping up" in [m.get("text") for m in replies], (
         "the grandfathered thread's concluding reply never reached Slack"
     )
@@ -288,7 +288,7 @@ async def test_a_private_channel_is_polled_only_by_a_member_bot(cohort_engine, s
         assert eng._client_for_channel(pcid, wiseman) is None
 
         # Control: invite wiseman and it can read it too.
-        invite(su, pcid, [wiseman.bot_user_id])
+        invite(su, pcid, [wiseman._bot_user_id])
         assert "members only" in [
             m.get("text") for m in wiseman.poll_channel_messages(pcid, oldest="0")
         ]
@@ -315,7 +315,7 @@ async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, sla
     assert priv and priv.get("id"), priv
     pname, pcid = priv["name"], priv["id"]
     try:
-        invite(su, pcid, [cravatt.bot_user_id])
+        invite(su, pcid, [cravatt._bot_user_id])
         eng._channel_id_map[pname] = pcid
         eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
         # cravatt posts to this channel by NAME below, and create_private_channel caches

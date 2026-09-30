@@ -41,6 +41,11 @@ class Job(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Earliest time `claim_job` may take this row again (migration 0053). Set
+    #: only when a failed job is re-queued for retry: 4 min after the first
+    #: failure, 16 min after the second (src/worker/main.py `retry_delay`). NULL
+    #: on every row that never failed: claimable at once, as before.
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     user: Mapped["User | None"] = relationship("User", back_populates="jobs")

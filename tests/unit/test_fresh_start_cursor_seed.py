@@ -17,8 +17,7 @@ There are three ways to a `"0"` cursor, not one:
 
 And the seed reached for `next(iter(self.slack_clients.values()), None)`, whose
 first-in-dict client being disconnected skipped the ENTIRE seed while the live
-poller (which uses `_next_poll_client`) carried on polling. The resume path
-`_rebuild_state_from_slack` had the same line.
+poller (which uses `_next_poll_client`) carried on polling.
 """
 import pytest
 
@@ -125,27 +124,6 @@ async def test_the_seed_uses_a_connected_client():
     assert eng._poll_cursors.get(CH_ID) == "1700000002.000000", (
         "the seed gave up because the FIRST client in the dict was "
         "disconnected, while the live poller would have kept polling"
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_resume_path_also_uses_a_connected_client():
-    """`_rebuild_state_from_slack` carried the identical line."""
-    dead = _Client(agent_id="dead", connected=False)
-    live = _Client(agent_id="wang", connected=True)
-    live.channel_history[CH_ID] = list(BACK_CATALOGUE)
-    eng = SimulationEngine(
-        agents=[Agent("dead", "DeadBot", "Dead"), Agent("wang", "WangBot", "Wang")],
-        slack_clients={"dead": dead, "wang": live},
-        fresh_start=False,
-    )
-    eng._channel_id_map = {CH_NAME: CH_ID}
-
-    await eng._rebuild_state_from_slack()
-
-    assert len(eng.message_log) == 2, (
-        "the resume reconcile gave up because the FIRST client in the dict was "
-        "disconnected — a restart then cannot recover its own in-flight threads"
     )
 
 

@@ -23,7 +23,7 @@ SEEDED_CHANNELS = [
 # SEEDED_CHANNELS, _CHANNEL_KEYWORDS, or _UNIVERSAL_CHANNELS
 # (src/agent/simulation.py) — those three drive Phase-1 topical
 # discovery/auto-join for PI-lab agents, and channel polling scope
-# (_poll_slack_for_bot_messages, _rebuild_state_from_slack) is keyed off
+# (_poll_slack_for_bot_messages) is keyed off
 # SEEDED_CHANNELS membership too. Keeping this name out of all three means
 # no PI-lab bot ever joins it, scans it, or treats the hub's headline posts
 # as something to reply to.
