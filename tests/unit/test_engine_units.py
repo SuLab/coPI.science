@@ -4,6 +4,8 @@ import ast
 import inspect
 import textwrap
 
+import pytest
+
 import src.agent.simulation as sim
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
@@ -52,6 +54,53 @@ def test_control_is_a_unit_and_stops_through_run_state():
     eng._running = True
     eng.control.request_stop()
     assert eng._running is False and eng._end_reason == "operator"
+
+
+def test_llm_log_is_a_unit():
+    from src.agent.engine.llm_log import LlmLog
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["llm_log"] is LlmLog
+    assert eng._on_llm_call.__self__ is eng.llm_log
+    assert eng.llm_log._recover_rows_individually.__self__ is eng.persistence
+
+
+@pytest.mark.asyncio
+async def test_slack_io_is_a_unit_and_reports_gone_threads_through_the_port(monkeypatch):
+    from src.agent.engine.slack_io import SlackIO
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["slack_io"] is SlackIO
+    seen = []
+
+    async def gone(thread_id):
+        seen.append(thread_id)
+
+    monkeypatch.setattr(eng, "_evict_dead_thread", gone)
+    await eng.slack_io._on_thread_gone("1.2")
+    assert seen == ["1.2"]
+    eng.slack_io.seed_cursor("C1", "5.0")
+    eng.slack_io.seed_cursor("C1", "4.0")
+    assert eng._poll_cursors["C1"] == "5.0"
+
+
+def test_scheduler_is_a_unit():
+    from src.agent.engine.scheduler import Scheduler
+
+    eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={},
+                           max_runtime_minutes=7, budget_cap=3)
+    assert sim._UNIT_CLASSES["scheduler"] is Scheduler
+    assert eng.scheduler.max_runtime_minutes == 7 and eng.budget_cap == 3
+    assert eng.is_within_time_limit is eng.scheduler.is_within_time_limit
+
+
+def test_panel_is_a_unit():
+    from src.agent.engine.panel import Panel
+
+    eng = _engine()
+    assert sim._UNIT_CLASSES["panel"] is Panel
+    assert eng._specialist_consults is eng.panel._specialist_consults
+    assert eng.panel._post_message.__self__ is eng.slack_io
 
 
 def test_every_self_name_in_a_unit_resolves():

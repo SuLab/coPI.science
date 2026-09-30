@@ -70,7 +70,9 @@ async def test_dispatch_services_all_pending_pairs(monkeypatch):
 def test_the_reactive_tier_is_gone():
     import inspect
 
-    src = inspect.getsource(SimulationEngine._select_agent)
+    from src.agent.engine.scheduler import Scheduler
+
+    src = inspect.getsource(Scheduler._select_agent)
     assert "_owes_reply" not in src, "the post lane must not do reactive selection"
     assert "_reactive_streak" not in src
 

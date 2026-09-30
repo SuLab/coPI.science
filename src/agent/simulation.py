@@ -6,7 +6,7 @@ import logging
 import random
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 from src.agent.agent import Agent
@@ -15,8 +15,12 @@ from src.agent.engine import constants, deps
 from src.agent.engine.channel_directory import ChannelDirectory
 from src.agent.engine.context import EngineContext, RunState, _Via
 from src.agent.engine.control import Control
+from src.agent.engine.llm_log import LlmLog
 from src.agent.engine.memory import Memory
+from src.agent.engine.panel import Panel
 from src.agent.engine.persistence import Persistence
+from src.agent.engine.scheduler import Scheduler
+from src.agent.engine.slack_io import SlackIO
 
 # isort: off
 from src.agent.engine.constants import (  # re-exported: tests and scripts import these from here
@@ -83,8 +87,7 @@ from src.agent.engine.sidecar import (  # re-exported
     _unfence_sidecar as _unfence_sidecar,
 )
 # isort: on
-from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog, is_panel_note
+from src.agent.message_log import LogEntry, MessageLog, is_panel_note
 from src.agent.post_types import (
     PostTypeSpec,
     available_for,
@@ -94,18 +97,12 @@ from src.agent.post_types import (
 from src.agent.prompt_safety import delimit
 from src.agent.roles import prompt_set_stamp
 from src.agent.run_marker import (
-    is_run_start_marker,
     parse_announce_channels,
     render_run_start_announcement,
 )
-from src.agent.slack_client import ThreadNotFound
 from src.agent.specialists import (
-    clip_question,
-    clip_rate_warning,
     domain_flatness_warning,
-    format_panel_note,
     panel_is_owed,
-    required_domains_for,
     signal_mix_report,
 )
 from src.agent.state import ThreadState
@@ -122,7 +119,6 @@ from src.models import (
     OpportunityAssessment,
     PromptChangeSuggestion,
     SimulationRun,
-    SpecialistConsult,
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
@@ -142,8 +138,6 @@ from src.services.assessment_headline import (
     render_assessment_headline,
 )
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
-from src.services.blackbird_rubric import band as rubric_band
-from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 from src.services.cohorts import compute_gates, summarise_gates
 from src.services.interview_state import ended_thread_ids
 from src.services.llm import set_call_log_callback
@@ -173,6 +167,10 @@ _UNIT_CLASSES: dict[str, type] = {
     "channel_directory": ChannelDirectory,
     "memory": Memory,
     "control": Control,
+    "llm_log": LlmLog,
+    "slack_io": SlackIO,
+    "scheduler": Scheduler,
+    "panel": Panel,
 }
 
 #: Owner-API names two units define under the same name (``headlines.enqueue()``,
@@ -220,7 +218,23 @@ class SimulationEngine:
         self.ctx.channel_id_resolver = self.channel_directory.channel_id_for
         self.memory = Memory(self.ctx)
         self.control = Control(self.ctx, run_state=self.run_state)
-        self.max_runtime_minutes = max_runtime_minutes
+        self.llm_log = LlmLog(self.ctx, persistence=self.persistence)
+        self.slack_io = SlackIO(
+            self.ctx,
+            channel_directory=self.channel_directory,
+            persistence=self.persistence,
+            # Ports (spec §7.2 rule 2), resolved through the facade at call time so
+            # a patched engine member is the one called.
+            on_thread_gone=lambda thread_id: self._evict_dead_thread(thread_id),
+            tag_filter=lambda text, agent: self._strip_disallowed_tags(text, agent),
+        )
+        self.scheduler = Scheduler(
+            self.ctx,
+            channel_directory=self.channel_directory,
+            max_runtime_minutes=max_runtime_minutes,
+            budget_cap=budget_cap,
+        )
+        self.panel = Panel(self.ctx, slack_io=self.slack_io)
         # 0 = off. When >0, the engine stops opening NEW pitches once this many
         # top-level posts exist this run, then ends the run when every opened
         # interview has drained (see _proposal_target_drained). Rehydrated on
@@ -234,7 +248,6 @@ class SimulationEngine:
         self.max_proposals = max_proposals
         self._proposals_posted = 0
         self._proposal_drain_streak = 0
-        self.budget_cap = budget_cap
         self._reset_cursors = reset_cursors
         # True only for `--fresh`, which has just minted a new run with no
         # agent_messages/agent_channels rows of its own (it deletes nothing —
@@ -244,73 +257,15 @@ class SimulationEngine:
         # history already on the transport (see _restore_slack_state).
         self._fresh_start = fresh_start
 
-        # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
-        self._role_rate_cache: dict[str, int | None] = {}
-
         # role name -> declared post_types. Same reason as _role_rate_cache
         # above: load_role() hits the disk on every call.
         self._role_post_types_cache: dict[str, tuple[PostTypeSpec, ...]] = {}
-
-        # (pi_agent_id, thread_id) -> the specialist domains consulted during
-        # that interview. Keyed per INTERVIEW, not per PI: a PI's second
-        # interview must convene its own panel rather than inherit the first
-        # one's. `huganir` was assessed 4 times in run 1787010946 and every
-        # assessment after the first rode on the first interview's consults.
-        # `thread_id` is None for direct callers that have no interview.
-        # In-memory on purpose: it is read by _persist_assessment one LLM call
-        # later, in the SAME process. A restart clears it, and the floor then
-        # fails OPEN for threads that predate the restart — see
-        # _persist_assessment.
-        #
-        # Why fail open, now that a gap no longer costs the verdict: flagging
-        # instead would mark every thread that survived a restart as
-        # panel_incomplete, including the ones whose panel genuinely WAS
-        # convened before the restart cleared this map. That is a false
-        # accusation on a real number. What failing open costs is subtler and
-        # is what `_floor_verifiable` exists to stop: an unverifiable verdict
-        # used to be stored as `panel_incomplete=False, missing_domains=NULL`,
-        # indistinguishable from a verified-complete panel, so every
-        # post-restart verdict silently inflated the clean-panel count. It is
-        # now recorded as the third state, `missing_domains=[]` — unverified.
-        self._specialist_consults: dict[tuple[str, str | None], set[str]] = {}
-
-        # verdict_signal -> count, for the whole run. The panel returned caution
-        # or blocking on 142/142 consults in run 1787010946 and never once
-        # cleared anything; a signal with no variance carries no information,
-        # and it took an audit to notice. Tallied so the run says so itself.
-        self._consult_signal_counts: dict[str, int] = {}
-
-        # signal counts per DOMAIN, for domain_flatness_warning. The run-level
-        # tally above cannot see a single stuck domain.
-        self._consult_signal_counts_by_domain: dict[str, dict[str, int]] = {}
-
-        self._start_time: datetime | None = None
 
         # Agent name lookups
         self._bot_name_to_id: dict[str, str] = {
             a.bot_name.lower(): a.agent_id for a in agents
         }
         self.message_log.set_bot_name_map(self._bot_name_to_id)
-
-        # channel name -> when its poll failure was last reported at WARNING.
-        # See _log_poll_error / POLL_ERROR_LOG_INTERVAL.
-        self._poll_error_last_logged: dict[str, float] = {}
-
-        # LLM call log buffer
-        self._llm_log_buffer: list[dict] = []
-        self._llm_log_flush_size = 10
-        # Every fire-and-forget flush task `_on_llm_call` has spawned and that
-        # has not finished yet. `stop()` gathers these before its own final
-        # flush; without that, `asyncio.run` cancelled them at interpreter
-        # shutdown, and because `_flush_llm_logs` takes its batch OUT of the
-        # buffer before awaiting the commit, a cancelled task loses those rows
-        # from the buffer AND the database. Entries are discarded in
-        # `_on_flush_done`, so the set does not grow for the run's life.
-        self._flush_tasks: set[asyncio.Task] = set()
-
-
-        # Slack poll cursor: channel_id -> latest ts seen
-        self._poll_cursors: dict[str, str] = {}
 
         # Closed thread IDs — prevents Phase 3 from re-activating decided threads
         self._closed_thread_ids: set[str] = set()
@@ -376,27 +331,6 @@ class SimulationEngine:
         # spelling slip is otherwise only visible by grepping logs.
         self._post_type_rejections: dict[str, int] = {}
 
-        # Panel-note clipping drift (see specialists.clip_rate_warning): every
-        # successful consult that posts a note counts toward the denominator,
-        # and every one whose question got clipped to PANEL_NOTE_QUESTION_CHARS
-        # counts toward the numerator. `_panel_note_clip_warned` makes the log
-        # line fire once per run/process rather than once per note once the
-        # threshold is crossed. The latch is deliberately conservative: one
-        # crossing means the calibration was exceeded on a real sample and is
-        # worth one look. The rate DOES un-cross back below the floor mid-run
-        # (observed: 3 clipped of 22 latches, then 100 unclipped notes later
-        # sitting at 2.5%) — but re-warning or un-warning as it oscillates
-        # would turn a drift signal into a ticker, so the latch stays latched.
-        # The logged tally is the FIRST crossing's counts, not the run's
-        # final rate.
-        self._panel_notes_posted: int = 0
-        self._panel_notes_clipped: int = 0
-        self._panel_note_clip_warned: bool = False
-
-        # Wall-clock throttles for Slack pollers + round-robin cursor over
-        # connected clients, so one agent's token doesn't carry all poll load.
-        self._last_channel_poll: float = 0.0
-        self._poll_client_cursor: int = 0
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
@@ -428,11 +362,6 @@ class SimulationEngine:
         # in-doubt claim, or the repair script): not posted here, and not LOST
         # either, since `--apply` would skip them too.
         self._unclaimed_headlines: list[str] = []
-        # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
-        # writer slot so its ids can never collide with the web app's or
-        # GrantBot's, which mint into the same agent_messages table from other
-        # processes (R1). See mint_ts and src/agent/ids.py.
-        self._ts_minter = TsMinter(WRITER_ENGINE)
         # Bounds concurrent reply-lane tasks PROCESS-WIDE. Constructed once,
         # here, and never re-constructed per call/per turn — the whole reason
         # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
@@ -481,134 +410,6 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-
-    @property
-    def is_within_time_limit(self) -> bool:
-        if self.max_runtime_minutes <= 0:
-            return True  # run forever (until SIGTERM)
-        if not self._start_time:
-            return True
-        elapsed = (deps.datetime.now(UTC) - self._start_time).total_seconds()
-        return elapsed < self.max_runtime_minutes * 60
-
-    def _agent_within_budget(self, agent: Agent) -> bool:
-        if self.budget_cap <= 0:
-            return True  # unlimited
-        return agent.api_call_count < self.budget_cap
-
-    def _agent_load(self, agent: Agent) -> int:
-        """Concurrent conversational obligations for one agent.
-
-        The shared signal behind BOTH the rate allowance (``_within_rate_limit``)
-        and the selection weight (``_select_agent``). Deriving both from one
-        number is the point: the failure this fixes was the limiter and the
-        scheduler holding contradictory views of what a hub deserves — the
-        reactive tier gave the blackbird hub a 7x boost while the cumulative cap
-        benched it for 161 consecutive turns, and the cap won, silently. See
-        docs/specs/2026-08-06-hub-budget-scheduler-design.md §1.4.
-
-        Floors at 1 so an idle agent stays eligible. Ceilings at
-        ``active_thread_threshold`` so nothing can inflate its own allowance past
-        the thread cap it is already bound by — that clamp is what stops a
-        thread-opening runaway from financing itself (§4.1).
-        """
-        live = sum(
-            1 for t in agent.state.active_threads.values() if t.status == "active"
-        )
-        return max(1, min(live, deps.get_settings().active_thread_threshold))
-
-    def _calls_per_load(self, agent: Agent) -> int:
-        """Per-unit-of-load LLM allowance for this agent's role.
-
-        Cached by role NAME, so an agent flipping roles at runtime simply looks
-        up a different key and needs no invalidation. The only staleness is a
-        role.toml edited mid-run, which matches get_settings() already being
-        lru_cached — both need a container recreate (design §5).
-
-        The cache exists because load_role() reads TOML from disk on every call
-        and this runs for every agent on every scheduler tick.
-        """
-        cached = self._role_rate_cache.get(agent.role, _UNSET)
-        if cached is _UNSET:
-            cached = deps.load_role(agent.role).calls_per_load_per_window
-            self._role_rate_cache[agent.role] = cached
-        if cached is not None:
-            return cached
-        return deps.get_settings().llm_calls_per_load_per_window
-
-    def _allowance_for(self, agent: Agent) -> int:
-        """Window allowance for one agent. The hub is on its own ceiling.
-
-        A ``scout_hub`` sits on an unpaced lane (the reservation reply path
-        of Task 9 of docs/plans/2026-08-14-two-lane-concurrent-scheduler.md
-        fires without the per-turn fan-out cap re-checking it), so the
-        per-load allowance that bounds every ``pi_lab`` no longer applies to
-        it — it gets ``hub_llm_calls_per_window`` instead, a brake against
-        runaway rather than a load-scaled budget. Every other role keeps the
-        existing formula. Shared by both ``_within_rate_limit`` (selection)
-        and ``Agent.try_reserve`` (spend) so the two checks cannot disagree
-        about what the hub deserves — that disagreement is exactly what
-        benched the hub for 161 turns in run 4f1e8395.
-        """
-        settings = deps.get_settings()
-        if agent.role == "scout_hub":
-            return settings.hub_llm_calls_per_window
-        return self._calls_per_load(agent) * self._agent_load(agent)
-
-    def _within_rate_limit(self, agent: Agent, now: float) -> bool:
-        """Sliding-window LLM rate check — the LIVE throttle.
-
-        allowance = ``self._allowance_for(agent)``: ``_calls_per_load(agent) *
-        _agent_load(agent)`` for a pi_lab, or ``hub_llm_calls_per_window`` for
-        the scout_hub, over llm_rate_window_seconds. Unlike the cumulative cap
-        this replaces, it self-heals: entries age out, so an agent throttled
-        now is eligible later. See design §4.2, §5.
-
-        This is the SELECTION-time check (consulted by ``_turn_eligible``).
-        The SPEND-time check is ``Agent.try_reserve``, called immediately
-        before each LLM call in ``_reply_to_thread`` / ``_phase5_new_post`` —
-        a selection-time-only check cannot bound concurrent spend once several
-        calls are in flight for one agent.
-        """
-        allowance = self._allowance_for(agent)
-        window_start = now - deps.get_settings().llm_rate_window_seconds
-        times = agent.state.call_times
-        while times and times[0] < window_start:
-            times.popleft()
-        ok = len(times) < allowance
-        if not ok and not agent.state.throttled:
-            logger.warning(
-                "[%s] throttled: %d LLM calls in the last %ds (allowance %d). "
-                "Eligible again as the window slides.",
-                agent.agent_id, len(times),
-                deps.get_settings().llm_rate_window_seconds, allowance,
-            )
-        agent.state.throttled = not ok
-        return ok
-
-    def _active_thread_count(self, agent: Agent) -> int:
-        """Count this agent's active threads."""
-        return len(agent.state.active_threads)
-
-    def _count_today_posts(self, agent: Agent) -> int:
-        """Count top-level posts by this agent in public channels, in the current Pacific time day.
-
-        collab_private channels are flat (every refinement reply is a top-level
-        post) and also host PI-initiated handover messages under the bot's
-        token. Both are legitimate per the 2-party private-channel design, so
-        they must not consume the spam-prevention cap that's scoped to public
-        new-conversation posts.
-        """
-        from zoneinfo import ZoneInfo
-        pacific = ZoneInfo("America/Los_Angeles")
-        today_start = deps.datetime.now(pacific).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        ).timestamp()
-        return sum(
-            1 for e in self.message_log.get_agent_top_level_posts(agent.agent_id, limit=100)
-            if e.posted_at >= today_start
-            and self._channel_visibility.get(e.channel) != VISIBILITY_COLLAB_PRIVATE
-        )
 
     async def start(self) -> None:
         """Run the full simulation."""
@@ -1348,74 +1149,6 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # Agent selection (weighted random)
     # ------------------------------------------------------------------
-
-    def _turn_eligible(self, agent: Agent, now: float) -> bool:
-        """Selection eligibility for one agent.
-
-        - within the LEGACY cumulative cap. Inert by default (``budget_cap``
-          defaults to 0, and ``_agent_within_budget`` short-circuits at <= 0);
-          armed only when an operator passes ``--budget``. Retained, not removed,
-          for back-compat — see design §6;
-        - within its sliding-window rate limit. This is the live throttle;
-        - past its per-agent cooldown. ``turn_delay_seconds`` throttles an
-          individual agent's tempo; enforcing it here (rather than as a global
-          ``asyncio.sleep`` after every productive turn) leaves the rest of the
-          roster free to act while one agent sits out. See v2 §10.3.
-        - not already ``in_flight``: a post-lane turn for this agent is
-          currently running. A no-op today (the post lane is strictly
-          sequential — the previous turn always finishes before the next
-          selection), but load-bearing once loop iterations can overlap.
-        """
-        if agent.state.in_flight:
-            return False
-        if not self._agent_within_budget(agent):
-            # Ordering is deliberate and must not change: the legacy cap decides
-            # eligibility first (that is what keeps the --budget compat tests
-            # meaningful). But short-circuiting here also froze
-            # ``state.throttled``, so with --budget armed an agent's next genuine
-            # throttle transition logged nothing. Evaluate the window check for
-            # its SIDE EFFECT (expire old entries, refresh the flag, emit the
-            # one-shot warning) and discard the result — eligibility is still
-            # decided by the cap alone.
-            self._within_rate_limit(agent, now)
-            return False
-        if not self._within_rate_limit(agent, now):
-            return False
-        delay = deps.get_settings().turn_delay_seconds
-        if delay > 0 and (now - agent.state.last_selected) < delay:
-            return False
-        return True
-
-    def _select_agent(self) -> Agent | None:
-        """Select the next agent for a post-lane turn (sequential — one at a time).
-
-        Staleness-weighted random, scaled by load:
-        P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
-        for agents that have repeatedly skipped Phase 5
-        (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
-        a star's hub — one endpoint of every conversation — draw a share that
-        tracks the edges it actually sits on, instead of the 1/N a uniform
-        weighting gave it. See design §4.3.
-
-        There is no reactive tier here any more: replies leave the paced pool
-        entirely (see `_dispatch_reply_lane`), so this is pure proactive
-        selection over the eligibility pool (`_turn_eligible`) — budget, the
-        sliding-window rate limit, the per-agent `turn_delay_seconds`
-        cooldown, and not already `in_flight`.
-        """
-        now = deps.time.time()
-        candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
-        if not candidates:
-            return None
-
-        weights = []
-        for a in candidates:
-            w = max(now - a.state.last_selected, 1.0) * self._agent_load(a)
-            skips = a.state.consecutive_phase5_skips
-            if skips >= 3:
-                w /= 2 ** (skips - 2)
-            weights.append(w)
-        return random.choices(candidates, weights=weights, k=1)[0]
 
     # ------------------------------------------------------------------
     # Reply lane — every (agent, thread) pair owing a reply, unpaced
@@ -5368,368 +5101,6 @@ class SimulationEngine:
                 agent_id, reason, exc, exc_info=True,
             )
 
-    async def _record_specialist_consult(
-        self,
-        agent_id: str,
-        *,
-        subject_agent_id: str | None,
-        thread_id: str | None,
-        channel_name: str | None,
-        domain: str,
-        question: str,
-        context_excerpt: str | None,
-        verdict_signal: str,
-        confidence: str,
-        concerns: list | None,
-        questions_to_ask: list | None,
-        raw_opinion: str,
-        truncated: bool | None = None,
-        # `read_state` is stored as of 0038. Defaults to None so a caller
-        # written before this parameter existed keeps recording "not stated"
-        # rather than asserting a read that was never checked.
-        read_state: str | None = None,
-        # The specialist contract's positive-evidence field, produced by the
-        # `on_consult_record` call in `tools.py` since the personas gained an
-        # `established` key. Still `None`-defaulted: a persona reply that omits
-        # the key, and every reply written before the key existed, parses to an
-        # empty tuple, and rows from before this column stay NULL. A NULL here
-        # therefore means "never asked", not "the specialist established
-        # nothing" — the same distinction the column's own comment draws.
-        established: list | None = None,
-    ) -> None:
-        """Write one successful consult to ``specialist_consults``.
-
-        Best-effort in exactly the same sense as ``_record_assessment_drop``:
-        never raises, a DB-less engine is a silent no-op, and a failure is an
-        ERROR with a traceback and nothing else. The consult itself has already
-        happened and has already been credited to the floor in memory
-        (``_note_consult``, fired first by ``_execute_consult_specialist``) —
-        losing this row costs visibility and post-restart verifiability, never
-        the opinion the hub is about to act on.
-
-        Called from the ``on_consult_record`` closure in ``_reply_to_thread``,
-        which is fired on a WIDER path than ``on_consult``: a refused domain, a
-        missing persona file, a failed call or an empty reply all write nothing,
-        but a reply the API cut off mid-sentence DOES write a row (it is the only
-        evidence the attempt happened) while not counting toward the floor. So
-        "a row here means the domain counts as consulted" holds only for
-        ``truncated`` in ``(False, None)`` — the qualification
-        ``src/models/specialist_consult.py`` states and the one a reader of these
-        rows as evidence of a convened panel (``_seed_consults_from_db``) has to
-        apply.
-
-        ``truncated`` defaults to ``None`` — "not stated" — so a caller written
-        before the column existed keeps its old meaning rather than asserting
-        completeness it never checked. ``src/agent/tools.py`` always sends a
-        real boolean.
-
-        Awaited inline by the tool call rather than dispatched as a background
-        task: an orphaned task would outlive the turn, and the engine's
-        shutdown path flushes its own buffers only — a `docker stop` landing
-        between the consult and the write would lose the row it was created to
-        keep.
-        """
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        try:
-            async with self.session_factory() as db:
-                db.add(SpecialistConsult(
-                    simulation_run_id=self.simulation_run_id,
-                    agent_id=agent_id,
-                    subject_agent_id=(subject_agent_id or None),
-                    thread_id=(thread_id or None),
-                    channel_name=(channel_name or None),
-                    domain=domain,
-                    question=question,
-                    context_excerpt=context_excerpt,
-                    verdict_signal=verdict_signal,
-                    confidence=confidence,
-                    concerns=concerns,
-                    questions_to_ask=questions_to_ask,
-                    raw_opinion=raw_opinion,
-                    truncated=truncated,
-                    read_state=read_state,
-                    # `[]` and NULL are different answers here, exactly as
-                    # they are for `concerns` above: NULL is "never asked",
-                    # `[]` is "asked, nothing came back". Collapsing `[]` to
-                    # NULL was harmless while no call site produced the field,
-                    # but `tools.py` now always sends a real list, so
-                    # collapsing it would relabel every zero-positive opinion
-                    # as unasked. `[]` is NOT "named nothing" specifically:
-                    # `_str_tuple` yields the empty tuple for a missing key
-                    # too, so it also covers a persona that ignored the key.
-                    # That ambiguity is accepted; conflating it with NULL is
-                    # not.
-                    established=None if established is None else list(established),
-                    rubric_version=RUBRIC_VERSION,
-                    rubric_content_hash=RUBRIC_CONTENT_HASH,
-                ))
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
-            logger.error(
-                "[%s] Failed to record the %s consult for %r (thread %s): %s — "
-                "the opinion still stands and still counts for the floor "
-                "in-process, but this run's panel is no longer reconstructable "
-                "after a restart",
-                agent_id, domain, subject_agent_id or "?", thread_id or "?", exc,
-                exc_info=True,
-            )
-
-    async def _post_panel_note(
-        self,
-        agent_id: str,
-        *,
-        channel: str | None,
-        thread_ts: str | None,
-        domain: str,
-        question: str,
-        verdict_signal: str,
-        truncated: bool | None = None,
-        read_state: str | None = None,
-        **_withheld,
-    ) -> None:
-        """Post the one-line, signal-level trace of a successful consult into
-        the interview thread.
-
-        Why at all: the evaluation panel was previously invisible in Slack. A
-        human watching an interview saw the hub go quiet for 30-40 seconds per
-        consult and then produce a verdict shaped by opinions nobody in the
-        workspace could see. The note makes the panel legible AT THE MOMENT it
-        is engaged — posted from inside the turn's tool rounds, so it lands
-        before the hub's eventual reply and the thread reads in the order things
-        actually happened.
-
-        Why so thin: an interview thread is visible to every lab in the
-        workspace. A specialist's opinion paraphrases the PI's confidential
-        statements back at them and quotes Blackbird's internal rubric, so
-        ``concerns``, ``questions_to_ask``, ``confidence`` and the opinion body
-        are NOT published. ``**_withheld`` is where they land — named for what
-        it does, and load-bearing in two directions: it lets this be called
-        with the same ``**fields`` the durable writer takes (one closure, one
-        contract), and it means a field added to that contract later is
-        withheld by DEFAULT rather than leaking the first time someone forgets.
-        ``format_panel_note`` then takes only the three publishable values, so
-        there is no parameter through which the rest could reach Slack. That
-        three-argument signature IS the enforcement and is deliberately not
-        widened.
-
-        ``truncated`` and ``read_state`` are the two fields pulled back out of
-        ``**_withheld``, and for the opposite reason to the rest: they are not
-        withheld from the note, they CANCEL it. ``truncated`` was the original
-        special case — a consult the API cut off mid-sentence parsed to
-        nothing, so ``verdict_signal`` is the schema's DEFAULT ``gap`` and
-        no specialist ever said it — and this note goes into the PI's own
-        interview thread, which every lab in the workspace can read. Publishing
-        a parse failure as ``gap`` states a panel opinion that does not
-        exist, and ``src/agent/tools.py`` has already refused to credit that
-        domain to the floor for exactly this reason; the note must agree with
-        the floor. It was absorbed silently by ``**_withheld`` until 2026-08-22,
-        which is why it is spelled out as a parameter rather than read out of
-        the catch-all: a named parameter is visible in the signature, a dict key
-        is not.
-
-        ``read_state`` (``src/agent/specialists.py::read_state_for``)
-        generalises that same reasoning to a reply that arrived COMPLETE and
-        simply failed to parse — not truncated, but just as unread: ``gap``
-        there is also a parse default, not something a specialist said. Any
-        ``read_state`` other than ``"parsed"`` cancels the note the same way
-        ``truncated`` does. ``read_state=None`` is treated as "post it" rather
-        than "unread": ``None`` means a caller written before this parameter
-        existed, and failing closed on that would silently stop every note the
-        moment a call site was missed rather than updated. ``truncated`` stays
-        in the signature alongside it (not folded into ``read_state`` and
-        removed) so a caller that supplies only one of the two still fails
-        closed.
-
-        The DURABLE row is still written either way — it is the only evidence
-        the attempt happened, and it now carries ``truncated=True`` so the floor
-        keeps refusing it across a restart. Only the workspace-visible claim is
-        skipped.
-
-        Best-effort, in exactly the sense ``_record_specialist_consult`` is:
-        never raises, so it cannot cost the consult, the turn or the reply. It
-        runs SECOND, after the durable record — if only one of the two can
-        happen it must be the artifact a verdict is audited against, not the
-        courtesy note.
-
-        `phase=PHASE_PANEL_NOTE` is the whole reason no prompt file had to
-        change: the row exists, it is in the thread, and every agent-facing
-        read of the message log skips it (see src/agent/message_log.py). The
-        flag is read HERE rather than cached at startup so an operator can
-        disable notes with a `.env` edit + container recreate and no rebuild.
-        """
-        if not channel:
-            # No channel, nowhere to post. A consult made outside a thread
-            # (a direct tool call, a test) has no interview to annotate.
-            return
-        # CANCELLED for any opinion we did not actually read. `truncated` was
-        # the original special case and its reasoning was right — "no
-        # specialist ever said it" — but it covered only an API cut-off. A
-        # reply that arrived COMPLETE and failed to parse is not truncated,
-        # and posted a workspace-visible "gap" for a verdict `parse_opinion`
-        # had defaulted. `read_state` is the general predicate; `truncated` is
-        # kept beside it so a caller that supplies only one still fails closed.
-        if truncated or (read_state is not None and read_state != "parsed"):
-            # See the docstring: the signal on an unread opinion is a parse
-            # default, not something a specialist said. Logged rather than
-            # silent — a note that does not appear is otherwise
-            # indistinguishable from `panel_notes_in_thread=false`.
-            logger.info(
-                "[%s] Panel note skipped for the %s consult (thread %s): "
-                "truncated=%r, read_state=%r, so its signal is a parse "
-                "default and not something a specialist said. The durable "
-                "row still stands and the domain still does not count "
-                "toward the floor.",
-                agent_id, domain, thread_ts or "?", truncated, read_state,
-            )
-            return
-        try:
-            if not deps.get_settings().panel_notes_in_thread:
-                return
-            posted = await self._post_message(
-                agent_id,
-                channel,
-                format_panel_note(
-                    domain=domain,
-                    verdict_signal=verdict_signal,
-                    question=question,
-                ),
-                thread_ts=thread_ts,
-                phase=PHASE_PANEL_NOTE,
-            )
-            if posted:
-                # Definitional consistency with what was actually posted: the
-                # note's question is exactly what `clip_question` returns, so
-                # asking whether IT changed the text (rather than re-deriving
-                # a length test here) can never drift from what shipped.
-                was_clipped = clip_question(question) != (question or "").strip()
-                self._panel_notes_posted += 1
-                if was_clipped:
-                    self._panel_notes_clipped += 1
-                if not self._panel_note_clip_warned:
-                    alarm = clip_rate_warning(
-                        self._panel_notes_clipped, self._panel_notes_posted,
-                    )
-                    if alarm:
-                        logger.warning("%s", alarm)
-                        self._panel_note_clip_warned = True
-        except Exception as exc:  # noqa: BLE001 — a note must not cost the opinion
-            logger.error(
-                "[%s] Failed to post the %s panel note to #%s (thread %s): %s — "
-                "the consult itself stands, is recorded, and still counts for "
-                "the floor; only the in-thread trace of it is missing",
-                agent_id, domain, channel, thread_ts or "?", exc, exc_info=True,
-            )
-
-    async def _seed_consults_from_db(
-        self, verdict: dict, thread: ThreadState | None,
-    ) -> None:
-        """Rehydrate this interview's consult record from ``specialist_consults``
-        when memory holds nothing for it.
-
-        The floor's in-memory map dies with the process, so before this every
-        verdict written after a restart was UNVERIFIABLE — stored with
-        ``missing_domains=[]`` no matter how thorough the panel had been (see
-        ``_floor_verifiable``). Production's normal exit is a SIGKILL, so that
-        was the ordinary case, not a corner one. The table now outlives the
-        process, so the record can be read back.
-
-        Deliberately ADDITIVE and narrow:
-
-        * Only when ``self._consulted_domains(subject, thread)`` is EMPTY. A
-          process that recorded anything for this interview stays authoritative
-          for it — memory is written on the success path itself and cannot be
-          behind a committed row that path also wrote.
-        * Only for a verdict that owes a panel at all, asked through
-          ``panel_is_owed`` — the SAME question ``_specialist_floor_gap`` asks,
-          on the same two inputs (the model's recommendation and the COMPUTED
-          band). This used to test ``recommendation not in
-          _PANEL_REQUIRED_FOR``, the recommendation-only rule the floor
-          abandoned, so it skipped rehydration for exactly the verdicts the new
-          floor holds to the panel: a verdict written ``pass`` that scores into
-          the ``conditional`` band is owed a panel, and the seed refused to look
-          for its consults. Production stamped such a verdict
-          ``panel_incomplete=true`` naming four domains, THREE of which were
-          recorded as consulted on that very thread.
-        * Keyed on ``(run, subject, thread)``, the same triple the in-memory map
-          uses. A different run's rows, or the same PI's OTHER interview, must
-          not satisfy this interview's panel — the exact hole
-          ``_specialist_floor_gap``'s docstring records.
-        * TRUNCATED consults are excluded. A row exists for every consult that
-          produced text, including one the API cut off mid-sentence — that row is
-          the only evidence the attempt happened, and ``src/agent/tools.py``
-          deliberately writes it while NOT crediting the domain in memory. Left
-          in this SELECT it would undo that refusal on the next restart, turning
-          an unread specialist into a consulted one. The filter is
-          ``truncated IS NOT TRUE``, never ``= False``: NULL is a third state
-          ("written before migration 0036"), and reading it as truncated would
-          invalidate every pre-migration row's credit on no evidence at all.
-          Rows written before 0036 therefore keep counting, which means three
-          known-truncated production consults still credit the floor —
-          unrecoverable from the table, and cheaper than the alternative.
-          Subject to that, this can only ever turn "we have no record" into
-          "here is the record".
-
-        Arming the floor off these rows does not weaken
-        ``ThreadState.floor_armed``'s latch. The latch exists to stop a
-        DIFFERENT interview's consult, landing mid-await in another task, from
-        retroactively arming this verdict; these rows are this interview's own,
-        already committed before this turn began, and the seed only ever moves
-        the latch False -> True. After the seed the global map really is
-        non-empty, which is precisely what ``floor_armed`` asserts.
-
-        Never raises: this runs inside ``_persist_assessment``, ahead of the
-        write, and a failed SELECT must cost the fallback, not the verdict.
-        """
-        if not panel_is_owed(
-            verdict.get("recommendation"), self._computed_score_and_band(verdict)[1]
-        ):
-            return
-        subject = verdict.get("subject_agent_id")
-        if not isinstance(subject, str) or not subject:
-            return
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        thread_id = thread.thread_id if thread is not None else None
-        if self._consulted_domains(subject, thread_id):
-            return
-        from sqlalchemy import select as sa_select
-
-        try:
-            async with self.session_factory() as db:
-                domains = (await db.execute(
-                    sa_select(SpecialistConsult.domain).where(
-                        SpecialistConsult.simulation_run_id == self.simulation_run_id,
-                        SpecialistConsult.subject_agent_id == subject,
-                        SpecialistConsult.thread_id == thread_id,
-                        # IS NOT TRUE, not `== False`: NULL is "written before
-                        # 0036", and those rows must keep crediting the floor
-                        # exactly as they do today. See the docstring.
-                        SpecialistConsult.truncated.is_not(True),
-                    )
-                )).scalars().all()
-        except Exception as exc:  # noqa: BLE001 — never lose a verdict over a lookup
-            logger.error(
-                "Failed to read back the consult record for %r (thread %s): %s "
-                "— this verdict's panel will be stored as UNVERIFIED",
-                subject, thread_id or "?", exc, exc_info=True,
-            )
-            return
-        if not domains:
-            return
-        self._specialist_consults.setdefault((subject, thread_id), set()).update(domains)
-        if thread is not None:
-            # The latch's own rule (`floor_armed or bool(_specialist_consults)`)
-            # re-applied to the map as the seed above just left it — not a live
-            # read of anything another task may be doing. See the docstring.
-            thread.floor_armed = True
-        logger.info(
-            "[specialists] floor rehydrated %d recorded consult(s) for %r "
-            "(thread %s) from specialist_consults — this verdict is checkable "
-            "even though the map was empty (restarted mid-interview?)",
-            len(set(domains)), subject, thread_id or "?",
-        )
-
     def _strip_disallowed_tags(
         self, message_text: str | None, agent: Agent
     ) -> tuple[str | None, int]:
@@ -5842,52 +5213,6 @@ class SimulationEngine:
             self._role_post_types_cache[role] = cached
         return cached
 
-    def _record_consult(
-        self, pi_agent_id: str, domain: str, thread_id: str | None = None,
-    ) -> None:
-        """Note a successful consult, keyed on the interview it happened in.
-
-        Keyed on ``(pi, thread)`` rather than the PI alone. One PI's consults
-        are NOT cumulative across interviews: a second interview is a second
-        idea and owes its own panel. ``thread_id`` is None for direct callers
-        that have no interview to name.
-        """
-        if not pi_agent_id:
-            return
-        self._specialist_consults.setdefault((pi_agent_id, thread_id), set()).add(domain)
-
-    def _note_consult(
-        self, pi_agent_id: str, domain: str, signal: str, thread_id: str | None = None,
-    ) -> None:
-        """Record a consult AND tally its signal.
-
-        Two concerns, deliberately kept apart: `_record_consult` answers "does
-        the floor consider this domain covered", which is per-interview; the
-        tallies answer "what is this panel's signal mix" (run-level) and "is
-        any one domain stuck on one label" (per-domain).
-
-        `signal` is whatever the caller passes, and `src/agent/tools.py` passes
-        `specialists.DEFAULTED_TALLY_LABEL` rather than a verdict label for a
-        consult whose signal could not be READ — so the tallies carry the read
-        failures as their own bucket and `signal_mix_report` /
-        `domain_flatness_warning` exclude them from the mix they judge. The
-        floor is unaffected: `_record_consult` runs first and takes only the
-        domain.
-        """
-        self._record_consult(pi_agent_id, domain, thread_id)
-        self._consult_signal_counts[signal] = (
-            self._consult_signal_counts.get(signal, 0) + 1
-        )
-        by_domain = self._consult_signal_counts_by_domain.setdefault(domain, {})
-        by_domain[signal] = by_domain.get(signal, 0) + 1
-
-    def _consulted_domains(
-        self, pi_agent_id: str, thread_id: str | None = None,
-    ) -> frozenset[str]:
-        """Domains consulted about this PI in this interview; empty for an
-        interview we have no record of."""
-        return frozenset(self._specialist_consults.get((pi_agent_id, thread_id), ()))
-
     # `_PANEL_REQUIRED_FOR` used to alias `specialists.PANEL_REQUIRED_FOR` here,
     # for call sites testing `recommendation in _PANEL_REQUIRED_FOR` directly.
     # All of them now ask `panel_is_owed`, which weighs the COMPUTED band as
@@ -5895,182 +5220,6 @@ class SimulationEngine:
     # leaving the alias in place would let a future call site quietly re-adopt
     # the abandoned rule. Removed 2026-08-22 with the last such site
     # (`_seed_consults_from_db`).
-
-    @staticmethod
-    def _computed_score_and_band(verdict: dict) -> tuple[float | None, str | None]:
-        """The weighted score and band this verdict's own scores imply.
-
-        One definition, because two callers now need it and they must agree: the
-        row writer (`_persist_assessment`) and the specialist floor, which gates
-        on the COMPUTED band as well as the model's written recommendation.
-
-        An empty/missing ``scores`` map is "we don't know", not "we scored it a
-        0.00 pass" — ``rubric_weighted_score({})`` returns 0.0 and that bands as
-        ``pass``, a real and decisive decline the model never made. Both columns
-        are nullable for exactly this case; leave them unset rather than record a
-        verdict nobody rendered.
-
-        One scale, one evidence bar (src/services/blackbird_rubric.py).
-        """
-        scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
-        if not scores:
-            return None, None
-        score = rubric_weighted_score(scores)
-        return score, rubric_band(score)
-
-    def _specialist_floor_gap(
-        self, verdict: dict, *, thread: ThreadState | None = None,
-    ) -> set[str]:
-        """Domains this verdict was obliged to consult but did not.
-
-        Empty means the verdict may be persisted. Whether a panel is owed at all
-        is ``specialists.panel_is_owed``'s question, not this method's, and it
-        weighs BOTH the model's written recommendation and the COMPUTED band:
-        either can pull a verdict into the panel and neither can pull it out,
-        and anything unreadable fails CLOSED.
-
-        This docstring used to state the abandoned rule — "only ``advance`` and
-        ``conditional`` are held to the panel: a ``pass`` costs Blackbird
-        nothing". Two things were wrong with it. A verdict that SCORES into
-        advance/conditional owed a panel however the hub chose to label it (3 of
-        the 4 conditional bands in the stored corpus are written ``pass``), and
-        ``route-to-incubation`` — the incubation grant Blackbird exists to award,
-        and the one recommendation that commits real money — was exempted as
-        though it were a decline. It is the last verdict that should go
-        unreviewed.
-
-        ``thread``, when given, supplies ``floor_armed`` — whether
-        ``_specialist_consults`` has been seen non-empty at any point in this
-        thread's life, latched once per turn at the top of
-        ``_reply_to_thread`` (see that latch's comment, and
-        ``ThreadState.floor_armed``'s own comment, for the full history: a
-        plain live read here was the original concurrency bug, and freezing
-        the value forever at activation was a second bug fixed in a later
-        round). It is consulted INSTEAD OF a live global map-emptiness check
-        at persist time, because persist happens even later in the same turn
-        as the latch, after this turn's own tool calls and after any `await` —
-        long enough for a DIFFERENT interview's consult, landing in another
-        task, to have changed the live map. ``thread=None`` (every direct
-        caller with no thread to offer, and all pre-existing tests) falls back
-        to a live global read, matching this method's behavior before
-        ``floor_armed`` existed at all.
-
-        The record is keyed on ``(subject, thread)``, not on the PI alone. An
-        earlier version keyed on the PI (``subject_agent_id``) only, back when
-        the artifact was a standalone Phase-5 post with no interview thread of
-        its own, and that keying survived Option A's move into the Phase-4
-        CONCLUDE reply even though a real thread existed at persist time by
-        then — one PI's specialist consults were treated as cumulative across
-        however many interview threads that PI had open. That let a PI's
-        SECOND interview inherit the FIRST interview's consults and never
-        convene its own panel: ``huganir`` was assessed 4 times in one run and
-        ``hart`` 4, and only the first of each ever faced a panel. Keying on
-        the thread as well as the PI gives each interview its own empty slot
-        to start from. ``thread=None`` (every direct caller with no thread to
-        offer, and all pre-existing tests) reads the ``None``-keyed slot for
-        that PI — the same slot ``_record_consult`` writes to when it, too, is
-        called with no ``thread_id``.
-
-        FAILS OPEN in the two cases ``_floor_verifiable`` names, both of which
-        mean "we have no record", never "the panel approved". An empty return
-        is therefore ambiguous ON ITS OWN — "no gap" and "no way to tell" look
-        identical here — which is why ``_persist_assessment`` asks
-        ``_floor_verifiable`` as well and records the difference on the row
-        (``missing_domains`` NULL vs ``[]``). Do not read an empty set as a
-        clean bill of health without asking that question too.
-
-        Note the second fail-open condition is about the whole map, not this
-        PI's slot. An earlier version failed open whenever the SUBJECT had no
-        consults, which quietly excused the commonest failure of all: a hub
-        that simply never convenes a panel. If the map holds entries for other
-        PIs, this process demonstrably records consults, so an absent PI means
-        the panel really was skipped for them — and the floor bites.
-
-        It does not fail open once any consult exists for that PI either: a hub
-        that consulted one cheap specialist must not thereby buy an exemption
-        from the rest.
-        """
-        # Gate on the COMPUTED band as well as the model's written
-        # recommendation, and stop exempting `route-to-incubation`. Keying on
-        # `recommendation` alone let a verdict that scores into `conditional`
-        # exempt itself by writing `pass` — 3 of the 4 conditional bands in the
-        # v2 corpus do exactly that — and it exempted Blackbird's own POSITIVE
-        # outcome on the reasoning that "a decline costs Blackbird nothing".
-        # `route-to-incubation` is the grant Blackbird exists to award; it is the
-        # last verdict that should go unreviewed. See `panel_is_owed`.
-        _, band = self._computed_score_and_band(verdict)
-        if not panel_is_owed(verdict.get("recommendation"), band):
-            return set()
-
-        unverifiable = self._floor_unverifiable_reason(verdict, thread)
-        if unverifiable is not None:
-            # Both fail-open branches log the same way, at INFO, naming the
-            # reason and the consequence — an operator reading this line needs
-            # to know the row it produced says "unverified", not "clean".
-            logger.info(
-                "[specialists] floor fails open for subject %r: %s. The verdict "
-                "is stored with missing_domains=[] — panel UNVERIFIED, which is "
-                "not the same as verified complete (NULL).",
-                verdict.get("subject_agent_id") or "?", unverifiable,
-            )
-            return set()
-
-        # Guaranteed a non-empty str by the check above.
-        subject = verdict.get("subject_agent_id")
-        consulted = self._consulted_domains(
-            subject, thread.thread_id if thread is not None else None
-        )
-        return set(required_domains_for(verdict, band=band) - consulted)
-
-    def _floor_unverifiable_reason(
-        self, verdict: dict, thread: ThreadState | None,
-    ) -> str | None:
-        """Why this verdict's panel cannot be checked at all, or ``None``.
-
-        The single definition of ``_specialist_floor_gap``'s two fail-open
-        conditions, so the gap computation and the "was this even checkable"
-        question asked by ``_persist_assessment`` can never drift apart. The
-        string is human-facing: it is logged, and it is the reason the row is
-        written with ``missing_domains=[]``.
-        """
-        _, band = self._computed_score_and_band(verdict)
-        if not panel_is_owed(verdict.get("recommendation"), band):
-            # No panel was owed, so there is nothing to be unable to verify.
-            return None
-        subject = verdict.get("subject_agent_id")
-        if not isinstance(subject, str) or not subject:
-            return "it names no subject_agent_id, so there is no consult record to join to"
-        armed = thread.floor_armed if thread is not None else bool(self._specialist_consults)
-        if not armed:
-            return (
-                "this process has recorded no consult for ANY PI (restarted "
-                "mid-interview?), so an absent record proves nothing"
-            )
-        return None
-
-    def _floor_verifiable(
-        self, verdict: dict, *, thread: ThreadState | None = None,
-    ) -> bool:
-        """Whether an empty ``_specialist_floor_gap`` means anything.
-
-        ``_specialist_floor_gap`` returns an empty set both when the panel was
-        genuinely complete and when there was no record to check it against —
-        and the second case is the NORMAL state right after a restart, which
-        production reaches by SIGKILL. Storing both as
-        ``panel_incomplete=False, missing_domains=NULL`` counted every
-        unverifiable verdict as a verified-complete panel and silently
-        under-reported the one number the whole instrumentation exists to
-        produce (spec §10's panel-gap surface).
-
-        False here means "we could not check", never "the panel failed" — the
-        row still stores ``panel_incomplete=False``, because we have no
-        evidence of a gap either. It is recorded as the third state the column
-        already anticipated: ``missing_domains=[]``.
-
-        True for a verdict no panel was owed for (a ``pass`` that also bands
-        ``pass``): nothing to verify is not the same as failing to verify.
-        """
-        return self._floor_unverifiable_reason(verdict, thread) is None
 
     def _available_post_types(self, agent: "Agent") -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
@@ -6269,410 +5418,9 @@ class SimulationEngine:
     # Slack Polling (PI messages)
     # ------------------------------------------------------------------
 
-    def _next_poll_client(self):
-        """Round-robin a connected Slack client for shared-token polling."""
-        connected = [
-            c for c in self.slack_clients.values() if c and c.is_connected
-        ]
-        if not connected:
-            return None
-        client = connected[self._poll_client_cursor % len(connected)]
-        self._poll_client_cursor += 1
-        return client
-
-    async def _poll_slack_for_bot_messages(self) -> None:
-        """Poll all channels for new bot-authored messages; mirror them into the log.
-
-        Renamed from ``_poll_slack_for_human_messages`` (2026-08-12
-        PI-interaction removal cycle): a human-authored channel message is no
-        longer ingested via Slack at all — there is no PI-bot interaction
-        surface left for it to feed (no reopen, no @-tag routing, no directive
-        flag), so keeping a human branch here would only have grown the log
-        with entries nothing downstream may act on. The remaining job is
-        exactly what the name says: mirror another bot's Slack-native post (a
-        message this process did not itself write) into the shared
-        ``MessageLog``, recording the Slack-mirror mapping so a reply to it
-        can still be threaded. See the removal cycle's PI-interaction audit
-        map and ``MessageLog``'s GATED-method inventory (human rows are
-        filtered there too, independent of this poller).
-        """
-        if not self.slack_clients:
-            return
-
-        now = deps.time.time()
-        if now - self._last_channel_poll < constants.CHANNEL_POLL_INTERVAL:
-            return
-        self._last_channel_poll = now
-
-        default_client = self._next_poll_client()
-        if not default_client:
-            return
-
-        # Poll seeded channels plus any collab_private channels tracked in
-        # _channel_visibility. Skipping non-seeded public channels avoids
-        # polling archived/stale channels from prior sims.
-        polled_ids = {
-            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in constants.SEEDED_CHANNELS
-            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
-        }
-        for ch_name, ch_id in polled_ids.items():
-            ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
-            # Private channels need a member bot; non-members get channel_not_found.
-            client = self._client_for_channel(ch_id, default_client)
-            if client is None:
-                logger.debug(
-                    "Skipping poll for private channel #%s — no connected member bot",
-                    ch_name,
-                )
-                continue
-            oldest = self._poll_cursors.get(ch_id, "0")
-            try:
-                messages = await client.apoll_channel_messages(ch_id, oldest=oldest)
-                # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
-                # a parent once it has replies, and the transport nulls that at ingest
-                # (slack_client.normalize_inbound_message). Copying it verbatim, as
-                # this loop used to, ingested a root as a reply to itself — and
-                # get_new_top_level_posts skips anything with a non-null thread_ts, so
-                # the post vanished from every reader of that method (e.g. the hub's
-                # Phase 3 auto-activation scan) and _rebuild_state_from_db made it
-                # permanent. The rule now lives in exactly one place.
-                for msg in messages:
-                    ts = msg.get("ts", "")
-                    # Engine-authored run-start markers are operational
-                    # signage, not conversation: never mirror one into the
-                    # log, but advance the cursor past it or this tick's
-                    # newest message gets re-fetched forever. See
-                    # src/agent/run_marker.py (prefix contract).
-                    if is_run_start_marker(msg.get("text")):
-                        if ts:
-                            self._poll_cursors[ch_id] = ts
-                        continue
-                    user_id = msg.get("user", "")
-                    is_bot = bool(msg.get("bot_id") or msg.get("subtype") == "bot_message")
-
-                    if not is_bot and user_id:
-                        is_bot = await client.ais_bot_user(user_id)
-
-                    # Bot messages are mirrored into the log so agents can scan
-                    # them; a human message is dropped outright — advance the
-                    # cursor past it (so it is not re-fetched every tick) but
-                    # never append it. There is no PI-bot interaction surface
-                    # left for a human channel post to feed.
-                    if not is_bot:
-                        if ts:
-                            self._poll_cursors[ch_id] = ts
-                        continue
-
-                    bot_name = msg.get("username", "bot")
-                    # Resolve agent_id from bot name
-                    bot_agent_id = self.message_log._bot_name_to_id.get(
-                        bot_name.lower()
-                    )
-                    entry = LogEntry(
-                        ts=ts,
-                        channel=ch_name,
-                        sender_agent_id=bot_agent_id,
-                        sender_name=bot_name,
-                        content=msg.get("text", ""),
-                        thread_ts=msg.get("thread_ts"),
-                        posted_at=float(ts) if ts else 0.0,
-                        is_bot=True,
-                        visibility=ch_visibility,
-                        # This message came *from* Slack, so record the mirror
-                        # mapping. Without it the entry looks DB-origin, and
-                        # _slack_parent_ts then reports "no Slack root" for any
-                        # thread rooted here — silently keeping every reply off
-                        # Slack. The roots this branch ingests are another
-                        # workspace bot's posts. Slack-origin ⇒ canonical id
-                        # *is* the Slack ts, so the thread parent needs no
-                        # translation.
-                        slack_ts=ts or None,
-                        slack_channel_id=ch_id,
-                        slack_thread_ts=msg.get("thread_ts"),
-                    )
-                    if not self.message_log.get_entry(ts):
-                        self.message_log.append(entry)
-                    if ts:
-                        self._poll_cursors[ch_id] = ts
-
-            except Exception as exc:  # noqa: BLE001
-                # This block covers the WHOLE per-channel ingest — the API call,
-                # `float(ts)`, `ais_bot_user` and the append — so it is the only
-                # place a broken channel is ever reported.
-                self._log_poll_error(ch_name, exc)
-
-    def _log_poll_error(self, ch_name: str, exc: Exception) -> None:
-        """Report a channel's poll failure — visibly, but at most once per window.
-
-        WARNING rather than DEBUG (production runs at INFO), and once per
-        `POLL_ERROR_LOG_INTERVAL` per CHANNEL rather than once per sweep. Per
-        channel and not globally: one permanently-broken channel silencing the
-        first failure of a second one would hide exactly the event this exists
-        to surface. The suppressed repeats still log at DEBUG, so a debug-level
-        operator can still see the failure is ongoing rather than resolved.
-        """
-        now = deps.time.time()
-        last = self._poll_error_last_logged.get(ch_name, 0.0)
-        if now - last < POLL_ERROR_LOG_INTERVAL:
-            logger.debug(
-                "Poll for #%s is still failing (warning suppressed for another "
-                "%.0fs): %s",
-                ch_name, POLL_ERROR_LOG_INTERVAL - (now - last), exc,
-            )
-            return
-        self._poll_error_last_logged[ch_name] = now
-        logger.warning(
-            "Polling error for #%s (further warnings for this channel "
-            "suppressed for %.0fs): %s",
-            ch_name, POLL_ERROR_LOG_INTERVAL, exc,
-        )
-
     # ------------------------------------------------------------------
     # Message posting
     # ------------------------------------------------------------------
-
-    def mint_ts(self) -> str:
-        """Return a monotonic, unique, ts-shaped id (decimal seconds string).
-
-        The canonical message/channel id when there is no Slack ts (Slack-off,
-        or a DB-origin message). Monotonicity preserves the posted_at=float(ts)
-        ordering the engine relies on; the minter's high-water mark is seeded from
-        the rebuild's max(posted_at) so new ids always sort after restored
-        history. Uniqueness is what makes the idempotent MessageLog.append safe,
-        and it holds across processes too: this minter owns the engine's writer
-        slot, disjoint from the web app's and GrantBot's (R1).
-        See src/agent/ids.py and specs/local-db-conversations.md.
-        """
-        return self._ts_minter.mint()
-
-    async def _post_message(
-        self,
-        agent_id: str,
-        channel: str,
-        text: str,
-        thread_ts: str | None = None,
-        phase: str | None = None,
-    ) -> str | None:
-        """Post a message to Slack and record it in the message log + DB.
-
-        ``phase`` overrides the KIND stamped on the resulting rows. None (every
-        pre-existing caller) keeps the derived value ``_flush_persisted`` has
-        always written — 'thread_reply' with a thread_ts, 'new_post' without —
-        so this parameter changes nothing for a reply or a post. It is passed
-        only by ``_post_panel_note``, as PHASE_PANEL_NOTE, which is what makes
-        the resulting rows invisible to every agent-facing MessageLog read (see
-        src/agent/message_log.py). Carried on the LogEntry, not applied at
-        flush time, so it survives the round trip through the log and back out
-        of the DB on the next rebuild.
-
-        Returns the canonical post id (the root chunk's ``ts`` — a real Slack
-        ts when a connected client posted, else a locally-minted one; see
-        "Canonical id" below), or ``None`` when nothing was actually recorded:
-        the text stripped to nothing, or the reply's parent thread was found
-        to be deleted — in either case nothing was posted and no log entry was
-        written. Callers that count a turn or persist something derived from
-        the post (e.g. the opportunity_assessment verdict sidecar, which
-        stores this id as ``slack_ts`` for a link back to the post it
-        summarises — F7) must check this before doing either. The return value is truthy exactly when a post
-        was recorded, so existing callers that only did ``if not posted:`` (or
-        ignore the return value entirely) are unaffected by the ``bool`` ->
-        ``str | None`` change.
-        """
-        # Final safety: strip any leaked <slack_message> tags, and any
-        # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
-        # never for the channel. See _strip_assessment_sidecar for why an
-        # unclosed tag is handled differently from a well-formed pair.
-        text = _strip_assessment_sidecar(text)
-        text = re.sub(r"</?slack_message>", "", text).strip()
-
-        # A sidecar-only or truncated response can strip to nothing — e.g. an
-        # unclosed <assessment_json> nested as the entire <slack_message> body,
-        # with no real text before it (_ASSESSMENT_UNCLOSED_RE then deletes
-        # from the very start of the string). Slack rejects empty text anyway,
-        # but bailing here also matters for what happens *after* posting:
-        # without this guard, _post_message still mints a ts and writes a
-        # LogEntry with content="" and slack_ts=None — a DB row with no
-        # corresponding Slack message, breaking the row-count-matches-Slack-
-        # message-count invariant documented below, and the caller still
-        # counts the turn as published (message_count incremented) even
-        # though nothing went out. Return before any of that — no Slack
-        # call, no minted ts, no log entry.
-        if not text:
-            logger.warning(
-                "[%s] Suppressed a post to #%s: text was empty after "
-                "stripping the assessment sidecar/slack_message tags — likely "
-                "a sidecar-only or truncated response with no real message body.",
-                agent_id, channel,
-            )
-            return None
-
-        client = self.slack_clients.get(agent_id)
-        agent = self.agents.get(agent_id)
-
-        # Cohort gate, outbound side. Placed here rather than in a phase so it
-        # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
-        # messages — and cannot be bypassed by a new call site. Idempotent, so the
-        # extra Phase 5 pass (which needs the cleaned text locally) is harmless.
-        # No-op when the gate is off for this agent. See v2 §9.
-        if agent is not None:
-            cleaned_text, _ = self._strip_disallowed_tags(text, agent)
-            text = cleaned_text or text
-
-        # Slack threads on the *root's Slack ts*, which equals the canonical
-        # thread_ts only when the root was born on Slack. A thread started
-        # Slack-off has a minted root id — passing that to Slack detaches the
-        # reply or errors — so such a reply is kept DB-only rather than mirrored.
-        slack_parent = self._slack_parent_ts(thread_ts)
-        can_mirror = thread_ts is None or slack_parent is not None
-
-        result: dict | None = None
-        if client and client.is_connected and not can_mirror:
-            logger.warning(
-                "[%s] Not mirroring reply to #%s: thread %s has no Slack root "
-                "(started with Slack off). The message is still recorded in the DB.",
-                agent_id, channel, thread_ts,
-            )
-        elif client and client.is_connected:
-            try:
-                result = await client.apost_message(channel, text, thread_ts=slack_parent)
-            except ThreadNotFound:
-                # Parent was deleted. post_message already cleaned up the
-                # orphan top-level post on Slack. Purge the dead thread_ts
-                # from state so no one replies to it again. Keyed by the
-                # canonical id, which is what the engine's state uses.
-                if thread_ts:
-                    await self._evict_dead_thread(thread_ts)
-                logger.warning(
-                    "[%s] Skipped reply to deleted thread %s in #%s",
-                    agent_id, thread_ts, channel,
-                )
-                return None
-        else:
-            logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
-
-        # One log entry per message that really exists on the transport. Normally
-        # that is one; it is several when the text was over Slack's 4000-character
-        # per-message limit and the client split it (see
-        # AgentSlackClient.post_message). Recording a single row for a post Slack
-        # turned into five messages left four of them in Slack with no row at all,
-        # and named the row's slack_ts after the *tail* — so _slack_parent_ts
-        # threaded replies onto a fragment, posted_at took the tail's clock, and the
-        # retired Slack reconcile re-ingested the unrecorded head chunks on the next
-        # restart as brand-new inbound messages. The mirror is only in bijection with
-        # Slack if the row count matches the message count.
-        mirrored = self._mirrored_messages(result, text, slack_parent)
-
-        # Canonical id: the Slack ts when a connected client posted, else a
-        # locally-minted ts. Slack ts (when present) is also recorded as the
-        # mirror mapping on the entry.
-        #
-        # `visibility` is stamped from the channel's class. It was previously omitted,
-        # so every agent-authored message defaulted to "public" even in a
-        # collab_private channel — including the ones written into a PI-created
-        # refinement channel. Two readers depend on this field:
-        #
-        #   - the cohort gate's private-channel exemption (_entry_allowed), which is
-        #     how a PI pairing outranks an admin cohort grouping — with the field
-        #     unset the exemption never fired, and two agents in different cohorts
-        #     could not converse in the channel the PI made for them;
-        #   - the G2 memory-synthesis filter, which is meant to keep private-channel
-        #     content out of the public memory segment.
-        #
-        # Found by a real multi-turn run: the private-channel messages persisted with
-        # visibility='public' while the AgentChannel row said collab_private.
-        # See specs/cohort-system-v2.md §7.
-        visibility = self._resolve_channel_visibility(channel)
-        sender_name = agent.bot_name if agent else f"{agent_id}Bot"
-        root_ts: str | None = None
-        for index, message in enumerate(mirrored or [None]):
-            slack_ts = message.get("ts") if message else None
-            ts = slack_ts or self.mint_ts()
-            try:
-                posted_at = float(ts)
-            except (TypeError, ValueError):
-                posted_at = deps.time.time()
-            # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
-            # a *root* post hangs off chunk 0 — one logical post stays one top-level
-            # post, so the hub's Phase 3 auto-activation scan doesn't see N roots
-            # where the author wrote one.
-            canonical_parent = thread_ts if (thread_ts or index == 0) else root_ts
-            entry = LogEntry(
-                ts=ts,
-                channel=channel,
-                sender_agent_id=agent_id,
-                sender_name=sender_name,
-                content=(message.get("text") if message else None) or text,
-                thread_ts=canonical_parent,
-                posted_at=posted_at,
-                is_bot=True,
-                visibility=visibility,
-                slack_ts=slack_ts,
-                slack_channel_id=(message.get("channel") if message else None),
-                # The parent the transport reports, so the row always describes the
-                # message the transport actually made rather than the one we asked for.
-                slack_thread_ts=(message.get("thread_ts") if message and slack_ts else None),
-                # None for every caller but the panel note — see the docstring.
-                # Stamped on EVERY chunk: a split message is several rows for
-                # one logical post, and a continuation chunk that lost the
-                # phase would be readable by agents while its head was not.
-                phase=phase,
-            )
-            if index == 0:
-                root_ts = ts
-            # Persisted to agent_messages via the MessageLog append callback
-            # (_enqueue_persist → _flush_persisted). The DB is the primary store.
-            self.message_log.append(entry)
-        # Write-through: the post is not done until its rows are in the database,
-        # because a restart restores from the database only. Serialized with every
-        # other flush by `_persist_flush_lock`. A failed flush re-queues the
-        # entries exactly as the per-tick flush does, and the post still counts as
-        # posted: it is on Slack.
-        if self.session_factory and self.simulation_run_id:
-            await self._flush_persisted()
-        return root_ts
-
-    @staticmethod
-    def _mirrored_messages(
-        result: dict | None, text: str, slack_parent: str | None,
-    ) -> list[dict]:
-        """Normalise a transport's post result into one record per real message.
-
-        ``AgentSlackClient`` reports ``posted_messages``; a Transport backend that
-        never splits need not, so a bare ``{"ts": ..., "channel": ...}`` is read as
-        the single message it describes. Returns ``[]`` when nothing was posted,
-        which is the signal to mint a local canonical id instead.
-        See src/agent/transport.py for the declared contract.
-        """
-        if not result:
-            return []
-        posted = result.get("posted_messages")
-        if posted:
-            return list(posted)
-        return [{
-            "ts": result.get("ts"),
-            "channel": result.get("channel"),
-            "text": text,
-            "thread_ts": slack_parent,
-        }]
-
-    def _slack_parent_ts(self, thread_ts: str | None) -> str | None:
-        """Resolve a canonical thread id to the Slack ts Slack must thread on.
-
-        Returns None when the thread has no Slack presence (a DB-origin root
-        minted while Slack was off), so callers can skip the mirror instead of
-        posting against an id Slack has never seen. Falls back to the canonical
-        id when the root is not in the log at all (windowed out by the B2 rebuild
-        bound), which preserves the pure-Slack-on behaviour where the canonical
-        id *is* the Slack ts. The rebuild populates slack_ts on restored entries,
-        so this survives a restart. See specs/local-db-conversations.md.
-        """
-        if not thread_ts:
-            return None
-        root = self.message_log.get_entry(thread_ts)
-        if root is None:
-            return thread_ts
-        return root.slack_ts
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -6951,116 +5699,6 @@ class SimulationEngine:
         """
         await self._seed_slack_cursors_without_ingest()
 
-    async def _seed_slack_cursors_without_ingest(self) -> None:
-        """Advance the Slack poll cursors past all existing history, ingesting none.
-
-        What `_restore_slack_state` runs on every start, fresh or resumed. Reads
-        the channels the live poller reads, and for each one moves
-        `_poll_cursors` to the newest timestamp present, so the first poll tick
-        asks Slack only for messages posted after this start.
-
-        The cursor is the ONLY thing standing between a start and the whole back
-        catalogue: `_poll_slack_for_bot_messages` dedups against
-        `message_log.get_entry(ts)`, which holds only this run's stored rows, so
-        it would re-append every other message it fetched.
-
-        Channel history is top-level-only, so a pre-start THREAD REPLY can carry
-        a ts above the cursor this leaves. Nothing reads it: the live poller uses
-        the same top-level-only endpoint, and no code fetches thread replies
-        since the Slack reconcile was retired — a Slack-native reply posted while
-        the engine was down is not recovered.
-
-        **No channel this pass touches may end with a "0" cursor**, and there are
-        three ways it used to:
-
-        1. `AgentSlackClient.get_full_channel_history` CATCHES `SlackApiError`
-           and returns `[]`, so the `try/except` below never fires for the
-           commonest failure there is. The channel looked empty, the cursor
-           stayed "0", and the live poller — a different endpoint, which does
-           NOT swallow — re-imported the whole back catalogue on the first tick
-           (harness: 30 messages).
-        2. A genuinely empty read, indistinguishable from (1) from here.
-        3. `_client_for_channel(...) is None`: a private channel with no
-           connected member bot, previously a bare `continue`.
-
-        All three now fall back to a WALL-CLOCK ts. That is a deliberate, small
-        trade: it is derived from this process's clock rather than Slack's, so a
-        clock skew could hide a message posted in the same second as the seed.
-        Weighed against re-importing an entire channel's history into a run that
-        asked to start clean, and against the fact that this branch only runs
-        when we could not read the channel at all, that is the better failure.
-        """
-        # `_next_poll_client()`, not `next(iter(self.slack_clients.values()))`:
-        # the latter picks whatever client happens to be first in the dict, and
-        # if THAT one is disconnected the whole seed was skipped — while the live
-        # poller, which does use `_next_poll_client`, kept polling happily.
-        default_client = self._next_poll_client()
-        if not default_client:
-            logger.info("No Slack client available — skipping the start-up cursor seed")
-            return
-
-        polled_ids = {
-            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in constants.SEEDED_CHANNELS
-            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
-        }
-        # One wall clock for the whole pass, so every unreadable channel gets the
-        # same baseline and the number is not a per-channel accident.
-        now_ts = f"{deps.time.time():.6f}"
-        channels = 0
-        skipped = 0
-        unreadable = 0
-
-        def _fallback(ch_id: str) -> None:
-            if self._poll_cursors.get(ch_id, "0") == "0":
-                self._poll_cursors[ch_id] = now_ts
-
-        for ch_name, ch_id in polled_ids.items():
-            client = self._client_for_channel(ch_id, default_client)
-            if client is None:
-                logger.warning(
-                    "Start-up cursor seed: no connected member bot for "
-                    "private channel #%s — parking its cursor at the wall clock "
-                    "rather than 0", ch_name,
-                )
-                _fallback(ch_id)
-                unreadable += 1
-                continue
-            try:
-                messages = await client.aget_full_channel_history(ch_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Start-up cursor seed failed for #%s: %s", ch_name, exc,
-                )
-                _fallback(ch_id)
-                unreadable += 1
-                continue
-            newest = ""
-            for msg in messages:
-                ts = msg.get("ts", "")
-                if not ts:
-                    continue
-                skipped += 1
-                if ts > newest:
-                    newest = ts
-            if newest:
-                cur = self._poll_cursors.get(ch_id, "0")
-                if newest > cur:
-                    self._poll_cursors[ch_id] = newest
-                channels += 1
-            else:
-                # Empty, or an error the client swallowed into an empty list —
-                # from here they are the same observation, and only one of them
-                # is safe to leave at "0".
-                _fallback(ch_id)
-                unreadable += 1
-        logger.info(
-            "Start-up cursor seed: ignoring %d pre-existing Slack message(s) across %d "
-            "channel(s); poll cursors advanced to the current head "
-            "(%d channel(s) unreadable or empty, parked at the wall clock)",
-            skipped, channels, unreadable,
-        )
-
     async def _rebuild_agent_state(self) -> None:
         """Reconstruct per-agent state from the message log + DB.
 
@@ -7329,158 +5967,6 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # LLM call logging
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _unbooked_calls(call_stats: object) -> int:
-        """How many REAL API calls in this turn nothing has booked yet.
-
-        Every caller already books its own terminating call (the two reserved
-        sites via ``try_reserve`` + ``record_api_call(already_reserved=True)``,
-        consults via ``on_api_call``, the memory update directly) and every
-        truncation retry already books itself via ``on_retry``. What no site
-        books is the extra TOOL ROUNDS inside ``generate_with_tools``: a turn
-        that used three rounds before its final text call made four real billed
-        calls and was metered as one.
-
-        So this counts ``kind == "round"`` entries and nothing else. Counting
-        ``len(call_stats)`` instead — the obvious fix — double-books every retry
-        AND the reservation at the two reserved sites.
-
-        Defensive throughout: this runs inside a logging callback, where raising
-        would take a turn down over bookkeeping. A missing or malformed
-        ``call_stats`` books nothing extra, which is also exactly right for the
-        4,650 of 5,771 stored rows that predate the column.
-        """
-        if not isinstance(call_stats, list):
-            return 0
-        return sum(
-            1 for c in call_stats
-            if isinstance(c, dict) and c.get("kind") == "round"
-        )
-
-    def _on_llm_call(self, data: dict) -> None:
-        """Callback fired after each LLM API call."""
-        # Book the calls this turn made that nothing else booked, BEFORE the
-        # buffer append: the flush below can hand control to another coroutine,
-        # and the throttle should see the spend as soon as it is known.
-        extra = self._unbooked_calls(data.get("call_stats"))
-        if extra:
-            agent = self.agents.get(data.get("agent_id"))
-            if agent is not None:
-                for _ in range(extra):
-                    agent.record_api_call()
-        self._llm_log_buffer.append(data)
-        if len(self._llm_log_buffer) >= self._llm_log_flush_size:
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._flush_llm_logs())
-                # Held in `_flush_tasks` for two reasons: `stop()` has to be able
-                # to await it (see there), and a bare `create_task` reference is
-                # otherwise only weakly held by the loop, so the task can be
-                # garbage-collected mid-flight.
-                self._flush_tasks.add(task)
-                task.add_done_callback(self._on_flush_done)
-            except RuntimeError:
-                pass
-
-    def _on_flush_done(self, task: asyncio.Task) -> None:
-        """Done-callback for a spawned `_flush_llm_logs`.
-
-        The cancelled-task guard is not defensive tidiness: ``task.exception()``
-        RE-RAISES ``CancelledError`` for a cancelled task, so the pre-fix
-        callback answered a batch lost to shutdown cancellation with a traceback
-        out of the done-callback that said nothing about the rows.
-        """
-        self._flush_tasks.discard(task)
-        if task.cancelled():
-            return
-        if task.exception():
-            logger.error("LLM log flush failed: %s", task.exception())
-
-    def _llm_log_record(self, entry: dict) -> LlmCallLog:
-        """One ``llm_call_logs`` row from one buffered callback payload.
-
-        Extracted so the batch write and the per-row recovery build the row the
-        same way — a recovery that mapped the fields differently would silently
-        store a different row than the one that failed.
-        """
-        return LlmCallLog(
-            simulation_run_id=self.simulation_run_id,
-            agent_id=entry.get("agent_id", "unknown"),
-            phase=entry.get("phase", "unknown"),
-            channel=entry.get("channel"),
-            thread_ts=entry.get("thread_ts"),
-            thread_phase=entry.get("thread_phase"),
-            message_ordinal=entry.get("message_ordinal"),
-            model=entry.get("model", ""),
-            system_prompt=entry.get("system_prompt", ""),
-            messages_json=entry.get("messages", []),
-            response_text=entry.get("response_text", ""),
-            input_tokens=entry.get("input_tokens", 0),
-            output_tokens=entry.get("output_tokens", 0),
-            latency_ms=entry.get("latency_ms", 0.0),
-            # The turn's real wall time, which `latency_ms` above is not — it
-            # carries only the LAST API call's latency, so summing that column
-            # understated true LLM wait by 25% on run 8b64a0e0. Default None
-            # rather than 0.0: a producer that supplied nothing means "not
-            # recorded", and 0.0 would read as an instantaneous turn.
-            wall_ms=entry.get("wall_ms"),
-            # The cached input this turn read and wrote, which `input_tokens`
-            # above EXCLUDES — `usage.input_tokens` counts only the uncached
-            # tail, so on a cached turn it can read 2 for a 30 KB prompt (see
-            # LlmCallLog's own comment). Billable input volume is the sum of the
-            # three columns, and that sum is unavailable while these two are
-            # NULL on every row. `.get`, not `[...]`: every other field here is
-            # read defensively and a producer that predates the keys (or a
-            # hand-built entry in a test) must still write a complete row.
-            #
-            # Default None, not 0, matching the nullable columns and
-            # `llm._sum_reported`: "no API call reported the field" and "the
-            # cache was read zero times" are different answers, and only the
-            # second licenses a conclusion.
-            cache_read_input_tokens=entry.get("cache_read_input_tokens"),
-            cache_creation_input_tokens=entry.get("cache_creation_input_tokens"),
-            # Per-API-call breakdown (stop_reason, the requested max_tokens
-            # ceiling, thinking/text split) that the three cumulative columns
-            # above cannot carry. Default None, not [] — a producer that
-            # supplied nothing means "not recorded", and an empty array would
-            # read as "recorded, zero calls", which never happens.
-            call_stats=entry.get("call_stats"),
-            created_at=entry.get("completed_at"),
-        )
-
-    async def _flush_llm_logs(self, *, final: bool = False) -> None:
-        """Write buffered LLM call logs to the database."""
-        if not self._llm_log_buffer or not self.session_factory or not self.simulation_run_id:
-            return
-        batch = self._llm_log_buffer[:]
-        self._llm_log_buffer.clear()
-        try:
-            async with self.session_factory() as db:
-                for entry in batch:
-                    db.add(self._llm_log_record(entry))
-                await db.commit()
-            logger.debug("Flushed %d LLM call logs to DB", len(batch))
-        except Exception as exc:
-            # Re-queue the failed batch instead of dropping it, exactly like
-            # _flush_persisted does for its own buffer: new entries may have
-            # been appended to _llm_log_buffer while we were awaiting the
-            # (failed) commit, so put the failed batch back in front to
-            # preserve chronological order for the next flush attempt. On a
-            # ROW-level error only, isolate the poison row first.
-            requeue = batch
-            if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
-                async def _one(db, entry):
-                    db.add(self._llm_log_record(entry))
-
-                _written, _lost, requeue = await self._recover_rows_individually(
-                    batch, _one, what="LLM call log",
-                )
-            if self._report_flush_failure(
-                what="LLM call log", requeue=requeue, exc=exc, final=final,
-                log=logger.warning,
-            ):
-                self._llm_log_buffer[0:0] = requeue
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose public profile file changed on disk since last turn.

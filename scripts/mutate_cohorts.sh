@@ -165,7 +165,7 @@ MUTANTS=(
 # outbound post is then stamped public. Nothing detected the drift for five days because
 # nothing re-ran this script; when it was re-run it reported ERROR rather than a false
 # kill, which is the one thing the old harness did get right.
-"src/agent/simulation.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
+"src/agent/engine/slack_io.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
 # M7 was pinned to `_owes_reply`'s grandfathered skip; D12 of
 # docs/plans/2026-09-25-rca-remediation-plan.md retired the rule and the function is
 # gone. Removed rather than re-pointed: `grandfathered` is now reporting-only, so there

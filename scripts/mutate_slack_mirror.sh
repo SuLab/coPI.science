@@ -129,10 +129,10 @@ fi
 # file ~~ exact source substring ~~ replacement ~~ what it breaks
 # `\n` in the FROM/TO fields is a newline (see the applier below).
 # S1 is anchored on the outbound LogEntry's `visibility=` line too: `slack_ts=slack_ts,`
-# alone occurs several times in simulation.py, and the applier requires exactly one.
+# alone occurs several times in slack_io.py, and the applier requires exactly one.
 MUTANTS=(
-"src/agent/simulation.py~~                visibility=visibility,\n                slack_ts=slack_ts,~~                visibility=visibility,\n                slack_ts=None,~~S1 the mirror mapping is never recorded on an outbound post"
-"src/agent/simulation.py~~        return root.slack_ts~~        return thread_ts~~S2 a canonical id is handed to Slack (a93d136)"
+"src/agent/engine/slack_io.py~~                visibility=visibility,\n                slack_ts=slack_ts,~~                visibility=visibility,\n                slack_ts=None,~~S1 the mirror mapping is never recorded on an outbound post"
+"src/agent/engine/slack_io.py~~        return root.slack_ts~~        return thread_ts~~S2 a canonical id is handed to Slack (a93d136)"
 "src/agent/slack_client.py~~            self._client = None~~            pass~~S3 a dead token still reports is_connected (the bug found by T11)"
 "src/agent/slack_client.py~~        last_exc: SlackApiError | None = None~~        last_exc = None  # noqa~~S4 sanity: this edit is inert and MUST survive"
 )

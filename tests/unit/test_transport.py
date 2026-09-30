@@ -12,6 +12,7 @@ import ast
 import asyncio
 from pathlib import Path
 
+from src.agent.engine.slack_io import SlackIO
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport, Transport
 
@@ -200,12 +201,12 @@ class TestPostResultContract:
 
     def test_nothing_posted_reports_no_messages(self):
         """Which is the signal to mint a local canonical id instead."""
-        assert SimulationEngine._mirrored_messages(None, "text", None) == []
+        assert SlackIO._mirrored_messages(None, "text", None) == []
 
     def test_a_backend_that_never_splits_may_omit_the_key(self):
         """`NullTransport` and any simple backend report a bare result; it describes the
         one message it made, and the source text is what that message carries."""
-        out = SimulationEngine._mirrored_messages(
+        out = SlackIO._mirrored_messages(
             {"ts": "1.0", "channel": "C_X"}, "hello", "0.5",
         )
         assert out == [{"ts": "1.0", "channel": "C_X", "text": "hello", "thread_ts": "0.5"}]
@@ -213,7 +214,7 @@ class TestPostResultContract:
     def test_reported_messages_are_passed_through_unchanged(self):
         posted = [{"ts": "1.0", "channel": "C_X", "text": "a", "thread_ts": None},
                   {"ts": "2.0", "channel": "C_X", "text": "b", "thread_ts": "1.0"}]
-        assert SimulationEngine._mirrored_messages(
+        assert SlackIO._mirrored_messages(
             {"ts": "1.0", "posted_messages": posted}, "a b", None,
         ) == posted
 

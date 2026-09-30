@@ -1002,8 +1002,10 @@ class TestTagHygiene:
     def test_all_outbound_paths_are_covered(self):
         """The strip lives in _post_message, so every caller inherits it — Phase 4
         replies included, which the original Phase-5-only placement missed."""
+        from src.agent.engine.slack_io import SlackIO
+
         assert "_strip_disallowed_tags" in inspect.getsource(
-            SimulationEngine._post_message
+            SlackIO._post_message
         )
 
     def test_indentation_and_code_blocks_survive(self, monkeypatch):
