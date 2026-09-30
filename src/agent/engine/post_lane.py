@@ -695,7 +695,7 @@ class PostLane:
             agent.state.consecutive_phase5_skips = previous_skips + 1
             return
         # New top-level post
-        posted = await self._post_message(agent.agent_id, channel, message_text)
+        posted = await self._post_message(agent.agent_id, channel, message_text, landed_check=True)
         if not posted:
             # _post_message already logged why (e.g. the text stripped to
             # empty). Nothing reached Slack, so neither the turn counter

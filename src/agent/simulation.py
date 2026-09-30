@@ -726,6 +726,12 @@ class SimulationEngine:
         Awaited from the entry point's finally-block so a graceful shutdown
         cannot lose the in-flight turn's messages. Idempotent.
 
+        Order (spec §8.4 S1-10): flushes, the headline sweep, the bounded memory
+        drain, a final flush, then the heartbeat. The sweep no longer waits for
+        the drain, so a drain that outlives ``docker stop -t 420`` cannot cost
+        the headlines. Only the order changed: the drain runs the same updates
+        with the same count bound.
+
         The headline sweep follows the recorded end-reason class
         (`src/agent/end_reasons.py`): TODAY and FINALIZE announce every owed
         headline (capped at ``HEADLINES_MAX_AT_SHUTDOWN``), HOLD only those of
@@ -736,11 +742,25 @@ class SimulationEngine:
         # Which shutdown sweep this is (spec P0-04, src/agent/end_reasons.py).
         # Nothing recorded — a direct stop() — behaves exactly as TODAY.
         end_class = end_reason_class(self._end_reason) if self._end_reason else TODAY
-        # Drain a BOUNDED number of queued memory updates BEFORE the log
-        # callback is cleared, so their llm_call_logs rows are captured by
-        # the flush below. Bounded: each is a real LLM call and the stop
-        # grace period is finite — the remainder is dropped loudly rather
-        # than racing the SIGKILL.
+        # 1. Flush what the sweep reads (S2-06 order): messages, decisions,
+        #    verdicts, then the LLM call logs.
+        await self._flush_persisted()
+        await self.threads.flush_pending_decisions()
+        await self._flush_pending_assessments()
+        await self._flush_llm_logs()
+        # 2. The headline sweep, decided by the end-reason class (P0-04, §8.2).
+        #    It no longer waits for the memory drain, so a drain that outlives
+        #    the stop grace period cannot cost the headlines. AFTER the sweep,
+        #    whatever it managed (SA4-04): a finalize stands even when headlines
+        #    could not post — they were logged LOST with the --finalize repair
+        #    command.
+        await self.headlines.shutdown_sweep(self.run_state.end_reason)
+        await self._record_run_end_state(end_class)
+        # 3. Drain a BOUNDED number of queued memory updates BEFORE the log
+        #    callback is cleared, so their llm_call_logs rows are captured by
+        #    the final flush below. Bounded by count, never by wall clock (B24):
+        #    the same updates run as before, only later. The remainder is
+        #    dropped loudly rather than racing the SIGKILL.
         try:
             await self._drain_memory_events(limit=MEMORY_EVENTS_MAX_AT_SHUTDOWN)
         except Exception:
@@ -769,20 +789,14 @@ class SimulationEngine:
         if pending:
             logger.info("Awaiting %d in-flight LLM log flush(es)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
-        # `final=True`: this is the LAST attempt at each buffer. Nothing drains
-        # them after `stop()` returns, so a failure here must say LOST with the
-        # row count rather than the "re-queued for retry" the per-tick path says.
+        # 4. Final flush. `final=True`: this is the LAST attempt at each buffer.
+        #    Nothing drains them after `stop()` returns, so a failure here must
+        #    say LOST with the row count rather than the "re-queued for retry"
+        #    the per-tick path says.
         await self._flush_persisted(force_stats=True, final=True)
         await self._flush_llm_logs(final=True)
+        await self.threads.flush_pending_decisions(final=True)
         await self._flush_pending_assessments(final=True)
-
-        # Every interview still holding an unannounced verdict is over; announce it
-        # now, after the final assessment flush above (Headlines owns the sweep).
-        await self.headlines.shutdown_sweep(self.run_state.end_reason)
-        # AFTER the sweep, whatever it managed (spec P0-04, SA4-04): a finalize
-        # stands even when headlines could not post — they were logged LOST with
-        # the --finalize repair command above.
-        await self._record_run_end_state(end_class)
 
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
         # `clear` share meant the panel could not discriminate; a 48-consult
@@ -819,6 +833,7 @@ class SimulationEngine:
             logger.warning("%s", line)
 
         logger.info("Simulation stopping...")
+        # 5. The heartbeat task, last: the page shows `stopping` until here.
         if self.heartbeat is not None:
             await self.heartbeat.stop()
 

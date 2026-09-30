@@ -965,7 +965,7 @@ class ReplyLane:
         # Post the reply
         posted = await self._post_message(
             agent.agent_id, thread.channel, response_text,
-            thread_ts=thread.thread_id,
+            thread_ts=thread.thread_id, landed_check=True,
         )
         if not posted:
             # _post_message already logged why (e.g. the text stripped to

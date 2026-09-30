@@ -167,6 +167,11 @@ def markdown_to_mrkdwn(text: str) -> str:
 
 MAX_RETRIES = 3
 
+#: A landed-check read looks back at most this far before the post attempt, so
+#: an older post of this bot (a previous run's, absent from this run's log) can
+#: never pass for the chunk in flight. Generous against clock skew.
+LANDED_CLOCK_SKEW_S = 120.0
+
 # Slack's largest accepted page for every cursor-paginated endpoint we call.
 SLACK_PAGE_LIMIT = 200
 
@@ -322,7 +327,13 @@ class AgentSlackClient:
         self.agent_id = agent_id
         self.bot_token = bot_token
         self._client: WebClient | None = None
+        self._post_client: WebClient | None = None
         self._bot_user_id: str | None = None
+        self._bot_id: str | None = None
+        # Channels this client has joined (AG-10). A join happens on first use, or
+        # again after Slack answers `not_in_channel`; the per-poll and per-post
+        # join is gone. Guarded by `_cache_lock`.
+        self._joined_channels: set[str] = set()
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._user_is_bot_cache: dict[str, bool] = {}
         # Guards the channel cache (``_channel_name_to_id``). Before the
@@ -353,11 +364,18 @@ class AgentSlackClient:
         source-level test in ``tests/unit/test_slack_client_contract.py`` fails if
         a second one appears. A new endpoint therefore inherits the retry/backoff
         path by construction instead of by the author remembering.
+
+        ``chat.postMessage`` goes through ``_post_client`` (built with
+        ``retry_handlers=[]``); ``_call_with_retry`` still retries a
+        ``ratelimited`` answer for every method, posts included — a 429 is a
+        definite rejection.
         """
         if self._client is None:
             raise SlackNotConnected(
                 f"[{self.agent_id}] {method} called with no authenticated client"
             )
+        if method == "chat_postMessage" and self._post_client is not None:
+            return self._call_with_retry(getattr(self._post_client, method), **kwargs)
         return self._call_with_retry(getattr(self._client, method), **kwargs)
 
     def _call_with_retry(self, method, **kwargs) -> Any:
@@ -455,13 +473,24 @@ class AgentSlackClient:
     # ------------------------------------------------------------------
 
     def _try_autojoin(self, channel_id: str) -> None:
-        """Best-effort self-join of a public channel before a read or post."""
+        """Join ``channel_id`` once per client (AG-10). Best-effort: a failure is
+        not cached, so the next use tries again."""
+        with self._cache_lock:
+            if channel_id in self._joined_channels:
+                return
         try:
             self._api("conversations_join", channel=channel_id)
         except Exception as exc:
             # Best-effort: SlackApiError, socket TimeoutError, SSL/DNS issues
-            # must not crash the simulation. Next poll cycle will retry.
+            # must not crash the simulation. The next use will retry.
             logger.debug("[%s] autojoin failed for %s: %s", self.agent_id, channel_id, exc)
+            return
+        with self._cache_lock:
+            self._joined_channels.add(channel_id)
+
+    def _forget_join(self, channel_id: str) -> None:
+        with self._cache_lock:
+            self._joined_channels.discard(channel_id)
 
     def connect(self) -> bool:
         """Authenticate and cache bot user ID. Returns True on success."""
@@ -470,9 +499,15 @@ class AgentSlackClient:
             return False
 
         self._client = WebClient(token=self.bot_token)
+        # chat.postMessage ONLY: no SDK re-POST after a connection error (C12,
+        # spec §8.4 AG-6). Every other method keeps the default client and its
+        # single connection-error retry, so reads and chat.getPermalink behave
+        # as before.
+        self._post_client = WebClient(token=self.bot_token, retry_handlers=[])
         try:
             auth = self._api("auth_test")
             self._bot_user_id = auth["user_id"]
+            self._bot_id = auth.get("bot_id")
             logger.info(
                 "[%s] Connected as %s (%s)",
                 self.agent_id, auth["user"], self._bot_user_id,
@@ -488,6 +523,7 @@ class AgentSlackClient:
             # on every tick instead of into the DB-only mode the design already has.
             logger.error("[%s] Slack auth failed: %s", self.agent_id, exc)
             self._client = None
+            self._post_client = None
             return False
 
     @property
@@ -574,6 +610,8 @@ class AgentSlackClient:
             )
             return []
         except SlackApiError as exc:
+            if exc.response.get("error") == "not_in_channel":
+                self._forget_join(channel_id)
             logger.error("[%s] Failed to poll channel %s: %s", self.agent_id, channel_id, exc)
             return []
 
@@ -661,6 +699,7 @@ class AgentSlackClient:
         thread_ts: str | None,
         *,
         may_raise_thread_not_found: bool,
+        _rejoined: bool = False,
     ) -> dict | None:
         """Post exactly one chat.postMessage and normalise the response.
 
@@ -680,6 +719,15 @@ class AgentSlackClient:
             err = exc.response.get("error")
             if err == "thread_not_found" and thread_ts and may_raise_thread_not_found:
                 raise ThreadNotFound(channel_id, thread_ts, err) from exc
+            if err == "not_in_channel" and not _rejoined:
+                # A person removed the bot. Before AG-10 the pre-post join re-added
+                # it, so the post landed; rejoin and retry once to land it the same way.
+                self._forget_join(channel_id)
+                self._try_autojoin(channel_id)
+                return self._post_one(
+                    channel_id, channel_label, text, thread_ts,
+                    may_raise_thread_not_found=may_raise_thread_not_found, _rejoined=True,
+                )
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel_label, exc)
             return None
 
@@ -721,11 +769,40 @@ class AgentSlackClient:
             "thread_ts": posted_thread_ts,
         }
 
+    def _landed(self, channel_id: str, parent: str | None, after_ts: str) -> dict | None:
+        """The newest message by THIS bot in the destination after ``after_ts``,
+        or None. Matched by author (``bot_id`` or ``user``), never by text:
+        mrkdwn and entity escaping change the stored text (SA3-18). Raises when
+        the read itself fails, so the caller keeps today's handling."""
+        if parent:
+            messages = self._paginate(
+                "conversations_replies", "messages",
+                channel=channel_id, ts=parent, oldest=after_ts, inclusive=False,
+            )
+        else:
+            messages = self._paginate(
+                "conversations_history", "messages",
+                channel=channel_id, oldest=after_ts, inclusive=False,
+            )
+        floor = float(after_ts)
+        mine = [
+            m for m in messages
+            if m.get("ts") and m.get("ts") != parent and float(m["ts"]) > floor
+            and (
+                (self._bot_id and m.get("bot_id") == self._bot_id)
+                or (self._bot_user_id and m.get("user") == self._bot_user_id)
+            )
+        ]
+        return max(mine, key=lambda m: float(m["ts"])) if mine else None
+
     def post_message(
         self,
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        *,
+        landed_check: bool = False,
+        known_ts: str | None = None,
     ) -> dict | None:
         """Post a message to a Slack channel (accepts name or ID).
 
@@ -742,6 +819,18 @@ class AgentSlackClient:
         thread rather than as further top-level messages: one logical post must
         stay one top-level post, or the hub's Phase 3 auto-activation scan sees N
         fresh roots where the author wrote one.
+
+        ``landed_check`` (replies and pitches only, spec §8.4 AG-6): on a
+        transport exception — no Slack response — the destination is read for a
+        message by this bot newer than the previous chunk's ts (else ``known_ts``,
+        the newest this bot has in the destination per the message log, floored
+        at the attempt time minus ``LANDED_CLOCK_SKEW_S``). Found: the chunk
+        counts as posted. Not found: the chunk is retried once. A second failure
+        raises for chunk 0, as today, and ends the post after the chunks that
+        landed for a later chunk, so a partly posted reply counts as posted.
+        Safe because a bot has at most one reply or pitch in flight per
+        destination (replies post under the thread lock; pitches come from the
+        one-at-a-time post lane).
         """
         if not self._client:
             # Not connected: report "not posted" so the engine mints a unique
@@ -770,10 +859,48 @@ class AgentSlackClient:
             # of a reply stay in the same thread; later chunks of a root hang off
             # chunk 0 so the post stays a single top-level message.
             parent = thread_ts if (thread_ts or index == 0) else posted[0]["ts"]
-            result = self._post_one(
-                channel_id, channel, chunk, parent,
-                may_raise_thread_not_found=(index == 0),
-            )
+            started = time.time()
+            try:
+                result = self._post_one(
+                    channel_id, channel, chunk, parent,
+                    may_raise_thread_not_found=(index == 0),
+                )
+            except ThreadNotFound:
+                raise
+            except Exception as exc:  # a transport error: Slack gave no answer
+                if not landed_check:
+                    raise
+                previous = posted[-1]["ts"] if posted else known_ts
+                oldest = max(float(previous or 0.0), started - LANDED_CLOCK_SKEW_S)
+                try:
+                    landed = self._landed(channel_id, parent, f"{oldest:.6f}")
+                except Exception:
+                    raise exc from None
+                if landed is not None:
+                    logger.warning(
+                        "[%s] Post to #%s raised %s but chunk %d landed (ts %s); not re-posting",
+                        self.agent_id, channel, type(exc).__name__, index + 1, landed["ts"],
+                    )
+                    result = {
+                        "ts": landed["ts"], "channel": channel_id, "text": chunk,
+                        "thread_ts": landed.get("thread_ts"),
+                    }
+                else:
+                    try:
+                        result = self._post_one(
+                            channel_id, channel, chunk, parent,
+                            may_raise_thread_not_found=(index == 0),
+                        )
+                    except ThreadNotFound:
+                        raise
+                    except Exception:
+                        if index == 0:
+                            raise
+                        logger.error(
+                            "[%s] Post to #%s stopped after %d/%d chunk(s): chunk %d "
+                            "failed twice", self.agent_id, channel, index, len(chunks), index + 1,
+                        )
+                        break
             if result is None:
                 # Never post the tail of a message whose head failed: stop and let
                 # the caller record only what actually landed.
@@ -842,6 +969,8 @@ class AgentSlackClient:
             return
         try:
             self._api("conversations_join", channel=channel_id)
+            with self._cache_lock:
+                self._joined_channels.add(channel_id)
         except SlackApiError as exc:
             logger.warning("[%s] Failed to join channel %s: %s", self.agent_id, channel_id, exc)
 

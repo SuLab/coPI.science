@@ -13,7 +13,7 @@ from src.agent.engine.sidecar import _strip_assessment_sidecar
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry
 from src.agent.run_marker import is_run_start_marker
-from src.agent.slack_client import ThreadNotFound
+from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 if TYPE_CHECKING:
@@ -266,8 +266,13 @@ class SlackIO:
         text: str,
         thread_ts: str | None = None,
         phase: str | None = None,
+        landed_check: bool = False,
     ) -> str | None:
         """Post a message to Slack and record it in the message log + DB.
+
+        ``landed_check``: passed only for replies and pitches (spec §8.4 AG-6);
+        panel notes, headlines and the run-start marker keep today's handling,
+        minus the SDK re-POST.
 
         ``phase`` overrides the KIND stamped on the resulting rows. None (every
         pre-existing caller) keeps the derived value ``_flush_persisted`` has
@@ -348,7 +353,13 @@ class SlackIO:
             )
         elif client and client.is_connected:
             try:
-                result = await client.apost_message(channel, text, thread_ts=slack_parent)
+                post_kwargs: dict = {"thread_ts": slack_parent}
+                if landed_check and isinstance(client, AgentSlackClient):
+                    post_kwargs["landed_check"] = True
+                    post_kwargs["known_ts"] = self.message_log.newest_own_slack_ts(
+                        agent_id, channel, thread_ts,
+                    )
+                result = await client.apost_message(channel, text, **post_kwargs)
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts

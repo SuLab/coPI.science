@@ -321,6 +321,24 @@ class MessageLog:
                 entry.sender_agent_id, []
             ).append(entry)
 
+    def newest_own_slack_ts(
+        self, agent_id: str, channel: str, thread_ts: str | None,
+    ) -> str | None:
+        """The newest Slack ts this agent already has in one destination — a
+        thread (root and replies, panel notes included) or the channel's top
+        level — per the log. The landed check (spec §8.4 AG-6) treats anything
+        by this bot newer than it as the chunk in flight."""
+        if thread_ts:
+            entries = [self._by_ts.get(thread_ts), *self._by_thread.get(thread_ts, [])]
+        else:
+            entries = list(self._top_level_by_sender.get(agent_id, []))
+        own = [
+            e.slack_ts for e in entries
+            if e is not None and e.sender_agent_id == agent_id
+            and e.channel == channel and e.slack_ts
+        ]
+        return max(own, key=float) if own else None
+
     def _since(self, since: float) -> list[LogEntry]:
         """Entries with posted_at strictly greater than ``since``, in
         INSERTION order — the same order the old full scans returned.

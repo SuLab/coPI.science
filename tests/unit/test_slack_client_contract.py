@@ -323,7 +323,7 @@ def _chokepoint_nodes():
     def _is_self_client(node) -> bool:
         return (
             isinstance(node, ast.Attribute)
-            and node.attr == "_client"
+            and node.attr in ("_client", "_post_client")
             and isinstance(node.value, ast.Name)
             and node.value.id == "self"
         )
@@ -358,6 +358,9 @@ def test_no_slack_endpoint_is_reached_outside_the_chokepoint():
     exactly one place that touches the WebClient, and a fifth instance of that class of
     bug requires editing this test first.
 
+    Two lookups, both in `_api`: `chat.postMessage` uses the no-retry
+    `_post_client` (spec §8.4 AG-6).
+
     Parsed from the file the loaded module was imported from, not from a path guess, so
     it also fails if the module under test is not the one in the working tree.
     """
@@ -367,11 +370,11 @@ def test_no_slack_endpoint_is_reached_outside_the_chokepoint():
         "these lines call a Slack endpoint directly and so inherit neither the "
         f"rate-limit retry nor pagination: {direct}"
     )
-    assert len(dynamic) == 1, (
-        f"expected exactly one dynamic endpoint lookup (in _api); found {dynamic}"
+    assert len(dynamic) == 2, (
+        f"expected exactly two dynamic endpoint lookups (both in _api); found {dynamic}"
     )
-    assert dynamic[0][1] == "_api", (
-        f"the WebClient is reached from {dynamic[0][1]}, not from _api"
+    assert {owner for _, owner in dynamic} == {"_api"}, (
+        f"the WebClient is reached from {dynamic}, not only from _api"
     )
 
 
