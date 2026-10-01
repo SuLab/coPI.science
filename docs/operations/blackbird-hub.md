@@ -467,3 +467,10 @@ are the two reasons that do not get a concluding reply.
 or the rubric while it runs (`src/agent/prompt_snapshot.py`); a disk edit shows as a
 banner on `/admin/simulation` and applies at the next start. The web app and the
 worker still read per use.
+
+**Registries.** Verdict-field labels, staff-only fields and soft length bounds live in
+`src/services/verdict_fields.py`; score bands and their colours in `src/services/bands.py`.
+Both reproduce today's values exactly (tests pin them); a label there is model-visible text
+in the assessment chat record. The engine records each loaded rubric in `rubric_documents`
+at start; nothing reads that table yet (provenance still resolves live rubric →
+`revisions.toml` → unknown). Neither registry changes any prompt.
