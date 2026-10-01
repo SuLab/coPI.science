@@ -16,10 +16,10 @@ import time
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import get_settings
+from src.database import make_engine
 from src.models import AgentRegistry, AppSetting, SlackAppProvision, User
 from src.services.advisory_locks import entity_key_sql
 from src.services.slack_provisioning import (
@@ -160,7 +160,7 @@ def _lock_session_factory():
     """
     global _lock_engine
     if _lock_engine is None:
-        _lock_engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        _lock_engine = make_engine("provision_lock")
     return async_sessionmaker(_lock_engine, expire_on_commit=False)
 
 

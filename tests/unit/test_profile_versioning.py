@@ -11,7 +11,7 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 
 # The values a live writer may pass. "private" and "slack_dm" survive only on rows
 # written before 2026-08-13; "monthly_refresh" was never written by anything.
-LIVE_MECHANISMS = {"web", "agent", "pipeline"}
+LIVE_MECHANISMS = {"web", "web_impersonated", "agent", "pipeline"}
 LIVE_PROFILE_TYPES = {"public", "memory"}
 
 
@@ -143,14 +143,95 @@ def _loop_values(name: str, call: ast.Call, parents: dict) -> set | None:
     return None
 
 
+def _constant_values(node: ast.expr) -> set | None:
+    """A literal, or a conditional choosing between literals."""
+    if isinstance(node, ast.Constant):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        a, b = _constant_values(node.body), _constant_values(node.orelse)
+        return None if a is None or b is None else a | b
+    return None
+
+
+def _enclosing_function(node: ast.AST, parents: dict):
+    node = parents.get(node)
+    while node is not None and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        node = parents.get(node)
+    return node
+
+
+def _src_trees() -> list[tuple[ast.Module, dict]]:
+    out = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        out.append((tree, {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}))
+    return out
+
+
+def _forwarded_values(func_name: str, param: str, seen: frozenset = frozenset()) -> set | None:
+    """Every value `param` of `func_name` takes across src/: its default when a
+    caller omits it, each caller's literal, and, recursively, what a caller that
+    forwards one of its own parameters receives. None marks a non-literal source.
+    A forwarded None means "no revision" (export_and_record), so it is dropped."""
+    if (func_name, param) in seen:
+        return None
+    seen = seen | {(func_name, param)}
+    values: set = set()
+    default = None
+    trees = _src_trees()
+    for tree, _parents in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+                args = node.args.kwonlyargs
+                for a, d in zip(args, node.args.kw_defaults, strict=True):
+                    if a.arg == param and d is not None:
+                        default = _constant_values(d)
+                pos = node.args.args[len(node.args.args) - len(node.args.defaults):]
+                for a, d in zip(pos, node.args.defaults, strict=True):
+                    if a.arg == param:
+                        default = _constant_values(d)
+    for tree, parents in trees:
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == func_name):
+                continue
+            kw = next((k for k in node.keywords if k.arg == param), None)
+            if kw is None:
+                if default is None:
+                    return None
+                values |= default
+                continue
+            literal = _constant_values(kw.value)
+            if literal is not None:
+                values |= literal
+                continue
+            outer = _enclosing_function(node, parents)
+            if not (isinstance(kw.value, ast.Name) and outer is not None):
+                return None
+            forwarded = _forwarded_values(outer.name, kw.value.id, seen)
+            if forwarded is None:
+                return None
+            values |= forwarded
+    return values - {None}
+
+
 def _argument_values(call: ast.Call, keyword: str, parents: dict) -> set | None:
     for kw in call.keywords:
         if kw.arg != keyword:
             continue
-        if isinstance(kw.value, ast.Constant):
-            return {kw.value.value}
+        literal = _constant_values(kw.value)
+        if literal is not None:
+            return literal
         if isinstance(kw.value, ast.Name):
-            return _loop_values(kw.value.id, call, parents)
+            looped = _loop_values(kw.value.id, call, parents)
+            if looped is not None:
+                return looped
+            outer = _enclosing_function(call, parents)
+            if outer is not None and kw.value.id in {
+                a.arg for a in outer.args.args + outer.args.kwonlyargs
+            }:
+                # A wrapper forwarding its own parameter (profile_publish.export_and_record):
+                # check what every caller passes it, transitively.
+                return _forwarded_values(outer.name, kw.value.id)
         return None
     return None
 
@@ -173,9 +254,12 @@ def test_live_writers_use_only_live_values():
             if _is_create_revision_call(node):
                 calls.append((path.relative_to(SRC.parent), node, parents))
 
-    # Six call sites existed when this guard was written; finding none would mean
+    # Six call sites existed when this guard was written; Phase 3 (RB-09) folded the
+    # four profile-export writers into profile_publish.export_and_record, whose
+    # forwarded mechanism is checked through its callers. Finding fewer would mean
     # the scan, not the writers, had changed.
-    assert len(calls) >= 6, [str(p) for p, _, _ in calls]
+    assert len(calls) >= 3, [str(p) for p, _, _ in calls]
+    assert any(str(p) == "src/services/profile_publish.py" for p, _, _ in calls)
     assert any(str(p) == "src/cli.py" for p, _, _ in calls)
 
     for path, call, parents in calls:

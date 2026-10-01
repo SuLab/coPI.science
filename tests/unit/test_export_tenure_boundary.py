@@ -9,8 +9,8 @@ be a ``TenureScopedPublications`` (``src/services/tenure_scope.py``), and the
 function raises ``TypeError`` on anything else, including a bare list. This
 file has two jobs:
 
-1. A static AST walk over every ``export_profile_to_markdown(`` call site in
-   ``src/`` and ``scripts/`` asserting each one obtains its ``publications``
+1. A static AST walk over every ``export_profile_to_markdown(`` and
+   ``export_and_record(`` call site in ``src/`` and ``scripts/`` asserting each one obtains its ``publications``
    argument from a ``tenure_scope`` producer (``scoped_publications_for_export``
    or ``scope_for_export``), not from a raw ``select(Publication)``/list
    expression. A written comment is what failed before (two call sites'
@@ -39,15 +39,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # what produced six of the eight misses.
 _ALLOWED_PRODUCERS = {"scoped_publications_for_export", "scope_for_export"}
 
-# The exact call sites this task converted. A seventh caller — or the loss of
-# one of these six — must fail this test loudly rather than silently
-# widening or narrowing the audited set.
+# The boundary functions. Phase 3 (RB-09) routed every live export through
+# `profile_publish.export_and_record`, which passes its `publications` parameter
+# (typed `TenureScopedPublications`) straight to `export_profile_to_markdown`; the
+# producer check therefore applies to callers of either function.
+_BOUNDARY_FUNCTIONS = {"export_profile_to_markdown", "export_and_record"}
+
+# The one pass-through wrapper: its export call forwards its own typed parameter.
+_PASS_THROUGH_SITES = {("src", "services", "profile_publish.py")}
+
+# The exact call sites. A new caller — or the loss of one — must fail this test
+# loudly rather than silently widening or narrowing the audited set. The router
+# and onboarding edit paths now reach the boundary through
+# `profile_edit.apply_profile_edits`.
 _EXPECTED_CALL_SITES = {
-    ("src", "routers", "agent_page.py"),
-    ("src", "routers", "onboarding.py"),
     ("src", "routers", "manager.py"),
     ("src", "services", "profile_pipeline.py"),
     ("src", "services", "profile_edit.py"),
+    ("src", "services", "profile_publish.py"),
     ("scripts", "audit_pub_dois.py"),
 }
 
@@ -87,14 +96,10 @@ def _find_call_sites() -> dict[tuple[str, ...], list[ast.Call]]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         calls: list[ast.Call] = []
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "export_profile_to_markdown"
-            ):
+            if isinstance(node, ast.Call) and _producer_name(node) in _BOUNDARY_FUNCTIONS:
                 calls.append(node)
-            # `export_profile_to_markdown`'s own def (in profile_export.py) is
-            # a FunctionDef, not a Call, so the match above never counts it.
+            # The boundary functions' own defs are FunctionDefs, not Calls, so
+            # the match above never counts them.
         rel = path.relative_to(REPO_ROOT).parts
         if calls:
             sites[rel] = calls
@@ -116,9 +121,9 @@ def _assigned_producer_names(tree: ast.Module) -> dict[str, str]:
     return out
 
 
-def test_export_call_site_count_is_exactly_eight():
-    """A ninth caller (or fewer than eight) must be reviewed, not silently
-    absorbed — this is the count named in the remediation plan and audit."""
+def test_export_call_site_set_is_exact():
+    """A new caller (or a lost one) must be reviewed, not silently absorbed. The
+    remediation plan's audit named eight; RB-09 folded the edit paths into one."""
     sites = _find_call_sites()
     found = set(sites.keys())
     assert found == _EXPECTED_CALL_SITES, (
@@ -146,9 +151,16 @@ def test_every_call_site_passes_a_tenure_scoped_producer():
             if pub_arg is None and len(call.args) >= 4:
                 pub_arg = call.args[3]
             assert pub_arg is not None, (
-                f"{'/'.join(rel_parts)}: export_profile_to_markdown call at "
+                f"{'/'.join(rel_parts)}: boundary call at "
                 f"line {call.lineno} passes no `publications` argument at all"
             )
+            if rel_parts in _PASS_THROUGH_SITES:
+                assert isinstance(pub_arg, ast.Name) and pub_arg.id == "publications", (
+                    f"{'/'.join(rel_parts)}:{call.lineno}: the wrapper must forward "
+                    "its own `publications` parameter unchanged"
+                )
+                assert "publications: TenureScopedPublications" in path.read_text(encoding="utf-8")
+                continue
             name = _producer_name(pub_arg)
             if name not in _ALLOWED_PRODUCERS and isinstance(pub_arg, ast.Name):
                 name = local_producers.get(pub_arg.id)

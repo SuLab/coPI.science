@@ -433,6 +433,8 @@ async def test_dimension_rows_use_the_archived_revision_stamped_on_the_row(db_se
         "weight": 6,
         "weight_note": "6%/4% (investment/incubation)",
         "pct": 60.0,
+        # The detail builder's rows (AP-10); the directory template ignores it.
+        "rationale": None,
     }
     assert by_key["team"]["score"] is None
     assert by_key["team"]["pct"] == 0.0
@@ -469,6 +471,8 @@ async def test_dimension_rows_use_the_live_revision_when_unstamped(db_session):
         "weight": 25,
         "weight_note": "25%",
         "pct": 80.0,
+        # The detail builder's rows (AP-10); the directory template ignores it.
+        "rationale": None,
     }
     assert by_key["team_executability"]["score"] is None
     assert by_key["team_executability"]["pct"] == 0.0

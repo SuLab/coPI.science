@@ -24,6 +24,7 @@ def test_per_role_arguments_are_todays(monkeypatch):
     assert database.engine_kwargs("cli") == {}
     assert database.engine_kwargs("heartbeat") == {"pool_size": 1, "max_overflow": 0, "pool_pre_ping": True}
     assert database.engine_kwargs("advisory_lock") == {"poolclass": NullPool, "isolation_level": "AUTOCOMMIT"}
+    assert database.engine_kwargs("provision_lock") == {"poolclass": NullPool}
 
 
 def test_no_other_create_async_engine_in_src():

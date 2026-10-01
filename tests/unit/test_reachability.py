@@ -968,7 +968,8 @@ def test_import_gate_actually_checked_the_lazy_imports():
     sites = import_sites()
     guarded = [s for s in sites if s.in_try]
     first_party = [s for s in sites if s.module.startswith("src")]
-    assert len(guarded) > 30, f"only {len(guarded)} try-guarded imports found"
+    # 29 at Phase 3: RB-13 hoisted agent_page's function-level imports to module top.
+    assert len(guarded) > 25, f"only {len(guarded)} try-guarded imports found"
     assert len(first_party) > 150, f"only {len(first_party)} first-party imports found"
 
 
@@ -981,11 +982,13 @@ def test_static_link_resolution_coverage_is_reported():
     # Pinned as an absolute count of values the matcher cannot check, not a
     # fraction: retiring pages removes resolvable links, which moves the fraction
     # without the matcher changing (the Phase 0b retirements took it from 80.4% to
-    # 79.9% with the same 43 unresolvable values).
+    # 79.9% with the same 43 unresolvable values). Phase 3's run-detail pager (RA-08)
+    # added two query-only links (`?page=…`): the partial serves both the admin and
+    # the manager run pages, so it cannot name either path.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 43, (
+    assert unresolvable <= 45, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 43) — the matcher probably regressed, or a new "
+        "checkable local path (was 45) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

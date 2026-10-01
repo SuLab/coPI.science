@@ -20,7 +20,8 @@ class Base(DeclarativeBase):
 
 
 EngineRole = Literal[
-    "web", "worker", "agent", "supervisor", "agent_roster", "cli", "heartbeat", "advisory_lock"
+    "web", "worker", "agent", "supervisor", "agent_roster", "cli", "heartbeat", "advisory_lock",
+    "provision_lock",
 ]
 
 
@@ -50,6 +51,11 @@ def engine_kwargs(role: EngineRole) -> dict[str, Any]:
         # SessionAdvisoryLock: the lock lives exactly as long as one dedicated
         # connection, so no pooling and no implicit transaction.
         return {"poolclass": NullPool, "isolation_level": "AUTOCOMMIT"}
+    if role == "provision_lock":
+        # The per-agent Slack provisioning lock (RA-15): a transaction-level advisory
+        # lock held across the Slack call, so a dedicated unpooled connection (never
+        # the web pool) that keeps its transaction (not AUTOCOMMIT).
+        return {"poolclass": NullPool}
     if role in ("agent_roster", "cli"):
         return {}
     raise ValueError(f"unknown engine role {role!r}")

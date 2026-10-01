@@ -79,6 +79,11 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
+    "src.services.blackbird_rubric:parse_rubric": (
+        "Public validator for scratch rubric documents (its docstring). The import-time "
+        "load reads the bytes once and calls parse_rubric_bytes, so rubric_documents "
+        "records exactly the bytes that were parsed (AP-7, Phase 3 Task 27)."
+    ),
     # Genuinely dead code the 2026-09-25 integration scan found (§5 step 2 of the plan
     # cited in the module docstring).
     # These are NOT roots: code reachable only from them must still be reported.

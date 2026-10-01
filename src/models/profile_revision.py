@@ -32,7 +32,7 @@ class ProfileRevision(Base):
     )
     mechanism: Mapped[str] = mapped_column(
         String(20), nullable=False
-    )  # web, agent, pipeline; "slack_dm" only on pre-2026-08-13 rows.
+    )  # web, web_impersonated, agent, pipeline; "slack_dm" only on pre-2026-08-13 rows.
     # "monthly_refresh" is never written: that job records "pipeline".
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
