@@ -2,9 +2,11 @@
 
   --jobs          mark all but the OLDEST pending/processing row of each duplicate
                   (user_id, type) group `failed`, last_error "duplicate — superseded by <id>".
-                  While a worker holds WORKER_LOCK_KEY a `processing` row is left alone
-                  (the worker would write its result over our `failed`): stop the worker,
-                  or wait for the job to finish, and re-run.
+                  A `processing` row is left alone (the worker would write its result
+                  over our `failed`) while a worker holds WORKER_LOCK_KEY, and also
+                  unless --worker-stopped is given: the pre-Phase-3 worker that is
+                  still running before 0056 never takes that lock. Stop the worker
+                  (or wait for the job to finish) and re-run with --worker-stopped.
   --provisions    keep the NEWEST slack_app_provisions row per agent, delete the rest,
                   and list their app_ids for manual deletion in Slack
   --publications  LIST ONLY: each affected PI, the duplicate count, and whether a
@@ -80,6 +82,13 @@ def plan_provision_remediation(rows) -> list[str]:
     for _agent, ids in rows:
         out.extend(ids[1:])
     return out
+
+
+def worker_may_be_live(lock_held: bool, worker_stopped: bool) -> bool:
+    """A held worker lock is a live worker. A free one proves nothing before 0056:
+    the pre-Phase-3 worker image still serving then never takes the lock, so only
+    the operator's ``--worker-stopped`` rules it out."""
+    return lock_held or not worker_stopped
 
 
 def split_for_live_worker(
@@ -165,9 +174,13 @@ async def _main(args: argparse.Namespace) -> int:
         worker_live = False
         if args.jobs:
             async with AsyncSession(engine) as probe:
-                worker_live = await advisory_lock_held(probe, WORKER_LOCK_KEY)
-            if worker_live:
+                lock_held = await advisory_lock_held(probe, WORKER_LOCK_KEY)
+            worker_live = worker_may_be_live(lock_held, args.worker_stopped)
+            if lock_held:
                 print("a worker holds the worker lock: `processing` duplicates will be skipped")
+            elif worker_live:
+                print("`processing` duplicates are skipped unless --worker-stopped "
+                      "(confirm the worker container is stopped first)")
         async with engine.connect() as conn:
             if args.jobs:
                 await _remediate_jobs(conn, args.apply, worker_live)
@@ -189,7 +202,8 @@ async def _main(args: argparse.Namespace) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for flag in ("--jobs", "--provisions", "--publications", "--emails", "--apply"):
+    for flag in ("--jobs", "--provisions", "--publications", "--emails", "--apply",
+                 "--worker-stopped"):
         ap.add_argument(flag, action="store_true")
     ap.add_argument("--database-url")
     raise SystemExit(asyncio.run(_main(ap.parse_args())))

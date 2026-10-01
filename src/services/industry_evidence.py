@@ -144,6 +144,10 @@ async def execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
         primary_field = primary_field or result.primary_field
         if result.note:
             await job_progress.record(ctx.id, "industry1", result.note)
+    if not refreshed:
+        # Nothing answered (an outage): fail the job so the worker's retry backoff
+        # runs it again, rather than rescoring stale rows and calling it done.
+        raise SourceUnavailable(f"every industry source unavailable: {','.join(unavailable)}")
 
     vetoed = {(r.source, r.kind, r.external_id) for r in (await db.execute(
         select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id,

@@ -41,3 +41,16 @@ async def test_helper_default_is_null(db_session):
 
 def test_constants():
     assert (INTERACTIVE_PRIORITY, BULK_PRIORITY) == (10, -10)
+
+
+async def test_an_interactive_enqueue_raises_a_pending_bulk_rows_priority(db_session):
+    """Bulk queued first, then the person arrives: their wait is interactive."""
+    user = await factories.make_user(db_session)
+    first = await enqueue_profile_job_if_absent(db_session, user, priority=BULK_PRIORITY)
+    again = await enqueue_profile_job_if_absent(db_session, user, priority=INTERACTIVE_PRIORITY)
+    await db_session.refresh(first)
+    assert again.id == first.id and first.priority == INTERACTIVE_PRIORITY
+    # A lower priority never lowers it.
+    await enqueue_profile_job_if_absent(db_session, user, priority=BULK_PRIORITY)
+    await db_session.refresh(first)
+    assert first.priority == INTERACTIVE_PRIORITY

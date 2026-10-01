@@ -318,11 +318,13 @@ async def fetch_pubmed_records(
 
     ``strict`` decides what one failed batch costs:
 
-    * ``strict=False`` (the default, for ingest callers such as
-      ``industry_evidence`` and the repair/sparse-data scripts): any failure is
-      logged and that batch's 100 PMIDs are lost, no more — the job of those
-      callers is to keep a long ingest going.
-    * ``strict=True`` (``resolve_corpus``) splits on ``_is_per_item_failure``:
+    * ``strict=False`` (the default, for ingest callers such as the
+      repair/sparse-data scripts): any failure is logged and that batch's 100
+      PMIDs are lost, no more — the job of those callers is to keep a long
+      ingest going.
+    * ``strict=True`` (``resolve_corpus``, and ``industry_evidence``'s PubMed COI
+      source, which turns a raise into "source unavailable, keep its stored rows")
+      splits on ``_is_per_item_failure``:
 
       - anything that is NOT a per-item failure re-raises: a transient failure
         (transport error, 429, 5xx), whose recovery is the job retry, and any
@@ -820,6 +822,7 @@ async def _esearch_phase(
                     )
             else:
                 candidates.append((doi, id_list[0]))
+                run.reset()  # a good answer ends a failure run, as a miss does below
                 continue
         except Exception as exc:
             if not strict:

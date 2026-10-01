@@ -176,6 +176,14 @@ else
     # does not remove it).
     trap migcheck_cleanup EXIT INT TERM
     migcheck_cleanup
+    # A run killed with SIGKILL skips the trap and leaves its container behind.
+    # Remove any copi-ci-migcheck-<pid> whose pid is no longer running; a live
+    # run's container (its pid exists) is left alone.
+    for stale in $(docker ps -a --format '{{.Names}}' --filter name=copi-ci-migcheck-); do
+      stale_pid="${stale#copi-ci-migcheck-}"
+      case "$stale_pid" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$stale_pid" 2>/dev/null || docker rm -fv "$stale" >/dev/null 2>&1 || true
+    done
     docker run -d --name "$MIGCHECK_CONTAINER" \
       -e POSTGRES_USER=copi -e POSTGRES_PASSWORD=copi -e POSTGRES_DB=copi_migcheck \
       -p "127.0.0.1:${MIGCHECK_PORT}:5432" postgres:15 >/dev/null

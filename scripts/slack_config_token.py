@@ -28,6 +28,7 @@ async def _main() -> int:
         await db.commit()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(OUT, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # the mode above applies only when the file is created
     with os.fdopen(fd, "w") as fh:
         fh.write(token)
     print(f"wrote {OUT} (0600); the refresh token stays in the database")

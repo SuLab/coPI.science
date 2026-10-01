@@ -29,3 +29,11 @@ def test_a_live_worker_leaves_processing_rows_alone():
     assert r.split_for_live_worker(plan, statuses, True) == ([("j-new", "j-old")], [("j-mid", "j-old")])
     assert r.split_for_live_worker(plan, statuses, False) == (plan, [])
 
+
+
+
+def test_processing_rows_need_worker_stopped_when_the_lock_is_free():
+    """A free worker lock proves nothing before 0056: the old worker never takes it."""
+    assert r.worker_may_be_live(lock_held=True, worker_stopped=True) is True
+    assert r.worker_may_be_live(lock_held=False, worker_stopped=False) is True
+    assert r.worker_may_be_live(lock_held=False, worker_stopped=True) is False

@@ -101,3 +101,24 @@ async def test_a_round_trip_mismatch_is_a_miss(recorder, monkeypatch):
 
     monkeypatch.setattr(pubmed, "_make_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert await pubmed.convert_dois_to_pmids(["10.1000/x.1"], strict=True) == {}
+
+
+async def test_alternating_esearch_failures_and_hits_do_not_trip_the_systemic_run(recorder, monkeypatch):
+    """A good single-hit ESearch answer ends a failure run (as the per-DOI loop's
+    verified hit did), so F, hit, F, hit, F is three isolated drops, not systemic."""
+    inner = recorder.handler
+
+    def handler(request):
+        if "esearch" in str(request.url):
+            n = int(request.url.params["term"].removesuffix("[doi]").rsplit(".", 1)[-1])
+            if n % 2 == 0:
+                return httpx.Response(400, text="bad term")
+        return inner(request)
+
+    monkeypatch.setattr(pubmed, "_make_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    dropped: list[str] = []
+    mapping = await pubmed.convert_dois_to_pmids(
+        [f"10.1000/x.{i}" for i in range(5)], strict=True, permanently_dropped=dropped
+    )
+    assert mapping == {"10.1000/x.1": "1001", "10.1000/x.3": "1003"}
+    assert dropped == ["10.1000/x.0", "10.1000/x.2", "10.1000/x.4"]

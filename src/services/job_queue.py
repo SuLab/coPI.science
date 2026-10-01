@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,8 +22,10 @@ async def insert_job_if_absent(
     priority: int | None = None,
 ) -> uuid.UUID | None:
     """Insert a pending job and return its id, or None when the user already has
-    a pending or processing job of this type. Adds to the caller's transaction;
-    the caller commits."""
+    a pending or processing job of this type. On that conflict a higher
+    ``priority`` is carried onto the existing PENDING row, so a person now waiting
+    on it is not left behind a bulk enqueue's lower priority. Adds to the caller's
+    transaction; the caller commits."""
     if type not in PER_USER_JOB_TYPES:
         raise ValueError(f"{type!r} is not a per-user job type")
     stmt = (
@@ -36,4 +38,12 @@ async def insert_job_if_absent(
         )
         .returning(Job.id)
     )
-    return (await db.execute(stmt)).scalar_one_or_none()
+    new_id = (await db.execute(stmt)).scalar_one_or_none()
+    if new_id is None and priority is not None:
+        await db.execute(
+            update(Job)
+            .where(Job.user_id == user_id, Job.type == type, Job.status == "pending",
+                   func.coalesce(Job.priority, 0) < priority)
+            .values(priority=priority)
+        )
+    return new_id

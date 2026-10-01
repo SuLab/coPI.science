@@ -73,3 +73,31 @@ async def test_a_failing_source_keeps_its_rows_and_others_refresh(db_session, mo
     assert rows == ["ctgov"]
     detail = [p for p in (job.payload or {}).get("progress", []) if p["step"] == "industry_done"]
     assert "unavailable=ctgov" in str(detail)
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("progress_on_test_connection")
+async def test_every_source_unavailable_fails_the_job_for_a_retry(db_session, monkeypatch):
+    user = User(orcid="0000-0001-4242-0002", name="Outage PI", user_role="pi")
+    db_session.add(user)
+    await db_session.flush()
+    await set_tenure_start(user.id, 2015, "manual", db=db_session)
+    db_session.add(_row(user.id, "ctgov", "trial_industry_collab", "NCT2:acme"))
+    job = Job(type="industry_evidence", user_id=user.id,
+              payload={"user_id": str(user.id), "orcid": user.orcid})
+    db_session.add(job)
+    await db_session.flush()
+
+    async def fail(self, ctx):
+        raise SourceUnavailable("down")
+
+    for cls in (registry.OpenAlexSource, registry.PubMedCoiSource, registry.UsptoSource,
+                registry.CtGovSource, registry.NihReporterSource):
+        monkeypatch.setattr(cls, "fetch", fail)
+    ctx = JobContext(id=job.id, type=job.type, user_id=job.user_id, payload=dict(job.payload),
+                     attempts=job.attempts, max_attempts=job.max_attempts)
+    with pytest.raises(SourceUnavailable, match="every industry source unavailable"):
+        await industry_evidence.execute_industry_evidence(ctx, db_session)
+    rows = (await db_session.execute(select(PiIndustryEvidence.source)
+                                     .where(PiIndustryEvidence.user_id == user.id))).scalars().all()
+    assert rows == ["ctgov"]
