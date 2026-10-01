@@ -209,6 +209,10 @@ class AssessmentChatUsage(Base):
         Index("ix_assessment_chat_usage_created", "created_at"),
         Index("ix_assessment_chat_usage_turn_id", "turn_id"),
         Index("ix_assessment_chat_usage_assessment_id", "assessment_id"),
+        Index(
+            "ix_chat_usage_streaming", "created_at",
+            postgresql_where=text("status = 'streaming'"),
+        ),
     )
 
     def __repr__(self) -> str:

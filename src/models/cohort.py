@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -55,6 +55,10 @@ class Cohort(Base):
     )
     created_by_user: Mapped["User | None"] = relationship(
         "User", foreign_keys=[created_by]
+    )
+
+    __table_args__ = (
+        Index("ix_cohorts_created_by", "created_by"),
     )
 
     def __repr__(self) -> str:
@@ -91,8 +95,10 @@ class CohortMembership(Base):
     )
 
     __table_args__ = (
-        # One membership row per (cohort, agent)
-        {"comment": "unique constraint on (cohort_id, agent_id) added in migration"},
+        UniqueConstraint("cohort_id", "agent_id", name="uq_cohort_membership_cohort_agent"),
+        Index("ix_cohort_memberships_added_by", "added_by"),
+        Index("ix_cohort_memberships_agent_id", "agent_id"),
+        Index("ix_cohort_memberships_cohort_id", "cohort_id"),
     )
 
     def __repr__(self) -> str:
@@ -157,6 +163,12 @@ class CohortAuditEvent(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_cohort_audit_events_actor_id", "actor_id"),
+        Index("ix_cohort_audit_events_cohort_id", "cohort_id"),
+        Index("ix_cohort_audit_events_created_at", "created_at"),
     )
 
     def __repr__(self) -> str:

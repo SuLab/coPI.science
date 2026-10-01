@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0055"
+DEFAULT_TARGET = "0056"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,12 +109,12 @@ DEFAULT_TARGET = "0055"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0055 objects enumerated in PLANNED_OBJECTS below.
+#: tables, no backfill), and the 0036-0056 objects enumerated in PLANNED_OBJECTS below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054",
+    "0051", "0052", "0053", "0054", "0055",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -175,7 +175,7 @@ BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", 
 
 # ---------------------------------------------------------------------------
 # What the migration chain CREATES (PLANNED_OBJECTS) and DROPS (PLANNED_DROPS), per
-# revision. Derived by reading 0019-0055; tests/unit/test_migration_checks.py re-derives
+# revision. Derived by reading 0019-0056; tests/unit/test_migration_checks.py re-derives
 # both from the migration files' upgrade() bodies and asserts they still match, so they
 # cannot silently drift.
 # ---------------------------------------------------------------------------
@@ -434,11 +434,20 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject(
         "0055", "constraint", "uq_opportunity_assessments_run_thread", "opportunity_assessments",
     ),
+    # 0056_phase3_constraints_and_indexes
+    PlannedObject("0056", "column", "priority", "jobs"),
+    PlannedObject("0056", "index", "uq_jobs_one_active_per_user_type", "jobs"),
+    PlannedObject("0056", "constraint", "uq_slack_app_provisions_agent", "slack_app_provisions"),
+    PlannedObject("0056", "constraint", "uq_publications_user_pmid", "publications"),
+    PlannedObject("0056", "index", "uq_users_email_lower", "users"),
+    PlannedObject("0056", "index", "ix_agent_messages_agent_phase", "agent_messages"),
+    PlannedObject("0056", "index", "ix_chat_usage_streaming", "assessment_chat_usage"),
+    PlannedObject("0056", "table", "rubric_documents"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0055.
+#: the only upgrade-time ``drop_table`` in 0019-0056.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -447,7 +456,7 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055",
+    "0051", "0052", "0053", "0054", "0055", "0056",
 )
 
 
@@ -489,6 +498,20 @@ def tables_dropped_between(current: str, target: str) -> frozenset[str]:
     pending = _pending_revisions(current, target)
     return frozenset(
         o.name for o in PLANNED_DROPS if o.kind == "table" and o.revision in pending
+    )
+
+
+def tables_sized_between(current: str | None, target: str) -> list[str]:
+    """Every existing table a pending revision locks (SC-17), sorted.
+
+    Derived from each pending ``PlannedObject.table`` (tables the chain itself creates
+    have nothing to size), so a revision that alters ``jobs`` or ``users`` is sized
+    without a hand-kept list.
+    """
+    lo = current or "0018"
+    created = tables_created_between(lo, target)
+    return sorted(
+        {o.table for o in planned_objects_between(lo, target) if o.table and o.table not in created}
     )
 
 
@@ -1963,6 +1986,38 @@ def check_migration_harness():
 
 
 async def check_sizing(conn, rev: str | None, target: str):
+    """agent_messages lock-window estimate plus the size of every other altered table.
+
+    The agent_messages estimate and its status are ``_check_agent_messages_sizing``'s,
+    unchanged. On top, every existing table a pending revision alters
+    (``tables_sized_between``: SC-17) is reported with its row count and heap/total
+    relation bytes, in the detail text and under ``data["sized_tables"]``, so the
+    operator sees what ``jobs``, ``users`` or ``publications`` cost before a migration
+    locks them. The status is not affected by those tables.
+    """
+    title, status, detail, rem, data = await _check_agent_messages_sizing(conn, rev, target)
+    sized: dict[str, dict[str, int]] = {}
+    for table in tables_sized_between(rev, target):
+        if not await table_exists(conn, table):
+            continue
+        sized[table] = {
+            "rows": int(await fetch_one_value(conn, f"SELECT count(*) FROM {table}")),
+            "heap_bytes": int(await fetch_one_value(conn, f"SELECT pg_relation_size('{table}')")),
+            "total_bytes": int(
+                await fetch_one_value(conn, f"SELECT pg_total_relation_size('{table}')")
+            ),
+        }
+    if sized:
+        lines = [
+            f"  {t}: {v['rows']:,} rows, heap {v['heap_bytes'] / 1e6:.1f} MB, "
+            f"total relation {v['total_bytes'] / 1e6:.1f} MB"
+            for t, v in sized.items()
+        ]
+        detail += f"\nOther tables {rev}..{target} alters:\n" + "\n".join(lines)
+    return (title, status, detail, rem, {**data, "sized_tables": sized})
+
+
+async def _check_agent_messages_sizing(conn, rev: str | None, target: str):
     """agent_messages row count, size, and the estimated lock window.
 
     The estimate scales with agent_messages only while a pending revision locks that

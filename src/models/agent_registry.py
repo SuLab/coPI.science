@@ -3,7 +3,16 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, SmallInteger, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,6 +76,13 @@ class AgentRegistry(Base):
         cascade="all, delete-orphan",
     )
 
+    __table_args__ = (
+        Index("ix_agents_agent_id", "agent_id"),
+        Index("ix_agents_approved_by", "approved_by"),
+        Index("ix_agents_muted_by", "muted_by"),
+        Index("ix_agents_user_id", "user_id"),
+    )
+
     def __repr__(self) -> str:
         return f"<AgentRegistry agent_id={self.agent_id} status={self.status}>"
 
@@ -111,8 +127,11 @@ class ProposalReview(Base):
     thread_decision: Mapped["ThreadDecision"] = relationship("ThreadDecision")
 
     __table_args__ = (
-        # Each agent can only review a thread decision once
-        {"comment": "unique constraint on (thread_decision_id, agent_id) added in migration"},
+        UniqueConstraint("thread_decision_id", "agent_id", name="uq_proposal_reviews_decision_agent"),
+        Index("ix_proposal_reviews_agent_id", "agent_id"),
+        Index("ix_proposal_reviews_delegate_user_id", "delegate_user_id"),
+        Index("ix_proposal_reviews_reviewed_by_user_id", "reviewed_by_user_id"),
+        Index("ix_proposal_reviews_user_id", "user_id"),
     )
 
     def __repr__(self) -> str:

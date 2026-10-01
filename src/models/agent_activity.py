@@ -143,6 +143,8 @@ class AgentMessage(Base):
             "simulation_run_id", "slack_ts",
             postgresql_where=text("slack_ts IS NOT NULL"),
         ),
+        Index("ix_agent_messages_agent_phase", "agent_id", "phase"),
+        Index("ix_agent_messages_run_id", "simulation_run_id"),
     )
 
     # Relationships
@@ -186,6 +188,10 @@ class AgentChannel(Base):
     )
     private_members: Mapped[list["PrivateChannelMember"]] = relationship(
         "PrivateChannelMember", back_populates="agent_channel", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_agent_channels_run_id", "simulation_run_id"),
     )
 
     def __repr__(self) -> str:
@@ -323,6 +329,11 @@ class LlmCallLog(Base):
         "SimulationRun", back_populates="llm_call_logs"
     )
 
+    __table_args__ = (
+        Index("ix_llm_call_logs_agent_id", "agent_id"),
+        Index("ix_llm_call_logs_run_id", "simulation_run_id"),
+    )
+
     def __repr__(self) -> str:
         return f"<LlmCallLog id={self.id} agent={self.agent_id} phase={self.phase} model={self.model}>"
 
@@ -334,6 +345,7 @@ class ThreadDecision(Base):
         # authenticated page load; measured ~129x with these (issue #25 P1).
         Index("ix_thread_decisions_agent_a_outcome", "agent_a", "outcome"),
         Index("ix_thread_decisions_agent_b_outcome", "agent_b", "outcome"),
+        Index("ix_thread_decisions_run_id", "simulation_run_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -403,6 +415,8 @@ class PrivateChannelMember(Base):
             unique=True,
             postgresql_where="user_id IS NOT NULL",
         ),
+        Index("ix_private_channel_members_added_by_user_id", "added_by_user_id"),
+        Index("ix_private_channel_members_user_id", "user_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

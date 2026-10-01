@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +52,12 @@ class DelegateInvitation(Base):
     )
     invited_by: Mapped["User"] = relationship("User", foreign_keys=[invited_by_user_id])
 
+    __table_args__ = (
+        Index("ix_delegate_invitations_accepted_by_user_id", "accepted_by_user_id"),
+        Index("ix_delegate_invitations_invited_by_user_id", "invited_by_user_id"),
+        Index("ix_delegate_invitations_pending_unique", "agent_registry_id", "email", unique=True, postgresql_where=text("status = 'pending'")),
+    )
+
     def __repr__(self) -> str:
         return f"<DelegateInvitation email={self.email!r} status={self.status}>"
 
@@ -90,8 +96,9 @@ class AgentDelegate(Base):
     invitation: Mapped["DelegateInvitation | None"] = relationship("DelegateInvitation")
 
     __table_args__ = (
-        # One delegation relationship per user per agent
-        {"comment": "unique constraint on (agent_registry_id, user_id) added in migration"},
+        UniqueConstraint("agent_registry_id", "user_id", name="uq_agent_delegate_agent_user"),
+        Index("ix_agent_delegates_invitation_id", "invitation_id"),
+        Index("ix_agent_delegates_user_id", "user_id"),
     )
 
     def __repr__(self) -> str:

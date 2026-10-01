@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -137,6 +137,13 @@ class User(Base):
     @classmethod
     def _is_staff_expr(cls):
         return cls.user_role.in_((USER_ROLE_MANAGER, USER_ROLE_ADMIN))
+
+    # `uq_users_email_lower` (0056) is the case-insensitive email uniqueness; `email` keeps
+    # its own case-sensitive unique constraint. The check mirrors `VALID_USER_ROLES`.
+    __table_args__ = (
+        Index("uq_users_email_lower", text("lower(email)"), unique=True),
+        CheckConstraint("user_role IN ('pi','manager','admin','reviewer')", name="ck_users_user_role"),
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} orcid={self.orcid} name={self.name!r}>"
