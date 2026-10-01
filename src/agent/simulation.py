@@ -358,6 +358,7 @@ class SimulationEngine:
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
         await self.run_announcer.record_loaded_stamps()
+        await self.run_announcer.record_loaded_rubric()
 
         # Resume only: recover lab pitches the previous process left without a
         # reply because it stopped in the tick they were posted. Placed AFTER the

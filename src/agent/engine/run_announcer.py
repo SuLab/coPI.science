@@ -18,6 +18,7 @@ from src.agent.run_marker import (
 )
 from src.models import SimulationRun
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+from src.services.rubric_documents import record_loaded_rubric
 
 if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
@@ -63,6 +64,19 @@ class RunAnnouncer:
         if self._snapshot is not None:
             return dict(self._snapshot.stamps)
         return {role: prompt_set_stamp(role) for role in ROLE_CAPABILITIES}
+
+    async def record_loaded_rubric(self) -> None:
+        """Store the rubric document this process loaded in ``rubric_documents``
+        (AP-7). Write-only and best-effort: a failure is logged, never raised."""
+        if not self.session_factory:
+            return
+        try:
+            async with self.session_factory() as db:
+                await record_loaded_rubric(db)
+        except Exception:  # noqa: BLE001 — write-only provenance copy
+            logger.exception(
+                "rubric_documents: could not record the loaded rubric (write-only; run continues)"
+            )
 
     async def record_loaded_stamps(self) -> None:
         """Append what this start loaded to ``run.config['loaded_stamps']``

@@ -41,102 +41,104 @@ def export_profile_to_markdown(
     if not agent_id:
         return None
 
-    lines = []
-    lines.append(f"# {user.name} Lab — Public Profile\n")
-    lines.append(f"**PI:** {user.name}")
-    if user.institution:
-        lines.append(f"**Institution:** {user.institution}")
-    if user.department:
-        lines.append(f"**Department:** {user.department}")
-    lines.append("")
-
-    # Research Summary
-    if profile.research_summary:
-        lines.append("## Research Summary\n")
-        lines.append(profile.research_summary)
-        lines.append("")
-
-    # Techniques
-    if profile.techniques:
-        lines.append("## Key Methods and Technologies\n")
-        for t in profile.techniques:
-            lines.append(f"- {t}")
-        lines.append("")
-
-    # Experimental Models
-    if profile.experimental_models:
-        lines.append("## Model Systems\n")
-        for m in profile.experimental_models:
-            lines.append(f"- {m}")
-        lines.append("")
-
-    # Disease Areas
-    if profile.disease_areas:
-        lines.append("## Disease Areas / Biological Processes\n")
-        for d in profile.disease_areas:
-            lines.append(f"- {d}")
-        lines.append("")
-
-    # Key Targets
-    if profile.key_targets:
-        lines.append("## Key Molecular Targets\n")
-        for k in profile.key_targets:
-            lines.append(f"- {k}")
-        lines.append("")
-
-    # Keywords
-    if profile.keywords:
-        lines.append("## Keywords\n")
-        lines.append(", ".join(profile.keywords))
-        lines.append("")
-
-    # Recent Publications (up to 20, most recent first)
-    if publications:
-        sorted_pubs = sorted(
-            [p for p in publications if p.title],
-            key=lambda p: p.year or 0,
-            reverse=True,
-        )[:20]
-        if sorted_pubs:
-            lines.append("## Recent Publications\n")
-            for pub in sorted_pubs:
-                # Build citation line with link
-                parts = []
-                if pub.title:
-                    parts.append(pub.title.rstrip("."))
-                if pub.journal:
-                    parts.append(f"*{pub.journal}*")
-                if pub.year:
-                    parts.append(f"({pub.year})")
-                citation = ". ".join(parts) + "."
-                # Add link — validate DOI before including
-                doi_ok = pub.doi and _validate_doi_journal(pub.doi, pub.journal)
-                if doi_ok:
-                    citation += f" https://doi.org/{pub.doi}"
-                elif pub.pmid:
-                    citation += f" https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
-                elif pub.doi:
-                    # DOI failed validation but no PMID fallback — include anyway
-                    citation += f" https://doi.org/{pub.doi}"
-                lines.append(f"- {citation}")
-            lines.append("")
-
-    # Grants
-    if profile.grant_titles:
-        lines.append("## Active Grants\n")
-        for g in profile.grant_titles:
-            lines.append(f"- {g}")
-        lines.append("")
-
+    text = _render_profile_markdown(user, profile, publications)
     path = PROFILES_DIR / f"{agent_id}.md"
     try:
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, "\n".join(lines))
+        atomic_write_text(path, text)
         logger.info("Exported profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
         logger.error("Failed to export profile for %s: %s", user.name, exc)
         return None
+
+
+def _header_lines(user: User) -> list[str]:
+    """Title, PI, institution and department lines, ending with a blank line."""
+    lines = [f"# {user.name} Lab — Public Profile\n", f"**PI:** {user.name}"]
+    if user.institution:
+        lines.append(f"**Institution:** {user.institution}")
+    if user.department:
+        lines.append(f"**Department:** {user.department}")
+    lines.append("")
+    return lines
+
+
+def _bullet_section(lines: list[str], title: str, items) -> None:
+    """Append a ``## title`` bullet list to ``lines``; nothing when ``items`` is falsy."""
+    if items:
+        lines.append(f"## {title}\n")
+        for item in items:
+            lines.append(f"- {item}")
+        lines.append("")
+
+
+def _citation(pub) -> str:
+    """One publication's citation text, with its DOI or PubMed link."""
+    parts = []
+    if pub.title:
+        parts.append(pub.title.rstrip("."))
+    if pub.journal:
+        parts.append(f"*{pub.journal}*")
+    if pub.year:
+        parts.append(f"({pub.year})")
+    citation = ". ".join(parts) + "."
+    # Add link — validate DOI before including
+    doi_ok = pub.doi and _validate_doi_journal(pub.doi, pub.journal)
+    if doi_ok:
+        citation += f" https://doi.org/{pub.doi}"
+    elif pub.pmid:
+        citation += f" https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
+    elif pub.doi:
+        # DOI failed validation but no PMID fallback — include anyway
+        citation += f" https://doi.org/{pub.doi}"
+    return citation
+
+
+def _publication_lines(publications: TenureScopedPublications | None) -> list[str]:
+    """Recent Publications section (up to 20, most recent first); empty when none."""
+    if not publications:
+        return []
+    sorted_pubs = sorted(
+        [p for p in publications if p.title],
+        key=lambda p: p.year or 0,
+        reverse=True,
+    )[:20]
+    if not sorted_pubs:
+        return []
+    lines = ["## Recent Publications\n"]
+    for pub in sorted_pubs:
+        lines.append(f"- {_citation(pub)}")
+    lines.append("")
+    return lines
+
+
+def _render_profile_markdown(
+    user: User,
+    profile: ResearcherProfile,
+    publications: TenureScopedPublications | None,
+) -> str:
+    """Render the exported markdown. Section order is part of the bot-facing contract."""
+    lines = _header_lines(user)
+
+    if profile.research_summary:
+        lines.append("## Research Summary\n")
+        lines.append(profile.research_summary)
+        lines.append("")
+
+    _bullet_section(lines, "Key Methods and Technologies", profile.techniques)
+    _bullet_section(lines, "Model Systems", profile.experimental_models)
+    _bullet_section(lines, "Disease Areas / Biological Processes", profile.disease_areas)
+    _bullet_section(lines, "Key Molecular Targets", profile.key_targets)
+
+    if profile.keywords:
+        lines.append("## Keywords\n")
+        lines.append(", ".join(profile.keywords))
+        lines.append("")
+
+    lines.extend(_publication_lines(publications))
+    _bullet_section(lines, "Active Grants", profile.grant_titles)
+    return "\n".join(lines)
 
 
 # Known DOI prefix → journal name patterns for validation.
