@@ -11,6 +11,10 @@ suite (zero findings) plus a ratcheted ceiling on `src/`, then the full pytest
 run with a branch-coverage floor. This is exactly what the `pre-push` hook
 runs, and it is the whole gate: there is no server-side CI.
 
+The round trip's throwaway Postgres is named `copi-ci-migcheck-<pid>` on a free
+127.0.0.1 port (override with `MIGCHECK_PORT`), so two runs no longer collide on it.
+A container leaked by an interrupted run is removed by name at that run's exit.
+
 **The supported way to run pytest alone is on the host, not inside a
 container:**
 

@@ -69,8 +69,9 @@ the row still holding exactly the value read at the start: the network calls
 take minutes, and a manager's manual edit made meanwhile must win — such a row
 is skipped and reported ``changed_since_read``. For each row written it queues
 one ``generate_profile`` job unless one is already PENDING; a PROCESSING job
-has already read the old year, so a new pending job is queued behind it and
-reported. Everything commits once. The profile pipeline queues
+has already read the old year, but the one-active-job rule keeps it as the only
+job, so it is reported and the operator re-queues once it finishes. The swaps
+commit first, then each queue call is its own short transaction. The profile pipeline queues
 ``enrich_grants`` and ``industry_evidence`` itself, so this script does not.
 
 ``--restore`` puts a row's ``old`` value back only if the row still holds the
@@ -443,39 +444,41 @@ async def run(
     backup = _write_backup(candidates, written, backup_dir)
     print(f"Backup: {backup}")
     rewritten = queued = already_pending = behind_processing = 0
+    rewritten_rows = []
     for o in changes:
         c = o.candidate
         if not await _swap_value(db, c.key, c.raw_value, written[c.key]):
             print(f"{c.user_id}  {c.name}  {c.orcid}  SKIP changed_since_read (row left as it is)")
             continue
         rewritten += 1
+        rewritten_rows.append(c)
+    await db.commit()  # every swap lands before anything is queued (SC-14)
+
+    for c in rewritten_rows:
         if await _has_pending_profile_job(db, c.user_id):
             already_pending += 1
             continue
-        # A processing job read the old year before this write; its output is
-        # stale, so queue a fresh one behind it rather than treating it as
-        # covering this change.
-        if await _has_processing_profile_job(db, c.user_id):
+        user = await db.get(User, c.user_id)
+        if user is None:
+            continue
+        processing = await _has_processing_profile_job(db, c.user_id)
+        job = await enqueue_profile_job_if_absent(db, user)
+        await db.commit()  # one short transaction per queue call (SC-15)
+        if job is None:
+            continue
+        if processing:
+            # A processing job read the old year before this write, so its output
+            # is stale. The one-active-job rule makes it the only job: nothing
+            # can be queued behind it.
             behind_processing += 1
             print(
                 f"{c.user_id}  {c.name}  {c.orcid}  NOTE a generate_profile job is "
-                "processing on the old year; queued a new one behind it"
-            )
-            # The one deliberate direct construction left: the helper would
-            # return the processing job.
-            db.add(
-                Job(
-                    type="generate_profile",
-                    user_id=c.user_id,
-                    payload={"user_id": str(c.user_id), "orcid": c.orcid},
-                )
+                "processing on the old year; the one-active-job rule keeps it as the only "
+                "job. Queue a fresh one for this user once it finishes (its output used "
+                "the old year)"
             )
         else:
-            user = await db.get(User, c.user_id)
-            if user is None or await enqueue_profile_job_if_absent(db, user) is None:
-                continue
-        queued += 1
-    await db.commit()
+            queued += 1
     print(
         f"Applied: rewritten={rewritten} "
         f"changed_since_read={len(changes) - rewritten} "

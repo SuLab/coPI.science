@@ -24,7 +24,8 @@
 #
 # Overridable env: VENV_PY (python interpreter), COV_MIN (coverage floor %),
 # SRC_LINT_MAX (src/ lint ceiling), CI_MIGRATION_DB (round-trip DSN, or `none` to
-# skip the round trip), MIGCHECK_PORT (host port for the throwaway Postgres),
+# skip the round trip), MIGCHECK_PORT (host port for the throwaway Postgres;
+# default: a free port chosen per run),
 # MIGRATION_FLOOR (the revision the round trip downgrades to).
 set -euo pipefail
 
@@ -55,8 +56,12 @@ SRC_LINT_MAX="${SRC_LINT_MAX:-231}"
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
 # published on 127.0.0.1 only. MIGRATION_FLOOR is how far down the round trip goes;
 # lowering it widens the round trip, which is always safe on a throwaway database.
-MIGCHECK_PORT="${MIGCHECK_PORT:-55432}"
-MIGCHECK_CONTAINER="copi-ci-migcheck"
+#
+# Per-run name and a free port (SC-18): two ci.sh runs no longer collide on the
+# throwaway Postgres. pytest's own database comes from testcontainers and was
+# already isolated. An explicit MIGCHECK_PORT still wins.
+MIGCHECK_PORT="${MIGCHECK_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}"
+MIGCHECK_CONTAINER="copi-ci-migcheck-$$"
 # 0018, not 0021. At 0021 the round trip never executed the 0019/0020/0021
 # DOWNGRADES — and those are the ones with teeth: 0019's downgrade drops the
 # content columns and puts agent_id back to NOT NULL, and 0019/0020/0021 lack the
@@ -160,13 +165,13 @@ else
   else
     migration_dsn="postgresql+asyncpg://copi:copi@127.0.0.1:${MIGCHECK_PORT}/copi_migcheck"
     echo "==> alembic round trip against a throwaway postgres:15 on 127.0.0.1:${MIGCHECK_PORT}"
-    # Fixed container name, removed up front as well as on exit, so a run that was
-    # killed mid-flight cannot wedge the next one. ci.sh is a serial pre-push gate;
-    # two concurrent runs would collide on the port regardless of the name.
+    # The container name carries this run's pid and the port is chosen free at
+    # start, so concurrent runs do not collide. It is removed by name up front as
+    # well as on exit.
     # INT and TERM as well as EXIT: this gate runs for ~6 minutes, so Ctrl-C
     # partway through is the likely case, and a leaked container keeps
-    # MIGCHECK_PORT bound — the next run would then fail its readiness wait and
-    # look like a broken migration rather than a stale container.
+    # its port bound until it is removed (it is named for this pid, so a later run
+    # does not remove it).
     trap migcheck_cleanup EXIT INT TERM
     migcheck_cleanup
     docker run -d --name "$MIGCHECK_CONTAINER" \
