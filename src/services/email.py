@@ -1,8 +1,12 @@
 """Email sending via AWS SES."""
 
+import asyncio
+import functools
 import html
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -95,20 +99,74 @@ def is_allowed_recipient(to_email: str | None) -> bool:
     return (to_email or "").lower() in allowed
 
 
-def send_delegate_invitation(
+@dataclass(frozen=True)
+class OutboundEmail:
+    """One transactional message, built by a ``build_*`` function and delivered by
+    ``send_transactional_email``."""
+
+    to: str
+    kind: str
+    subject: str | None = None
+    text_body: str | None = None
+    html_body: str | None = None
+    raw: Any = None  # a built MIME message (the welcome email)
+
+
+@functools.lru_cache(maxsize=4)
+def _ses_client(region: str):
+    import boto3
+    return boto3.client("ses", region_name=region)
+
+
+async def send_transactional_email(message: OutboundEmail, *, force: bool = False) -> bool:
+    """The one sender (RB-06): allowlist check, SES in a worker thread with a cached
+    client, errors logged and returned as False. Callers call it only AFTER their
+    db.commit(), so an email never announces a row that then rolls back.
+
+    ``force=True`` skips the outbound allowlist (admin/test sends only)."""
+    from src.config import get_settings
+    settings = get_settings()
+
+    if not force and not is_allowed_recipient(message.to):
+        logger.info("%s email to %s suppressed by outbound allowlist", message.kind, message.to)
+        return False
+
+    try:
+        client = _ses_client(settings.aws_region)
+        if message.raw is not None:
+            await asyncio.to_thread(
+                client.send_raw_email,
+                Source=settings.ses_sender_email,
+                Destinations=[message.to],
+                RawMessage={"Data": message.raw.as_string()},
+            )
+        else:
+            await asyncio.to_thread(
+                client.send_email,
+                Source=settings.ses_sender_email,
+                Destination={"ToAddresses": [message.to]},
+                Message={
+                    "Subject": {"Data": message.subject, "Charset": "UTF-8"},
+                    "Body": {
+                        "Text": {"Data": message.text_body, "Charset": "UTF-8"},
+                        "Html": {"Data": message.html_body, "Charset": "UTF-8"},
+                    },
+                },
+            )
+        logger.info("%s email sent to %s", message.kind, message.to)
+        return True
+    except Exception as exc:
+        logger.error("Failed to send %s email to %s: %s", message.kind, message.to, exc)
+        return False
+
+
+def build_delegate_invitation(
     to_email: str,
     pi_name: str,
     bot_name: str,
     invite_url: str,
-) -> bool:
-    """Send a delegate invitation email via AWS SES. Returns True on success."""
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not is_allowed_recipient(to_email):
-        logger.info("Delegate invite to %s suppressed by outbound allowlist", to_email)
-        return False
-
+) -> OutboundEmail:
+    """Build the delegate invitation email (sent by ``send_transactional_email``)."""
     subject = f"{clean_subject(pi_name)} invited you to join their lab on CoPI"
 
     # HTML-escaped copies for the HTML body (SEC-13). Plain-text body below uses
@@ -148,25 +206,10 @@ def send_delegate_invitation(
         </p>
     </div>""" + email_shell_close()
 
-    try:
-        import boto3
-        client = boto3.client("ses", region_name=settings.aws_region)
-        client.send_email(
-            Source=settings.ses_sender_email,
-            Destination={"ToAddresses": [to_email]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Text": {"Data": text_body, "Charset": "UTF-8"},
-                    "Html": {"Data": html_body, "Charset": "UTF-8"},
-                },
-            },
-        )
-        logger.info("Invitation email sent to %s for %s", to_email, bot_name)
-        return True
-    except Exception as exc:
-        logger.error("Failed to send invitation email to %s: %s", to_email, exc)
-        return False
+    return OutboundEmail(
+        to=to_email, kind="delegate_invitation",
+        subject=subject, text_body=text_body, html_body=html_body,
+    )
 
 
 def build_welcome_email(to_email: str, name: str | None = None):
@@ -344,35 +387,7 @@ The CoPI team — Scripps Research
     return subject, msg
 
 
-def send_welcome_email(
-    to_email: str,
-    name: str | None = None,
-    *,
-    force: bool = False,
-) -> bool:
-    """Send the 'Welcome to CoPI' email via AWS SES. Returns True on success.
-
-    ``force=True`` skips the outbound allowlist (admin/test sends only).
-    """
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not force and not is_allowed_recipient(to_email):
-        logger.info("Welcome email to %s suppressed by outbound allowlist", to_email)
-        return False
-
-    _, msg = build_welcome_email(to_email, name)
-
-    try:
-        import boto3
-        client = boto3.client("ses", region_name=settings.aws_region)
-        client.send_raw_email(
-            Source=settings.ses_sender_email,
-            Destinations=[to_email],
-            RawMessage={"Data": msg.as_string()},
-        )
-        logger.info("Welcome email sent to %s", to_email)
-        return True
-    except Exception as exc:
-        logger.error("Failed to send welcome email to %s: %s", to_email, exc)
-        return False
+def build_welcome(to_email: str, name: str | None = None) -> OutboundEmail:
+    """Build the 'Welcome to CoPI' email (sent by ``send_transactional_email``)."""
+    subject, msg = build_welcome_email(to_email, name)
+    return OutboundEmail(to=to_email, kind="welcome", subject=subject, raw=msg)

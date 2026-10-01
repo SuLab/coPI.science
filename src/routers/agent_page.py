@@ -2,16 +2,22 @@
 
 import asyncio
 import logging
+import re
+import secrets
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select, tuple_
+from sqlalchemy import text as sa_text
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
 from src.dependencies import (
     get_agent_with_access,
@@ -23,11 +29,17 @@ from src.models import (
     AgentDelegate,
     AgentMessage,
     AgentRegistry,
+    DelegateInvitation,
     ResearcherProfile,
     User,
 )
 from src.services.agent_identity import derive_agent_identity
+from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+from src.services.email import build_delegate_invitation, send_transactional_email
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.runs import latest_run_id
+from src.services.slack_tokens import get_any_bot_token
+from src.services.slack_web import get_user_info, lookup_user_by_email_async
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -201,7 +213,6 @@ async def agent_dashboard(
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
-        from src.services.slack_tokens import get_any_bot_token
         # to_thread because _resolve_delegate_names is sync and calls
         # slack_web.get_user_info once per delegate, each of which can retry with
         # backoff. Run inline it would block the event loop for every other
@@ -212,7 +223,6 @@ async def agent_dashboard(
         )
 
     # Pending invitations (for PI view)
-    from src.models import DelegateInvitation
     pending_invitations = []
     if is_owner:
         pending_result = await db.execute(
@@ -310,8 +320,19 @@ async def request_agent(
         pi_name=current_user.name,
         status="pending",
     )
+    user_id = current_user.id  # read before a rollback expires the instance
     db.add(agent)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A double submit lost the race on agents.user_id (the first request created
+        # the lab); anything else, such as an agent_id collision with another user,
+        # is a real error and propagates (RB-11).
+        await db.rollback()
+        mine = await db.execute(select(AgentRegistry.id).where(AgentRegistry.user_id == user_id))
+        if mine.scalar_one_or_none() is None:
+            raise
+        return RedirectResponse(url="/agent", status_code=302)
     logger.info(
         "agent %s: requested by %s (%s)",
         agent_id, current_user.id, impersonation_note(current_user) or "direct",
@@ -340,9 +361,6 @@ async def agent_conversations(
     Slack-independent window onto what the agent's workspace is discussing.
     See specs/local-db-conversations.md.
     """
-    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.runs import latest_run_id
-
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         return RedirectResponse(url="/agent", status_code=302)
@@ -468,9 +486,6 @@ async def agent_thread_replies(
     by clicking, and a future reader should not "fix" this back toward engine
     parity.
     """
-    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.runs import latest_run_id
-
     agent, _is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         raise HTTPException(status_code=404)
@@ -668,8 +683,6 @@ def _resolve_delegate_names(slack_ids: list[str], bot_token: str | None) -> list
     A name that will not resolve falls back to the raw id — this only feeds the
     dashboard's delegate list, so one unresolvable id must not blank the rest.
     """
-    from src.services.slack_web import get_user_info
-
     if not bot_token:
         return [{"slack_id": sid, "name": sid} for sid in slack_ids]
 
@@ -715,9 +728,6 @@ async def delegate_connect_slack(
 
     error = None
     try:
-        from src.services.slack_tokens import get_any_bot_token
-        from src.services.slack_web import lookup_user_by_email_async
-
         bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available."
@@ -739,8 +749,6 @@ async def delegate_connect_slack(
                 # in Python just re-races. Commit unconditionally now: when the
                 # id is already present the UPDATE matches no row and the
                 # commit is a no-op.
-                from sqlalchemy import text as sa_text
-                from sqlalchemy import update as sa_update
                 await db.execute(
                     sa_update(AgentRegistry)
                     .where(
@@ -784,16 +792,18 @@ async def invite_delegate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Send delegate invitation(s) by email."""
-    import re
-    import secrets
-    from datetime import datetime, timedelta
+    """Send delegate invitation(s) by email.
 
-    from src.config import get_settings
-    from src.models import DelegateInvitation
-    from src.services.email import send_delegate_invitation
-
+    The agent row is locked FOR UPDATE for the request, so two concurrent invites
+    serialize and the "already pending" check sees the first one's row (there is no
+    unique constraint on pending invitations). The emails go out only after the
+    commit, so none announces an invitation that then rolls back.
+    """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent = (await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalar_one()
     note = impersonation_note(current_user)
     logger.info("agent %s: delegate invite by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
@@ -811,7 +821,7 @@ async def invite_delegate(
     ]
 
     errors = []
-    sent_count = 0
+    to_send: list[tuple[str, str]] = []
     for email in email_list:
         # Basic validation (length-capped to avoid ReDoS; see SEC-16)
         if not is_valid_email(email):
@@ -861,12 +871,15 @@ async def invite_delegate(
         db.add(invitation)
         await db.flush()  # Get the ID
 
-        # Send email (non-blocking — invitation is created regardless)
-        invite_url = f"{settings.base_url}/invite/{token}"
-        send_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
-        sent_count += 1
+        to_send.append((email, f"{settings.base_url}/invite/{token}"))
 
     await db.commit()
+
+    # The invitation exists regardless of whether the email gets through.
+    for email, invite_url in to_send:
+        await send_transactional_email(
+            build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
+        )
 
     error_msg = "; ".join(errors) if errors else ""
     if error_msg:
@@ -886,8 +899,6 @@ async def revoke_invitation(
     current_user: User = Depends(get_current_user),
 ):
     """Revoke a pending delegate invitation."""
-    from src.models import DelegateInvitation
-
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     note = impersonation_note(current_user)
     logger.info("agent %s: invitation revoke by %s (%s)", agent.agent_id, current_user.id, note or "direct")
@@ -936,9 +947,6 @@ async def remove_delegate(
         # Remove Slack ID if present
         if delegate.user.email and agent.delegate_slack_ids:
             try:
-                from src.services.slack_tokens import get_any_bot_token
-                from src.services.slack_web import lookup_user_by_email_async
-
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
                     sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
@@ -946,8 +954,6 @@ async def remove_delegate(
                     # the read-remove-reassign wrote the whole array back and
                     # lost a concurrent append (issue #22 C1). NULLIF preserves
                     # the old "empty means NULL" shape of this column.
-                    from sqlalchemy import text as sa_text
-                    from sqlalchemy import update as sa_update
                     if sid:
                         await db.execute(
                             sa_update(AgentRegistry)

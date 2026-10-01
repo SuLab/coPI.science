@@ -156,6 +156,19 @@ def create_app(
     )
 
 
+def delete_app(config_token: str, app_id: str) -> None:
+    """Delete an app created by apps.manifest.create (superseded provisioning)."""
+    resp = httpx.post(
+        f"{SLACK_API}/apps.manifest.delete",
+        headers={"Authorization": f"Bearer {config_token}"},
+        json={"app_id": app_id},
+        timeout=20,
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"apps.manifest.delete failed: {data.get('error')}")
+
+
 def exchange_code(
     client_id: str,
     client_secret: str,

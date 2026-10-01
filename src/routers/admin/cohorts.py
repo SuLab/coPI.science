@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,6 +28,7 @@ from src.models import (
     User,
 )
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
+from src.services.cohort_gate_inputs import load_gate_inputs
 from src.services.cohorts import compute_gates, record_cohort_audit_event, summarise_gates
 
 # ---------------------------------------------------------------------------
@@ -60,30 +61,19 @@ async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
     """Preview of the gate the engine will compute from the current topology.
 
     Uses the same ``compute_gates`` the engine uses, so the preview cannot drift from
-    the behaviour. The roster is AgentRegistry's *active* agents — what the engine
-    loads — so an inactive agent shows as absent rather than as unrestricted.
-    See v2 §12.
+    the behaviour. The roster is the engine's roster query (active, and pi_lab rows
+    linked to a user), so an inactive agent shows as absent rather than as
+    unrestricted. See v2 §12.
     """
     settings = get_settings()
-    active = (await db.execute(
-        select(AgentRegistry.agent_id, AgentRegistry.bot_name)
-        .where(AgentRegistry.status == "active")
-        .order_by(AgentRegistry.bot_name)
-    )).all()
-    agent_ids = [r.agent_id for r in active]
-    rows = (await db.execute(
-        select(CohortMembership.cohort_id, CohortMembership.agent_id)
-    )).all()
-    cohort_count = (await db.execute(
-        select(func.count()).select_from(Cohort)
-    )).scalar() or 0
+    inputs = await load_gate_inputs(db)
 
     gates, preflight_error = compute_gates(
-        membership_rows=[(r[0], r[1]) for r in rows],
-        agent_ids=agent_ids,
+        membership_rows=inputs.membership_rows,
+        agent_ids=inputs.agent_ids,
         isolation_enabled=settings.cohort_isolation_enabled,
         policy=settings.cohort_default_policy,
-        cohort_count=cohort_count,
+        cohort_count=inputs.cohort_count,
         has_db=True,
     )
 
@@ -104,7 +94,7 @@ async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
             aid: (None if g is None else sorted(g)) for aid, g in gates.items()
         },
         "summary": summarise_gates(gates),
-        "bot_names": {r.agent_id: r.bot_name for r in active},
+        "bot_names": inputs.bot_names,
         "snapshot": snapshot,
     }
 
@@ -498,9 +488,12 @@ async def admin_cohort_delete(
     module whose path-addressed row is missing (and ``admin_cohort_detail`` for
     this very id). It used to be a bare redirect to the list, which said nothing
     at all — a double-submitted delete looked like it had done the work.
+
+    The cohort row is locked FOR UPDATE, so a delete and an add serialize (RA-12).
     """
     result = await db.execute(
         select(Cohort).options(selectinload(Cohort.memberships)).where(Cohort.id == cohort_id)
+        .with_for_update(of=Cohort)
     )
     cohort = result.scalar_one_or_none()
     if not cohort:
@@ -534,8 +527,11 @@ async def admin_cohort_add_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Add an agent to the cohort."""
-    result = await db.execute(select(Cohort).where(Cohort.id == cohort_id))
+    """Add an agent to the cohort.
+
+    The cohort row is locked FOR UPDATE, so a delete and an add serialize (RA-12).
+    """
+    result = await db.execute(select(Cohort).where(Cohort.id == cohort_id).with_for_update())
     cohort = result.scalar_one_or_none()
     if not cohort:
         raise HTTPException(status_code=404, detail="Cohort not found")

@@ -5,31 +5,20 @@ import logging
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
+from src.services.email import build_welcome, send_transactional_email
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
-
-
-def _maybe_send_welcome(user: User, was_complete: bool) -> None:
-    """Send the welcome email once, the first time a user completes onboarding.
-
-    No-op if onboarding was already complete or the user has no email. The send
-    catches its own errors, so a failure never blocks onboarding completion.
-    """
-    if was_complete or not user.email:
-        return
-    from src.services.email import send_welcome_email
-    send_welcome_email(user.email, name=user.name)
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -164,14 +153,16 @@ async def save_profile(
     # This is now the terminal step of onboarding (the private-profile step
     # that used to own completion — onboarding_complete flip, welcome email,
     # pending-invite/post-login-redirect resume — was removed with private
-    # instructions; those side effects relocate here). Not gated on
-    # `was_complete` alone being new: the guard on `_maybe_send_welcome`
-    # itself still makes a replay of this POST a no-op for the welcome email.
-    was_complete = current_user.onboarding_complete
-    current_user.onboarding_complete = True
+    # instructions; those side effects relocate here). The conditional UPDATE is
+    # the once-only gate for the welcome email (PS-12): a replayed or concurrent
+    # save matches no row. The email leaves only after the commit.
+    flipped = (await db.execute(
+        update(User).where(User.id == current_user.id, User.onboarding_complete.is_(False))
+        .values(onboarding_complete=True).returning(User.id)
+    )).scalar_one_or_none()
     await db.commit()
-
-    _maybe_send_welcome(current_user, was_complete)
+    if flipped is not None and current_user.email:
+        await send_transactional_email(build_welcome(current_user.email, current_user.name))
 
     # Check for pending invite token
     pending_token = request.session.pop("pending_invite_token", None)

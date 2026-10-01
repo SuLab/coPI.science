@@ -437,7 +437,15 @@ async def manager_veto_grant(
     user_id: uuid.UUID, grant_id: uuid.UUID, request: Request,
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
-    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it."""
+    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it.
+
+    The profile row is locked so a concurrent profile edit or veto cannot interleave
+    its grant_titles write (RA-13).
+    """
+    profile = (await db.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+        .with_for_update()
+    )).scalar_one_or_none()
     grant = (await db.execute(
         select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
     )).scalar_one_or_none()
@@ -447,9 +455,6 @@ async def manager_veto_grant(
     remaining = (await db.execute(
         select(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None))
     )).scalars().all()
-    profile = (await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
-    )).scalar_one_or_none()
     if profile is not None:
         new_titles = derive_grant_titles([
             GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})

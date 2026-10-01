@@ -33,6 +33,7 @@ async def test_start_provisioning_does_not_block_the_loop(engine, monkeypatch):
         return "xoxe.xoxp-config"
     monkeypatch.setattr(ap, "_config_token", fake_config_token)
     monkeypatch.setattr(ap, "lookup_team_id", lambda token: None)
+    monkeypatch.setattr(ap, "_lock_session_factory", lambda: async_sessionmaker(engine))
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:

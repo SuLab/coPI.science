@@ -134,15 +134,23 @@ def _no_env_bot_tokens(monkeypatch):
 @pytest.fixture(autouse=True)
 def sent_emails(monkeypatch) -> list[dict]:
     """Recording double for the SES leg (the plan's email seam: record, never send)."""
-    sent: list[dict] = []
+    import src.routers.agent_page as agent_page_routes
+    from src.services import email as email_svc
 
-    def _send(to_email, pi_name, bot_name, invite_url):
-        sent.append(
-            {"to": to_email, "pi_name": pi_name, "bot_name": bot_name, "url": invite_url}
-        )
+    sent: list[dict] = []
+    built: dict[str, dict] = {}
+
+    def _build(to_email, pi_name, bot_name, invite_url):
+        built[to_email] = {"to": to_email, "pi_name": pi_name, "bot_name": bot_name, "url": invite_url}
+        return email_svc.build_delegate_invitation(to_email, pi_name, bot_name, invite_url)
+
+    async def _send(message, *, force=False):
+        sent.append(built.pop(message.to))
         return True
 
-    monkeypatch.setattr("src.services.email.send_delegate_invitation", _send)
+    # Patched at the USE site: the real SES path is unreachable from these tests.
+    monkeypatch.setattr(agent_page_routes, "build_delegate_invitation", _build)
+    monkeypatch.setattr(agent_page_routes, "send_transactional_email", _send)
     return sent
 
 
