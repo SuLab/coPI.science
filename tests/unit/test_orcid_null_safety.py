@@ -36,6 +36,8 @@ async def test_a_null_external_ids_work_summary_does_not_raise(monkeypatch):
     }
 
     class _Resp:
+        status_code = 200  # read by http_pacing.with_retries
+
         def raise_for_status(self):
             return None
 
@@ -91,6 +93,8 @@ async def test_a_null_title_and_publication_date_do_not_raise_either(monkeypatch
     }
 
     class _Resp:
+        status_code = 200  # read by http_pacing.with_retries
+
         def raise_for_status(self):
             return None
 
