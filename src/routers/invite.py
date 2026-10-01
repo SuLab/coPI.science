@@ -204,8 +204,10 @@ async def _accept_invitation(
     )).scalar_one()
     if claimed is None:
         # Another request accepted (or revoked) it first; the delegation, if any, exists.
+        # Read the slug before the rollback, which expires every loaded attribute.
+        agent_slug = agent.agent_id
         await db.rollback()
-        return RedirectResponse(url=f"/agent/{agent.agent_id}/dashboard", status_code=302)
+        return RedirectResponse(url=f"/agent/{agent_slug}/dashboard", status_code=302)
     await db.execute(
         pg_insert(AgentDelegate)
         .values(id=uuid.uuid4(), agent_registry_id=invitation.agent_registry_id,

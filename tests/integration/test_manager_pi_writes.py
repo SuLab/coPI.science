@@ -130,7 +130,9 @@ async def test_manager_unmute_404s_on_a_non_pi_target(client, db_session):
 async def test_manager_mutes_and_unmutes_a_pi(client, db_session):
     manager = await _manager(db_session)
     pi = await factories.make_user(db_session)
-    agent = await factories.make_agent(db_session, user=pi, status="active")
+    # Unmute goes through the activation gate (RA-01): grounded profile + token.
+    await factories.make_profile(db_session, user=pi, evidence_pub_count=3, evidence_pmid_count=3)
+    agent = await factories.make_agent(db_session, user=pi, status="active", slack_bot_token="xoxb-1")
 
     r = await client.post(
         f"/manager/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,

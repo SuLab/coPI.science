@@ -36,7 +36,7 @@ async def test_unmuting_clears_attribution_and_reactivates(db_session):
     pi = await factories.make_user(db_session)
     manager = await factories.make_user(db_session, user_role="manager")
     # Unmute goes through the activation gate (RA-01): grounded profile + token.
-    await factories.make_profile(db_session, user=pi, evidence_state="grounded")
+    await factories.make_profile(db_session, user=pi, evidence_pub_count=3, evidence_pmid_count=3)
     agent = await factories.make_agent(
         db_session, user=pi, status="inactive", slack_bot_token="xoxb-1",
         muted_at=datetime.now(UTC), muted_by=manager.id,

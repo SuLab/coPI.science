@@ -20,7 +20,8 @@ async def test_jobs_filter_and_paginate_in_sql(client, db_session):
     await db_session.flush()
     r = await client.get("/admin/jobs?status_filter=completed&page=2", headers=auth_headers(admin.id))
     assert r.status_code == 200
-    assert r.text.count("Review Feedback Analysis") == 130 - directory.JOBS_PAGE_SIZE
+    # Row cells only: the type filter's <option> carries the same label once.
+    assert r.text.count(">Review Feedback Analysis</td>") == 130 - directory.JOBS_PAGE_SIZE
     assert "Enrich Grants" not in r.text
     assert ">130</div>" in r.text  # the status card and the Total card count every completed row
 

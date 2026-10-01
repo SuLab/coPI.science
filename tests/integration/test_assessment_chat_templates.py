@@ -163,7 +163,10 @@ def test_the_chat_script_accepts_only_its_own_citation_markers():
     assert "markerNumber(part)" in place
     assert "PRIVATE_USE_ALL" in place
     # RSEC-1: the private marked instance never enters marked's raw-block state.
-    assert "inRawBlock: false" in js
+    # The instance comes from the shared factory's "chat" profile (LC-02).
+    factory = (JS.parent / "markdown.js").read_text(encoding="utf-8")
+    chat_profile = factory.split('if (profile === "chat") {', 1)[1].split("} else if", 1)[0]
+    assert "inRawBlock: false" in chat_profile
     # R2SEC-2: no attribute but href survives sanitizing, so a marker cannot hide
     # in a title tooltip.
     assert 'ALLOWED_ATTR: ["href"],' in js

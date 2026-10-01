@@ -23,10 +23,11 @@ async def set_agent_mute_state(
     "no_token" or "activation_blocked"."""
     if agent.status not in _MUTABLE_STATUSES:
         return "agent_not_mutable"
+    agent_pk = agent.id  # read now: the unmute path expires `agent` before its UPDATE
     if muted:
         result = await db.execute(
             update(AgentRegistry)
-            .where(AgentRegistry.id == agent.id, AgentRegistry.status.in_(_MUTABLE_STATUSES))
+            .where(AgentRegistry.id == agent_pk, AgentRegistry.status.in_(_MUTABLE_STATUSES))
             .values(status="inactive", muted_at=datetime.now(UTC), muted_by=actor.id)
         )
     else:
@@ -39,7 +40,7 @@ async def set_agent_mute_state(
             return "activation_blocked"
         result = await db.execute(
             update(AgentRegistry)
-            .where(AgentRegistry.id == agent.id, AgentRegistry.status.in_(_MUTABLE_STATUSES))
+            .where(AgentRegistry.id == agent_pk, AgentRegistry.status.in_(_MUTABLE_STATUSES))
             .values(status="active", muted_at=None, muted_by=None)
         )
     if result.rowcount != 1:
