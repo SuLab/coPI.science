@@ -1,15 +1,36 @@
 """The split parse_rubric yields an EQUAL Rubric for the live document and raises
-the same error as the frozen original for broken ones."""
+the same error as the frozen original for broken ones; the revisions.toml view
+builders' output is equal too (they are display views, not rubric documents).
+
+tests/fixtures/rubric_views_frozen.txt holds, one per line, the reprs of
+``parse_rubric(RUBRIC_PATH)``, ``live_revision_view()`` and
+``_parse_registry(REVISIONS_PATH)`` as the phase base (9b66cc85) produced them."""
+from pathlib import Path
+
 import pytest
 
 from src.services import blackbird_rubric as br
+from src.services import rubric_revisions as rr
 from tests.unit._frozen_parse_rubric import frozen_parse_rubric
+
+FROZEN = (
+    (Path(__file__).resolve().parents[1] / "fixtures" / "rubric_views_frozen.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
 
 
 def test_live_rubric_is_equal():
     assert br.parse_rubric(br.RUBRIC_PATH) == frozen_parse_rubric(br.RUBRIC_PATH)
     assert repr(br.parse_rubric(br.RUBRIC_PATH)) == repr(frozen_parse_rubric(br.RUBRIC_PATH))
     assert br.parse_rubric(br.RUBRIC_PATH) == br.load_rubric()
+    assert repr(br.parse_rubric(br.RUBRIC_PATH)) == FROZEN[0]
+
+
+def test_views_are_equal():
+    assert len(FROZEN) == 3
+    assert repr(rr.live_revision_view()) == FROZEN[1]
+    assert repr(rr._parse_registry(rr.REVISIONS_PATH)) == FROZEN[2]
 
 
 def _broken_docs():
