@@ -347,7 +347,14 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             )
         return doi
 
+    stored_pmids: set[str | None] = set()
+
     def _store(rec: dict[str, Any]) -> None:
+        # One row per pmid: a second one would violate uq_publications_user_pmid
+        # (0056) and fail the job, so a duplicate keeps its first occurrence.
+        if rec.get("pmid") in stored_pmids:
+            return
+        stored_pmids.add(rec.get("pmid"))
         pub = Publication(
             user_id=user_id,
             pmid=rec.get("pmid"),

@@ -159,11 +159,6 @@ _RETRYABLE_TRANSPORT = (
 _SHARED_CLIENT: contextvars.ContextVar[httpx.AsyncClient | None] = contextvars.ContextVar(
     "pubmed_shared_client", default=None
 )
-# PMID -> record for every DOI verification `convert_dois_to_pmids` accepted inside an
-# `ncbi_session()`, so the caller's later EFetch stage need not fetch those PMIDs again.
-_VERIFIED_RECORDS: contextvars.ContextVar[dict[str, dict[str, Any]] | None] = contextvars.ContextVar(
-    "pubmed_verified_records", default=None
-)
 
 
 @asynccontextmanager
@@ -171,22 +166,13 @@ async def ncbi_session() -> AsyncIterator[httpx.AsyncClient]:
     """One httpx client for every NCBI request issued inside the block (DP-06):
     `resolve_corpus` wraps its retrieval in this, so a corpus reuses one connection
     pool instead of opening a client per request. Pacing and the semaphore are
-    unchanged. The block also collects the records DOI verification fetched
-    (`session_verified_records`)."""
+    unchanged."""
     async with _make_client() as client:
-        client_token = _SHARED_CLIENT.set(client)
-        records_token = _VERIFIED_RECORDS.set({})
+        token = _SHARED_CLIENT.set(client)
         try:
             yield client
         finally:
-            _VERIFIED_RECORDS.reset(records_token)
-            _SHARED_CLIENT.reset(client_token)
-
-
-def session_verified_records() -> dict[str, dict[str, Any]]:
-    """PMID -> record for the DOI verifications accepted so far inside the current
-    `ncbi_session()` (a live dict; empty outside one)."""
-    return _VERIFIED_RECORDS.get() or {}
+            _SHARED_CLIENT.reset(token)
 
 
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
@@ -679,14 +665,16 @@ async def convert_dois_to_pmids(
     as unmapped (above) is an answer and is never recorded there.
 
     Single ESearch hits are verified in batches of at most 100 through
-    ``_fetch_pubmed_batch``, matched back to their DOI by PMID (a one-candidate
-    batch keeps today's ``records[0]``); a per-item failure of a batch falls back
-    to one fetch per PMID with today's per-item/systemic classification, so one
-    bad record loses only its own DOI. The systemic-run counter is shared by the
-    ESearch and verification phases; because the phases now run one after the
-    other, a verification failure is counted after all the ESearches rather than
-    interleaved with them. Inside an ``ncbi_session()`` each accepted record is
-    also kept for ``session_verified_records()``.
+    ``_fetch_pubmed_batch`` (``_VerificationFetcher``), matched back to their DOI
+    by PMID. Every case the batch cannot answer exactly as the old one-fetch-per-hit
+    loop did gets that loop's own single fetch and its ``records[0]``: a PMID the
+    batch did not return under its own number, every PMID of a batch that returned
+    a duplicate or unrequested PMID, every PMID of a batch that failed per-item (or
+    failed at all, non-strict), and a one-PMID chunk. So one bad record loses only
+    its own DOI. All ESearches run before any verification, but every outcome is
+    then classified in DOI order through one systemic-run counter, so the mapping
+    (and its order), ``permanently_dropped`` (and its order) and the point of a
+    systemic raise are those of the per-DOI loop.
     """
     if not dois:
         return {}
@@ -695,12 +683,9 @@ async def convert_dois_to_pmids(
     remaining = [d for d in dois if d not in mapping]
     if remaining:
         logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
-        run = _Run()
-        candidates = await _esearch_phase(
-            remaining, run, strict=strict, permanently_dropped=permanently_dropped
-        )
+        answers = await _esearch_phase(remaining, strict=strict)
         await _verify_phase(
-            candidates, mapping, run, strict=strict, permanently_dropped=permanently_dropped
+            remaining, answers, mapping, strict=strict, permanently_dropped=permanently_dropped
         )
     return mapping
 
@@ -716,20 +701,24 @@ class _Run:
     def reset(self) -> None:
         self.n, self.sig = 0, None
 
+    def counts_to_systemic(self, exc: BaseException) -> bool:
+        """Count a per-item failure into the run; True once the run is systemic."""
+        sig = _failure_signature(exc)
+        self.n, self.sig = (self.n + 1, sig) if sig == self.sig else (1, sig)
+        return self.n >= _SYSTEMIC_RUN
+
     def note_failure(
         self, exc: BaseException, doi: str, permanently_dropped: list[str] | None
     ) -> None:
-        """Strict mode: re-raise anything but a per-item failure (and a systemic run
-        of them); otherwise report the DOI as dropped. Call inside an ``except``."""
+        """Strict mode: re-raise ``exc`` unless it is a per-item failure that does
+        not complete a systemic run; otherwise report the DOI as dropped."""
         if not _is_per_item_failure(exc):
             raise exc
-        sig = _failure_signature(exc)
-        self.n, self.sig = (self.n + 1, sig) if sig == self.sig else (1, sig)
-        if self.n >= _SYSTEMIC_RUN:
+        if self.counts_to_systemic(exc):
             logger.error(
                 "DOI lookup: %d consecutive DOIs failed %s; treating "
                 "it as systemic, not per-DOI",
-                self.n, _describe(sig),
+                self.n, _describe(self.sig),
             )
             raise exc
         logger.warning(
@@ -790,16 +779,15 @@ async def _idconv_phase(dois: list[str], mapping: dict[str, str], *, strict: boo
             )
 
 
-async def _esearch_phase(
-    remaining: list[str],
-    run: _Run,
-    *,
-    strict: bool,
-    permanently_dropped: list[str] | None,
-) -> list[tuple[str, str]]:
-    """Phase 2: PubMed ESearch per DOI; returns the single-hit ``(doi, pmid)``
-    candidates, still to be round-trip verified."""
-    candidates: list[tuple[str, str]] = []
+async def _esearch_phase(remaining: list[str], *, strict: bool) -> list[str | BaseException | None]:
+    """Phase 2: one PubMed ESearch per DOI, in order. Each answer is the single-hit
+    PMID (still to be verified), None (no hit, several hits, or a non-strict
+    failure), or in strict mode the failure itself, which ``_verify_phase``
+    classifies in DOI order. The phase ends early at a strict failure that is not
+    per-item, and at the ``_SYSTEMIC_RUN``-th identical per-item failure in a row:
+    the classification raises at or before that answer, so no later one is read."""
+    answers: list[str | BaseException | None] = []
+    streak = _Run()
     for doi in remaining:
         try:
             params = {
@@ -810,102 +798,120 @@ async def _esearch_phase(
             resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
             data = resp.json()
             id_list = data.get("esearchresult", {}).get("idlist", [])
-            # D4b (coverage design §7): a multi-hit DOI ESearch is a MISS,
-            # not a hit. Taking idlist[0] unchecked resolved one Research
-            # Square DOI to four unrelated PMIDs and stored the first —
-            # the same wrong paper landed on six PIs' rows.
-            if len(id_list) != 1:
-                if len(id_list) > 1:
-                    logger.warning(
-                        "ESearch for DOI %s returned %d PMIDs; treating "
-                        "as a miss (D4b)", doi, len(id_list),
-                    )
-            else:
-                candidates.append((doi, id_list[0]))
-                run.reset()  # a good answer ends a failure run, as a miss does below
-                continue
         except Exception as exc:
             if not strict:
                 logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
+                answers.append(None)
                 continue
-            run.note_failure(exc, doi, permanently_dropped)
+            answers.append(exc)
+            if not _is_per_item_failure(exc) or streak.counts_to_systemic(exc):
+                break
             continue
-        run.reset()
-    return candidates
+        streak.reset()
+        # D4b (coverage design §7): a multi-hit DOI ESearch is a MISS,
+        # not a hit. Taking idlist[0] unchecked resolved one Research
+        # Square DOI to four unrelated PMIDs and stored the first —
+        # the same wrong paper landed on six PIs' rows.
+        if len(id_list) == 1:
+            answers.append(id_list[0])
+            continue
+        if len(id_list) > 1:
+            logger.warning(
+                "ESearch for DOI %s returned %d PMIDs; treating "
+                "as a miss (D4b)", doi, len(id_list),
+            )
+        answers.append(None)
+    return answers
 
 
-async def _fetch_verification_chunk(
-    chunk: list[tuple[str, str]],
-    run: _Run,
-    *,
-    strict: bool,
-    permanently_dropped: list[str] | None,
-) -> dict[str, dict[str, Any]]:
-    """PMID -> record for one chunk of at most 100 candidates: one batch fetch, or
-    (on a per-item failure of it) one fetch per PMID. A one-candidate chunk maps its
-    PMID to ``records[0]``, as the single-PMID fetch always did."""
-    pmids = list(dict.fromkeys(pmid for _doi, pmid in chunk))
+class _VerificationFetcher:
+    """The EFetch half of DOI verification: the hit PMIDs, in hit order, in chunks
+    of at most 100, one batch request per chunk, made when the first hit of the
+    chunk is verified. ``records(i)`` returns what the old per-hit fetch returned
+    for hit ``i`` (the caller reads ``records[0]``): the batch's record under that
+    PMID when the batch is unambiguous, otherwise that old single fetch itself."""
 
-    def _index(records: list[dict[str, Any]], asked: list[str]) -> dict[str, dict[str, Any]]:
-        if len(asked) == 1:
-            return {asked[0]: records[0]} if records else {}
-        return {str(r.get("pmid")): r for r in records}
+    def __init__(self, pmids: list[str], *, strict: bool) -> None:
+        self._pmids = pmids
+        self._strict = strict
+        # chunk start -> PMID -> record; None: single fetches for that chunk.
+        self._chunks: dict[int, dict[str, dict[str, Any]] | None] = {}
 
-    try:
-        by_pmid = _index(await _fetch_pubmed_batch(pmids), pmids)
-        run.reset()
-        return by_pmid
-    except Exception as exc:
-        if strict and not _is_per_item_failure(exc):
-            raise
-        if not strict:
-            logger.debug("verification batch failed (%s); falling back to single fetches", exc)
-    by_pmid = {}
-    for doi, pmid in chunk:
+    async def records(self, i: int) -> list[dict[str, Any]]:
+        start = i - i % 100
+        if start not in self._chunks:
+            self._chunks[start] = await self._batch(self._pmids[start:start + 100])
+        by_pmid = self._chunks[start]
+        pmid = self._pmids[i]
+        if by_pmid is not None and pmid in by_pmid:
+            return [by_pmid[pmid]]
+        return await self._single(pmid)
+
+    async def _batch(self, pmids: list[str]) -> dict[str, dict[str, Any]] | None:
+        unique = list(dict.fromkeys(pmids))
+        if len(unique) == 1:
+            return None  # the batch request would be the single fetch itself
         try:
-            by_pmid.update(_index(await _fetch_pubmed_batch([pmid]), [pmid]))
-        except Exception as one:
-            if not strict:
-                logger.debug("ESearch DOI lookup failed for %s: %s", doi, one)
-                continue
-            run.note_failure(one, doi, permanently_dropped)
-            continue
-        run.reset()
-    return by_pmid
+            records = await _fetch_pubmed_batch(unique)
+        except Exception as exc:
+            if self._strict and not _is_per_item_failure(exc):
+                raise
+            logger.debug("verification batch failed (%s); falling back to single fetches", exc)
+            return None
+        returned = [str(r.get("pmid")) for r in records]
+        if len(set(returned)) != len(returned) or not set(returned) <= set(unique):
+            # A record under a duplicate or unrequested PMID: which request it
+            # answers is unknown, so every PMID of the chunk is fetched alone.
+            return None
+        return dict(zip(returned, records, strict=True))
+
+    async def _single(self, pmid: str) -> list[dict[str, Any]]:
+        # Strict fetches the one record directly, so a failure reaches the
+        # classification with its status intact (through fetch_pubmed_records a
+        # one-PMID batch would be dropped inside it and read as a verification miss).
+        if self._strict:
+            return await _fetch_pubmed_batch([pmid])
+        return await fetch_pubmed_records([pmid])
 
 
 async def _verify_phase(
-    candidates: list[tuple[str, str]],
+    remaining: list[str],
+    answers: list[str | BaseException | None],
     mapping: dict[str, str],
-    run: _Run,
     *,
     strict: bool,
     permanently_dropped: list[str] | None,
 ) -> None:
-    """Round-trip verify the ESearch candidates: the PMID's authoritative DOI must
-    equal the queried DOI, or the single hit is still the wrong paper."""
-    verified = _VERIFIED_RECORDS.get()
-    for i in range(0, len(candidates), 100):
-        chunk = candidates[i:i + 100]
-        by_pmid = await _fetch_verification_chunk(
-            chunk, run, strict=strict, permanently_dropped=permanently_dropped
-        )
-        for doi, pmid in chunk:
-            record = by_pmid.get(str(pmid))
-            if record is None:
+    """Phase 3, in DOI order like the old per-DOI loop: round-trip verify each
+    single hit (the PMID's authoritative DOI must equal the queried DOI, or the
+    single hit is still the wrong paper) and classify each strict failure of
+    either phase through one systemic-run counter. ``answers`` may stop short of
+    ``remaining`` (see ``_esearch_phase``); its last answer then raises here."""
+    fetcher = _VerificationFetcher([a for a in answers if isinstance(a, str)], strict=strict)
+    run = _Run()
+    hit = 0
+    for doi, answer in zip(remaining[: len(answers)], answers, strict=True):
+        if isinstance(answer, BaseException):
+            run.note_failure(answer, doi, permanently_dropped)
+            continue
+        if answer is not None:
+            hit += 1
+            try:
+                records = await fetcher.records(hit - 1)
+            except Exception as exc:
+                run.note_failure(exc, doi, permanently_dropped)
                 continue
-            authoritative = normalize_doi(record.get("doi"))
+            authoritative = normalize_doi(records[0].get("doi")) if records else None
             queried = normalize_doi(doi)
             if authoritative and queried and authoritative.lower() == queried.lower():
-                mapping[doi] = pmid
-                if verified is not None:
-                    verified[str(pmid)] = record
+                mapping[doi] = answer
             else:
                 logger.warning(
                     "ESearch hit for DOI %s (PMID %s) failed round-trip "
                     "verification (authoritative DOI %r); treating as a "
-                    "miss (D4b)", doi, pmid, authoritative,
+                    "miss (D4b)", doi, answer, authoritative,
                 )
+        run.reset()
 
 
 async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:

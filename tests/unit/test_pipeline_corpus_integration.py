@@ -179,6 +179,21 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
     assert profile.evidence_pub_count == 2
 
 
+async def test_a_duplicate_pmid_in_kept_stores_one_row_not_a_job_failure(db_session, wired):
+    """Correction 9: ``uq_publications_user_pmid`` (0056) makes a second row for the
+    same pmid an IntegrityError; ``_store`` keeps the first occurrence instead."""
+    user, _agent, job = await _make_pi(db_session)
+    first, second = _rec(1, 2020, "First copy"), _rec(1, 2019, "Second copy")
+    wired.corpus = _uncapped([first, second, _rec(2, 2018, "Other paper")])
+
+    await run_profile_pipeline(user.id, db_session, job.id)
+
+    stored = (await db_session.execute(
+        select(Publication).where(Publication.user_id == user.id).order_by(Publication.pmid)
+    )).scalars().all()
+    assert [(p.pmid, p.title) for p in stored] == [("1", "First copy"), ("2", "Other paper")]
+
+
 async def test_paper_tier_dates_tenure_when_orcid_has_no_hopkins_employment(
     db_session, wired
 ):
