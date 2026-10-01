@@ -472,7 +472,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     seen_attempts = []
 
     async def always_fails(user_id, db, job_id=None):
-        seen_attempts.append(job.attempts)
+        seen_attempts.append((await db.execute(select(Job.attempts).where(Job.id == job_id))).scalar_one())
         raise RuntimeError("pipeline exploded (T5.2)")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)

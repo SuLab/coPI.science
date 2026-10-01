@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_claim_order_is_priority_then_age(db_session):
     u1, u2, u3 = [await factories.make_user(db_session) for _ in range(3)]
-    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
+    t0 = datetime.now(UTC) - timedelta(hours=1)
     db_session.add_all([
         Job(type="enrich_grants", user_id=u1.id, payload={}, priority=BULK_PRIORITY, enqueued_at=t0),
         Job(type="enrich_grants", user_id=u2.id, payload={}, priority=None, enqueued_at=t0 + timedelta(minutes=1)),

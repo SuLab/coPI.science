@@ -10,6 +10,7 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from src.models import Job, RubricDocument, SlackAppProvision
 from src.models.job import PER_USER_JOB_TYPES
@@ -83,7 +84,7 @@ async def test_one_active_job_per_user_type(db_session):
     user = await factories.make_user(db_session)
     db_session.add(Job(type="generate_profile", user_id=user.id, payload={}))
     await db_session.flush()
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
             db_session.add(Job(type="generate_profile", user_id=user.id, payload={}))
             await db_session.flush()
@@ -99,7 +100,7 @@ async def test_review_jobs_are_not_constrained(db_session):
 
 async def test_email_lower_unique(db_session):
     await factories.make_user(db_session, email="Case@Example.edu")
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
             await factories.make_user(db_session, email="case@example.edu")
 

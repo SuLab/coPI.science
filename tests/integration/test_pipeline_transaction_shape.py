@@ -13,7 +13,12 @@ from src.models import Job, User
 from src.services import job_progress
 from src.services.profile_pipeline import run_profile_pipeline
 from src.worker import main as worker
-from tests.unit.test_pipeline_corpus_integration import _make_pi, _rec, _uncapped, wired  # noqa: F401
+from tests.unit.test_pipeline_corpus_integration import (  # noqa: F401
+    _make_pi,
+    _rec,
+    _uncapped,
+    wired,
+)
 
 pytestmark = pytest.mark.asyncio
 

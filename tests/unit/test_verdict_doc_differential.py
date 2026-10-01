@@ -2,7 +2,7 @@
 frozen original for fixtures that exercise every branch, for both tiers. Its output
 is part of the assessment-chat model input (C27)."""
 import itertools
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +19,7 @@ def _assessment(**over):
         key_points={"proposal": ["kp1"], "lab_background": ["kp2"]}, score_rationale="Because",
         strengths=["s1", "", None, " s2 "], risks=["r1"], competitive_landscape=["c1"], evidence_maturity=["e1"],
         recommended_next_experiment="Para one.\n\nPara two.", subject_agent_id="lab1", agent_id="hub",
-        created_at=datetime(2026, 9, 1, 12, 34, tzinfo=timezone.utc), channel_name="interview-1",
+        created_at=datetime(2026, 9, 1, 12, 34, tzinfo=UTC), channel_name="interview-1",
         recommendation="pass", weighted_score=2.5, band="pass", rubric_version="3.5.0",
         rubric_content_hash="abc123def456", missing_domains=["legal"], gating={"ip_clear": "met", "odd": True},
         red_flags=["f1", "f2"], rationale="R1\n\nR2",
