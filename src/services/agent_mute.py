@@ -1,32 +1,49 @@
-"""Mute/unmute a PI's agent — a purpose-built control over the existing
+"""Mute/unmute a PI's agent: a purpose-built control over the existing
 'active'/'inactive' status axis (design decisions D2-D4), not a new status
 value. pending/suspended agents are admin-only concerns and are left alone."""
-import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import AgentRegistry
+from src.models import AgentRegistry, User
+from src.services.agent_activation import activate_agent
 
 _MUTABLE_STATUSES = ("active", "inactive")
 
 
 async def set_agent_mute_state(
-    db: AsyncSession, *, agent: AgentRegistry, muted: bool, actor_user_id: uuid.UUID,
-) -> bool:
-    """Returns False (no-op) if agent.status isn't active/inactive; otherwise
-    flips status + attribution and commits, returning True."""
+    db: AsyncSession, *, agent: AgentRegistry, muted: bool, actor: User,
+) -> str | None:
+    """Mute: active -> inactive with attribution. Unmute: the activation gate
+    (activate_agent, no override; the manager surface never overrides) plus the
+    Slack-token check, applied as an UPDATE conditional on status still being
+    active/inactive, so a concurrent suspend or delete is never overwritten (RA-01).
+    Returns None on success (committed), else a refusal code: "agent_not_mutable",
+    "no_token" or "activation_blocked"."""
     if agent.status not in _MUTABLE_STATUSES:
-        return False
-
+        return "agent_not_mutable"
     if muted:
-        agent.status = "inactive"
-        agent.muted_at = datetime.now(UTC)
-        agent.muted_by = actor_user_id
+        result = await db.execute(
+            update(AgentRegistry)
+            .where(AgentRegistry.id == agent.id, AgentRegistry.status.in_(_MUTABLE_STATUSES))
+            .values(status="inactive", muted_at=datetime.now(UTC), muted_by=actor.id)
+        )
     else:
-        agent.status = "active"
-        agent.muted_at = None
-        agent.muted_by = None
-
+        if not agent.slack_bot_token:
+            return "no_token"
+        with db.no_autoflush:
+            blockers = await activate_agent(db, agent, actor=actor, override=False)
+        db.expire(agent)  # discard activate_agent's in-memory flip; the UPDATE below is the write
+        if blockers:
+            return "activation_blocked"
+        result = await db.execute(
+            update(AgentRegistry)
+            .where(AgentRegistry.id == agent.id, AgentRegistry.status.in_(_MUTABLE_STATUSES))
+            .values(status="active", muted_at=None, muted_by=None)
+        )
+    if result.rowcount != 1:
+        await db.rollback()
+        return "agent_not_mutable"
     await db.commit()
-    return True
+    return None

@@ -82,6 +82,7 @@ async def apply_profile_edits(
     form: Mapping[str, str | None], expected_version: int | None,
     jhu_tenure_start: str | None = None, email_required: bool = False,
     change_summary: str | None = None, export_agent: AgentRegistry | None = None,
+    mechanism: str = "web",
 ) -> str | None:
     """The one writer behind /profile/save, /agent/{id}/public-profile/save,
     /onboarding/save-profile and /manager/pis/{id}/profile (RB-09).
@@ -92,8 +93,9 @@ async def apply_profile_edits(
     "" clears a user field (``or None``) exactly as the full forms always did.
     ``expected_version`` is the profile-version check (``write_profile_text_fields``);
     None saves without it. ``export_agent`` skips the agent lookup when the caller
-    already holds the agent. Returns an error code, or None after committing and
-    exporting.
+    already holds the agent. ``mechanism`` is the revision mechanism recorded
+    for the export (``web_impersonated`` for an impersonated session). Returns an
+    error code, or None after committing and exporting.
     """
     # Optional JHU tenure-start correction (manager form only; the PI's own
     # /profile/save never sends the field). Blank = leave unchanged.
@@ -154,7 +156,7 @@ async def apply_profile_edits(
     )
     path = await export_and_record(
         db, user=target_user, profile=profile, agent=agent, publications=user_pubs,
-        mechanism="web", changed_by_user_id=changed_by_user_id,
+        mechanism=mechanism, changed_by_user_id=changed_by_user_id,
         change_summary=change_summary,
     )
     if path is not None and agent is not None:

@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import FormData
 
 from src.database import get_db
-from src.dependencies import get_admin_user, get_review_user, get_staff_user
+from src.dependencies import (
+    get_admin_user,
+    get_review_user,
+    get_staff_user,
+    recorded_by,
+    refuse_impersonation,
+)
 from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
 from src.services.assessment_reviews import (
     assign_reviewer,
@@ -53,27 +59,6 @@ _DB = Depends(get_db)
 _REVIEW = Depends(get_review_user)
 _STAFF = Depends(get_staff_user)
 _ADMIN = Depends(get_admin_user)
-
-
-def _refuse_impersonation(current_user: User) -> None:
-    if getattr(current_user, "_is_impersonated", False):
-        raise HTTPException(
-            status_code=403, detail="Review actions are disabled while impersonating."
-        )
-
-
-def _recorded_by(current_user: User) -> User | None:
-    """The real admin when the session is impersonating, else None. Review
-    writes are attributed to the impersonated user (operator decision
-    2026-09-10); this is the second signature on the row."""
-    if getattr(current_user, "_is_impersonated", False):
-        real = getattr(current_user, "_real_admin", None)
-        logger.warning(
-            "Review action by admin %s while impersonating %s",
-            getattr(real, "id", None), current_user.id,
-        )
-        return real
-    return None
 
 
 #: The two surface tokens that return the reader to the LIST page rather than
@@ -326,7 +311,7 @@ async def submit_review_feedback(
             comment=comment,
             feedback_mode=feedback_mode,
             dimension_scores=dimension_scores,
-            recorded_by=_recorded_by(current_user),
+            recorded_by=recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -372,7 +357,7 @@ async def edit_review_feedback(
             comment=comment,
             feedback_mode=feedback_mode,
             dimension_scores=dimension_scores,
-            recorded_by=_recorded_by(current_user),
+            recorded_by=recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -394,7 +379,7 @@ async def delete_review_feedback(
 ):
     review = await _load_review(db, feedback_id)
     assessment_id = review.assessment_id
-    recorder = _recorded_by(current_user)
+    recorder = recorded_by(current_user)
     await db.delete(review)
     await db.commit()
     logger.info(
@@ -422,7 +407,7 @@ async def set_review_status(
     try:
         await record_status_event(
             db, assessment=assessment, actor=current_user, action=action,
-            recorded_by=_recorded_by(current_user),
+            recorded_by=recorded_by(current_user),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -444,7 +429,7 @@ async def assign_review(
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    _refuse_impersonation(current_user)
+    refuse_impersonation(current_user)
     assessment = await _load_assessment(db, assessment_id)
     assignee_id = _parse_assignee_id(assignee_user_id)
     assignee = await _load_assignee(db, assignee_id)
@@ -465,7 +450,7 @@ async def unassign_review(
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    _refuse_impersonation(current_user)
+    refuse_impersonation(current_user)
     assessment = await _load_assessment(db, assessment_id)
     assignee_id = _parse_assignee_id(assignee_user_id)
     await unassign_reviewer(db, assessment=assessment, assignee_user_id=assignee_id)
@@ -513,7 +498,7 @@ async def generate_prompt_suggestions(
     nothing and the redirect's ``generated=0&eligible=N`` says so out loud
     rather than silently.
     """
-    _refuse_impersonation(current_user)
+    refuse_impersonation(current_user)
     scope = _parse_optional_assessment_id(assessment_id)
     enqueued, eligible = await enqueue_pending_analyses(
         db, requested_by=current_user, assessment_id=scope
@@ -556,7 +541,7 @@ async def set_suggestion_status(
     never a bare-prefix constant (the same discipline
     ``_assessments_redirect`` documents), because there is no admin/manager
     surface split to whitelist here: this page lives on /manager only."""
-    _refuse_impersonation(current_user)
+    refuse_impersonation(current_user)
     if action not in _SUGGESTION_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status action")
     suggestion = await _load_suggestion(db, suggestion_id)

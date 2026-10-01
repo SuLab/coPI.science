@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import requires_linked_user, star_role
@@ -22,6 +23,7 @@ from src.routers.admin._common import (
     templates,
 )
 from src.services.agent_activation import activate_agent, activation_blockers
+from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
 
 
@@ -166,6 +168,8 @@ async def admin_agent_detail(
             valid_statuses=VALID_AGENT_STATUSES,
             available_roles=available_roles(),
             slack_error=request.query_params.get("slack_error"),
+            form_error=request.query_params.get("error"),
+            form_version=agent_form_version(agent),
             slack_ok=request.query_params.get("slack_ok"),
             role_error=request.query_params.get("role_error"),
             spoke_state=spoke_state,
@@ -231,11 +235,12 @@ async def admin_ensure_agent_spoke(
 async def admin_approve_agent(
     agent_id: uuid.UUID,
     request: Request,
-    agent_slug: str = Form(...),
+    agent_slug: str = Form(""),
     bot_name: str = Form(...),
-    slack_bot_token: str = Form(""),
+    replace_slack_bot_token: str = Form(""),
     agent_status: str = Form(None),
     activation_override: str = Form(""),
+    form_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -255,13 +260,40 @@ async def admin_approve_agent(
     and an active agent with no exported profile is the Kavran-class failure.
     A refusal applies NO edits at all — the form's slug/name/token changes
     roll back with it, so what the admin sees stays what the DB holds.
+
+    The form is guarded against staleness (RA-02): the row is locked, and a
+    ``form_version`` that no longer matches ``agent_form_version`` means another
+    writer changed it after the page rendered, so nothing is written. The slug is
+    editable only while the agent is pending (RA-14), and the Slack bot token is
+    write-only: a blank ``replace_slack_bot_token`` keeps the stored one (RA-03).
     """
     result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+        select(AgentRegistry)
+        .where(AgentRegistry.id == agent_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    if form_version != agent_form_version(agent):
+        return RedirectResponse(url=f"/admin/agents/{agent_id}?error=stale_form", status_code=302)
+    new_slug = agent_slug.strip().lower()
+    if new_slug and new_slug != agent.agent_id:
+        if agent.status != "pending":
+            return RedirectResponse(
+                url=f"/admin/agents/{agent_id}?error=slug_read_only", status_code=302
+            )
+        taken = await db.scalar(
+            select(AgentRegistry.id).where(
+                AgentRegistry.agent_id == new_slug, AgentRegistry.id != agent.id
+            )
+        )
+        if taken is not None:
+            return RedirectResponse(
+                url=f"/admin/agents/{agent_id}?error=slug_taken", status_code=302
+            )
 
     activating = agent.status == "pending" or (
         agent.status != "active" and agent_status == "active"
@@ -277,14 +309,21 @@ async def admin_approve_agent(
                 status_code=302,
             )
 
-    agent.agent_id = agent_slug.strip().lower()
+    if new_slug:
+        agent.agent_id = new_slug  # pending only, by the check above
     agent.bot_name = bot_name.strip()
-    agent.slack_bot_token = slack_bot_token.strip() or None
+    # No path clears the token from this form; user_deletion and provisioning own that.
+    if replace_slack_bot_token.strip():
+        agent.slack_bot_token = replace_slack_bot_token.strip()
 
     if not activating and agent_status in VALID_AGENT_STATUSES:
         agent.status = agent_status
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()  # a concurrent rename took the slug
+        return RedirectResponse(url=f"/admin/agents/{agent_id}?error=slug_taken", status_code=302)
 
     return RedirectResponse(url="/admin/agents", status_code=302)
 
@@ -333,7 +372,7 @@ async def admin_provision_slack(
         oauth_url = await start_provisioning(db, agent, initiated_by=current_user)
     except ProvisioningError as exc:
         return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?slack_error={str(exc)[:200]}",
+            url=f"/admin/agents/{agent_id}?slack_error={quote(str(exc)[:200])}",
             status_code=302,
         )
     return RedirectResponse(url=oauth_url, status_code=302)

@@ -22,10 +22,10 @@ async def test_muting_an_active_agent_sets_inactive_and_attribution(db_session):
     agent = await factories.make_agent(db_session, user=pi, status="active")
 
     ok = await set_agent_mute_state(
-        db_session, agent=agent, muted=True, actor_user_id=manager.id,
+        db_session, agent=agent, muted=True, actor=manager,
     )
 
-    assert ok is True
+    assert ok is None
     await db_session.refresh(agent)
     assert agent.status == "inactive"
     assert agent.muted_by == manager.id
@@ -35,16 +35,18 @@ async def test_muting_an_active_agent_sets_inactive_and_attribution(db_session):
 async def test_unmuting_clears_attribution_and_reactivates(db_session):
     pi = await factories.make_user(db_session)
     manager = await factories.make_user(db_session, user_role="manager")
+    # Unmute goes through the activation gate (RA-01): grounded profile + token.
+    await factories.make_profile(db_session, user=pi, evidence_state="grounded")
     agent = await factories.make_agent(
-        db_session, user=pi, status="inactive",
+        db_session, user=pi, status="inactive", slack_bot_token="xoxb-1",
         muted_at=datetime.now(UTC), muted_by=manager.id,
     )
 
     ok = await set_agent_mute_state(
-        db_session, agent=agent, muted=False, actor_user_id=manager.id,
+        db_session, agent=agent, muted=False, actor=manager,
     )
 
-    assert ok is True
+    assert ok is None
     await db_session.refresh(agent)
     assert agent.status == "active"
     assert agent.muted_by is None
@@ -57,10 +59,10 @@ async def test_muting_a_pending_agent_is_a_no_op(db_session):
     agent = await factories.make_agent(db_session, user=pi, status="pending")
 
     ok = await set_agent_mute_state(
-        db_session, agent=agent, muted=True, actor_user_id=manager.id,
+        db_session, agent=agent, muted=True, actor=manager,
     )
 
-    assert ok is False
+    assert ok == "agent_not_mutable"
     await db_session.refresh(agent)
     assert agent.status == "pending"
     assert agent.muted_at is None
@@ -72,10 +74,10 @@ async def test_muting_a_suspended_agent_is_a_no_op(db_session):
     agent = await factories.make_agent(db_session, user=pi, status="suspended")
 
     ok = await set_agent_mute_state(
-        db_session, agent=agent, muted=True, actor_user_id=manager.id,
+        db_session, agent=agent, muted=True, actor=manager,
     )
 
-    assert ok is False
+    assert ok == "agent_not_mutable"
     await db_session.refresh(agent)
     assert agent.status == "suspended"
 
@@ -88,7 +90,7 @@ async def test_unmuting_a_pending_agent_cannot_activate_it(db_session):
     pi = await factories.make_user(db_session, orcid="0000-0021-0000-0001")
     agent = await factories.make_agent(db_session, user=pi, status="pending")
     changed = await set_agent_mute_state(
-        db_session, agent=agent, muted=False, actor_user_id=pi.id,
+        db_session, agent=agent, muted=False, actor=pi,
     )
-    assert changed is False
+    assert changed == "agent_not_mutable"
     assert agent.status == "pending"

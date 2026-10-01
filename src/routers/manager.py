@@ -376,12 +376,10 @@ async def _manager_set_mute(
             url=f"/manager/pis/{user_id}?error=no_agent", status_code=302
         )
 
-    ok = await set_agent_mute_state(
-        db, agent=agent, muted=muted, actor_user_id=current_user.id,
-    )
-    if not ok:
+    refusal = await set_agent_mute_state(db, agent=agent, muted=muted, actor=current_user)
+    if refusal is not None:
         return RedirectResponse(
-            url=f"/manager/pis/{user_id}?error=agent_not_mutable", status_code=302
+            url=f"/manager/pis/{user_id}?error={refusal}", status_code=302
         )
     return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 

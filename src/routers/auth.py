@@ -296,7 +296,7 @@ async def auth_callback(
     # surfaces (base.html still shows them My Profile / My Agent), so sending
     # an admin with incomplete onboarding anywhere but /onboarding just defers
     # the same bounce one hop, via /profile.
-    if not user.onboarding_complete and not user.is_manager and not user.is_reviewer:
+    if not user.onboarding_complete and user.may_use_pi_surfaces:
         return RedirectResponse(url="/onboarding", status_code=302)
 
     # Resume the page the user originally requested, if any.

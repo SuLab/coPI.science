@@ -5,13 +5,14 @@ import uuid
 
 from fastapi import Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_admin_user
+from src.dependencies import get_admin_user, refuse_impersonation
 from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
 from src.routers.admin._common import _template_context, router, templates
+from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.directory import list_pi_directory, load_user_detail
 from src.services.user_deletion import delete_user_account
 
@@ -91,16 +92,12 @@ async def admin_delete_user(
     current_user: User = Depends(get_admin_user),
 ):
     """Delete a user account (admin only) — through the full teardown."""
-    if getattr(current_user, "_is_impersonated", False):
-        # Same guard as POST /profile/delete-account (deletion audit F8/D6):
-        # under impersonation `current_user` is the impersonated admin, so the
-        # self-delete check below compares against the WRONG identity and the
-        # log line would attribute the deletion to someone who never acted.
-        # Drop impersonation first; then delete.
-        raise HTTPException(
-            status_code=403,
-            detail="Account deletion is disabled while impersonating.",
-        )
+    # Same guard as POST /profile/delete-account (deletion audit F8/D6):
+    # under impersonation `current_user` is the impersonated admin, so the
+    # self-delete check below compares against the WRONG identity and the
+    # log line would attribute the deletion to someone who never acted.
+    # Drop impersonation first; then delete.
+    refuse_impersonation(current_user, "Account deletion is disabled while impersonating.")
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -133,6 +130,9 @@ async def admin_set_user_role(
     Named for users, not agents: POST /agents/{agent_id}/role already exists
     and sets a BOT role (pi_lab / scout_hub), which is a different thing.
     """
+    # Under impersonation `current_user` is the impersonated user, so the
+    # own-role guard below would compare against the wrong identity.
+    refuse_impersonation(current_user, "Role changes are disabled while impersonating.")
     if user_role not in VALID_USER_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role: {user_role}")
 
@@ -162,17 +162,15 @@ async def admin_set_user_role(
     # (denied) and Y (allowed) count as 2, Y is demotable, and zero loginable
     # admins remain. An earlier note recorded the unfiltered count as "more
     # conservative"; that was backwards.
-    if user.user_role == USER_ROLE_ADMIN and user_role != USER_ROLE_ADMIN:
-        admin_count = await db.scalar(
-            select(func.count(User.id)).where(
-                User.user_role == USER_ROLE_ADMIN,
-                User.access_status == "allowed",
-            )
-        )
-        if (admin_count or 0) <= 1:
+    # ensure_admin_remains takes the admin-invariant lock, which is held until
+    # the commit below, so concurrent demotions cannot both pass.
+    if user_role != USER_ROLE_ADMIN:
+        try:
+            await ensure_admin_remains(db, user=user)
+        except LastAdminError:
             raise HTTPException(
                 status_code=400, detail="Cannot demote the last remaining admin"
-            )
+            ) from None
 
     previous = user.user_role
     user.user_role = user_role

@@ -125,6 +125,13 @@ class User(Base):
     def _is_reviewer_expr(cls):
         return cls.user_role == USER_ROLE_REVIEWER
 
+    @property
+    def may_use_pi_surfaces(self) -> bool:
+        """The PI surfaces (My Profile, My Agent, onboarding, PI writes): PIs and
+        admins (admins keep them; CLAUDE.md "Exclude manager, never non-PI").
+        An allowlist, so a role added later is excluded until listed."""
+        return self.user_role in (USER_ROLE_PI, USER_ROLE_ADMIN)
+
     # The "may see the manager views" predicate. Everything that means
     # "admin OR manager" must name THIS, never a widened is_admin (F7).
     # Deliberately EXCLUDES USER_ROLE_REVIEWER: a reviewer's surfaces are

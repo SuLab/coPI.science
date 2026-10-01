@@ -58,20 +58,16 @@ async def onboarding_start(
     # A MANAGER has no research profile to review (D7). Bounce it rather than
     # render a PI page it can never complete.
     #
-    # Deliberately is_manager, not `!= USER_ROLE_PI`. An admin is not a `pi`
-    # either, but admins keep the PI surfaces: templates/base.html still shows
-    # them My Profile / My Agent, and /profile bounces anyone whose onboarding
-    # is incomplete straight back here. A `!= 'pi'` test therefore trapped an
-    # admin with onboarding_complete=False in a permanent
-    # /profile -> /onboarding -> /manager/pis deflection with no way to ever
-    # finish onboarding — locked out of their own profile by a guard aimed at
-    # managers.
-    if current_user.is_manager:
-        return RedirectResponse(url="/manager/pis", status_code=302)
-
-    # A REVIEWER is neither staff nor PI and has no research profile
-    # to review either — same reasoning as the manager bounce above.
-    if current_user.is_reviewer:
+    # The rule is `may_use_pi_surfaces` (PI or admin), not `!= USER_ROLE_PI`:
+    # admins keep the PI surfaces (templates/base.html shows them My Profile /
+    # My Agent, and /profile bounces anyone whose onboarding is incomplete
+    # straight back here), so a `!= 'pi'` test would trap an admin in a
+    # permanent /profile -> /onboarding -> /manager/pis deflection.
+    # A REVIEWER is neither staff nor PI and has no research profile either;
+    # each role keeps its own landing page.
+    if not current_user.may_use_pi_surfaces:
+        if current_user.is_manager:
+            return RedirectResponse(url="/manager/pis", status_code=302)
         return RedirectResponse(url="/manager/assessments", status_code=302)
 
     # Get latest job for this user
@@ -92,18 +88,16 @@ async def onboarding_start(
     # spin on "Building Your Profile" forever (the template treats job_status
     # 'none' the same as pending/processing and offers no retry).
     #
-    # `not is_manager` for the same reason as the bounce above: F8's concern is
-    # firing ORCID/PubMed profile generation for an account that has no lab and
-    # may have no relevant publications, which is a MANAGER. Narrowing this to
-    # `== 'pi'` would leave an admin staring at "Building Your Profile" with no
-    # job, no profile and no retry — the exact spin this self-heal exists to
-    # prevent.
+    # `may_use_pi_surfaces` for the same reason as the bounce above: F8's
+    # concern is firing ORCID/PubMed profile generation for an account that has
+    # no lab and may have no relevant publications, which is a MANAGER.
+    # Narrowing this to `== 'pi'` would leave an admin staring at "Building Your
+    # Profile" with no job, no profile and no retry.
     if (
         job is None
         and profile is None
         and current_user.access_status == "allowed"
-        and not current_user.is_manager
-        and not current_user.is_reviewer
+        and current_user.may_use_pi_surfaces
     ):
         job = await enqueue_profile_job_if_absent(db, current_user)
         await db.commit()

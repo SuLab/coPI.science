@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.database import get_db
-from src.dependencies import get_agent_with_access, get_current_user, get_pi_user
+from src.dependencies import (
+    get_agent_with_access,
+    get_current_user,
+    get_pi_user,
+    impersonation_note,
+)
 from src.models import (
     AgentDelegate,
     AgentMessage,
@@ -307,6 +312,10 @@ async def request_agent(
     )
     db.add(agent)
     await db.commit()
+    logger.info(
+        "agent %s: requested by %s (%s)",
+        agent_id, current_user.id, impersonation_note(current_user) or "direct",
+    )
 
     return RedirectResponse(url="/agent", status_code=302)
 
@@ -624,6 +633,7 @@ async def save_public_profile(
             detail="This lab is no longer linked to a PI account",
         )
 
+    note = impersonation_note(current_user)
     pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
@@ -634,6 +644,8 @@ async def save_public_profile(
         },
         expected_version=parse_expected_version(profile_version),
         export_agent=agent,
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(
@@ -641,8 +653,8 @@ async def save_public_profile(
         )
 
     logger.info(
-        "Public profile for agent %s updated by %s",
-        agent.agent_id, current_user.name,
+        "Public profile for agent %s updated by %s (%s)",
+        agent.agent_id, current_user.name, note or "direct",
     )
 
     return RedirectResponse(
@@ -692,6 +704,8 @@ async def delegate_connect_slack(
 ):
     """Let a delegate link their Slack account to this agent."""
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
+    logger.info("agent %s: Slack connect by %s (%s)", agent.agent_id, current_user.id, note or "direct")
 
     if not current_user.email:
         return RedirectResponse(
@@ -780,6 +794,8 @@ async def invite_delegate(
     from src.services.email import send_delegate_invitation
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
+    logger.info("agent %s: delegate invite by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
     if agent.status != "active":
@@ -873,6 +889,8 @@ async def revoke_invitation(
     from src.models import DelegateInvitation
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
+    logger.info("agent %s: invitation revoke by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
 
@@ -901,6 +919,7 @@ async def remove_delegate(
 ):
     """Remove an active delegate."""
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
 
@@ -945,8 +964,8 @@ async def remove_delegate(
         await db.delete(delegate)
         await db.commit()
         logger.info(
-            "Delegate %s removed from agent %s by %s",
-            delegate.user_id, agent.agent_id, current_user.name,
+            "Delegate %s removed from agent %s by %s (%s)",
+            delegate.user_id, agent.agent_id, current_user.name, note or "direct",
         )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

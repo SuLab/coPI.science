@@ -195,12 +195,12 @@ async def get_pi_user(
     a manager or reviewer who could POST the first could then POST the second
     and receive an AgentRegistry row. That is the escalation this closes.
 
-    The predicate is `is_manager or is_reviewer`, NOT `user_role == 'pi'`: an
-    admin is not a `pi` either, and `templates/base.html` still offers admins
-    the My Profile and My Agent links, so a `== 'pi'` test would 403 every
-    admin on their own nav. Admins keep the PI surfaces, exactly as they did
-    before this branch — this is an additive denylist, never a positive
-    `== 'pi'` allowlist.
+    The predicate is `User.may_use_pi_surfaces` (PI or admin), NOT
+    `user_role == 'pi'`: an admin is not a `pi` either, and
+    `templates/base.html` still offers admins the My Profile and My Agent
+    links, so a `== 'pi'` test would 403 every admin on their own nav. It
+    equals the old `not (is_manager or is_reviewer)` for every role in
+    VALID_USER_ROLES, and an unknown role fails closed.
 
     403 rather than a redirect: every route wearing this is a POST, and
     replaying a POST as a GET navigation is wrong for the same reason
@@ -208,12 +208,40 @@ async def get_pi_user(
     these forms (the nav hides them), so reaching one is not a wrong turn to
     be gently corrected — it is a request that must simply fail, visibly.
     """
-    if current_user.is_manager or current_user.is_reviewer:
+    if not current_user.may_use_pi_surfaces:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Staff accounts have no lab profile or agent (PI accounts only)",
         )
     return current_user
+
+
+def refuse_impersonation(
+    current_user: User, detail: str = "Review actions are disabled while impersonating."
+) -> None:
+    """403 when the session is impersonating. `detail` names the refused action."""
+    if getattr(current_user, "_is_impersonated", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def recorded_by(current_user: User) -> User | None:
+    """The real admin when the session is impersonating, else None. Writes are
+    attributed to the impersonated user (operator decision 2026-09-10); this is
+    the second signature, for tables that have a recorded_by column."""
+    if getattr(current_user, "_is_impersonated", False):
+        real = getattr(current_user, "_real_admin", None)
+        logger.warning(
+            "Action by admin %s while impersonating %s", getattr(real, "id", None), current_user.id
+        )
+        return real
+    return None
+
+
+def impersonation_note(current_user: User) -> str | None:
+    """For writes with no recorded_by column: a note for the log line and the
+    revision's change_summary."""
+    real = recorded_by(current_user)
+    return f"impersonated by admin {real.id}" if real is not None else None
 
 
 async def get_staff_user(
