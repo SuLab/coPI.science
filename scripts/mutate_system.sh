@@ -280,9 +280,9 @@ MUTANTS=(
 "pubmed_doi~~src/services/pubmed.py~~    if assigned.lower() == auth.lower():~~    if True:~~M2 reconcile_pub_doi always reports a match, so a PMID keeps whatever DOI it arrived with"
 'pubmed_tool~~src/services/pubmed.py~~    params.setdefault("tool", _NCBI_TOOL)~~    pass  # tool= no longer sent~~M3 _ncbi_get stops identifying itself to NCBI (throttle, then IP block)'
 # --- worker (T5) -----------------------------------------------------------------------
-'worker~~src/worker/main.py~~    logger.info("Job %s completed", job.id)~~    logger.info("Job %s has completed", job.id)~~M12c INERT log string — MUST SURVIVE'
+'worker~~src/worker/main.py~~    logger.info("Job %s completed", job_id)~~    logger.info("Job %s has completed", job_id)~~M12c INERT log string — MUST SURVIVE'
 "worker~~src/worker/main.py~~        .with_for_update(skip_locked=True)~~        .with_for_update()~~M4 claim_job drops SKIP LOCKED, so a worker pool serialises behind the slowest job"
-'worker~~src/worker/main.py~~            if job.type == "generate_profile":~~            job.status = "completed"; job.completed_at = datetime.now(timezone.utc); await db.commit()\n            if job.type == "generate_profile":~~M5 the job is marked completed and committed BEFORE the work is dispatched'
+'worker~~src/worker/main.py~~            await handler(ctx, db)~~            await _mark_completed(session_factory, job_id)\n            await handler(ctx, db)~~M5 the job is marked completed and committed BEFORE the work is dispatched'
 # --- profile pipeline (T4) -------------------------------------------------------------
 "pipeline~~src/services/profile_pipeline.py~~    Validate synthesized profile fields.~~    Validate the synthesized profile fields. [INERT EDIT]~~M12d INERT docstring — MUST SURVIVE"
 "pipeline~~src/services/profile_pipeline.py~~def _validate_profile(profile: dict[str, Any]) -> bool:~~def _validate_profile(profile: dict[str, Any]) -> bool:\n    return True~~M6 _validate_profile always returns True, so no profile is ever rejected"

@@ -182,8 +182,9 @@ async def test_edit_mid_job_leaves_the_edited_row_unconsumed_and_requeued(
     await db_session.refresh(r1)
     assert r1.comment == "EDITED"
     assert r1.consumed_at is None, "only ORIGINAL was analyzed; EDITED is still owed a job"
-    suggestion = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
-    assert suggestion.feedback_snapshot[0]["comment"] == "ORIGINAL"
+    # The only row changed mid-call, so nothing was stamped and no suggestion
+    # was written for the stale ORIGINAL snapshot (AP-11).
+    assert (await db_session.execute(select(PromptChangeSuggestion))).scalars().all() == []
     assert sorted(j.status for j in await _review_jobs(db_session)) == ["processing"]
     await _assert_a_manual_generate_picks_it_up(db_session, assessment, reviewer)
 
@@ -236,8 +237,8 @@ async def test_dimension_only_edit_mid_job_leaves_the_row_unconsumed_and_requeue
     assert r1.consumed_at is None, (
         "only the pre-edit dimension scores were analyzed; the edited row is still owed a job"
     )
-    suggestion = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
-    assert suggestion.feedback_snapshot[0]["dimension_scores"] == {key_a: 3}
+    # The only row changed mid-call: nothing stamped, no suggestion (AP-11).
+    assert (await db_session.execute(select(PromptChangeSuggestion))).scalars().all() == []
     assert sorted(j.status for j in await _review_jobs(db_session)) == ["processing"]
     await _assert_a_manual_generate_picks_it_up(db_session, assessment, reviewer)
 

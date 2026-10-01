@@ -178,6 +178,9 @@ EXPECTED_INDEXES: dict[str, str] = {
     "uq_users_email_lower": "USING btree (lower((email)::text))",
     "ix_agent_messages_agent_phase": "USING btree (agent_id, phase)",
     "ix_chat_usage_streaming": "USING btree (created_at) WHERE (",
+    # 0056 unique constraints: their backing indexes, as for the 0019/0022 ones.
+    "uq_slack_app_provisions_agent": "USING btree (agent_registry_id)",
+    "uq_publications_user_pmid": "USING btree (user_id, pmid)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)

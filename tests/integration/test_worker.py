@@ -392,9 +392,10 @@ async def test_claim_job_is_atomic_under_real_concurrency(wk):
     # because Postgres' LockRows node re-checks the qual after the lock is granted and
     # moves on to the next row when it no longer matches. Removing SKIP LOCKED is caught
     # by the timing test below, and only by it.
-    uid2 = await wk.new_user()
+    # Two users: 0056 allows one active generate_profile job per user.
+    uid2, uid3 = await wk.new_user(), await wk.new_user()
     j2 = await wk.enqueue(uid2)
-    j3 = await wk.enqueue(uid2)
+    j3 = await wk.enqueue(uid3)
 
     claims2, spans2 = await _race_claims(wk.factory, n=2)
     _assert_overlapped(spans2, 2)
@@ -532,10 +533,11 @@ async def test_claim_job_will_not_claim_a_job_whose_attempts_are_exhausted(wk):
     Control: a normal job enqueued a second later IS claimed, so "returns None" is not
     the whole story.
     """
-    uid = await wk.new_user()
+    # Two users: 0056 allows one active generate_profile job per user.
+    uid, uid_normal = await wk.new_user(), await wk.new_user()
     t0 = datetime.now(UTC)
     exhausted = await wk.enqueue(uid, max_attempts=0, enqueued_at=t0)
-    normal = await wk.enqueue(uid, max_attempts=3, enqueued_at=t0 + timedelta(seconds=5))
+    normal = await wk.enqueue(uid_normal, max_attempts=3, enqueued_at=t0 + timedelta(seconds=5))
 
     async with wk.factory() as db:
         first = await worker_main.claim_job(db)

@@ -327,7 +327,7 @@ async def run_worker():
     global _shutdown
 
     settings = get_settings()
-    engine = make_engine("worker")
+    engine = make_engine("worker", settings.database_url)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     lock_conn = await acquire_worker_lock(engine)

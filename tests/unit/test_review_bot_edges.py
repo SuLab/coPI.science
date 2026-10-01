@@ -345,9 +345,9 @@ async def test_deleting_the_only_review_mid_call_does_not_crash_the_job(
     with caplog.at_level("WARNING", logger="src.services.review_bot"):
         await review_bot.execute_review_analysis(job, db_session)  # must not raise
 
-    s = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
-    assert s.feedback_snapshot[0]["id"] == str(review.id)
-    assert any("stamped 0 of 1" in rec.getMessage() for rec in caplog.records)
+    # No feedback row is still as snapshotted, so no suggestion is written (AP-11).
+    assert (await db_session.execute(select(PromptChangeSuggestion))).scalars().all() == []
+    assert any("no suggestion written" in rec.getMessage() for rec in caplog.records)
 
 
 async def test_an_invalid_additional_target_is_dropped_and_warned_not_fatal(
