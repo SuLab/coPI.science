@@ -273,7 +273,7 @@ DC="docker compose -f docker-compose.prod.yml"
 #    still exceed that.
 #
 #    How many real API calls a turn can be, corrected 2026-08-22: the loop is
-#    `range(max_tool_rounds + 1)` (src/services/llm.py:1360), so the setting
+#    `range(max_tool_rounds + 1)` (src/services/llm.py:1345), so the setting
 #    UNDER-counts by one. A turn is 1..8 billed calls at the default
 #    `max_tool_rounds=5` — up to max_tool_rounds + 1 tool-capable calls, then a
 #    terminating or forced-final call, then at most one max_tokens retry. The
@@ -427,6 +427,14 @@ In the working tree's `docker-compose.prod.yml`, under `blackbird-app`, add
 then `$DC up -d --force-recreate blackbird-app`. uvicorn 0.52.1 reads CLI options from
 `UVICORN_*` variables and has no graceful timeout by default (C13), so a streaming chat
 answer could otherwise hold shutdown until Docker's SIGKILL. Never commit this file.
+
+### The worker
+
+Only one worker runs: a second `worker` container exits at boot
+(`WorkerAlreadyRunning`) before touching the queue. Interactive jobs (onboarding,
+refresh, approvals, Add-PI, review-bot generate) claim ahead of bulk ones
+(`cli regenerate-profiles`, `scripts/enqueue_enrichment.py`, pipeline-enqueued
+enrichment).
 
 ### Simulation control plane (2026-08-30)
 

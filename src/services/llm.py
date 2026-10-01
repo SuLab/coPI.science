@@ -1153,6 +1153,149 @@ async def make_decision(
     return extract_json(response_text)
 
 
+# --- generate_with_tools notes -------------------------------------------------
+# Contract and rationale moved out of the function so its body stays within the
+# 200-line function gate (tests/unit/test_function_length_gate.py). The
+# function's code is frozen under B24; only comments live here.
+#
+# Parameter contracts
+#
+# ``on_retry``, same contract as ``generate_agent_response``'s: it fires
+# once — synchronously, before this returns — exactly when one of this
+# function's two internal max_tokens retries (the "final text" branch's,
+# or the max-tool-rounds fallback's; at most one runs per call) actually
+# makes a second API call. A caller that books one call against a rate
+# limiter or budget for this whole turn (e.g. ``Agent.record_api_call``)
+# should pass that callable here so a retried turn is booked as the two
+# real API calls it made, not one. Optional and additive: omitting it
+# changes nothing about behavior or the return contract.
+#
+# ``on_stop_reason``, same contract as ``generate_agent_response``'s: it
+# fires exactly once, with the stop_reason of whichever call actually ended
+# the turn — the terminating text call, the forced final call, or either
+# one's retry. A tool ROUND's stop_reason is never reported here (it is in
+# ``call_stats``); the question this answers is "is the answer I am holding
+# complete?".
+#
+# ``should_continue``, if given, is polled before each tool round AFTER the
+# first. Returning False stops the loop from opening a NEW round; it does not
+# abort anything in flight, so no issued call is wasted and the turn still
+# falls through to the forced final call and returns a usable reply.
+#
+# This exists for cooperative shutdown. ``SimulationEngine.request_stop()``
+# only flips a flag, and the durable flush runs in main.py's finally — which
+# needs the main loop to RETURN. One thread_reply turn measured up to 134
+# seconds here (5 rounds x a real API call each), so `docker stop` expired
+# mid-turn and SIGKILLed the process before the flush, losing the in-flight
+# turn's buffered rows. Polling the engine's own `_running` flag bounds a
+# stopping turn to the round already underway plus one final call.
+#
+# Omitting it is exactly the pre-existing behaviour: the loop runs to
+# max_tool_rounds as before.
+#
+# note (ledger)
+# Per-turn billing totals, the per-CALL breakdown (one entry per REAL API
+# call, in call order: 78.6% of thread_reply rows are 2+ calls, so
+# "output_tokens" alone is a sum of unknown addends), the turn's latency and
+# the best answer in hand all live in the ledger. See note (guard) for why it is bound before the `try`: the tool-round `acreate`,
+# `_execute_tool_blocks` and `b.model_dump()` can each raise after a round has
+# been BILLED, and every one of them used to take the whole turn's record with
+# it. `ledger.recovered` of None means "nothing salvageable — re-raise"; ("", None)
+# means "the turn got far enough that returning nothing is the honest outcome".
+#
+# note (cache)
+# The tool_result block currently carrying the message-side cache
+# breakpoint, so the next round can take the marker off it. It is set in the
+# tool-round branch of the loop.
+# The message-side cache breakpoint, ROLLED FORWARD rather than
+# accumulated: the API allows at most 4 `cache_control` blocks per
+# request and a 5-round turn would want 6. Moving it is free — a marker
+# designates where to check for and write a cache entry, it is not part
+# of the content being matched, so dropping the previous round's does not
+# invalidate the entry it wrote. The tool outputs are the bulk of what
+# each subsequent round re-sends, so this is where the second breakpoint
+# earns its keep.
+#
+# Caveat worth knowing: a breakpoint walks back at most 20 content blocks
+# looking for a prior entry, and one round of 8 consults contributes 16
+# blocks. A round that wide can miss the previous round's entry even
+# though the marker is placed correctly.
+#
+# note (+ 1)
+# `+ 1` — one more tool-capable call than the setting names, and it
+# STAYS. It reads like an off-by-one and behaves like headroom nobody
+# has ever needed: across all 1,121 stored rows carrying `call_stats`,
+# the most rounds any turn used is 4 against a budget of 6, and no
+# caller anywhere passes `max_tool_rounds` at all. Removing it would
+# also delete coverage rather than add it — `max_tool_rounds=1` is used
+# as SETUP to force a two-round turn in 12 places across 6 test files
+# (the only multi-round path the suite exercises), so
+# `range(max_tool_rounds)` would turn every one of them into a
+# single-round turn that asserts nothing.
+# The documentation was wrong, not the loop; it has been corrected
+# instead (the module comment on `call_stats`, this function's
+# docstring, and the "Max tool rounds" warning in the function).
+#
+# note (thinking)
+# ADAPTIVE here, unlike every other call site in this module (which
+# take acreate's thinking-disabled default). This is the only call
+# that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
+# write a tool call into its visible TEXT instead of emitting a
+# tool_use block: the turn succeeds, the call never runs, and no
+# error is raised. For the hub that would mean silently skipping
+# consult_specialist — the panel would look convened and never be.
+# Thinking shares the max_tokens budget, so this path's budget was
+# raised alongside this change (src/agent/simulation.py).
+# The truncation retry deliberately does NOT set this: it passes no
+# `tools`, so it carries no tool-in-text risk and is better off
+# spending its whole budget on the answer.
+#
+# note (retry)
+# If the retry throws, the truncated first pass is the answer: it
+# is billed and the best one available (the retry asks for up to
+# NONSTREAMING_MAX_TOKENS, ~351 s of generation against a 300 s read
+# timeout, and the reply it would discard is a concluding hub turn's
+# verdict). The stop_reason reported stays `max_tokens`.
+#
+# note (recovered)
+# From here on, an exception returns "" instead of raising: the tool loop
+# is over, its rounds are billed and recorded, and there is nothing left
+# to try. Deliberately NOT a fallthrough into the accounting below —
+# `response_text` is unbound at this point and `message` still points at
+# the LAST TOOL ROUND, so falling through would add that round's tokens a
+# second time and label the entry `forced_final`, inventing an API call
+# that never happened.
+#
+# note (guard)
+# ``Exception``, so ``CancelledError`` (a BaseException since 3.8) still
+# propagates untouched: a cancelled turn is not a failed one, and the
+# cooperative-shutdown path must not be silently converted into a reply.
+#
+# ONE guard for the whole turn, not four patches at the retry sites.
+# Measured: an exception anywhere after the first call wrote
+# `rows written: 0` for a turn that had made 6 real API calls — and
+# `SimulationEngine` rebuilds `api_call_count` and the rate limiter's
+# `call_times` ledger from exactly those rows, per CALL (summing
+# `COALESCE(jsonb_array_length(call_stats), 1)`), so all six calls
+# stopped existing at the next restart, not one.
+#
+# The row is written for EVERY failure except the one request that was
+# never issued (`NonStreamingMaxTokensError`, raised by `acreate`'s
+# pre-flight check before any I/O). Not `if call_stats`, which was the
+# first version of this line: a first-round `acreate` that raises AFTER
+# the request went out — a 300 s APITimeoutError, the latent trigger this
+# whole guard exists for — leaves `call_stats` empty while having been
+# fully billed, and would have written nothing. An empty `call_stats` on
+# the row says exactly that: the turn is recorded, no call completed.
+#
+# Nothing to salvage, so the exception IS the outcome. Swallowing it
+# here would turn the one error this module raises BY NAME — a call
+# site above NONSTREAMING_MAX_TOKENS — into a turn that silently
+# said nothing, which is the failure mode that constant exists to
+# prevent.
+# -------------------------------------------------------------------------------
+
+
 async def generate_with_tools(
     system_prompt: str,
     messages: list[dict[str, Any]],
@@ -1179,38 +1322,8 @@ async def generate_with_tools(
 
     Returns the final text response.
 
-    ``on_retry``, same contract as ``generate_agent_response``'s: it fires
-    once — synchronously, before this returns — exactly when one of this
-    function's two internal max_tokens retries (the "final text" branch's,
-    or the max-tool-rounds fallback's; at most one runs per call) actually
-    makes a second API call. A caller that books one call against a rate
-    limiter or budget for this whole turn (e.g. ``Agent.record_api_call``)
-    should pass that callable here so a retried turn is booked as the two
-    real API calls it made, not one. Optional and additive: omitting it
-    changes nothing about behavior or the return contract.
-
-    ``on_stop_reason``, same contract as ``generate_agent_response``'s: it
-    fires exactly once, with the stop_reason of whichever call actually ended
-    the turn — the terminating text call, the forced final call, or either
-    one's retry. A tool ROUND's stop_reason is never reported here (it is in
-    ``call_stats``); the question this answers is "is the answer I am holding
-    complete?".
-
-    ``should_continue``, if given, is polled before each tool round AFTER the
-    first. Returning False stops the loop from opening a NEW round; it does not
-    abort anything in flight, so no issued call is wasted and the turn still
-    falls through to the forced final call below and returns a usable reply.
-
-    This exists for cooperative shutdown. ``SimulationEngine.request_stop()``
-    only flips a flag, and the durable flush runs in main.py's finally — which
-    needs the main loop to RETURN. One thread_reply turn measured up to 134
-    seconds here (5 rounds x a real API call each), so `docker stop` expired
-    mid-turn and SIGKILLed the process before the flush, losing the in-flight
-    turn's buffered rows. Polling the engine's own `_running` flag bounds a
-    stopping turn to the round already underway plus one final call.
-
-    Omitting it is exactly the pre-existing behaviour: the loop runs to
-    max_tool_rounds as before.
+    The ``on_retry``, ``on_stop_reason`` and ``should_continue`` contracts are in
+    the "generate_with_tools notes" block directly above this function.
     """
     # Start of the TURN, for `wall_ms`. Distinct from the per-call `t0`
     # below: this one spans every round, every retry and the tool execution
@@ -1222,35 +1335,13 @@ async def generate_with_tools(
 
     # Work with a mutable copy of messages
     conversation = list(messages)
-    # Per-turn billing totals, the per-CALL breakdown (one entry per REAL API
-    # call, in call order: 78.6% of thread_reply rows are 2+ calls, so
-    # "output_tokens" alone is a sum of unknown addends), the turn's latency and
-    # the best answer in hand all live in the ledger. See the guard at the bottom
-    # for why it is bound before the `try`: the tool-round `acreate`,
-    # `_execute_tool_blocks` and `b.model_dump()` can each raise after a round has
-    # been BILLED, and every one of them used to take the whole turn's record with
-    # it. `ledger.recovered` of None means "nothing salvageable — re-raise"; ("", None)
-    # means "the turn got far enough that returning nothing is the honest outcome".
+    # Per-turn ledger, bound before the `try`; see note (ledger).
     ledger = _CallLedger()
-    # The tool_result block currently carrying the message-side cache
-    # breakpoint, so the next round can take the marker off it. See where it is
-    # set, below.
+    # The tool_result block carrying the message-side cache breakpoint; see note (cache).
     cached_tool_result: dict[str, Any] | None = None
 
     try:
-        # `+ 1` — one more tool-capable call than the setting names, and it
-        # STAYS. It reads like an off-by-one and behaves like headroom nobody
-        # has ever needed: across all 1,121 stored rows carrying `call_stats`,
-        # the most rounds any turn used is 4 against a budget of 6, and no
-        # caller anywhere passes `max_tool_rounds` at all. Removing it would
-        # also delete coverage rather than add it — `max_tool_rounds=1` is used
-        # as SETUP to force a two-round turn in 12 places across 6 test files
-        # (the only multi-round path the suite exercises), so
-        # `range(max_tool_rounds)` would turn every one of them into a
-        # single-round turn that asserts nothing.
-        # The documentation was wrong, not the loop; it has been corrected
-        # instead (the module comment on `call_stats`, this function's
-        # docstring, and the "Max tool rounds" warning below).
+        # `+ 1` stays: one more tool-capable call than the setting names; see note (+ 1).
         for round_num in range(max_tool_rounds + 1):
             # Round 0 always runs — without it this returns nothing at all. From
             # round 1 on, a stop request ends the loop rather than opening another
@@ -1273,18 +1364,7 @@ async def generate_with_tools(
                 max_tokens=max_tokens, accumulate_latency=False,
                 model=model, system=system_prompt, messages=conversation,
                 tools=tools,
-                # ADAPTIVE here, unlike every other call site in this module (which
-                # take acreate's thinking-disabled default). This is the only call
-                # that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
-                # write a tool call into its visible TEXT instead of emitting a
-                # tool_use block: the turn succeeds, the call never runs, and no
-                # error is raised. For the hub that would mean silently skipping
-                # consult_specialist — the panel would look convened and never be.
-                # Thinking shares the max_tokens budget, so this path's budget was
-                # raised alongside this change (src/agent/simulation.py).
-                # The truncation retry deliberately does NOT set this: it passes no
-                # `tools`, so it carries no tool-in-text risk and is better off
-                # spending its whole budget on the answer.
+                # ADAPTIVE, unlike every other call site in this module; see note (thinking).
                 thinking={"type": "adaptive"},
             )
 
@@ -1298,11 +1378,7 @@ async def generate_with_tools(
                     _log_empty_reply(
                         message, model=model, log_meta=log_meta, where="final"
                     )
-                # If the retry throws, the truncated first pass is the answer: it
-                # is billed and the best one available (the retry asks for up to
-                # NONSTREAMING_MAX_TOKENS, ~351 s of generation against a 300 s read
-                # timeout, and the reply it would discard is a concluding hub turn's
-                # verdict). The stop_reason reported stays `max_tokens`.
+                # If the retry throws, the truncated first pass is the answer; see note (retry).
                 response_text, final_message = await _retry_if_truncated(
                     client, ledger, first=message, first_text=response_text, model=model,
                     max_tokens=max_tokens, system_prompt=system_prompt, messages=conversation,
@@ -1324,19 +1400,7 @@ async def generate_with_tools(
             # — and build one tool_result per block, in block order.
             tool_results = await _execute_tool_blocks(tool_use_blocks, tool_executor)
 
-            # The message-side cache breakpoint, ROLLED FORWARD rather than
-            # accumulated: the API allows at most 4 `cache_control` blocks per
-            # request and a 5-round turn would want 6. Moving it is free — a marker
-            # designates where to check for and write a cache entry, it is not part
-            # of the content being matched, so dropping the previous round's does not
-            # invalidate the entry it wrote. The tool outputs are the bulk of what
-            # each subsequent round re-sends, so this is where the second breakpoint
-            # earns its keep.
-            #
-            # Caveat worth knowing: a breakpoint walks back at most 20 content blocks
-            # looking for a prior entry, and one round of 8 consults contributes 16
-            # blocks. A round that wide can miss the previous round's entry even
-            # though the marker is placed correctly.
+            # The message-side cache breakpoint is ROLLED FORWARD, not accumulated; see note (cache).
             if tool_results:
                 if cached_tool_result is not None:
                     cached_tool_result.pop("cache_control", None)
@@ -1360,13 +1424,7 @@ async def generate_with_tools(
             "Max tool rounds (%d) reached, forcing final response",
             max_tool_rounds + 1,
         )
-        # From here on, an exception returns "" instead of raising: the tool loop
-        # is over, its rounds are billed and recorded, and there is nothing left
-        # to try. Deliberately NOT a fallthrough into the accounting below —
-        # `response_text` is unbound at this point and `message` still points at
-        # the LAST TOOL ROUND, so falling through would add that round's tokens a
-        # second time and label the entry `forced_final`, inventing an API call
-        # that never happened.
+        # From here on an exception returns "" instead of raising; see note (recovered).
         ledger.recovered = ("", None)
         # `forced_final` rather than `final`: this call is reached either by
         # exhausting max_tool_rounds or by the cooperative-shutdown `break` above,
@@ -1392,26 +1450,8 @@ async def generate_with_tools(
                             turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
                             final_message=final_message)
     except Exception as exc:
-        # ``Exception``, so ``CancelledError`` (a BaseException since 3.8) still
-        # propagates untouched: a cancelled turn is not a failed one, and the
-        # cooperative-shutdown path must not be silently converted into a reply.
-        #
-        # ONE guard for the whole turn, not four patches at the retry sites.
-        # Measured: an exception anywhere after the first call wrote
-        # `rows written: 0` for a turn that had made 6 real API calls — and
-        # `SimulationEngine` rebuilds `api_call_count` and the rate limiter's
-        # `call_times` ledger from exactly those rows, per CALL (summing
-        # `COALESCE(jsonb_array_length(call_stats), 1)`), so all six calls
-        # stopped existing at the next restart, not one.
-        #
-        # The row is written for EVERY failure except the one request that was
-        # never issued (`NonStreamingMaxTokensError`, raised by `acreate`'s
-        # pre-flight check before any I/O). Not `if call_stats`, which was the
-        # first version of this line: a first-round `acreate` that raises AFTER
-        # the request went out — a 300 s APITimeoutError, the latent trigger this
-        # whole guard exists for — leaves `call_stats` empty while having been
-        # fully billed, and would have written nothing. An empty `call_stats` on
-        # the row says exactly that: the turn is recorded, no call completed.
+        # ONE guard for the whole turn; ``Exception`` leaves ``CancelledError`` alone.
+        # See note (guard).
         if not isinstance(exc, NonStreamingMaxTokensError):
             _emit_call_log(
                 system_prompt=system_prompt,
@@ -1426,11 +1466,7 @@ async def generate_with_tools(
                 wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
         if ledger.recovered is None:
-            # Nothing to salvage, so the exception IS the outcome. Swallowing it
-            # here would turn the one error this module raises BY NAME — a call
-            # site above NONSTREAMING_MAX_TOKENS — into a turn that silently
-            # said nothing, which is the failure mode that constant exists to
-            # prevent.
+            # Nothing to salvage: the exception IS the outcome; see note (guard).
             raise
         recovered_text, recovered_message = ledger.recovered
         logger.exception(

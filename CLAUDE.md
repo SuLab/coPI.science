@@ -98,6 +98,9 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
+- `0056` (head): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
+  as a dry run first, and apply the publications dedupe only with the owner's go-ahead
+  (the "Deploy order for `0056`" box in `docs/operations/migration-deploy-notes.md`).
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
   stopped: the worker holds its transaction across a whole pipeline run and trips the
   chain's 10 s `lock_timeout`.

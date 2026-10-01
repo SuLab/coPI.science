@@ -15,6 +15,8 @@
 #   4. ruff lint of src/ against a CEILING (SRC_LINT_MAX) rather than zero. src/
 #      carries pre-existing style debt, so this is a ratchet: it blocks NEW debt
 #      without demanding the old debt be paid first.
+#   4b. ruff C901 zero gate over src/ (max-complexity 20); the length gate is
+#      tests/unit/test_function_length_gate.py (200 lines per function, in step 5).
 #   5. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
@@ -255,6 +257,11 @@ if [ "$src_findings" -gt "$SRC_LINT_MAX" ]; then
   exit 1
 fi
 echo "    ${src_findings} findings (ceiling ${SRC_LINT_MAX})"
+
+echo "==> ruff C901 zero gate (src/, max-complexity 20)"
+# A separate ZERO gate, not part of the SRC_LINT_MAX ratchet above (spec §9.8): every
+# function over complexity 20 was split in Phases 1 and 3, so any finding here is new.
+"$VENV_PY" -m ruff check src --select C901 --config lint.mccabe.max-complexity=20 --output-format=concise
 
 echo "==> pytest (full suite + branch coverage, fail-under=${COV_MIN}%)"
 "$VENV_PY" -m pytest tests/ \

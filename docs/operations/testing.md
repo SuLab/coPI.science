@@ -7,8 +7,13 @@ count or a line number before relying on it.
 Run `./scripts/ci.sh` before committing — alembic sanity (single head, no
 duplicate revision ids), an upgrade→downgrade→upgrade round trip against a
 throwaway Postgres it creates and destroys itself, `ruff check` on the test
-suite (zero findings) plus a ratcheted ceiling on `src/`, then the full pytest
-run with a branch-coverage floor. This is exactly what the `pre-push` hook
+suite (zero findings) plus a ratcheted ceiling on `src/`, a separate **C901 zero
+gate** over `src/` (`ruff --select C901` at max-complexity 20: any finding is new, so
+split the function rather than raise the limit), then the full pytest run with a
+branch-coverage floor. The pytest run includes the **length gate**,
+`tests/unit/test_function_length_gate.py`: no `src/` function is longer than 200
+lines, docstring included. Move rationale into a module-level comment block rather
+than deleting it. This is exactly what the `pre-push` hook
 runs, and it is the whole gate: there is no server-side CI.
 
 The round trip's throwaway Postgres is named `copi-ci-migcheck-<pid>` on a free
