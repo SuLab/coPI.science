@@ -116,9 +116,8 @@ async def _simulation_context(
     )
     recent_commands = recent_result.scalars().all()
 
-    latest_run = (
-        await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()).limit(1))
-    ).scalar_one_or_none()
+    latest_id = await latest_run_id(db)
+    latest_run = await db.get(SimulationRun, latest_id) if latest_id is not None else None
     # Held headlines of a stopped run (spec §8.2): owed, never claimed.
     held_counts = None
     if latest_run is not None and latest_run.status == "stopped":

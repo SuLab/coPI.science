@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import ColumnElement, and_, false, func, or_, select, true
+from sqlalchemy import ColumnElement, and_, false, or_, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
-from src.models import AgentMessage, AgentRegistry, Cohort, CohortMembership
+from src.models import AgentMessage
+from src.services.cohort_gate_inputs import load_gate_inputs
 from src.services.cohorts import compute_gates
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
@@ -99,9 +100,9 @@ async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None
     """The viewing agent's ``allowed_sender_ids``, via the engine's own computation.
 
     Same call the admin preview makes (``_cohort_gate_context``), with one
-    deliberate difference: the roster is the active agents **plus the viewing
-    agent**. ``/agent/{id}/conversations`` admits ``status in ("active",
-    "inactive")``, but ``compute_gates`` only returns keys for the roster it is
+    deliberate difference: the roster is the engine's roster query (active, and
+    pi_lab rows linked to a user) **plus the viewing agent**.
+    ``/agent/{id}/conversations`` admits ``status in ("active", "inactive")``, but ``compute_gates`` only returns keys for the roster it is
     handed. Widening the roster here is what stops an inactive viewer falling
     through ``gates.get(agent_id)`` below to its default of ``None`` — i.e.
     silently getting an UNGATED feed — rather than an ergonomic nicety to dodge
@@ -110,25 +111,14 @@ async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None
     cannot turn a refusal into a silent roster-wide isolation.
     """
     settings = get_settings()
-    roster = {
-        r[0] for r in (await db.execute(
-            select(AgentRegistry.agent_id).where(AgentRegistry.status == "active")
-        )).all()
-    }
-    roster.add(agent_id)
-    rows = (await db.execute(
-        select(CohortMembership.cohort_id, CohortMembership.agent_id)
-    )).all()
-    cohort_count = (await db.execute(
-        select(func.count()).select_from(Cohort)
-    )).scalar() or 0
+    inputs = await load_gate_inputs(db, extra_agent_ids=[agent_id])
 
     gates, preflight_error = compute_gates(
-        membership_rows=[(r[0], r[1]) for r in rows],
-        agent_ids=sorted(roster),
+        membership_rows=inputs.membership_rows,
+        agent_ids=inputs.agent_ids,
         isolation_enabled=settings.cohort_isolation_enabled,
         policy=settings.cohort_default_policy,
-        cohort_count=cohort_count,
+        cohort_count=inputs.cohort_count,
         has_db=True,
     )
     if preflight_error is not None and settings.cohort_isolation_enabled:

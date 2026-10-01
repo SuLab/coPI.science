@@ -106,6 +106,9 @@
             {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
             {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
             {% elif request.query_params.get('error') == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
+            {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
+            {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
+            {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>

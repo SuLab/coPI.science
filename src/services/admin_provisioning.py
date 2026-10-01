@@ -14,13 +14,17 @@ import logging
 import secrets
 import time
 
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from src.config import get_settings
 from src.models import AgentRegistry, AppSetting, SlackAppProvision, User
+from src.services.advisory_locks import entity_key_sql
 from src.services.slack_provisioning import (
     create_app,
+    delete_app,
     exchange_code,
     lookup_team_id,
 )
@@ -77,8 +81,11 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     is set after an auth failure). Only then do we rotate and persist the new
     ``(token, refresh, exp)`` triple atomically before returning (SEC-10).
 
-    Seeds from ``Settings`` (``.env``) on first use; thereafter the KV rows are
-    authoritative.
+    Seeds from ``Settings`` (``.env``) on first use. The refresh token is read only
+    from ``AppSetting``, under a row lock, by this module and by
+    ``scripts/slack_config_token.py``: two concurrent callers would otherwise both
+    spend the same single-use token. The lock is held through the Slack rotation and
+    released by the commit that persists the new triple.
     """
     settings = get_settings()
 
@@ -92,7 +99,28 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
             except ValueError:
                 pass  # unparseable expiry -> fall through and rotate
 
-    refresh = await _kv_get(db, _KEY_REFRESH) or settings.slack_config_refresh_token
+    row = (await db.execute(
+        select(AppSetting).where(AppSetting.key == _KEY_REFRESH)
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if row is None and settings.slack_config_refresh_token:
+        # First use only: seed the KV row from .env, then read it back locked.
+        await db.execute(
+            pg_insert(AppSetting)
+            .values(key=_KEY_REFRESH, value=settings.slack_config_refresh_token)
+            .on_conflict_do_nothing(index_elements=["key"])
+        )
+        row = (await db.execute(
+            select(AppSetting).where(AppSetting.key == _KEY_REFRESH)
+            .with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+    if not force_rotate:
+        cached = await _kv_get(db, _KEY_TOKEN)
+        exp_raw = await _kv_get(db, _KEY_TOKEN_EXP)
+        if cached and exp_raw and exp_raw.isdigit() and int(exp_raw) - time.time() > _TOKEN_EXP_MARGIN:
+            await db.commit()
+            return cached  # another holder rotated while we waited for the row lock
+    refresh = row.value if row is not None else None
 
     if refresh:
         try:
@@ -120,6 +148,22 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     )
 
 
+_lock_engine = None
+
+
+def _lock_session_factory():
+    """Sessions for the per-agent provisioning lock (a seam for tests).
+
+    The lock lives on a dedicated NullPool connection, not the web pool: it stays
+    open across the whole Slack call, and pinning a pooled connection for that long
+    is what issue #24 C2 removed from ``db``.
+    """
+    global _lock_engine
+    if _lock_engine is None:
+        _lock_engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    return async_sessionmaker(_lock_engine, expire_on_commit=False)
+
+
 def _redirect_uri() -> str:
     return f"{get_settings().base_url.rstrip('/')}{CALLBACK_PATH}"
 
@@ -140,7 +184,26 @@ async def start_provisioning(
     what that path wants, so the keyword is deliberately explicit rather than
     defaulted: a web caller that forgets it mints an install only an admin can
     finish — a TypeError, not a silently unattributed install.
+
+    A transaction-level advisory lock per agent, held on its own connection for the
+    whole call, makes a second concurrent provisioning for the same agent fail with
+    ``ProvisioningError`` instead of creating a second Slack app (RA-15).
     """
+    lock_factory = _lock_session_factory()
+    async with lock_factory() as lock_db:
+        got = await lock_db.scalar(
+            text(f"SELECT pg_try_advisory_xact_lock({entity_key_sql('provision')})"),
+            {"id": str(agent.id)},
+        )
+        if not got:
+            raise ProvisioningError("A Slack provisioning for this agent is already in progress")
+        return await _start_provisioning_locked(db, agent, initiated_by=initiated_by)
+
+
+async def _start_provisioning_locked(
+    db: AsyncSession, agent: AgentRegistry, *, initiated_by: User | None
+) -> str:
+    """The body of ``start_provisioning``, run while the per-agent lock is held."""
     redirect_uri = _redirect_uri()
 
     def _create(token: str) -> dict:
@@ -177,13 +240,22 @@ async def start_provisioning(
             raise ProvisioningError(f"Could not create the Slack app: {exc}")
 
     # Idempotency: a prior "Provision" click for this agent may have left a
-    # pending bridge row (holding a client_secret + reusable state). Drop any
-    # such rows so there is at most one live provisioning per agent (SEC-10).
-    await db.execute(
-        delete(SlackAppProvision).where(
-            SlackAppProvision.agent_registry_id == agent.id
-        )
-    )
+    # pending bridge row (holding a client_secret + reusable state) and a Slack app.
+    # Drop the rows so there is at most one live provisioning per agent (SEC-10),
+    # and delete the superseded app so it is not orphaned in the workspace (PS-17).
+    superseded = (await db.execute(select(SlackAppProvision).where(
+        SlackAppProvision.agent_registry_id == agent.id))).scalars().all()
+    for old in superseded:
+        if old.app_id:
+            try:
+                await asyncio.to_thread(delete_app, config_token, old.app_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete superseded Slack app %s: %s — delete it by hand",
+                    old.app_id, exc,
+                )
+        await db.delete(old)
+    await db.flush()
 
     state = secrets.token_urlsafe(32)
     db.add(SlackAppProvision(

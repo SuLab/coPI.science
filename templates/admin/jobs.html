@@ -21,7 +21,7 @@
     </div>
     {% endfor %}
     <div class="bg-white border rounded-lg p-3 text-center">
-        <div class="text-2xl font-bold text-gray-800">{{ jobs | length }}</div>
+        <div class="text-2xl font-bold text-gray-800">{{ total }}</div>
         <div class="text-xs text-gray-500 mt-1">Total</div>
     </div>
 </div>
@@ -100,6 +100,17 @@
         </tbody>
     </table>
 </div>
+
+{% if page_count > 1 %}
+{% set qs = ('&status_filter=' ~ status_filter if status_filter else '') ~ ('&type_filter=' ~ type_filter if type_filter else '') %}
+<div id="jobs-pager" class="flex items-center justify-between mt-4 text-sm text-gray-600">
+    <span>Page {{ page }} of {{ page_count }} ({{ total }} jobs)</span>
+    <span class="flex gap-3">
+        {% if page > 1 %}<a href="/admin/jobs?page={{ page - 1 }}{{ qs | e }}" class="text-indigo-600 hover:underline">&larr; Prev</a>{% endif %}
+        {% if page < page_count %}<a href="/admin/jobs?page={{ page + 1 }}{{ qs | e }}" class="text-indigo-600 hover:underline">Next &rarr;</a>{% endif %}
+    </span>
+</div>
+{% endif %}
 
 <script>
 function applyFilter() {

@@ -421,6 +421,13 @@ edited `.env`. For the web tier the equivalent is `$DC up -d --force-recreate
 blackbird-app` — and one `.env` key now fails the site closed if it is wrong,
 see "The Origin guard" in `docs/operations/pis-and-access.md`.
 
+**Graceful web shutdown (LC-01, operator step, compose file stays uncommitted — D5).**
+In the working tree's `docker-compose.prod.yml`, under `blackbird-app`, add
+`UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=5` to `environment:` and `stop_grace_period: 20s`,
+then `$DC up -d --force-recreate blackbird-app`. uvicorn 0.52.1 reads CLI options from
+`UVICORN_*` variables and has no graceful timeout by default (C13), so a streaming chat
+answer could otherwise hold shutdown until Docker's SIGKILL. Never commit this file.
+
 ### Simulation control plane (2026-08-30)
 
 `src.agent.supervisor` is now the `agent` service's `command` (see the

@@ -1,11 +1,13 @@
 """Invitation acceptance router."""
 
 import logging
+import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
@@ -187,48 +189,33 @@ async def _accept_invitation(
             {"request": request, "error": _INVITE_EMAIL_MISMATCH_MSG},
         )
 
-    # Check if already a delegate
-    existing = await db.execute(
-        select(AgentDelegate).where(
-            AgentDelegate.agent_registry_id == invitation.agent_registry_id,
-            AgentDelegate.user_id == user.id,
-        )
-    )
-    if existing.scalar_one_or_none():
-        # Already a delegate — just mark invitation and redirect
-        invitation.status = "accepted"
-        invitation.accepted_by_user_id = user.id
-        invitation.accepted_at = datetime.now(UTC)
-        await db.commit()
-
-        # Get agent_id for redirect
-        agent_result = await db.execute(
-            select(AgentRegistry.agent_id).where(
-                AgentRegistry.id == invitation.agent_registry_id
-            )
-        )
-        agent_id = agent_result.scalar_one()
-        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
-
-    # Create delegation
-    delegate = AgentDelegate(
-        agent_registry_id=invitation.agent_registry_id,
-        user_id=user.id,
-        invitation_id=invitation.id,
-    )
-    db.add(delegate)
-
-    # Mark invitation accepted
-    invitation.status = "accepted"
-    invitation.accepted_by_user_id = user.id
-    invitation.accepted_at = datetime.now(UTC)
-
-    # Try Slack sync
-    agent_result = await db.execute(
+    # Claim the invitation with a conditional UPDATE: of two racing accepts only one
+    # matches status = 'pending'. The delegate insert is ON CONFLICT DO NOTHING on
+    # the (agent, user) unique constraint, so a user who is already a delegate via
+    # another invitation is not an error either (RB-10).
+    claimed = (await db.execute(
+        update(DelegateInvitation)
+        .where(DelegateInvitation.id == invitation.id, DelegateInvitation.status == "pending")
+        .values(status="accepted", accepted_by_user_id=user.id, accepted_at=datetime.now(UTC))
+        .returning(DelegateInvitation.id)
+    )).scalar_one_or_none()
+    agent = (await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == invitation.agent_registry_id)
+    )).scalar_one()
+    if claimed is None:
+        # Another request accepted (or revoked) it first; the delegation, if any, exists.
+        await db.rollback()
+        return RedirectResponse(url=f"/agent/{agent.agent_id}/dashboard", status_code=302)
+    await db.execute(
+        pg_insert(AgentDelegate)
+        .values(id=uuid.uuid4(), agent_registry_id=invitation.agent_registry_id,
+                user_id=user.id, invitation_id=invitation.id)
+        .on_conflict_do_nothing(constraint="uq_agent_delegate_agent_user")
     )
-    agent = agent_result.scalar_one()
+    await db.commit()
 
+    # Slack sync runs after the commit: the delegation must not wait on (or roll
+    # back with) a network call. Best-effort, as before.
     if user.email:
         try:
             from src.services.slack_tokens import token_for_agent_row
@@ -244,9 +231,8 @@ async def _accept_invitation(
                     # C1). The dedup guard has to live in the SQL — a
                     # check-then-append in Python just re-races.
                     from sqlalchemy import text as sa_text
-                    from sqlalchemy import update as sa_update
                     await db.execute(
-                        sa_update(AgentRegistry)
+                        update(AgentRegistry)
                         .where(
                             AgentRegistry.id == agent.id,
                             sa_text(

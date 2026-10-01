@@ -83,7 +83,7 @@ from src.services.pi_onboarding import (
     find_or_create_pi_by_orcid,
 )
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
-from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
@@ -97,6 +97,7 @@ _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity
 _REVIEW = Depends(get_review_user)    # + reviewer — the four read handlers only
 _AGENT_FILTER = Query(default=[])
+_PAGE = Query(1, ge=1)
 
 #: The review-bot-drafted prompt-change queue. Read-only display cap
 #: — a reviewer never reaches this pair (get_staff_user, not get_review_user):
@@ -330,12 +331,15 @@ async def manager_edit_pi_profile(
 
     error = await apply_profile_edits(
         db, target_user=detail["user"], changed_by_user_id=current_user.id,
-        name=name, email=email, institution=institution, department=department,
-        research_summary=research_summary, techniques=techniques,
-        experimental_models=experimental_models, disease_areas=disease_areas,
-        key_targets=key_targets, keywords=keywords,
+        form={
+            "name": name, "email": email, "institution": institution,
+            "department": department, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
         jhu_tenure_start=jhu_tenure_start,
-        expected_profile_version=parse_expected_version(profile_version),
+        expected_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
@@ -357,12 +361,10 @@ async def _manager_set_mute(
             url=f"/manager/pis/{user_id}?error=no_agent", status_code=302
         )
 
-    ok = await set_agent_mute_state(
-        db, agent=agent, muted=muted, actor_user_id=current_user.id,
-    )
-    if not ok:
+    refusal = await set_agent_mute_state(db, agent=agent, muted=muted, actor=current_user)
+    if refusal is not None:
         return RedirectResponse(
-            url=f"/manager/pis/{user_id}?error=agent_not_mutable", status_code=302
+            url=f"/manager/pis/{user_id}?error={refusal}", status_code=302
         )
     return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 
@@ -407,7 +409,10 @@ async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid
         if user is None or profile is None:
             return
         publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
-        export_profile_to_markdown(user, profile, agent.agent_id, publications=publications)
+        await export_and_record(
+            db, user=user, profile=profile, agent=agent, publications=publications,
+            mechanism=None,
+        )
     except Exception:
         logger.exception("Failed to re-export profile markdown for user %s after veto", user_id)
 
@@ -417,7 +422,15 @@ async def manager_veto_grant(
     user_id: uuid.UUID, grant_id: uuid.UUID, request: Request,
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
-    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it."""
+    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it.
+
+    The profile row is locked so a concurrent profile edit or veto cannot interleave
+    its grant_titles write (RA-13).
+    """
+    profile = (await db.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+        .with_for_update()
+    )).scalar_one_or_none()
     grant = (await db.execute(
         select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
     )).scalar_one_or_none()
@@ -427,9 +440,6 @@ async def manager_veto_grant(
     remaining = (await db.execute(
         select(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None))
     )).scalars().all()
-    profile = (await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
-    )).scalar_one_or_none()
     if profile is not None:
         new_titles = derive_grant_titles([
             GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})
@@ -680,6 +690,7 @@ async def manager_discussions(
     channel_filter: str | None = None,
     status_filter: str | None = None,
     agent_filter: list[str] = _AGENT_FILTER,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
@@ -698,6 +709,7 @@ async def manager_discussions(
         channel_filter=channel_filter,
         status_filter=status_filter,
         agent_filter=agent_filter,
+        page=page,
     )
     # What the panel was asked, and what it said, per thread — the same cards
     # /admin/discussions shows, minus the verbatim reply. A domain, a signal, a
@@ -747,12 +759,13 @@ async def manager_activity(
 async def manager_activity_detail(
     run_id: uuid.UUID,
     request: Request,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
     """One run's per-agent and per-channel stats. There is deliberately no
     llm-calls drill-down here (D10)."""
-    view = await build_run_detail(db, run_id)
+    view = await build_run_detail(db, run_id, page=page)
     if view is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return templates.TemplateResponse(

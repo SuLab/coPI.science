@@ -2,16 +2,16 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user, get_pi_user
+from src.dependencies import get_current_user, get_pi_user, refuse_impersonation
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
-from src.models.user import USER_ROLE_ADMIN
+from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
@@ -159,11 +159,14 @@ async def profile_save(
     """
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
-        name=name, email=email, institution=institution, department=department,
-        research_summary=research_summary, techniques=techniques,
-        experimental_models=experimental_models, disease_areas=disease_areas,
-        key_targets=key_targets, keywords=keywords,
-        expected_profile_version=parse_expected_version(profile_version),
+        form={
+            "name": name, "email": email, "institution": institution,
+            "department": department, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)
@@ -215,11 +218,7 @@ async def delete_account(
     audit F8). Admins delete accounts through /admin/users/{id}/delete,
     which logs the actor.
     """
-    if getattr(current_user, "_is_impersonated", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Account deletion is disabled while impersonating.",
-        )
+    refuse_impersonation(current_user, "Account deletion is disabled while impersonating.")
 
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
@@ -227,17 +226,10 @@ async def delete_account(
     # The same "at least one admin can still log in" invariant the role
     # route defends (src/routers/admin/users.py) — deletion is the other door out
     # of adminhood, and it had no guard (deletion audit F7).
-    if current_user.user_role == USER_ROLE_ADMIN:
-        admin_count = await db.scalar(
-            select(func.count(User.id)).where(
-                User.user_role == USER_ROLE_ADMIN,
-                User.access_status == "allowed",
-            )
-        )
-        if (admin_count or 0) <= 1:
-            return RedirectResponse(
-                url="/profile/delete-account?error=last_admin", status_code=302
-            )
+    try:
+        await ensure_admin_remains(db, user=current_user)
+    except LastAdminError:
+        return RedirectResponse(url="/profile/delete-account?error=last_admin", status_code=302)
 
     await delete_user_account(db, current_user)
 

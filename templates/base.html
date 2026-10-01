@@ -57,7 +57,7 @@
                 </a>
                 {% if current_user %}
                 <div class="ml-8 flex flex-wrap gap-x-4 gap-y-1">
-                    {% if current_user.user_role == 'pi' or current_user.is_admin %}
+                    {% if current_user.may_use_pi_surfaces %}
                     <a href="/profile" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'profile' %}text-indigo-600 font-semibold{% endif %}">
                         My Profile
@@ -67,7 +67,7 @@
                         {% if active_page == 'settings' %}text-indigo-600 font-semibold{% endif %}">
                         Settings
                     </a>
-                    {% if current_user.user_role == 'pi' or current_user.is_admin %}
+                    {% if current_user.may_use_pi_surfaces %}
                     <a href="/agent" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium relative
                         {% if active_page == 'agent' %}text-indigo-600 font-semibold{% endif %}">
                         My Agent

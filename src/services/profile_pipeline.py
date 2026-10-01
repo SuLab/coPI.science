@@ -736,7 +736,6 @@ async def _export_profile(run: PipelineRun) -> None:
     agent_reg = run.agent_reg
     # agent_reg was loaded before step 3 (the tenure map needed it);
     # it gates file export and revision here.
-    agent_id = agent_reg.agent_id if agent_reg else None
 
     # A concurrent account deletion can commit while this pipeline is between
     # flushes (the worker holds no lock on the users row). Re-check before the
@@ -760,28 +759,19 @@ async def _export_profile(run: PipelineRun) -> None:
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
     # tenure_start is already resolved above, so scope the rows already
     # loaded here rather than re-querying it via scoped_publications_for_export.
-    from src.services.profile_export import export_profile_to_markdown
+    from src.services.profile_publish import export_and_record
     from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
         select(Publication).where(Publication.user_id == user.id)
     )
     user_pubs = scope_for_export(pub_result.scalars().all(), run.tenure_start)
-    exported_path = export_profile_to_markdown(
-        user, profile, agent_id, publications=user_pubs
-    )
 
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    if agent_reg and exported_path:
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="public",
-            content=exported_path.read_text(encoding="utf-8"),
-            mechanism="pipeline",
-            change_summary="Profile generated from ORCID + PubMed",
-        )
-        await db.flush()
+    # Record the revision alongside the export.
+    await export_and_record(
+        db, user=user, profile=profile, agent=agent_reg, publications=user_pubs,
+        mechanism="pipeline", change_summary="Profile generated from ORCID + PubMed",
+    )
+    await db.flush()
 
     await run.progress("complete", "Profile generation complete.")
 

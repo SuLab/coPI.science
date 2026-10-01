@@ -114,7 +114,7 @@ async def test_veto_reexports_profile_markdown_when_pi_has_an_agent(client, db_s
     db_session.add(g)
     await db_session.commit()
 
-    with patch("src.routers.manager.export_profile_to_markdown") as mock_export:
+    with patch("src.services.profile_publish.export_profile_to_markdown") as mock_export:
         r = await client.post(
             f"/manager/pis/{pi.id}/grants/{g.id}/veto", data={}, headers=auth_headers(mgr.id),
             follow_redirects=False,
@@ -136,7 +136,7 @@ async def test_veto_skips_reexport_when_pi_has_no_agent(client, db_session):
     db_session.add(g)
     await db_session.commit()
 
-    with patch("src.routers.manager.export_profile_to_markdown") as mock_export:
+    with patch("src.services.profile_publish.export_profile_to_markdown") as mock_export:
         r = await client.post(
             f"/manager/pis/{pi.id}/grants/{g.id}/veto", data={}, headers=auth_headers(mgr.id),
             follow_redirects=False,

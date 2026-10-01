@@ -218,8 +218,9 @@ doc's §8.
   in person). The four non-review actions on that router —
   reviewer assign, unassign, prompt-suggestion generate, and prompt-suggestion
   status — still refuse an
-  impersonated session outright (`_refuse_impersonation`,
-  `src/routers/reviews.py`).
+  impersonated session outright (`refuse_impersonation`,
+  `src/dependencies.py`, shared with the admin role and delete routes and
+  `POST /profile/delete-account`).
 - **Admin** — everything, including `/admin/*` and impersonation.
 
 `is_manager` means exactly `user_role == 'manager'`. The "may see the manager views"
@@ -227,6 +228,21 @@ predicate is **`is_staff`** (admin OR manager). **Never widen `is_admin`** — i
 (`src/dependencies.py`, and a duplicate check in `src/main.py`) is gated on it and
 returns a fully substituted user, so a manager satisfying `is_admin` would be a full
 privilege escalation.
+
+**One PI-surface rule.** `User.may_use_pi_surfaces` (`src/models/user.py`) is
+`user_role in (pi, admin)`: the nav links in `base.html`, `get_pi_user`, the
+onboarding bounce and the post-login onboarding redirect all read it. It is an
+allowlist, so a role added later is excluded from the PI surfaces until listed,
+and for every role in `VALID_USER_ROLES` it equals the old
+`not (is_manager or is_reviewer)`. Each excluded role keeps its own landing page.
+
+**Impersonation.** `refuse_impersonation`, `recorded_by` and `impersonation_note`
+live in `src/dependencies.py`. Role changes (`POST /admin/users/{id}/role`) are
+refused under impersonation (403), as are account deletions. Writes on the agent
+page (`/agent/*`) made while impersonating are attributed to the impersonated
+user, with `impersonated by admin <uuid>` in the log line; a public-profile save
+records its revision with mechanism `web_impersonated` and that note as the
+change summary.
 
 **Exclude `manager`, never "non-PI".** An admin is not a `pi` either, and admins keep
 the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 'pi'`
@@ -249,7 +265,14 @@ against a PI they name.
 
 Appoint from **/admin/users/{id} → Account Type**. The last admin cannot be demoted
 there (that guard counts only admins with `access_status='allowed'` — a denied admin
-cannot log in, so counting one would just make demotion easier). If no admin can log in at all, recover from a container shell:
+cannot log in, so counting one would just make demotion easier). The check,
+`ensure_admin_remains` (`src/services/admin_invariant.py`), takes the
+`ADMIN_INVARIANT_LOCK_KEY` advisory transaction lock before counting, and both doors
+out of adminhood (the role route and `POST /profile/delete-account`) call it, so two
+concurrent demotions cannot both pass. The lock is held to the caller's commit.
+Not covered: an admin deleted by another admin (`/admin/users/{id}/delete`) or
+denied access does not go through this check (open-findings rows
+`2026-09-30/W-admin-cross-delete` and `2026-09-30/W-admin-access-denial`). If no admin can log in at all, recover from a container shell:
 
     docker compose -f docker-compose.prod.yml exec blackbird-app \
       python -m src.cli role:set --orcid 0000-0000-0000-0000 --role admin

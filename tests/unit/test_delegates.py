@@ -135,8 +135,8 @@ class TestGetAgentWithAccess:
 class TestEmailService:
     def test_imports(self):
         """Email service is importable."""
-        from src.services.email import send_delegate_invitation
-        assert callable(send_delegate_invitation)
+        from src.services.email import send_transactional_email
+        assert callable(send_transactional_email)
 
 
 # ---------------------------------------------------------------

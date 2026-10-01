@@ -8,6 +8,7 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import Match
 
@@ -136,6 +137,135 @@ async def login_start(request: Request):
     return RedirectResponse(url=authorization_url, status_code=302)
 
 
+async def _create_new_user(
+    db: AsyncSession, *, orcid_id: str, orcid_name: str, profile_data: dict,
+    allowlist_entry, resolved_email: str | None,
+) -> User | None:
+    """Insert a first-login user; None when a concurrent first login for the same
+    ORCID won the `users.orcid` unique race (RB-11), after rolling back only the
+    savepoint so the caller re-selects the winner's row."""
+    is_allowlisted = allowlist_entry is not None
+    # Create new user — pending unless allowlisted
+    user = User(
+        orcid=orcid_id,
+        name=profile_data.get("name") or orcid_name,
+        institution=profile_data.get("institution"),
+        department=profile_data.get("department"),
+        access_status="allowed" if is_allowlisted else "pending",
+    )
+    try:
+        async with db.begin_nested():
+            db.add(user)
+            await db.flush()  # Get the ID
+    except IntegrityError:
+        return None
+    # Through the one writer: an address another account already holds is
+    # refused and the login proceeds without an email.
+    if resolved_email:
+        await assign_user_email(db, user, resolved_email)
+
+    # Only enqueue profile generation for allowed users
+    if user.access_status == "allowed":
+        await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
+        logger.info("Created allowed user %s (%s), enqueued profile job", user.id, orcid_id)
+    else:
+        logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
+    return user
+
+
+async def _find_or_create_user(
+    db: AsyncSession, *, orcid_id: str, orcid_name: str, profile_data: dict,
+    allowlist_entry,
+) -> User:
+    """The user for this ORCID: created on first login, otherwise refreshed from
+    the ORCID profile and the allowlist. Does not commit."""
+    is_allowlisted = allowlist_entry is not None
+
+    # Resolve a best-effort email: prefer the ORCID-published address, else fall
+    # back to the allowlist hint. Structured so more strategies can chain later.
+    resolved_email = profile_data.get("email") or (
+        allowlist_entry.email if allowlist_entry else None
+    )
+
+    # Find or create user
+    result = await db.execute(select(User).where(User.orcid == orcid_id))
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        user = await _create_new_user(
+            db, orcid_id=orcid_id, orcid_name=orcid_name, profile_data=profile_data,
+            allowlist_entry=allowlist_entry, resolved_email=resolved_email,
+        )
+        if user is not None:
+            return user
+        # A concurrent first login created the row: continue as an existing user.
+        user = (await db.execute(select(User).where(User.orcid == orcid_id))).scalar_one()
+
+    # Existing user — update name/institution/department/email if empty
+    if not user.name and profile_data.get("name"):
+        user.name = profile_data["name"]
+    if not user.institution and profile_data.get("institution"):
+        user.institution = profile_data["institution"]
+    if not user.department and profile_data.get("department"):
+        user.department = profile_data["department"]
+    if not user.email and resolved_email:
+        await assign_user_email(db, user, resolved_email)
+    # Allowlist can promote an existing PENDING user to allowed.
+    # 'denied' is an explicit admin decision and must not be overruled
+    # by a seed list (deletion audit 2026-08-25, F6).
+    if is_allowlisted and user.access_status == "pending":
+        user.access_status = "allowed"
+        from src.models import ResearcherProfile
+        profile_check = await db.execute(
+            select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
+        )
+        if profile_check.scalar_one_or_none() is None:
+            await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
+    # Set claimed_at if this was a seeded profile
+    if user.claimed_at is None:
+        user.claimed_at = datetime.now(timezone.utc)
+    logger.info("Existing user %s logged in (access=%s)", user.id, user.access_status)
+    return user
+
+
+def _post_login_redirect(request: Request, user: User) -> RedirectResponse:
+    """Where a freshly logged-in, allowed user goes; writes the session keys."""
+    # Set session
+    request.session["user_id"] = str(user.id)
+    request.session.pop("pending_access", None)
+
+    # Check for pending invite token — skip onboarding, go straight to acceptance
+    pending_token = request.session.pop("pending_invite_token", None)
+    if pending_token:
+        request.session.pop(POST_LOGIN_KEY, None)
+        return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
+
+    # New PIs go through onboarding first; the saved destination is left in the
+    # session and consumed when onboarding completes. A MANAGER is not a PI
+    # (D7) and has no research profile to review, so it skips onboarding —
+    # without this a manager is sent to a page whose only exit is saving a
+    # research profile (POST /onboarding/save-profile is the sole write of
+    # onboarding_complete in src/). A REVIEWER is neither staff nor
+    # PI and has no research profile either, so it skips onboarding too.
+    #
+    # Admins are excluded from the skip, not included in it: they keep the PI
+    # surfaces (base.html still shows them My Profile / My Agent), so sending
+    # an admin with incomplete onboarding anywhere but /onboarding just defers
+    # the same bounce one hop, via /profile.
+    if not user.onboarding_complete and user.may_use_pi_surfaces:
+        return RedirectResponse(url="/onboarding", status_code=302)
+
+    # Resume the page the user originally requested, if any.
+    next_url = pop_post_login_redirect(request)
+    if next_url:
+        return RedirectResponse(url=next_url, status_code=302)
+    if user.is_manager:
+        return RedirectResponse(url="/manager/pis", status_code=302)
+    if user.is_reviewer:
+        return RedirectResponse(url="/manager/assessments", status_code=302)
+    return RedirectResponse(url="/profile", status_code=302)
+
+
 @router.get("/auth/callback")
 async def auth_callback(
     request: Request,
@@ -199,65 +329,11 @@ async def auth_callback(
         select(AccessAllowlist).where(AccessAllowlist.orcid == orcid_id)
     )
     allowlist_entry = allowlist_result.scalar_one_or_none()
-    is_allowlisted = allowlist_entry is not None
 
-    # Resolve a best-effort email: prefer the ORCID-published address, else fall
-    # back to the allowlist hint. Structured so more strategies can chain later.
-    resolved_email = profile_data.get("email") or (
-        allowlist_entry.email if allowlist_entry else None
+    user = await _find_or_create_user(
+        db, orcid_id=orcid_id, orcid_name=orcid_name,
+        profile_data=profile_data, allowlist_entry=allowlist_entry,
     )
-
-    # Find or create user
-    result = await db.execute(select(User).where(User.orcid == orcid_id))
-    user = result.scalar_one_or_none()
-
-    if user is None:
-        # Create new user — pending unless allowlisted
-        user = User(
-            orcid=orcid_id,
-            name=profile_data.get("name") or orcid_name,
-            institution=profile_data.get("institution"),
-            department=profile_data.get("department"),
-            access_status="allowed" if is_allowlisted else "pending",
-        )
-        db.add(user)
-        await db.flush()  # Get the ID
-        # Through the one writer: an address another account already holds is
-        # refused and the login proceeds without an email.
-        if resolved_email:
-            await assign_user_email(db, user, resolved_email)
-
-        # Only enqueue profile generation for allowed users
-        if user.access_status == "allowed":
-            await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
-            logger.info("Created allowed user %s (%s), enqueued profile job", user.id, orcid_id)
-        else:
-            logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
-    else:
-        # Existing user — update name/institution/department/email if empty
-        if not user.name and profile_data.get("name"):
-            user.name = profile_data["name"]
-        if not user.institution and profile_data.get("institution"):
-            user.institution = profile_data["institution"]
-        if not user.department and profile_data.get("department"):
-            user.department = profile_data["department"]
-        if not user.email and resolved_email:
-            await assign_user_email(db, user, resolved_email)
-        # Allowlist can promote an existing PENDING user to allowed.
-        # 'denied' is an explicit admin decision and must not be overruled
-        # by a seed list (deletion audit 2026-08-25, F6).
-        if is_allowlisted and user.access_status == "pending":
-            user.access_status = "allowed"
-            from src.models import ResearcherProfile
-            profile_check = await db.execute(
-                select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
-            )
-            if profile_check.scalar_one_or_none() is None:
-                await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
-        # Set claimed_at if this was a seeded profile
-        if user.claimed_at is None:
-            user.claimed_at = datetime.now(timezone.utc)
-        logger.info("Existing user %s logged in (access=%s)", user.id, user.access_status)
 
     if user.access_status == "allowed":
         user.last_login_at = datetime.now(timezone.utc)
@@ -275,40 +351,7 @@ async def auth_callback(
         }
         return RedirectResponse(url="/access-pending", status_code=302)
 
-    # Set session
-    request.session["user_id"] = str(user.id)
-    request.session.pop("pending_access", None)
-
-    # Check for pending invite token — skip onboarding, go straight to acceptance
-    pending_token = request.session.pop("pending_invite_token", None)
-    if pending_token:
-        request.session.pop(POST_LOGIN_KEY, None)
-        return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
-
-    # New PIs go through onboarding first; the saved destination is left in the
-    # session and consumed when onboarding completes. A MANAGER is not a PI
-    # (D7) and has no research profile to review, so it skips onboarding —
-    # without this a manager is sent to a page whose only exit is saving a
-    # research profile (POST /onboarding/save-profile is the sole write of
-    # onboarding_complete in src/). A REVIEWER is neither staff nor
-    # PI and has no research profile either, so it skips onboarding too.
-    #
-    # Admins are excluded from the skip, not included in it: they keep the PI
-    # surfaces (base.html still shows them My Profile / My Agent), so sending
-    # an admin with incomplete onboarding anywhere but /onboarding just defers
-    # the same bounce one hop, via /profile.
-    if not user.onboarding_complete and not user.is_manager and not user.is_reviewer:
-        return RedirectResponse(url="/onboarding", status_code=302)
-
-    # Resume the page the user originally requested, if any.
-    next_url = pop_post_login_redirect(request)
-    if next_url:
-        return RedirectResponse(url=next_url, status_code=302)
-    if user.is_manager:
-        return RedirectResponse(url="/manager/pis", status_code=302)
-    if user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
-    return RedirectResponse(url="/profile", status_code=302)
+    return _post_login_redirect(request, user)
 
 
 @router.post("/logout")

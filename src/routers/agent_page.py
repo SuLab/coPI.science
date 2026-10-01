@@ -2,27 +2,43 @@
 
 import asyncio
 import logging
+import re
+import secrets
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import distinct, func, select, tuple_
+from sqlalchemy import text as sa_text
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
-from src.dependencies import get_agent_with_access, get_current_user, get_pi_user
+from src.dependencies import (
+    get_agent_with_access,
+    get_current_user,
+    get_pi_user,
+    impersonation_note,
+)
 from src.models import (
     AgentDelegate,
     AgentMessage,
     AgentRegistry,
+    DelegateInvitation,
     ResearcherProfile,
     User,
 )
 from src.services.agent_identity import derive_agent_identity
-from src.services.profile_edit import parse_expected_version, write_profile_text_fields
-from src.services.profile_export import export_profile_to_markdown
+from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+from src.services.email import build_delegate_invitation, send_transactional_email
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.runs import latest_run_id
+from src.services.slack_tokens import get_any_bot_token
+from src.services.slack_web import get_user_info, lookup_user_by_email_async
 from src.services.validators import is_valid_email
 from src.web.templating import make_templates
 
@@ -197,7 +213,6 @@ async def agent_dashboard(
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
-        from src.services.slack_tokens import get_any_bot_token
         # to_thread because _resolve_delegate_names is sync and calls
         # slack_web.get_user_info once per delegate, each of which can retry with
         # backoff. Run inline it would block the event loop for every other
@@ -208,7 +223,6 @@ async def agent_dashboard(
         )
 
     # Pending invitations (for PI view)
-    from src.models import DelegateInvitation
     pending_invitations = []
     if is_owner:
         pending_result = await db.execute(
@@ -306,8 +320,23 @@ async def request_agent(
         pi_name=current_user.name,
         status="pending",
     )
+    user_id = current_user.id  # read before a rollback expires the instance
     db.add(agent)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A double submit lost the race on agents.user_id (the first request created
+        # the lab); anything else, such as an agent_id collision with another user,
+        # is a real error and propagates (RB-11).
+        await db.rollback()
+        mine = await db.execute(select(AgentRegistry.id).where(AgentRegistry.user_id == user_id))
+        if mine.scalar_one_or_none() is None:
+            raise
+        return RedirectResponse(url="/agent", status_code=302)
+    logger.info(
+        "agent %s: requested by %s (%s)",
+        agent_id, current_user.id, impersonation_note(current_user) or "direct",
+    )
 
     return RedirectResponse(url="/agent", status_code=302)
 
@@ -332,9 +361,6 @@ async def agent_conversations(
     Slack-independent window onto what the agent's workspace is discussing.
     See specs/local-db-conversations.md.
     """
-    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.runs import latest_run_id
-
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         return RedirectResponse(url="/agent", status_code=302)
@@ -460,9 +486,6 @@ async def agent_thread_replies(
     by clicking, and a future reader should not "fix" this back toward engine
     parity.
     """
-    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
-    from src.services.runs import latest_run_id
-
     agent, _is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
         raise HTTPException(status_code=404)
@@ -522,10 +545,6 @@ async def agent_thread_replies(
 # --------------------------------------------------------------------------
 # Public profile view/edit (PI and delegates)
 # --------------------------------------------------------------------------
-
-
-def _parse_list(val: str) -> list[str]:
-    return [s.strip() for s in val.split(",") if s.strip()]
 
 
 @router.get("/{agent_id}/public-profile", response_class=HTMLResponse)
@@ -629,60 +648,28 @@ async def save_public_profile(
             detail="This lab is no longer linked to a PI account",
         )
 
-    # Update the PI's profile
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
+    note = impersonation_note(current_user)
+    pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
+    error = await apply_profile_edits(
+        db, target_user=pi_user, changed_by_user_id=current_user.id,
+        form={
+            "research_summary": research_summary, "techniques": techniques,
+            "experimental_models": experimental_models, "disease_areas": disease_areas,
+            "key_targets": key_targets, "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
+        export_agent=agent,
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=agent.user_id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's VALUES,
-        # which cannot reference its own target table ("invalid reference to
-        # FROM-clause entry for table researcher_profiles").
-        await db.flush()
-
-    written = await write_profile_text_fields(db, profile, {
-        "research_summary": research_summary,
-        "techniques": _parse_list(techniques),
-        "experimental_models": _parse_list(experimental_models),
-        "disease_areas": _parse_list(disease_areas),
-        "key_targets": _parse_list(key_targets),
-        "keywords": _parse_list(keywords),
-    }, parse_expected_version(profile_version))
-    if not written:
-        await db.rollback()
+    if error:
         return RedirectResponse(
-            url=f"/agent/{agent_id}/public-profile/edit?error=profile_changed", status_code=302,
+            url=f"/agent/{agent_id}/public-profile/edit?error={error}", status_code=302,
         )
-    await db.commit()
-
-    # Export to markdown for agent consumption (tenure-scoped publications)
-    pi_result = await db.execute(select(User).where(User.id == agent.user_id))
-    pi_user = pi_result.scalar_one()
-    from src.services.tenure_scope import scoped_publications_for_export
-    user_pubs = await scoped_publications_for_export(db, agent.user_id, agent.agent_id)
-    exported_path = export_profile_to_markdown(
-        pi_user, profile, agent.agent_id, publications=user_pubs
-    )
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    content = exported_path.read_text(encoding="utf-8") if exported_path else ""
-    await create_revision(
-        db,
-        agent_registry_id=agent.id,
-        profile_type="public",
-        content=content,
-        changed_by_user_id=current_user.id,
-        mechanism="web",
-    )
-    await db.commit()
 
     logger.info(
-        "Public profile for agent %s updated by %s",
-        agent.agent_id, current_user.name,
+        "Public profile for agent %s updated by %s (%s)",
+        agent.agent_id, current_user.name, note or "direct",
     )
 
     return RedirectResponse(
@@ -696,8 +683,6 @@ def _resolve_delegate_names(slack_ids: list[str], bot_token: str | None) -> list
     A name that will not resolve falls back to the raw id — this only feeds the
     dashboard's delegate list, so one unresolvable id must not blank the rest.
     """
-    from src.services.slack_web import get_user_info
-
     if not bot_token:
         return [{"slack_id": sid, "name": sid} for sid in slack_ids]
 
@@ -732,6 +717,8 @@ async def delegate_connect_slack(
 ):
     """Let a delegate link their Slack account to this agent."""
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
+    logger.info("agent %s: Slack connect by %s (%s)", agent.agent_id, current_user.id, note or "direct")
 
     if not current_user.email:
         return RedirectResponse(
@@ -741,9 +728,6 @@ async def delegate_connect_slack(
 
     error = None
     try:
-        from src.services.slack_tokens import get_any_bot_token
-        from src.services.slack_web import lookup_user_by_email_async
-
         bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available."
@@ -765,8 +749,6 @@ async def delegate_connect_slack(
                 # in Python just re-races. Commit unconditionally now: when the
                 # id is already present the UPDATE matches no row and the
                 # commit is a no-op.
-                from sqlalchemy import text as sa_text
-                from sqlalchemy import update as sa_update
                 await db.execute(
                     sa_update(AgentRegistry)
                     .where(
@@ -810,16 +792,20 @@ async def invite_delegate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Send delegate invitation(s) by email."""
-    import re
-    import secrets
-    from datetime import datetime, timedelta
+    """Send delegate invitation(s) by email.
 
-    from src.config import get_settings
-    from src.models import DelegateInvitation
-    from src.services.email import send_delegate_invitation
-
+    The agent row is locked FOR UPDATE for the request, so two concurrent invites
+    serialize and the "already pending" check sees the first one's row (there is no
+    unique constraint on pending invitations). The emails go out only after the
+    commit, so none announces an invitation that then rolls back.
+    """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent = (await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalar_one()
+    note = impersonation_note(current_user)
+    logger.info("agent %s: delegate invite by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
     if agent.status != "active":
@@ -835,7 +821,7 @@ async def invite_delegate(
     ]
 
     errors = []
-    sent_count = 0
+    to_send: list[tuple[str, str]] = []
     for email in email_list:
         # Basic validation (length-capped to avoid ReDoS; see SEC-16)
         if not is_valid_email(email):
@@ -885,12 +871,15 @@ async def invite_delegate(
         db.add(invitation)
         await db.flush()  # Get the ID
 
-        # Send email (non-blocking — invitation is created regardless)
-        invite_url = f"{settings.base_url}/invite/{token}"
-        send_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
-        sent_count += 1
+        to_send.append((email, f"{settings.base_url}/invite/{token}"))
 
     await db.commit()
+
+    # The invitation exists regardless of whether the email gets through.
+    for email, invite_url in to_send:
+        await send_transactional_email(
+            build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
+        )
 
     error_msg = "; ".join(errors) if errors else ""
     if error_msg:
@@ -910,9 +899,9 @@ async def revoke_invitation(
     current_user: User = Depends(get_current_user),
 ):
     """Revoke a pending delegate invitation."""
-    from src.models import DelegateInvitation
-
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
+    logger.info("agent %s: invitation revoke by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
 
@@ -941,6 +930,7 @@ async def remove_delegate(
 ):
     """Remove an active delegate."""
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    note = impersonation_note(current_user)
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
 
@@ -957,9 +947,6 @@ async def remove_delegate(
         # Remove Slack ID if present
         if delegate.user.email and agent.delegate_slack_ids:
             try:
-                from src.services.slack_tokens import get_any_bot_token
-                from src.services.slack_web import lookup_user_by_email_async
-
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
                     sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
@@ -967,8 +954,6 @@ async def remove_delegate(
                     # the read-remove-reassign wrote the whole array back and
                     # lost a concurrent append (issue #22 C1). NULLIF preserves
                     # the old "empty means NULL" shape of this column.
-                    from sqlalchemy import text as sa_text
-                    from sqlalchemy import update as sa_update
                     if sid:
                         await db.execute(
                             sa_update(AgentRegistry)
@@ -985,8 +970,8 @@ async def remove_delegate(
         await db.delete(delegate)
         await db.commit()
         logger.info(
-            "Delegate %s removed from agent %s by %s",
-            delegate.user_id, agent.agent_id, current_user.name,
+            "Delegate %s removed from agent %s by %s (%s)",
+            delegate.user_id, agent.agent_id, current_user.name, note or "direct",
         )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

@@ -14,6 +14,7 @@ logged; silence is not an option, activation-by-default is not either.
 import pytest
 
 from src.models import USER_ROLE_ADMIN, Job
+from src.services.agent_form import agent_form_version
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -25,7 +26,10 @@ async def _admin(db_session):
 
 
 def _approve_form(agent, **extra):
-    form = {"agent_slug": agent.agent_id, "bot_name": agent.bot_name}
+    form = {
+        "agent_slug": agent.agent_id, "bot_name": agent.bot_name,
+        "form_version": agent_form_version(agent),
+    }
     form.update(extra)
     return form
 

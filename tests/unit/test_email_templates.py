@@ -5,12 +5,14 @@ All CoPI emails wrap their content between ``email_shell_open()`` and
 footer. The footer tagline reads "... SU LAB, Scripps Research".
 """
 
+from src.services import email as email_svc
 from src.services.email import (
     FOOTER_TAGLINE,
+    build_delegate_invitation,
     build_welcome_email,
     email_shell_close,
     email_shell_open,
-    send_delegate_invitation,
+    send_transactional_email,
 )
 
 
@@ -72,14 +74,14 @@ def test_welcome_email_uses_shared_footer():
     assert "/settings/unsubscribe/" not in text
 
 
-def test_delegate_invitation_uses_shared_branding(monkeypatch):
+async def test_delegate_invitation_uses_shared_branding(monkeypatch):
     """Transactional invite shares the wrapper + tagline but has no unsubscribe."""
     from src.config import get_settings
 
     # Hermetic: the test's premise is an unrestricted recipient allowlist (the
     # field's own default, "" = send to everyone). Pin it rather than inherit
     # whatever OUTBOUND_EMAIL_ALLOWLIST the deployed .env on this host sets —
-    # otherwise send_delegate_invitation silently no-ops and returns False.
+    # otherwise send_transactional_email silently no-ops and returns False.
     monkeypatch.setenv("OUTBOUND_EMAIL_ALLOWLIST", "")
     get_settings.cache_clear()
     try:
@@ -89,13 +91,11 @@ def test_delegate_invitation_uses_shared_branding(monkeypatch):
             def send_email(self, **kwargs):
                 captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
 
-        import boto3
+        monkeypatch.setattr(email_svc, "_ses_client", lambda region: _FakeSES())
 
-        monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
-
-        assert send_delegate_invitation(
+        assert await send_transactional_email(build_delegate_invitation(
             "colleague@example.com", "Dr. PI", "PIBot", "https://copi.science/invite/abc"
-        )
+        ))
         html = captured["html"]
         assert html.lstrip().startswith('<div style="font-family')
         assert FOOTER_TAGLINE in html
@@ -104,7 +104,7 @@ def test_delegate_invitation_uses_shared_branding(monkeypatch):
         get_settings.cache_clear()
 
 
-def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
+async def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
     """PI-chosen pi_name/bot_name must be HTML-escaped in the invite body (SEC-13)."""
     from src.config import get_settings
 
@@ -121,16 +121,14 @@ def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
                 captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
                 captured["subject"] = kwargs["Message"]["Subject"]["Data"]
 
-        import boto3
+        monkeypatch.setattr(email_svc, "_ses_client", lambda region: _FakeSES())
 
-        monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
-
-        assert send_delegate_invitation(
+        assert await send_transactional_email(build_delegate_invitation(
             "colleague@example.com",
             '<img src=x onerror=alert(1)>',
             '<script>alert(2)</script>',
             "https://copi.science/invite/abc",
-        )
+        ))
         html = captured["html"]
         assert "<img src=x onerror=alert(1)>" not in html
         assert "<script>alert(2)</script>" not in html

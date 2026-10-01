@@ -1,7 +1,7 @@
 """The /admin/simulation Live tab's view model and SVG composition, for ONE run (spec §7.3; moved from the admin router)."""
 
 import uuid
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -20,6 +20,7 @@ from src.models import (
 )
 from src.services import display_format as fmt
 from src.services.build_info import API_CALL_UNITS_NOTE
+from src.services.runs import runs_ordered
 from src.services.simulation_control import HEARTBEAT_STALE_SECONDS
 from src.services.simulation_stats import (
     CALL_STATS_ROW_LIMIT,
@@ -29,6 +30,7 @@ from src.services.simulation_stats import (
     cost_by_stage,
     cost_per_interview,
     cost_summary,
+    fetch_call_stat_rows,
     funnel,
     hourly_activity,
     hub_lab_burn,
@@ -140,9 +142,7 @@ async def _resolve_selected_run(
     """`?run=<uuid>`, defaulting to the latest run by `started_at`. An absent,
     malformed, or unknown `run` param all fall back to the default rather than
     erroring — the selector is a convenience, not a hard filter that can 404."""
-    runs = (
-        await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()))
-    ).scalars().all()
+    runs = await runs_ordered(db)
     selected = None
     run_param = request.query_params.get("run")
     if run_param:
@@ -442,6 +442,32 @@ def _burn_line(burn_points) -> str | None:
     return burn_line_html
 
 
+#: Stats of ENDED runs never change except by a resume, which reopens the run and
+#: changes ended_at, so (run_id, ended_at) is a safe key. Bounded (RA-06).
+_ENDED_RUN_STATS: OrderedDict[tuple, dict] = OrderedDict()
+_ENDED_RUN_STATS_MAX = 8
+
+
+async def _call_stat_aggregates(db: AsyncSession, run: SimulationRun):
+    """(stop-reason taxonomy, latency percentiles) from ONE `call_stats` fetch;
+    an ended run's pair is cached so a re-render does not refetch."""
+    cache_key = (run.id, run.ended_at) if run.status != "running" and run.ended_at else None
+    cached = _ENDED_RUN_STATS.get(cache_key) if cache_key else None
+    if cached is None:
+        call_rows = await fetch_call_stat_rows(db, run.id)
+        cached = {
+            "taxonomy": await stop_reason_taxonomy(db, run.id, rows=call_rows),
+            "latency": await latency_percentiles(db, run.id, rows=call_rows),
+        }
+        if cache_key:
+            _ENDED_RUN_STATS[cache_key] = cached
+            while len(_ENDED_RUN_STATS) > _ENDED_RUN_STATS_MAX:
+                _ENDED_RUN_STATS.popitem(last=False)
+    elif cache_key:
+        _ENDED_RUN_STATS.move_to_end(cache_key)
+    return cached["taxonomy"], cached["latency"]
+
+
 async def live_tab_context(
     db: AsyncSession,
     request: Request,
@@ -475,8 +501,7 @@ async def live_tab_context(
     domains = await specialist_mix(db, run_id)
     fanout = await consult_fanout(db, run_id)
     agents = await per_agent(db, run_id)
-    taxonomy = await stop_reason_taxonomy(db, run_id)
-    latency = await latency_percentiles(db, run_id)
+    taxonomy, latency = await _call_stat_aggregates(db, selected_run)
     timeline = await interview_timeline(db, run_id)
     per_interview = await cost_per_interview(db, run_id)
     stage_costs = await cost_by_stage(db, run_id)

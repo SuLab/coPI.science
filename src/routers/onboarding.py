@@ -4,35 +4,22 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
-from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.models import Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
-from src.services.profile_edit import parse_expected_version, write_profile_text_fields
+from src.services.email import build_welcome, send_transactional_email
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
-from src.services.user_email import assign_user_email
-from src.services.validators import is_valid_email
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = make_templates()
-
-
-def _maybe_send_welcome(user: User, was_complete: bool) -> None:
-    """Send the welcome email once, the first time a user completes onboarding.
-
-    No-op if onboarding was already complete or the user has no email. The send
-    catches its own errors, so a failure never blocks onboarding completion.
-    """
-    if was_complete or not user.email:
-        return
-    from src.services.email import send_welcome_email
-    send_welcome_email(user.email, name=user.name)
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -61,20 +48,16 @@ async def onboarding_start(
     # A MANAGER has no research profile to review (D7). Bounce it rather than
     # render a PI page it can never complete.
     #
-    # Deliberately is_manager, not `!= USER_ROLE_PI`. An admin is not a `pi`
-    # either, but admins keep the PI surfaces: templates/base.html still shows
-    # them My Profile / My Agent, and /profile bounces anyone whose onboarding
-    # is incomplete straight back here. A `!= 'pi'` test therefore trapped an
-    # admin with onboarding_complete=False in a permanent
-    # /profile -> /onboarding -> /manager/pis deflection with no way to ever
-    # finish onboarding — locked out of their own profile by a guard aimed at
-    # managers.
-    if current_user.is_manager:
-        return RedirectResponse(url="/manager/pis", status_code=302)
-
-    # A REVIEWER is neither staff nor PI and has no research profile
-    # to review either — same reasoning as the manager bounce above.
-    if current_user.is_reviewer:
+    # The rule is `may_use_pi_surfaces` (PI or admin), not `!= USER_ROLE_PI`:
+    # admins keep the PI surfaces (templates/base.html shows them My Profile /
+    # My Agent, and /profile bounces anyone whose onboarding is incomplete
+    # straight back here), so a `!= 'pi'` test would trap an admin in a
+    # permanent /profile -> /onboarding -> /manager/pis deflection.
+    # A REVIEWER is neither staff nor PI and has no research profile either;
+    # each role keeps its own landing page.
+    if not current_user.may_use_pi_surfaces:
+        if current_user.is_manager:
+            return RedirectResponse(url="/manager/pis", status_code=302)
         return RedirectResponse(url="/manager/assessments", status_code=302)
 
     # Get latest job for this user
@@ -95,18 +78,16 @@ async def onboarding_start(
     # spin on "Building Your Profile" forever (the template treats job_status
     # 'none' the same as pending/processing and offers no retry).
     #
-    # `not is_manager` for the same reason as the bounce above: F8's concern is
-    # firing ORCID/PubMed profile generation for an account that has no lab and
-    # may have no relevant publications, which is a MANAGER. Narrowing this to
-    # `== 'pi'` would leave an admin staring at "Building Your Profile" with no
-    # job, no profile and no retry — the exact spin this self-heal exists to
-    # prevent.
+    # `may_use_pi_surfaces` for the same reason as the bounce above: F8's
+    # concern is firing ORCID/PubMed profile generation for an account that has
+    # no lab and may have no relevant publications, which is a MANAGER.
+    # Narrowing this to `== 'pi'` would leave an admin staring at "Building Your
+    # Profile" with no job, no profile and no retry.
     if (
         job is None
         and profile is None
         and current_user.access_status == "allowed"
-        and not current_user.is_manager
-        and not current_user.is_reviewer
+        and current_user.may_use_pi_surfaces
     ):
         job = await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
         await db.commit()
@@ -153,88 +134,36 @@ async def save_profile(
     bot of its own (D7).
     """
 
-    # Email is required at onboarding. Validate before persisting anything so a
-    # bad value rejects the whole submission (mirrors profile_save on /profile).
-    email_clean = (email or "").strip().lower()
-    if not email_clean:
-        return RedirectResponse(url="/onboarding?error=email_required", status_code=302)
-    if not is_valid_email(email_clean):
-        return RedirectResponse(url="/onboarding?error=invalid_email", status_code=302)
-    if email_clean != (current_user.email or ""):
-        if not await assign_user_email(db, current_user, email_clean):
-            return RedirectResponse(url="/onboarding?error=email_taken", status_code=302)
-
-    def parse_list(val: str) -> list[str]:
-        return [s.strip() for s in val.split(",") if s.strip()]
-
-    result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
+    # Email is required at onboarding. apply_profile_edits validates it before
+    # persisting anything, so a bad value rejects the whole submission.
+    error = await apply_profile_edits(
+        db, target_user=current_user, changed_by_user_id=current_user.id,
+        form={
+            "email": email, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
+        email_required=True,
+        change_summary="Profile saved during onboarding",
     )
-    profile = result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=current_user.id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's VALUES,
-        # which cannot reference its own target table ("invalid reference to
-        # FROM-clause entry for table researcher_profiles").
-        await db.flush()
-
-    written = await write_profile_text_fields(db, profile, {
-        "research_summary": research_summary,
-        "techniques": parse_list(techniques),
-        "experimental_models": parse_list(experimental_models),
-        "disease_areas": parse_list(disease_areas),
-        "key_targets": parse_list(key_targets),
-        "keywords": parse_list(keywords),
-    }, parse_expected_version(profile_version))
-    if not written:
-        await db.rollback()
-        return RedirectResponse(url="/onboarding?error=profile_changed", status_code=302)
-    await db.commit()
-
-    # Look up agent_id (gates file export and revision)
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id_for_export = agent_reg.agent_id if agent_reg else None
-
-    # Export to markdown for agent consumption (tenure-scoped publications)
-    from src.services.profile_export import export_profile_to_markdown
-    from src.services.tenure_scope import scoped_publications_for_export
-    user_pubs = await scoped_publications_for_export(
-        db, current_user.id, agent_id_for_export
-    )
-    exported_path = export_profile_to_markdown(
-        current_user, profile, agent_id_for_export, publications=user_pubs
-    )
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    if agent_reg and exported_path:
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="public",
-            content=exported_path.read_text(encoding="utf-8"),
-            changed_by_user_id=current_user.id,
-            mechanism="web",
-            change_summary="Profile saved during onboarding",
-        )
-        await db.commit()
+    if error:
+        return RedirectResponse(url=f"/onboarding?error={error}", status_code=302)
 
     # This is now the terminal step of onboarding (the private-profile step
     # that used to own completion — onboarding_complete flip, welcome email,
     # pending-invite/post-login-redirect resume — was removed with private
-    # instructions; those side effects relocate here). Not gated on
-    # `was_complete` alone being new: the guard on `_maybe_send_welcome`
-    # itself still makes a replay of this POST a no-op for the welcome email.
-    was_complete = current_user.onboarding_complete
-    current_user.onboarding_complete = True
+    # instructions; those side effects relocate here). The conditional UPDATE is
+    # the once-only gate for the welcome email (PS-12): a replayed or concurrent
+    # save matches no row. The email leaves only after the commit.
+    flipped = (await db.execute(
+        update(User).where(User.id == current_user.id, User.onboarding_complete.is_(False))
+        .values(onboarding_complete=True).returning(User.id)
+    )).scalar_one_or_none()
     await db.commit()
-
-    _maybe_send_welcome(current_user, was_complete)
+    if flipped is not None and current_user.email:
+        await send_transactional_email(build_welcome(current_user.email, current_user.name))
 
     # Check for pending invite token
     pending_token = request.session.pop("pending_invite_token", None)

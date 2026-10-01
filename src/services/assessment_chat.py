@@ -59,6 +59,7 @@ from src.services.assessment_chat_stream import (
 )
 from src.services.llm import CLIENT_READ_TIMEOUT_SECONDS
 from src.services.llm_pricing import PRICES, cost_for_tokens
+from src.services.runs import latest_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -410,9 +411,7 @@ async def verdict_may_change(db: AsyncSession, assessment: Any) -> bool:
     )
     if status == "running":
         return True
-    latest_id = await db.scalar(
-        select(SimulationRun.id).order_by(SimulationRun.started_at.desc()).limit(1)
-    )
+    latest_id = await latest_run_id(db)
     return latest_id == assessment.simulation_run_id
 
 
@@ -596,17 +595,11 @@ async def prepare_turn(
     if await _has_streaming_turn(db, user_id=user_id):
         raise ChatError(409, "answer_in_progress")
     tier = tier_for(user)
-    turns = await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
     loaded = await load_chat_record(db, assessment_id, tier=tier)
     if loaded is None:
         raise ChatError(404, "not_found")
     record = loaded[0]
-    request = build_request(
-        model=model,
-        effort=settings.assessment_chat_effort,
-        system_prompt=system_prompt,
-        messages=build_messages(record, replay_window(turns), question),
-    )
     # Serialize every ask's check-then-insert against the two dollar ceilings
     # (SB-9/PA1-14): without this, two concurrent requests can both read the $100
     # global total as under the ceiling before either has committed its own spend,
@@ -618,8 +611,16 @@ async def prepare_turn(
     await _take_spend_lock(db)
     # The per-user caps were read unlocked above, as a cheap head start; another ask
     # of this user's may have committed its turn since, so both are read again here,
-    # under the lock, before anything is inserted (R2SEC-3).
-    await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    # under the lock, before anything is inserted (R2SEC-3), and the request is built
+    # from THESE turns, so a turn another request of this user committed meanwhile is
+    # in the history (LC-07).
+    turns = await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    request = build_request(
+        model=model,
+        effort=settings.assessment_chat_effort,
+        system_prompt=system_prompt,
+        messages=build_messages(record, replay_window(turns), question),
+    )
     if await spend_24h(db, user_id=user_id) >= Decimal(str(settings.assessment_chat_daily_user_usd_limit)):
         raise ChatError(429, "daily_spend_limit")
     if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
@@ -1000,8 +1001,12 @@ async def clear_history(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: 
     """Delete the caller's turns on this assessment, every tier (D16). Refuses while one
     is still streaming after the sweep, and never deletes a streaming turn even if one
     starts meanwhile. The ledger rows survive (`turn_id` SET NULL), which is why Clear
-    cannot reset the caps."""
+    cannot reset the caps. Takes the spend lock first (LC-07), after committing the sweep
+    as `prepare_turn` does, so a concurrent ask cannot insert a streaming turn between
+    the check and the delete."""
     await sweep_stale(db)
+    await db.commit()
+    await _take_spend_lock(db)
     in_flight = await db.scalar(
         select(func.count(AssessmentChatTurn.id)).where(
             AssessmentChatTurn.assessment_id == assessment_id,

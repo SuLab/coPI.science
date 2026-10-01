@@ -98,13 +98,14 @@ def welcome_emails(monkeypatch):
     """Recording double for the one SES call these routers make."""
     sent: list[dict] = []
 
-    import src.services.email as email_mod
+    import src.routers.onboarding as onboarding_routes
 
-    def _record(to_email, name=None, *, force=False):
-        sent.append({"to": to_email, "name": name})
+    async def _record(message, *, force=False):
+        sent.append({"to": message.to, "kind": message.kind})
         return True
 
-    monkeypatch.setattr(email_mod, "send_welcome_email", _record)
+    # Patched at the USE site: the real SES path is unreachable from these tests.
+    monkeypatch.setattr(onboarding_routes, "send_transactional_email", _record)
     return sent
 
 
@@ -522,7 +523,7 @@ async def test_onboarding_save_profile_requires_a_valid_unused_email(client, db_
 async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
     client, db_session, newcomer, welcome_emails
 ):
-    """The replay control on ``_maybe_send_welcome``'s ``was_complete`` guard.
+    """The replay control on the conditional ``onboarding_complete`` flip (PS-12).
 
     Aimed at POST /onboarding/save-profile because that is now the only
     terminal step left: the private-profile step that used to own this
