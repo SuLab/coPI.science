@@ -29,7 +29,7 @@ async def test_second_worker_exits_before_the_stale_sweep(engine, monkeypatch):
 
     monkeypatch.setattr(worker, "requeue_stale_processing_jobs", spy)
     # Never build an engine from .env; hand run_worker the test engine instead.
-    monkeypatch.setattr(worker, "create_async_engine", lambda *a, **k: engine)
+    monkeypatch.setattr(worker, "make_engine", lambda *a, **k: engine)
     try:
         with pytest.raises(worker.WorkerAlreadyRunning):
             await worker.run_worker()

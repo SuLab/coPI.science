@@ -18,11 +18,10 @@ def _run(coro):
 
 async def _get_db():
     """Get an async database session."""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from src.config import get_settings
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+    from src.database import make_engine
+    engine = make_engine("cli")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, factory
 
@@ -33,6 +32,13 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
 
     from src.models import User
     from src.services.orcid import fetch_orcid_profile
+    from src.services.pi_onboarding import record_employment_tenure, validate_orcid
+
+    try:
+        orcid = validate_orcid(orcid)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
 
     engine, factory = await _get_db()
     async with factory() as db:
@@ -63,6 +69,7 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
                 from src.services.user_email import assign_user_email
 
                 await assign_user_email(db, user, profile_data["email"])
+            await record_employment_tenure(db, user, profile_data)
             console.print(f"[green]Created user: {user.name} ({orcid})[/green]")
 
         if run_pipeline:

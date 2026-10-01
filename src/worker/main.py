@@ -19,10 +19,10 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from src.config import get_settings
+from src.database import make_engine
 from src.models import Job, User
 from src.services import job_progress
 from src.services.profile_pipeline import run_profile_pipeline
@@ -327,7 +327,7 @@ async def run_worker():
     global _shutdown
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = make_engine("worker")
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     lock_conn = await acquire_worker_lock(engine)

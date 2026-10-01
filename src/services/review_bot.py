@@ -720,30 +720,31 @@ async def execute_review_analysis(ctx: JobContext, db: AsyncSession) -> None:
 
     now = datetime.now(UTC)
     # One row per proposal (D6): the primary, then each surviving
-    # `additional_proposals` entry. Every row shares this job's
-    # `feedback_snapshot`, `prompt_files`, `model`, `transcript_available`,
-    # `input_truncated` and `raw_response` — they came out of ONE model call on
-    # ONE set of feedback rows, and `raw_response` is shared rather than sliced
-    # per row deliberately: the model emitted a single reply and each row is a
-    # view of it, so a reader of any one row can reconstruct the whole reply,
-    # including the entries this handler dropped.
-    for row_target, row_body in [(target, suggestion_text), *additional]:
-        db.add(
-            PromptChangeSuggestion(
-                assessment_id=assessment.id,
-                subject_label=_subject_label(assessment),
-                assessment_created_at=assessment.created_at,
-                rubric_version=assessment.rubric_version,
-                feedback_snapshot=feedback_snapshot,
-                target=row_target,
-                prompt_files=prompt_files_meta,
-                suggestion=row_body,
-                model=settings.llm_review_model,
-                transcript_available=thread_id is not None,
-                input_truncated=input_truncated,
-                raw_response=raw,
-            )
+    # `additional_proposals` entry. Built here but added only if at least one
+    # feedback row is still as snapshotted (see the stamping below). Every row
+    # shares this job's `feedback_snapshot`, `prompt_files`, `model`,
+    # `transcript_available`, `input_truncated` and `raw_response` — they came
+    # out of ONE model call on ONE set of feedback rows, and `raw_response` is
+    # shared rather than sliced per row deliberately: the model emitted a single
+    # reply and each row is a view of it, so a reader of any one row can
+    # reconstruct the whole reply, including the entries this handler dropped.
+    suggestions = [
+        PromptChangeSuggestion(
+            assessment_id=assessment.id,
+            subject_label=_subject_label(assessment),
+            assessment_created_at=assessment.created_at,
+            rubric_version=assessment.rubric_version,
+            feedback_snapshot=feedback_snapshot,
+            target=row_target,
+            prompt_files=prompt_files_meta,
+            suggestion=row_body,
+            model=settings.llm_review_model,
+            transcript_available=thread_id is not None,
+            input_truncated=input_truncated,
+            raw_response=raw,
         )
+        for row_target, row_body in [(target, suggestion_text), *additional]
+    ]
     # Stamp ONLY the rows this job analyzed, and only if they still read exactly
     # as snapshotted. A row edited while the model call was in flight
     # (`edit_feedback` resets consumed_at and changes the content) or deleted in
@@ -766,6 +767,14 @@ async def execute_review_analysis(ctx: JobContext, db: AsyncSession) -> None:
             .values(consumed_at=now)
         )
         stamped += result.rowcount or 0
+    if stamped == 0:
+        logger.warning(
+            "review bot: every feedback row for assessment %s changed while the model "
+            "call was in flight (job %s); no suggestion written",
+            assessment.id, ctx.id,
+        )
+        await db.commit()
+        return
     if stamped != len(reviews):
         logger.warning(
             "review bot: stamped %d of %d feedback rows consumed for assessment %s "
@@ -774,6 +783,7 @@ async def execute_review_analysis(ctx: JobContext, db: AsyncSession) -> None:
             stamped, len(reviews), assessment.id, ctx.id,
         )
 
-    # One commit covering both the new suggestion row and every consumed_at —
+    db.add_all(suggestions)
+    # One commit covering both the new suggestion rows and every consumed_at —
     # consumption and the suggestion must land together or not at all.
     await db.commit()
