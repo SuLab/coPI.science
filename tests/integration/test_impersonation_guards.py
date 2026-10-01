@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import select
 
-from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, ProfileRevision, User
+from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, ProfileRevision
 from src.services import profile_export
 from tests import factories
 from tests.integration.test_manager_access import auth_headers

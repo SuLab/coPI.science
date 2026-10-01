@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 async def test_order_breaks_ties_by_id(db_session):
-    t = datetime(2100, 1, 1, tzinfo=timezone.utc)  # later than any other row in the DB
+    t = datetime(2100, 1, 1, tzinfo=UTC)  # later than any other row in the DB
     a = await factories.make_simulation_run(db_session, id=uuid.UUID(int=1), started_at=t)
     b = await factories.make_simulation_run(db_session, id=uuid.UUID(int=2), started_at=t)
     runs = await runs_ordered(db_session)
