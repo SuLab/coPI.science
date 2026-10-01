@@ -14,6 +14,7 @@ import logging
 import httpx
 
 from src.config import get_settings
+from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,11 @@ async def fetch_works_by_orcid(orcid: str) -> list[dict]:
             contact = getattr(settings, "ncbi_contact_email", None)
             if contact:
                 params["mailto"] = contact
-            resp = await client.get(OPENALEX_WORKS_URL, params=params)
+            resp = await with_retries(
+                lambda p=params: client.get(OPENALEX_WORKS_URL, params=p),
+                attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+            )
             resp.raise_for_status()
             data = resp.json()
             for work in data.get("results", []):

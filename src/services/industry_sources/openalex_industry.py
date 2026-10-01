@@ -93,25 +93,39 @@ async def fetch_works_for_pmids(pmids: list[str]) -> list[dict]:
 
 
 async def company_funder_ids(funder_ids: set[str]) -> set[str]:
-    """Funder ids whose entity also has an ``institution`` role of type company (e.g. GSK)."""
+    """Funder ids whose entity also has an ``institution`` role of type company (e.g. GSK).
+
+    One funders request and one institutions request per chunk of 50 funders (DP-12);
+    the answer is the same set the per-funder lookup returned."""
     if not funder_ids:
         return set()
     hits: set[str] = set()
     contact = getattr(get_settings(), "ncbi_contact_email", None)
+    mailto = {"mailto": contact} if contact else {}
+    ordered = sorted(funder_ids)
     async with httpx.AsyncClient(timeout=30) as client:
-        for i in range(0, len(funder_ids), 50):
-            chunk = "|".join(sorted(funder_ids)[i:i + 50])
-            params = {"filter": f"ids.openalex:{chunk}", "select": "id,display_name,roles", "per-page": 50}
-            if contact:
-                params["mailto"] = contact
-            resp = await client.get(f"{OA}/funders", params=params)
+        for i in range(0, len(ordered), 50):
+            chunk = "|".join(ordered[i:i + 50])
+            resp = await client.get(f"{OA}/funders", params={
+                "filter": f"ids.openalex:{chunk}", "select": "id,display_name,roles", "per-page": 50, **mailto,
+            })
             resp.raise_for_status()
+            inst_by_funder: dict[str, list[str]] = {}
             for f in resp.json().get("results") or []:
                 inst_ids = [_oaid(r.get("id")) for r in f.get("roles") or [] if r.get("role") == "institution"]
-                if not inst_ids:
-                    continue
-                r2 = await client.get(f"{OA}/institutions", params={"filter": f"ids.openalex:{'|'.join(inst_ids)}", "select": "id,type", **({"mailto": contact} if contact else {})})
+                if inst_ids:
+                    inst_by_funder[_oaid(f.get("id"))] = inst_ids
+            all_insts = sorted({i for ids in inst_by_funder.values() for i in ids})
+            if not all_insts:
+                continue
+            companies: set[str] = set()
+            for j in range(0, len(all_insts), 50):
+                r2 = await client.get(f"{OA}/institutions", params={
+                    "filter": f"ids.openalex:{'|'.join(all_insts[j:j + 50])}",
+                    "select": "id,type", "per-page": 50, **mailto,
+                })
                 r2.raise_for_status()
-                if any(i.get("type") == "company" for i in r2.json().get("results") or []):
-                    hits.add(_oaid(f.get("id")))
+                companies |= {_oaid(i.get("id")) for i in r2.json().get("results") or []
+                              if i.get("type") == "company"}
+            hits |= {fid for fid, ids in inst_by_funder.items() if companies & set(ids)}
     return hits

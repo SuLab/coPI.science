@@ -1,12 +1,11 @@
 import re
 
-import httpx
-
 from src.config import get_settings
 from src.services.industry_sources import EvidenceItem
 from src.services.industry_sources.companies import classify_company
+from src.services.odp import ODP_PACER, ODP_SEARCH_URL, odp_client, odp_headers
 
-SEARCH_URL = "https://api.uspto.gov/api/v1/patent/applications/search"
+SEARCH_URL = ODP_SEARCH_URL
 _FIELDS = ["applicationNumberText", "applicationMetaData.inventionTitle", "applicationMetaData.filingDate",
            "applicationMetaData.firstInventorName", "applicationMetaData.applicantBag", "assignmentBag"]
 # [a-z0-9]+ naturally splits on hyphens ("beta-lactam" -> "beta", "lactam"),
@@ -42,8 +41,12 @@ async def fetch_jhu_applications(inventor_full_name: str) -> list[dict]:
     if not key:
         return []
     q = f'applicationMetaData.firstInventorName:"{inventor_full_name}" AND applicationMetaData.applicantBag.applicantNameText:"Johns Hopkins"'
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(SEARCH_URL, headers={"X-API-KEY": key}, json={"q": q, "pagination": {"offset": 0, "limit": 100}, "fields": _FIELDS})
+    async with odp_client(timeout=30, follow_redirects=False) as client:
+        await ODP_PACER.wait()
+        resp = await client.post(
+            SEARCH_URL, headers=odp_headers(key),
+            json={"q": q, "pagination": {"offset": 0, "limit": 100}, "fields": _FIELDS},
+        )
         if resp.status_code == 404:
             # ODP answers 404 for a search with no matching applications — an
             # empty result, not an outage. Every other error status still

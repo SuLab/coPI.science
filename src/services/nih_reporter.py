@@ -6,17 +6,18 @@ Two guards exist because RePORTER SILENTLY IGNORES unknown criteria keys:
 grant to one PI. Rate limit measured at ~200 requests/minute per IP
 (``x-rate-limit-limit: 1m``), so requests are paced 0.35 s apart.
 """
-import asyncio
 import logging
 
 import httpx
+
+from src.services.http_pacing import Pacer, with_retries
 
 logger = logging.getLogger(__name__)
 
 BASE = "https://api.reporter.nih.gov/v2"
 PAGE = 500
 _PACE_INTERVAL = 0.35
-_next_slot = 0.0
+_PACER = Pacer(_PACE_INTERVAL)
 
 ALLOWED_CRITERIA = frozenset({
     "pi_names", "pi_profile_ids", "org_names", "org_names_exact_match", "fiscal_years",
@@ -39,26 +40,15 @@ class ReporterFirehoseError(RuntimeError):
     """meta.total exceeded the per-PI ceiling; the filter did not bite."""
 
 
-async def _pace() -> None:
-    global _next_slot
-    loop = asyncio.get_running_loop()
-    now = loop.time()
-    wait = _next_slot - now
-    _next_slot = max(now, _next_slot) + _PACE_INTERVAL
-    if wait > 0:
-        await asyncio.sleep(wait)
-
-
 async def _post(client: httpx.AsyncClient, path: str, body: dict) -> dict:
-    await _pace()
-    for attempt in range(3):
-        resp = await client.post(f"{BASE}/{path}", json=body)
-        if resp.status_code == 429 and attempt < 2:
-            await asyncio.sleep(2.0 * (attempt + 1))
-            continue
-        resp.raise_for_status()
-        return resp.json()
-    raise RuntimeError("unreachable")
+    # Paces once per _post (not per 429 retry), as before.
+    resp = await with_retries(
+        lambda: client.post(f"{BASE}/{path}", json=body),
+        attempts=3, backoff=lambda a: 2.0 * (a + 1),
+        retry_statuses=frozenset({429}), pacer=_PACER, pace_each_attempt=False,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _check_criteria(criteria: dict) -> None:

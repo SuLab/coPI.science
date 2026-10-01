@@ -1,15 +1,20 @@
 """PubMed and PMC fetching service with rate limiting."""
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from src.config import get_settings
+from src.services.http_pacing import Pacer
 
 logger = logging.getLogger(__name__)
 
@@ -92,28 +97,18 @@ def reconcile_pub_doi(
 # rate = concurrency / per-request-time, so 8 concurrent holders each
 # pausing 0.12s could burst far past the keyless 3/s (issue #23 V9).
 _request_semaphore = asyncio.Semaphore(3)
-_next_slot: float = 0.0
 
 
 def _pace_interval() -> float:
     return 0.11 if get_settings().ncbi_api_key else 0.34
 
 
-async def _pace() -> None:
-    """Space request starts at least _pace_interval() apart, process-wide.
+_PACER = Pacer(lambda: _pace_interval())  # the lambda keeps patching _pace_interval effective
 
-    The read-modify-write of _next_slot has no await between read and
-    write, so it is atomic on the event loop — no lock object needed (and
-    none wanted: a module-level asyncio primitive binds to the first event
-    loop that touches it, which breaks under pytest's per-test loops).
-    """
-    global _next_slot
-    loop = asyncio.get_running_loop()
-    now = loop.time()
-    wait = _next_slot - now
-    _next_slot = max(now, _next_slot) + _pace_interval()
-    if wait > 0:
-        await asyncio.sleep(wait)
+
+async def _pace() -> None:
+    """Space request starts at least _pace_interval() apart, process-wide (see http_pacing)."""
+    await _PACER.wait()
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -161,6 +156,39 @@ _RETRYABLE_TRANSPORT = (
 )
 
 
+_SHARED_CLIENT: contextvars.ContextVar[httpx.AsyncClient | None] = contextvars.ContextVar(
+    "pubmed_shared_client", default=None
+)
+# PMID -> record for every DOI verification `convert_dois_to_pmids` accepted inside an
+# `ncbi_session()`, so the caller's later EFetch stage need not fetch those PMIDs again.
+_VERIFIED_RECORDS: contextvars.ContextVar[dict[str, dict[str, Any]] | None] = contextvars.ContextVar(
+    "pubmed_verified_records", default=None
+)
+
+
+@asynccontextmanager
+async def ncbi_session() -> AsyncIterator[httpx.AsyncClient]:
+    """One httpx client for every NCBI request issued inside the block (DP-06):
+    `resolve_corpus` wraps its retrieval in this, so a corpus reuses one connection
+    pool instead of opening a client per request. Pacing and the semaphore are
+    unchanged. The block also collects the records DOI verification fetched
+    (`session_verified_records`)."""
+    async with _make_client() as client:
+        client_token = _SHARED_CLIENT.set(client)
+        records_token = _VERIFIED_RECORDS.set({})
+        try:
+            yield client
+        finally:
+            _VERIFIED_RECORDS.reset(records_token)
+            _SHARED_CLIENT.reset(client_token)
+
+
+def session_verified_records() -> dict[str, dict[str, Any]]:
+    """PMID -> record for the DOI verifications accepted so far inside the current
+    `ncbi_session()` (a live dict; empty outside one)."""
+    return _VERIFIED_RECORDS.get() or {}
+
+
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     """Make a rate-limited, identified GET request to NCBI, with retry.
 
@@ -175,25 +203,35 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _request_semaphore:
+        shared = _SHARED_CLIENT.get()
+        if shared is not None:
+            return await _ncbi_attempts(shared, url, params)
         async with _make_client() as client:
-            for attempt in range(3):
-                await _pace()
-                try:
-                    resp = await client.get(url, params=params)
-                except _RETRYABLE_TRANSPORT as exc:
-                    if attempt == 2:
-                        raise
-                    logger.info(
-                        "NCBI transport failure on attempt %d (%s: %s) — retrying",
-                        attempt + 1, type(exc).__name__, exc,
-                    )
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                    continue
-                if resp.status_code in (429, 500, 502, 503) and attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                    continue
-                resp.raise_for_status()
-                return resp
+            return await _ncbi_attempts(client, url, params)
+
+
+async def _ncbi_attempts(
+    client: httpx.AsyncClient, url: str, params: dict[str, Any]
+) -> httpx.Response:
+    """The paced, retried GET loop of `_ncbi_get`, on a given client."""
+    for attempt in range(3):
+        await _pace()
+        try:
+            resp = await client.get(url, params=params)
+        except _RETRYABLE_TRANSPORT as exc:
+            if attempt == 2:
+                raise
+            logger.info(
+                "NCBI transport failure on attempt %d (%s: %s) — retrying",
+                attempt + 1, type(exc).__name__, exc,
+            )
+            await asyncio.sleep(1.0 * (2 ** attempt))
+            continue
+        if resp.status_code in (429, 500, 502, 503) and attempt < 2:
+            await asyncio.sleep(1.0 * (2 ** attempt))
+            continue
+        resp.raise_for_status()
+        return resp
 
 
 def _per_item_4xx(exc: BaseException) -> int | None:
@@ -637,12 +675,71 @@ async def convert_dois_to_pmids(
 
     ``permanently_dropped`` is populated in strict mode only; a DOI answered
     as unmapped (above) is an answer and is never recorded there.
+
+    Single ESearch hits are verified in batches of at most 100 through
+    ``_fetch_pubmed_batch``, matched back to their DOI by PMID (a one-candidate
+    batch keeps today's ``records[0]``); a per-item failure of a batch falls back
+    to one fetch per PMID with today's per-item/systemic classification, so one
+    bad record loses only its own DOI. The systemic-run counter is shared by the
+    ESearch and verification phases; because the phases now run one after the
+    other, a verification failure is counted after all the ESearches rather than
+    interleaved with them. Inside an ``ncbi_session()`` each accepted record is
+    also kept for ``session_verified_records()``.
     """
     if not dois:
         return {}
+    mapping: dict[str, str] = {}
+    await _idconv_phase(dois, mapping, strict=strict)
+    remaining = [d for d in dois if d not in mapping]
+    if remaining:
+        logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
+        run = _Run()
+        candidates = await _esearch_phase(
+            remaining, run, strict=strict, permanently_dropped=permanently_dropped
+        )
+        await _verify_phase(
+            candidates, mapping, run, strict=strict, permanently_dropped=permanently_dropped
+        )
+    return mapping
 
-    mapping = {}
 
+@dataclass
+class _Run:
+    """Consecutive per-DOI lookups that failed per-item the same way, and that
+    failure's signature; any other outcome resets it."""
+
+    n: int = 0
+    sig: tuple[str, int | str] | None = None
+
+    def reset(self) -> None:
+        self.n, self.sig = 0, None
+
+    def note_failure(
+        self, exc: BaseException, doi: str, permanently_dropped: list[str] | None
+    ) -> None:
+        """Strict mode: re-raise anything but a per-item failure (and a systemic run
+        of them); otherwise report the DOI as dropped. Call inside an ``except``."""
+        if not _is_per_item_failure(exc):
+            raise exc
+        sig = _failure_signature(exc)
+        self.n, self.sig = (self.n + 1, sig) if sig == self.sig else (1, sig)
+        if self.n >= _SYSTEMIC_RUN:
+            logger.error(
+                "DOI lookup: %d consecutive DOIs failed %s; treating "
+                "it as systemic, not per-DOI",
+                self.n, _describe(sig),
+            )
+            raise exc
+        logger.warning(
+            "ESearch DOI lookup for %s failed permanently (%s: %s); "
+            "treating it as no PMID for this DOI",
+            doi, type(exc).__name__, exc,
+        )
+        if permanently_dropped is not None:
+            permanently_dropped.append(doi)
+
+
+async def _idconv_phase(dois: list[str], mapping: dict[str, str], *, strict: bool) -> None:
     # Phase 1: NCBI ID converter (batch — only finds PMC-indexed papers).
     # The converter echoes each DOI in ITS canonical casing (lowercased), not
     # the caller's: ORCID records often carry the publisher's uppercase form
@@ -690,88 +787,122 @@ async def convert_dois_to_pmids(
                 type(exc).__name__, exc, ", ".join(batch),
             )
 
-    # Phase 2: PubMed ESearch for remaining DOIs
-    remaining = [d for d in dois if d not in mapping]
-    if remaining:
-        logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
-        # Consecutive per-DOI lookups that failed per-item the same way, and
-        # that failure's signature; any other outcome resets the run.
-        run, last_sig = 0, None
-        for doi in remaining:
-            try:
-                params = {
-                    "db": "pubmed",
-                    "term": f"{doi}[doi]",
-                    "retmode": "json",
-                }
-                resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
-                data = resp.json()
-                id_list = data.get("esearchresult", {}).get("idlist", [])
-                # D4b (coverage design §7): a multi-hit DOI ESearch is a MISS,
-                # not a hit. Taking idlist[0] unchecked resolved one Research
-                # Square DOI to four unrelated PMIDs and stored the first —
-                # the same wrong paper landed on six PIs' rows.
-                if len(id_list) != 1:
-                    if len(id_list) > 1:
-                        logger.warning(
-                            "ESearch for DOI %s returned %d PMIDs; treating "
-                            "as a miss (D4b)", doi, len(id_list),
-                        )
-                else:
-                    pmid = id_list[0]
-                    # Round-trip verify: the PMID's authoritative DOI must
-                    # equal the queried DOI, or the single hit is still the
-                    # wrong paper. Strict fetches the one record directly, so
-                    # a failure reaches the classification below with its
-                    # status intact (through fetch_pubmed_records a one-PMID
-                    # batch would be dropped inside it and read here as a
-                    # verification miss).
-                    if strict:
-                        records = await _fetch_pubmed_batch([pmid])
-                    else:
-                        records = await fetch_pubmed_records([pmid])
-                    authoritative = (
-                        normalize_doi(records[0].get("doi")) if records else None
-                    )
-                    queried = normalize_doi(doi)
-                    if (
-                        authoritative
-                        and queried
-                        and authoritative.lower() == queried.lower()
-                    ):
-                        mapping[doi] = pmid
-                    else:
-                        logger.warning(
-                            "ESearch hit for DOI %s (PMID %s) failed round-trip "
-                            "verification (authoritative DOI %r); treating as a "
-                            "miss (D4b)", doi, pmid, authoritative,
-                        )
-            except Exception as exc:
-                if not strict:
-                    logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
-                    continue
-                if not _is_per_item_failure(exc):
-                    raise
-                sig = _failure_signature(exc)
-                run, last_sig = (run + 1, sig) if sig == last_sig else (1, sig)
-                if run >= _SYSTEMIC_RUN:
-                    logger.error(
-                        "DOI lookup: %d consecutive DOIs failed %s; treating "
-                        "it as systemic, not per-DOI",
-                        run, _describe(sig),
-                    )
-                    raise
-                logger.warning(
-                    "ESearch DOI lookup for %s failed permanently (%s: %s); "
-                    "treating it as no PMID for this DOI",
-                    doi, type(exc).__name__, exc,
-                )
-                if permanently_dropped is not None:
-                    permanently_dropped.append(doi)
-                continue
-            run, last_sig = 0, None
 
-    return mapping
+async def _esearch_phase(
+    remaining: list[str],
+    run: _Run,
+    *,
+    strict: bool,
+    permanently_dropped: list[str] | None,
+) -> list[tuple[str, str]]:
+    """Phase 2: PubMed ESearch per DOI; returns the single-hit ``(doi, pmid)``
+    candidates, still to be round-trip verified."""
+    candidates: list[tuple[str, str]] = []
+    for doi in remaining:
+        try:
+            params = {
+                "db": "pubmed",
+                "term": f"{doi}[doi]",
+                "retmode": "json",
+            }
+            resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
+            data = resp.json()
+            id_list = data.get("esearchresult", {}).get("idlist", [])
+            # D4b (coverage design §7): a multi-hit DOI ESearch is a MISS,
+            # not a hit. Taking idlist[0] unchecked resolved one Research
+            # Square DOI to four unrelated PMIDs and stored the first —
+            # the same wrong paper landed on six PIs' rows.
+            if len(id_list) != 1:
+                if len(id_list) > 1:
+                    logger.warning(
+                        "ESearch for DOI %s returned %d PMIDs; treating "
+                        "as a miss (D4b)", doi, len(id_list),
+                    )
+            else:
+                candidates.append((doi, id_list[0]))
+                continue
+        except Exception as exc:
+            if not strict:
+                logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
+                continue
+            run.note_failure(exc, doi, permanently_dropped)
+            continue
+        run.reset()
+    return candidates
+
+
+async def _fetch_verification_chunk(
+    chunk: list[tuple[str, str]],
+    run: _Run,
+    *,
+    strict: bool,
+    permanently_dropped: list[str] | None,
+) -> dict[str, dict[str, Any]]:
+    """PMID -> record for one chunk of at most 100 candidates: one batch fetch, or
+    (on a per-item failure of it) one fetch per PMID. A one-candidate chunk maps its
+    PMID to ``records[0]``, as the single-PMID fetch always did."""
+    pmids = list(dict.fromkeys(pmid for _doi, pmid in chunk))
+
+    def _index(records: list[dict[str, Any]], asked: list[str]) -> dict[str, dict[str, Any]]:
+        if len(asked) == 1:
+            return {asked[0]: records[0]} if records else {}
+        return {str(r.get("pmid")): r for r in records}
+
+    try:
+        by_pmid = _index(await _fetch_pubmed_batch(pmids), pmids)
+        run.reset()
+        return by_pmid
+    except Exception as exc:
+        if strict and not _is_per_item_failure(exc):
+            raise
+        if not strict:
+            logger.debug("verification batch failed (%s); falling back to single fetches", exc)
+    by_pmid = {}
+    for doi, pmid in chunk:
+        try:
+            by_pmid.update(_index(await _fetch_pubmed_batch([pmid]), [pmid]))
+        except Exception as one:
+            if not strict:
+                logger.debug("ESearch DOI lookup failed for %s: %s", doi, one)
+                continue
+            run.note_failure(one, doi, permanently_dropped)
+            continue
+        run.reset()
+    return by_pmid
+
+
+async def _verify_phase(
+    candidates: list[tuple[str, str]],
+    mapping: dict[str, str],
+    run: _Run,
+    *,
+    strict: bool,
+    permanently_dropped: list[str] | None,
+) -> None:
+    """Round-trip verify the ESearch candidates: the PMID's authoritative DOI must
+    equal the queried DOI, or the single hit is still the wrong paper."""
+    verified = _VERIFIED_RECORDS.get()
+    for i in range(0, len(candidates), 100):
+        chunk = candidates[i:i + 100]
+        by_pmid = await _fetch_verification_chunk(
+            chunk, run, strict=strict, permanently_dropped=permanently_dropped
+        )
+        for doi, pmid in chunk:
+            record = by_pmid.get(str(pmid))
+            if record is None:
+                continue
+            authoritative = normalize_doi(record.get("doi"))
+            queried = normalize_doi(doi)
+            if authoritative and queried and authoritative.lower() == queried.lower():
+                mapping[doi] = pmid
+                if verified is not None:
+                    verified[str(pmid)] = record
+            else:
+                logger.warning(
+                    "ESearch hit for DOI %s (PMID %s) failed round-trip "
+                    "verification (authoritative DOI %r); treating as a "
+                    "miss (D4b)", doi, pmid, authoritative,
+                )
 
 
 async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:

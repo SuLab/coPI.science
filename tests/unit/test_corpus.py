@@ -421,9 +421,9 @@ async def test_a_bare_initial_unconfirmed_miss_keeps_its_reason(monkeypatch):
 
 
 def _flag_reason_literals() -> set[str]:
-    """Every string literal ``resolve_corpus`` puts under a ``"reason"`` key of
+    """Every string literal ``_gate_records`` puts under a ``"reason"`` key of
     a flagged dict, including both arms of a conditional expression."""
-    tree = ast.parse(inspect.getsource(corpus.resolve_corpus))
+    tree = ast.parse(inspect.getsource(corpus._gate_records))
     reasons: set[str] = set()
 
     def collect(node):
