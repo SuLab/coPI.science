@@ -1,0 +1,4469 @@
+{
+"records": 744,
+"matrix": {
+"anon|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"anon|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"anon|1280|/": [
+200,
+"/login",
+0,
+0
+],
+"anon|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"anon|1280|/settings": [
+200,
+"/login?next=%2Fsettings",
+0,
+0
+],
+"anon|1280|/login": [
+200,
+"/login",
+0,
+0
+],
+"anon|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"anon|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"anon|1280|/onboarding": [
+200,
+"/login?next=%2Fonboarding",
+0,
+0
+],
+"anon|1280|/profile": [
+200,
+"/login?next=%2Fprofile",
+0,
+0
+],
+"anon|1280|/profile/delete-account": [
+200,
+"/login?next=%2Fprofile%2Fdelete-account",
+0,
+0
+],
+"anon|1280|/profile/edit": [
+200,
+"/login?next=%2Fprofile%2Fedit",
+0,
+0
+],
+"anon|1280|/agent": [
+200,
+"/login?next=%2Fagent",
+0,
+0
+],
+"anon|1280|/agent/obrien/dashboard": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fdashboard",
+0,
+0
+],
+"anon|1280|/agent/obrien/thread/1790866301.697524": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fthread%2F1790866301.697524",
+0,
+0
+],
+"anon|1280|/agent/obrien/conversations": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fconversations",
+0,
+0
+],
+"anon|1280|/agent/obrien/public-profile": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fpublic-profile",
+0,
+0
+],
+"anon|1280|/agent/obrien/public-profile/edit": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fpublic-profile%2Fedit",
+0,
+0
+],
+"anon|1280|/agent/nosuch/dashboard": [
+200,
+"/login?next=%2Fagent%2Fnosuch%2Fdashboard",
+0,
+0
+],
+"anon|1280|/admin": [
+200,
+"/login?next=%2Fadmin",
+0,
+0
+],
+"anon|1280|/admin/users": [
+200,
+"/login?next=%2Fadmin%2Fusers",
+0,
+0
+],
+"anon|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/login?next=%2Fadmin%2Fusers%2F2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+0,
+0
+],
+"anon|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Fusers%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|1280|/admin/users/not-a-uuid": [
+200,
+"/login?next=%2Fadmin%2Fusers%2Fnot-a-uuid",
+0,
+0
+],
+"anon|1280|/admin/jobs": [
+200,
+"/login?next=%2Fadmin%2Fjobs",
+0,
+0
+],
+"anon|1280|/admin/activity": [
+200,
+"/login?next=%2Fadmin%2Factivity",
+0,
+0
+],
+"anon|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"anon|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476%2Fllm-calls",
+0,
+0
+],
+"anon|1280|/admin/discussions": [
+200,
+"/login?next=%2Fadmin%2Fdiscussions",
+0,
+0
+],
+"anon|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|1280|/admin/agents": [
+200,
+"/login?next=%2Fadmin%2Fagents",
+0,
+0
+],
+"anon|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+200,
+"/login?next=%2Fadmin%2Fagents%2F984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+0,
+0
+],
+"anon|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+200,
+"/login?next=%2Fadmin%2Fagents%2Fed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+0,
+0
+],
+"anon|1280|/admin/assessments": [
+200,
+"/login?next=%2Fadmin%2Fassessments",
+0,
+0
+],
+"anon|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2Fb5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+0,
+0
+],
+"anon|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2F12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+0,
+0
+],
+"anon|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2Feabeb49d-256f-4db5-8899-ce90da2171e5",
+0,
+0
+],
+"anon|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|1280|/admin/cohorts": [
+200,
+"/login?next=%2Fadmin%2Fcohorts",
+0,
+0
+],
+"anon|1280|/admin/cohorts/topology": [
+200,
+"/login?next=%2Fadmin%2Fcohorts%2Ftopology",
+0,
+0
+],
+"anon|1280|/admin/access-requests": [
+200,
+"/login?next=%2Fadmin%2Faccess-requests",
+0,
+0
+],
+"anon|1280|/admin/simulation": [
+200,
+"/login?next=%2Fadmin%2Fsimulation",
+0,
+0
+],
+"anon|1280|/manager": [
+200,
+"/login?next=%2Fmanager",
+0,
+0
+],
+"anon|1280|/manager/pis": [
+200,
+"/login?next=%2Fmanager%2Fpis",
+0,
+0
+],
+"anon|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/login?next=%2Fmanager%2Fpis%2F2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+0,
+0
+],
+"anon|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fmanager%2Fpis%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|1280|/manager/assessments": [
+200,
+"/login?next=%2Fmanager%2Fassessments",
+0,
+0
+],
+"anon|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login?next=%2Fmanager%2Fassessments%2F12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+0,
+0
+],
+"anon|1280|/manager/discussions": [
+200,
+"/login?next=%2Fmanager%2Fdiscussions",
+0,
+0
+],
+"anon|1280|/manager/activity": [
+200,
+"/login?next=%2Fmanager%2Factivity",
+0,
+0
+],
+"anon|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/login?next=%2Fmanager%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"anon|1280|/manager/slack-bots": [
+200,
+"/login?next=%2Fmanager%2Fslack-bots",
+0,
+0
+],
+"anon|1280|/manager/prompt-suggestions": [
+200,
+"/login?next=%2Fmanager%2Fprompt-suggestions",
+0,
+0
+],
+"anon|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login",
+0,
+0
+],
+"anon|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"anon|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fmanager%2Fprompt-suggestions%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|1280|/admin/assessments?page=-1&sort=zzz": [
+200,
+"/login?next=%2Fadmin%2Fassessments%3Fpage%3D-1%26sort%3Dzzz",
+0,
+0
+],
+"anon|1280|/admin/assessments?page=99999": [
+200,
+"/login?next=%2Fadmin%2Fassessments%3Fpage%3D99999",
+0,
+0
+],
+"anon|1280|/manager/assessments?status=<script>&page=abc": [
+200,
+"/login?next=%2Fmanager%2Fassessments%3Fstatus%3D%253Cscript%253E%26page%3Dabc",
+0,
+0
+],
+"anon|1280|/admin/discussions?run=garbage": [
+200,
+"/login?next=%2Fadmin%2Fdiscussions%3Frun%3Dgarbage",
+0,
+0
+],
+"anon|1280|/admin/jobs?status=nonsense": [
+200,
+"/login?next=%2Fadmin%2Fjobs%3Fstatus%3Dnonsense",
+0,
+0
+],
+"anon|1280|/admin/activity?page=-5": [
+200,
+"/login?next=%2Fadmin%2Factivity%3Fpage%3D-5",
+0,
+0
+],
+"admin|1280|/login": [
+200,
+"/profile",
+0,
+0
+],
+"admin|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"admin|1280|/": [
+200,
+"/profile",
+0,
+0
+],
+"admin|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"admin|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"admin|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"admin|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"admin|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"admin|1280|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"admin|1280|/onboarding": [
+200,
+"/profile",
+0,
+0
+],
+"admin|1280|/profile": [
+200,
+"/profile",
+0,
+0
+],
+"admin|1280|/profile/edit": [
+200,
+"/profile/edit",
+0,
+0
+],
+"admin|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"admin|1280|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"admin|1280|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"admin|1280|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"admin|1280|/agent": [
+200,
+"/agent",
+0,
+0
+],
+"admin|1280|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"admin|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"admin|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|1280|/admin/users/not-a-uuid": [
+422,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"admin|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+1653,
+0
+],
+"admin|1280|/admin": [
+200,
+"/admin",
+0,
+0
+],
+"admin|1280|/admin/users": [
+200,
+"/admin/users",
+0,
+0
+],
+"admin|1280|/admin/jobs": [
+200,
+"/admin/jobs",
+0,
+0
+],
+"admin|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|1280|/admin/activity": [
+200,
+"/admin/activity",
+0,
+0
+],
+"admin|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"admin|1280|/admin/discussions": [
+200,
+"/admin/discussions",
+0,
+0
+],
+"admin|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+200,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+0,
+0
+],
+"admin|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+200,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+0,
+0
+],
+"admin|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+200,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+0,
+0
+],
+"admin|1280|/admin/agents": [
+200,
+"/admin/agents",
+0,
+0
+],
+"admin|1280|/admin/assessments": [
+200,
+"/admin/assessments",
+0,
+0
+],
+"admin|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|1280|/admin/cohorts": [
+200,
+"/admin/cohorts",
+0,
+0
+],
+"admin|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+200,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+0,
+0
+],
+"admin|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4008,
+0
+],
+"admin|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+200,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+0,
+0
+],
+"admin|1280|/admin/cohorts/topology": [
+200,
+"/admin/cohorts/topology",
+0,
+0
+],
+"admin|1280|/admin/access-requests": [
+200,
+"/admin/access-requests",
+0,
+0
+],
+"admin|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+1653,
+0
+],
+"admin|1280|/manager": [
+200,
+"/manager/pis",
+0,
+0
+],
+"admin|1280|/manager/pis": [
+200,
+"/manager/pis",
+0,
+0
+],
+"admin|1280|/admin/simulation": [
+200,
+"/admin/simulation",
+0,
+0
+],
+"admin|1280|/manager/assessments": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"admin|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4008,
+0
+],
+"admin|1280|/manager/activity": [
+200,
+"/manager/activity",
+0,
+0
+],
+"admin|1280|/manager/discussions": [
+200,
+"/manager/discussions",
+0,
+0
+],
+"admin|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"admin|1280|/manager/prompt-suggestions": [
+200,
+"/manager/prompt-suggestions",
+0,
+0
+],
+"admin|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|1280|/manager/slack-bots": [
+200,
+"/manager/slack-bots",
+0,
+0
+],
+"admin|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"admin|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"admin|1280|/manager/assessments?status=<script>&page=abc": [
+200,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+0,
+0
+],
+"admin|1280|/admin/assessments?page=-1&sort=zzz": [
+200,
+"/admin/assessments?page=-1&sort=zzz",
+0,
+0
+],
+"admin|1280|/admin/assessments?page=99999": [
+200,
+"/admin/assessments?page=99999",
+0,
+0
+],
+"admin|1280|/admin/discussions?run=garbage": [
+200,
+"/admin/discussions?run=garbage",
+0,
+0
+],
+"admin|1280|/admin/jobs?status=nonsense": [
+200,
+"/admin/jobs?status=nonsense",
+0,
+0
+],
+"admin|1280|/admin/activity?page=-5": [
+200,
+"/admin/activity?page=-5",
+0,
+0
+],
+"manager|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"manager|1280|/": [
+200,
+"/profile",
+0,
+0
+],
+"manager|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"manager|1280|/login": [
+200,
+"/profile",
+0,
+0
+],
+"manager|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"manager|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"manager|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"manager|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"manager|1280|/onboarding": [
+200,
+"/profile",
+0,
+0
+],
+"manager|1280|/profile": [
+200,
+"/profile",
+0,
+0
+],
+"manager|1280|/profile/edit": [
+200,
+"/profile/edit",
+0,
+0
+],
+"manager|1280|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"manager|1280|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"manager|1280|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"manager|1280|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"manager|1280|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"manager|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"manager|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"manager|1280|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"manager|1280|/agent": [
+200,
+"/agent",
+0,
+0
+],
+"manager|1280|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"manager|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"manager|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"manager|1280|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"manager|1280|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"manager|1280|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"manager|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"manager|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"manager|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"manager|1280|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"manager|1280|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"manager|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"manager|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"manager|1280|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"manager|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"manager|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"manager|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"manager|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"manager|1280|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"manager|1280|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"manager|1280|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"manager|1280|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"manager|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"manager|1280|/manager": [
+200,
+"/manager/pis",
+0,
+0
+],
+"manager|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+1653,
+0
+],
+"manager|1280|/manager/pis": [
+200,
+"/manager/pis",
+0,
+0
+],
+"manager|1280|/manager/assessments": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"manager|1280|/manager/discussions": [
+200,
+"/manager/discussions",
+0,
+0
+],
+"manager|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4008,
+0
+],
+"manager|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"manager|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"manager|1280|/manager/activity": [
+200,
+"/manager/activity",
+0,
+0
+],
+"manager|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"manager|1280|/manager/prompt-suggestions": [
+200,
+"/manager/prompt-suggestions",
+0,
+0
+],
+"manager|1280|/manager/slack-bots": [
+200,
+"/manager/slack-bots",
+0,
+0
+],
+"manager|1280|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"manager|1280|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"manager|1280|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"manager|1280|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"manager|1280|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"manager|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"manager|1280|/manager/assessments?status=<script>&page=abc": [
+200,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+0,
+0
+],
+"reviewer|1280|/": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"reviewer|1280|/login": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"reviewer|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"reviewer|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"reviewer|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"reviewer|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"reviewer|1280|/onboarding": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"reviewer|1280|/profile": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/profile/edit": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"reviewer|1280|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"reviewer|1280|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"reviewer|1280|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"reviewer|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"reviewer|1280|/agent": [
+200,
+"/agent",
+0,
+0
+],
+"reviewer|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"reviewer|1280|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"reviewer|1280|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"reviewer|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"reviewer|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|1280|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"reviewer|1280|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"reviewer|1280|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"reviewer|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"reviewer|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"reviewer|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|1280|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"reviewer|1280|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"reviewer|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"reviewer|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"reviewer|1280|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"reviewer|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"reviewer|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"reviewer|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"reviewer|1280|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"reviewer|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|1280|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"reviewer|1280|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"reviewer|1280|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"reviewer|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|1280|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"reviewer|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+1658,
+0
+],
+"reviewer|1280|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"reviewer|1280|/manager/assessments": [
+200,
+"/manager/assessments",
+0,
+0
+],
+"reviewer|1280|/manager": [
+200,
+"/manager/pis",
+0,
+0
+],
+"reviewer|1280|/manager/pis": [
+200,
+"/manager/pis",
+0,
+0
+],
+"reviewer|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"reviewer|1280|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"reviewer|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4008,
+0
+],
+"reviewer|1280|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"reviewer|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"reviewer|1280|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"reviewer|1280|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"reviewer|1280|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"reviewer|1280|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"reviewer|1280|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"reviewer|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"reviewer|1280|/manager/assessments?status=<script>&page=abc": [
+200,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+0,
+0
+],
+"pi|1280|/": [
+200,
+"/profile",
+2041,
+0
+],
+"pi|1280|/login": [
+200,
+"/profile",
+2041,
+0
+],
+"pi|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"pi|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"pi|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"pi|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"pi|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"pi|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"pi|1280|/onboarding": [
+200,
+"/profile",
+2041,
+0
+],
+"pi|1280|/profile": [
+200,
+"/profile",
+2041,
+0
+],
+"pi|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"pi|1280|/profile/edit": [
+200,
+"/profile/edit",
+1568,
+0
+],
+"pi|1280|/agent/obrien/thread/1790866301.697524": [
+404,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"pi|1280|/agent": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"pi|1280|/agent/obrien/dashboard": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"pi|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"pi|1280|/agent/obrien/conversations": [
+200,
+"/agent/obrien/conversations",
+0,
+0
+],
+"pi|1280|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"pi|1280|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"pi|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|1280|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"pi|1280|/agent/obrien/public-profile": [
+200,
+"/agent/obrien/public-profile",
+1717,
+0
+],
+"pi|1280|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"pi|1280|/agent/obrien/public-profile/edit": [
+200,
+"/agent/obrien/public-profile/edit",
+1568,
+0
+],
+"pi|1280|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"pi|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"pi|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|1280|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"pi|1280|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"pi|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"pi|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"pi|1280|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"pi|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"pi|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"pi|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|1280|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"pi|1280|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"pi|1280|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"pi|1280|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"pi|1280|/manager": [
+403,
+"/manager",
+null,
+null
+],
+"pi|1280|/manager/pis": [
+403,
+"/manager/pis",
+null,
+null
+],
+"pi|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|1280|/manager/assessments": [
+403,
+"/manager/assessments",
+null,
+null
+],
+"pi|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|1280|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"pi|1280|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"pi|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi|1280|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"pi|1280|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"pi|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|1280|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"pi|1280|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"pi|1280|/manager/assessments?status=<script>&page=abc": [
+403,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+null,
+null
+],
+"pi|1280|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"pi|1280|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"pi|1280|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"pi|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"pi2|1280|/": [
+200,
+"/profile",
+0,
+0
+],
+"pi2|1280|/login": [
+200,
+"/profile",
+0,
+0
+],
+"pi2|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"pi2|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"pi2|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"pi2|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"pi2|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"pi2|1280|/onboarding": [
+200,
+"/profile",
+0,
+0
+],
+"pi2|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"pi2|1280|/profile/edit": [
+200,
+"/profile/edit",
+0,
+0
+],
+"pi2|1280|/profile": [
+200,
+"/profile",
+0,
+0
+],
+"pi2|1280|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"pi2|1280|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"pi2|1280|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"pi2|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"pi2|1280|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"pi2|1280|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"pi2|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"pi2|1280|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"pi2|1280|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"pi2|1280|/agent": [
+200,
+"/agent/vogelstein/dashboard",
+0,
+0
+],
+"pi2|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi2|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi2|1280|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"pi2|1280|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"pi2|1280|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"pi2|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi2|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"pi2|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi2|1280|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"pi2|1280|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"pi2|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"pi2|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"pi2|1280|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"pi2|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"pi2|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi2|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"pi2|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi2|1280|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"pi2|1280|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"pi2|1280|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"pi2|1280|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"pi2|1280|/manager": [
+403,
+"/manager",
+null,
+null
+],
+"pi2|1280|/manager/pis": [
+403,
+"/manager/pis",
+null,
+null
+],
+"pi2|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi2|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi2|1280|/manager/assessments": [
+403,
+"/manager/assessments",
+null,
+null
+],
+"pi2|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi2|1280|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"pi2|1280|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"pi2|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi2|1280|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"pi2|1280|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"pi2|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi2|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi2|1280|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"pi2|1280|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"pi2|1280|/manager/assessments?status=<script>&page=abc": [
+403,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+null,
+null
+],
+"pi2|1280|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"pi2|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"pi2|1280|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"pi2|1280|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"delegate|1280|/": [
+200,
+"/profile",
+0,
+0
+],
+"delegate|1280|/login": [
+200,
+"/profile",
+0,
+0
+],
+"delegate|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"delegate|1280|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"delegate|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"delegate|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"delegate|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"delegate|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"delegate|1280|/onboarding": [
+200,
+"/profile",
+0,
+0
+],
+"delegate|1280|/profile/edit": [
+200,
+"/profile/edit",
+0,
+0
+],
+"delegate|1280|/profile": [
+200,
+"/profile",
+0,
+0
+],
+"delegate|1280|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"delegate|1280|/agent": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"delegate|1280|/agent/obrien/thread/1790866301.697524": [
+404,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"delegate|1280|/agent/obrien/dashboard": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"delegate|1280|/agent/obrien/conversations": [
+200,
+"/agent/obrien/conversations",
+0,
+0
+],
+"delegate|1280|/agent/obrien/public-profile": [
+200,
+"/agent/obrien/public-profile",
+1717,
+0
+],
+"delegate|1280|/agent/obrien/public-profile/edit": [
+200,
+"/agent/obrien/public-profile/edit",
+1568,
+0
+],
+"delegate|1280|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"delegate|1280|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"delegate|1280|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"delegate|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"delegate|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"delegate|1280|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"delegate|1280|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"delegate|1280|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"delegate|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"delegate|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"delegate|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"delegate|1280|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"delegate|1280|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"delegate|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"delegate|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"delegate|1280|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"delegate|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"delegate|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"delegate|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"delegate|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"delegate|1280|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"delegate|1280|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"delegate|1280|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"delegate|1280|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"delegate|1280|/manager": [
+403,
+"/manager",
+null,
+null
+],
+"delegate|1280|/manager/pis": [
+403,
+"/manager/pis",
+null,
+null
+],
+"delegate|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"delegate|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"delegate|1280|/manager/assessments": [
+403,
+"/manager/assessments",
+null,
+null
+],
+"delegate|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"delegate|1280|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"delegate|1280|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"delegate|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"delegate|1280|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"delegate|1280|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"delegate|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"delegate|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"delegate|1280|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"delegate|1280|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"delegate|1280|/manager/assessments?status=<script>&page=abc": [
+403,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+null,
+null
+],
+"delegate|1280|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"delegate|1280|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"delegate|1280|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"delegate|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"pending|1280|/": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/login": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"pending|1280|/settings": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"pending|1280|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"pending|1280|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"pending|1280|/onboarding": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/profile": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/profile/edit": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/profile/delete-account": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/obrien/dashboard": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/obrien/conversations": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/obrien/thread/1790866301.697524": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/obrien/public-profile/edit": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/obrien/public-profile": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/users": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/agent/nosuch/dashboard": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/users/00000000-0000-0000-0000-000000000000": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/users/not-a-uuid": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/jobs": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/activity": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/activity/00000000-0000-0000-0000-000000000000": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/discussions": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/agents": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/cohorts": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/cohorts/topology": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/access-requests": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/simulation": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/pis": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/pis/00000000-0000-0000-0000-000000000000": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/assessments": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/activity": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/slack-bots": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/discussions": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/prompt-suggestions": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"pending|1280|/admin/assessments?page=-1&sort=zzz": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/assessments?page=99999": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/manager/assessments?status=<script>&page=abc": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/discussions?run=garbage": [
+200,
+"/access-pending",
+0,
+0
+],
+"pending|1280|/admin/activity?page=-5": [
+200,
+"/access-pending",
+0,
+0
+],
+"admin|375|/login": [
+200,
+"/profile",
+0,
+0
+],
+"pending|1280|/admin/jobs?status=nonsense": [
+200,
+"/access-pending",
+0,
+0
+],
+"admin|375|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"admin|375|/": [
+200,
+"/profile",
+0,
+0
+],
+"admin|375|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"admin|375|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"admin|375|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"admin|375|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"admin|375|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"admin|375|/onboarding": [
+200,
+"/profile",
+0,
+0
+],
+"admin|375|/profile": [
+200,
+"/profile",
+0,
+0
+],
+"admin|375|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"admin|375|/profile/edit": [
+200,
+"/profile/edit",
+0,
+0
+],
+"admin|375|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"admin|375|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"admin|375|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"admin|375|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"admin|375|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"admin|375|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"admin|375|/agent": [
+200,
+"/agent",
+0,
+0
+],
+"admin|375|/admin/users/not-a-uuid": [
+422,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"admin|375|/admin/users/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|375|/admin": [
+200,
+"/admin",
+0,
+0
+],
+"admin|375|/admin/users": [
+200,
+"/admin/users",
+0,
+0
+],
+"admin|375|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+2382,
+0
+],
+"admin|375|/admin/jobs": [
+200,
+"/admin/jobs",
+11,
+0
+],
+"admin|375|/admin/activity/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|375|/admin/activity": [
+200,
+"/admin/activity",
+0,
+0
+],
+"admin|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"admin|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+200,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+0,
+0
+],
+"admin|375|/admin/agents": [
+200,
+"/admin/agents",
+5,
+0
+],
+"admin|375|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+200,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+0,
+0
+],
+"admin|375|/admin/discussions": [
+200,
+"/admin/discussions",
+259,
+0
+],
+"admin|375|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+200,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+0,
+0
+],
+"admin|375|/admin/assessments": [
+200,
+"/admin/assessments",
+174,
+0
+],
+"admin|375|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+404,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|375|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+200,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+0,
+0
+],
+"admin|375|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+200,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+0,
+0
+],
+"admin|375|/admin/cohorts": [
+200,
+"/admin/cohorts",
+0,
+0
+],
+"admin|375|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4801,
+0
+],
+"admin|375|/admin/access-requests": [
+200,
+"/admin/access-requests",
+0,
+0
+],
+"admin|375|/admin/cohorts/topology": [
+200,
+"/admin/cohorts/topology",
+0,
+0
+],
+"admin|375|/manager/pis/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|375|/admin/simulation": [
+200,
+"/admin/simulation",
+223,
+0
+],
+"admin|375|/manager": [
+200,
+"/manager/pis",
+0,
+0
+],
+"admin|375|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+2382,
+0
+],
+"admin|375|/manager/pis": [
+200,
+"/manager/pis",
+0,
+0
+],
+"admin|375|/manager/assessments": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"admin|375|/manager/discussions": [
+200,
+"/manager/discussions",
+96,
+0
+],
+"admin|375|/manager/activity": [
+200,
+"/manager/activity",
+0,
+0
+],
+"admin|375|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"admin|375|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"admin|375|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"admin|375|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4801,
+0
+],
+"admin|375|/manager/slack-bots": [
+200,
+"/manager/slack-bots",
+0,
+0
+],
+"admin|375|/manager/prompt-suggestions": [
+200,
+"/manager/prompt-suggestions",
+119,
+0
+],
+"admin|375|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"admin|375|/admin/assessments?page=-1&sort=zzz": [
+200,
+"/admin/assessments?page=-1&sort=zzz",
+174,
+0
+],
+"admin|375|/admin/discussions?run=garbage": [
+200,
+"/admin/discussions?run=garbage",
+259,
+0
+],
+"admin|375|/manager/assessments?status=<script>&page=abc": [
+200,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+174,
+0
+],
+"admin|375|/admin/jobs?status=nonsense": [
+200,
+"/admin/jobs?status=nonsense",
+11,
+0
+],
+"admin|375|/admin/assessments?page=99999": [
+200,
+"/admin/assessments?page=99999",
+174,
+0
+],
+"admin|375|/admin/activity?page=-5": [
+200,
+"/admin/activity?page=-5",
+0,
+0
+],
+"pi|375|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"pi|375|/login": [
+200,
+"/profile",
+2770,
+0
+],
+"pi|375|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"pi|375|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"pi|375|/": [
+200,
+"/profile",
+2770,
+0
+],
+"pi|375|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"pi|375|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"pi|375|/onboarding": [
+200,
+"/profile",
+2770,
+0
+],
+"pi|375|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"pi|375|/profile": [
+200,
+"/profile",
+2770,
+0
+],
+"pi|375|/profile/edit": [
+200,
+"/profile/edit",
+2233,
+0
+],
+"pi|375|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"pi|375|/agent/obrien/thread/1790866301.697524": [
+404,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"pi|375|/agent": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"pi|375|/agent/obrien/dashboard": [
+200,
+"/agent/obrien/dashboard",
+0,
+0
+],
+"pi|375|/agent/obrien/conversations": [
+200,
+"/agent/obrien/conversations",
+0,
+0
+],
+"pi|375|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"pi|375|/agent/obrien/public-profile": [
+200,
+"/agent/obrien/public-profile",
+2382,
+0
+],
+"pi|375|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"pi|375|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"pi|375|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi|375|/agent/obrien/public-profile/edit": [
+200,
+"/agent/obrien/public-profile/edit",
+2233,
+0
+],
+"pi|375|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|375|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"pi|375|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"pi|375|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"pi|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"pi|375|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|375|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"pi|375|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"pi|375|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"pi|375|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"pi|375|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"pi|375|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"pi|375|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|375|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"pi|375|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|375|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"pi|375|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"pi|375|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"pi|375|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"pi|375|/manager": [
+403,
+"/manager",
+null,
+null
+],
+"pi|375|/manager/pis": [
+403,
+"/manager/pis",
+null,
+null
+],
+"pi|375|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"pi|375|/manager/pis/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|375|/manager/assessments": [
+403,
+"/manager/assessments",
+null,
+null
+],
+"pi|375|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|375|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"pi|375|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"pi|375|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"pi|375|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"pi|375|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"pi|375|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"pi|375|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"pi|375|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"pi|375|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"pi|375|/manager/assessments?status=<script>&page=abc": [
+403,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+null,
+null
+],
+"pi|375|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"pi|375|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"pi|375|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"pi|375|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"reviewer|375|/": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/login": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"reviewer|375|/settings": [
+200,
+"/settings",
+0,
+0
+],
+"reviewer|375|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"reviewer|375|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"reviewer|375|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"reviewer|375|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"reviewer|375|/onboarding": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/profile/edit": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/profile": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/agent/obrien/dashboard": [
+403,
+"/agent/obrien/dashboard",
+null,
+null
+],
+"reviewer|375|/agent/obrien/conversations": [
+403,
+"/agent/obrien/conversations",
+null,
+null
+],
+"reviewer|375|/profile/delete-account": [
+200,
+"/profile/delete-account",
+0,
+0
+],
+"reviewer|375|/agent/obrien/thread/1790866301.697524": [
+403,
+"/agent/obrien/thread/1790866301.697524",
+null,
+null
+],
+"reviewer|375|/agent": [
+200,
+"/agent",
+0,
+0
+],
+"reviewer|375|/agent/obrien/public-profile": [
+403,
+"/agent/obrien/public-profile",
+null,
+null
+],
+"reviewer|375|/agent/obrien/public-profile/edit": [
+403,
+"/agent/obrien/public-profile/edit",
+null,
+null
+],
+"reviewer|375|/agent/nosuch/dashboard": [
+404,
+"/agent/nosuch/dashboard",
+null,
+null
+],
+"reviewer|375|/admin": [
+403,
+"/admin",
+null,
+null
+],
+"reviewer|375|/admin/users": [
+403,
+"/admin/users",
+null,
+null
+],
+"reviewer|375|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+403,
+"/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+null,
+null
+],
+"reviewer|375|/admin/users/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/users/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|375|/admin/users/not-a-uuid": [
+403,
+"/admin/users/not-a-uuid",
+null,
+null
+],
+"reviewer|375|/admin/jobs": [
+403,
+"/admin/jobs",
+null,
+null
+],
+"reviewer|375|/admin/activity": [
+403,
+"/admin/activity",
+null,
+null
+],
+"reviewer|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"reviewer|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+403,
+"/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls",
+null,
+null
+],
+"reviewer|375|/admin/activity/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/activity/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|375|/admin/discussions": [
+403,
+"/admin/discussions",
+null,
+null
+],
+"reviewer|375|/admin/agents": [
+403,
+"/admin/agents",
+null,
+null
+],
+"reviewer|375|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+403,
+"/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+null,
+null
+],
+"reviewer|375|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+403,
+"/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+null,
+null
+],
+"reviewer|375|/admin/assessments": [
+403,
+"/admin/assessments",
+null,
+null
+],
+"reviewer|375|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+403,
+"/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+null,
+null
+],
+"reviewer|375|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+403,
+"/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"reviewer|375|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+403,
+"/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5",
+null,
+null
+],
+"reviewer|375|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+403,
+"/admin/assessments/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|375|/admin/cohorts": [
+403,
+"/admin/cohorts",
+null,
+null
+],
+"reviewer|375|/admin/cohorts/topology": [
+403,
+"/admin/cohorts/topology",
+null,
+null
+],
+"reviewer|375|/admin/access-requests": [
+403,
+"/admin/access-requests",
+null,
+null
+],
+"reviewer|375|/admin/simulation": [
+403,
+"/admin/simulation",
+null,
+null
+],
+"reviewer|375|/manager/pis/00000000-0000-0000-0000-000000000000": [
+404,
+"/manager/pis/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|375|/manager/pis": [
+200,
+"/manager/pis",
+0,
+0
+],
+"reviewer|375|/manager": [
+200,
+"/manager/pis",
+0,
+0
+],
+"reviewer|375|/manager/discussions": [
+403,
+"/manager/discussions",
+null,
+null
+],
+"reviewer|375|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+2387,
+0
+],
+"reviewer|375|/manager/assessments": [
+200,
+"/manager/assessments",
+174,
+0
+],
+"reviewer|375|/manager/activity": [
+403,
+"/manager/activity",
+null,
+null
+],
+"reviewer|375|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+403,
+"/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476",
+null,
+null
+],
+"reviewer|375|/manager/slack-bots": [
+403,
+"/manager/slack-bots",
+null,
+null
+],
+"reviewer|375|/manager/prompt-suggestions": [
+403,
+"/manager/prompt-suggestions",
+null,
+null
+],
+"reviewer|375|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+403,
+"/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000",
+null,
+null
+],
+"reviewer|375|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+null,
+null
+],
+"reviewer|375|/admin/assessments?page=-1&sort=zzz": [
+403,
+"/admin/assessments?page=-1&sort=zzz",
+null,
+null
+],
+"reviewer|375|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+4801,
+0
+],
+"reviewer|375|/admin/assessments?page=99999": [
+403,
+"/admin/assessments?page=99999",
+null,
+null
+],
+"reviewer|375|/admin/discussions?run=garbage": [
+403,
+"/admin/discussions?run=garbage",
+null,
+null
+],
+"reviewer|375|/admin/jobs?status=nonsense": [
+403,
+"/admin/jobs?status=nonsense",
+null,
+null
+],
+"reviewer|375|/admin/activity?page=-5": [
+403,
+"/admin/activity?page=-5",
+null,
+null
+],
+"reviewer|375|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"reviewer|375|/manager/assessments?status=<script>&page=abc": [
+200,
+"/manager/assessments?status=%3Cscript%3E&page=abc",
+174,
+0
+],
+"anon|375|/access-pending": [
+200,
+"/access-pending",
+0,
+0
+],
+"anon|375|/": [
+200,
+"/login",
+0,
+0
+],
+"anon|375|/settings": [
+200,
+"/login?next=%2Fsettings",
+0,
+0
+],
+"anon|375|/login": [
+200,
+"/login",
+0,
+0
+],
+"anon|375|/cabo-graph": [
+200,
+"/cabo-graph",
+0,
+0
+],
+"anon|375|/scripps-graph": [
+200,
+"/scripps-graph",
+0,
+0
+],
+"anon|375|/schultz-alumni-pilot": [
+200,
+"/schultz-alumni-pilot",
+0,
+0
+],
+"anon|375|/schultz-group-alumni": [
+200,
+"/schultz-group-alumni",
+0,
+0
+],
+"anon|375|/profile": [
+200,
+"/login?next=%2Fprofile",
+0,
+0
+],
+"anon|375|/profile/edit": [
+200,
+"/login?next=%2Fprofile%2Fedit",
+0,
+0
+],
+"anon|375|/onboarding": [
+200,
+"/login?next=%2Fonboarding",
+0,
+0
+],
+"anon|375|/profile/delete-account": [
+200,
+"/login?next=%2Fprofile%2Fdelete-account",
+0,
+0
+],
+"anon|375|/agent": [
+200,
+"/login?next=%2Fagent",
+0,
+0
+],
+"anon|375|/agent/obrien/dashboard": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fdashboard",
+0,
+0
+],
+"anon|375|/agent/obrien/conversations": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fconversations",
+0,
+0
+],
+"anon|375|/agent/obrien/thread/1790866301.697524": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fthread%2F1790866301.697524",
+0,
+0
+],
+"anon|375|/agent/obrien/public-profile/edit": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fpublic-profile%2Fedit",
+0,
+0
+],
+"anon|375|/agent/obrien/public-profile": [
+200,
+"/login?next=%2Fagent%2Fobrien%2Fpublic-profile",
+0,
+0
+],
+"anon|375|/agent/nosuch/dashboard": [
+200,
+"/login?next=%2Fagent%2Fnosuch%2Fdashboard",
+0,
+0
+],
+"anon|375|/admin": [
+200,
+"/login?next=%2Fadmin",
+0,
+0
+],
+"anon|375|/admin/users": [
+200,
+"/login?next=%2Fadmin%2Fusers",
+0,
+0
+],
+"anon|375|/admin/users/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/login?next=%2Fadmin%2Fusers%2F2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+0,
+0
+],
+"anon|375|/admin/users/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Fusers%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|375|/admin/users/not-a-uuid": [
+200,
+"/login?next=%2Fadmin%2Fusers%2Fnot-a-uuid",
+0,
+0
+],
+"anon|375|/admin/jobs": [
+200,
+"/login?next=%2Fadmin%2Fjobs",
+0,
+0
+],
+"anon|375|/admin/activity": [
+200,
+"/login?next=%2Fadmin%2Factivity",
+0,
+0
+],
+"anon|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"anon|375|/admin/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476/llm-calls": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476%2Fllm-calls",
+0,
+0
+],
+"anon|375|/admin/activity/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Factivity%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|375|/admin/discussions": [
+200,
+"/login?next=%2Fadmin%2Fdiscussions",
+0,
+0
+],
+"anon|375|/admin/agents": [
+200,
+"/login?next=%2Fadmin%2Fagents",
+0,
+0
+],
+"anon|375|/admin/agents/984cbfed-2cd9-46d6-9b1f-04c2f2f2209c": [
+200,
+"/login?next=%2Fadmin%2Fagents%2F984cbfed-2cd9-46d6-9b1f-04c2f2f2209c",
+0,
+0
+],
+"anon|375|/admin/agents/ed5f78a3-6eaa-4d27-b0ac-14bd330c650d": [
+200,
+"/login?next=%2Fadmin%2Fagents%2Fed5f78a3-6eaa-4d27-b0ac-14bd330c650d",
+0,
+0
+],
+"anon|375|/admin/assessments": [
+200,
+"/login?next=%2Fadmin%2Fassessments",
+0,
+0
+],
+"anon|375|/admin/assessments/b5550d98-b7bb-41b3-adeb-0f0e5dcc01b9": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2Fb5550d98-b7bb-41b3-adeb-0f0e5dcc01b9",
+0,
+0
+],
+"anon|375|/admin/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2F12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+0,
+0
+],
+"anon|375|/admin/assessments/eabeb49d-256f-4db5-8899-ce90da2171e5": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2Feabeb49d-256f-4db5-8899-ce90da2171e5",
+0,
+0
+],
+"anon|375|/admin/assessments/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fadmin%2Fassessments%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|375|/admin/cohorts": [
+200,
+"/login?next=%2Fadmin%2Fcohorts",
+0,
+0
+],
+"anon|375|/admin/cohorts/topology": [
+200,
+"/login?next=%2Fadmin%2Fcohorts%2Ftopology",
+0,
+0
+],
+"anon|375|/admin/access-requests": [
+200,
+"/login?next=%2Fadmin%2Faccess-requests",
+0,
+0
+],
+"anon|375|/manager": [
+200,
+"/login?next=%2Fmanager",
+0,
+0
+],
+"anon|375|/admin/simulation": [
+200,
+"/login?next=%2Fadmin%2Fsimulation",
+0,
+0
+],
+"anon|375|/manager/pis": [
+200,
+"/login?next=%2Fmanager%2Fpis",
+0,
+0
+],
+"anon|375|/manager/pis/2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a": [
+200,
+"/login?next=%2Fmanager%2Fpis%2F2c2ce591-1968-4cc0-a2af-e76c8a0b1c8a",
+0,
+0
+],
+"anon|375|/manager/pis/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fmanager%2Fpis%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|375|/manager/assessments": [
+200,
+"/login?next=%2Fmanager%2Fassessments",
+0,
+0
+],
+"anon|375|/manager/assessments/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login?next=%2Fmanager%2Fassessments%2F12e04c8f-3bfd-4aa8-8cea-8027d5887819",
+0,
+0
+],
+"anon|375|/manager/discussions": [
+200,
+"/login?next=%2Fmanager%2Fdiscussions",
+0,
+0
+],
+"anon|375|/manager/activity": [
+200,
+"/login?next=%2Fmanager%2Factivity",
+0,
+0
+],
+"anon|375|/manager/activity/290e2356-c42c-4b16-b6a9-9a5bd675b476": [
+200,
+"/login?next=%2Fmanager%2Factivity%2F290e2356-c42c-4b16-b6a9-9a5bd675b476",
+0,
+0
+],
+"anon|375|/manager/slack-bots": [
+200,
+"/login?next=%2Fmanager%2Fslack-bots",
+0,
+0
+],
+"anon|375|/manager/prompt-suggestions": [
+200,
+"/login?next=%2Fmanager%2Fprompt-suggestions",
+0,
+0
+],
+"anon|375|/manager/prompt-suggestions/00000000-0000-0000-0000-000000000000": [
+200,
+"/login?next=%2Fmanager%2Fprompt-suggestions%2F00000000-0000-0000-0000-000000000000",
+0,
+0
+],
+"anon|375|/assessment-chat/12e04c8f-3bfd-4aa8-8cea-8027d5887819": [
+200,
+"/login",
+0,
+0
+],
+"anon|375|/invite/badtoken": [
+200,
+"/invite/badtoken",
+0,
+0
+],
+"anon|375|/admin/assessments?page=-1&sort=zzz": [
+200,
+"/login?next=%2Fadmin%2Fassessments%3Fpage%3D-1%26sort%3Dzzz",
+0,
+0
+],
+"anon|375|/admin/assessments?page=99999": [
+200,
+"/login?next=%2Fadmin%2Fassessments%3Fpage%3D99999",
+0,
+0
+],
+"anon|375|/manager/assessments?status=<script>&page=abc": [
+200,
+"/login?next=%2Fmanager%2Fassessments%3Fstatus%3D%253Cscript%253E%26page%3Dabc",
+0,
+0
+],
+"anon|375|/admin/discussions?run=garbage": [
+200,
+"/login?next=%2Fadmin%2Fdiscussions%3Frun%3Dgarbage",
+0,
+0
+],
+"anon|375|/admin/jobs?status=nonsense": [
+200,
+"/login?next=%2Fadmin%2Fjobs%3Fstatus%3Dnonsense",
+0,
+0
+],
+"anon|375|/admin/activity?page=-5": [
+200,
+"/login?next=%2Fadmin%2Factivity%3Fpage%3D-5",
+0,
+0
+]
+}
+}
