@@ -6,6 +6,7 @@ from src.services import industry_evidence, industry_score
 from src.services.industry_sources import registry
 from src.services.industry_sources.registry import SOURCES, SourceUnavailable
 from src.services.jhu_rules import set_tenure_start
+from src.worker.main import JobContext
 
 _TODAY_WEIGHTS = {
     "coauthor_company": (3.0, 30.0),
@@ -39,6 +40,7 @@ def _row(user_id, source, kind, external_id):
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("progress_on_test_connection")
 async def test_a_failing_source_keeps_its_rows_and_others_refresh(db_session, monkeypatch):
     user = User(orcid="0000-0001-4242-0001", name="Isolation PI", user_role="pi")
     db_session.add(user)
@@ -62,7 +64,10 @@ async def test_a_failing_source_keeps_its_rows_and_others_refresh(db_session, mo
                 registry.UsptoSource, registry.NihReporterSource):
         monkeypatch.setattr(cls, "fetch", empty)
 
-    await industry_evidence.execute_industry_evidence(job, db_session)
+    ctx = JobContext(id=job.id, type=job.type, user_id=job.user_id, payload=dict(job.payload),
+                     attempts=job.attempts, max_attempts=job.max_attempts)
+    await industry_evidence.execute_industry_evidence(ctx, db_session)
+    await db_session.refresh(job)
     rows = (await db_session.execute(select(PiIndustryEvidence.source)
                                      .where(PiIndustryEvidence.user_id == user.id))).scalars().all()
     assert rows == ["ctgov"]
