@@ -17,7 +17,7 @@ from sqlalchemy import select  # noqa: E402
 from src.database import get_session_factory  # noqa: E402
 from src.models import ResearcherProfile, User  # noqa: E402
 from src.models.job import BULK_PRIORITY  # noqa: E402
-from src.services.job_queue import insert_job_if_absent  # noqa: E402
+from src.services.grant_enrichment import enqueue_enrichment_jobs  # noqa: E402
 
 
 async def enqueue_for_all(db, *, apply: bool, only: str | None, orcid: str | None) -> int:
@@ -29,11 +29,7 @@ async def enqueue_for_all(db, *, apply: bool, only: str | None, orcid: str | Non
     for u in users:
         print(f"{'ENQUEUE' if apply else 'would enqueue'} {types} for {u.name} ({u.orcid})")
         if apply:
-            for t in types:
-                await insert_job_if_absent(
-                    db, type=t, user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid},
-                    priority=BULK_PRIORITY,
-                )
+            await enqueue_enrichment_jobs(db, u.id, u.orcid, types=tuple(types), priority=BULK_PRIORITY)
     if apply:
         await db.commit()
     return len(users)

@@ -15,12 +15,13 @@ from tests import factories
 pytestmark = pytest.mark.integration
 
 
-async def _committed(engine):
+async def _committed(engine, *, bot_token=None):
     f = async_sessionmaker(engine, expire_on_commit=False)
     async with f() as s:
         pi = await factories.make_user(s, name="Inv Pi", email=f"pi{uuid.uuid4().hex[:6]}@x.edu")
         d = await factories.make_user(s, name="Del", email=f"d{uuid.uuid4().hex[:6]}@x.edu")
-        agent = await factories.make_agent(s, user=pi, agent_id=f"inv{uuid.uuid4().hex[:6]}", status="active")
+        agent = await factories.make_agent(s, user=pi, agent_id=f"inv{uuid.uuid4().hex[:6]}", status="active",
+                                           slack_bot_token=bot_token)
         inv = DelegateInvitation(agent_registry_id=agent.id, invited_by_user_id=pi.id, email=d.email,
                                  token=uuid.uuid4().hex, status="pending",
                                  expires_at=datetime.now(UTC) + timedelta(days=1))
@@ -43,11 +44,18 @@ async def test_double_accept_creates_one_delegate(engine, monkeypatch):
     """Review Focus 3."""
     from src.routers import invite as invite_routes
 
+    f, pi, d, agent, inv = await _committed(engine, bot_token="xoxb-test-accept")
+    seen_delegates = []
+
     async def lookup(token, email):
+        # Runs only after the accept commits: a separate session already sees the row.
+        async with f() as probe:
+            seen_delegates.append((await probe.execute(
+                select(func.count()).select_from(AgentDelegate)
+                .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one())
         return None
 
     monkeypatch.setattr("src.services.slack_web.lookup_user_by_email_async", lookup)
-    f, pi, d, agent, inv = await _committed(engine)
     try:
         async def accept():
             async with f() as s:
@@ -61,6 +69,8 @@ async def test_double_accept_creates_one_delegate(engine, monkeypatch):
             n = (await s.execute(select(func.count()).select_from(AgentDelegate)
                                  .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one()
         assert n == 1
+        # One accept won and looked the delegate up in Slack, after its commit.
+        assert seen_delegates == [1]
     finally:
         await _cleanup(f, [pi.id, d.id], [agent.id])
 

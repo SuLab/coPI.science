@@ -92,7 +92,7 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
     attributed to the impersonated manager; a reviewer still cannot.
 
     Still refused while impersonating: reviewer assign/unassign and
-    prompt-suggestion generate/status (`_refuse_impersonation`, reviews.py),
+    prompt-suggestion generate/status (`refuse_impersonation`, src/dependencies.py),
     every assessment-chat route (`_refused`, assessment_chat.py), self-service
     account deletion (profile.py) and the admin user delete (admin.py). Review
     feedback and review-status writes are allowed, attributed to the

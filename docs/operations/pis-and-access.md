@@ -79,11 +79,13 @@ Requires `SLACK_CONFIG_TOKEN` / `SLACK_CONFIG_REFRESH_TOKEN` in the environment 
 rotating pair is persisted in the `app_settings` KV table) and a public `base_url`.
 
 **Bulk provisioning** (many agents at once) still uses the host script. First export the
-roster from the container, then run the script on the host:
+roster and mint a config access token from the container (the single-use refresh token
+lives only in `app_settings`, so the host never sees it), then run the script on the host:
 
 ```bash
 docker compose -f docker-compose.prod.yml run --rm --no-deps -T -v "$PWD/data:/app/data" blackbird-app python scripts/export_agent_roster.py   # writes host data/agent_roster.json
-python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T --user "$(id -u):$(id -g)" -v "$PWD/data:/app/data" blackbird-app python scripts/slack_config_token.py   # writes data/.slack_config_token (0600)
+python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs; removes the token file
 ```
 
 The web service has no `./data` mount, so the one-off binds one. The host script

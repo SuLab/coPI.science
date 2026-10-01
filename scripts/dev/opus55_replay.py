@@ -604,7 +604,7 @@ def sampling_statement(run_ids: list[uuid.UUID], model: str):
         select(LlmCallLog.id, LlmCallLog.simulation_run_id, LlmCallLog.created_at,
                LlmCallLog.thread_ts, LlmCallLog.agent_id, LlmCallLog.message_ordinal,
                LlmCallLog.thread_phase, LlmCallLog.phase,
-               LlmCallLog.response_text.contains("<assessment_json>").label("has_sidecar"))
+               LlmCallLog.response_text.contains("<assessment_json>", autoescape=True).label("has_sidecar"))
         .where(LlmCallLog.simulation_run_id.in_(run_ids), LlmCallLog.model == model)
         .order_by(LlmCallLog.created_at)
     )
