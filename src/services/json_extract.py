@@ -21,10 +21,10 @@ finds an object that is *there*, and nothing here repairs one that is not.
 See docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H5.
 
 Callers: ``src.agent.specialists.parse_opinion`` (which must never raise, so it
-wraps) and ``src.services.review_bot``. ``src.services.llm`` still carries its
-own copy, ``_extract_json`` (profile synthesis, which lets the ValueError out
-after logging the full text). ``tests/unit/test_json_extract.py`` replays a
-shared corpus through both copies and is the drift alarm between them.
+wraps) and ``src.services.review_bot``. ``src.services.llm`` (profile
+synthesis, which lets the ValueError out after logging the full text) and
+``make_decision`` also call it; the private copy that module and the engine's
+sidecar carried was removed in Phase 3 (LC-04).
 """
 
 from __future__ import annotations

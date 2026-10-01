@@ -4,7 +4,6 @@ import pytest
 
 from src.agent.simulation import (
     SimulationEngine,
-    _extract_json,
     _extract_slack_message,
     _strip_llm_preamble,
 )
@@ -126,35 +125,6 @@ class TestStripLlmPreamble:
         text = "Unfortunately the full text isn't available.\n\nYour ABPP platform could help us identify..."
         result = _strip_llm_preamble(text)
         assert result == "Your ABPP platform could help us identify..."
-
-
-# ---------------------------------------------------------------
-# _extract_json
-# ---------------------------------------------------------------
-
-class TestExtractJson:
-    def test_raw_json(self):
-        text = '{"selected_post_ids": ["1", "2"]}'
-        result = _extract_json(text)
-        assert result["selected_post_ids"] == ["1", "2"]
-
-    def test_json_in_code_block(self):
-        text = '```json\n{"selected_post_ids": ["1"]}\n```'
-        result = _extract_json(text)
-        assert result["selected_post_ids"] == ["1"]
-
-    def test_json_with_surrounding_text(self):
-        text = 'Here is my response:\n{"action": "reply"}\nDone.'
-        result = _extract_json(text)
-        assert result["action"] == "reply"
-
-    def test_invalid_json_raises(self):
-        with pytest.raises(ValueError):
-            _extract_json("no json here")
-
-    def test_empty_string_raises(self):
-        with pytest.raises(ValueError):
-            _extract_json("")
 
 
 # ---------------------------------------------------------------

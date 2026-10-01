@@ -98,7 +98,7 @@ async def test_the_installed_sdk_draws_the_line_exactly_where_we_do():
 async def test_no_call_site_in_src_asks_for_more_than_the_ceiling():
     """A literal `max_tokens=N` above the limit is a call that can never succeed.
 
-    Cheap static sweep, deliberately not a mock: the guard in ``_acreate`` only
+    Cheap static sweep, deliberately not a mock: the guard in ``acreate`` only
     fires when the call is actually made, and the call sites that matter most
     (phase-4 thread_reply, phase-5, a consult) are the ones a unit test is least
     likely to reach on the day someone raises one.
@@ -155,7 +155,7 @@ async def test_the_shared_client_carries_a_300s_timeout():
 
 
 async def test_setting_any_timeout_disables_the_sdks_own_ceiling_guard():
-    """The trap that makes ``_acreate``'s guard load-bearing rather than belt.
+    """The trap that makes ``acreate``'s guard load-bearing rather than belt.
 
     ``Messages.create`` applies ``_calculate_nonstreaming_timeout`` — the thing
     that raises on ``max_tokens > 21_333`` — only ``if not stream and not
@@ -178,15 +178,15 @@ async def test_setting_any_timeout_disables_the_sdks_own_ceiling_guard():
 async def test_acreate_still_raises_above_the_nonstreaming_ceiling():
     """With the SDK's guard out of the picture, this is the only one left.
 
-    Asserted against ``_acreate`` directly rather than through a public entry
-    point, because ``_acreate`` is the single choke point every non-streaming
+    Asserted against ``acreate`` directly rather than through a public entry
+    point, because ``acreate`` is the single choke point every non-streaming
     request in this module passes through — the property under test is that the
     check lives THERE, not that one caller happens to be covered.
     """
     fake = FakeAnthropic([text_response("never reached")])
 
     with pytest.raises(ValueError, match="NONSTREAMING_MAX_TOKENS"):
-        await llm._acreate(
+        await llm.acreate(
             fake, model="m", max_tokens=llm.NONSTREAMING_MAX_TOKENS + 1,
             system="s", messages=[],
         )
@@ -194,7 +194,7 @@ async def test_acreate_still_raises_above_the_nonstreaming_ceiling():
 
     # ...and the last accepted value still goes through, so the guard is a
     # ceiling rather than an off-by-one that costs a whole token of budget.
-    await llm._acreate(
+    await llm.acreate(
         fake, model="m", max_tokens=llm.NONSTREAMING_MAX_TOKENS,
         system="s", messages=[],
     )
@@ -360,7 +360,7 @@ async def test_a_call_site_above_the_ceiling_fails_fast_and_says_why(
     assert str(llm.NONSTREAMING_MAX_TOKENS) in message
     assert "streaming" in message.lower()
     assert fake.calls == [], (
-        "the point of raising in _acreate is that nothing is issued — a request "
+        "the point of raising in acreate is that nothing is issued — a request "
         "that cannot succeed must not be billed first"
     )
 

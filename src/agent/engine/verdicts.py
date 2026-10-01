@@ -34,7 +34,6 @@ from src.agent.engine.sidecar import (
     _normalize_gating,
     _reply_opens_with_pause,
     _sidecar_has_valid_json_block,
-    _str_or_none,
 )
 from src.agent.specialists import panel_is_owed
 from src.agent.state import ThreadState
@@ -55,6 +54,7 @@ from src.services.assessment_headline import (
     _clip_at_sentence,
 )
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+from src.services.verdict_fields import sidecar_column_kwargs
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -803,9 +803,9 @@ class Verdicts:
         # instead of dropping: a truncated recommendation is still useful for
         # triage, an absent one is not.
         subject_agent_id = _bounded_str(subject_view.get("subject_agent_id"), 50)
-        funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
-        recommendation = _bounded_str(verdict.get("recommendation"), 30)
-        confidence = _bounded_str(verdict.get("confidence"), 20)
+        # The plain sidecar fields (funnel_stage/recommendation/confidence among
+        # them, bounded the same way) come from the VERDICT_FIELDS registry.
+        sidecar_columns = sidecar_column_kwargs(verdict)
         self._warn_headline_and_pitch_shape(agent_id, verdict)
         normalized_key_points = self._normalized_key_points(agent_id, key_points)
         self._warn_bullet_fields_shape(agent_id, verdict)
@@ -813,8 +813,7 @@ class Verdicts:
         return self._assessment_kwargs(
             agent_id=agent_id, channel=channel, verdict=verdict, slack_ts=slack_ts,
             thread=thread, subject_agent_id=subject_agent_id,
-            funnel_stage=funnel_stage, recommendation=recommendation,
-            confidence=confidence, computed_score=computed_score,
+            sidecar_columns=sidecar_columns, computed_score=computed_score,
             computed_band=computed_band, gating=gating, scores=scores,
             red_flags=red_flags, milestones=milestones,
             normalized_key_points=normalized_key_points, _rationales=_rationales,
@@ -1157,7 +1156,7 @@ class Verdicts:
 
     def _assessment_kwargs(
         self, *, agent_id, channel, verdict, slack_ts, thread, subject_agent_id,
-        funnel_stage, recommendation, confidence, computed_score, computed_band,
+        sidecar_columns, computed_score, computed_band,
         gating, scores, red_flags, milestones, normalized_key_points, _rationales,
         gap, floor_verifiable, panel_owed,
     ) -> dict:
@@ -1170,7 +1169,7 @@ class Verdicts:
             simulation_run_id=self.simulation_run_id,
             agent_id=agent_id,
             subject_agent_id=subject_agent_id,
-            # Bounded like its four siblings above. `channel_name` is
+            # Bounded like `subject_agent_id`. `channel_name` is
             # String(100) NOT NULL and was passed raw, so an over-long channel
             # name was the one string field left able to DataError the whole row
             # out of existence. `or ""` because the column is NOT NULL and
@@ -1186,42 +1185,18 @@ class Verdicts:
             # `_assessed_threads` (see `_rehydrate_assessed_threads`) instead of
             # treating the interview's own concluding verdict as a first one.
             thread_id=(thread.thread_id if thread is not None else None) or None,
-            company_or_project=_str_or_none(verdict.get("company_or_project")),
-            # Sidecar items 6-8 (2026-09-09): the reviewer-facing narrative.
-            # `company_or_project` above stays the short label — these three are
-            # what the assessment pages lead with. Each degrades exactly like
-            # its existing siblings: a wrong type becomes None and `raw_verdict`
-            # keeps the original, because a malformed narrative field must never
-            # cost the verdict (A20).
-            headline=_str_or_none(verdict.get("headline")),
+            # The plain sidecar fields: company_or_project, headline,
+            # elevator_pitch, score_rationale, strengths, risks,
+            # competitive_landscape, evidence_maturity, funnel_stage,
+            # recommendation, confidence, rationale and
+            # recommended_next_experiment. Their treatments and the reasons for
+            # them live in src/services/verdict_fields.py.
+            **sidecar_columns,
             key_points=normalized_key_points,
-            elevator_pitch=_str_or_none(verdict.get("elevator_pitch")),
-            # Sidecar item 10 (0048): why the dimension scores came out where
-            # they did. App-only by design (D3) — the six-field
-            # #assessments-summary headline never renders it, which is the
-            # whole reason it is a column of its own rather than more pitch.
-            # Degrades exactly like its narrative siblings above.
-            score_rationale=_str_or_none(verdict.get("score_rationale")),
             # Sidecar item 2's companion (0052): the per-dimension reasons.
             # Degrades to None on a wrong shape like its narrative siblings;
             # raw_verdict keeps the original either way.
             dimension_rationales=_rationales,
-            # Sidecar items 11/12 (0049): the hub's own strengths/risks
-            # bullets. Degrades to None on a wrong type like its narrative
-            # siblings above; raw_verdict keeps the original either way.
-            strengths=normalize_bullets(verdict.get("strengths")),
-            risks=normalize_bullets(verdict.get("risks")),
-            # Sidecar items 13/14 (0050): the competitor set with stages, and the
-            # per-axis statement of what is settled. Degrade to None on a wrong
-            # type like their narrative siblings above; raw_verdict keeps the
-            # original either way.
-            competitive_landscape=normalize_bullets(
-                verdict.get("competitive_landscape")
-            ),
-            evidence_maturity=normalize_bullets(verdict.get("evidence_maturity")),
-            funnel_stage=funnel_stage,
-            recommendation=recommendation,
-            confidence=confidence,
             weighted_score=computed_score,
             band=computed_band,
             gating=gating,
@@ -1229,13 +1204,6 @@ class Verdicts:
             red_flags=red_flags if isinstance(red_flags, list) else None,
             derisking_milestones=(
                 milestones if isinstance(milestones, list) else None
-            ),
-            rationale=_str_or_none(verdict.get("rationale")),
-            # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird
-            # should fund next. Degrades to None on a wrong type like its Text
-            # siblings; raw_verdict keeps the original either way.
-            recommended_next_experiment=_str_or_none(
-                verdict.get("recommended_next_experiment")
             ),
             raw_verdict=verdict,
             # WHICH rubric produced this row. The weights, thresholds and

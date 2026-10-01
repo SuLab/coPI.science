@@ -2,11 +2,11 @@
 
 import asyncio
 import contextvars
-import json
 import logging
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache, partial
 from typing import Any, Callable
@@ -14,6 +14,7 @@ from typing import Any, Callable
 import anthropic
 
 from src.config import get_settings
+from src.services.json_extract import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ CLIENT_READ_TIMEOUT_SECONDS = 300.0
 # `_client_for_key` now passes a timeout of its own (CLIENT_READ_TIMEOUT_SECONDS
 # above), so that condition is permanently false. Verified against the installed
 # SDK source of anthropic 1.0.0 and 0.120.2, the two versions this repo ran when
-# this was written. The check in `_acreate` is therefore
+# this was written. The check in `acreate` is therefore
 # the ONLY thing standing between a mis-sized call site and a request the API
 # will reject after it has been sent: do not remove it, and do not "simplify" it
 # on the grounds that the SDK checks too. tests/unit/
@@ -186,7 +187,7 @@ def _cacheable_system(system_prompt: str) -> list[dict[str, Any]]:
     position 0 and invalidate every downstream entry.
 
     Returns blocks, never a bare string, so callers do not have to care which
-    shape they got. `_acreate` is the only caller.
+    shape they got. `acreate` is the only caller.
     """
     boundary = system_prompt.find(_STABLE_PREFIX_BOUNDARY)
     if boundary <= 0:
@@ -216,7 +217,7 @@ def get_anthropic_client() -> anthropic.Anthropic:
 class NonStreamingMaxTokensError(ValueError):
     """A call site asked for more ``max_tokens`` than non-streaming allows.
 
-    Raised by ``_acreate``'s pre-flight check BEFORE any HTTP request is made,
+    Raised by ``acreate``'s pre-flight check BEFORE any HTTP request is made,
     which is the one property that distinguishes it from every other exception
     in this module: nothing was sent and nothing was billed. That is why the
     failure paths in ``generate_agent_response`` and ``generate_with_tools``
@@ -259,7 +260,7 @@ _API_MAX_CONCURRENCY = 8
 # read timeout could starve the Slack pollers, the persist flush and the roster
 # sync out of the same 6 threads.
 #
-# 12 = the 8 above plus slack for orphans. A cancelled ``_acreate`` (shutdown, a
+# 12 = the 8 above plus slack for orphans. A cancelled ``acreate`` (shutdown, a
 # ``wait_for``) releases its semaphore slot the moment the await unwinds, but the
 # thread it left behind stays blocked inside the HTTP request until the read
 # timeout fires — up to 300 s. Without that margin a few of those would make the
@@ -327,7 +328,7 @@ def _api_semaphore() -> asyncio.Semaphore:
     return semaphore
 
 
-async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
+async def acreate(client: anthropic.Anthropic, **kwargs: Any):
     """``client.messages.create`` awaited OFF the event-loop thread.
 
     ``anthropic.Anthropic`` is the synchronous client, so calling it directly
@@ -504,7 +505,7 @@ def _retry_budget(
 
     Clamping is logged at WARNING because the retry did not get what it asked
     for: at the cap it is not a bigger budget at all. It is still worth making —
-    the retry passes no ``tools`` and takes ``_acreate``'s thinking-disabled
+    the retry passes no ``tools`` and takes ``acreate``'s thinking-disabled
     default, so the same ceiling buys strictly more *text* than the adaptive
     thinking call that truncated — but an operator reading "retrying with
     max_tokens=21333" after a 16000 truncation should not have to work out why
@@ -552,7 +553,7 @@ def _block_types(message: Any) -> list[str | None]:
     two turns billed several hundred non-reasoning output tokens and returned no
     text at all, with ``stop_reason='end_turn'``. Summarized thinking and every
     accounting explanation were ruled out (36 calibration rows, 8 negative
-    controls); the only surviving hypothesis is a block type ``_all_text``
+    controls); the only surviving hypothesis is a block type ``all_text``
     ignores — ``redacted_thinking`` — and it stays INFERRED because zero such
     blocks appear in the 5,543 stored ``llm_call_logs`` rows. Nothing had ever
     recorded the types. Now everything does, so the next occurrence names itself.
@@ -787,14 +788,14 @@ def _call_stat(
         "stop_reason": getattr(message, "stop_reason", None),
         # What the reply was actually MADE of. `stop_reason` says why generation
         # ended; this says what came back, which is the only way to tell a
-        # refusal apart from a reply whose every block is of a type `_all_text`
+        # refusal apart from a reply whose every block is of a type `all_text`
         # skips. See `_block_types`.
         "block_types": _block_types(message),
         "latency_ms": round(latency_ms, 1),
     }
 
 
-def _all_text(message: Any) -> str:
+def all_text(message: Any) -> str:
     """Every ``text`` block's text, joined with a newline — not just the first.
 
     Supersedes the block-0-only helper this replaced. That was safe while
@@ -870,17 +871,17 @@ Return your response as valid JSON matching the specified schema."""
 
     client = get_anthropic_client()
     try:
-        message = await _acreate(
+        message = await acreate(
             client,
             model=settings.llm_profile_model,
             max_tokens=4000,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
-        response_text = _all_text(message)
+        response_text = all_text(message)
 
         try:
-            return _extract_json(response_text)
+            return extract_json(response_text)
         except ValueError:
             logger.error(
                 "Profile synthesis response for %s could not be parsed; full text:\n%s",
@@ -892,54 +893,130 @@ Return your response as valid JSON matching the specified schema."""
         raise
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    """Extract JSON object from LLM response text."""
-    # Try direct parse first
-    text = text.strip()
-    if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+@dataclass
+class _CallLedger:
+    """What one turn has billed so far: the per-call stats, token totals and the
+    latency figure `_emit_call_log` reports (the last round's latency plus any
+    truncation retry's, exactly as the two turn functions computed it before)."""
+    call_stats: list[dict[str, Any]] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: float = 0.0
+    seq: int = 0
+    #: (text, message) to hand back if a later call raises; None = nothing to salvage.
+    recovered: tuple[str, Any] | None = None
 
-    # Look for JSON code block
-    if "```json" in text:
-        start = text.find("```json") + 7
-        end = text.find("```", start)
-        if end > start:
-            block = text[start:end].strip()
-            try:
-                return json.loads(block)
-            except json.JSONDecodeError:
-                pass
-            # Claude sometimes drops the opening brace inside the fence — try
-            # wrapping when the block looks like the body of an object.
-            if block.startswith('"') and ":" in block:
-                try:
-                    return json.loads("{" + block.rstrip(", \n") + "}")
-                except json.JSONDecodeError:
-                    pass
 
-    # Look for any JSON block
-    if "```" in text:
-        start = text.find("```") + 3
-        end = text.find("```", start)
-        if end > start:
-            try:
-                return json.loads(text[start:end].strip())
-            except json.JSONDecodeError:
-                pass
+async def _billed_call(
+    client: anthropic.Anthropic, ledger: _CallLedger, *,
+    kind: str | Callable[[Any], str], max_tokens: int, accumulate_latency: bool,
+    **create_kwargs: Any,
+) -> Any:
+    """One `acreate` call, booked into `ledger`. `create_kwargs` are passed through
+    untouched, so the request is byte-identical to the inline calls it replaces.
+    A call that raises books nothing: only completed calls are in `call_stats`."""
+    t0 = time.monotonic()
+    message = await acreate(client, max_tokens=max_tokens, **create_kwargs)
+    latency = (time.monotonic() - t0) * 1000
+    ledger.latency_ms = ledger.latency_ms + latency if accumulate_latency else latency
+    ledger.input_tokens += message.usage.input_tokens
+    ledger.output_tokens += message.usage.output_tokens
+    ledger.seq += 1
+    ledger.call_stats.append(_call_stat(
+        seq=ledger.seq, kind=kind(message) if callable(kind) else kind,
+        max_tokens=max_tokens, message=message, latency_ms=latency,
+    ))
+    return message
 
-    # Try to find { ... } block
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            pass
 
-    raise ValueError(f"Could not extract JSON from LLM response: {text[:200]}")
+async def _retry_if_truncated(
+    client: anthropic.Anthropic, ledger: _CallLedger, *, first: Any, first_text: str,
+    model: str, max_tokens: int, system_prompt: str, messages: list, on_retry,
+    log_meta, where: str, warn_prefix: str, tail_note: str,
+) -> tuple[str, Any]:
+    """The max_tokens retry both turn functions ran inline: same budget, same
+    request (no tools, thinking left to acreate's default), `on_retry` fired right
+    after the retry returns, the retry's text preferred when non-blank.
+
+    Truncated is not worthless: `first_text` is a real, billed answer, so it is
+    parked in `ledger.recovered` before the retry. If the retry raises, the turn's
+    handler returns it, and reports `first` (stop_reason `max_tokens`, i.e.
+    "incomplete") to `on_stop_reason`. Returns (text, the reply that ended the turn)."""
+    if first.stop_reason != "max_tokens":
+        return first_text, first
+    retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
+    logger.warning(
+        "%s (stop_reason=max_tokens, %d tokens). Retrying with max_tokens=%d",
+        warn_prefix, first.usage.output_tokens, retry_max,
+    )
+    ledger.recovered = (first_text, first)
+    retry_msg = await _billed_call(
+        client, ledger, kind="retry", max_tokens=retry_max, accumulate_latency=True,
+        model=model, system=system_prompt, messages=messages,
+    )
+    # A second real, billed API call for what the caller booked as one turn: fire
+    # the caller's own accounting hook so a rate limiter sized to "one call per
+    # turn" is not quietly undercounting the turn most likely to retry.
+    if on_retry is not None:
+        on_retry()
+    # Whitespace is truthy and is not an answer: a blank retry must not replace a
+    # truncated-but-usable first pass. Tested, not stripped: the text is stored
+    # VERBATIM in `llm_call_logs.response_text`.
+    retry_text = all_text(retry_msg)
+    text_out = retry_text if retry_text.strip() else first_text
+    if not text_out.strip():
+        _log_empty_reply(retry_msg, model=model, log_meta=log_meta, where=f"{where}_retry")
+    if retry_msg.stop_reason == "max_tokens":
+        # Loud: the tail (a phase-5 sidecar, a closing tag) is emitted last, so a
+        # still-truncated response silently drops it while the text looks complete.
+        logger.error(
+            "Response still truncated after 2x max_tokens retry "
+            "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+            "out_tok=%d) — returning the truncated text; anything "
+            "the model emits last (e.g. %s) may be "
+            "missing from it.",
+            model, (log_meta or {}).get("agent_id", "?"), (log_meta or {}).get("phase", "?"),
+            retry_max, retry_msg.usage.output_tokens, tail_note,
+        )
+    return text_out, retry_msg
+
+
+def _finish_turn(
+    ledger: _CallLedger, *, system_prompt: str, messages: list, response_text: str,
+    model: str, log_meta, turn_t0: float, on_stop_reason, final_message: Any,
+) -> str:
+    """Write the turn's row, report the ending stop_reason once, return the text."""
+    _emit_call_log(
+        system_prompt=system_prompt, messages=messages, response_text=response_text,
+        model=model, input_tokens=ledger.input_tokens, output_tokens=ledger.output_tokens,
+        latency_ms=ledger.latency_ms, call_stats=ledger.call_stats, log_meta=log_meta,
+        wall_ms=(time.monotonic() - turn_t0) * 1000,
+    )
+    _notify_stop_reason(on_stop_reason, final_message)
+    return response_text
+
+
+def _log_empty_content(
+    message: Any, *, model: str, log_meta, system_prompt: str, messages: list,
+) -> None:
+    agent_id = (log_meta or {}).get("agent_id", "?")
+    phase = (log_meta or {}).get("phase", "?")
+    sys_chars = len(system_prompt)
+    user_chars = sum(len(m.get("content", "")) for m in messages)
+    user_tail = (messages[-1].get("content", "")[-400:] if messages else "")
+    # ONE error line, deliberately. The empty-content branch keeps its own early
+    # return rather than falling through to `_log_empty_reply`, so a single billed
+    # call still produces a single ERROR — and this is the only place `user_tail`
+    # exists, which is what names the prompt that caused it.
+    logger.error(
+        "Claude returned empty content (model=%s agent=%s phase=%s "
+        "stop=%r sys_chars=%d user_chars=%d in_tok=%d out_tok=%d) "
+        "user_tail=%r",
+        model, agent_id, phase, getattr(message, "stop_reason", None),
+        sys_chars, user_chars,
+        message.usage.input_tokens, message.usage.output_tokens,
+        user_tail,
+    )
 
 
 async def generate_agent_response(
@@ -973,250 +1050,82 @@ async def generate_agent_response(
     Raises only when there is nothing to hand back — a first call that failed, or
     a call refused before it was issued (``NonStreamingMaxTokensError``).
     """
-    # Start of the TURN, for `wall_ms`. Distinct from the per-call `t0`
-    # below: this one spans every round, every retry and the tool execution
-    # between them, which is the number `latency_ms` has never carried.
+    # Start of the TURN, for `wall_ms`: spans every call and retry.
     _turn_t0 = time.monotonic()
     settings = get_settings()
     model = model or settings.llm_agent_model
     client = get_anthropic_client()
-    # Per-turn billing totals (cumulative across the retry below), plus the
-    # per-CALL breakdown. The two are deliberately different questions: the
-    # totals answer "what did this turn cost", call_stats answers "which call
-    # truncated and how much was it allowed" — and one row can only answer the
-    # second by carrying a list.
-    #
-    # Bound BEFORE the `try`, with `response_text` and `latency_ms`, because the
-    # failure path at the bottom reports them: a retry that raises used to take
-    # the record of both billed calls with it.
-    total_input_tokens = 0
-    total_output_tokens = 0
-    call_stats: list[dict[str, Any]] = []
-    latency_ms = 0.0
+    # Per-turn billing totals (cumulative across the retry) plus the per-CALL
+    # breakdown live in the ledger. It and `response_text` are bound BEFORE the
+    # `try` because the failure path at the bottom reports them: a retry that
+    # raises used to take the record of both billed calls with it.
+    ledger = _CallLedger()
     response_text = ""
-    # The best answer in hand, and the reply that produced it, if the turn dies
-    # from here on — same two locals, same meaning, as ``generate_with_tools``.
-    # ``None`` means "nothing salvageable, the exception IS the outcome".
-    recovered_text: str | None = None
-    recovered_message: Any = None
     try:
-        t0 = time.monotonic()
-        message = await _acreate(
-            client,
-            model=model,
-            max_tokens=max_tokens,
-            system=system_prompt,
-            messages=messages,
-        )
-        latency_ms = (time.monotonic() - t0) * 1000
-        total_input_tokens += message.usage.input_tokens
-        total_output_tokens += message.usage.output_tokens
-        call_stats.append(
-            _call_stat(
-                seq=1, kind="final", max_tokens=max_tokens,
-                message=message, latency_ms=latency_ms,
-            )
+        message = await _billed_call(
+            client, ledger, kind="final", max_tokens=max_tokens, accumulate_latency=False,
+            model=model, system=system_prompt, messages=messages,
         )
         if not message.content:
-            agent_id = (log_meta or {}).get("agent_id", "?")
-            phase = (log_meta or {}).get("phase", "?")
-            sys_chars = len(system_prompt)
-            user_chars = sum(len(m.get("content", "")) for m in messages)
-            user_tail = (messages[-1].get("content", "")[-400:] if messages else "")
-            # ONE error line, deliberately. This branch keeps its own early
-            # return rather than falling through to `_log_empty_reply`, so a
-            # single billed call still produces a single ERROR — and this is the
-            # only place `user_tail` exists, which is what names the prompt that
-            # caused it.
-            logger.error(
-                "Claude returned empty content (model=%s agent=%s phase=%s "
-                "stop=%r sys_chars=%d user_chars=%d in_tok=%d out_tok=%d) "
-                "user_tail=%r",
-                model, agent_id, phase, getattr(message, "stop_reason", None),
-                sys_chars, user_chars,
-                message.usage.input_tokens, message.usage.output_tokens,
-                user_tail,
-            )
+            _log_empty_content(message, model=model, log_meta=log_meta,
+                               system_prompt=system_prompt, messages=messages)
             # The row, BEFORE the return. This used to be the one exit from this
             # module that wrote nothing at all (C5) — see `_emit_call_log`.
-            _emit_call_log(
-                system_prompt=system_prompt,
-                messages=messages,
-                response_text="",
-                model=model,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                latency_ms=latency_ms,
-                call_stats=call_stats,
-                log_meta=log_meta,
-                wall_ms=(time.monotonic() - _turn_t0) * 1000,
-            )
-            _notify_stop_reason(on_stop_reason, message)
-            return ""
-        response_text = _all_text(message)
-        # The reply that ENDED this turn, which is what `on_stop_reason`
-        # reports. Reassigned by the retry below; `message` deliberately keeps
-        # pointing at the first call so the "still truncated" log line and the
-        # token accumulation can both name the right one.
-        final_message = message
+            return _finish_turn(ledger, system_prompt=system_prompt, messages=messages,
+                                response_text="", model=model, log_meta=log_meta,
+                                turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                final_message=message)
+        response_text = all_text(message)
         if not response_text.strip() and message.stop_reason != "max_tokens":
-            _log_empty_reply(
-                message, model=model, log_meta=log_meta, where="single_call"
-            )
-
-        # Retry once with higher max_tokens if response was truncated
-        if message.stop_reason == "max_tokens":
-            retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
-            logger.warning(
-                "Response truncated (stop_reason=max_tokens, %d tokens). "
-                "Retrying with max_tokens=%d",
-                message.usage.output_tokens, retry_max,
-            )
-            t0 = time.monotonic()
-            # Truncated is not worthless: this text is a real, billed answer,
-            # and if the retry dies it is the only one there will ever be.
-            # `message` (not `retry_msg`) is what `on_stop_reason` should then
-            # report — `max_tokens`, i.e. "incomplete" — which is what makes the
-            # fallthrough safe for the specialist floor.
-            recovered_text, recovered_message = response_text, message
-            retry_msg = await _acreate(
-                client,
-                model=model,
-                max_tokens=retry_max,
-                system=system_prompt,
-                messages=messages,
-            )
-            # This is a second real, billed API call for what the caller
-            # booked as one turn — fire the caller's own accounting hook (if
-            # any) so a rate limiter sized to "one call per turn" isn't
-            # quietly undercounting the one turn most likely to retry: the
-            # phase-5 assessment, whose body runs long enough to hit
-            # max_tokens before its <assessment_json> sidecar at the end.
-            if on_retry is not None:
-                on_retry()
-            retry_latency = (time.monotonic() - t0) * 1000
-            latency_ms += retry_latency
-            final_message = retry_msg
-            # `_all_text(retry_msg) or response_text` only defended against "".
-            # A retry that comes back as "\n\n   \n" is TRUTHY, so it won the
-            # `or` and replaced a truncated-but-usable first pass with
-            # blankness — which the engine reads as "the model said nothing"
-            # and skips, losing the turn to the very retry meant to save it.
-            #
-            # Tested, not stripped: `response_text` is what lands in
-            # `llm_call_logs.response_text` VERBATIM and what the backfill
-            # scripts regex for `<assessment_json>`, so storing the stripped
-            # text here would quietly rewrite the record of the reply.
-            retry_text = _all_text(retry_msg)
-            response_text = retry_text if retry_text.strip() else response_text
-            if not response_text.strip():
-                _log_empty_reply(
-                    retry_msg, model=model, log_meta=log_meta,
-                    where="single_call_retry",
-                )
-            # ACCUMULATE, matching latency_ms above and generate_with_tools.
-            # This line used to be `message = retry_msg  # use retry stats for
-            # logging`, which made the logged row carry ONLY the retry's tokens:
-            # the first call was real and billed even though its truncated text
-            # was thrown away, so every retried turn under-reported its input
-            # AND output tokens by a whole call. The per-call split now lives in
-            # call_stats, so the row no longer has to choose one call's numbers.
-            total_input_tokens += retry_msg.usage.input_tokens
-            total_output_tokens += retry_msg.usage.output_tokens
-            call_stats.append(
-                _call_stat(
-                    seq=2, kind="retry", max_tokens=retry_max,
-                    message=retry_msg, latency_ms=retry_latency,
-                )
-            )
-
-            if retry_msg.stop_reason == "max_tokens":
-                # The retry doubled max_tokens and STILL truncated. The
-                # retry's (still-truncated) text is returned below — it is
-                # still the best available answer — but this must be loud:
-                # for phase 5 the <assessment_json> verdict sidecar is
-                # emitted last, so a still-truncated response silently drops
-                # the machine-readable verdict while the Slack post can still
-                # look complete.
-                agent_id = (log_meta or {}).get("agent_id", "?")
-                phase = (log_meta or {}).get("phase", "?")
-                logger.error(
-                    "Response still truncated after 2x max_tokens retry "
-                    "(model=%s agent=%s phase=%s retry_max_tokens=%d "
-                    "out_tok=%d) — returning the truncated text; anything "
-                    "the model emits last (e.g. a phase-5 <assessment_json> "
-                    "sidecar) may be missing from it.",
-                    # retry_msg, not `message`: this used to read through the
-                    # `message = retry_msg` alias, which is gone now that the
-                    # token totals accumulate. The number that belongs in a
-                    # "the RETRY still truncated" line is the retry's own.
-                    model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
-                )
-
-        _emit_call_log(
-            system_prompt=system_prompt,
-            messages=messages,
-            response_text=response_text,
-            model=model,
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens,
-            latency_ms=latency_ms,
-            call_stats=call_stats,
-            log_meta=log_meta,
-            wall_ms=(time.monotonic() - _turn_t0) * 1000,
-        )
+            _log_empty_reply(message, model=model, log_meta=log_meta, where="single_call")
         # `final_message`, not `message`: when a retry ran it is the retry that
         # ended the turn, so a turn that truncated and then recovered must report
-        # `end_turn` — otherwise every recovered turn looks truncated to the
-        # caller.
-        _notify_stop_reason(on_stop_reason, final_message)
-
-        return response_text
+        # `end_turn` — otherwise every recovered turn looks truncated to the caller.
+        response_text, final_message = await _retry_if_truncated(
+            client, ledger, first=message, first_text=response_text, model=model,
+            max_tokens=max_tokens, system_prompt=system_prompt, messages=messages,
+            on_retry=on_retry, log_meta=log_meta, where="single_call",
+            warn_prefix="Response truncated",
+            tail_note="a phase-5 <assessment_json> sidecar",
+        )
+        return _finish_turn(ledger, system_prompt=system_prompt, messages=messages,
+                            response_text=response_text, model=model, log_meta=log_meta,
+                            turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                            final_message=final_message)
     except Exception as exc:
-        # Both halves of what generate_with_tools' guard does. THE RECORD:
-        # both calls of a retried turn are billed; without this the turn wrote
-        # no row at all, and SimulationEngine rebuilds `api_call_count` and the
-        # rate limiter's `call_times` from these rows — per CALL, summing
-        # `COALESCE(jsonb_array_length(call_stats), 1)`, so a lost row refunds
-        # BOTH billed calls, not one. A failure here therefore silently refunded
-        # the throttle at the next restart. The row carries
-        # the first pass's truncated text too: it is what the dropped-verdict
-        # backfill regexes `llm_call_logs.response_text` for, and it was paid
-        # for.
+        # Both halves of what generate_with_tools' guard does. THE RECORD: both
+        # calls of a retried turn are billed, and SimulationEngine rebuilds
+        # `api_call_count` and the rate limiter's `call_times` from these rows per
+        # CALL (summing `COALESCE(jsonb_array_length(call_stats), 1)`), so a lost
+        # row refunds BOTH calls at the next restart. The row carries the first
+        # pass's truncated text too: the dropped-verdict backfill regexes
+        # `llm_call_logs.response_text` for it, and it was paid for.
         #
         # The one failure that writes nothing is the request that was never
         # issued — see NonStreamingMaxTokensError.
         if not isinstance(exc, NonStreamingMaxTokensError):
             _emit_call_log(
-                system_prompt=system_prompt,
-                messages=messages,
-                response_text=response_text,
-                model=model,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                latency_ms=latency_ms,
-                call_stats=call_stats,
-                log_meta=log_meta,
+                system_prompt=system_prompt, messages=messages, response_text=response_text,
+                model=model, input_tokens=ledger.input_tokens, output_tokens=ledger.output_tokens,
+                latency_ms=ledger.latency_ms, call_stats=ledger.call_stats, log_meta=log_meta,
                 wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
-        if recovered_text is None:
+        if ledger.recovered is None:
             # Nothing succeeded yet, so the exception IS the outcome — and a
             # mis-sized max_tokens, the one error this module raises by name,
             # must stay as loud as it was.
             logger.error("Failed to generate agent response: %s", exc)
             raise
         # THE TEXT: the retry died on top of a truncated-but-usable first pass.
-        # This half was deferred when the record half landed, because
-        # src/agent/tools.py's consult path tested `stop_reasons[-1] ==
-        # "refusal"` and a fallthrough reports `max_tokens` — so a truncated
-        # specialist opinion would have been credited to the panel as a complete
-        # one. That call site now uses `is_truncated_stop`, which covers both, so
-        # returning the text can no longer launder an unfinished opinion.
+        # src/agent/tools.py's consult path tests `is_truncated_stop`, which covers
+        # the `max_tokens` a fallthrough reports, so returning the text cannot
+        # launder an unfinished specialist opinion.
+        recovered_text, recovered_message = ledger.recovered
         logger.exception(
             "The max_tokens retry failed after %d billed call(s) (model=%s "
             "agent=%s phase=%s) — returning the %d character(s) the first pass "
             "already produced rather than losing them with the exception.",
-            len(call_stats), model, (log_meta or {}).get("agent_id", "?"),
+            len(ledger.call_stats), model, (log_meta or {}).get("agent_id", "?"),
             (log_meta or {}).get("phase", "?"), len(recovered_text),
         )
         _notify_stop_reason(on_stop_reason, recovered_message)
@@ -1241,7 +1150,7 @@ async def make_decision(
         max_tokens=300,
         log_meta=log_meta,
     )
-    return _extract_json(response_text)
+    return extract_json(response_text)
 
 
 async def generate_with_tools(
@@ -1313,35 +1222,20 @@ async def generate_with_tools(
 
     # Work with a mutable copy of messages
     conversation = list(messages)
-    total_input_tokens = 0
-    total_output_tokens = 0
-    # One entry per REAL API call, in call order. The totals above are per-turn
-    # billing and stay cumulative (see the comment on `_call_log_callback` for
-    # why); this list is what makes a single row interpretable — 78.6% of
-    # thread_reply rows are 2+ calls, so "output_tokens" on its own is a sum of
-    # unknown addends.
-    call_stats: list[dict[str, Any]] = []
-    seq = 0
+    # Per-turn billing totals, the per-CALL breakdown (one entry per REAL API
+    # call, in call order: 78.6% of thread_reply rows are 2+ calls, so
+    # "output_tokens" alone is a sum of unknown addends), the turn's latency and
+    # the best answer in hand all live in the ledger. See the guard at the bottom
+    # for why it is bound before the `try`: the tool-round `acreate`,
+    # `_execute_tool_blocks` and `b.model_dump()` can each raise after a round has
+    # been BILLED, and every one of them used to take the whole turn's record with
+    # it. `ledger.recovered` of None means "nothing salvageable — re-raise"; ("", None)
+    # means "the turn got far enough that returning nothing is the honest outcome".
+    ledger = _CallLedger()
     # The tool_result block currently carrying the message-side cache
     # breakpoint, so the next round can take the marker off it. See where it is
     # set, below.
     cached_tool_result: dict[str, Any] | None = None
-
-    # Everything below runs under ONE guard, at the bottom of this function.
-    # See it for why the class of bug it closes cannot be fixed at the retry
-    # sites: the tool-round `_acreate`, `_execute_tool_blocks` and
-    # `b.model_dump()` can each raise after a round has been BILLED, and every
-    # one of them used to take the whole turn's record with it.
-    #
-    # These are read by that guard, alongside `call_stats` and the two totals
-    # above, so they are bound before the `try` and kept current as the turn
-    # proceeds.
-    latency_ms = 0.0
-    # The best answer in hand, and the reply that produced it, if the turn dies
-    # from here on. `None` means "nothing salvageable — re-raise"; "" means "the
-    # turn got far enough that returning nothing is the honest outcome".
-    recovered_text: str | None = None
-    recovered_message: Any = None
 
     try:
         # `+ 1` — one more tool-capable call than the setting names, and it
@@ -1370,16 +1264,17 @@ async def generate_with_tools(
                 )
                 break
 
-            t0 = time.monotonic()
-            message = await _acreate(
-                client,
-                model=model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=conversation,
+            message = await _billed_call(
+                client, ledger,
+                # Recorded for EVERY round, not just the terminating one: a
+                # tool-use round that hit max_tokens used to leave no log line and
+                # no DB trace whatsoever.
+                kind=lambda m: "final" if not [b for b in m.content if b.type == "tool_use"] else "round",
+                max_tokens=max_tokens, accumulate_latency=False,
+                model=model, system=system_prompt, messages=conversation,
                 tools=tools,
                 # ADAPTIVE here, unlike every other call site in this module (which
-                # take _acreate's thinking-disabled default). This is the only call
+                # take acreate's thinking-disabled default). This is the only call
                 # that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
                 # write a tool call into its visible TEXT instead of emitting a
                 # tool_use block: the turn succeeds, the call never runs, and no
@@ -1387,131 +1282,37 @@ async def generate_with_tools(
                 # consult_specialist — the panel would look convened and never be.
                 # Thinking shares the max_tokens budget, so this path's budget was
                 # raised alongside this change (src/agent/simulation.py).
-                # The truncation retry below deliberately does NOT set this: it
-                # passes no `tools`, so it carries no tool-in-text risk and is
-                # better off spending its whole budget on the answer.
+                # The truncation retry deliberately does NOT set this: it passes no
+                # `tools`, so it carries no tool-in-text risk and is better off
+                # spending its whole budget on the answer.
                 thinking={"type": "adaptive"},
             )
-            latency_ms = (time.monotonic() - t0) * 1000
-            total_input_tokens += message.usage.input_tokens
-            total_output_tokens += message.usage.output_tokens
 
             # Check if the response contains tool use
             tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
 
-            # Recorded for EVERY round, not just the terminating one. `stop_reason`
-            # used to be inspected only inside the `not tool_use_blocks` branch
-            # below, so a tool-use round that hit max_tokens left no log line and no
-            # DB trace whatsoever — the single blindest spot in this module, and the
-            # one that made the truncation count on the last sizing exercise a guess.
-            seq += 1
-            call_stats.append(
-                _call_stat(
-                    seq=seq,
-                    kind="final" if not tool_use_blocks else "round",
-                    max_tokens=max_tokens,
-                    message=message,
-                    latency_ms=latency_ms,
-                )
-            )
-
             if not tool_use_blocks:
                 # Final text response — no more tool calls
-                response_text = _all_text(message)
-                # The call that ended the turn; reassigned by the retry below.
-                final_message = message
+                response_text = all_text(message)
                 if not response_text.strip() and message.stop_reason != "max_tokens":
                     _log_empty_reply(
                         message, model=model, log_meta=log_meta, where="final"
                     )
-
-                # Retry once with higher max_tokens if response was truncated
-                if message.stop_reason == "max_tokens":
-                    retry_max = _retry_budget(
-                        max_tokens, model=model, log_meta=log_meta
-                    )
-                    logger.warning(
-                        "Response truncated (stop_reason=max_tokens, %d tokens). "
-                        "Retrying with max_tokens=%d",
-                        message.usage.output_tokens, retry_max,
-                    )
-                    # If the retry throws, THIS is the answer: truncated, billed,
-                    # and the best one available — the retry is the call most
-                    # likely to fail (it asks for up to NONSTREAMING_MAX_TOKENS,
-                    # ~351 s of generation against a 300 s read timeout) and the
-                    # reply it would discard is a concluding hub turn's verdict.
-                    # `message`, not `final_message`: the stop_reason reported
-                    # must be true of the TEXT being returned, which is
-                    # `max_tokens`.
-                    recovered_text, recovered_message = response_text, message
-                    t0 = time.monotonic()
-                    retry_msg = await _acreate(
-                        client,
-                        model=model,
-                        max_tokens=retry_max,
-                        system=system_prompt,
-                        messages=conversation,
-                    )
-                    # Second real, billed API call for what the caller booked as
-                    # one turn — fire the caller's own accounting hook (if any),
-                    # same reasoning as generate_agent_response's retry (B0).
-                    if on_retry is not None:
-                        on_retry()
-                    retry_latency = (time.monotonic() - t0) * 1000
-                    latency_ms += retry_latency
-                    total_input_tokens += retry_msg.usage.input_tokens
-                    total_output_tokens += retry_msg.usage.output_tokens
-                    seq += 1
-                    call_stats.append(
-                        _call_stat(
-                            seq=seq, kind="retry", max_tokens=retry_max,
-                            message=retry_msg, latency_ms=retry_latency,
-                        )
-                    )
-                    final_message = retry_msg
-                    # Whitespace is truthy and is not an answer — see the same
-                    # three lines in generate_agent_response for the whole story.
-                    retry_text = _all_text(retry_msg)
-                    response_text = (
-                        retry_text if retry_text.strip() else response_text
-                    )
-                    if not response_text.strip():
-                        _log_empty_reply(
-                            retry_msg, model=model, log_meta=log_meta,
-                            where="final_retry",
-                        )
-                    if retry_msg.stop_reason == "max_tokens":
-                        # Loud and specific, matching generate_agent_response: a
-                        # silent still-truncated retry here drops the tail of a
-                        # phase-4 reply (e.g. the closing </slack_message> tag)
-                        # with no trace in the logs.
-                        agent_id = (log_meta or {}).get("agent_id", "?")
-                        phase = (log_meta or {}).get("phase", "?")
-                        logger.error(
-                            "Response still truncated after 2x max_tokens retry "
-                            "(model=%s agent=%s phase=%s retry_max_tokens=%d "
-                            "out_tok=%d) — returning the truncated text; anything "
-                            "the model emits last (e.g. a closing tag) may be "
-                            "missing from it.",
-                            model, agent_id, phase, retry_max,
-                            retry_msg.usage.output_tokens,
-                        )
-
-                _emit_call_log(
-                    system_prompt=system_prompt,
-                    messages=conversation,
-                    response_text=response_text,
-                    model=model,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    latency_ms=latency_ms,
-                    call_stats=call_stats,
-                    log_meta=log_meta,
-                    wall_ms=(time.monotonic() - _turn_t0) * 1000,
+                # If the retry throws, the truncated first pass is the answer: it
+                # is billed and the best one available (the retry asks for up to
+                # NONSTREAMING_MAX_TOKENS, ~351 s of generation against a 300 s read
+                # timeout, and the reply it would discard is a concluding hub turn's
+                # verdict). The stop_reason reported stays `max_tokens`.
+                response_text, final_message = await _retry_if_truncated(
+                    client, ledger, first=message, first_text=response_text, model=model,
+                    max_tokens=max_tokens, system_prompt=system_prompt, messages=conversation,
+                    on_retry=on_retry, log_meta=log_meta, where="final",
+                    warn_prefix="Response truncated", tail_note="a closing tag",
                 )
-                _notify_stop_reason(on_stop_reason, final_message)
-
-                return response_text
+                return _finish_turn(ledger, system_prompt=system_prompt, messages=conversation,
+                                    response_text=response_text, model=model, log_meta=log_meta,
+                                    turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                    final_message=final_message)
 
             # Append the assistant message with tool_use blocks
             conversation.append({
@@ -1566,112 +1367,30 @@ async def generate_with_tools(
         # the LAST TOOL ROUND, so falling through would add that round's tokens a
         # second time and label the entry `forced_final`, inventing an API call
         # that never happened.
-        recovered_text = ""
-        t0 = time.monotonic()
-        message = await _acreate(
-            client,
-            model=model,
-            max_tokens=max_tokens,
-            system=system_prompt,
-            messages=conversation,
-        )
-        latency_ms = (time.monotonic() - t0) * 1000
-        total_input_tokens += message.usage.input_tokens
-        total_output_tokens += message.usage.output_tokens
+        ledger.recovered = ("", None)
         # `forced_final` rather than `final`: this call is reached either by
         # exhausting max_tool_rounds or by the cooperative-shutdown `break` above,
         # and both are worth telling apart from a turn that finished on its own —
         # the tool loop spent its budget before the answer was written.
-        seq += 1
-        call_stats.append(
-            _call_stat(
-                seq=seq, kind="forced_final", max_tokens=max_tokens,
-                message=message, latency_ms=latency_ms,
-            )
+        message = await _billed_call(
+            client, ledger, kind="forced_final", max_tokens=max_tokens, accumulate_latency=False,
+            model=model, system=system_prompt, messages=conversation,
         )
-        response_text = _all_text(message)
-        # The call that ended the turn; reassigned by the retry below.
-        final_message = message
+        response_text = all_text(message)
         if not response_text.strip() and message.stop_reason != "max_tokens":
-            _log_empty_reply(
-                message, model=model, log_meta=log_meta, where="forced_final"
-            )
-
-        # Retry once with higher max_tokens if response was truncated
-        if message.stop_reason == "max_tokens":
-            retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
-            logger.warning(
-                "Response truncated after max rounds (stop_reason=max_tokens, %d tokens). "
-                "Retrying with max_tokens=%d",
-                message.usage.output_tokens, retry_max,
-            )
-            # Same as the other retry site: a retry that throws must not take
-            # the truncated forced-final reply down with it.
-            recovered_text, recovered_message = response_text, message
-            t0 = time.monotonic()
-            retry_msg = await _acreate(
-                client,
-                model=model,
-                max_tokens=retry_max,
-                system=system_prompt,
-                messages=conversation,
-            )
-            # Second real, billed API call for what the caller booked as one
-            # turn — same accounting hook as the other retry site above (B0).
-            if on_retry is not None:
-                on_retry()
-            retry_latency = (time.monotonic() - t0) * 1000
-            latency_ms += retry_latency
-            total_input_tokens += retry_msg.usage.input_tokens
-            total_output_tokens += retry_msg.usage.output_tokens
-            seq += 1
-            call_stats.append(
-                _call_stat(
-                    seq=seq, kind="retry", max_tokens=retry_max,
-                    message=retry_msg, latency_ms=retry_latency,
-                )
-            )
-            final_message = retry_msg
-            # Whitespace is truthy and is not an answer — see the same three lines
-            # in generate_agent_response for the whole story.
-            retry_text = _all_text(retry_msg)
-            response_text = retry_text if retry_text.strip() else response_text
-            if not response_text.strip():
-                _log_empty_reply(
-                    retry_msg, model=model, log_meta=log_meta,
-                    where="forced_final_retry",
-                )
-            if retry_msg.stop_reason == "max_tokens":
-                # This retry site never re-checked stop_reason at all before this
-                # fix — a still-truncated response after exhausting max_tool_rounds
-                # AND doubling max_tokens passed silently. Loud and specific, same
-                # as the other retry site.
-                agent_id = (log_meta or {}).get("agent_id", "?")
-                phase = (log_meta or {}).get("phase", "?")
-                logger.error(
-                    "Response still truncated after 2x max_tokens retry "
-                    "(model=%s agent=%s phase=%s retry_max_tokens=%d "
-                    "out_tok=%d) — returning the truncated text; anything "
-                    "the model emits last (e.g. a closing tag) may be "
-                    "missing from it.",
-                    model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
-                )
-
-        _emit_call_log(
-            system_prompt=system_prompt,
-            messages=conversation,
-            response_text=response_text,
-            model=model,
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens,
-            latency_ms=latency_ms,
-            call_stats=call_stats,
-            log_meta=log_meta,
-            wall_ms=(time.monotonic() - _turn_t0) * 1000,
+            _log_empty_reply(message, model=model, log_meta=log_meta, where="forced_final")
+        # Same as the other retry site: a retry that throws must not take the
+        # truncated forced-final reply down with it.
+        response_text, final_message = await _retry_if_truncated(
+            client, ledger, first=message, first_text=response_text, model=model,
+            max_tokens=max_tokens, system_prompt=system_prompt, messages=conversation,
+            on_retry=on_retry, log_meta=log_meta, where="forced_final",
+            warn_prefix="Response truncated after max rounds", tail_note="a closing tag",
         )
-        _notify_stop_reason(on_stop_reason, final_message)
-
-        return response_text
+        return _finish_turn(ledger, system_prompt=system_prompt, messages=conversation,
+                            response_text=response_text, model=model, log_meta=log_meta,
+                            turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                            final_message=final_message)
     except Exception as exc:
         # ``Exception``, so ``CancelledError`` (a BaseException since 3.8) still
         # propagates untouched: a cancelled turn is not a failed one, and the
@@ -1686,9 +1405,9 @@ async def generate_with_tools(
         # stopped existing at the next restart, not one.
         #
         # The row is written for EVERY failure except the one request that was
-        # never issued (`NonStreamingMaxTokensError`, raised by `_acreate`'s
+        # never issued (`NonStreamingMaxTokensError`, raised by `acreate`'s
         # pre-flight check before any I/O). Not `if call_stats`, which was the
-        # first version of this line: a first-round `_acreate` that raises AFTER
+        # first version of this line: a first-round `acreate` that raises AFTER
         # the request went out — a 300 s APITimeoutError, the latent trigger this
         # whole guard exists for — leaves `call_stats` empty while having been
         # fully billed, and would have written nothing. An empty `call_stats` on
@@ -1697,27 +1416,28 @@ async def generate_with_tools(
             _emit_call_log(
                 system_prompt=system_prompt,
                 messages=conversation,
-                response_text=recovered_text or "",
+                response_text=(ledger.recovered or ("",))[0] or "",
                 model=model,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                latency_ms=latency_ms,
-                call_stats=call_stats,
+                input_tokens=ledger.input_tokens,
+                output_tokens=ledger.output_tokens,
+                latency_ms=ledger.latency_ms,
+                call_stats=ledger.call_stats,
                 log_meta=log_meta,
                 wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
-        if recovered_text is None:
+        if ledger.recovered is None:
             # Nothing to salvage, so the exception IS the outcome. Swallowing it
             # here would turn the one error this module raises BY NAME — a call
             # site above NONSTREAMING_MAX_TOKENS — into a turn that silently
             # said nothing, which is the failure mode that constant exists to
             # prevent.
             raise
+        recovered_text, recovered_message = ledger.recovered
         logger.exception(
             "LLM turn failed after %d billed call(s) (model=%s agent=%s "
             "phase=%s) — returning the %d character(s) already in hand rather "
             "than losing them with the exception.",
-            len(call_stats), model, (log_meta or {}).get("agent_id", "?"),
+            len(ledger.call_stats), model, (log_meta or {}).get("agent_id", "?"),
             (log_meta or {}).get("phase", "?"), len(recovered_text),
         )
         # The reply that ended the turn is the one whose text we are returning —

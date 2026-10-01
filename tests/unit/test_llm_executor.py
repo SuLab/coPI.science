@@ -1,6 +1,6 @@
 """Where API calls run, and how many of them run at once.
 
-`_acreate` used `asyncio.to_thread`, which submits to the loop's DEFAULT
+`acreate` used `asyncio.to_thread`, which submits to the loop's DEFAULT
 executor — sized `min(32, cpu_count + 4)`, i.e. **6** on the 2-vCPU host this
 deployment runs on (verified in the deployed container). Two consequences,
 neither of them visible as an error:
@@ -68,7 +68,7 @@ class _RecordingAnthropic(FakeAnthropic):
 
 
 async def _api_call(fake):
-    return await llm._acreate(
+    return await llm.acreate(
         fake, model="m", max_tokens=100, system="sys", messages=[]
     )
 
