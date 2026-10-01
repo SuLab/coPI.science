@@ -68,6 +68,8 @@ ASSESSMENTS_LIMIT = 500
 JOBS_PAGE_SIZE = 100
 RUN_MESSAGES_PAGE_SIZE = 200
 DISCUSSIONS_PAGE_SIZE = 200
+#: Upper bound for every `?page=` query parameter, so OFFSET stays in range.
+MAX_PAGE = 100_000
 
 # The sort orders the triage queue offers, as (query-param value, label). ONE
 # tuple, not a set of values here and a label map in each template: a sort the

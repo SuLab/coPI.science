@@ -1,5 +1,6 @@
 """Admin agent registry routes."""
 
+import re
 import uuid
 from urllib.parse import quote
 
@@ -25,6 +26,11 @@ from src.routers.admin._common import (
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
+
+#: The slug names profile files (profiles/public/<slug>.md) and must pass
+#: user_deletion's _SAFE_AGENT_ID: a slug outside it could escape the profiles
+#: directory, and its agent could never be deleted.
+_SLUG_RE = re.compile(r"[a-z0-9_-]{1,50}")
 
 
 @router.get("/agents", response_class=HTMLResponse)
@@ -276,6 +282,10 @@ async def admin_approve_agent(
         if agent.status != "pending":
             return RedirectResponse(
                 url=f"/admin/agents/{agent_id}?error=slug_read_only", status_code=302
+            )
+        if not _SLUG_RE.fullmatch(new_slug):
+            return RedirectResponse(
+                url=f"/admin/agents/{agent_id}?error=invalid_slug", status_code=302
             )
         taken = await db.scalar(
             select(AgentRegistry.id).where(

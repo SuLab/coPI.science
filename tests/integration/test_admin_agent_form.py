@@ -72,3 +72,23 @@ async def test_provision_error_is_quoted(client, db_session, monkeypatch):
     r = await client.post(f"/admin/agents/{agent.id}/slack/provision", headers=auth_headers(admin.id),
                           follow_redirects=False)
     assert "slack_error=bad%20%26%20worse%20%23fragment" in r.headers["location"]
+
+
+@pytest.mark.parametrize("slug", ["../escape", "has space", "x" * 51, "dot.slug"])
+async def test_pending_slug_outside_the_safe_charset_is_refused(client, db_session, slug):
+    """The slug names profiles/public/<slug>.md and must pass user_deletion's rule."""
+    admin, agent = await _setup(db_session, status="pending", agent_id="pendingtwo")
+    r = await client.post(f"/admin/agents/{agent.id}/approve",
+                          data={"agent_slug": slug, "bot_name": agent.bot_name,
+                                "form_version": agent_form_version(agent), "activation_override": "1"},
+                          headers=auth_headers(admin.id), follow_redirects=False)
+    assert r.status_code == 302 and "error=invalid_slug" in r.headers["location"]
+    await db_session.refresh(agent)
+    assert agent.agent_id == "pendingtwo"
+
+
+async def test_page_parameters_are_bounded(client, db_session):
+    """A huge ?page= is a 422, never an OFFSET overflow."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    r = await client.get("/admin/jobs?page=99999999999999999999", headers=auth_headers(admin.id))
+    assert r.status_code == 422

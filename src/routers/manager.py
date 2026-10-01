@@ -68,6 +68,7 @@ from src.services.assessment_reviews import (
     count_pending_analysis_candidates,
 )
 from src.services.directory import (
+    MAX_PAGE,
     build_discussions_view,
     build_run_detail,
     list_assessments,
@@ -97,7 +98,7 @@ _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity
 _REVIEW = Depends(get_review_user)    # + reviewer — the four read handlers only
 _AGENT_FILTER = Query(default=[])
-_PAGE = Query(1, ge=1)
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 #: The review-bot-drafted prompt-change queue. Read-only display cap
 #: — a reviewer never reaches this pair (get_staff_user, not get_review_user):

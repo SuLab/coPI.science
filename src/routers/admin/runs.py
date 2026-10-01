@@ -12,10 +12,10 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import LlmCallLog, SimulationRun, User
 from src.routers.admin._common import _template_context, router, templates
-from src.services.directory import build_run_detail, list_runs_overview
+from src.services.directory import MAX_PAGE, build_run_detail, list_runs_overview
 from src.services.headline_claims import held_headline_counts, list_in_doubt
 
-_PAGE = Query(1, ge=1)
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
 @router.get("/activity", response_class=HTMLResponse)

@@ -9,10 +9,10 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import ProposalReview, User
 from src.routers.admin._common import _template_context, router, templates
-from src.services.directory import build_discussions_view
+from src.services.directory import MAX_PAGE, build_discussions_view
 from src.services.thread_panel import panel_cards_by_thread
 
-_PAGE = Query(1, ge=1)
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
 @router.get("/discussions", response_class=HTMLResponse)

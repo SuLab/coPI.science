@@ -1,6 +1,6 @@
 """Admin profile-job queue page."""
 
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +10,9 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import Job, User
 from src.routers.admin._common import _template_context, router, templates
-from src.services.directory import JOBS_PAGE_SIZE
+from src.services.directory import JOBS_PAGE_SIZE, MAX_PAGE
+
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
 @router.get("/jobs", response_class=HTMLResponse)
@@ -18,12 +20,11 @@ async def admin_jobs(
     request: Request,
     status_filter: str | None = None,
     type_filter: str | None = None,
-    page: int = 1,
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """Job queue overview."""
-    page = max(1, page)
     query = select(Job).options(selectinload(Job.user)).order_by(Job.enqueued_at.desc())
     if status_filter:
         query = query.where(Job.status == status_filter)

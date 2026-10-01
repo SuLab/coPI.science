@@ -32,6 +32,7 @@
             {% if form_error == 'stale_form' %}This agent changed after the page loaded. Nothing was saved; review the current values and save again.
             {% elif form_error == 'slug_read_only' %}The agent ID (slug) is fixed once the agent is approved.
             {% elif form_error == 'slug_taken' %}That agent ID (slug) is already in use by another agent.
+            {% elif form_error == 'invalid_slug' %}An agent ID (slug) is 1–50 lowercase letters, digits, hyphens or underscores.
             {% else %}The form could not be saved.{% endif %}
         </p>
     </div>
