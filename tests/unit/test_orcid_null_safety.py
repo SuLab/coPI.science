@@ -36,6 +36,8 @@ async def test_a_null_external_ids_work_summary_does_not_raise(monkeypatch):
     }
 
     class _Resp:
+        status_code = 200  # read by http_pacing.with_retries
+
         def raise_for_status(self):
             return None
 
@@ -52,7 +54,7 @@ async def test_a_null_external_ids_work_summary_does_not_raise(monkeypatch):
         async def get(self, url, headers=None):
             return _Resp()
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda timeout=30: _Client())
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: _Client())
 
     works = await orcid.fetch_orcid_works("0000-0003-3474-019X")
 
@@ -91,6 +93,8 @@ async def test_a_null_title_and_publication_date_do_not_raise_either(monkeypatch
     }
 
     class _Resp:
+        status_code = 200  # read by http_pacing.with_retries
+
         def raise_for_status(self):
             return None
 
@@ -107,7 +111,7 @@ async def test_a_null_title_and_publication_date_do_not_raise_either(monkeypatch
         async def get(self, url, headers=None):
             return _Resp()
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda timeout=30: _Client())
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: _Client())
 
     works = await orcid.fetch_orcid_works("0000-0003-3474-019X")
 

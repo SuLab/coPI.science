@@ -10,7 +10,7 @@ from src.services import pubmed
 @pytest.mark.asyncio
 async def test_pace_spaces_request_starts(monkeypatch):
     monkeypatch.setattr(pubmed, "_pace_interval", lambda: 0.05)
-    pubmed._next_slot = 0.0
+    pubmed._PACER.reset()
     t0 = time.monotonic()
     await asyncio.gather(*(pubmed._pace() for _ in range(10)))
     elapsed = time.monotonic() - t0

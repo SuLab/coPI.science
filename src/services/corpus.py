@@ -28,6 +28,7 @@ job retries instead of storing a thin S1-only corpus as if it were the answer
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,7 +39,9 @@ from src.services.pubmed import (
     _doi_fold,
     convert_dois_to_pmids,
     fetch_pubmed_records,
+    ncbi_session,
     search_pmids,
+    session_verified_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -423,137 +426,14 @@ def _pmid_sort_key(pmid: str) -> int:
         return 0
 
 
-async def resolve_corpus(
-    orcid: str,
+def _gate_records(
+    records: list[dict[str, Any]],
+    stages: dict[str, set[str]],
     name: str,
     institution: str | None,
-    *,
-    cap: int = DEFAULT_CAP,
-) -> CorpusResult:
-    """Resolve, gate, dedupe, rank and cap a PI's publication corpus.
-
-    Every retrieval stage runs inside ``_stage``, so any failure it raises
-    becomes ``CorpusStageError`` and no corpus is built. The three lookups
-    that swallow failures by default run with ``strict=True``:
-    ``fetch_orcid_works`` then raises on anything but a record-state status
-    (``_RECORD_STATE_STATUSES``: 301, 404, 409, 410); the two NCBI lookups
-    raise on a transient failure or a bug, while a permanent per-item failure
-    drops only that PMID/DOI and is reported in
-    ``CorpusResult.permanently_dropped`` rather than hidden (a run of
-    ``_SYSTEMIC_RUN`` identical ones raises instead).
-    """
-
-    stages: dict[str, set[str]] = {}
-    doi_pool: dict[str, str] = {}  # doi -> first stage that proposed it
-
-    def _add(pmid: str | None, stage: str) -> None:
-        if pmid:
-            stages.setdefault(str(pmid), set()).add(stage)
-
-    async def _stage(stage_name: str, coro):
-        try:
-            return await coro
-        except Exception as exc:
-            raise CorpusStageError(
-                f"corpus stage {stage_name} failed: {exc}"
-            ) from exc
-
-    stage_counts: dict[str, int] = {}
-    permanently_dropped: list[str] = []
-
-    orcid_dois: dict[str, str] = {}
-    orcid_doi_only: dict[str, str] = {}  # doi -> "" until resolved to a pmid
-
-    orcid_works = await _stage(
-        "s1_orcid_works", fetch_orcid_works(orcid, strict=True)
-    )
-    for w in orcid_works:
-        if w.get("pmid"):
-            _add(w["pmid"], "s1")
-            if w.get("doi"):
-                orcid_dois[str(w["pmid"])] = w["doi"]
-        elif w.get("doi"):
-            doi_pool.setdefault(w["doi"], "s1")
-            orcid_doi_only[w["doi"]] = ""
-    stage_counts["s1"] = len(orcid_works)
-
-    openalex_works = await _stage("s2_openalex", fetch_works_by_orcid(orcid))
-    for w in openalex_works:
-        if w.get("pmid"):
-            _add(w["pmid"], "s2")
-        elif w.get("doi"):
-            doi_pool.setdefault(w["doi"], "s2")
-    stage_counts["s2"] = len(openalex_works)
-
-    s3_pmids = await _stage(
-        "s3_pubmed_auid", search_pmids(f"{orcid}[auid]", retmax=SEARCH_RETMAX)
-    )
-    for pmid in s3_pmids:
-        _add(pmid, "s3")
-    stage_counts["s3"] = len(s3_pmids)
-
-    if institution and institution.strip():
-        term = build_pubmed_query(name, [institution])
-        s4_pmids = await _stage(
-            "s4_pubmed_name_affiliation",
-            search_pmids(term, retmax=SEARCH_RETMAX),
-        )
-        for pmid in s4_pmids:
-            _add(pmid, "s4")
-        stage_counts["s4"] = len(s4_pmids)
-    else:
-        # R4: a missing institution silently disables S4 — say so loudly.
-        logger.warning(
-            "resolve_corpus(%s): no institution on file, S4 skipped", orcid
-        )
-        stage_counts["s4"] = 0
-
-    if doi_pool:
-        mapping = await _stage(
-            "doi_resolution",
-            convert_dois_to_pmids(
-                list(doi_pool), strict=True,
-                permanently_dropped=permanently_dropped,
-            ),
-        )
-        for doi, pmid in mapping.items():
-            stage = doi_pool.get(doi)
-            if stage is None:
-                # convert_dois_to_pmids guarantees its keys are the caller's
-                # own forms; when that contract broke (the converter echoed
-                # lowercase, 2026-08-25) a bracket lookup here killed the
-                # whole profile job. Losing one attribution must never cost
-                # the corpus — skip it loudly instead.
-                logger.warning(
-                    "doi_resolution returned %r, which is not a doi_pool "
-                    "key; skipping it",
-                    doi,
-                )
-                continue
-            _add(pmid, stage)
-            if doi in orcid_doi_only:
-                orcid_dois[str(pmid)] = doi
-
-    records = (
-        await _stage(
-            "efetch",
-            fetch_pubmed_records(
-                list(stages), strict=True,
-                permanently_dropped=permanently_dropped,
-            ),
-        )
-        if stages
-        else []
-    )
-    # A DOI whose lookup failed per-item is not missing if its paper arrived
-    # anyway, through another stage's PMID: EFetch returned a record carrying
-    # that DOI. Only a DOI with no such record leaves the corpus incomplete.
-    fetched_dois = {_doi_fold(r["doi"]) for r in records if r.get("doi")}
-    permanently_dropped[:] = [
-        item for item in permanently_dropped
-        if item not in doi_pool or _doi_fold(item) not in fetched_dois
-    ]
-
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    """Identity and type gates over EFetch records: returns (kept, flagged, dropped).
+    Every flagged entry's "reason" literal lives here (tests/unit/test_corpus.py)."""
     kept: list[dict[str, Any]] = []
     flagged: list[dict[str, Any]] = []
     dropped = {
@@ -650,7 +530,14 @@ async def resolve_corpus(
                 )
                 continue
         kept.append(rec)
+    return kept, flagged, dropped
 
+
+def _dedupe_and_rank(
+    kept: list[dict[str, Any]], dropped: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Title dedupe and newest-first ranking (pre-cap); counts the duplicates it
+    drops into ``dropped["duplicate_title"]``."""
     # Dedupe by normalized title (PMID dedupe fell out of the stages map).
     # Preprint/journal pairs share a title; keep the later year (the journal
     # version), tiebreak higher PMID. Errata never reach here (EXCLUDED_TYPES).
@@ -673,6 +560,166 @@ async def resolve_corpus(
         key=lambda r: (r.get("year") or 0, _pmid_sort_key(r.get("pmid"))),
         reverse=True,
     )
+    return ranked
+
+
+def _attribute_resolved_dois(
+    mapping: dict[str, str],
+    doi_pool: dict[str, str],
+    orcid_doi_only: dict[str, str],
+    orcid_dois: dict[str, str],
+    add: Callable[[str | None, str], None],
+) -> None:
+    """Credit each DOI-resolved PMID to the stage that proposed its DOI."""
+    for doi, pmid in mapping.items():
+        stage = doi_pool.get(doi)
+        if stage is None:
+            # convert_dois_to_pmids guarantees its keys are the caller's
+            # own forms; when that contract broke (the converter echoed
+            # lowercase, 2026-08-25) a bracket lookup here killed the
+            # whole profile job. Losing one attribution must never cost
+            # the corpus — skip it loudly instead.
+            logger.warning(
+                "doi_resolution returned %r, which is not a doi_pool "
+                "key; skipping it",
+                doi,
+            )
+            continue
+        add(pmid, stage)
+        if doi in orcid_doi_only:
+            orcid_dois[str(pmid)] = doi
+
+
+async def resolve_corpus(
+    orcid: str,
+    name: str,
+    institution: str | None,
+    *,
+    cap: int = DEFAULT_CAP,
+) -> CorpusResult:
+    """Resolve, gate, dedupe, rank and cap a PI's publication corpus.
+
+    Every retrieval stage runs inside ``_stage``, so any failure it raises
+    becomes ``CorpusStageError`` and no corpus is built. The three lookups
+    that swallow failures by default run with ``strict=True``:
+    ``fetch_orcid_works`` then raises on anything but a record-state status
+    (``_RECORD_STATE_STATUSES``: 301, 404, 409, 410); the two NCBI lookups
+    raise on a transient failure or a bug, while a permanent per-item failure
+    drops only that PMID/DOI and is reported in
+    ``CorpusResult.permanently_dropped`` rather than hidden (a run of
+    ``_SYSTEMIC_RUN`` identical ones raises instead).
+    """
+
+    stages: dict[str, set[str]] = {}
+    doi_pool: dict[str, str] = {}  # doi -> first stage that proposed it
+
+    def _add(pmid: str | None, stage: str) -> None:
+        if pmid:
+            stages.setdefault(str(pmid), set()).add(stage)
+
+    async def _stage(stage_name: str, coro):
+        try:
+            return await coro
+        except Exception as exc:
+            raise CorpusStageError(
+                f"corpus stage {stage_name} failed: {exc}"
+            ) from exc
+
+    stage_counts: dict[str, int] = {}
+    permanently_dropped: list[str] = []
+
+    orcid_dois: dict[str, str] = {}
+    orcid_doi_only: dict[str, str] = {}  # doi -> "" until resolved to a pmid
+
+    async with ncbi_session():
+        orcid_works = await _stage(
+            "s1_orcid_works", fetch_orcid_works(orcid, strict=True)
+        )
+        for w in orcid_works:
+            if w.get("pmid"):
+                _add(w["pmid"], "s1")
+                if w.get("doi"):
+                    orcid_dois[str(w["pmid"])] = w["doi"]
+            elif w.get("doi"):
+                doi_pool.setdefault(w["doi"], "s1")
+                orcid_doi_only[w["doi"]] = ""
+        stage_counts["s1"] = len(orcid_works)
+
+        openalex_works = await _stage("s2_openalex", fetch_works_by_orcid(orcid))
+        for w in openalex_works:
+            if w.get("pmid"):
+                _add(w["pmid"], "s2")
+            elif w.get("doi"):
+                doi_pool.setdefault(w["doi"], "s2")
+        stage_counts["s2"] = len(openalex_works)
+
+        s3_pmids = await _stage(
+            "s3_pubmed_auid", search_pmids(f"{orcid}[auid]", retmax=SEARCH_RETMAX)
+        )
+        for pmid in s3_pmids:
+            _add(pmid, "s3")
+        stage_counts["s3"] = len(s3_pmids)
+
+        if institution and institution.strip():
+            term = build_pubmed_query(name, [institution])
+            s4_pmids = await _stage(
+                "s4_pubmed_name_affiliation",
+                search_pmids(term, retmax=SEARCH_RETMAX),
+            )
+            for pmid in s4_pmids:
+                _add(pmid, "s4")
+            stage_counts["s4"] = len(s4_pmids)
+        else:
+            # R4: a missing institution silently disables S4 — say so loudly.
+            logger.warning(
+                "resolve_corpus(%s): no institution on file, S4 skipped", orcid
+            )
+            stage_counts["s4"] = 0
+
+        if doi_pool:
+            mapping = await _stage(
+                "doi_resolution",
+                convert_dois_to_pmids(
+                    list(doi_pool), strict=True,
+                    permanently_dropped=permanently_dropped,
+                ),
+            )
+            _attribute_resolved_dois(
+                mapping, doi_pool, orcid_doi_only, orcid_dois, _add
+            )
+
+        # PMIDs DOI resolution already fetched to verify are not fetched again.
+        verified = session_verified_records()
+        to_fetch = [p for p in stages if p not in verified]
+        fetched = (
+            await _stage(
+                "efetch",
+                fetch_pubmed_records(
+                    to_fetch, strict=True,
+                    permanently_dropped=permanently_dropped,
+                ),
+            )
+            if to_fetch
+            else []
+        )
+        # Back to the order one EFetch over `stages` would have returned: stage
+        # order, then anything EFetch returned under a PMID we never asked for.
+        by_pmid = {str(r.get("pmid")): r for r in fetched}
+        by_pmid.update({p: r for p, r in verified.items() if p in stages})
+        records = [by_pmid.pop(p) for p in stages if p in by_pmid]
+        records.extend(by_pmid.values())
+
+    # A DOI whose lookup failed per-item is not missing if its paper arrived
+    # anyway, through another stage's PMID: EFetch returned a record carrying
+    # that DOI. Only a DOI with no such record leaves the corpus incomplete.
+    fetched_dois = {_doi_fold(r["doi"]) for r in records if r.get("doi")}
+    permanently_dropped[:] = [
+        item for item in permanently_dropped
+        if item not in doi_pool or _doi_fold(item) not in fetched_dois
+    ]
+
+    kept, flagged, dropped = _gate_records(records, stages, name, institution)
+    ranked = _dedupe_and_rank(kept, dropped)
     kept = ranked[:cap]  # the cap is applied LAST
 
     logger.info(

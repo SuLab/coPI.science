@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
+
 logger = logging.getLogger(__name__)
 
 ORCID_API_BASE = "https://pub.orcid.org/v3.0"
@@ -15,7 +17,11 @@ async def fetch_orcid_record(orcid_id: str) -> dict[str, Any]:
     url = f"{ORCID_API_BASE}/{orcid_id}/record"
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=headers)
+        resp = await with_retries(
+            lambda: client.get(url, headers=headers),
+            attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+            retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -100,7 +106,11 @@ async def fetch_orcid_grants(orcid_id: str) -> list[str]:
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            resp = await client.get(url, headers=headers)
+            resp = await with_retries(
+                lambda: client.get(url, headers=headers),
+                attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+            )
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -147,7 +157,11 @@ async def fetch_orcid_works(
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            resp = await client.get(url, headers=headers)
+            resp = await with_retries(
+                lambda: client.get(url, headers=headers),
+                attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+            )
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:

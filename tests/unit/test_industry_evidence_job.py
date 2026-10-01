@@ -12,7 +12,9 @@ from src.models import (
     User,
 )
 from src.services import industry_evidence as ie
+from src.services import pubmed
 from src.services.industry_score import SCORER_VERSION
+from src.services.industry_sources import ctgov, openalex_industry, uspto_inventor
 from src.services.jhu_rules import set_tenure_start
 from src.worker.main import JobContext
 
@@ -49,7 +51,7 @@ async def test_no_tenure_start_writes_unscored_row_and_collects_nothing(db_sessi
         called.append(1)
         return []
 
-    monkeypatch.setattr(ie, "fetch_works_for_pmids", boom)
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", boom)
     await ie.execute_industry_evidence(_ctx(job), db_session)
     s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id))).scalar_one()
     assert s.score is None and s.reason == "no_tenure_start" and called == []
@@ -72,7 +74,7 @@ async def test_job_stores_evidence_and_score(db_session, monkeypatch):
                  "authorships": [{"author": {"orcid": "https://orcid.org/0000-0002-2214-0114"}, "institutions": [{"id": "https://openalex.org/I145311948", "type": "education"}], "author_position": "last", "is_corresponding": True},
                                  {"author": {"orcid": None}, "institutions": [{"id": "https://openalex.org/I4210091798", "display_name": "Paratek Pharmaceuticals (United States)", "type": "company"}], "author_position": "middle"}]}]
 
-    async def recs(pmids):
+    async def recs(pmids, **kw):
         return [{"pmid": "38980071", "year": 2024, "coi_statement": "A and B are employees of Paratek Pharmaceuticals, Inc.", "affiliations": []}]
 
     async def none(*a, **k):
@@ -81,11 +83,11 @@ async def test_job_stores_evidence_and_score(db_session, monkeypatch):
     async def cf(ids):
         return set()
 
-    monkeypatch.setattr(ie, "fetch_works_for_pmids", works)
-    monkeypatch.setattr(ie, "fetch_pubmed_records", recs)
-    monkeypatch.setattr(ie, "fetch_jhu_applications", none)
-    monkeypatch.setattr(ie, "fetch_jhu_industry_trials", none)
-    monkeypatch.setattr(ie, "company_funder_ids", cf)
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", works)
+    monkeypatch.setattr(pubmed, "fetch_pubmed_records", recs)
+    monkeypatch.setattr(uspto_inventor, "fetch_jhu_applications", none)
+    monkeypatch.setattr(ctgov, "fetch_jhu_industry_trials", none)
+    monkeypatch.setattr(openalex_industry, "company_funder_ids", cf)
 
     await ie.execute_industry_evidence(_ctx(job), db_session)
     rows = (await db_session.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == u.id))).scalars().all()
@@ -162,8 +164,6 @@ async def test_rescore_re_reads_tenure_start_when_omitted(db_session):
 
 @respx.mock
 async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch):
-    from src.services.industry_sources import uspto_inventor
-
     u = User(orcid="0000-0005-5555-6666", name="No Patents", user_role="pi")
     db_session.add(u)
     await db_session.flush()
@@ -178,10 +178,10 @@ async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch)
     async def cf(ids):
         return set()
 
-    monkeypatch.setattr(ie, "fetch_works_for_pmids", none)
-    monkeypatch.setattr(ie, "fetch_pubmed_records", none)
-    monkeypatch.setattr(ie, "fetch_jhu_industry_trials", none)
-    monkeypatch.setattr(ie, "company_funder_ids", cf)
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", none)
+    monkeypatch.setattr(pubmed, "fetch_pubmed_records", none)
+    monkeypatch.setattr(ctgov, "fetch_jhu_industry_trials", none)
+    monkeypatch.setattr(openalex_industry, "company_funder_ids", cf)
     monkeypatch.setattr(
         "src.services.industry_sources.uspto_inventor.get_settings",
         lambda: type("S", (), {"uspto_api_key": "k"})(),
