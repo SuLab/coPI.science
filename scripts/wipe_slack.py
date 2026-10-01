@@ -5,12 +5,14 @@ public channel of whatever workspace the tokens authenticate to. To make it
 hard to run against the wrong workspace by accident (SEC-11), it:
 
   * requires a ``--workspace`` assertion that must match the workspace the
-    tokens actually authenticate to (team id, team domain, or workspace name),
+    tokens actually authenticate to (team id, team domain, or workspace name; matched exactly),
   * supports ``--dry-run`` to report what *would* be deleted, and
   * prompts for confirmation before deleting (skip with ``--yes``).
 
 Bot tokens are sourced from the DB (``AgentRegistry.slack_bot_token``) with the
-legacy ``.env`` mapping as a fallback.
+legacy ``.env`` mapping as a fallback. The dry run and the delete pass walk every
+history page, every thread and every channel page, so the dry-run count equals the
+delete count.
 
 Usage:
     # See what would be deleted (safe):
@@ -78,12 +80,27 @@ async def _load_bots() -> list[tuple[str, str]]:
     return bots
 
 
+def workspace_matches(info: dict, expected: str) -> bool:
+    """True when ``expected`` EXACTLY equals the team id, the team name, the
+    workspace URL, or its subdomain (case-insensitive). A substring would let
+    ``--workspace test`` match ``test-prod`` (SEC-11)."""
+    want = expected.strip().lower()
+    if not want:
+        return False
+    url = info.get("url", "").lower().rstrip("/")
+    host = url.split("://", 1)[-1]
+    candidates = {info.get("team_id", "").lower(), info.get("team", "").lower(), url, host,
+                  host.split(".", 1)[0]}
+    candidates.discard("")
+    return want in candidates
+
+
 def _assert_workspace(client: WebClient, expected: str) -> dict:
     """Authenticate and verify the workspace matches ``expected``.
 
-    ``expected`` may be the team id (T…), the team domain, or the workspace
-    name. Aborts the process on any mismatch so a stale/misconfigured token
-    can't silently wipe the wrong workspace (SEC-11).
+    ``expected`` is the team id (T...), the team domain, or the workspace name,
+    matched exactly. Aborts the process on any mismatch so a stale/misconfigured
+    token can't silently wipe the wrong workspace (SEC-11).
     """
     try:
         info = client.auth_test()
@@ -94,10 +111,7 @@ def _assert_workspace(client: WebClient, expected: str) -> dict:
     team_id = info.get("team_id", "")
     team = info.get("team", "")
     url = info.get("url", "")
-    want = expected.strip().lower()
-    candidates = {team_id.lower(), team.lower(), url.lower().rstrip("/")}
-    matched = want in candidates or any(want and want in c for c in candidates if c)
-    if not matched:
+    if not workspace_matches(info, expected):
         print(
             "FATAL: --workspace assertion did not match the authenticated "
             f"workspace.\n  expected: {expected!r}\n  team_id : {team_id}\n"
@@ -109,8 +123,61 @@ def _assert_workspace(client: WebClient, expected: str) -> dict:
     return info
 
 
+def _call(fn, **kw):
+    """One Slack call with the script's ratelimited retry."""
+    while True:
+        try:
+            return fn(**kw)
+        except SlackApiError as e:
+            if e.response.get("error") == "ratelimited":
+                time.sleep(int(e.response.headers.get("Retry-After", 2)))
+                continue
+            raise
+
+
+def list_channels(client) -> list[dict]:
+    """Every public channel, following ``conversations.list`` cursors."""
+    out, cursor = [], None
+    while True:
+        page = _call(client.conversations_list, types="public_channel", limit=200, cursor=cursor)
+        out += page.get("channels", [])
+        cursor = (page.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            return out
+
+
+def _deletable(m: dict, bot_user_id: str) -> bool:
+    return m.get("user") == bot_user_id and m.get("subtype") not in UNDELETABLE_SUBTYPES
+
+
+def iter_own_messages(client, channel_id: str, bot_user_id: str):
+    """Yield the ts of every deletable message by this bot in the channel: every
+    history page, plus the replies of every root that has any (SC-10)."""
+    cursor = None
+    while True:
+        hist = _call(client.conversations_history, channel=channel_id, limit=200, cursor=cursor)
+        for m in hist.get("messages", []):
+            if _deletable(m, bot_user_id):
+                yield m["ts"]
+            if m.get("reply_count"):
+                rcursor = None
+                while True:
+                    rep = _call(client.conversations_replies, channel=channel_id, ts=m["ts"],
+                                limit=200, cursor=rcursor)
+                    for r in rep.get("messages", []):
+                        if r["ts"] != m["ts"] and _deletable(r, bot_user_id):
+                            yield r["ts"]
+                    rcursor = (rep.get("response_metadata") or {}).get("next_cursor")
+                    if not rcursor:
+                        break
+        cursor = (hist.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            return
+
+
 def _count_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channel_names: dict[str, str]) -> int:
-    """Dry-run: count (don't delete) this bot's deletable messages."""
+    """Dry-run: count (don't delete) this bot's deletable messages, through the
+    same enumeration the delete pass uses."""
     client = WebClient(token=bot_token)
     try:
         bot_user_id = client.auth_test()["user_id"]
@@ -121,25 +188,11 @@ def _count_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channe
     total = 0
     for ch_id in channel_ids:
         name = channel_names.get(ch_id, ch_id)
-        cursor = None
-        ch_count = 0
-        while True:
-            try:
-                hist = client.conversations_history(channel=ch_id, limit=200, cursor=cursor)
-            except SlackApiError as e:
-                if e.response.get("error") == "ratelimited":
-                    delay = int(e.response.headers.get("Retry-After", 2))
-                    time.sleep(delay)
-                    continue
-                break
-            except Exception:
-                break
-            for m in hist.get("messages", []):
-                if m.get("user") == bot_user_id and m.get("subtype") not in UNDELETABLE_SUBTYPES:
-                    ch_count += 1
-            cursor = hist.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+        try:
+            ch_count = sum(1 for _ in iter_own_messages(client, ch_id, bot_user_id))
+        except Exception as exc:
+            print(f"[{agent_id}] #{name} could not be read, skipped: {exc}", flush=True)
+            continue
         if ch_count:
             print(f"[{agent_id}] #{name} would delete {ch_count} messages", flush=True)
         total += ch_count
@@ -148,7 +201,7 @@ def _count_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channe
 
 
 def _wipe_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channel_names: dict[str, str]) -> int:
-    """Delete this bot's messages from every listed channel."""
+    """Delete this bot's messages (roots and thread replies) from every listed channel."""
     print(f"[{agent_id}] authenticating...", flush=True)
     client = WebClient(token=bot_token)
     try:
@@ -161,56 +214,32 @@ def _wipe_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channel
     total = 0
     for ch_id in channel_ids:
         name = channel_names.get(ch_id, ch_id)
-        skip_ts = set()  # track messages we failed to delete so we don't loop forever
-
-        while True:
+        # Collect first, then delete: one pass, so a message that fails to delete
+        # cannot be revisited forever.
+        try:
+            targets = list(iter_own_messages(client, ch_id, bot_user_id))
+        except Exception as exc:
+            print(f"[{agent_id}] #{name} could not be read, skipped: {exc}", flush=True)
+            continue
+        if targets:
+            print(f"[{agent_id}] #{name} deleting {len(targets)} messages...", flush=True)
+        for ts in targets:
             try:
-                hist = client.conversations_history(channel=ch_id, limit=200)
+                client.chat_delete(channel=ch_id, ts=ts)
+                total += 1
+                time.sleep(0.05)
             except SlackApiError as e:
                 if e.response.get("error") == "ratelimited":
                     delay = int(e.response.headers.get("Retry-After", 2))
-                    print(f"[{agent_id}] #{name} rate limited on history, waiting {delay}s", flush=True)
+                    print(f"[{agent_id}] #{name} rate limited, waiting {delay}s", flush=True)
                     time.sleep(delay)
-                    continue
-                break
+                    try:
+                        client.chat_delete(channel=ch_id, ts=ts)
+                        total += 1
+                    except Exception:
+                        pass
             except Exception:
-                break
-
-            msgs = hist.get("messages", [])
-            if not msgs:
-                break
-
-            my_msgs = [
-                m for m in msgs
-                if m.get("user") == bot_user_id
-                and m.get("subtype") not in UNDELETABLE_SUBTYPES
-                and m["ts"] not in skip_ts
-            ]
-            if not my_msgs:
-                break
-
-            print(f"[{agent_id}] #{name} deleting {len(my_msgs)} messages...", flush=True)
-            for msg in my_msgs:
-                ts = msg["ts"]
-                try:
-                    client.chat_delete(channel=ch_id, ts=ts)
-                    total += 1
-                    time.sleep(0.05)
-                except SlackApiError as e:
-                    err = e.response.get("error")
-                    if err == "ratelimited":
-                        delay = int(e.response.headers.get("Retry-After", 2))
-                        print(f"[{agent_id}] #{name} rate limited, waiting {delay}s", flush=True)
-                        time.sleep(delay)
-                        try:
-                            client.chat_delete(channel=ch_id, ts=ts)
-                            total += 1
-                        except Exception:
-                            skip_ts.add(ts)
-                    else:
-                        skip_ts.add(ts)
-                except Exception:
-                    skip_ts.add(ts)
+                pass
 
     print(f"[{agent_id}] DONE — {total} messages deleted", flush=True)
     return total
@@ -228,7 +257,7 @@ def wipe_slack(workspace: str, dry_run: bool, assume_yes: bool):
     # workspace these tokens actually authenticate to.
     _assert_workspace(client, workspace)
 
-    channels = client.conversations_list(types="public_channel", limit=200)["channels"]
+    channels = list_channels(client)
     channel_ids = [ch["id"] for ch in channels]
     channel_names = {ch["id"]: ch["name"] for ch in channels}
     print(f"Channels: {[ch['name'] for ch in channels]}", flush=True)

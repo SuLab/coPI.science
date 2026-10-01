@@ -61,6 +61,8 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT=$(pwd -P)
+# Shared isolation, guard and scoring functions (also used by the other two harnesses).
+source "$ROOT/scripts/lib/mutation_harness.sh"
 
 : "${SLACK_TEST_WORKSPACE:?live workspace credentials required}"
 
@@ -68,28 +70,6 @@ PY="${MUT_PYTHON:-$PWD/.venv-test/bin/python}"
 [ -x "$PY" ] || { echo "ERROR: $PY missing — create .venv-test ON THE HOST (CLAUDE.md); the images have no pytest" >&2; exit 1; }
 case "$PY" in /*) ;; *) PY="$ROOT/$PY" ;; esac  # pytest runs from the copy, not from here
 MUT_TIMEOUT="${MUT_TIMEOUT:-900}"
-
-# An operator-supplied directory is accepted only if it is a real directory (not a
-# symlink, checked before anything resolves it) owned by the current user, and is then
-# forced to 0700: `mkdir -p -m 0700` sets no mode on a directory that already exists, so
-# a pre-made 0755 copy directory would otherwise hold a world-readable copy of `.env`.
-# $1 = the variable's name (for messages), $2 = its path, $3 = "empty" to also require
-# that the directory be absent or empty.
-secure_override_dir() {
-  local d="$2"
-  while [ "$d" != "/" ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
-  if [ -L "$d" ]; then
-    echo "ERROR: $1=$2 is a symlink; refusing it." >&2; return 1
-  fi
-  if [ "${3:-}" = "empty" ] && [ -e "$d" ] && [ -n "$(ls -A -- "$d" 2>/dev/null)" ]; then
-    echo "ERROR: $1=$2 exists and is not empty; refusing to reuse it." >&2; return 1
-  fi
-  mkdir -p -m 0700 -- "$d" || { echo "ERROR: cannot create $1=$2" >&2; return 1; }
-  if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then
-    echo "ERROR: $1=$2 is not a directory owned by $(id -un); refusing it." >&2; return 1
-  fi
-  chmod 0700 -- "$d" || { echo "ERROR: cannot chmod 0700 $1=$2" >&2; return 1; }
-}
 
 # The log dir is created, not assumed: an absent one makes every `>"$log"` redirect fail
 # (see S4 in the header). A failed redirect no longer scores a kill regardless: a kill
@@ -139,27 +119,8 @@ MUTANTS=(
 
 # ---------------------------------------------------------------------------
 # Build the mutable copy OUTSIDE the repository and PROVE it is what runs.
-#
-# The copy directory is guarded before the tar and before every `rm -rf`. If mktemp
-# failed, COPY would be empty, bash's `cd ""` would succeed as a no-op, `pwd -P` would
-# return the repo root, the mutants would land in the live tree and the EXIT trap would
-# delete it. Physical paths are compared with physical paths.
+# (copy_is_safe and the guards live in scripts/lib/mutation_harness.sh.)
 # ---------------------------------------------------------------------------
-copy_is_safe() {
-  case "$COPY" in
-    ""|/) echo "ERROR: unsafe copy directory '${COPY}'" >&2; return 1 ;;
-    /*) ;;
-    *) echo "ERROR: copy directory '$COPY' is not absolute" >&2; return 1 ;;
-  esac
-  case "$COPY/" in
-    "$ROOT"/*) echo "ERROR: copy directory $COPY is the repository or inside it ($ROOT)" >&2; return 1 ;;
-  esac
-  case "$ROOT/" in
-    "$COPY"/*) echo "ERROR: copy directory $COPY contains the repository ($ROOT)" >&2; return 1 ;;
-  esac
-  return 0
-}
-
 if [ -n "${MUTMIRROR_COPY_DIR:-}" ]; then
   COPY="$MUTMIRROR_COPY_DIR"
   secure_override_dir MUTMIRROR_COPY_DIR "$COPY" empty || exit 1
@@ -191,25 +152,9 @@ trap 'on_signal 129' HUP
 
 echo "building a throwaway copy of the tree at ${COPY} (the repo is never written to)"
 copy_is_safe || exit 1
-# backups/ holds the production dumps (RCA S1). .env stays in, for parity with ci.sh:
-# Settings reads a cwd-relative .env, and the copy is a 0700 directory removed on EXIT,
-# INT, TERM or HUP.
-if ! tar -C "$ROOT" \
-      --exclude=./.git --exclude=./.venv-test --exclude=./backups --exclude=./logs \
-      --exclude=./mutants --exclude=./build --exclude=./.hypothesis --exclude=./.pytest_cache \
-      --exclude=./.ruff_cache --exclude=./.playwright-mcp --exclude=__pycache__ \
-      -cf - . | tar -C "$COPY" -xf -; then
-  echo "ERROR: could not copy $ROOT into $COPY" >&2
-  exit 1
-fi
+mh_make_copy || exit 1
 
-prov=$(cd "$COPY" && "$PY" -c 'import src; print(src.__file__)' 2>/dev/null)
-if [ "$prov" != "$COPY/src/__init__.py" ]; then
-  echo "ERROR: from $COPY, 'import src' resolves to '${prov:-<nothing>}', not" >&2
-  echo "$COPY/src/__init__.py. The mutants would not be under test. Refusing to run." >&2
-  exit 1
-fi
-echo "provenance OK: pytest will import $prov"
+mh_check_provenance || exit 1
 
 # -rfE: the summary lists `FAILED <node>` for failed tests (the kill evidence) and
 # `ERROR <node>` for setup/collection errors (diagnostics only, never a kill).
@@ -230,7 +175,8 @@ fi
 grep -E "passed|failed" "$LOGDIR/baseline.log" | tail -1
 echo
 
-fail=0; killed=0; i=0
+fail=0 killed=0 survived=0 errors=0 broken_inert=0 inert_ok=0 void=0 i=0
+declare -a SURVIVORS=()
 for m in "${MUTANTS[@]}"; do
   i=$((i+1))
   file="${m%%~~*}"; rest="${m#*~~}"
@@ -238,77 +184,30 @@ for m in "${MUTANTS[@]}"; do
   to="${rest%%~~*}"; label="${rest#*~~}"
   inert=0; [[ "$label" == S4* ]] && inert=1
 
-  if ! FROM="$from" TO="$to" "$PY" - "$COPY/$file" <<'PY'
-import os, pathlib, sys
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
-frm = os.environ["FROM"].replace("\\n", "\n")
-to = os.environ["TO"].replace("\\n", "\n")
-n = s.count(frm)
-if n != 1:
-    sys.stderr.write(f"expected exactly 1 occurrence in {p.name}, found {n}: {frm!r}\n")
-    sys.exit(1)
-p.write_text(s.replace(frm, to, 1))
-PY
+  if ! mh_apply_mutant "$file" "$from" "$to"
   then
     echo "ERROR   $label — target not found or not unique; the code moved" >&2
     cp -- "$file" "$COPY/$file" >/dev/null 2>&1
-    fail=1; continue
+    fail=1; errors=$((errors + 1)); continue
   fi
 
-  mod="${file#src/}"; mod="src.${mod%.py}"; mod="${mod//\//.}"
-  if ! (cd "$COPY" && "$PY" -c "import $mod") >/dev/null 2>&1; then
+  if ! mh_check_imports "$file"; then
     echo "VOID    $label — the mutated module does not import; result discarded" >&2
     cp -- "$file" "$COPY/$file" >/dev/null 2>&1
-    fail=1; continue
+    void=$((void + 1)); fail=1; continue
   fi
 
   log="$LOGDIR/m$i.log"
   run_selection "$log"; rc=$?
-  case "$rc" in
-    0)
-      if [ "$inert" -eq 1 ]; then
-        echo "survived (expected)  $label   [$(grep -oE '[0-9]+ passed' "$log" | tail -1)]"
-        killed=$((killed+1))
-      else
-        echo "SURVIVED  $label   [$(grep -oE '[0-9]+ passed' "$log" | tail -1)]"; fail=1
-      fi ;;
-    1)
-      # Exit 1 is a kill only if a test FAILED. It also comes from a setup or fixture
-      # ERROR (testcontainers/Docker, an unreachable workspace), a failed `cd`, or a
-      # failed `>"$log"` redirect — none of which names a failing test.
-      killers=$(grep -oE "^FAILED [^ ]+" "$log" 2>/dev/null | sed 's/^FAILED //' | head -3 | tr '\n' ' ')
-      if [ -z "$killers" ]; then
-        echo "ERROR   $label — pytest exit 1 with no FAILED line (setup/collection ERROR," >&2
-        echo "        failed cd, or failed log redirect) names no failing test; see $log" >&2
-        fail=1
-      elif [ "$inert" -eq 1 ]; then
-        echo "KILLED AN INERT MUTANT  $label — the tier is flaky or broken, not sensitive" >&2
-        grep -E "^FAILED|^ERROR" "$log" | head -3 >&2
-        fail=1
-      else
-        echo "killed    $label"
-        echo "          by: $killers"
-        killed=$((killed+1))
-      fi ;;
-    124|137)
-      # Never a kill, inert or real: a kill must name a failing test.
-      echo "ERROR   $label — TIMEOUT after ${MUT_TIMEOUT}s (exit $rc); see $log" >&2
-      fail=1 ;;
-    *)
-      echo "ERROR   $label — pytest exit $rc names no failing test; see $log" >&2
-      fail=1 ;;
-  esac
-  cp -- "$file" "$COPY/$file" >/dev/null 2>&1
-  if ! cmp -s -- "$file" "$COPY/$file"; then
-    echo "ERROR: $COPY/$file no longer matches $file; the copy is polluted. Stopping." >&2
-    exit 1
-  fi
+  mh_score "$rc" "$log" "$label" "$inert"
+  mh_restore "$file" || exit 1
 done
 
 echo
 git diff --quiet -- src/ || { echo "FATAL: src/ was modified — results are void" >&2; exit 1; }
 echo "repo clean check: src/ untouched"
-echo "killed ${killed}/${#MUTANTS[@]}"
+mh_report slack_mirror
+echo "${void} void"
 echo "logs: $LOGDIR"
 [ "$fail" -eq 0 ] && echo "the live Slack mirror tier has teeth" || echo "SURVIVING, VOID OR ERROR MUTANTS" >&2
 exit "$fail"

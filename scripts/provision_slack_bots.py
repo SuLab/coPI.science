@@ -20,14 +20,21 @@ How it works
 6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>; the closing
    message says how they reach the engine
 
-Prerequisites (one-time, done by a workspace admin in a browser)
------------------------------------------------------------------
-  1. Go to https://api.slack.com/apps
-  2. Click "Your App Configuration Tokens" → "Generate Token" for your workspace
-  3. Copy both the token (xoxe-...) and the refresh token
-  4. Add to .env:
-       SLACK_CONFIG_TOKEN=xoxe-...
-       SLACK_CONFIG_REFRESH_TOKEN=xoxe-...
+The app-config credential is never kept in .env. The single-use refresh token lives
+only in the database (AppSetting) and is rotated in-container by
+scripts/slack_config_token.py, which leaves a short-lived ACCESS token in
+data/.slack_config_token. This script reads that file and deletes it when it ends.
+
+Prerequisites
+-------------
+  1. A usable config token in the database (the admin Provision flow keeps one; a
+     workspace admin seeds it once from https://api.slack.com/apps -> "Your App
+     Configuration Tokens"). SLACK_CONFIG_TOKEN and SLACK_CONFIG_REFRESH_TOKEN in
+     .env are no longer read here.
+  2. Mint the access token to a file (the container runs as you, so the file is yours):
+       docker compose -f docker-compose.prod.yml run --rm --no-deps -T \\
+           --user "$(id -u):$(id -g)" -v "$PWD/data:/app/data" \\
+           blackbird-app python scripts/slack_config_token.py
 
 Usage
 -----
@@ -41,7 +48,8 @@ Usage
   python scripts/provision_slack_bots.py --dry-run
 
   # Re-run the OAuth step without recreating apps (useful if the server was
-  # interrupted midway — re-uses credentials saved in .provision_state.json):
+  # interrupted midway — re-uses credentials saved in .provision_state.json).
+  # A plain re-run also resumes: agents already in that file are not recreated.
   python scripts/provision_slack_bots.py --skip-create
 """
 
@@ -68,11 +76,11 @@ from src.services.slack_provisioning import (
     BOT_SCOPES,
     create_app,
     exchange_code,
-    rotate_config_token,
 )
 from src.services.slack_provisioning import (
     lookup_team_id as _slack_lookup_team_id,
 )
+from src.services.token_format import is_valid_token
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -80,8 +88,38 @@ from src.services.slack_provisioning import (
 
 CALLBACK_PATH = "/oauth/callback"
 STATE_FILE = Path(".provision_state.json")
+# Written by scripts/slack_config_token.py (in-container); deleted when this script ends.
+CONFIG_TOKEN_PATH = Path("data/.slack_config_token")
+MINT_COMMAND = (
+    'docker compose -f docker-compose.prod.yml run --rm --no-deps -T --user "$(id -u):$(id -g)" '
+    '-v "$PWD/data:/app/data" blackbird-app python scripts/slack_config_token.py'
+)
 
 console = Console()
+
+
+def load_existing_state() -> list[dict]:
+    """Credentials of apps created by an earlier (possibly interrupted) run."""
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else []
+
+
+def split_against_state(missing: list[dict], state: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(agents still to create, state entries for the agents in ``missing``).
+
+    An agent already in ``state`` has an app; recreating it would orphan that app
+    and its client_secret (SC-13)."""
+    have = {a["agent_id"] for a in state}
+    wanted = {lab["id"] for lab in missing}
+    return [lab for lab in missing if lab["id"] not in have], [a for a in state if a["agent_id"] in wanted]
+
+
+def tokenized_agents(env: dict) -> set[str]:
+    """Lowercased agent ids with a usable ``SLACK_BOT_TOKEN_<ID>`` in ``env`` (SC-12)."""
+    return {
+        k[len("SLACK_BOT_TOKEN_"):].lower()
+        for k, v in env.items()
+        if k.upper().startswith("SLACK_BOT_TOKEN_") and is_valid_token(v)
+    }
 
 
 def _write_state(created: list[dict]) -> None:
@@ -176,7 +214,7 @@ def scope_conflicts(omit: dict[str, set[str]], add: dict[str, set[str]]) -> list
 # ---------------------------------------------------------------------------
 # Slack API helpers
 # ---------------------------------------------------------------------------
-# create_app / exchange_code / rotate_config_token live in
+# create_app / exchange_code live in
 # src/services/slack_provisioning.py (shared with the admin UI). The only
 # script-local helper is the env-scanning team-id detector below.
 
@@ -184,12 +222,7 @@ def scope_conflicts(omit: dict[str, set[str]], add: dict[str, set[str]]) -> list
 def lookup_team_id(existing_env: dict) -> str | None:
     """Detect the workspace team_id from the first valid bot token in .env."""
     for key, val in existing_env.items():
-        if (
-            key.upper().startswith("SLACK_BOT_TOKEN_")
-            and val
-            and val.startswith("xoxb-")
-            and not val.startswith("xoxb-placeholder")
-        ):
+        if key.upper().startswith("SLACK_BOT_TOKEN_") and is_valid_token(val):
             team_id = _slack_lookup_team_id(val)
             if team_id:
                 return team_id
@@ -348,13 +381,7 @@ def main():
             console.print("[yellow]Could not detect team ID — OAuth links may open the wrong workspace.[/yellow]")
             console.print("  Pass --team-id T... to fix this.")
 
-    tokenized = {
-        k[len("SLACK_BOT_TOKEN_"):].lower()
-        for k, v in existing_env.items()
-        if k.upper().startswith("SLACK_BOT_TOKEN_")
-        and v
-        and not v.startswith("xoxb-placeholder")
-    }
+    tokenized = tokenized_agents(existing_env)
 
     # An agent needs a token if it has neither a DB token (roster has_token) nor
     # a token already in this .env.
@@ -410,59 +437,18 @@ def main():
         return
 
     # -----------------------------------------------------------------------
-    # 2. Obtain / rotate config token
+    # 2. Read the config access token minted in-container
     # -----------------------------------------------------------------------
-    config_token = existing_env.get("SLACK_CONFIG_TOKEN", "").strip()
-    refresh_token = existing_env.get("SLACK_CONFIG_REFRESH_TOKEN", "").strip()
-
-    # EITHER credential is enough. Requiring SLACK_CONFIG_TOKEN here was a bug: the
-    # rotation below derives a fresh access token from the refresh token and
-    # overwrites config_token unconditionally, so a refresh-token-only .env — the
-    # normal state after a rotation, since rotation replaces both — was rejected
-    # for want of a value the script was about to discard anyway.
-    if not config_token and not refresh_token:
+    if not CONFIG_TOKEN_PATH.exists():
         console.print(
-            "\n[bold red]Neither SLACK_CONFIG_TOKEN nor SLACK_CONFIG_REFRESH_TOKEN "
-            "is set in .env[/bold red]"
-        )
-        console.print(
-            "  1. Open https://api.slack.com/apps in a browser\n"
-            "  2. Click 'Your App Configuration Tokens'\n"
-            "  3. Click 'Generate Token' for your workspace\n"
-            "  4. Copy BOTH values into .env. Note the prefixes differ:\n"
-            "       SLACK_CONFIG_TOKEN=xoxe.xoxp-...   (access token, ~12h life)\n"
-            "       SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...  (refresh token, single use)\n"
-            "  The refresh token alone is sufficient — it mints the access token.\n"
+            "\n[bold red]No config token file.[/bold red] Mint one from the database first (the "
+            "refresh token is single-use and lives only in AppSetting):\n  " + MINT_COMMAND
         )
         sys.exit(1)
-
-    if refresh_token:
-        console.print("Rotating config token...")
-        try:
-            config_token, new_refresh, _exp = rotate_config_token(refresh_token)
-            set_key(args.env_file, "SLACK_CONFIG_TOKEN", config_token, quote_mode="never")
-            set_key(args.env_file, "SLACK_CONFIG_REFRESH_TOKEN", new_refresh, quote_mode="never")
-            console.print("[green]Config token rotated and saved.[/green]")
-        except Exception as exc:
-            console.print(f"[yellow]Token rotation failed ({exc}); using existing token.[/yellow]")
-
-    # Rotation can fail with a still-empty config_token — a refresh token that was
-    # revoked, expired, or already spent (they are single use, so a value left in
-    # .env after someone rotated it elsewhere is dead). Stop here rather than
-    # calling apps.manifest.create with an empty Authorization header, which fails
-    # with an opaque Slack error that says nothing about the real cause.
+    config_token = CONFIG_TOKEN_PATH.read_text().strip()
     if not config_token:
-        console.print(
-            "\n[bold red]No usable config token.[/bold red] The refresh token in "
-            f"{args.env_file} did not rotate, and SLACK_CONFIG_TOKEN is empty."
-        )
-        console.print(
-            "  Config refresh tokens are SINGLE USE: whoever rotated it last holds the\n"
-            "  only live one, and a copy left behind in .env is already dead.\n"
-            "  Generate a fresh pair at https://api.slack.com/apps -> "
-            "'Your App Configuration Tokens'\n"
-            "  and replace BOTH values in .env."
-        )
+        console.print(f"\n[bold red]{CONFIG_TOKEN_PATH} is empty.[/bold red] Mint it again:\n  {MINT_COMMAND}")
+        CONFIG_TOKEN_PATH.unlink(missing_ok=True)
         sys.exit(1)
 
     # -----------------------------------------------------------------------
@@ -509,8 +495,16 @@ def main():
             console.print(f"  [cyan]{i:2d}.[/cyan] [bold]{app['bot_name']}[/bold] ({app['pi_name']})")
             console.print(f"      {_oauth_url(app)}\n")
     else:
+        state_merged = load_existing_state()
+        to_create, resumed = split_against_state(missing, state_merged)
+        for app in resumed:
+            console.print(
+                f"  [yellow]{app['bot_name']}[/yellow] already created in a previous run; "
+                "re-run with --skip-create to finish its OAuth"
+            )
+        new_apps: list[dict] = []
         failed_count = 0
-        for i, lab in enumerate(missing):
+        for i, lab in enumerate(to_create):
             try:
                 dropped = omit.get(lab["id"].lower(), set())
                 extra = add.get(lab["id"].lower(), set())
@@ -523,10 +517,13 @@ def main():
                     config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
                     scopes=scopes,
                 )
+                new_apps.append(app)
                 created.append(app)
                 # Persist immediately (0600) so an interruption mid-run doesn't
-                # lose the client_secret we just minted.
-                _write_state(created)
+                # lose the client_secret we just minted. The previous run's entries
+                # are kept; none is ever dropped here.
+                state_merged.append(app)
+                _write_state(state_merged)
                 _CallbackHandler.pending[app["agent_id"]] = {
                     "bot_name": app["bot_name"],
                     "client_id": app["client_id"],
@@ -538,16 +535,24 @@ def main():
                 console.print(f"  [red]failed[/red]  {lab['name']}: {exc}")
                 failed_count += 1
             # Slack's Manifest API allows ~10 req/min; 12s between calls stays well under
-            if i < len(missing) - 1:
+            if i < len(to_create) - 1:
                 time.sleep(12)
 
-        if created:
-            _write_state(created)
+        created = resumed + new_apps
+        for app in resumed:
+            _CallbackHandler.pending[app["agent_id"]] = {
+                "bot_name": app["bot_name"],
+                "client_id": app["client_id"],
+                "client_secret": app["client_secret"],
+            }
+        if new_apps:
+            _write_state(state_merged)
         if failed_count:
             console.print(f"[yellow]{failed_count} app(s) failed to create — fix errors and re-run.[/yellow]")
 
     if not created:
         console.print("[red]No apps available for OAuth. Exiting.[/red]")
+        CONFIG_TOKEN_PATH.unlink(missing_ok=True)
         server.shutdown()
         sys.exit(1)
 
@@ -562,6 +567,7 @@ def main():
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
         server.shutdown()
+        CONFIG_TOKEN_PATH.unlink(missing_ok=True)
 
     done = len(_CallbackHandler.received)
     total = len(created)
