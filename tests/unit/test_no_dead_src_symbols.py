@@ -139,11 +139,6 @@ ALLOWLIST: dict[str, str] = {
         "tests/integration/test_engine_liveness.py to prove liveness follows the "
         "lock-holding connection. No production reader is planned."
     ),
-    "src.services.advisory_locks:entity_key_sql": (
-        "Per-entity advisory lock keys, built in Phase 2 Task 4; consumed by Phase 3's "
-        "provision and corpus locks (docs/plans/2026-09-29-audit-remediation-phase-3-web-scripts.md), "
-        "which remove this entry."
-    ),
 }
 
 

@@ -26,6 +26,9 @@ SINGLE_DEFINITION_NAMES = {
     "_distinctive_aff_tokens",
     "INSTITUTION_STOPWORDS",
     "match_pi_author",
+    "_surname_matches",
+    "build_pubmed_query",
+    "_match_pi_author_detail",
 }
 
 SEARCH_ROOTS = ("src", "scripts")

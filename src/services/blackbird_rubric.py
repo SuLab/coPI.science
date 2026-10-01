@@ -380,6 +380,14 @@ def _parse_stage_bars(
     return stage_bar_global, stage_bars
 
 
+def _read_rubric_bytes(path: Path) -> bytes:
+    """The rubric file's bytes; ``RubricError`` when unreadable."""
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise RubricError(f"rubric document unreadable at {path}: {exc}") from exc
+
+
 def parse_rubric(path: Path) -> Rubric:
     """Parse and validate a rubric document. Raises ``RubricError`` on any
     defect — the caller (module import, below) deliberately does not catch it.
@@ -387,10 +395,13 @@ def parse_rubric(path: Path) -> Rubric:
     Public so the validator is testable against scratch files without
     monkeypatching the module-level singleton.
     """
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        raise RubricError(f"rubric document unreadable at {path}: {exc}") from exc
+    return parse_rubric_bytes(_read_rubric_bytes(path), str(path))
+
+
+def parse_rubric_bytes(raw_bytes: bytes, source: str) -> Rubric:
+    """Parse and validate rubric document bytes; ``source`` names them in errors.
+    ``parse_rubric`` reads the file and delegates here."""
+    path = source
     try:
         data = tomllib.loads(raw_bytes.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
@@ -448,7 +459,13 @@ def parse_rubric(path: Path) -> Rubric:
 
 # Loaded ONCE, at import, failing fast — see the module docstring for why
 # load-once beats live reload here.
-_RUBRIC = parse_rubric(RUBRIC_PATH)
+_RUBRIC_BYTES = _read_rubric_bytes(RUBRIC_PATH)
+_RUBRIC = parse_rubric_bytes(_RUBRIC_BYTES, str(RUBRIC_PATH))
+
+
+def loaded_rubric_bytes() -> bytes:
+    """The exact bytes the import-time rubric was parsed from (AP-7 capture)."""
+    return _RUBRIC_BYTES
 
 
 def load_rubric() -> Rubric:

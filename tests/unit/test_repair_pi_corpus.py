@@ -16,10 +16,8 @@ from scripts.repair_pi_corpus import (
     classify_excluded_type,
     classify_stored_publications,
     find_duplicate_title_removals,
-    matched_used_bare_initial,
     normalize_title,
     partition_duplicate_pmids,
-    select_additions,
 )
 
 
@@ -74,29 +72,35 @@ def test_classify_excluded_type_routes_a_secondary_hit_to_review_not_removal():
 
 
 # ---------------------------------------------------------------------------
-# matched_used_bare_initial
+# bare initial (corpus._match_pi_author_detail)
 # ---------------------------------------------------------------------------
+
+
+def _bare(record, name):
+    from src.services.corpus import _match_pi_author_detail
+
+    return _match_pi_author_detail(record, name)[2]
 
 
 def test_bare_initial_true_when_forename_is_a_single_letter():
     record = _record(1, authors=[_author("Rothstein", "J", "J")])
-    assert matched_used_bare_initial(record, "Jeffrey Rothstein") is True
+    assert _bare(record, "Jeffrey Rothstein") is True
 
 
 def test_bare_initial_true_when_only_initials_present_no_forename():
     record = _record(1, authors=[_author("Rothstein", None, "JD")])
-    assert matched_used_bare_initial(record, "Jeffrey Rothstein") is True
+    assert _bare(record, "Jeffrey Rothstein") is True
 
 
 def test_bare_initial_false_for_a_full_forename_match():
     record = _record(1, authors=[_author("Green", "Rachel", "R")])
-    assert matched_used_bare_initial(record, "Rachel Green") is False
+    assert _bare(record, "Rachel Green") is False
 
 
 def test_bare_initial_false_for_a_single_token_pi_name():
     # No first name to discriminate on at all — not a "bare initial" case.
     record = _record(1, authors=[_author("Cher", None, "C")])
-    assert matched_used_bare_initial(record, "Cher") is False
+    assert _bare(record, "Cher") is False
 
 
 # ---------------------------------------------------------------------------
@@ -325,42 +329,6 @@ def test_the_whole_pipeline_combines_duplicate_pmid_identity_and_title_dedup():
         "e": "duplicate_title",
     }
     assert review == []
-
-
-# ---------------------------------------------------------------------------
-# select_additions
-# ---------------------------------------------------------------------------
-
-
-def test_select_additions_excludes_already_stored_pmids():
-    kept = [{"pmid": "1", "year": 2020}, {"pmid": "2", "year": 2019}]
-    additions, over_cap = select_additions(kept, stored_pmids=["1"], survivors=1)
-    assert [r["pmid"] for r in additions] == ["2"]
-    assert over_cap == []
-
-
-def test_select_additions_is_empty_when_everything_is_already_stored():
-    kept = [{"pmid": "1"}, {"pmid": "2"}]
-    assert select_additions(kept, stored_pmids=["1", "2"], survivors=2) == ([], [])
-
-
-def test_select_additions_never_pushes_the_corpus_past_the_cap():
-    # Rothstein's measured shape: 15 survivors + 42 candidates = 57 without a
-    # budget, over a cap of 50 ("leung at 53",
-    # docs/specs/2026-08-13-pi-profile-coverage-design.md). Only 35 may land.
-    kept = [{"pmid": str(i), "year": 2026 - i} for i in range(42)]
-    additions, over_cap = select_additions(kept, stored_pmids=[], survivors=15, cap=50)
-    assert len(additions) == 35
-    assert len(over_cap) == 7
-    # The budget trims the OLDEST candidates, never the stored survivors.
-    assert [r["pmid"] for r in over_cap] == [str(i) for i in range(35, 42)]
-
-
-def test_select_additions_stores_nothing_when_the_corpus_is_already_at_the_cap():
-    kept = [{"pmid": "900", "year": 2026}]
-    additions, over_cap = select_additions(kept, stored_pmids=[], survivors=50, cap=50)
-    assert additions == []
-    assert [r["pmid"] for r in over_cap] == ["900"]
 
 
 # ---------------------------------------------------------------------------

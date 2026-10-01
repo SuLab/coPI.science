@@ -13,8 +13,8 @@ removes a row without printing its evidence first.
 
 Removal set (automatic, still gated on --apply):
   - every stored row but the first (by ``created_at``, then ``id``) that
-    shares an identical PMID (``duplicate_pmid`` — the non-unique index means
-    this is observed, not enforced, D8);
+    shares an identical PMID (``duplicate_pmid`` — observed, not enforced, until
+    migration 0056 adds ``uq_publications_user_pmid``);
   - rows whose refetched record fails the CURRENT ``match_pi_author`` and lists
     authors, none of whom carries the PI's surname (``no_individual_author_match``);
   - rows whose refetched ``pub_types`` intersect ``EXCLUDED_TYPES`` with NO
@@ -32,13 +32,17 @@ Review set (``--review``, NEVER applied automatically):
     (``unverifiable_no_authors``), consortium-only (``consortium_only``), or
     the PI's surname present with a disagreeing forename (``forename_mismatch``);
   - rows with a secondary excluded type (``secondary_excluded_type``, D4);
+  - resolved additions found without an ORCID anchor (``unanchored_addition``);
   - rows with no stored PMID at all (``no_pmid`` — nothing to refetch);
   - rows whose stored PMID PubMed no longer returns a record for
     (``unrefetchable`` — a retracted/merged/mis-keyed PMID is not evidence of
     mis-attribution, so it is never auto-removed on that basis alone).
 
 Addition set: ``resolve_corpus``'s kept set (ranked year-DESC/PMID-DESC,
-capped), excluding PMIDs already stored.
+capped), excluding PMIDs already stored, by the profile pipeline's own rule
+(``select_corpus_additions``): only ORCID-anchored finds are stored; records
+found by OpenAlex or name+affiliation search alone go to review as
+``unanchored_addition``. Each PI is applied under the corpus advisory lock.
 
 Usage (run via ``docker compose -f docker-compose.prod.yml run --rm --no-deps -T
 blackbird-app``, never ``exec`` — the running container may still hold the
@@ -56,6 +60,12 @@ pre-fix matcher, plan Task 4):
 
     # Apply only the additions:
     python scripts/repair_pi_corpus.py --only additions --apply
+
+    # The 0056 publications dedupe (duplicate_pmid removals only). Runs only
+    # with the owner's go-ahead, BEFORE migration 0056 adds
+    # ``uq_publications_user_pmid``; once the constraint exists duplicates
+    # cannot occur and this finds nothing:
+    python scripts/repair_pi_corpus.py --only duplicate-pmids --apply
 """
 
 from __future__ import annotations
@@ -85,11 +95,13 @@ from src.services.corpus import (  # noqa: E402
 from src.services.corpus import (  # noqa: E402
     EXCLUDED_TYPES,
     CorpusStageError,
+    _match_pi_author_detail,
     _split_particle_splice,
     _surname_matches,
     match_pi_author,
     resolve_corpus,
 )
+from src.services.corpus_additions import lock_corpus, select_corpus_additions  # noqa: E402
 from src.services.pubmed import fetch_pubmed_records  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -145,7 +157,7 @@ class PiRepairPlan:
     review: list[ReviewCandidate] = field(default_factory=list)
     additions: list[dict[str, Any]] = field(default_factory=list)
     # Ranked additions the CORPUS_CAP budget had no room for. Reported, never
-    # stored — see `select_additions`.
+    # stored — see `select_corpus_additions`.
     over_cap: list[dict[str, Any]] = field(default_factory=list)
     additions_error: str | None = None
 
@@ -166,33 +178,6 @@ def pmid_sort_key(pmid: str | None) -> int:
         return int(pmid)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
-
-
-def matched_used_bare_initial(record: dict[str, Any], pi_name: str) -> bool:
-    """Whether the author ``match_pi_author`` found rests on a bare initial.
-
-    Independently re-derives "which author matched", rather than importing
-    ``corpus.py``'s private ``_author_first_name_matches`` — it duplicates a
-    small amount of logic instead of depending on an internal that may change
-    shape underneath this script.
-    """
-    parts = pi_name.strip().split()
-    if len(parts) < 2:
-        return False
-    last_name = parts[-1].lower()
-    for author in record.get("authors") or []:
-        if author.get("collective"):
-            continue
-        last = (author.get("last") or "").strip().lower()
-        if not last or last != last_name:
-            continue
-        fore = (author.get("fore") or "").strip()
-        initials = (author.get("initials") or "").strip()
-        if fore:
-            stripped = fore.replace(".", "").replace(" ", "")
-            return len(stripped) <= 1
-        return bool(initials)
-    return False
 
 
 def classify_excluded_type(pub_types: Iterable[str]) -> str | None:
@@ -387,7 +372,7 @@ def classify_stored_publications(
             )
             continue
 
-        if matched_used_bare_initial(record, pi_name):
+        if _match_pi_author_detail(record, pi_name)[2]:
             review.append(
                 ReviewCandidate(
                     publication_id=pub.id,
@@ -466,36 +451,6 @@ def build_removal_and_review_plan(
     return dup_pmid_removals + id_removals + title_removals, review
 
 
-def select_additions(
-    kept_records: Sequence[dict[str, Any]],
-    stored_pmids: Iterable[str],
-    survivors: int,
-    cap: int = CORPUS_CAP,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """``resolve_corpus``'s kept set minus what is stored, split at the budget.
-
-    Returns ``(to_store, over_cap)``. ``survivors`` is how many stored rows
-    REMAIN after this run's removals, and the budget is ``cap - survivors`` —
-    the same arithmetic as ``profile_pipeline``'s existing-corpus branch.
-
-    Without the budget the two sets simply concatenate: Rothstein measured 18
-    stored - 3 removed + 42 resolver additions = 57, over a cap of 50. That is
-    the "leung at 53" defect class ``profile_pipeline`` names (audit M4), and
-    it matters because a surviving stored row is NOT necessarily in the
-    resolver's kept set (7 of Rothstein's 15 survivors are older than its
-    50th-ranked record), so the union is genuinely larger than either side.
-
-    Trimming the ADDITIONS rather than the survivors is deliberate: a stored
-    row may carry per-paper human verification this run cannot reproduce, and
-    dropping one to make room for a freshly resolved record would be a
-    deletion with no evidence behind it.
-    """
-    stored = {str(p) for p in stored_pmids if p}
-    candidates = [r for r in kept_records if str(r.get("pmid")) not in stored]
-    budget = max(0, cap - survivors)
-    return candidates[:budget], candidates[budget:]
-
-
 # ---------------------------------------------------------------------------
 # I/O layer
 # ---------------------------------------------------------------------------
@@ -542,6 +497,15 @@ async def build_plan_for_pi(
         user_id=user.id, orcid=user.orcid, name=user.name, agent_id=agent_id
     )
     stored = await load_stored_publications(db, user.id)
+    # Read-only phase done: end the transaction so no connection sits idle in
+    # transaction across the PubMed/OpenAlex/ORCID round trips below.
+    await db.commit()
+
+    if only == "duplicate-pmids":
+        # The 0056 publications dedupe: the duplicate_pmid partition alone, no
+        # network evidence needed (the rows are the same paper stored twice).
+        plan.removals, _canonical = partition_duplicate_pmids(stored)
+        return plan
 
     if only in (None, "removals"):
         pmids = sorted({p.pmid for p in stored if p.pmid})
@@ -565,8 +529,19 @@ async def build_plan_for_pi(
             # pass above, so the budget reflects the post-repair corpus.
             removed_ids = {r.publication_id for r in plan.removals}
             survivors = sum(1 for p in stored if p.id not in removed_ids)
-            plan.additions, plan.over_cap = select_additions(
-                resolved.kept, stored_pmids, survivors
+            adds = select_corpus_additions(
+                resolved.kept, stored_pmids, survivors, CORPUS_CAP
+            )
+            plan.additions, plan.over_cap = adds.to_store, adds.over_cap
+            plan.review.extend(
+                ReviewCandidate(
+                    publication_id="",
+                    pmid=rec.get("pmid"),
+                    reason="unanchored_addition",
+                    title=rec.get("title") or "",
+                    evidence={"stages": rec.get("stages") or []},
+                )
+                for rec in adds.review_only
             )
 
     return plan
@@ -582,12 +557,31 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> None:
     "A transaction is already begun on this Session" — measured 2026-09-22,
     when it failed for all 73 PIs and wrote nothing. Committing per PI keeps
     the same atomicity and the same failure isolation.
+
+    The corpus advisory lock is taken first and held to the commit, so a
+    concurrent profile-pipeline run cannot interleave its publication writes.
+    The stored PMIDs are re-read under that lock: an addition that landed since
+    planning is skipped rather than inserted twice.
     """
     try:
+        await lock_corpus(db, plan.user_id)
+        stored_now = set(
+            (
+                await db.execute(
+                    select(Publication.pmid).where(
+                        Publication.user_id == plan.user_id,
+                        Publication.pmid.isnot(None),
+                    )
+                )
+            ).scalars()
+        )
         if plan.removals:
             ids = [uuid.UUID(r.publication_id) for r in plan.removals]
             await db.execute(delete(Publication).where(Publication.id.in_(ids)))
         for rec in plan.additions:
+            if rec.get("pmid") in stored_now:
+                print(f"    already stored since planning: pmid={rec.get('pmid')}")
+                continue
             db.add(
                 Publication(
                     user_id=plan.user_id,
@@ -769,7 +763,9 @@ def main() -> None:
     parser.add_argument(
         "--orcid", action="append", default=[], help="Scope to this ORCID (repeatable)"
     )
-    parser.add_argument("--only", choices=["removals", "additions"], default=None)
+    parser.add_argument(
+        "--only", choices=["removals", "additions", "duplicate-pmids"], default=None
+    )
     parser.add_argument(
         "--review", action="store_true", help="Also print the --review judgement-call report"
     )

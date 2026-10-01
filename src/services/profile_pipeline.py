@@ -31,6 +31,7 @@ from src.services.corpus import (
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
     resolve_corpus,
 )
+from src.services.corpus_additions import lock_corpus, select_corpus_additions
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
     derive_employment_start,
@@ -323,6 +324,7 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
     # synthesis and export, not storage — R2: "the full verified corpus stays
     # stored"), so both cohorts' rows mean the same thing and a tenure-year
     # correction is recoverable without a re-fetch.
+    await lock_corpus(db, user_id)
     existing_result = await db.execute(
         select(Publication).where(Publication.user_id == user_id)
     )
@@ -376,19 +378,10 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
                 doi = _reconcile(rec)
                 if doi and existing_pubs[pmid].doi != doi:
                     existing_pubs[pmid].doi = doi
-        new_recs = [
-            r for r in corpus_result.kept
-            if r.get("pmid") and r["pmid"] not in existing_pubs
-        ]
-        anchored = [
-            r for r in new_recs if set(r.get("stages") or []) & {"s1", "s3"}
-        ]
-        review_only = [
-            r for r in new_recs
-            if not (set(r.get("stages") or []) & {"s1", "s3"})
-        ]
-        budget = max(0, CORPUS_CAP - len(existing_pubs))
-        to_store, over_cap = anchored[:budget], anchored[budget:]
+        adds = select_corpus_additions(
+            corpus_result.kept, existing_pubs, len(existing_pubs), CORPUS_CAP
+        )
+        to_store, over_cap, review_only = adds.to_store, adds.over_cap, adds.review_only
         for rec in to_store:
             _store(rec)
         if to_store:
