@@ -4,7 +4,6 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +15,11 @@ from src.services.profile_edit import apply_profile_edits, parse_expected_versio
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:

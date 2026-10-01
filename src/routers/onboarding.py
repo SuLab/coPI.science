@@ -4,7 +4,6 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +15,11 @@ from src.services.profile_edit import parse_expected_version, write_profile_text
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 
 def _maybe_send_welcome(user: User, was_complete: bool) -> None:

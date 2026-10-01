@@ -14,7 +14,7 @@ from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry
 from src.agent.run_marker import is_run_start_marker
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
-from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.models.agent_activity import VISIBILITY_PUBLIC
 
 if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
@@ -35,6 +35,7 @@ class SlackIO:
     _channel_id_map = via("_channel_directory")
     _channel_visibility = via("_channel_directory")
     _client_for_channel = via("_channel_directory")
+    _polled_channel_ids = via("_channel_directory")
     _resolve_channel_visibility = via("_channel_directory")
     _flush_persisted = via("_persistence")
 
@@ -128,11 +129,7 @@ class SlackIO:
         # Poll seeded channels plus any collab_private channels tracked in
         # _channel_visibility. Skipping non-seeded public channels avoids
         # polling archived/stale channels from prior sims.
-        polled_ids = {
-            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in constants.SEEDED_CHANNELS
-            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
-        }
+        polled_ids = self._polled_channel_ids()
         for ch_name, ch_id in polled_ids.items():
             ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
             # Private channels need a member bot; non-members get channel_not_found.
@@ -546,11 +543,7 @@ class SlackIO:
             logger.info("No Slack client available — skipping the start-up cursor seed")
             return
 
-        polled_ids = {
-            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
-            if ch_name in constants.SEEDED_CHANNELS
-            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
-        }
+        polled_ids = self._polled_channel_ids()
         # One wall clock for the whole pass, so every unreadable channel gets the
         # same baseline and the number is not a per-channel accident.
         now_ts = f"{deps.time.time():.6f}"

@@ -57,18 +57,15 @@ from src.services.rubric_revisions import (
     PROVENANCE_LIVE,
     PROVENANCE_UNKNOWN,
 )
+from src.services.verdict_fields import VERDICT_FIELD, VERDICT_FIELDS
 
-#: Mirrors the `hub_*` sets in templates/admin/_assessment_detail_body.html. The page gates these
+#: Mirrors the `hub_*` sets in templates/admin/_assessment_detail_body.html (which read the
+#: same set through the `staff_only_verdict_fields` template global). The page gates these
 #: in the TEMPLATE, not in build_assessment_detail, so the chat must gate them itself.
 #: tests/integration/test_assessment_chat_parity.py binds the two.
-STAFF_ONLY_VERDICT_FIELDS = ("strengths", "risks", "competitive_landscape", "evidence_maturity")
+STAFF_ONLY_VERDICT_FIELDS = tuple(f.key for f in VERDICT_FIELDS if f.staff_only)
 
-_STAFF_ONLY_LABELS = {
-    "strengths": "Hub-listed strength (the hub's own words)",
-    "risks": "Hub-listed risk (the hub's own words)",
-    "competitive_landscape": "Competitive landscape (the hub's own words)",
-    "evidence_maturity": "Evidence maturity (the hub's own words)",
-}
+_STAFF_ONLY_LABELS = {f.key: f.label for f in VERDICT_FIELDS if f.staff_only}
 
 DOC_VERDICT = "verdict"
 DOC_INTERVIEW = "interview"
@@ -312,41 +309,37 @@ def _items(value: object) -> list[str]:
     return out
 
 
-def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
-    a = detail["assessment"]
-    doc = _Doc(DOC_VERDICT)
-    banding = detail.get("banding") or {}
-    pass_label = str(banding.get("pass_label") or "decline")
-    revision = detail.get("revision")
+def _add_plain(doc: _Doc, a: Any, key: str, value_fn=None) -> None:
+    """One block for a plain registry field: label and anchor come from the registry,
+    so the record and the registry cannot drift (S2-05)."""
+    f = VERDICT_FIELD[key]
+    value = getattr(a, f.column)
+    if value:
+        doc.add(f.label, [value_fn(value) if value_fn else value], anchor=f.anchor)
 
-    # --- The brief, in the page's reading order (anchor `brief`).
-    if a.company_or_project:
-        doc.add("Project label", [a.company_or_project], anchor="brief")
-    if a.headline:
-        doc.add("Headline", [a.headline], anchor="brief")
-    if a.confidence:
-        doc.add("Hub's confidence label", [str(a.confidence).strip("[]")], anchor="brief")
-    if a.elevator_pitch:
-        doc.add("In one minute — the hub's elevator pitch", [a.elevator_pitch], anchor="brief")
+
+def _brief_section(doc: _Doc, a: Any) -> None:
+    """The brief, in the page's reading order (anchors `brief`, `score-rationale`)."""
+    _add_plain(doc, a, "company_or_project")
+    _add_plain(doc, a, "headline")
+    _add_plain(doc, a, "confidence", lambda v: str(v).strip("[]"))
+    _add_plain(doc, a, "elevator_pitch")
     for group_label, points in key_point_sections(a.key_points):
         for point in points:
             if group_label is None:
                 doc.add("Key point", [point], anchor="brief")
             else:
                 doc.add(f"Key point — {_label_safe(group_label)}", [point], anchor="brief")
-    if a.score_rationale:
-        doc.add(
-            "Why this score — the hub's own explanation",
-            [a.score_rationale],
-            anchor="score-rationale",
-        )
+    _add_plain(doc, a, "score_rationale")
 
-    # --- Evidence summary (anchor `signals`).
+
+def _signals_section(doc: _Doc, a: Any, detail: dict[str, Any], tier: str) -> None:
+    """Evidence summary (anchor `signals`)."""
     transcript_available = bool(detail.get("messages_available"))
     if tier == CHAT_TIER_STAFF:
         for field_name in STAFF_ONLY_VERDICT_FIELDS:
             for bullet in _items(getattr(a, field_name, None)):
-                doc.add(_STAFF_ONLY_LABELS[field_name], [bullet], anchor="signals")
+                doc.add(_STAFF_ONLY_LABELS[field_name], [bullet], anchor=VERDICT_FIELD[field_name].anchor)
     signals = detail.get("verdict_signals") or {}
     for item in signals.get("strengths") or []:
         # Only the consult entries: they are the one place the page shows a
@@ -372,12 +365,16 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
                 )
         doc.add(label, [str(line) for line in item["body"]], anchor="signals")
 
-    # --- The ask (anchor `ask`).
+
+def _ask_section(doc: _Doc, a: Any) -> None:
+    """The ask (anchor `ask`)."""
     ask = _paragraphs(a.recommended_next_experiment)
     for i, para in enumerate(ask, 1):
         doc.add(f"Recommended next experiment, paragraph {i} of {len(ask)}", [para], anchor="ask")
 
-    # --- The verdict header card (anchor `verdict`).
+
+def _verdict_section(doc: _Doc, a: Any, pass_label: str) -> None:
+    """The verdict header card (anchor `verdict`): lab, screener, time, channel, recommendation, score and band."""
     if a.subject_agent_id:
         doc.add("Lab — the agent id of the PI's lab bot", [a.subject_agent_id], anchor="verdict")
     doc.add("Screened by — the hub's agent id", [a.agent_id], anchor="verdict")
@@ -410,6 +407,10 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
             " score or band was computed",
             anchor="verdict",
         )
+
+
+def _rubric_section(doc: _Doc, a: Any, detail: dict[str, Any], revision: Any, pass_label: str) -> None:
+    """Band thresholds and rubric stamp of the verdict header card (anchor `verdict`)."""
     if revision is not None and getattr(revision, "advance_min", None) is not None:
         lines = [
             f"≥{revision.advance_min} advance, <{revision.conditional_min}"
@@ -450,7 +451,9 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
             anchor="verdict",
         )
 
-    # --- Panel status (anchor `panel`).
+
+def _panel_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
+    """Panel status (anchor `panel`)."""
     state = detail.get("panel_state")
     if state == "gap":
         missing = ", ".join(str(d) for d in (a.missing_domains or [])) or "(unnamed)"
@@ -463,7 +466,9 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
     else:
         doc.add(_PANEL_UNRECORDED, anchor="panel")
 
-    # --- Gates (anchor `gating`).
+
+def _gating_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
+    """Gates (anchor `gating`)."""
     descriptions = detail.get("gating_descriptions") or {}
     if isinstance(a.gating, dict) and a.gating:
         for key, value in a.gating.items():
@@ -476,19 +481,25 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
     else:
         doc.add("Gates — none recorded", anchor="gating")
 
-    # --- Red flags (anchor `red-flags`).
+
+def _red_flags_section(doc: _Doc, a: Any) -> None:
+    """Red flags (anchor `red-flags`)."""
     flags = _items(a.red_flags)
     for i, flag in enumerate(flags, 1):
         doc.add(f"Red flag {i} of {len(flags)}", [flag], anchor="red-flags")
     if not flags and not a.red_flags:
         doc.add("Red flags — none recorded", anchor="red-flags")
 
-    # --- Rationale (anchor `rationale`).
+
+def _rationale_section(doc: _Doc, a: Any) -> None:
+    """Rationale (anchor `rationale`)."""
     paragraphs = _paragraphs(a.rationale)
     for i, para in enumerate(paragraphs, 1):
         doc.add(f"Rationale, paragraph {i} of {len(paragraphs)}", [para], anchor="rationale")
 
-    # --- Dimension scores (anchor `scores`).
+
+def _dimensions_section(doc: _Doc, detail: dict[str, Any], revision: Any) -> None:
+    """Dimension scores (anchor `scores`)."""
     dims = [d for d in detail.get("dimensions") or [] if isinstance(d, dict)]
     scale = (
         f"; scale {revision.scale_min} to {revision.scale_max}"
@@ -523,6 +534,24 @@ def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
         doc.add(label, lines, anchor="scores")
     if not dims:
         doc.add("Dimension scores — none recorded", anchor="scores")
+
+
+def _verdict_doc(detail: dict[str, Any], tier: str) -> _Doc:
+    a = detail["assessment"]
+    doc = _Doc(DOC_VERDICT)
+    banding = detail.get("banding") or {}
+    pass_label = str(banding.get("pass_label") or "decline")
+    revision = detail.get("revision")
+    _brief_section(doc, a)
+    _signals_section(doc, a, detail, tier)
+    _ask_section(doc, a)
+    _verdict_section(doc, a, pass_label)
+    _rubric_section(doc, a, detail, revision, pass_label)
+    _panel_section(doc, a, detail)
+    _gating_section(doc, a, detail)
+    _red_flags_section(doc, a)
+    _rationale_section(doc, a)
+    _dimensions_section(doc, detail, revision)
     return doc
 
 

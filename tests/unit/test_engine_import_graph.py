@@ -188,6 +188,7 @@ EXPECTED_METHOD_OWNER: dict[str, str] = {
     "_on_llm_call": "llm_log", "_on_flush_done": "llm_log", "_llm_log_record": "llm_log",
     "_flush_llm_logs": "llm_log", "_unbooked_calls": "llm_log",
     "_resolve_channel_visibility": "channel_directory", "_client_for_channel": "channel_directory",
+    "_polled_channel_ids": "channel_directory",
     "_ensure_seeded_channels": "channel_directory",
     "_ensure_assessments_summary_channel": "channel_directory",
     "_persist_seeded_channels": "channel_directory",

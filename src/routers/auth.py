@@ -11,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import Match
 
-from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
@@ -19,8 +18,9 @@ from src.models import AccessAllowlist, User
 from src.services.orcid import fetch_orcid_profile
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
+from src.web.templating import make_templates
 
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
