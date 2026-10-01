@@ -23,6 +23,7 @@ worker does the generating.
 """
 
 import asyncio
+import hashlib
 import uuid
 
 import pytest
@@ -46,13 +47,15 @@ from tests import factories
 pytestmark = pytest.mark.integration
 
 # Rows created by this module are committed for real, so they are tagged and deleted
-# around every test. ORCID is a free-form String(50); nothing validates the format.
-ORCID_PREFIX = "CLI-TEST-"
+# around every test. `cli seed-profile` validates the ORCID format (MD-14), so a tag
+# maps to a well-formed iD under a prefix no other test uses; the prefix is the tag.
+ORCID_PREFIX = "0000-0006-60"
 AGENT_PREFIX = "clitest"
 
 
 def _orcid(tag: str) -> str:
-    return f"{ORCID_PREFIX}{tag}"
+    n = int(hashlib.sha256(tag.encode()).hexdigest(), 16) % 10**6
+    return f"{ORCID_PREFIX}{n // 10**4:02d}-{n % 10**4:04d}"
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +114,16 @@ def _clean_slate(engine):
 def cli_points_at_test_db(monkeypatch, pg_url):
     """Repoint `_get_db()` at the migrated test database.
 
-    `_get_db` does `from src.config import get_settings` *inside* the function, so
-    patching the module attribute is enough — the real `_get_db` still runs.
+    `_get_db` builds its engine with `src.database.make_engine("cli")`, which reads
+    `src.database.get_settings`; the CLI's other lazy `from src.config import
+    get_settings` reads the config module attribute. Patch both, so the real
+    `_get_db` still runs.
     """
-    from src import config
+    from src import config, database
 
     patched = config.get_settings().model_copy(update={"database_url": pg_url})
     monkeypatch.setattr(config, "get_settings", lambda: patched)
+    monkeypatch.setattr(database, "get_settings", lambda: patched)
     monkeypatch.setenv("DATABASE_URL", pg_url)
 
     # Guard, not decoration: in the app container the ambient DATABASE_URL is the
