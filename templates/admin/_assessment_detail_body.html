@@ -165,17 +165,32 @@
         {% if has_points %}
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
+            {# A group holding ONE point renders it as text, not as a one-item
+               list: scout_hub >= 1.9.0 writes exactly one per group. Older rows
+               (1.8.0, legacy, the flat <= 1.2.0 list) can hold several, and
+               those keep their bullets. `link_doi_references`: a key point
+               sometimes cites a paper as `doi 10.…` rather than by URL, and both
+               read "cited paper", as the pitch's URLs do. #}
             {% if kp_sections[0][0] is none %}
+            {% set flat_points = kp_sections[0][1] %}
+            {% if flat_points | length == 1 %}
+            <p class="assessment-brief-points assessment-prose max-w-none mt-1">{{ plain_citations(flat_points[0], link_doi_references=True) }}</p>
+            {% else %}
             <ul class="assessment-brief-points assessment-prose max-w-none mt-1 list-disc list-inside space-y-0.5">
-                {% for point in kp_sections[0][1] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+                {% for point in flat_points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
             </ul>
+            {% endif %}
             {% else %}
             <div class="assessment-brief-points assessment-prose max-w-none mt-1 space-y-2">
                 {% for label, points in kp_sections %}
                 <div><span class="font-semibold">{{ label }}</span>
+                    {% if points | length == 1 %}
+                    <p>{{ plain_citations(points[0], link_doi_references=True) }}</p>
+                    {% else %}
                     <ul class="list-disc list-inside">
-                    {% for point in points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
-                    </ul></div>
+                    {% for point in points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                    </ul>
+                    {% endif %}</div>
                 {% endfor %}
             </div>
             {% endif %}

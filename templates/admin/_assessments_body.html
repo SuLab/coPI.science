@@ -403,17 +403,29 @@
             {% if has_points %}
             <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
                 <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+                {# One point renders as text and several as bullets, with
+                   `doi 10.…` references linked: the same rule as the detail
+                   page's key points (admin/_assessment_detail_body.html). #}
                 {% if kp_sections[0][0] is none %}
+                {% set flat_points = kp_sections[0][1] %}
+                {% if flat_points | length == 1 %}
+                <p class="mt-1 text-sm text-gray-700">{{ plain_citations(flat_points[0], link_doi_references=True) }}</p>
+                {% else %}
                 <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
-                    {% for point in kp_sections[0][1] %}<li>{{ plain_citations(point) }}</li>{% endfor %}
+                    {% for point in flat_points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
                 </ul>
+                {% endif %}
                 {% else %}
                 <div class="mt-1 space-y-2">
                     {% for label, points in kp_sections %}
                     <div><span class="font-semibold text-gray-800">{{ label }}</span>
+                        {% if points | length == 1 %}
+                        <p class="text-sm text-gray-700">{{ plain_citations(points[0], link_doi_references=True) }}</p>
+                        {% else %}
                         <ul class="list-disc list-inside text-sm text-gray-700">
-                        {% for point in points %}<li>{{ plain_citations(point) }}</li>{% endfor %}
-                        </ul></div>
+                        {% for point in points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                        </ul>
+                        {% endif %}</div>
                     {% endfor %}
                 </div>
                 {% endif %}

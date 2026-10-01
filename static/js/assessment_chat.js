@@ -41,8 +41,14 @@
   // asterisks visible. marked treats U+2009 as ordinary whitespace, which
   // prevents both.
   const MARK_GAP = String.fromCharCode(0x2009);
-  const MAIN_PAD = "xl:pr-[30rem]";
   const POLL_MS = 5000;
+  // Drawer width (2026-10-01). Only ever set from md up; below md the drawer is
+  // full screen. The bounds keep it usable and leave a quarter of the page in view.
+  const WIDTH_KEY = "assessment-chat-width";
+  const WIDTH_MIN_PX = 320;
+  const WIDTH_MAX_FRACTION = 0.75;
+  const WIDTH_STEP_PX = 16;
+  const WIDE = window.matchMedia("(min-width: 768px)");
   const QUESTION_CLASS = "ml-8 whitespace-pre-wrap rounded-lg bg-indigo-50 px-3 py-2 text-sm text-gray-900";
   const ANSWER_CLASS = "rounded-lg border border-gray-200 px-3 py-2";
 
@@ -96,11 +102,11 @@
     live: drawer.querySelector("[data-chat-live]"),
     notice: drawer.querySelector("[data-chat-verdict-notice]"),
     starters: drawer.querySelector("[data-chat-starters]"),
-    close: drawer.querySelector("[data-chat-close]")
+    close: drawer.querySelector("[data-chat-close]"),
+    resize: drawer.querySelector("[data-chat-resize]")
   };
   const openers = Array.from(document.querySelectorAll("[data-chat-open]"));
   const bubble = document.querySelector("[data-chat-bubble]");
-  const main = document.querySelector("main");
   const state = { turns: [], limits: null, busy: false, loaded: false, open: false, opener: null, poll: 0, historySeq: 0 };
 
   // SW-11: elements this file itself made `inert` while the drawer is a
@@ -853,6 +859,109 @@
     await loadHistory();
   }
 
+  // ---- drawer width ------------------------------------------------------
+
+  // The drawer overlays the page at every width, so opening it never changes the
+  // page's layout. From md up its left edge is a handle: drag it, or press ←/→
+  // while it has focus; a double-click resets to the template's `md:w-[28rem]`.
+  // The chosen width is kept in localStorage, which can be unavailable or throw
+  // (storage disabled, some privacy modes), so every access is guarded and the
+  // fallback is that default.
+  function readSavedWidth() {
+    try {
+      const value = Number(window.localStorage.getItem(WIDTH_KEY));
+      return Number.isFinite(value) && value > 0 ? value : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function storeWidth(px) {
+    try {
+      if (px === null) {
+        window.localStorage.removeItem(WIDTH_KEY);
+      } else {
+        window.localStorage.setItem(WIDTH_KEY, String(px));
+      }
+    } catch (err) {
+      // Not remembered; the width still applies to this page.
+    }
+  }
+
+  let savedWidth = readSavedWidth();
+
+  function maxWidth() {
+    return Math.floor(window.innerWidth * WIDTH_MAX_FRACTION);
+  }
+
+  function clampWidth(px) {
+    return Math.round(Math.min(Math.max(px, WIDTH_MIN_PX), maxWidth()));
+  }
+
+  // Shows the saved width clamped to this window WITHOUT rewriting it, so a
+  // narrower window shrinks the drawer and a wider one restores it. Below md the
+  // inline width is cleared: it would fight `inset-0`'s full-screen layout.
+  function applyWidth() {
+    if (!WIDE.matches) {
+      drawer.style.width = "";
+      return;
+    }
+    drawer.style.width = savedWidth === null ? "" : clampWidth(savedWidth) + "px";
+    if (els.resize && state.open) {
+      els.resize.setAttribute("aria-valuemin", String(WIDTH_MIN_PX));
+      els.resize.setAttribute("aria-valuemax", String(maxWidth()));
+      els.resize.setAttribute("aria-valuenow", String(Math.round(drawer.getBoundingClientRect().width)));
+    }
+  }
+
+  function setWidth(px) {
+    savedWidth = clampWidth(px);
+    applyWidth();
+  }
+
+  if (els.resize) {
+    els.resize.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0 || !WIDE.matches) {
+        return;
+      }
+      event.preventDefault();  // no text selection while dragging
+      const startX = event.clientX;
+      const startWidth = drawer.getBoundingClientRect().width;
+      els.resize.setPointerCapture(event.pointerId);
+      function onMove(moveEvent) {
+        // The handle is the drawer's LEFT edge: moving left widens it.
+        setWidth(startWidth + startX - moveEvent.clientX);
+      }
+      function onEnd() {
+        els.resize.removeEventListener("pointermove", onMove);
+        els.resize.removeEventListener("pointerup", onEnd);
+        els.resize.removeEventListener("pointercancel", onEnd);
+        if (savedWidth !== null) {
+          storeWidth(savedWidth);
+        }
+      }
+      els.resize.addEventListener("pointermove", onMove);
+      els.resize.addEventListener("pointerup", onEnd);
+      els.resize.addEventListener("pointercancel", onEnd);
+    });
+    els.resize.addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+      event.preventDefault();
+      const current = drawer.getBoundingClientRect().width;
+      setWidth(current + (event.key === "ArrowLeft" ? WIDTH_STEP_PX : -WIDTH_STEP_PX));
+      storeWidth(savedWidth);
+    });
+    els.resize.addEventListener("dblclick", function () {
+      savedWidth = null;
+      storeWidth(null);
+      applyWidth();
+    });
+  }
+  window.addEventListener("resize", applyWidth);
+  applyWidth();
+
   // ---- drawer ------------------------------------------------------------
 
   // SW-11: on a narrow viewport the drawer covers the whole screen but is not
@@ -901,9 +1010,7 @@
     // than relying on `hidden` winning the cascade keeps the result
     // independent of the order the CDN emits the two utilities in.
     if (bubble) { bubble.classList.remove("flex"); bubble.classList.add("hidden"); }
-    if (main) {
-      main.classList.add(MAIN_PAD);
-    }
+    applyWidth();  // now visible, so the handle's aria-valuenow can be measured
     mobileModalActive = window.matchMedia("(max-width: 767px)").matches;
     if (mobileModalActive) {
       drawer.setAttribute("role", "dialog");
@@ -922,9 +1029,6 @@
     openers.forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
     // Before the focus return below: focus must not land on a hidden element.
     if (bubble) { bubble.classList.remove("hidden"); bubble.classList.add("flex"); }
-    if (main) {
-      main.classList.remove(MAIN_PAD);
-    }
     if (mobileModalActive) {
       drawer.removeAttribute("role");
       drawer.removeAttribute("aria-modal");

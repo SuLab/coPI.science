@@ -110,3 +110,11 @@ byte-identical to before. Clear takes the same lock before its streaming check.
 **One markdown factory (LC-02).** `window.createSanitizingMarked(profile)` in
 `static/js/markdown.js` builds the private marked instance for the `page`, `chat` and
 `graph` profiles; every profile treats "~" as literal text.
+
+**Drawer layout (2026-10-01).** The drawer overlays the page at every width:
+opening it never reflows the page, which stays scrollable and clickable behind it
+(below `md` it is full screen and the page behind is `inert`, as before). From `md`
+up its left edge is a resize handle — drag it, press ←/→ while it has focus, or
+double-click to reset to 28rem — bounded to 320 px … 75% of the window. The chosen
+width is kept per browser in `localStorage["assessment-chat-width"]`, a number and
+nothing else.

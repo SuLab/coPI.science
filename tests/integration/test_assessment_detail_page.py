@@ -3085,3 +3085,78 @@ async def test_a_reviewer_sees_the_dimension_reasons(client, db_session):
     provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
     assert "BlackbirdBot's own text from the verdict sidecar" in provenance
     assert "In the hub's words" not in body
+
+
+# --- Key points: one point is text, `doi 10.…` is a link (2026-10-01) -------
+
+
+def _key_points_block(body: str) -> str:
+    return body[body.index("assessment-brief-keypoints") : body.index("assessment-signals")]
+
+
+async def test_a_one_point_group_renders_as_text_and_a_two_point_group_keeps_bullets(
+    client, db_session, admin
+):
+    """scout_hub >= 1.9.0 writes one point per group, and a one-item list is
+    noise. A 1.8.0 row can hold two, and those keep the bullets that separate
+    them."""
+    _, assessment = await _seed(db_session)
+    assessment.key_points = {
+        "indication_audience": ["ONE-POINT-MARKER"],
+        "lab_background": ["TWO-A-MARKER", "TWO-B-MARKER"],
+    }
+    await db_session.flush()
+
+    block = _key_points_block(_main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text))
+    assert "<p>ONE-POINT-MARKER</p>" in block
+    assert "<li>ONE-POINT-MARKER</li>" not in block
+    assert "<li>TWO-A-MARKER</li>" in block and "<li>TWO-B-MARKER</li>" in block
+    assert block.count("<ul") == 1
+
+
+@pytest.mark.parametrize(
+    "points,bulleted",
+    [(["FLAT-ONLY-MARKER"], False), (["FLAT-A-MARKER", "FLAT-B-MARKER"], True)],
+)
+async def test_a_flat_key_point_list_is_bulleted_only_with_several_points(
+    client, db_session, admin, points, bulleted
+):
+    _, assessment = await _seed(db_session)
+    assessment.key_points = points
+    await db_session.flush()
+
+    block = _key_points_block(_main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text))
+    assert "assessment-brief-points" in block
+    assert ("<ul" in block) is bulleted
+    for point in points:
+        assert (f"<li>{point}</li>" in block) is bulleted
+
+
+async def test_a_doi_reference_in_a_key_point_is_a_cited_paper_link(
+    client, db_session, admin
+):
+    """The pitch links its `https://doi.org/…` URLs; a key point that cites the
+    same paper as `doi 10.…` now reads the same. Only key points: the same text
+    in a plain-text rationale stays text."""
+    _, assessment = await _seed(db_session)
+    assessment.key_points = {
+        "lab_background": ["Published (ACS Med Chem Lett 2026, doi 10.1021/acsmedchemlett.5c00623)."]
+    }
+    assessment.prose_format = None
+    assessment.rationale = "RATIONALE-MARKER doi 10.1021/acsmedchemlett.5c00623 stays."
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    url = "https://doi.org/10.1021/acsmedchemlett.5c00623"
+    assert (
+        f'(ACS Med Chem Lett 2026, <a class="citation-link" href="{url}" title="{url}"'
+        ' rel="noreferrer">cited paper</a>).'
+    ) in _key_points_block(body)
+    rationale = body[body.index("assessment-rationale"):]
+    assert "RATIONALE-MARKER doi 10.1021/acsmedchemlett.5c00623 stays." in rationale

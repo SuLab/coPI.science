@@ -18,6 +18,11 @@ write-time ``prose_format`` stamp:
   template renders it unescaped — which is safe only because this function
   escapes every non-URL span itself.
 
+Key points opt in to one more shape (``link_doi_references``, 2026-10-01): a
+DOI written without a scheme — ``doi 10.1021/…``, ``doi:10.1101/…`` — links to
+``https://doi.org/<doi>`` under the same label. Every other field keeps the
+2026-09-21 rule that a scheme-less DOI stays text.
+
 Measured 2026-09-21 against CDN bundles whose sha384 matches the SRI pins in
 all four assessment wrappers, so these are the builds production serves:
 
@@ -57,7 +62,8 @@ CITATION_LABEL = "cited paper"
 
 #: Conservative on purpose. ``http``/``https`` only — a false link on a staff
 #: reviewing surface is worse than a visible URL, so ``mailto:``, bare ``www.``
-#: and scheme-less DOIs are left as text. The excluded characters are the ones
+#: and scheme-less DOIs are left as text (key points opt in to a ``doi``-prefixed
+#: one, ``_DOI_REF_RE``). The excluded characters are the ones
 #: that would break the markdown destination (``<``, ``>``), the title (``"``),
 #: a code span (backtick), or — the subtle one — the CommonMark escape: a
 #: trailing ``\`` escapes the destination's closing ``>`` and then the title's
@@ -65,6 +71,17 @@ CITATION_LABEL = "cited paper"
 #: the raw ``[cited paper](<https://…`` to the reader. That is precisely the
 #: failure the angle brackets exist to prevent.
 _URL_RE = re.compile(r'https?://[^\s<>"`\\]+')
+
+#: A scheme-less DOI introduced by the word ``doi`` (``doi 10.1021/x``,
+#: ``doi:10.1101/x``, ``DOI: 10.1038/x``), the shape the hub sometimes writes in
+#: key points. The prefix is required, so a bare ``10.1234/x`` stays text, for
+#: the same reason ``_URL_RE`` is conservative. The suffix stops at exactly the
+#: characters ``_URL_RE`` excludes, so the ``https://doi.org/`` URL built from it
+#: always passes ``_is_linkable``'s full match. Alternated AFTER ``_URL_RE``, so a
+#: full ``https://doi.org/…`` URL is still matched as a URL.
+_DOI_REF_RE = r'\b(?i:doi):?\s*(?P<doi>10\.[0-9]{4,9}/[^\s<>"`\\]+)'
+_URL_OR_DOI_RE = re.compile(_URL_RE.pattern + "|" + _DOI_REF_RE)
+_DOI_RESOLVER = "https://doi.org/"
 
 #: Spans the markdown rewriter must not touch: fenced code, code spans,
 #: autolinks, and inline links/images. Ordered longest-construct-first so a
@@ -238,8 +255,17 @@ def markdown_with_citation_links(text: object) -> object:
     return "".join(out)
 
 
-def plain_with_citation_links(text: object) -> Markup | None:
+def plain_with_citation_links(
+    text: object, *, link_doi_references: bool = False
+) -> Markup | None:
     """Escape ``text`` and rewrite every URL in it as a ``cited paper`` anchor.
+
+    ``link_doi_references`` (key points only) also rewrites a ``doi``-prefixed
+    scheme-less DOI (``_DOI_REF_RE``) as an anchor to ``https://doi.org/<doi>``.
+    The whole reference, prefix included, becomes the label, the way a pitch's
+    ``(eLife 2025, https://doi.org/…)`` reads ``(eLife 2025, cited paper)``. A
+    DOI with nothing left after its ``/`` once trailing punctuation is peeled
+    stays text.
 
     Matching runs on the RAW string and escaping is applied per span. The
     reverse order is the defect this ordering exists to prevent: ``escape()``
@@ -261,9 +287,20 @@ def plain_with_citation_links(text: object) -> Markup | None:
         return Markup(text)
     parts: list[Markup] = []
     pos = 0
-    for match in _URL_RE.finditer(text):
-        url, trail = _split_trailing(match.group())
-        if not _is_linkable(url) or _truncated_at_backslash(text, match.end()):
+    matcher = _URL_OR_DOI_RE if link_doi_references else _URL_RE
+    for match in matcher.finditer(text):
+        doi = match.groupdict().get("doi")
+        if doi is None:
+            url, trail = _split_trailing(match.group())
+        else:
+            # The `doi` group ends the match, so its trail is the match's trail.
+            doi, trail = _split_trailing(doi)
+            url = _DOI_RESOLVER + doi if doi.split("/", 1)[1] else ""
+        if (
+            not url
+            or not _is_linkable(url)
+            or _truncated_at_backslash(text, match.end())
+        ):
             continue
         parts.append(escape(text[pos : match.start()]))
         parts.append(

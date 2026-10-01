@@ -1783,3 +1783,57 @@ async def test_the_dimension_panel_names_the_tab_it_describes(
         f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
     )).text
     assert " only)" not in all_tab
+
+
+# --- Card key points: one point is text, `doi 10.…` is a link (2026-10-01) --
+
+
+def _card_points_block(html: str) -> str:
+    return html[
+        html.index("assessment-card-points") : html.index(
+            '<details class="assessment-card-score-rationale'
+        )
+    ]
+
+
+async def test_a_card_renders_a_one_point_group_as_text_with_its_doi_linked(
+    client, db_session, admin
+):
+    """The detail page's rule, on the card: one point is text, several keep
+    their bullets, and a `doi 10.…` reference is a "cited paper" link."""
+    run, _ = await _seed_narrative_row(
+        db_session, project="Card Points Co",
+        key_points={
+            "lab_background": ["Built on doi:10.1101/2025.10.19.682634, public"],
+            "proposal": ["CARD-TWO-A", "CARD-TWO-B"],
+        },
+    )
+    block = _card_points_block((await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text)
+    url = "https://doi.org/10.1101/2025.10.19.682634"
+    assert (
+        f'<p class="text-sm text-gray-700">Built on <a class="citation-link" href="{url}"'
+        f' title="{url}" rel="noreferrer">cited paper</a>, public</p>'
+    ) in block
+    assert "<li>CARD-TWO-A</li>" in block and "<li>CARD-TWO-B</li>" in block
+    assert block.count("<ul") == 1
+
+
+@pytest.mark.parametrize(
+    "points,bulleted",
+    [(["CARD-FLAT-ONLY"], False), (["CARD-FLAT-A", "CARD-FLAT-B"], True)],
+)
+async def test_a_flat_card_list_is_bulleted_only_with_several_points(
+    client, db_session, admin, points, bulleted
+):
+    run, _ = await _seed_narrative_row(
+        db_session, project="Card Flat Co", key_points=points,
+    )
+    block = _card_points_block((await client.get(
+        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+    )).text)
+    assert ("<ul" in block) is bulleted
+    for point in points:
+        assert (f"<li>{point}</li>" in block) is bulleted
+        assert point in block

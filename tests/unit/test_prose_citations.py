@@ -294,3 +294,74 @@ def test_a_url_truncated_by_a_backslash_is_left_as_text(fn):
     BOTH paths."""
     text = "see https://x.test/a\\b for the data"
     assert str(fn(text)) == text
+
+
+# --- key points: `doi`-prefixed scheme-less DOIs (2026-10-01) ----------------
+
+
+def _doi_anchor(doi: str) -> str:
+    url = f"https://doi.org/{doi}"
+    return (
+        f'<a class="citation-link" href="{url}" title="{url}"'
+        f' rel="noreferrer">{CITATION_LABEL}</a>'
+    )
+
+
+def test_a_scheme_less_doi_stays_text_by_default():
+    """Every field but key points keeps the 2026-09-21 rule."""
+    text = "(ACS Med Chem Lett 2026, doi 10.1021/acsmedchemlett.5c00623)."
+    assert str(plain_with_citation_links(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text,doi,tail",
+    [
+        # The production shapes, verbatim (key points, 2026-09-09 .. 2026-09-29).
+        ("(ACS Med Chem Lett 2026, doi 10.1021/acsmedchemlett.5c00623).",
+         "10.1021/acsmedchemlett.5c00623", ")."),
+        ("preprint doi:10.1101/2025.10.19.682634, public", "10.1101/2025.10.19.682634",
+         ", public"),
+        ("(Nat Commun 2025, doi 10.1038/s41467-025-62482-7); the call",
+         "10.1038/s41467-025-62482-7", "); the call"),
+        ("See DOI: 10.1016/j.omtn.2025.102453.", "10.1016/j.omtn.2025.102453", "."),
+        # A balanced `(` `)` inside the DOI is part of it, as on the URL path.
+        ("doi 10.1002/(SICI)1521-3773(19980316)37:5 here",
+         "10.1002/(SICI)1521-3773(19980316)37:5", " here"),
+    ],
+)
+def test_a_doi_reference_becomes_a_doi_org_link(text, doi, tail):
+    out = str(plain_with_citation_links(text, link_doi_references=True))
+    assert _doi_anchor(doi) in out
+    assert out.endswith(str(escape(tail)))
+    # The whole reference, `doi` prefix included, is replaced by the label.
+    assert "doi 10." not in out and "doi:10." not in out and "DOI: 10." not in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a bare 10.1234/abc with no doi prefix",
+        "endoi 10.1234/abc is not the word doi",
+        "doi.org/10.1234/abc without a scheme",
+        "doi 10.12/abc has a registrant code too short to be a DOI",
+        "doi 10.1234/). has nothing after its slash",
+        "doi 10.1234/a\\b is cut at a backslash",
+        "doi 10.\u0661\u0662\u0663\u0664/x uses non-ASCII digits",
+    ],
+)
+def test_a_doi_lookalike_stays_text(text):
+    assert str(plain_with_citation_links(text, link_doi_references=True)) == str(escape(text))
+
+
+def test_a_full_doi_url_is_linked_once_beside_a_doi_reference():
+    """A full URL still matches as a URL first; the `doi` inside `doi.org/10.…`
+    is not a second, overlapping reference."""
+    text = f"a <b> & {DOI}, and doi 10.1038/x."
+    out = str(plain_with_citation_links(text, link_doi_references=True))
+    assert out == (
+        "a &lt;b&gt; &amp; "
+        f'<a class="citation-link" href="{DOI}" title="{DOI}"'
+        f' rel="noreferrer">{CITATION_LABEL}</a>'
+        f", and {_doi_anchor('10.1038/x')}."
+    )
+    assert out.count("<a ") == 2

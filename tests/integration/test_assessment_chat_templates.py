@@ -199,3 +199,45 @@ def test_the_chat_script_names_no_route():
     second, unchecked copy of the routes."""
     js = JS.read_text(encoding="utf-8")
     assert not re.search(r"""["']/[A-Za-z]""", js)
+
+
+async def test_the_drawer_carries_a_keyboard_resize_handle_from_md_up(client, db_session):
+    """2026-10-01: the drawer is resizable. A focusable window splitter, hidden
+    below md where the drawer is full screen."""
+    _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
+    drawer = body[body.index('id="assessment-chat"'):].split("</aside>", 1)[0]
+    handle = re.search(r"<div data-chat-resize[^>]*>", drawer)
+    assert handle is not None
+    tag = handle.group()
+    for attr in ('role="separator"', 'aria-orientation="vertical"',
+                 'aria-controls="assessment-chat"', 'aria-label="Resize chat panel"',
+                 'tabindex="0"'):
+        assert attr in tag, attr
+    classes = re.search(r'class="([^"]*)"', tag).group(1).split()
+    assert "hidden" in classes and "md:block" in classes
+    assert "cursor-col-resize" in classes
+    assert not {"text-xs", "text-gray-400", "text-gray-500"} & set(classes)
+
+
+def test_opening_the_drawer_never_changes_the_page_layout():
+    """2026-10-01: an overlay at every width. The script used to pad <main> at
+    xl so the drawer squeezed the page; nothing in it may touch <main> now."""
+    js = JS.read_text(encoding="utf-8")
+    assert "MAIN_PAD" not in js
+    assert 'querySelector("main")' not in js
+    assert "main.classList" not in js
+
+
+def test_the_drawer_width_is_remembered_behind_guarded_storage():
+    """localStorage can be unavailable or throw, so every access sits inside a
+    try block, and the width is only set from md up."""
+    js = JS.read_text(encoding="utf-8")
+    assert 'const WIDTH_KEY = "assessment-chat-width";' in js
+    assert 'window.matchMedia("(min-width: 768px)")' in js
+    for name in ("readSavedWidth", "storeWidth"):
+        body = js[js.index(f"function {name}("):]
+        body = body[: body.index("\n  }\n") + 4]
+        assert "try {" in body and "catch (err)" in body, name
+        assert body.index("try {") < body.index("localStorage"), name
+    # getItem, removeItem, setItem: every call is in one of the two functions.
+    assert js.count("window.localStorage") == 3
