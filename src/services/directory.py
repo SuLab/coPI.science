@@ -27,6 +27,7 @@ from src.models import (
     AgentChannel,
     AgentMessage,
     AssessmentDrop,
+    Job,
     OpportunityAssessment,
     PiGrant,
     PiIndustryEvidence,
@@ -62,6 +63,11 @@ from src.services.tenure_scope import scoped_counts, scoped_publications_for
 # cap only ever drops the least-actionable tail, and the "N of TOTAL" note
 # below says so rather than hiding the truncation.
 ASSESSMENTS_LIMIT = 500
+
+#: Page sizes for the lists that used to load every row.
+JOBS_PAGE_SIZE = 100
+RUN_MESSAGES_PAGE_SIZE = 200
+DISCUSSIONS_PAGE_SIZE = 200
 
 # The sort orders the triage queue offers, as (query-param value, label). ONE
 # tuple, not a set of values here and a label map in each template: a sort the
@@ -164,12 +170,22 @@ async def list_pi_directory(
     behaviour, unchanged. ``roles=(USER_ROLE_PI,)`` is what the manager
     directory passes to see PIs only.
     """
-    query = select(User).options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
+    # An EXISTS flag instead of loading every user's jobs: all that is read
+    # from them is whether one is pending or processing.
+    active_job = (
+        select(Job.id)
+        .where(Job.user_id == User.id, Job.status.in_(("pending", "processing")))
+        .exists()
+        .label("has_active_job")
+    )
+    query = select(User, active_job).options(selectinload(User.profile), selectinload(User.agent))
     if roles is not None:
         query = query.where(User.user_role.in_(roles))
 
     result = await db.execute(query)
-    users = result.scalars().unique().all()
+    pairs = result.unique().all()
+    users = [u for u, _ in pairs]
+    active_by_user = {u.id: flag for u, flag in pairs}
 
     # Publication counts, scoped to each PI's JHU tenure window (Task 13 and
     # D17 of docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md).
@@ -209,8 +225,7 @@ async def list_pi_directory(
             profile_status = "complete"
         else:
             # Check if there's a running job
-            active_jobs = [j for j in user.jobs if j.status in ("pending", "processing")]
-            profile_status = "generating" if active_jobs else "no_profile"
+            profile_status = "generating" if active_by_user[user.id] else "no_profile"
 
         # Apply filters
         if status_filter and profile_status != status_filter:
@@ -799,62 +814,42 @@ async def list_assessments(
     }
 
 
-async def build_discussions_view(
-    db: AsyncSession,
-    *,
-    run_id: str | None,
-    channel_filter: str | None,
-    status_filter: str | None,
-    agent_filter: list[str],
-) -> dict[str, Any]:
-    """Discussion summary: threads grouped by status.
-
-    Stops before the router's ``if export:`` branch — export is admin-only,
-    returns a different response type (``PlainTextResponse`` / an export
-    template) entirely, and consumes ``threads`` from this function's return
-    value. The manager router will never pass an export parameter.
-
-    Both the "no simulation runs exist at all" early-return and the normal
-    return below yield the same 9 keys (including ``agents`` and
-    ``agent_filter``, which the early return used to omit) so a template can
-    rely on their presence rather than on Jinja2's lenient ``Undefined``.
-    """
-    # Pick which simulation run to show
-    runs = await runs_ordered(db)
-
-    show_all_runs = run_id == "all"
-    selected_run_id = "all" if show_all_runs else None
-    if not show_all_runs and run_id:
+def _select_run(runs: list[SimulationRun], run_id: str | None) -> uuid.UUID | str | None:
+    """The run (or ``"all"``) the page shows: the requested one, else the newest."""
+    selected_run_id: uuid.UUID | str | None = "all" if run_id == "all" else None
+    if run_id != "all" and run_id:
         try:
             selected_run_id = uuid.UUID(run_id)
         except ValueError:
             pass
     if not selected_run_id and runs:
         selected_run_id = runs[0].id
+    return selected_run_id
 
-    if not selected_run_id:
-        return {
-            "runs": runs,
-            "selected_run_id": None,
-            "threads": [],
-            "counts": {},
-            "channels": [],
-            "agents": [],
-            "channel_filter": channel_filter,
-            "status_filter": status_filter,
-            "agent_filter": [],
-        }
 
+async def _load_thread_inputs(
+    db: AsyncSession,
+    selected_run_id: uuid.UUID | str,
+    show_all_runs: bool,
+) -> tuple[list[Any], dict[str, int], dict[str, set[str]], dict[str, ThreadDecision]]:
+    """Root posts, reply counts, repliers and the last decision per thread.
+
+    Root posts are column rows (``message_ts, channel_name, agent_id,
+    created_at``), not ORM rows, so a message's ``content`` is never loaded.
+    """
     # Get all root posts (new_post phase, no thread_ts)
-    roots_query = select(AgentMessage).where(
+    roots_query = select(
+        AgentMessage.message_ts,
+        AgentMessage.channel_name,
+        AgentMessage.agent_id,
+        AgentMessage.created_at,
+    ).where(
         AgentMessage.phase == "new_post",
         AgentMessage.thread_ts.is_(None),
     )
     if not show_all_runs:
         roots_query = roots_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    roots_result = await db.execute(roots_query.order_by(AgentMessage.created_at)
-    )
-    root_posts = roots_result.scalars().all()
+    root_posts = (await db.execute(roots_query.order_by(AgentMessage.created_at))).all()
 
     # Get reply counts and replier agent IDs per thread
     reply_query = select(
@@ -882,16 +877,30 @@ async def build_discussions_view(
     if not show_all_runs:
         decisions_query = decisions_query.where(ThreadDecision.simulation_run_id == selected_run_id)
     decisions_result = await db.execute(decisions_query.order_by(ThreadDecision.decided_at))
-    all_decisions = decisions_result.scalars().all()
 
     # Build a map: thread_id -> final outcome (last decision wins)
     decision_map: dict[str, ThreadDecision] = {}
-    for d in all_decisions:
+    for d in decisions_result.scalars().all():
         decision_map[d.thread_id] = d
+    return root_posts, reply_count_map, replier_map, decision_map
 
-    # Build thread list
-    threads = []
-    available_channels = set()
+
+def _thread_status(decision: ThreadDecision | None, reply_count: int) -> str:
+    """A thread's status: its decision's outcome, else active/no_replies by replies."""
+    if decision:
+        return decision.outcome
+    return "active" if reply_count > 0 else "no_replies"
+
+
+def _build_threads(
+    root_posts: list[Any],
+    reply_count_map: dict[str, int],
+    replier_map: dict[str, set[str]],
+    decision_map: dict[str, ThreadDecision],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """The thread dicts (root posts, then orphaned decisions) and their channels."""
+    threads: list[dict[str, Any]] = []
+    available_channels: set[str] = set()
     for post in root_posts:
         ts = post.message_ts
         available_channels.add(post.channel_name)
@@ -903,20 +912,6 @@ async def build_discussions_view(
         other_agents = repliers - {post.agent_id}
         replier = next(iter(other_agents), None) if other_agents else None
 
-        if decision:
-            if decision.outcome == "proposal":
-                thread_status = "proposal"
-            elif decision.outcome == "no_proposal":
-                thread_status = "no_proposal"
-            elif decision.outcome == "timeout":
-                thread_status = "timeout"
-            else:
-                thread_status = decision.outcome
-        elif reply_count > 0:
-            thread_status = "active"
-        else:
-            thread_status = "no_replies"
-
         threads.append({
             "message_ts": ts,
             "channel_name": post.channel_name,
@@ -924,7 +919,7 @@ async def build_discussions_view(
             "created_at": post.created_at,
             "reply_count": reply_count,
             "replier": replier,
-            "status": thread_status,
+            "status": _thread_status(decision, reply_count),
             "decision": decision,
         })
 
@@ -935,7 +930,6 @@ async def build_discussions_view(
     known_thread_ids = {t["message_ts"] for t in threads}
     for thread_id, td in decision_map.items():
         if thread_id not in known_thread_ids:
-            other_agents = replier_map.get(td.thread_id, set())
             poster_id = td.agent_a
             replier = td.agent_b if td.agent_a == poster_id else td.agent_a
             threads.append({
@@ -950,28 +944,36 @@ async def build_discussions_view(
             })
             known_thread_ids.add(td.thread_id)
             available_channels.add(td.channel)
+    return threads, available_channels
 
-    # Count by status over the whole run, before any filter: the summary cards
-    # link to `?run_id=...&status_filter=...` with no channel or agent filter,
-    # so each card's number must be what its link lists, and "Total threads"
-    # (the sum) is the same under every filter. It counts threads, not root
-    # posts: an orphaned decision (no root post) is listed, carded and
-    # exported as a thread, so it is counted as one too.
+
+def _status_counts(threads: list[dict[str, Any]]) -> dict[str, int]:
+    """Count by status over the whole run, before any filter: the summary cards
+    link to `?run_id=...&status_filter=...` with no channel or agent filter,
+    so each card's number must be what its link lists, and "Total threads"
+    (the sum) is the same under every filter. It counts threads, not root
+    posts: an orphaned decision (no root post) is listed, carded and
+    exported as a thread, so it is counted as one too.
+    """
     counts: dict[str, int] = {}
     for t in threads:
         s = t["status"]
         counts[s] = counts.get(s, 0) + 1
+    return counts
 
-    # Collect available agents from threads.
-    #
-    # Every add is None-guarded, including the poster's. `agent_id` is nullable
-    # on agent_messages and really is NULL in production: the retired Slack reconcile
-    # (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
-    # `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
-    # id). This set is sorted() below, so a single None took the whole page down
-    # with "'<' not supported between instances of 'NoneType' and 'str'". The
-    # replier and decision adds were already guarded; the poster's was not.
-    available_agents = set()
+
+def _collect_agents(threads: list[dict[str, Any]]) -> set[str]:
+    """Available agents from threads.
+
+    Every add is None-guarded, including the poster's. `agent_id` is nullable
+    on agent_messages and really is NULL in production: the retired Slack reconcile
+    (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
+    `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
+    id). The caller sorts this set, so a single None took the whole page down
+    with "'<' not supported between instances of 'NoneType' and 'str'". The
+    replier and decision adds were already guarded; the poster's was not.
+    """
+    available_agents: set[str] = set()
     for t in threads:
         for candidate in (
             t["agent_id"],
@@ -981,8 +983,16 @@ async def build_discussions_view(
         ):
             if candidate:
                 available_agents.add(candidate)
+    return available_agents
 
-    # Apply filters
+
+def _apply_filters(
+    threads: list[dict[str, Any]],
+    channel_filter: str | None,
+    status_filter: str | None,
+    agent_filter: list[str],
+) -> list[dict[str, Any]]:
+    """Narrow the thread list by channel, status and agent."""
     if channel_filter:
         threads = [t for t in threads if t["channel_name"] == channel_filter]
     if status_filter:
@@ -997,6 +1007,70 @@ async def build_discussions_view(
                 t["decision"].agent_a in agent_set or t["decision"].agent_b in agent_set
             ))
         ]
+    return threads
+
+
+async def build_discussions_view(
+    db: AsyncSession,
+    *,
+    run_id: str | None,
+    channel_filter: str | None,
+    status_filter: str | None,
+    agent_filter: list[str],
+    page: int | None = 1,
+) -> dict[str, Any]:
+    """Discussion summary: threads grouped by status.
+
+    ``page=None`` returns every thread (the admin export); otherwise
+    ``threads`` is one page of ``DISCUSSIONS_PAGE_SIZE`` and the result carries
+    ``page``, ``page_count`` and ``thread_total`` (the filtered thread count).
+    ``counts``, ``channels`` and ``agents`` are computed over the whole
+    selection before any filter or paging.
+
+    Stops before the router's ``if export:`` branch — export is admin-only,
+    returns a different response type (``PlainTextResponse`` / an export
+    template) entirely, and consumes ``threads`` from this function's return
+    value. The manager router will never pass an export parameter.
+
+    Both the "no simulation runs exist at all" early-return and the normal
+    return below yield the same keys (including ``agents`` and
+    ``agent_filter``, which the early return used to omit) so a template can
+    rely on their presence rather than on Jinja2's lenient ``Undefined``.
+    """
+    # Pick which simulation run to show
+    runs = await runs_ordered(db)
+    selected_run_id = _select_run(runs, run_id)
+
+    if not selected_run_id:
+        return {
+            "runs": runs,
+            "selected_run_id": None,
+            "threads": [],
+            "counts": {},
+            "channels": [],
+            "agents": [],
+            "channel_filter": channel_filter,
+            "status_filter": status_filter,
+            "agent_filter": [],
+            "page": 1,
+            "page_count": 1,
+            "thread_total": 0,
+        }
+
+    inputs = await _load_thread_inputs(db, selected_run_id, run_id == "all")
+    threads, available_channels = _build_threads(*inputs)
+    counts = _status_counts(threads)
+    available_agents = _collect_agents(threads)
+    threads = _apply_filters(threads, channel_filter, status_filter, agent_filter)
+
+    thread_total = len(threads)
+    page_count = max(1, -(-thread_total // DISCUSSIONS_PAGE_SIZE))
+    if page is None:
+        page_out = 1
+    else:
+        page_out = max(1, page)
+        start = (page_out - 1) * DISCUSSIONS_PAGE_SIZE
+        threads = threads[start:start + DISCUSSIONS_PAGE_SIZE]
 
     return {
         "runs": runs,
@@ -1008,6 +1082,9 @@ async def build_discussions_view(
         "channel_filter": channel_filter,
         "status_filter": status_filter,
         "agent_filter": agent_filter or [],
+        "page": page_out,
+        "page_count": page_count,
+        "thread_total": thread_total,
     }
 
 
@@ -1045,9 +1122,16 @@ async def list_runs_overview(db: AsyncSession) -> dict[str, Any]:
     }
 
 
-async def build_run_detail(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any] | None:
+async def build_run_detail(
+    db: AsyncSession, run_id: uuid.UUID, *, page: int = 1
+) -> dict[str, Any] | None:
     """Simulation run detail. Returns None when the row is absent (the
-    router turns that into its own 404 — this module stays HTTP-free)."""
+    router turns that into its own 404 — this module stays HTTP-free).
+
+    The per-agent and per-channel stats are SQL aggregates over the whole run;
+    ``messages`` is one page (``RUN_MESSAGES_PAGE_SIZE``) of column rows, with
+    no ``content``, ordered by time.
+    """
     run_result = await db.execute(
         select(SimulationRun).where(SimulationRun.id == run_id)
     )
@@ -1055,13 +1139,23 @@ async def build_run_detail(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any
     if not run:
         return None
 
-    # Messages for this run
-    messages_result = await db.execute(
-        select(AgentMessage)
+    page = max(1, page)
+    message_total = await db.scalar(
+        select(func.count(AgentMessage.id)).where(AgentMessage.simulation_run_id == run_id)
+    ) or 0
+    messages = (await db.execute(
+        select(
+            AgentMessage.agent_id,
+            AgentMessage.channel_name,
+            AgentMessage.created_at,
+            AgentMessage.phase,
+            AgentMessage.message_length,
+        )
         .where(AgentMessage.simulation_run_id == run_id)
-        .order_by(AgentMessage.created_at)
-    )
-    messages = messages_result.scalars().all()
+        .order_by(AgentMessage.created_at, AgentMessage.id)
+        .limit(RUN_MESSAGES_PAGE_SIZE)
+        .offset((page - 1) * RUN_MESSAGES_PAGE_SIZE)
+    )).all()
 
     # Channels for this run
     channels_result = await db.execute(
@@ -1070,35 +1164,42 @@ async def build_run_detail(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any
     channels = channels_result.scalars().all()
 
     # Aggregate by agent
-    agent_stats: dict[str, dict] = {}
-    for msg in messages:
-        if msg.agent_id not in agent_stats:
-            agent_stats[msg.agent_id] = {"count": 0, "total_length": 0}
-        agent_stats[msg.agent_id]["count"] += 1
-        agent_stats[msg.agent_id]["total_length"] += msg.message_length
-
-    for agent_id, stats in agent_stats.items():
-        stats["avg_length"] = (
-            stats["total_length"] // stats["count"] if stats["count"] > 0 else 0
-        )
+    agent_stats: dict[str | None, dict[str, int]] = {
+        agent_id: {
+            "count": n,
+            "total_length": int(total_len or 0),
+            "avg_length": int(total_len or 0) // n if n else 0,
+        }
+        for agent_id, n, total_len in (await db.execute(
+            select(AgentMessage.agent_id, func.count(), func.sum(AgentMessage.message_length))
+            .where(AgentMessage.simulation_run_id == run_id)
+            .group_by(AgentMessage.agent_id)
+        )).all()
+    }
 
     # Aggregate by channel
     #
-    # The agent add is None-guarded: `agent_id` is nullable on agent_messages
-    # and really is NULL in production — the retired Slack reconcile
-    # (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
+    # The agent aggregate is None-guarded (the FILTER clause): `agent_id` is
+    # nullable on agent_messages and really is NULL in production — the retired
+    # Slack reconcile (`_rebuild_state_from_slack`, removed 2026-09-29) recorded
+    # a real Slack message whose sender maps to no known bot as
     # `is_bot=True, agent_id=NULL`. This set is sorted() in the template
-    # (activity_detail.html), so an unguarded add of a single None took the
-    # whole page down with "'<' not supported between instances of
-    # 'NoneType' and 'str'" — the same bug class fixed for /admin/discussions
-    # in 73a78c3.
-    channel_stats: dict[str, dict] = {}
-    for msg in messages:
-        if msg.channel_name not in channel_stats:
-            channel_stats[msg.channel_name] = {"count": 0, "agents": set()}
-        channel_stats[msg.channel_name]["count"] += 1
-        if msg.agent_id:
-            channel_stats[msg.channel_name]["agents"].add(msg.agent_id)
+    # (activity_detail.html), so a single None took the whole page down with
+    # "'<' not supported between instances of 'NoneType' and 'str'" — the same
+    # bug class fixed for /admin/discussions in 73a78c3.
+    channel_stats: dict[str, dict[str, Any]] = {
+        name: {"count": n, "agents": set(agents or [])}
+        for name, n, agents in (await db.execute(
+            select(
+                AgentMessage.channel_name,
+                func.count(),
+                func.array_agg(func.distinct(AgentMessage.agent_id))
+                .filter(AgentMessage.agent_id.isnot(None)),
+            )
+            .where(AgentMessage.simulation_run_id == run_id)
+            .group_by(AgentMessage.channel_name)
+        )).all()
+    }
 
     return {
         "run": run,
@@ -1106,4 +1207,7 @@ async def build_run_detail(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any
         "channels": channels,
         "agent_stats": agent_stats,
         "channel_stats": channel_stats,
+        "message_total": message_total,
+        "page": page,
+        "page_count": max(1, -(-message_total // RUN_MESSAGES_PAGE_SIZE)),
     }

@@ -90,6 +90,17 @@
 
 {% include "admin/_discussions_threads.html" %}
 
+{% if page_count > 1 %}
+{% set pager_qs %}run_id={{ selected_run_id }}{% if channel_filter %}&channel_filter={{ channel_filter | urlencode }}{% endif %}{% if status_filter %}&status_filter={{ status_filter | urlencode }}{% endif %}{% for a in agent_filter %}&agent_filter={{ a | urlencode }}{% endfor %}{% endset %}
+<div id="discussions-pager" class="flex items-center justify-between mt-4 text-sm text-gray-600">
+    <span>Page {{ page }} of {{ page_count }} ({{ thread_total }} threads)</span>
+    <span class="flex gap-3">
+        {% if page > 1 %}<a href="/manager/discussions?{{ pager_qs }}&page={{ page - 1 }}" class="text-indigo-600 hover:underline">&larr; Prev</a>{% endif %}
+        {% if page < page_count %}<a href="/manager/discussions?{{ pager_qs }}&page={{ page + 1 }}" class="text-indigo-600 hover:underline">Next &rarr;</a>{% endif %}
+    </span>
+</div>
+{% endif %}
+
 {% endif %}
 {% endblock %}
 

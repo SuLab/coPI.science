@@ -39,18 +39,10 @@ async def admin_agents(
     )
     agents = result.scalars().all()
 
-    # Get linked user names
-    user_map = {}
-    for agent in agents:
-        if agent.user_id:
-            u_result = await db.execute(select(User).where(User.id == agent.user_id))
-            u = u_result.scalar_one_or_none()
-            if u:
-                user_map[str(agent.user_id)] = u.name
-
-    # Get all users for the linking dropdown
+    # One users query serves both the linked-name map and the linking dropdown.
     users_result = await db.execute(select(User).order_by(User.name))
     all_users = users_result.scalars().all()
+    user_map = {str(u.id): u.name for u in all_users}
 
     # Which agents have a usable bot token (DB column preferred, .env fallback).
     from src.services.slack_tokens import token_for_agent_row

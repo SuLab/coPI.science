@@ -11,12 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
         integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
         crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
-        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
-        crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
-        integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
-        crossorigin="anonymous"></script>
+{% include "_head_assets.html" %}
 <style>
   html, body { height: 100%; margin: 0; }
   body {
@@ -623,12 +618,8 @@
       return e === undefined ? "" : e;
     });
   }
-  // "~" means "approximately" in proposal text; without this marked pairs tildes
-  // into <del> spans (the same override static/js/markdown.js applies).
-  if (window.marked && typeof marked.use === "function") {
-    marked.use({ tokenizer: { del() { return undefined; } } });
-  }
-  if (window.marked) marked.setOptions({ gfm: true, breaks: true });
+  // Private marked instance (gfm, breaks, "~" literal) from static/js/markdown.js.
+  const graphMarked = window.createSanitizingMarked ? window.createSanitizingMarked("graph") : null;
   if (window.DOMPurify) {
     // Open proposal links in a new tab without leaking the referrer.
     DOMPurify.addHook("afterSanitizeAttributes", (node) => {
@@ -640,11 +631,11 @@
   }
   function renderMarkdown(s) {
     const text = emojify(s);
-    if (!window.marked || !window.DOMPurify) {
+    if (!graphMarked || !window.DOMPurify) {
       // Graceful fallback if a CDN failed to load.
       return `<div style="white-space:pre-wrap">${escapeHtml(text)}</div>`;
     }
-    return DOMPurify.sanitize(marked.parse(text));
+    return DOMPurify.sanitize(graphMarked.parse(text));
   }
 
   const modal = d3.select("#proposal-modal");

@@ -135,9 +135,13 @@ def test_the_chat_script_carries_the_b1_and_sec_fixes():
     # SEC-1a: never decode a candidate href to match it against allowed_links.
     assert "decodeURI(" not in js
     # SEC-1b: raw HTML is escaped as text by a private marked instance, never
-    # passed through the global renderer.
-    assert "new window.marked.Marked()" in js
-    assert "html: function (html)" in js
+    # passed through the global renderer. The instance comes from the shared
+    # factory's "chat" profile (LC-02).
+    assert 'createSanitizingMarked("chat")' in js
+    factory = (JS.parent / "markdown.js").read_text(encoding="utf-8")
+    chat_profile = factory.split('if (profile === "chat") {', 1)[1].split("} else if", 1)[0]
+    assert "new window.marked.Marked()" in factory
+    assert "html: function (html)" in chat_profile
     # New error codes the client must be able to show.
     assert '"forbidden"' not in js  # the key is unquoted object-literal style
     assert "forbidden:" in js

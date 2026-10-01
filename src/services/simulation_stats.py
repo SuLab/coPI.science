@@ -941,6 +941,10 @@ async def _fetch_call_stat_rows(
     return list((await db.execute(stmt)).all())
 
 
+#: Public name for the simulation view, which fetches once for both aggregates.
+fetch_call_stat_rows = _fetch_call_stat_rows
+
+
 def _taxonomy_bucket(stop_reason: str | None) -> str:
     if stop_reason in ("end_turn", "tool_use"):
         return "normal"
@@ -953,8 +957,12 @@ def _taxonomy_bucket(stop_reason: str | None) -> str:
     return stop_reason
 
 
-async def stop_reason_taxonomy(db: AsyncSession, run_id: uuid.UUID) -> dict[str, int]:
-    rows = await _fetch_call_stat_rows(db, run_id)
+async def stop_reason_taxonomy(
+    db: AsyncSession, run_id: uuid.UUID, *,
+    rows: list[tuple[str, list | None]] | None = None,
+) -> dict[str, int]:
+    """Stop-reason buckets; pass `rows` (from `fetch_call_stat_rows`) to share one fetch."""
+    rows = rows if rows is not None else await _fetch_call_stat_rows(db, run_id)
     counts: Counter[str] = Counter()
     for _phase, call_stats in rows:
         if not call_stats:
@@ -973,14 +981,15 @@ def _percentiles(values: list[float]) -> LatencyPcts:
 
 
 async def latency_percentiles(
-    db: AsyncSession, run_id: uuid.UUID,
+    db: AsyncSession, run_id: uuid.UUID, *,
+    rows: list[tuple[str, list | None]] | None = None,
 ) -> dict[str, LatencyPcts]:
     """P50/P95/P99 per phase from `call_stats`, plus an "overall" key across
     every phase. `statistics.quantiles(data, n=100)` returns 99 cut points
     (P50/P95/P99 = indices 49/94/98) and raises StatisticsError below 2
     samples — `_percentiles` guards that, returning an all-None percentile
-    set instead."""
-    rows = await _fetch_call_stat_rows(db, run_id)
+    set instead. Pass `rows` (from `fetch_call_stat_rows`) to share one fetch."""
+    rows = rows if rows is not None else await _fetch_call_stat_rows(db, run_id)
     by_phase: dict[str, list[float]] = defaultdict(list)
     overall: list[float] = []
     for phase, call_stats in rows:

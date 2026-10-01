@@ -99,3 +99,14 @@ deleted span.
 When the hub updates the verdict, earlier turns stay visible below a "Verdict updated after
 this point" divider but leave replay and the turn cap; turns from before `0054` (NULL)
 count as revision 1, so their conversations continue unchanged.
+
+**History under the spend lock (LC-07).** `prepare_turn` re-reads the history under the
+spend lock and builds the request from those turns, so a turn another request of the same
+user committed meanwhile is included; with no concurrent writer the request is
+byte-identical to before. Clear takes the same lock before its streaming check.
+
+**Busy input (LC-09).** The question textarea is disabled while an answer streams.
+
+**One markdown factory (LC-02).** `window.createSanitizingMarked(profile)` in
+`static/js/markdown.js` builds the private marked instance for the `page`, `chat` and
+`graph` profiles; every profile treats "~" as literal text.

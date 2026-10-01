@@ -125,6 +125,19 @@ def _job_progress_off_the_real_database():
     job_progress.configure(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_ses(monkeypatch):
+    """No test may reach SES. A route that sends without the test faking the
+    sender gets a client that raises, which `send_transactional_email` logs and
+    returns as False. Tests that check a send patch `_ses_client` themselves."""
+    from src.services import email as email_svc
+
+    def _unreachable(region):
+        raise RuntimeError("SES is unreachable from tests; patch email._ses_client")
+
+    monkeypatch.setattr(email_svc, "_ses_client", _unreachable)
+
+
 @pytest_asyncio.fixture
 async def progress_on_test_connection(db_session):
     """Route job_progress.record through a second session on the test's own

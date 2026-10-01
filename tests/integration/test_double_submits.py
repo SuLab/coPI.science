@@ -120,3 +120,34 @@ async def test_double_invite_creates_one_invitation_and_one_email(engine, monkey
         assert sent == ["fresh@x.edu"]
     finally:
         await _cleanup(f, [pi.id, d.id], [agent.id])
+
+
+async def test_concurrent_first_login_creates_one_user(engine):
+    """RB-11: two first logins for one ORCID yield one user and no IntegrityError."""
+    from src.routers.auth import _find_or_create_user
+
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    orcid = f"0000-0003-{uuid.uuid4().int % 10000:04d}-0009"
+    profile = {"orcid": orcid, "name": "Race Login"}
+
+    async def login():
+        async with f() as s:
+            user = await _find_or_create_user(
+                s, orcid_id=orcid, orcid_name="Race Login",
+                profile_data=profile, allowlist_entry=None,
+            )
+            await s.commit()
+            return user.id
+
+    try:
+        a, b = await asyncio.gather(login(), login())
+        assert a == b
+        async with f() as s:
+            n = (await s.execute(
+                select(func.count()).select_from(User).where(User.orcid == orcid)
+            )).scalar_one()
+        assert n == 1
+    finally:
+        async with f() as s:
+            await s.execute(text("DELETE FROM users WHERE orcid = :o"), {"o": orcid})
+            await s.commit()

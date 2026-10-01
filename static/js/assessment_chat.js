@@ -163,6 +163,7 @@
     state.busy = busy;
     els.send.disabled = busy || hasStreaming();
     els.clear.disabled = busy;
+    els.input.disabled = busy;
   }
 
   function updateCounter() {
@@ -261,45 +262,10 @@
     if (sanitizingMarked) {
       return sanitizingMarked;
     }
-    if (!window.marked || !window.marked.Marked) {
-      return null;
+    if (typeof window.createSanitizingMarked !== "function") {
+      return null;  // fail closed: renderBody falls back to text
     }
-    const instance = new window.marked.Marked();
-    instance.use({
-      tokenizer: {
-        // The hub writes "~" for "approximately" ("~30-37%"); marked would pair
-        // two tildes into a <del> span and the chat's sanitizer then drops the
-        // tag, deleting the text between them. Returning undefined treats every
-        // tilde as literal text: the same override static/js/markdown.js applies
-        // to the global instance, which this private one never sees.
-        del: function () {
-          return undefined;
-        },
-        // marked's own `tag` tokenizer switches the lexer into a raw-block state
-        // after <code>, <pre>, <kbd> or <script>, in which later text is emitted
-        // UNESCAPED, so an escaped entity decodes after all (RSEC-1, reproduced
-        // with marked 12.0.2). Raw HTML is rendered as text below, so that state
-        // is never wanted: same match, never entering it.
-        tag: function (src) {
-          const cap = this.rules.inline.tag.exec(src);
-          if (cap) {
-            return { type: "html", raw: cap[0], inLink: false, inRawBlock: false, block: false, text: cap[0] };
-          }
-          return undefined;
-        }
-      },
-      renderer: {
-        html: function (html) {
-          return String(html)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/[\"]/g, "&quot;")
-            .replace(/[']/g, "&#39;");
-        }
-      }
-    });
-    sanitizingMarked = instance;
+    sanitizingMarked = window.createSanitizingMarked("chat");
     return sanitizingMarked;
   }
 

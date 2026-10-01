@@ -731,12 +731,16 @@
     Pause auto-refresh <span class="sc-meta">(refreshes every 30 s; open tables stay open)</span>
 </label>
 <script>
+let inFlight = false;
 const simRefreshTimer = setInterval(() => {
   if (document.getElementById('sim-refresh-pause')?.checked) return;
+  // Polite: skip a hidden tab and never stack a second fetch on a slow one.
+  if (document.hidden || inFlight) return;
   // Never replace #sim-body while the operator is typing inside it: the swap
   // would discard the in-progress announce-template or channel-list edit.
   if (document.getElementById('sim-body')?.contains(document.activeElement)
       && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
+  inFlight = true;
   fetch(location.href).then(r => r.text()).then(h => {
     const d = new DOMParser().parseFromString(h, 'text/html');
     const next = d.getElementById('sim-body');
@@ -745,7 +749,7 @@ const simRefreshTimer = setInterval(() => {
     const open = new Set([...cur.querySelectorAll('details[open][data-sc-key]')].map(el => el.dataset.scKey));
     cur.innerHTML = next.innerHTML;
     cur.querySelectorAll('details[data-sc-key]').forEach(el => { if (open.has(el.dataset.scKey)) el.open = true; });
-  });
+  }).finally(() => { inFlight = false; });
 }, 30000);
 </script>
 {% endblock %}

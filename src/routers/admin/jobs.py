@@ -2,7 +2,7 @@
 
 from fastapi import Depends, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -10,6 +10,7 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import Job, User
 from src.routers.admin._common import _template_context, router, templates
+from src.services.directory import JOBS_PAGE_SIZE
 
 
 @router.get("/jobs", response_class=HTMLResponse)
@@ -17,27 +18,26 @@ async def admin_jobs(
     request: Request,
     status_filter: str | None = None,
     type_filter: str | None = None,
+    page: int = 1,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """Job queue overview."""
+    page = max(1, page)
     query = select(Job).options(selectinload(Job.user)).order_by(Job.enqueued_at.desc())
-    result = await db.execute(query)
-    all_jobs = result.scalars().unique().all()
+    if status_filter:
+        query = query.where(Job.status == status_filter)
+    if type_filter:
+        query = query.where(Job.type == type_filter)
+    total = (
+        await db.execute(select(func.count()).select_from(query.order_by(None).subquery()))
+    ).scalar_one()
+    jobs = (
+        await db.execute(query.limit(JOBS_PAGE_SIZE).offset((page - 1) * JOBS_PAGE_SIZE))
+    ).scalars().unique().all()
 
-    # Filter
-    jobs = []
-    for job in all_jobs:
-        if status_filter and job.status != status_filter:
-            continue
-        if type_filter and job.type != type_filter:
-            continue
-        jobs.append(job)
-
-    # Summary counts
-    counts = {}
-    for job in all_jobs:
-        counts[job.status] = counts.get(job.status, 0) + 1
+    # Summary counts: every job by status, whatever the filters
+    counts = dict((await db.execute(select(Job.status, func.count()).group_by(Job.status))).all())
 
     return templates.TemplateResponse(
         request,
@@ -50,5 +50,8 @@ async def admin_jobs(
             counts=counts,
             status_filter=status_filter,
             type_filter=type_filter,
+            total=total,
+            page=page,
+            page_count=max(1, -(-total // JOBS_PAGE_SIZE)),
         ),
     )

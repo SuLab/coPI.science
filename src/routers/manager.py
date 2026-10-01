@@ -97,6 +97,7 @@ _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity
 _REVIEW = Depends(get_review_user)    # + reviewer — the four read handlers only
 _AGENT_FILTER = Query(default=[])
+_PAGE = Query(1, ge=1)
 
 #: The review-bot-drafted prompt-change queue. Read-only display cap
 #: — a reviewer never reaches this pair (get_staff_user, not get_review_user):
@@ -689,6 +690,7 @@ async def manager_discussions(
     channel_filter: str | None = None,
     status_filter: str | None = None,
     agent_filter: list[str] = _AGENT_FILTER,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
@@ -707,6 +709,7 @@ async def manager_discussions(
         channel_filter=channel_filter,
         status_filter=status_filter,
         agent_filter=agent_filter,
+        page=page,
     )
     # What the panel was asked, and what it said, per thread — the same cards
     # /admin/discussions shows, minus the verbatim reply. A domain, a signal, a
@@ -756,12 +759,13 @@ async def manager_activity(
 async def manager_activity_detail(
     run_id: uuid.UUID,
     request: Request,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
     """One run's per-agent and per-channel stats. There is deliberately no
     llm-calls drill-down here (D10)."""
-    view = await build_run_detail(db, run_id)
+    view = await build_run_detail(db, run_id, page=page)
     if view is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return templates.TemplateResponse(

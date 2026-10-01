@@ -15,6 +15,8 @@ from src.routers.admin._common import _template_context, router, templates
 from src.services.directory import build_run_detail, list_runs_overview
 from src.services.headline_claims import held_headline_counts, list_in_doubt
 
+_PAGE = Query(1, ge=1)
+
 
 @router.get("/activity", response_class=HTMLResponse)
 async def admin_activity(
@@ -47,11 +49,12 @@ async def admin_activity(
 async def admin_activity_detail(
     run_id: uuid.UUID,
     request: Request,
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """Simulation run detail."""
-    detail = await build_run_detail(db, run_id)
+    detail = await build_run_detail(db, run_id, page=page)
     if detail is None:
         raise HTTPException(status_code=404, detail="Run not found")
     held_counts = (
@@ -68,6 +71,9 @@ async def admin_activity_detail(
             active_admin="activity",
             run=detail["run"],
             messages=detail["messages"],
+            message_total=detail["message_total"],
+            page=detail["page"],
+            page_count=detail["page_count"],
             channels=detail["channels"],
             agent_stats=detail["agent_stats"],
             channel_stats=detail["channel_stats"],

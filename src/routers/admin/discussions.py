@@ -12,6 +12,8 @@ from src.routers.admin._common import _template_context, router, templates
 from src.services.directory import build_discussions_view
 from src.services.thread_panel import panel_cards_by_thread
 
+_PAGE = Query(1, ge=1)
+
 
 @router.get("/discussions", response_class=HTMLResponse)
 async def admin_discussions(
@@ -21,6 +23,7 @@ async def admin_discussions(
     status_filter: str | None = None,
     agent_filter: list[str] = Query(default=[]),
     export: str = "",
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -31,6 +34,8 @@ async def admin_discussions(
         channel_filter=channel_filter,
         status_filter=status_filter,
         agent_filter=agent_filter,
+        # The export lists every thread; the HTML page shows one page.
+        page=None if export else page,
     )
 
     # No simulation runs exist at all: render the normal HTML page and return
@@ -56,6 +61,9 @@ async def admin_discussions(
                 channel_filter=view["channel_filter"],
                 status_filter=view["status_filter"],
                 agent_filter=view["agent_filter"],
+                page=view["page"],
+                page_count=view["page_count"],
+                thread_total=view["thread_total"],
                 # No run selected means no threads, so no panel to summarize —
                 # but the keys must still be present: the shared threads body
                 # reads them on every render. Nothing was read, so nothing was
@@ -170,6 +178,9 @@ async def admin_discussions(
             channel_filter=view["channel_filter"],
             status_filter=view["status_filter"],
             agent_filter=view["agent_filter"],
+            page=view["page"],
+            page_count=view["page_count"],
+            thread_total=view["thread_total"],
             panel_by_thread=panel.by_thread,
             # A capped panel read must not look like an unconsulted page.
             panel_truncated=panel.truncated,
