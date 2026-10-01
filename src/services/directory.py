@@ -1176,6 +1176,8 @@ async def build_run_detail(
             select(AgentMessage.agent_id, func.count(), func.sum(AgentMessage.message_length))
             .where(AgentMessage.simulation_run_id == run_id)
             .group_by(AgentMessage.agent_id)
+            # First-appearance order, as the per-message loop this replaced built it.
+            .order_by(func.min(AgentMessage.created_at))
         )).all()
     }
 
@@ -1200,6 +1202,7 @@ async def build_run_detail(
             )
             .where(AgentMessage.simulation_run_id == run_id)
             .group_by(AgentMessage.channel_name)
+            .order_by(func.min(AgentMessage.created_at))
         )).all()
     }
 

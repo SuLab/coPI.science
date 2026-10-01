@@ -60,3 +60,21 @@ async def test_pi_directory_has_no_jobs_selectinload(db_session, engine):
         event.remove(engine.sync_engine, "before_cursor_execute", before)
     assert seen == []
     assert next(r for r in rows if r["user"].id == user.id)["profile_status"] == "generating"
+
+
+async def test_run_detail_stats_keep_first_appearance_order(db_session):
+    """The per-agent and per-channel tables list keys in the order they first
+    posted, as the per-message loop the SQL aggregates replaced did."""
+    from datetime import UTC, datetime, timedelta
+
+    run = await factories.make_simulation_run(db_session)
+    t0 = datetime(2026, 9, 1, tzinfo=UTC)
+    order = [("zeta", "c-late"), ("alpha", "c-early"), ("zeta", "c-early"), ("mid", "c-mid"), ("alpha", "c-late")]
+    for i, (agent, channel) in enumerate(order):
+        await factories.make_agent_message(
+            db_session, run=run, agent_id=agent, channel_name=channel,
+            message_length=5, created_at=t0 + timedelta(minutes=i),
+        )
+    detail = await directory.build_run_detail(db_session, run.id)
+    assert list(detail["agent_stats"]) == ["zeta", "alpha", "mid"]
+    assert list(detail["channel_stats"]) == ["c-late", "c-early", "c-mid"]
