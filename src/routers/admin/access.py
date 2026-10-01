@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import AccessAllowlist, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.admin._common import _template_context, router, templates
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 
@@ -87,7 +88,7 @@ async def admin_approve_access(
         select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
     )
     if profile_result.scalar_one_or_none() is None:
-        await enqueue_profile_job_if_absent(db, user)
+        await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
 
     await db.commit()
     logger.info("Admin %s approved access for user %s", current_user.name, user.id)
@@ -149,7 +150,7 @@ async def admin_allowlist_add(
             select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
         )
         if profile_result.scalar_one_or_none() is None:
-            await enqueue_profile_job_if_absent(db, user)
+            await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
 
     await db.commit()
     return RedirectResponse(url="/admin/access-requests", status_code=302)

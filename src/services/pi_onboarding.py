@@ -1,10 +1,10 @@
 """ORCID-driven PI onboarding, shared by the manager Add-PI route and admin's
 impersonate-if-new path. Ports the fetch->create->enqueue logic that was
 duplicated inline in src/routers/admin/impersonation.py's impersonate_user — see design
-decision D7. A third copy remains in src/cli.py's _seed_one_orcid,
-deliberately not unified here: that CLI path reuses an existing user and
-falls back to a stub user on fetch failure, both of which this function
-refuses by design (D6)."""
+decision D7. `cli seed-profile` shares `validate_orcid` and
+`record_employment_tenure` with this module (MD-14) but keeps its own
+reuse-existing-user and stub-on-fetch-failure behaviour, both of which
+`find_or_create_pi_by_orcid` refuses by design (D6)."""
 
 import logging
 import re
@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import USER_ROLE_PI, AgentRegistry, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
 from src.services.jhu_rules import derive_employment_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
@@ -25,6 +26,23 @@ logger = logging.getLogger(__name__)
 # arbitrary text out of the ORCID URL path, PubMed [auid]/[Author] search
 # terms, and the manager page's error redirect (audit L1).
 _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+
+
+def validate_orcid(orcid: str) -> str:
+    """Format-only check shared by Add-PI and `cli seed-profile` (MD-14)."""
+    orcid = orcid.strip()
+    if not _ORCID_RE.match(orcid):
+        raise ValueError(f"Invalid ORCID iD format: {orcid[:40]!r}")
+    return orcid
+
+
+async def record_employment_tenure(db: AsyncSession, user: User, profile_data: dict) -> int | None:
+    """Persist the employment-derived JHU tenure start when ORCID carries one."""
+    tenure_year = derive_employment_start(profile_data.get("employments") or [])
+    if tenure_year is not None:
+        await set_tenure_start(user.id, tenure_year, "orcid_employment", db=db)
+        logger.info("Tenure start %d (orcid_employment) recorded for %s", tenure_year, user.orcid)
+    return tenure_year
 
 
 async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
@@ -43,9 +61,7 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     H1/H2: the paper-derived fallback lives in the pipeline and only
     persists from a fully resolved corpus).
     """
-    orcid = orcid.strip()
-    if not _ORCID_RE.match(orcid):
-        raise ValueError(f"Invalid ORCID iD format: {orcid[:40]!r}")
+    orcid = validate_orcid(orcid)
     existing = (
         await db.execute(select(User).where(User.orcid == orcid))
     ).scalar_one_or_none()
@@ -69,14 +85,9 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     if profile_data.get("email"):
         await assign_user_email(db, user, profile_data["email"])
 
-    tenure_year = derive_employment_start(profile_data.get("employments") or [])
-    if tenure_year is not None:
-        await set_tenure_start(user.id, tenure_year, "orcid_employment", db=db)
-        logger.info(
-            "Tenure start %d (orcid_employment) recorded for %s", tenure_year, orcid
-        )
+    await record_employment_tenure(db, user, profile_data)
 
-    await enqueue_profile_job_if_absent(db, user)
+    await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
     return user
 
 

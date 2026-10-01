@@ -69,6 +69,7 @@ from src.models import (
     OpportunityAssessment,
     User,
 )
+from src.models.job import INTERACTIVE_PRIORITY
 from src.services.blackbird_rubric import (
     RUBRIC_CONTENT_HASH,
     RUBRIC_VERSION,
@@ -146,7 +147,11 @@ def _normalized_dimension_scores(
 
 
 async def enqueue_analysis_if_absent(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID | None
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    priority: int | None = None,
 ) -> bool:
     """Enqueue one ``review_feedback_analysis`` job for ``assessment_id``,
     unless a PENDING job for it already exists. Returns whether a new job was
@@ -182,6 +187,7 @@ async def enqueue_analysis_if_absent(
             type="review_feedback_analysis",
             user_id=user_id,
             payload={"assessment_id": str(assessment_id)},
+            priority=priority,
         )
     )
     return True
@@ -284,7 +290,10 @@ async def enqueue_pending_analyses(
         if str(eligible_id) in already_pending:
             continue
         if await enqueue_analysis_if_absent(
-            db, assessment_id=eligible_id, user_id=requested_by.id
+            db,
+            assessment_id=eligible_id,
+            user_id=requested_by.id,
+            priority=INTERACTIVE_PRIORITY,
         ):
             enqueued += 1
     return enqueued, eligible

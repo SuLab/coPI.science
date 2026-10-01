@@ -14,8 +14,14 @@ from src.models import (
 from src.services import industry_evidence as ie
 from src.services.industry_score import SCORER_VERSION
 from src.services.jhu_rules import set_tenure_start
+from src.worker.main import JobContext
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("progress_on_test_connection")]
+
+
+def _ctx(job):
+    return JobContext(id=job.id, type=job.type, user_id=job.user_id, payload=dict(job.payload),
+                      attempts=job.attempts, max_attempts=job.max_attempts)
 
 
 async def _seed_peers(db_session, n, raw_sum=1.0, reason="ok"):
@@ -44,7 +50,7 @@ async def test_no_tenure_start_writes_unscored_row_and_collects_nothing(db_sessi
         return []
 
     monkeypatch.setattr(ie, "fetch_works_for_pmids", boom)
-    await ie.execute_industry_evidence(job, db_session)
+    await ie.execute_industry_evidence(_ctx(job), db_session)
     s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id))).scalar_one()
     assert s.score is None and s.reason == "no_tenure_start" and called == []
 
@@ -81,7 +87,7 @@ async def test_job_stores_evidence_and_score(db_session, monkeypatch):
     monkeypatch.setattr(ie, "fetch_jhu_industry_trials", none)
     monkeypatch.setattr(ie, "company_funder_ids", cf)
 
-    await ie.execute_industry_evidence(job, db_session)
+    await ie.execute_industry_evidence(_ctx(job), db_session)
     rows = (await db_session.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == u.id))).scalars().all()
     assert {r.kind for r in rows} == {"coauthor_company", "coi_relationship"}
     s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id).order_by(PiIndustryScore.computed_at.desc()))).scalars().first()
@@ -182,6 +188,7 @@ async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch)
     )
     respx.post(uspto_inventor.SEARCH_URL).mock(return_value=httpx.Response(404))
 
-    await ie.execute_industry_evidence(job, db_session)  # must not raise
+    await ie.execute_industry_evidence(_ctx(job), db_session)  # must not raise
+    await db_session.refresh(job)
     progress = [p["step"] for p in (job.payload or {}).get("progress", [])]
     assert "industry_done" in progress

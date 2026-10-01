@@ -1,22 +1,51 @@
-"""Durable job-progress entries (spec §7.4). Moved out of ``profile_pipeline`` so the
-enrichment handlers can record progress without importing the pipeline (which
-imports them lazily): that was a function-level import cycle."""
+"""Job progress entries (`jobs.payload['progress']`), written in their OWN short
+transaction (spec §9.2 DP-09).
 
-from src.models import Job
+A handler's pipeline transaction never modifies its jobs row: that row used to be
+dirtied by every progress append and so stayed row-locked for the whole run, and
+progress only became visible at the final commit. `record` commits each entry on
+its own session, so /onboarding shows progress mid-run, and a failed run keeps the
+progress that explains it. Best-effort: a failed write never fails the job (and
+logs nothing, so the pipeline's log stream is unchanged).
+"""
+from __future__ import annotations
+
+import contextlib
+import uuid
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None
+
+_APPEND_SQL = text(
+    "UPDATE jobs SET payload = jsonb_set("
+    "  COALESCE(payload::jsonb, '{}'::jsonb), '{progress}',"
+    "  COALESCE(payload::jsonb -> 'progress', '[]'::jsonb)"
+    "  || jsonb_build_array(jsonb_build_object("
+    "       'step', CAST(:step AS text), 'detail', CAST(:detail AS text)))"
+    ")::json WHERE id = :id"
+)
 
 
-def append_job_progress(job: Job, step: str, detail: str = "") -> None:
-    """Append a progress entry so it actually reaches the database.
+def configure(factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None) -> None:
+    """Point `record` at a session factory (the worker's; a test's). None restores
+    the default, `src.database.get_session_factory()`."""
+    global _factory
+    _factory = factory
 
-    ``Job.payload`` is a plain JSON column with no mutation tracking: an
-    in-place append is only written if the attribute happens to be dirty for
-    another reason. The old closure reassigned the payload on its FIRST call
-    only, so every append after the pipeline's first ``db.flush()`` was
-    silently dropped at commit. Reassigning a fresh dict on every call marks
-    the attribute dirty each time.
-    """
-    payload = dict(job.payload or {})
-    progress = list(payload.get("progress") or [])
-    progress.append({"step": step, "detail": detail})
-    payload["progress"] = progress
-    job.payload = payload
+
+async def record(job_id: uuid.UUID | None, step: str, detail: str = "") -> None:
+    """Append `{"step", "detail"}` to the job's progress and commit it at once."""
+    if job_id is None:
+        return
+    factory = _factory
+    if factory is None:
+        from src.database import get_session_factory
+        factory = get_session_factory()
+    with contextlib.suppress(Exception):
+        async with factory() as session:
+            await session.execute(_APPEND_SQL, {"id": job_id, "step": step, "detail": detail})
+            await session.commit()
