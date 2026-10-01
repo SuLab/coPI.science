@@ -6,13 +6,13 @@ PI notification email. Their tables stay.
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 
 from src.dependencies import get_current_user
 from src.models import User
+from src.web.templating import make_templates
 
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:

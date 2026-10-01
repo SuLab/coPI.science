@@ -10,7 +10,7 @@ from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import hub_agent
 from src.agent.slack_client import SlackListingIncomplete
 from src.models import AgentChannel
-from src.models.agent_activity import VISIBILITY_PUBLIC
+from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 logger = logging.getLogger("src.agent.simulation")
 
@@ -50,6 +50,15 @@ class ChannelDirectory:
         channels before their AgentChannel row is created).
         """
         return self._channel_visibility.get(channel_name, VISIBILITY_PUBLIC)
+
+    def _polled_channel_ids(self) -> dict[str, str]:
+        """The channels the poller reads and the fresh-start seed parks cursors in:
+        the seeded channels plus collab-private ones (S2-12: one definition)."""
+        return {
+            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
+            if ch_name in constants.SEEDED_CHANNELS
+            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
+        }
 
     def _client_for_channel(self, channel_id: str, fallback):
         """Return the Slack client to poll ``channel_id`` with: always ``fallback``.

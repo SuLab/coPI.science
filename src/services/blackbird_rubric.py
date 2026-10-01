@@ -49,6 +49,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.services.bands import BANDS, band_for
+
 logger = logging.getLogger(__name__)
 
 # CWD-relative, the same convention src/agent/roles.py uses for PROMPTS_DIR:
@@ -172,22 +174,8 @@ def _require_str_list(value: object, where: str) -> tuple[str, ...]:
     return tuple(_require_str(item, f"{where}[{i}]") for i, item in enumerate(value))
 
 
-def parse_rubric(path: Path) -> Rubric:
-    """Parse and validate a rubric document. Raises ``RubricError`` on any
-    defect — the caller (module import, below) deliberately does not catch it.
-
-    Public so the validator is testable against scratch files without
-    monkeypatching the module-level singleton.
-    """
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        raise RubricError(f"rubric document unreadable at {path}: {exc}") from exc
-    try:
-        data = tomllib.loads(raw_bytes.decode("utf-8"))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        raise RubricError(f"rubric document is not valid TOML ({path}): {exc}") from exc
-
+def _parse_meta(data: dict) -> tuple[dict, str]:
+    """The [meta] table and its validated version."""
     meta = data.get("meta")
     if not isinstance(meta, dict):
         raise RubricError("rubric document: missing [meta] table")
@@ -203,7 +191,11 @@ def parse_rubric(path: Path) -> Rubric:
             f"(opportunity_assessments.rubric_version is String(20)); got "
             f"{len(version)}: {version!r}"
         )
+    return meta, version
 
+
+def _parse_scale(data: dict) -> tuple[float, float]:
+    """The [scale] table's integer min and max."""
     scale = data.get("scale")
     if not isinstance(scale, dict):
         raise RubricError("rubric document: missing [scale] table")
@@ -213,7 +205,11 @@ def parse_rubric(path: Path) -> Rubric:
         raise RubricError("rubric document: [scale] min/max must be integers")
     if not scale_min < scale_max:
         raise RubricError("rubric document: [scale].min must be < [scale].max")
+    return scale_min, scale_max
 
+
+def _parse_banding(data: dict) -> tuple[dict, float, float]:
+    """The [banding] table and its two grid-aligned thresholds."""
     banding = data.get("banding")
     if not isinstance(banding, dict):
         raise RubricError("rubric document: missing [banding] table")
@@ -241,7 +237,11 @@ def parse_rubric(path: Path) -> Rubric:
         raise RubricError(
             "rubric document: [banding].advance_min must be > conditional_min"
         )
+    return banding, advance_min, conditional_min
 
+
+def _parse_gating(data: dict) -> dict[str, dict[str, str]]:
+    """The three structural [gating.*] tables."""
     gating_raw = data.get("gating")
     if not isinstance(gating_raw, dict):
         raise RubricError("rubric document: missing [gating] tables")
@@ -263,7 +263,11 @@ def parse_rubric(path: Path) -> Rubric:
             f"{unknown_gates} — the three gating keys are structural (they are "
             "the sidecar's JSON keys) and cannot be added to by editing this file"
         )
+    return gating
 
+
+def _parse_dimensions(data: dict) -> list[RubricDimension]:
+    """The [[dimension]] entries: count, per-entry shape, unique keys, weights summing to 100."""
     dims_raw = data.get("dimension")
     if not isinstance(dims_raw, list):
         raise RubricError("rubric document: missing [[dimension]] entries")
@@ -321,17 +325,13 @@ def parse_rubric(path: Path) -> Rubric:
             "rubric document: dimension weight values must sum to 100, "
             f"found {total_weight}"
         )
+    return dimensions
 
-    def _section_text(table_name: str, field: str = "text") -> str:
-        table = data.get(table_name)
-        if not isinstance(table, dict):
-            raise RubricError(f"rubric document: missing [{table_name}] table")
-        return _require_str(table.get(field), f"[{table_name}].{field}")
 
-    red_flags_table = data.get("red_flags")
-    if not isinstance(red_flags_table, dict):
-        raise RubricError("rubric document: missing [red_flags] table")
-
+def _parse_stage_bars(
+    data: dict, dimensions: list[RubricDimension], gating: dict[str, dict[str, str]]
+) -> tuple[StageBar, dict[str, StageBar]]:
+    """The global stage bar and the per-domain bars, each `source` checked against the document's own keys."""
     # Per-domain stage bars. `source` names the clause each bar condenses and is
     # validated against the document's OWN keys — the point of the field is that
     # a reviewer can check the condensation against the original, and a source
@@ -377,6 +377,42 @@ def parse_rubric(path: Path) -> Rubric:
             source=source,
             text=_require_str(entry.get("text"), f"[stage_bar.{domain}].text"),
         )
+    return stage_bar_global, stage_bars
+
+
+def parse_rubric(path: Path) -> Rubric:
+    """Parse and validate a rubric document. Raises ``RubricError`` on any
+    defect — the caller (module import, below) deliberately does not catch it.
+
+    Public so the validator is testable against scratch files without
+    monkeypatching the module-level singleton.
+    """
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise RubricError(f"rubric document unreadable at {path}: {exc}") from exc
+    try:
+        data = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise RubricError(f"rubric document is not valid TOML ({path}): {exc}") from exc
+
+    meta, version = _parse_meta(data)
+    scale_min, scale_max = _parse_scale(data)
+    banding, advance_min, conditional_min = _parse_banding(data)
+    gating = _parse_gating(data)
+    dimensions = _parse_dimensions(data)
+
+    def _section_text(table_name: str, field: str = "text") -> str:
+        table = data.get(table_name)
+        if not isinstance(table, dict):
+            raise RubricError(f"rubric document: missing [{table_name}] table")
+        return _require_str(table.get(field), f"[{table_name}].{field}")
+
+    red_flags_table = data.get("red_flags")
+    if not isinstance(red_flags_table, dict):
+        raise RubricError("rubric document: missing [red_flags] table")
+
+    stage_bar_global, stage_bars = _parse_stage_bars(data, dimensions, gating)
 
     return Rubric(
         version=version,
@@ -444,7 +480,7 @@ _TOTAL_WEIGHT = sum(RUBRIC_WEIGHTS.values())
 # band()'s decision lines, in ascending order, mirrored here so the display
 # rounding in weighted_score() can be checked against them. Grid-alignment is
 # validated by parse_rubric.
-_BAND_THRESHOLDS = (_RUBRIC.conditional_min, _RUBRIC.advance_min)
+_BAND_THRESHOLDS = tuple(sorted(getattr(_RUBRIC, b.threshold_key) for b in BANDS if b.threshold_key))
 
 
 def weighted_score(scores: dict[str, object] | None) -> float:
@@ -551,11 +587,7 @@ def band(score: float) -> str:
     not 'passing' the screen. The returned value is the stable stored vocabulary;
     the display label for the decline band is ``BANDING["pass_label"]``.
     """
-    if score >= _RUBRIC.advance_min:
-        return "advance"
-    if score >= _RUBRIC.conditional_min:
-        return "conditional"
-    return "pass"
+    return band_for(score, {"advance_min": _RUBRIC.advance_min, "conditional_min": _RUBRIC.conditional_min})
 
 
 def _format_threshold(value: float) -> str:

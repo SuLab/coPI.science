@@ -239,15 +239,15 @@
    reaches the manager route. A column is raw JSONB, so anything that is not a
    real list (a string, a mapping) renders as nothing rather than as one
    bullet per character or per key. #}
-{% set hub_strengths = a.strengths if (viewer_is_staff and a.strengths is iterable and a.strengths is not string and a.strengths is not mapping) else [] %}
-{% set hub_risks = a.risks if (viewer_is_staff and a.risks is iterable and a.risks is not string and a.risks is not mapping) else [] %}
+{% set hub_strengths = a.strengths if ((viewer_is_staff or 'strengths' not in staff_only_verdict_fields) and a.strengths is iterable and a.strengths is not string and a.strengths is not mapping) else [] %}
+{% set hub_risks = a.risks if ((viewer_is_staff or 'risks' not in staff_only_verdict_fields) and a.risks is iterable and a.risks is not string and a.risks is not mapping) else [] %}
 {# Sidecar items 13/14 (0050). Staff-only on the page for the same reason as the
    0049 bullets above: the prompt promises the model these are never seen outside
    staff, and a reviewer account reaches the manager route. A column is raw JSONB,
    so anything that is not a real list renders as nothing rather than as one
    bullet per character or per key. #}
-{% set hub_landscape = a.competitive_landscape if (viewer_is_staff and a.competitive_landscape is iterable and a.competitive_landscape is not string and a.competitive_landscape is not mapping) else [] %}
-{% set hub_maturity = a.evidence_maturity if (viewer_is_staff and a.evidence_maturity is iterable and a.evidence_maturity is not string and a.evidence_maturity is not mapping) else [] %}
+{% set hub_landscape = a.competitive_landscape if ((viewer_is_staff or 'competitive_landscape' not in staff_only_verdict_fields) and a.competitive_landscape is iterable and a.competitive_landscape is not string and a.competitive_landscape is not mapping) else [] %}
+{% set hub_maturity = a.evidence_maturity if ((viewer_is_staff or 'evidence_maturity' not in staff_only_verdict_fields) and a.evidence_maturity is iterable and a.evidence_maturity is not string and a.evidence_maturity is not mapping) else [] %}
 {# One derived row. `kind` is strengths|risks|mid_scale|unestablished — BOTH
    maps below must name every kind, because a miss yields Undefined and
    `glyph[1]` then raises, 500ing the page. Layout is a
@@ -607,18 +607,14 @@
             <div class="text-sm text-gray-600 mt-2">Score and band</div>
             <div class="mt-0.5">
                 <span class="text-2xl font-bold
-                    {% if a.band == 'advance' %}text-green-700
-                    {% elif a.band == 'conditional' %}text-amber-700
-                    {% else %}text-gray-600{% endif %}">
+                    {{ band_class(a.band, 700, 600) }}">
                     {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
                 </span>
                 {# Same vocabulary as the list page: the stored band value is
                    "pass", and unlabelled it reads as the opposite of the
                    decline it records. #}
                 <span class="band-label ml-1.5 text-sm font-medium uppercase tracking-wide align-middle
-                    {% if a.band == 'advance' %}text-green-700
-                    {% elif a.band == 'conditional' %}text-amber-700
-                    {% else %}text-gray-600{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
+                    {{ band_class(a.band, 700, 600) }}">{{ band_label(a.band, banding.pass_label) or '—' }}</span>
             </div>
             <div class="text-sm text-gray-600 mt-1">
                 computed, not taken from the model &middot;
