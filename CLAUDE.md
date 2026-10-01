@@ -26,7 +26,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   on a throwaway Postgres, `ruff check` on `tests/` (zero findings) and on `src/` (a
   ratcheted ceiling), then the full pytest run with a branch-coverage floor. Run it
   before committing. `scripts/install-hooks.sh` installs it as a `pre-push` hook.
-- Its throwaway Postgres has a fixed name (`copi-ci-migcheck`), so never run two at once.
+- Its throwaway Postgres is named `copi-ci-migcheck-<pid>` on a free port, so two runs no longer
+  collide on it (a leaked container from an interrupted run is removed by name at that run's exit).
 - Run pytest on the host, not in a container (the images install without the `[dev]`
   extra, so pytest is absent there): `.venv-test/bin/python -m pytest tests/ -v`. With
   `TEST_DATABASE_URL` unset, `tests/conftest.py` starts its own Postgres through
@@ -41,7 +42,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   be 100-400x slower; check the mount before suspecting a hang.
 - The suite and the images resolve different `anthropic` versions (`pyproject.toml`
   pins only `>=0.26.0`; measured 2026-09-29: 1.9.0 in all three images, 0.120.2 in
-  `.venv-test`). Do not tighten the pin. `_acreate`'s
+  `.venv-test`). Do not tighten the pin. `acreate`'s
   `NonStreamingMaxTokensError` in `src/services/llm.py` is the only enforcement of the
   non-streaming `max_tokens` ceiling (`NONSTREAMING_MAX_TOKENS`): the SDK skips its own
   check because the client sets a custom timeout. Do not remove it.

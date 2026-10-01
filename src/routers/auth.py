@@ -11,16 +11,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import Match
 
-from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
 from src.models import AccessAllowlist, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.services.orcid import fetch_orcid_profile
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
+from src.web.templating import make_templates
 
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -228,7 +229,7 @@ async def auth_callback(
 
         # Only enqueue profile generation for allowed users
         if user.access_status == "allowed":
-            await enqueue_profile_job_if_absent(db, user)
+            await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
             logger.info("Created allowed user %s (%s), enqueued profile job", user.id, orcid_id)
         else:
             logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
@@ -252,7 +253,7 @@ async def auth_callback(
                 select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
             )
             if profile_check.scalar_one_or_none() is None:
-                await enqueue_profile_job_if_absent(db, user)
+                await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
         # Set claimed_at if this was a seeded profile
         if user.claimed_at is None:
             user.claimed_at = datetime.now(timezone.utc)

@@ -351,7 +351,7 @@ async def test_make_decision_parses_json_from_response(monkeypatch):
 async def test_thinking_is_disabled_by_default_on_every_call(monkeypatch):
     """A call site that passes no `thinking` must NOT inherit adaptive thinking.
 
-    Defaulted centrally in `_acreate` so a NEW call site cannot acquire
+    Defaulted centrally in `acreate` so a NEW call site cannot acquire
     thinking-on by forgetting the parameter.
     """
     fake = FakeAnthropic(responses=["ok"])
@@ -414,7 +414,7 @@ def test_a_reply_with_only_thinking_yields_empty_string():
     from tests.fakes import _Message, _ThinkingBlock
 
     msg = _Message(content=[_ThinkingBlock(thinking="thought hard, said nothing")])
-    assert llm._all_text(msg) == ""
+    assert llm.all_text(msg) == ""
 
 
 # ---------------------------------------------------------------------------

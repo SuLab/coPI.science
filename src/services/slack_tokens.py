@@ -14,29 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
 from src.models import AgentRegistry
+from src.services.token_format import is_valid_token
+
+__all__ = ["env_token", "get_any_bot_token", "is_valid_token", "token_for_agent_row"]
 
 logger = logging.getLogger(__name__)
-
-
-def is_valid_token(token: str | None) -> bool:
-    """True for a value that could plausibly be a Slack **bot** token.
-
-    Every caller passes a bot token, and Slack bot tokens are always ``xoxb-``. The
-    prefix check is not cosmetic. Whatever this accepts is what ``token_for_agent_row``
-    and ``get_any_bot_token`` hand out, and what the engine's ``slack_enabled``
-    auto-detect in ``src/agent/main.py`` counts: with ``SLACK_ENABLED`` unset, the mere
-    *presence* of a valid-looking token switches the whole integration on. Before the
-    prefix check, a user token (``xoxp-``), an app-config token (``xoxe.xoxp-`` — which
-    lives in the same ``.env`` as the bot tokens), a stray ``"   "``, or an unfilled
-    ``REPLACE_ME`` all counted as "usable", flipping Slack on and then failing every
-    API call with ``invalid_auth`` or ``not_allowed_token_type``.
-
-    ``xoxb-placeholder`` remains a recognised no-op value for seeded rows.
-    """
-    if not token:
-        return False
-    token = token.strip()
-    return token.startswith("xoxb-") and not token.startswith("xoxb-placeholder")
 
 
 def env_token(agent_id: str) -> str | None:

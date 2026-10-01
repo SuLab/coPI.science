@@ -44,7 +44,7 @@ _DOI = "10.1234/abc.def"
 @pytest.fixture(autouse=True)
 def _no_waiting(monkeypatch):
     monkeypatch.setattr(pubmed, "_pace_interval", lambda: 0.0)
-    pubmed._next_slot = 0.0
+    pubmed._PACER.reset()
     real_sleep = asyncio.sleep
 
     async def _instant(seconds):

@@ -13,6 +13,8 @@ from src.agent.prompt_snapshot import role_spec
 from src.agent.specialists import (
     DEFAULTED_TALLY_LABEL,
     SPECIALIST_DOMAINS,
+    SpecialistOpinion,
+    SpecialistSpec,
     has_usable_content,
     parse_opinion,
     persona_path,
@@ -448,61 +450,10 @@ async def _execute_search_prior_art(query: str) -> str:
     return "\n\n".join(lines)
 
 
-async def _execute_consult_specialist(
-    domain: str,
-    question: str,
-    context: str,
-    *,
-    agent_id: str,
-    channel: str | None = None,
-    thread_ts: str | None = None,
-    thread_phase: str | None = None,
-    message_ordinal: int | None = None,
-    on_consult: Callable[[str, str], None] | None = None,
-    on_consult_record: Callable[..., Awaitable[None]] | None = None,
-    on_api_call: Callable[[], None] | None = None,
-) -> str:
-    """Ask one specialist persona for an opinion.
-
-    ``on_consult`` is invoked with the domain and the parsed verdict signal
-    ONLY on a successful call. A refused domain, a missing persona file, a
-    failed LLM call, an empty reply, or a reply the API stopped mid-sentence
-    (``is_truncated_stop`` — ``refusal`` OR ``max_tokens``) must not satisfy the
-    enforcement floor — otherwise "the specialist was unreachable" would
-    silently become "the specialist approved".
-
-    ``on_consult_record`` fires on a strictly WIDER path — every case above that
-    produced text at all, truncated ones included — and is the durable record of
-    the attempt (``specialist_consults``). It carries only what this function
-    knows — the ask, the parsed opinion, and whether the reply was cut off
-    (``truncated``); the engine's own closure supplies who asked, about whom,
-    and in which thread and channel. Deliberately
-    SECOND: the in-memory ``on_consult`` is what the floor reads in-process and
-    stays authoritative there, so a write that fails must not un-count a
-    consult that really happened. It is awaited rather than
-    fired-and-forgotten (a bare task would outlive the turn and race the
-    engine's shutdown flush), but it can neither raise into nor change the
-    string this returns — see the guard at the call.
-
-    ``channel`` is the interview's channel, used only for this call's own
-    ``llm_call_logs`` metadata. None for a direct caller with no thread.
-
-    ``on_api_call`` is a DIFFERENT question — "was an Opus call billed?", not
-    "does this count as consulted?" — so it fires on a different schedule: once
-    per call actually issued, before it is issued, whatever the outcome. A
-    consult is a real Opus call; booking it is what keeps the hub visible to the
-    sliding-window limiter and to ``SimulationRun.total_api_calls`` (see
-    ``Agent.record_api_call``'s invariant). Callers pass
-    ``agent.record_api_call``. The two callbacks deliberately disagree on a
-    consult that was billed but did not parse.
-    """
-    spec = SPECIALIST_DOMAINS.get(domain)
-    if spec is None:
-        return (
-            f"Unknown specialist domain {domain!r}. Valid domains: "
-            + ", ".join(sorted(SPECIALIST_DOMAINS))
-        )
-
+def _load_persona_text(domain: str) -> str | None:
+    """The domain's persona prompt with the stage bar substituted, or None when its
+    file is missing (logged here; the caller tells the model the specialist is
+    unavailable)."""
     path = persona_path(domain)
     # The persona as loaded at engine start when a snapshot is installed (spec
     # §8.6); otherwise today's disk read.
@@ -512,10 +463,7 @@ async def _execute_consult_specialist(
         persona = path.read_text(encoding="utf-8") if path.is_file() else None
     if persona is None:
         logger.error("[specialists] persona file missing for %s: %s", domain, path)
-        return (
-            f"The {domain} specialist is unavailable (persona file missing). "
-            "Proceed without this opinion; it will not count as consulted."
-        )
+        return None
 
     # The specialists were never inside the mechanism that keeps the hub's
     # prompt and the document in step (render_rubric_markdown -> {rubric},
@@ -525,6 +473,25 @@ async def _execute_consult_specialist(
         persona = persona.replace(
             _STAGE_BAR_PLACEHOLDER, render_stage_bar_markdown(domain)
         )
+    return persona
+
+
+async def _call_specialist(
+    domain: str,
+    persona: str,
+    question: str,
+    context: str,
+    *,
+    agent_id: str,
+    channel: str | None,
+    thread_ts: str | None,
+    thread_phase: str | None,
+    message_ordinal: int | None,
+    on_api_call: Callable[[], None] | None,
+) -> tuple[str | None, list[str], str | None]:
+    """Book and issue the one Opus call. Returns ``(raw, stop_reasons, error)``:
+    ``error`` is the string for the model when the call raised (``raw`` is then
+    None). ``on_api_call`` fires before the call, whatever the outcome."""
     # Book the call before issuing it, the same way _reply_to_thread books its
     # own: a call that is made and then fails is still billed, so charging only
     # on success would let a flapping specialist run free.
@@ -607,24 +574,23 @@ async def _execute_consult_specialist(
         )
     except Exception as exc:  # noqa: BLE001 — a dead specialist must not kill the turn
         logger.error("[specialists] %s consult failed: %s", domain, exc)
-        return f"Error consulting the {domain} specialist: {exc}"
+        return None, stop_reasons, f"Error consulting the {domain} specialist: {exc}"
+    return raw, stop_reasons, None
 
-    # A billed call that came back empty is not an opinion. `on_api_call`
-    # already fired above (it answers "was this billed?"); `on_consult` answers
-    # "does this satisfy the floor?" and the two must disagree here. Checked
-    # BEFORE parsing: this branch returns a fixed string and reads nothing off
-    # the opinion, so parsing first was work whose only possible consumer was
-    # the branch that never runs.
-    if not has_usable_content(raw):
-        logger.error(
-            "[specialists] %s returned no usable content — NOT counted as "
-            "consulted", domain,
-        )
-        return (
-            f"The {domain} specialist returned an empty response. Proceed "
-            "without this opinion; it will not count as consulted."
-        )
-    opinion = parse_opinion(raw, domain=domain)
+
+async def _record_consult_outcome(
+    domain: str,
+    question: str,
+    context: str,
+    opinion: SpecialistOpinion,
+    stop_reasons: list[str],
+    *,
+    agent_id: str,
+    on_consult: Callable[[str, str], None] | None,
+    on_consult_record: Callable[..., Awaitable[None]] | None,
+) -> tuple[bool, str]:
+    """Count the consult toward the floor (never when truncated), log it, and write
+    the durable record, in that order. Returns ``(truncated, read_state)``."""
     # A reply the API stopped mid-sentence is not an opinion either, and it is a
     # WORSE failure than an empty one because it looks like a complete answer.
     # Measured over run 8b64a0e0: 3 consults ended in `refusal`, all 3 were
@@ -736,6 +702,13 @@ async def _execute_consult_specialist(
                 "[specialists] %s consult recorded in memory but NOT durably: %s",
                 domain, exc, exc_info=True,
             )
+    return truncated, read_state
+
+
+def _format_consult_result(
+    spec: SpecialistSpec, domain: str, opinion: SpecialistOpinion, truncated: bool, read_state: str
+) -> str:
+    """The string the hub model reads back for one consult."""
     if truncated:
         # Say so in the string the MODEL reads, not just in the log. Otherwise
         # the hub consults once, sees a plausible opinion, believes the domain is
@@ -769,3 +742,98 @@ async def _execute_consult_specialist(
         f"{spec.title}\n\n{opinion.raw}\n\n"
         f"— signal: {opinion.verdict_signal} (read: {read_state})"
     )
+
+
+async def _execute_consult_specialist(
+    domain: str,
+    question: str,
+    context: str,
+    *,
+    agent_id: str,
+    channel: str | None = None,
+    thread_ts: str | None = None,
+    thread_phase: str | None = None,
+    message_ordinal: int | None = None,
+    on_consult: Callable[[str, str], None] | None = None,
+    on_consult_record: Callable[..., Awaitable[None]] | None = None,
+    on_api_call: Callable[[], None] | None = None,
+) -> str:
+    """Ask one specialist persona for an opinion.
+
+    ``on_consult`` is invoked with the domain and the parsed verdict signal
+    ONLY on a successful call. A refused domain, a missing persona file, a
+    failed LLM call, an empty reply, or a reply the API stopped mid-sentence
+    (``is_truncated_stop`` — ``refusal`` OR ``max_tokens``) must not satisfy the
+    enforcement floor — otherwise "the specialist was unreachable" would
+    silently become "the specialist approved".
+
+    ``on_consult_record`` fires on a strictly WIDER path — every case above that
+    produced text at all, truncated ones included — and is the durable record of
+    the attempt (``specialist_consults``). It carries only what this function
+    knows — the ask, the parsed opinion, and whether the reply was cut off
+    (``truncated``); the engine's own closure supplies who asked, about whom,
+    and in which thread and channel. Deliberately
+    SECOND: the in-memory ``on_consult`` is what the floor reads in-process and
+    stays authoritative there, so a write that fails must not un-count a
+    consult that really happened. It is awaited rather than
+    fired-and-forgotten (a bare task would outlive the turn and race the
+    engine's shutdown flush), but it can neither raise into nor change the
+    string this returns — see the guard at the call.
+
+    ``channel`` is the interview's channel, used only for this call's own
+    ``llm_call_logs`` metadata. None for a direct caller with no thread.
+
+    ``on_api_call`` is a DIFFERENT question — "was an Opus call billed?", not
+    "does this count as consulted?" — so it fires on a different schedule: once
+    per call actually issued, before it is issued, whatever the outcome. A
+    consult is a real Opus call; booking it is what keeps the hub visible to the
+    sliding-window limiter and to ``SimulationRun.total_api_calls`` (see
+    ``Agent.record_api_call``'s invariant). Callers pass
+    ``agent.record_api_call``. The two callbacks deliberately disagree on a
+    consult that was billed but did not parse.
+    """
+    spec = SPECIALIST_DOMAINS.get(domain)
+    if spec is None:
+        return (
+            f"Unknown specialist domain {domain!r}. Valid domains: "
+            + ", ".join(sorted(SPECIALIST_DOMAINS))
+        )
+
+    persona = _load_persona_text(domain)
+    if persona is None:
+        return (
+            f"The {domain} specialist is unavailable (persona file missing). "
+            "Proceed without this opinion; it will not count as consulted."
+        )
+
+    raw, stop_reasons, error = await _call_specialist(
+        domain, persona, question, context,
+        agent_id=agent_id, channel=channel, thread_ts=thread_ts,
+        thread_phase=thread_phase, message_ordinal=message_ordinal,
+        on_api_call=on_api_call,
+    )
+    if error is not None:
+        return error
+
+    # A billed call that came back empty is not an opinion. `on_api_call`
+    # already fired above (it answers "was this billed?"); `on_consult` answers
+    # "does this satisfy the floor?" and the two must disagree here. Checked
+    # BEFORE parsing: this branch returns a fixed string and reads nothing off
+    # the opinion, so parsing first was work whose only possible consumer was
+    # the branch that never runs.
+    if not has_usable_content(raw):
+        logger.error(
+            "[specialists] %s returned no usable content — NOT counted as "
+            "consulted", domain,
+        )
+        return (
+            f"The {domain} specialist returned an empty response. Proceed "
+            "without this opinion; it will not count as consulted."
+        )
+    opinion = parse_opinion(raw, domain=domain)
+    truncated, read_state = await _record_consult_outcome(
+        domain, question, context, opinion, stop_reasons,
+        agent_id=agent_id, on_consult=on_consult, on_consult_record=on_consult_record,
+    )
+    return _format_consult_result(spec, domain, opinion, truncated, read_state)
+

@@ -11,6 +11,10 @@ suite (zero findings) plus a ratcheted ceiling on `src/`, then the full pytest
 run with a branch-coverage floor. This is exactly what the `pre-push` hook
 runs, and it is the whole gate: there is no server-side CI.
 
+The round trip's throwaway Postgres is named `copi-ci-migcheck-<pid>` on a free
+127.0.0.1 port (override with `MIGCHECK_PORT`), so two runs no longer collide on it.
+A container leaked by an interrupted run is removed by name at that run's exit.
+
 **The supported way to run pytest alone is on the host, not inside a
 container:**
 
@@ -71,7 +75,7 @@ container, no manual database, no env var needed. This is exactly what
 > `_client_for_key` now constructs its client with
 > `anthropic.Timeout(CLIENT_READ_TIMEOUT_SECONDS, connect=5.0)`
 > (`src/services/llm.py:41`, `:145`) — so that condition is permanently false
-> and the SDK will happily send a request the API rejects. `_acreate`'s own
+> and the SDK will happily send a request the API rejects. `acreate`'s own
 > check, which raises `NonStreamingMaxTokensError` (`:216`, raised at `:382`),
 > is now the ONLY enforcement in the process. Do not remove it on the grounds
 > that the SDK checks too; it does not.

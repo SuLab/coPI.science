@@ -25,10 +25,12 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
-# The one import outside the standard library, and it is chosen to keep this
-# module's "dependency-free on the engine" promise: src/services/json_extract.py
-# is pure (no SDK, no DB, no engine) and exists precisely so this module need not
-# import src.services.llm to get its extractor. See that module's docstring.
+# The only imports outside the standard library, chosen to keep this module's
+# "dependency-free on the engine" promise: src/services/json_extract.py is pure
+# (no SDK, no DB, no engine) and exists precisely so this module need not import
+# src.services.llm to get its extractor (see that module's docstring), and
+# src/services/bands.py is the dependency-free band registry.
+from src.services.bands import BANDS
 from src.services.json_extract import extract_json
 
 logger = logging.getLogger(__name__)
@@ -893,7 +895,7 @@ _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 #: this set are absent from that module entirely
 #: (``tests/unit/test_panel_state.py``). A rule change would otherwise silently
 #: restate every historical row's verdict under today's rule.
-PANEL_REQUIRED_FOR: frozenset[str] = frozenset({"advance", "conditional"})
+PANEL_REQUIRED_FOR: frozenset[str] = frozenset(b.name for b in BANDS if b.panel_required)
 
 #: The only recommendation that buys an exemption: a decline. Use
 #: ``panel_is_owed`` rather than this set — the exemption is conditional on the

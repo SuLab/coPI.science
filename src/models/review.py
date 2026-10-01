@@ -34,6 +34,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     SmallInteger,
@@ -122,6 +123,11 @@ class AssessmentReview(Base):
         nullable=False,
     )
 
+    __table_args__ = (
+        CheckConstraint("feedback_mode IN ('learn','log_only')", name="ck_assessment_reviews_mode"),
+        CheckConstraint("score >= 1 AND score <= 5", name="ck_assessment_reviews_score"),
+    )
+
     def __repr__(self) -> str:
         return f"<AssessmentReview assessment={self.assessment_id} score={self.score}>"
 
@@ -161,6 +167,10 @@ class AssessmentReviewEvent(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("action IN ('approved','disapproved','cleared')", name="ck_assessment_review_events_action"),
     )
 
     def __repr__(self) -> str:
@@ -278,6 +288,10 @@ class PromptChangeSuggestion(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('open','dismissed','implemented')", name="ck_prompt_change_suggestions_status"),
     )
 
     def __repr__(self) -> str:

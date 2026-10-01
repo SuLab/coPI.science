@@ -277,9 +277,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
-        "0049", "0050", "0051", "0052", "0053", "0054",
+        "0049", "0050", "0051", "0052", "0053", "0054", "0055",
     )
-    assert pf.DEFAULT_TARGET == "0055"
+    assert pf.DEFAULT_TARGET == "0056"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -336,12 +336,11 @@ def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
 
 def test_agent_messages_ddl_pending_is_derived_from_planned_objects():
     """The row-scaled lock estimate applies while any pending revision touches
-    agent_messages. That includes a 0020 start: 0021 still builds
-    ix_agent_messages_run_created on it."""
-    for rev in ("0018", "0019", "0020"):
+    agent_messages: 0021 (ix_agent_messages_run_created) and 0056
+    (ix_agent_messages_agent_phase)."""
+    for rev in ("0018", "0019", "0020", "0021", "0050", "0055"):
         assert pf.agent_messages_ddl_pending(rev, pf.DEFAULT_TARGET) is True, rev
-    for rev in ("0021", "0050"):
-        assert pf.agent_messages_ddl_pending(rev, pf.DEFAULT_TARGET) is False, rev
+    assert pf.agent_messages_ddl_pending("0021", "0055") is False
     assert not hasattr(pf, "POST_0019_STARTS")
 
 
@@ -1800,3 +1799,37 @@ async def test_ambiguous_revision_distinguishes_all_three_signatures(monkeypatch
         assert status == pf.BLOCK
         seen.append(detail)
     assert len(set(seen)) == 3, "each of the three states must be diagnosed differently"
+
+
+# --------------------------------------------------------------------------- #
+# 0056: sizing per altered table, postflight pins through head, drift enforcement
+# --------------------------------------------------------------------------- #
+
+
+def test_sizing_covers_every_altered_table():
+    assert pf.tables_sized_between("0055", "0056") == [
+        "agent_messages", "assessment_chat_usage", "jobs", "publications", "slack_app_provisions", "users"]
+    assert "rubric_documents" not in pf.tables_sized_between("0055", "0056")  # created, nothing to size
+
+
+def test_postflight_pins_reach_head():
+    for name in ("uq_jobs_one_active_per_user_type", "uq_users_email_lower",
+                 "ix_agent_messages_agent_phase", "ix_chat_usage_streaming"):
+        assert name in po.EXPECTED_INDEXES
+    for name in ("uq_slack_app_provisions_agent", "uq_publications_user_pmid"):
+        assert name in po.EXPECTED_CONSTRAINTS
+    assert "rubric_documents" in po.EXPECTED_TABLES
+
+
+def test_drift_check_enforces_0056_objects():
+    assert po.DRIFT_ENFORCED_NAMES == frozenset({
+        "uq_jobs_one_active_per_user_type", "uq_slack_app_provisions_agent", "uq_publications_user_pmid",
+        "uq_users_email_lower", "ix_agent_messages_agent_phase", "ix_chat_usage_streaming"})
+
+
+async def test_sizing_reports_every_altered_table(monkeypatch):
+    _stub_agent_messages(monkeypatch, 10)
+    _title, _status, detail, _rem, data = await pf.check_sizing(None, "0055", "0056")
+    assert sorted(data["sized_tables"]) == pf.tables_sized_between("0055", "0056")
+    assert data["sized_tables"]["jobs"] == {"rows": 10, "heap_bytes": 50_000_000, "total_bytes": 50_000_000}
+    assert "jobs: 10 rows" in detail

@@ -452,9 +452,9 @@
                 (pass ON the deal), and unlabelled it reads as the opposite of
                 what it means. Always visible text, never colour alone. #}
             {%- if a.weighted_score is not none %}
-            <div class="mt-2"><span class="text-xl font-bold {% if a.band == 'advance' %}text-green-600{% elif a.band == 'conditional' %}text-amber-600{% else %}text-gray-400{% endif %}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {% if a.band == 'advance' %}text-green-600{% elif a.band == 'conditional' %}text-amber-600{% else %}text-gray-400{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span></div>
+            <div class="mt-2"><span class="text-xl font-bold {{ band_class(a.band, 600, 400) }}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {{ band_class(a.band, 600, 400) }}">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
             {%- else %}
-            <div class="mt-2"><span class="text-xl font-bold text-gray-400">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-400">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span></div>
+            <div class="mt-2"><span class="text-xl font-bold text-gray-400">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-400">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
             {%- endif %}
             {%- if a.score_rationale %}
             <div class="assessment-prose max-w-none mt-2">

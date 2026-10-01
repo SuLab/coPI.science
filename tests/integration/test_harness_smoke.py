@@ -79,7 +79,8 @@ async def test_container_is_migrated(engine):
         #      (the one-row-per-interview verdict store, spec §8.1)
         # 0055 uq_opportunity_assessments_run_thread (one assessment row per
         #      interview; prechecks refuse a live run and duplicate groups)
-        assert v == "0055"
+        # 0056 jobs.priority, the one-active-job index, four uniques, two indexes, rubric_documents
+        assert v == "0056"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from src.services import patents
+from src.services import odp, patents
 
 
 @pytest.fixture(autouse=True)
@@ -19,9 +19,9 @@ def _isolated_and_unpaced(monkeypatch):
     them raise the interval back up themselves.
     """
     patents.clear_prior_art_cache()
-    monkeypatch.setattr(patents, "_PACE_INTERVAL", 0.0)
+    monkeypatch.setattr(odp, "ODP_PACE_INTERVAL", 0.0)
     monkeypatch.setattr(patents, "_ODP_BACKOFF", 0.0)
-    patents._next_slot = 0.0
+    odp.ODP_PACER.reset()
 
 
 # A realistic USPTO ODP Patent File Wrapper search response (trimmed).
@@ -513,8 +513,8 @@ async def test_every_odp_request_in_the_ladder_is_paced(monkeypatch):
     # pubmed._ncbi_get, where `await _pace()` before every attempt is the
     # load-bearing half).
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    monkeypatch.setattr(patents, "_PACE_INTERVAL", 0.05)
-    patents._next_slot = 0.0
+    monkeypatch.setattr(odp, "ODP_PACE_INTERVAL", 0.05)
+    odp.ODP_PACER.reset()
     respx.post(patents.SEARCH_URL).mock(
         return_value=httpx.Response(200, json={"count": 0, "patentFileWrapperDataBag": []})
     )

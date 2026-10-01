@@ -4,22 +4,23 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user, refuse_impersonation
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -184,7 +185,7 @@ async def profile_refresh(
     fires the same ORCID/PubMed generate_profile pipeline that F8 kept off
     manager accounts on the onboarding side.
     """
-    await enqueue_profile_job_if_absent(db, current_user)
+    await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
     await db.commit()
     return RedirectResponse(url="/profile?refreshing=1", status_code=302)
 

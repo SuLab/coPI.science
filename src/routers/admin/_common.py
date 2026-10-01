@@ -2,51 +2,14 @@
 template environment, and the dependency singletons."""
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.templating import Jinja2Templates
 
 from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import User
-from src.services import display_format as fmt
-from src.services.assessment_detail import key_point_sections
-from src.services.llm import is_truncated_stop
-from src.services.prose_citations import markdown_with_citation_links, plain_with_citation_links
+from src.web.templating import make_templates
 
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
-
-# `{{ dt | ts }}` — one UTC datetime rendering for the whole admin surface
-# (src/services/display_format.timestamp). A filter, not a per-call helper, so
-# a template can never accidentally print a raw `datetime.__str__`.
-templates.env.filters["ts"] = fmt.timestamp
-
-# "Did this API call stop before it finished?" — registered as a Jinja TEST so
-# `admin/llm_calls.html` can `selectattr('stop_reason', 'truncated_stop')` and
-# reach the real predicate rather than re-listing its stop reasons.
-#
-# The template used to test `stop_reason == 'max_tokens'` on its own, which
-# rendered a `refusal`-truncated turn as complete on the one page an operator
-# opens to audit truncation. `is_truncated_stop` (src/services/llm.py) is the
-# single definition — the engine, the specialist floor and the Slack posting
-# path all read it — so a third stop reason added there reaches this page for
-# free. A test, not a filter or a global: `selectattr` takes a test name.
-templates.env.tests["truncated_stop"] = is_truncated_stop
-
-# The key-point sections a stored `key_points` value renders as (current or
-# legacy labels, see `key_point_sections`), used by both
-# `_assessments_body.html` and `_assessment_detail_body.html`. Registered as a
-# Jinja global rather than a context key: the admin assessments handler
-# forbids a new one (see the comment on `_assessments_body.html`'s card-list
-# block).
-templates.env.globals["key_point_sections"] = key_point_sections
-
-# Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). Registered
-# as globals for the same reason `key_point_sections` is: the admin assessments
-# handler allowlists its context keys and forbids a new one, and BOTH routers
-# include the same two partials while each `Jinja2Templates` keeps its own
-# globals. src/routers/manager.py carries the identical two lines.
-templates.env.globals["md_citations"] = markdown_with_citation_links
-templates.env.globals["plain_citations"] = plain_with_citation_links
+templates = make_templates()
 
 # Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
 # can move an already-approved agent between these from the edit page; the sim

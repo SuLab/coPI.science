@@ -31,10 +31,11 @@ from typing import Any
 import httpx
 
 from src.config import get_settings
+from src.services.odp import ODP_PACER, ODP_SEARCH_URL, odp_client, odp_headers
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://api.uspto.gov/api/v1/patent/applications/search"
+SEARCH_URL = ODP_SEARCH_URL
 
 # One search token: a run of letters/digits, optionally carrying the ONE piece of
 # punctuation that survives tokenisation — a hyphen joining a symbol to a NUMERIC
@@ -436,6 +437,9 @@ def _tiers(tokens: list[str]) -> list[list[str]]:
 # read, so this is the closest published number plus the observation that three
 # back-to-back POSTs on one key were enough to trip it. A whole four-tier ladder
 # costs 3s of spacing, against consults that take 25-40s.
+# `_PACE_INTERVAL` / `_next_slot` are vestigial: the pacer now lives in src/services/odp.py
+# (ODP_PACE_INTERVAL / ODP_PACER). They stay only because the frozen golden driver
+# (tests/characterization/test_prompt_freeze_gm.py) still monkeypatches them by name.
 _PACE_INTERVAL = 1.0
 _next_slot: float = 0.0
 
@@ -445,21 +449,8 @@ _ODP_BACKOFF = 1.0
 
 
 async def _pace() -> None:
-    """Space ODP request starts at least ``_PACE_INTERVAL`` apart, process-wide.
-
-    Lifted from ``pubmed._pace``, including the reason it holds no lock: the
-    read-modify-write of ``_next_slot`` has no ``await`` between the read and the
-    write, so it is atomic on the event loop, and a module-level asyncio primitive
-    would bind to the first event loop that touched it (which breaks under
-    pytest's per-test loops).
-    """
-    global _next_slot
-    loop = asyncio.get_running_loop()
-    now = loop.time()
-    wait = _next_slot - now
-    _next_slot = max(now, _next_slot) + _PACE_INTERVAL
-    if wait > 0:
-        await asyncio.sleep(wait)
+    """Pace one ODP request (shared ODP pacer; see src/services/odp.py)."""
+    await ODP_PACER.wait()
 
 
 # Full-text (abstract + first claim) enrichment. Each pre-grant-publication XML is
@@ -496,7 +487,7 @@ async def _fetch_fulltext(client: httpx.AsyncClient, uri: str) -> tuple[str, str
     """
     try:
         await _pace()
-        r = await client.get(uri, headers={"X-API-KEY": _api_key()})
+        r = await client.get(uri, headers=odp_headers(_api_key()))
         r.raise_for_status()
         xml = r.text
     except (httpx.HTTPError, ValueError) as exc:
@@ -568,7 +559,7 @@ async def _search_titles(
     }
     for attempt in range(_ODP_ATTEMPTS):
         await _pace()
-        resp = await client.post(SEARCH_URL, json=body, headers={"X-API-KEY": key})
+        resp = await client.post(SEARCH_URL, json=body, headers=odp_headers(key))
         if resp.status_code != 429:
             break
         if attempt < _ODP_ATTEMPTS - 1:
@@ -717,7 +708,7 @@ async def search_prior_art(query: str, limit: int = 10) -> PriorArtResult | None
     terms_used = tiers[-1]
     total_count: int | None = None
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        async with odp_client(timeout=60, follow_redirects=True) as client:
             for terms in tiers:
                 attempt = await _search_titles(client, terms, limit, key)
                 if attempt is None:

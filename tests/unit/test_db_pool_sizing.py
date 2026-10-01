@@ -18,8 +18,10 @@ def test_pool_is_larger_than_the_max_concurrent_reply_tasks():
 def test_agent_engine_is_constructed_with_explicit_pool_settings():
     import inspect
 
+    from src import database
     from src.agent import main as agent_main
 
-    src = inspect.getsource(agent_main)
-    assert "pool_size=settings.db_pool_size" in src
-    assert "max_overflow=settings.db_max_overflow" in src
+    assert 'make_engine("agent")' in inspect.getsource(agent_main)
+    src = inspect.getsource(database.engine_kwargs)
+    assert "s.db_pool_size" in src
+    assert "s.db_max_overflow" in src

@@ -3,7 +3,17 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +46,13 @@ class Publication(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="publications")
+
+    # NULL pmids do not conflict (C24).
+    __table_args__ = (
+        UniqueConstraint("user_id", "pmid", name="uq_publications_user_pmid"),
+        Index("ix_publications_pmid", "pmid"),
+        Index("ix_publications_user_id", "user_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<Publication id={self.id} pmid={self.pmid} title={self.title[:40]!r}>"

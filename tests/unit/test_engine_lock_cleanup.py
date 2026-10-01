@@ -48,7 +48,7 @@ def _patch(monkeypatch, rec, *, acquire_raises=False, hb_stop_raises=False, disp
     monkeypatch.setattr(agent_main, "validate_engine_settings", lambda settings: None)
     monkeypatch.setattr(agent_main, "SessionAdvisoryLock", _Lock)
     monkeypatch.setattr(agent_main, "EngineHeartbeat", _Heartbeat)
-    monkeypatch.setattr(agent_main, "create_async_engine", lambda *a, **kw: _Engine())
+    monkeypatch.setattr(agent_main, "make_engine", lambda *a, **kw: _Engine())
     monkeypatch.setattr(agent_main, "async_sessionmaker", lambda *a, **kw: None)
     monkeypatch.setattr(agent_main, "_run_simulation_locked", _locked)
 

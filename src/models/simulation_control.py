@@ -10,7 +10,7 @@ replay a request from before the process came up.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime
@@ -41,6 +41,11 @@ class SimulationCommand(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     #: Free-text outcome: run id started, error tail, or the stale reason.
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_simulation_commands_pending", "status", "created_at"),
+        Index("uq_simulation_commands_one_pending", "command", unique=True, postgresql_where=text("status = 'pending'")),
+    )
 
 
 class SimulationProcessStatus(Base):

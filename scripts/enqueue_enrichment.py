@@ -1,5 +1,8 @@
 """Enqueue enrich_grants / industry_evidence jobs for existing PIs. Preview by default.
 
+Jobs go in through the idempotent helper at bulk priority, so a re-run adds nothing and
+interactive work is claimed first.
+
   docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/enqueue_enrichment.py --apply
 """
 import argparse
@@ -12,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import select  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
-from src.models import Job, ResearcherProfile, User  # noqa: E402
+from src.models import ResearcherProfile, User  # noqa: E402
+from src.models.job import BULK_PRIORITY  # noqa: E402
+from src.services.job_queue import insert_job_if_absent  # noqa: E402
 
 
 async def enqueue_for_all(db, *, apply: bool, only: str | None, orcid: str | None) -> int:
@@ -25,13 +30,10 @@ async def enqueue_for_all(db, *, apply: bool, only: str | None, orcid: str | Non
         print(f"{'ENQUEUE' if apply else 'would enqueue'} {types} for {u.name} ({u.orcid})")
         if apply:
             for t in types:
-                pending = await db.execute(
-                    select(Job.id)
-                    .where(Job.user_id == u.id, Job.type == t, Job.status.in_(("pending", "processing")))
-                    .limit(1)
+                await insert_job_if_absent(
+                    db, type=t, user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid},
+                    priority=BULK_PRIORITY,
                 )
-                if pending.scalars().first() is None:
-                    db.add(Job(type=t, user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid}))
     if apply:
         await db.commit()
     return len(users)

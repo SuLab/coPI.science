@@ -48,6 +48,7 @@ from src.models.review import (
     AssessmentReviewEvent,
     PromptChangeSuggestion,
 )
+from src.models.rubric_document import RubricDocument
 from src.models.simulation_control import (
     AdminAuditEvent,
     SimulationCommand,
@@ -121,4 +122,5 @@ __all__ = [
     "PiIndustryScore",
     "AssessmentChatTurn",
     "AssessmentChatUsage",
+    "RubricDocument",
 ]

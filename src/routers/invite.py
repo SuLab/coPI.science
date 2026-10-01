@@ -6,17 +6,17 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.models import AgentDelegate, AgentRegistry, DelegateInvitation, User
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 _INVITE_EMAIL_MISMATCH_MSG = (
     "This invitation was sent to a different email address. Please sign in with "

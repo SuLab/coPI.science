@@ -43,7 +43,6 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,7 +62,7 @@ from src.models import (
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_mute import set_agent_mute_state
-from src.services.assessment_detail import build_assessment_detail, key_point_sections
+from src.services.assessment_detail import build_assessment_detail
 from src.services.assessment_reviews import (
     MAX_ANALYSES_PER_PRESS,
     count_pending_analysis_candidates,
@@ -86,28 +85,13 @@ from src.services.pi_onboarding import (
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
-from src.services.prose_citations import (
-    markdown_with_citation_links,
-    plain_with_citation_links,
-)
 from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_review_user)])
-templates = Jinja2Templates(directory="templates")
-
-# See src/routers/admin/_common.py's identical registration: both routers include the
-# same `_assessments_body.html`/`_assessment_detail_body.html` partials, and
-# each `Jinja2Templates` instance keeps its own globals.
-templates.env.globals["key_point_sections"] = key_point_sections
-
-# Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7). See the
-# identical registration in src/routers/admin/_common.py for why it is a global and
-# why it has to be done twice: each router owns its own Jinja2Templates
-# instance, so registering on one leaves the other 500ing on UndefinedError.
-templates.env.globals["md_citations"] = markdown_with_citation_links
-templates.env.globals["plain_citations"] = plain_with_citation_links
+templates = make_templates()
 
 _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity

@@ -23,8 +23,9 @@ from __future__ import annotations
 import hashlib
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
+
+from src.database import make_engine
 
 
 def fixed_key(name: str) -> int:
@@ -78,7 +79,7 @@ class SessionAdvisoryLock:
 
     async def acquire(self) -> bool:
         """``pg_try_advisory_lock``; True when this connection now holds it."""
-        self._engine = create_async_engine(self._url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+        self._engine = make_engine("advisory_lock", self._url)
         self._conn = await self._engine.connect()
         self._held = bool(await self._conn.scalar(
             text("SELECT pg_try_advisory_lock(:key)"), {"key": self._key}

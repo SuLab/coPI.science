@@ -5,9 +5,15 @@ from src.models import Job, PiGrant, Publication, ResearcherProfile, User
 from src.services import grant_enrichment as ge
 from src.services.jhu_rules import set_tenure_start
 from src.services.nih_reporter import ReporterFirehoseError
+from src.worker.main import JobContext
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("progress_on_test_connection")]
 JHU = {"org_name": "JOHNS HOPKINS UNIVERSITY"}
+
+
+def _ctx(job):
+    return JobContext(id=job.id, type=job.type, user_id=job.user_id, payload=dict(job.payload),
+                      attempts=job.attempts, max_attempts=job.max_attempts)
 
 
 def _row(core, fy, pid, org=JHU):
@@ -43,7 +49,7 @@ async def test_job_writes_only_pmid_linked_in_tenure_grants_and_projects_titles(
     monkeypatch.setattr(ge, "search_projects", fake_search)
     monkeypatch.setattr(ge, "publications_for_cores", fake_links)
 
-    await ge.execute_enrich_grants(job, db_session)
+    await ge.execute_enrich_grants(_ctx(job), db_session)
 
     grants = (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all()
     assert {g.core_project_num for g in grants} == {"R01AI137329", "R21AI190702"}
@@ -66,8 +72,9 @@ async def test_no_candidates_completes_without_rows(db_session, monkeypatch):
         return []
 
     monkeypatch.setattr(ge, "search_projects", none)
-    await ge.execute_enrich_grants(job, db_session)
+    await ge.execute_enrich_grants(_ctx(job), db_session)
     assert (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all() == []
+    await db_session.refresh(job)
     progress = job.payload.get("progress") or []
     assert progress and "no_reporter_match" in progress[-1]["detail"]
 
@@ -93,7 +100,7 @@ async def test_ineligible_activity_code_does_not_wipe_orcid_seed(db_session, mon
     monkeypatch.setattr(ge, "search_projects", fake_search)
     monkeypatch.setattr(ge, "publications_for_cores", fake_links)
 
-    await ge.execute_enrich_grants(job, db_session)
+    await ge.execute_enrich_grants(_ctx(job), db_session)
 
     grants = (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all()
     assert {g.core_project_num for g in grants} == {"U54XX000001"}
@@ -114,18 +121,18 @@ async def test_common_surname_firehose_completes_cleanly(db_session, monkeypatch
 
     monkeypatch.setattr(ge, "search_projects", blow_up)
 
-    await ge.execute_enrich_grants(job, db_session)
+    await ge.execute_enrich_grants(_ctx(job), db_session)
 
     assert (await db_session.execute(select(PiGrant).where(PiGrant.user_id == u.id))).scalars().all() == []
+    await db_session.refresh(job)
     progress = job.payload.get("progress") or []
     assert progress and "too common" in progress[-1]["detail"]
 
 
-async def test_enqueue_tolerates_duplicate_pending_rows(db_session):
+async def test_enqueue_skips_a_type_that_already_has_an_active_row(db_session):
     u = User(orcid="0000-0005-0000-0005", name="Duplicate Pending", user_role="pi")
     db_session.add(u)
     await db_session.flush()
-    db_session.add(Job(type="enrich_grants", user_id=u.id, status="pending", payload={}))
     db_session.add(Job(type="enrich_grants", user_id=u.id, status="pending", payload={}))
     await db_session.flush()
 
@@ -133,5 +140,5 @@ async def test_enqueue_tolerates_duplicate_pending_rows(db_session):
     await db_session.flush()
 
     jobs = (await db_session.execute(select(Job).where(Job.user_id == u.id))).scalars().all()
-    assert len([j for j in jobs if j.type == "enrich_grants"]) == 2
+    assert len([j for j in jobs if j.type == "enrich_grants"]) == 1
     assert len([j for j in jobs if j.type == "industry_evidence"]) == 1

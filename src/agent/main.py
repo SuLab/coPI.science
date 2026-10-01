@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 import typer
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
 from src.agent.engine.context import RunState
@@ -31,6 +31,7 @@ from src.agent.prompt_snapshot import install as install_prompt_snapshot
 from src.agent.roles import role_problem
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
+from src.database import make_engine
 from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.build_info import API_CALL_UNITS_NOTE
@@ -287,9 +288,7 @@ async def _run_simulation(
         if _supervisor_shutdown_requested():
             run_state.request_stop("signal")
         if locking:
-            hb_engine = create_async_engine(
-                settings.database_url, pool_size=1, max_overflow=0, pool_pre_ping=True,
-            )
+            hb_engine = make_engine("heartbeat")
             heartbeat = EngineHeartbeat(
                 lock=lock, run_state=run_state,
                 session_factory=async_sessionmaker(hb_engine, expire_on_commit=False),
@@ -315,33 +314,25 @@ async def _run_simulation(
                     await lock.release()
 
 
-async def _run_simulation_locked(
-    max_runtime: int,
-    budget: int,
-    mock: bool,
-    no_db: bool,
-    fresh: bool,
-    reset_cursors: bool = False,
-    all_agents: bool = False,
-    max_proposals: int = 0,
-    *,
-    run_state: RunState,
-    heartbeat: EngineHeartbeat | None,
-) -> None:
-    settings = get_settings()
+async def _load_roster(all_agents: bool, no_db: bool) -> tuple[list[Agent], dict[str, str | None]]:
+    """Read the roster from the AgentRegistry table: ``(agents, roster_tokens)``.
 
-    # The roster is sourced entirely from the AgentRegistry table (the DB is the
-    # single source of truth). By default we run the active_roster_select
-    # criterion (status=='active', pi_lab linked to a user); pass --all-agents
-    # to include every row regardless of status (the token gate
-    # below still drops anyone without a valid bot token). The roster read runs
-    # even under --no-db (it is independent of event logging).
+    The roster is sourced entirely from the AgentRegistry table (the DB is the
+    single source of truth). By default we run the active_roster_select
+    criterion (status=='active', pi_lab linked to a user); pass --all-agents
+    to include every row regardless of status (the token gate
+    below still drops anyone without a valid bot token). The roster read runs
+    even under --no-db (it is independent of event logging).
+
+    An empty ``agents`` list means there is nothing to run; the reason is logged
+    here.
+    """
     from sqlalchemy import select as _select
-    from sqlalchemy.ext.asyncio import async_sessionmaker as _asm, create_async_engine as _cae
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _asm
     from src.models import AgentRegistry as _AR
 
     roster_tokens: dict[str, str | None] = {}
-    _engine = _cae(settings.database_url)
+    _engine = make_engine("agent_roster")
     try:
         _sf = _asm(_engine, expire_on_commit=False)
         async with _sf() as _db:
@@ -380,7 +371,7 @@ async def _run_simulation_locked(
             "all statuses (--all-agents)" if all_agents
             else "status='active', pi_lab linked to a user",
         )
-        return
+        return agents, roster_tokens
 
     logger.info(
         "Roster: %d agents (%s)",
@@ -388,19 +379,20 @@ async def _run_simulation_locked(
         "all statuses (--all-agents)" if all_agents
         else "status='active', pi_lab linked to a user",
     )
+    return agents, roster_tokens
 
-    # Everything the prompt readers need, loaded once for this run (spec §8.6): a
-    # mid-run edit of a prompt, persona, role.toml or the rubric file cannot
-    # change the next turn; the heartbeat reports it as drift instead.
-    snapshot = PromptSnapshot.load()
-    install_prompt_snapshot(snapshot)
-    if heartbeat is not None:
-        heartbeat.set_drift_source(snapshot.disk_drift)
 
-    # Resolve whether Slack is enabled. --mock forces it off; an explicit
-    # SLACK_ENABLED env setting wins next; otherwise auto-detect from whether
-    # any agent has a usable bot token. When off, the DB is the sole store and
-    # no Slack API calls are made. See specs/local-db-conversations.md.
+def _build_slack_clients(
+    settings, agents: list[Agent], roster_tokens: dict[str, str | None], mock: bool,
+) -> tuple[bool, dict]:
+    """Resolve whether Slack is enabled and build the per-agent transports:
+    ``(slack_enabled, slack_clients)``.
+
+    --mock forces Slack off; an explicit SLACK_ENABLED env setting wins next;
+    otherwise auto-detect from whether any agent has a usable bot token. When
+    off, the DB is the sole store and no Slack API calls are made. See
+    specs/local-db-conversations.md.
+    """
     from src.services.slack_tokens import env_token, is_valid_token
 
     def _token_for(agent_id: str) -> str | None:
@@ -438,7 +430,11 @@ async def _run_simulation_locked(
         for agent in agents:
             slack_clients[agent.agent_id] = NullTransport(agent_id=agent.agent_id)
         logger.info("Slack disabled — running DB-only (NullTransport for %d agents)", len(agents))
+    return slack_enabled, slack_clients
 
+
+def _archive_memory_if_fresh(fresh: bool) -> None:
+    """Archive-and-reset working memory for a fresh run; a plain resume touches nothing."""
     if fresh:
         # A fresh run must not carry previous runs' synthesized verdict
         # ledgers into its prompts (they are injected into EVERY system
@@ -456,59 +452,179 @@ async def _run_simulation_locked(
         else:
             logger.info("--fresh: no working memory to archive")
 
+
+async def _open_or_resume_run(
+    settings,
+    agents: list[Agent],
+    snapshot: PromptSnapshot,
+    heartbeat: EngineHeartbeat | None,
+    *,
+    max_runtime: int,
+    budget: int,
+    mock: bool,
+    fresh: bool,
+    max_proposals: int,
+):
+    """Build the DB session factory and open (fresh) or reopen (resume) the run row.
+
+    Returns ``(session_factory, simulation_run_id, max_proposals)``; a resume
+    inherits ``max_proposals`` from the run's stored config.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from src.models import SimulationRun
+    engine = make_engine("agent")
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    run_config = {
+        "max_runtime": max_runtime,
+        "budget_cap": budget,
+        "mock": mock,
+        "agent_count": len(agents),
+        "active_thread_threshold": settings.active_thread_threshold,
+        "max_thread_messages": settings.max_thread_messages,
+        "max_proposals": max_proposals,
+        "prompt_stamps": snapshot.stamps_json(),
+    }
+
+    if fresh:
+        simulation_run_id = await _open_fresh_run(session_factory, run_config)
+    else:
+        # Resume: find the latest simulation run
+        async with session_factory() as db:
+            result = await db.execute(
+                select(SimulationRun)
+                .order_by(SimulationRun.started_at.desc())
+                .limit(1)
+            )
+            existing_run = result.scalar_one_or_none()
+
+            if existing_run:
+                simulation_run_id = existing_run.id
+                max_proposals = _reopen_run_for_resume(existing_run, max_proposals)
+                await db.commit()
+                logger.info("Resuming simulation run %s", simulation_run_id)
+            else:
+                # No existing run — create one
+                run = SimulationRun(status="running", config=_stamp_run_config(run_config))
+                db.add(run)
+                await db.commit()
+                simulation_run_id = run.id
+                logger.info("Created new simulation run %s", simulation_run_id)
+    if heartbeat is not None:
+        heartbeat.set_run_id(simulation_run_id)
+    return session_factory, simulation_run_id, max_proposals
+
+
+def _log_start_banner(agents: list[Agent], runtime_label: str, budget: int, fresh: bool) -> None:
+    """The deprecated-budget warning, the start line and the screening-rubric line."""
+    if budget > 0:
+        logger.warning(
+            "--budget %d is the DEPRECATED cumulative cap. It counts LLM calls "
+            "for the ENTIRE run, is rebuilt from llm_call_logs on restart, and "
+            "therefore benches an agent PERMANENTLY once crossed — this is what "
+            "took the blackbird hub off the air for 161 consecutive turns. The "
+            "sliding-window rate limiter supersedes it. Pass --budget 0 unless "
+            "you specifically want the legacy behaviour.",
+            budget,
+        )
+    logger.info(
+        "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
+        len(agents), runtime_label, budget,
+        " (fresh start)" if fresh else " (resuming)",
+    )
+    # Which rubric this run screens against. This line is what makes the
+    # rubric document's editing workflow checkable (see the header comment
+    # of prompts/rubric/blackbird-rubric.toml, step 3): the document is
+    # loaded ONCE at import, so applying an edit means a restart — and the
+    # only way to confirm the restart picked the edit up is to compare
+    # these two values against the file.
+    logger.info(
+        "Screening rubric: version %s (content hash %s)",
+        RUBRIC_VERSION, RUBRIC_CONTENT_HASH,
+    )
+
+
+async def _finalize_run(sim_engine, agents: list[Agent], session_factory, simulation_run_id) -> None:
+    """Shutdown tail, run on every exit path: flush, mark the run stopped, log the summary."""
+    # Durably flush buffered messages/LLM logs before anything else. The DB
+    # is the primary conversation store, so anything still in the in-memory
+    # buffer at exit is otherwise unrecoverable. Runs on every exit path
+    # (signal, time limit, budget exhaustion, crash).
+    try:
+        await sim_engine.stop()
+    except Exception:
+        logger.exception("Final flush on shutdown failed")
+
+    # Update simulation run status
+    if session_factory and simulation_run_id:
+        async with session_factory() as db:
+            from sqlalchemy import select
+            from src.models import SimulationRun
+            result = await db.execute(
+                select(SimulationRun).where(SimulationRun.id == simulation_run_id)
+            )
+            run = result.scalar_one_or_none()
+            if run:
+                run.status = "stopped"
+                run.ended_at = datetime.now(timezone.utc)
+                # Totals are written by stop()'s final flush
+                # (COUNT(agent_messages) and the live api_call_count sum);
+                # overwriting them here from process-local counters
+                # undercounted every resumed run (AG-5).
+                await db.commit()
+
+    logger.info("Simulation stopped.")
+    logger.info(
+        # "api_calls" here is the same per-agent number that sums into
+        # SimulationRun.total_api_calls — real API calls, not turns.
+        "Summary (api_calls = real API calls, not turns): %s",
+        {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
+         for a in agents},
+    )
+    install_prompt_snapshot(None)
+
+
+async def _run_simulation_locked(
+    max_runtime: int,
+    budget: int,
+    mock: bool,
+    no_db: bool,
+    fresh: bool,
+    reset_cursors: bool = False,
+    all_agents: bool = False,
+    max_proposals: int = 0,
+    *,
+    run_state: RunState,
+    heartbeat: EngineHeartbeat | None,
+) -> None:
+    settings = get_settings()
+
+    agents, roster_tokens = await _load_roster(all_agents, no_db)
+    if not agents:
+        return
+
+    # Everything the prompt readers need, loaded once for this run (spec §8.6): a
+    # mid-run edit of a prompt, persona, role.toml or the rubric file cannot
+    # change the next turn; the heartbeat reports it as drift instead.
+    snapshot = PromptSnapshot.load()
+    install_prompt_snapshot(snapshot)
+    if heartbeat is not None:
+        heartbeat.set_drift_source(snapshot.disk_drift)
+
+    slack_enabled, slack_clients = _build_slack_clients(settings, agents, roster_tokens, mock)
+    _archive_memory_if_fresh(fresh)
+
     # Set up database session factory
     session_factory = None
     simulation_run_id = None
 
     if not no_db:
-        from sqlalchemy import select
-        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import SimulationRun
-        engine = create_async_engine(
-            settings.database_url,
-            pool_size=settings.db_pool_size,
-            max_overflow=settings.db_max_overflow,
-            pool_pre_ping=True,
+        session_factory, simulation_run_id, max_proposals = await _open_or_resume_run(
+            settings, agents, snapshot, heartbeat,
+            max_runtime=max_runtime, budget=budget, mock=mock, fresh=fresh,
+            max_proposals=max_proposals,
         )
-        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-        run_config = {
-            "max_runtime": max_runtime,
-            "budget_cap": budget,
-            "mock": mock,
-            "agent_count": len(agents),
-            "active_thread_threshold": settings.active_thread_threshold,
-            "max_thread_messages": settings.max_thread_messages,
-            "max_proposals": max_proposals,
-            "prompt_stamps": snapshot.stamps_json(),
-        }
-
-        if fresh:
-            simulation_run_id = await _open_fresh_run(session_factory, run_config)
-        else:
-            # Resume: find the latest simulation run
-            async with session_factory() as db:
-                result = await db.execute(
-                    select(SimulationRun)
-                    .order_by(SimulationRun.started_at.desc())
-                    .limit(1)
-                )
-                existing_run = result.scalar_one_or_none()
-
-                if existing_run:
-                    simulation_run_id = existing_run.id
-                    max_proposals = _reopen_run_for_resume(existing_run, max_proposals)
-                    await db.commit()
-                    logger.info("Resuming simulation run %s", simulation_run_id)
-                else:
-                    # No existing run — create one
-                    run = SimulationRun(status="running", config=_stamp_run_config(run_config))
-                    db.add(run)
-                    await db.commit()
-                    simulation_run_id = run.id
-                    logger.info("Created new simulation run %s", simulation_run_id)
-        if heartbeat is not None:
-            heartbeat.set_run_id(simulation_run_id)
 
     # Create simulation engine
     runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
@@ -536,31 +652,7 @@ async def _run_simulation_locked(
     )
 
     try:
-        if budget > 0:
-            logger.warning(
-                "--budget %d is the DEPRECATED cumulative cap. It counts LLM calls "
-                "for the ENTIRE run, is rebuilt from llm_call_logs on restart, and "
-                "therefore benches an agent PERMANENTLY once crossed — this is what "
-                "took the blackbird hub off the air for 161 consecutive turns. The "
-                "sliding-window rate limiter supersedes it. Pass --budget 0 unless "
-                "you specifically want the legacy behaviour.",
-                budget,
-            )
-        logger.info(
-            "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
-            len(agents), runtime_label, budget,
-            " (fresh start)" if fresh else " (resuming)",
-        )
-        # Which rubric this run screens against. This line is what makes the
-        # rubric document's editing workflow checkable (see the header comment
-        # of prompts/rubric/blackbird-rubric.toml, step 3): the document is
-        # loaded ONCE at import, so applying an edit means a restart — and the
-        # only way to confirm the restart picked the edit up is to compare
-        # these two values against the file.
-        logger.info(
-            "Screening rubric: version %s (content hash %s)",
-            RUBRIC_VERSION, RUBRIC_CONTENT_HASH,
-        )
+        _log_start_banner(agents, runtime_label, budget, fresh)
         _log_api_call_units()
         await sim_engine.start()
     except Exception:
@@ -570,42 +662,7 @@ async def _run_simulation_locked(
         # class, which this cannot displace.
         sim_engine.request_stop("start_failed")
     finally:
-        # Durably flush buffered messages/LLM logs before anything else. The DB
-        # is the primary conversation store, so anything still in the in-memory
-        # buffer at exit is otherwise unrecoverable. Runs on every exit path
-        # (signal, time limit, budget exhaustion, crash).
-        try:
-            await sim_engine.stop()
-        except Exception:
-            logger.exception("Final flush on shutdown failed")
-
-        # Update simulation run status
-        if session_factory and simulation_run_id:
-            async with session_factory() as db:
-                from sqlalchemy import select
-                from src.models import SimulationRun
-                result = await db.execute(
-                    select(SimulationRun).where(SimulationRun.id == simulation_run_id)
-                )
-                run = result.scalar_one_or_none()
-                if run:
-                    run.status = "stopped"
-                    run.ended_at = datetime.now(timezone.utc)
-                    # Totals are written by stop()'s final flush
-                    # (COUNT(agent_messages) and the live api_call_count sum);
-                    # overwriting them here from process-local counters
-                    # undercounted every resumed run (AG-5).
-                    await db.commit()
-
-        logger.info("Simulation stopped.")
-        logger.info(
-            # "api_calls" here is the same per-agent number that sums into
-            # SimulationRun.total_api_calls — real API calls, not turns.
-            "Summary (api_calls = real API calls, not turns): %s",
-            {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
-             for a in agents},
-        )
-        install_prompt_snapshot(None)
+        await _finalize_run(sim_engine, agents, session_factory, simulation_run_id)
 
 
 if __name__ == "__main__":

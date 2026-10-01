@@ -366,7 +366,7 @@ async def test_a_pending_profile_job_is_not_duplicated(db_session, fakes, tmp_pa
     assert await _profile_jobs(db_session, user) == 1
 
 
-async def test_a_processing_profile_job_still_gets_a_fresh_one_queued(
+async def test_a_processing_profile_job_is_reported_not_duplicated(
     db_session, fakes, tmp_path, capsys
 ):
     """A processing job read the old year already; its output is stale."""
@@ -385,12 +385,12 @@ async def test_a_processing_profile_job_still_gets_a_fresh_one_queued(
     await _apply(db_session, [user.orcid], tmp_path)
 
     assert await _profile_jobs(db_session, user, "processing") == 1
-    assert await _profile_jobs(db_session, user, "pending") == 1
+    assert await _profile_jobs(db_session, user, "pending") == 0
     out = capsys.readouterr().out
     assert "profile_jobs_queued_behind_processing=1" in out
 
 
-async def test_apply_commits_exactly_once(db_session, fakes, tmp_path, monkeypatch):
+async def test_apply_commits_swaps_once_then_each_queue_call(db_session, fakes, tmp_path, monkeypatch):
     a = await _pi(db_session, 2018)
     b = await _pi(db_session, 2017)
     for u in (a, b):
@@ -406,7 +406,7 @@ async def test_apply_commits_exactly_once(db_session, fakes, tmp_path, monkeypat
 
     await _apply(db_session, [a.orcid, b.orcid], tmp_path)
 
-    assert len(commits) == 1
+    assert len(commits) == 3  # the swaps, then one per queued user
     assert (await _stored(db_session, a))["year"] == 2009
     assert (await _stored(db_session, b))["year"] == 2009
 

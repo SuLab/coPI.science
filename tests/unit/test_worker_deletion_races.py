@@ -55,13 +55,11 @@ async def test_vanished_job_row_is_skipped_quietly(session_factory):
 async def test_failure_after_deletion_does_not_raise(session_factory, monkeypatch):
     user_id, job_id = await _seed_committed_job(session_factory)
 
-    async def _delete_user_then_fail(job, db):
+    async def _delete_user_then_fail(ctx, db):
         await _delete_user(session_factory, user_id)
         raise RuntimeError("pipeline blew up mid-flight")
 
-    monkeypatch.setattr(
-        worker_main, "execute_generate_profile", _delete_user_then_fail
-    )
+    monkeypatch.setitem(worker_main.JOB_HANDLERS, "generate_profile", _delete_user_then_fail)
     # Used to raise StaleDataError from inside the except handler.
     await worker_main.process_job(job_id, "generate_profile", 1, 3, session_factory)
 
@@ -69,10 +67,10 @@ async def test_failure_after_deletion_does_not_raise(session_factory, monkeypatc
 async def test_normal_failure_still_marks_retry(session_factory, monkeypatch):
     user_id, job_id = await _seed_committed_job(session_factory)
     try:
-        async def _fail(job, db):
+        async def _fail(ctx, db):
             raise RuntimeError("ordinary failure")
 
-        monkeypatch.setattr(worker_main, "execute_generate_profile", _fail)
+        monkeypatch.setitem(worker_main.JOB_HANDLERS, "generate_profile", _fail)
         await worker_main.process_job(
             job_id, "generate_profile", 1, 3, session_factory
         )

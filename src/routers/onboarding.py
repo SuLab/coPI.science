@@ -4,21 +4,22 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
 from src.services.email import build_welcome, send_transactional_email
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -88,7 +89,7 @@ async def onboarding_start(
         and current_user.access_status == "allowed"
         and current_user.may_use_pi_surfaces
     ):
-        job = await enqueue_profile_job_if_absent(db, current_user)
+        job = await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
         await db.commit()
         logger.info("Auto-enqueued generate_profile for user %s on /onboarding", current_user.id)
 
@@ -195,6 +196,6 @@ async def retry_pipeline(
     for a manager (F8). Narrowing only the GET left the pipeline one form
     POST away.
     """
-    await enqueue_profile_job_if_absent(db, current_user)
+    await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
     await db.commit()
     return RedirectResponse(url="/onboarding", status_code=302)

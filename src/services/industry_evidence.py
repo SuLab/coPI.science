@@ -1,40 +1,30 @@
 """Worker handler for the ``industry_evidence`` job + rescoring helper."""
+from __future__ import annotations
+
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import (
     AgentRegistry,
-    Job,
     PiIndustryEvidence,
     PiIndustryScore,
     Publication,
     ResearcherProfile,
     User,
 )
+from src.services import job_progress
 from src.services.industry_score import SCORER_VERSION, normalise, score_evidence
-from src.services.industry_sources.ctgov import evidence_from_study, fetch_jhu_industry_trials
-from src.services.industry_sources.openalex_industry import (
-    company_funder_ids,
-    evidence_from_work,
-    fetch_works_for_pmids,
-)
-from src.services.industry_sources.pubmed_coi import evidence_from_record
-from src.services.industry_sources.uspto_inventor import (
-    evidence_from_application,
-    fetch_jhu_applications,
-)
+from src.services.industry_sources.registry import SOURCES, SourceContext, SourceUnavailable
 from src.services.jhu_rules import get_tenure_start
-from src.services.job_progress import append_job_progress
-from src.services.pubmed import fetch_pubmed_records
+
+if TYPE_CHECKING:
+    from src.worker.main import JobContext
 
 logger = logging.getLogger(__name__)
-
-
-def _oaid(url):
-    return (url or "").rsplit("/", 1)[-1]
 
 
 _MIN_COHORT_PEERS = 3
@@ -123,45 +113,47 @@ async def rescore_user(db: AsyncSession, user_id: uuid.UUID, tenure_start: int |
     return score
 
 
-async def execute_industry_evidence(job: Job, db: AsyncSession) -> None:
-    user_id = uuid.UUID(job.payload["user_id"])
+async def execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
+    user_id = uuid.UUID(ctx.payload["user_id"])
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
     agent = (await db.execute(select(AgentRegistry).where(AgentRegistry.user_id == user_id))).scalar_one_or_none()
     tenure_start = await get_tenure_start(db, user_id, agent_id=agent.agent_id if agent else None)
     if tenure_start is None:
         db.add(PiIndustryScore(user_id=user_id, score=None, reason="no_tenure_start", components={}, scorer_version=SCORER_VERSION))
         await db.flush()
-        append_job_progress(job, "industry_done", "unscored: no JHU tenure start")
+        await job_progress.record(ctx.id, "industry_done", "unscored: no JHU tenure start")
         return
 
     profile = (await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))).scalar_one_or_none()
     keywords = set((profile.keywords or []) + (profile.key_targets or []) + (profile.disease_areas or [])) if profile else set()
     conditions = set(profile.disease_areas or []) if profile else set()
     pubs = (await db.execute(select(Publication).where(Publication.user_id == user_id, Publication.pmid.isnot(None)))).scalars().all()
-    pmids = [p.pmid for p in pubs]
-    year_by_pmid = {p.pmid: p.year for p in pubs}
+    sctx = SourceContext(user=user, tenure_start=tenure_start, keywords=keywords, conditions=conditions,
+                         pmids=[p.pmid for p in pubs], year_by_pmid={p.pmid: p.year for p in pubs})
 
-    items = []
-    works = await fetch_works_for_pmids(pmids)
-    funder_ids = {_oaid(f.get("id")) for w in works for f in w.get("funders") or []}
-    cfids = await company_funder_ids(funder_ids)
-    primary_field = None
-    for w in works:
-        primary_field = primary_field or ((w.get("primary_topic") or {}).get("field") or {}).get("display_name")
-        items += evidence_from_work(w, user.orcid, tenure_start, company_funder_ids=cfids)
-    append_job_progress(job, "industry1", f"openalex works={len(works)} items={len(items)}")
-
-    for rec in await fetch_pubmed_records(pmids):
-        y = rec.get("year") or year_by_pmid.get(str(rec.get("pmid")))
-        items += evidence_from_record(rec, pi_year_ok=bool(y and y >= tenure_start))
-    for app in await fetch_jhu_applications(user.name):
-        items += evidence_from_application(app, tenure_start, keywords)
-    for st in await fetch_jhu_industry_trials(user.name):
-        items += evidence_from_study(st, tenure_start, conditions)
+    items, primary_field, refreshed, unavailable = [], None, [], []
+    for source in SOURCES:
+        try:
+            result = await source.fetch(sctx)
+        except SourceUnavailable as exc:
+            logger.warning("industry_evidence %s: %s — keeping its stored rows", user_id, exc)
+            unavailable.append(source.name)
+            continue
+        refreshed.append(source.name)
+        items += result.items
+        primary_field = primary_field or result.primary_field
+        if result.note:
+            await job_progress.record(ctx.id, "industry1", result.note)
 
     vetoed = {(r.source, r.kind, r.external_id) for r in (await db.execute(
-        select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id, PiIndustryEvidence.vetoed_at.isnot(None)))).scalars().all()}
-    await db.execute(delete(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id, PiIndustryEvidence.vetoed_at.is_(None)))
+        select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id,
+                                         PiIndustryEvidence.vetoed_at.isnot(None)))).scalars().all()}
+    if refreshed:
+        await db.execute(delete(PiIndustryEvidence).where(
+            PiIndustryEvidence.user_id == user_id,
+            PiIndustryEvidence.source.in_(refreshed),
+            PiIndustryEvidence.vetoed_at.is_(None),
+        ))
     seen = set()
     for it in items:
         key = (it.source, it.kind, it.external_id)
@@ -171,4 +163,5 @@ async def execute_industry_evidence(job: Job, db: AsyncSession) -> None:
         db.add(PiIndustryEvidence(user_id=user_id, **it.__dict__))
     await db.flush()
     s = await rescore_user(db, user_id, tenure_start, primary_field)
-    append_job_progress(job, "industry_done", f"evidence={s.evidence_count} raw={s.raw_sum} score={s.score} v{SCORER_VERSION}")
+    suffix = f" unavailable={','.join(unavailable)}" if unavailable else ""
+    await job_progress.record(ctx.id, "industry_done", f"evidence={s.evidence_count} raw={s.raw_sum} score={s.score} v{SCORER_VERSION}{suffix}")

@@ -3,11 +3,42 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
+
+#: The job types that may have at most one pending-or-processing row per user
+#: (0056 `uq_jobs_one_active_per_user_type`). `review_feedback_analysis` is
+#: excluded on purpose: one reviewer press enqueues up to 25 rows (SA3-04).
+PER_USER_JOB_TYPES = ("generate_profile", "enrich_grants", "industry_evidence")
+
+#: The partial-index predicate, shared by the model, the migration and every
+#: `ON CONFLICT (user_id, type) WHERE ...` enqueue (Postgres infers the index only when
+#: the conflict predicate matches this text). `job_type_text` is the IMMUTABLE
+#: `enum::text` wrapper 0056 creates: a fresh alembic chain cannot use the enum values
+#: 0039 and 0047 add in the same transaction, and a plain cast is not immutable.
+ONE_ACTIVE_PER_USER_TYPE_WHERE = (
+    "status IN ('pending','processing') AND user_id IS NOT NULL "
+    "AND job_type_text(type) IN ('generate_profile','enrich_grants','industry_evidence')"
+)
+
+#: `jobs.priority` (0056): higher is claimed first, NULL reads as 0. A person
+#: waiting on a page outranks bulk enrichment and regeneration.
+INTERACTIVE_PRIORITY = 10
+BULK_PRIORITY = -10
 
 
 class Job(Base):
@@ -46,6 +77,20 @@ class Job(Base):
     #: failure, 16 min after the second (src/worker/main.py `retry_delay`). NULL
     #: on every row that never failed: claimable at once, as before.
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    #: Claim order: `claim_job` sorts by COALESCE(priority, 0) DESC, enqueued_at.
+    #: 10 = interactive (a person is waiting), -10 = bulk; NULL = 0 (every row
+    #: written before 0056, and every enqueue that states no priority).
+    priority: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_jobs_one_active_per_user_type", "user_id", "type",
+            unique=True, postgresql_where=text(ONE_ACTIVE_PER_USER_TYPE_WHERE),
+        ),
+        Index("ix_jobs_status", "status"),
+        Index("ix_jobs_user_id", "user_id"),
+    )
 
     # Relationships
     user: Mapped["User | None"] = relationship("User", back_populates="jobs")

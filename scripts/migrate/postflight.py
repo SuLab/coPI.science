@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -136,17 +136,21 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("researcher_profiles", "synthesis_validated", "boolean", True, ""),
     ("researcher_profiles", "evidence_pmid_count", "integer", True, ""),
     ("researcher_profiles", "evidence_pub_count", "integer", True, ""),
+    # 0056 — NULL means "enqueued before 0056 or without a stated priority"; never backfilled.
+    ("jobs", "priority", "smallint", True, ""),
 )
 
-EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
+EXPECTED_TABLES = (
+    "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
+)
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. preflight.PLANNED_OBJECTS now also carries entries past 0023 (for
-#: its own collision check, which covers every revision up to its target), but this
-#: script's pinned expectations have not been extended past 0023 — bump this tuple (and
-#: add the corresponding EXPECTED_* entries) when that happens. The row-count and enum
-#: checks do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023")
+#: actually verify. Pinned: 0019-0023 and 0056. Not pinned (documented omission):
+#: 0024-0055 objects, which preflight's PLANNED_OBJECTS collision check and
+#: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
+#: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
+#: do not read it: they are scoped by revision span instead.
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -168,6 +172,12 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_cohort_audit_events_cohort_id": "USING btree (cohort_id)",
     "ix_cohort_audit_events_created_at": "USING btree (created_at)",
     "uq_cohort_membership_cohort_agent": "USING btree (cohort_id, agent_id)",
+    # 0056. Partial indexes pin the prefix up to the predicate: the predicate's
+    # enum-cast rendering is Postgres's, not ours.
+    "uq_jobs_one_active_per_user_type": "USING btree (user_id, type) WHERE (",
+    "uq_users_email_lower": "USING btree (lower((email)::text))",
+    "ix_agent_messages_agent_phase": "USING btree (agent_id, phase)",
+    "ix_chat_usage_streaming": "USING btree (created_at) WHERE (",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -180,6 +190,8 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
         "cohort_memberships",
         "UNIQUE (cohort_id, agent_id)",
     ),
+    "uq_slack_app_provisions_agent": ("slack_app_provisions", "UNIQUE (agent_registry_id)"),
+    "uq_publications_user_pmid": ("publications", "UNIQUE (user_id, pmid)"),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {
@@ -221,16 +233,15 @@ MUST_BE_NON_NULL = tuple(
 # ---------------------------------------------------------------------------
 # ORM-drift classification.
 # ---------------------------------------------------------------------------
-# alembic's compare_metadata() is a strong drift detector in ONE direction only. On a
-# database that reached 0023 through the real chain it still reports 25 differences,
-# every one of them the DB having something the ORM does not declare (indexes created in
-# 0001-0017 with no Index() in the model, UniqueConstraints declared inline as
-# unique=True, plus spurious add_table_comment entries). Those are pre-existing and
-# harmless. The ops that mean "the DB is MISSING something the ORM requires" are the
-# ones that matter, and they are the ones a dropped column/index/table produces:
-# verified by sabotage — dropping agent_messages.content yields add_column, dropping
+# alembic's compare_metadata() reports differences in both directions. Since Phase 3
+# the models declare every index and constraint the migrations create, so on a correctly
+# migrated database it reports only the legacy ``users.is_admin`` column (remove_column).
+# The ops that mean "the DB is MISSING something the ORM requires" are the ones that
+# matter, and they are the ones a dropped column/index/table produces: verified by
+# sabotage — dropping agent_messages.content yields add_column, dropping
 # ix_agent_messages_run_created yields add_index, and relaxing sender_name's NOT NULL
-# yields modify_nullable.
+# yields modify_nullable. remove_index/remove_constraint stay ignorable in general, except
+# for the names in DRIFT_ENFORCED_NAMES.
 DRIFT_FAIL_OPS = frozenset(
     {
         "add_table",
@@ -245,6 +256,12 @@ DRIFT_FAIL_OPS = frozenset(
 DRIFT_IGNORED_OPS = frozenset(
     {"remove_index", "remove_constraint", "add_table_comment", "remove_column"}
 )
+#: 0056's objects: a remove_index/remove_constraint op naming one of these means
+#: the MODEL stopped declaring it (DB-08), which must fail rather than be ignored.
+DRIFT_ENFORCED_NAMES = frozenset({
+    "uq_jobs_one_active_per_user_type", "uq_slack_app_provisions_agent", "uq_publications_user_pmid",
+    "uq_users_email_lower", "ix_agent_messages_agent_phase", "ix_chat_usage_streaming",
+})
 
 # ---------------------------------------------------------------------------
 # SQL
@@ -784,6 +801,8 @@ async def check_orm_drift(conn_url: str):
             op = item[0] if isinstance(item, (tuple, list)) else str(item)
             if op in DRIFT_FAIL_OPS:
                 failures.append(f"{op}: {str(item)[:180]}")
+            elif op in DRIFT_IGNORED_OPS and any(n in str(item) for n in DRIFT_ENFORCED_NAMES):
+                failures.append(f"{op}: {str(item)[:180]}")
             elif op in DRIFT_IGNORED_OPS:
                 ignored += 1
             else:
@@ -798,9 +817,9 @@ async def check_orm_drift(conn_url: str):
                  "wrong shape. Restore, or apply the missing DDL and re-run."],
                 data)
     detail = (
-        f"0 findings that matter; {ignored} pre-existing differences ignored (indexes and "
-        "inline unique constraints created before 0018 that the models never declare, plus "
-        "spurious add_table_comment entries — measured: 25 on a correctly migrated database)."
+        f"0 findings that matter; {ignored} pre-existing differences ignored (a remove_column "
+        "for the legacy users.is_admin the User model replaces with a hybrid; measured: 1 on a "
+        "correctly migrated database)."
     )
     if unknown:
         return (title, WARN, detail + f" {len(unknown)} unclassified op(s): {unknown}", [], data)
@@ -896,9 +915,9 @@ def build_parser():
             action.help = (
                 f"Revision alembic_version must equal (default {DEFAULT_TARGET}). The enum "
                 "check and the row-count comparison are scoped to it; the table, column, "
-                "index and constraint expectations describe 0023 and only 0023, so "
+                "index and constraint expectations describe 0023 and 0056, so "
                 "--target 0019 will match the stamp and then correctly report everything "
-                "0020-0023 has not yet created."
+                "0020-0023 and 0056 have not yet created."
             )
     ap.add_argument("--snapshot", default=None, help="Row-count snapshot written by preflight")
     ap.add_argument(

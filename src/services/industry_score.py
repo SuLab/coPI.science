@@ -1,18 +1,12 @@
 """Pure, versioned industry-interest scorer. Bump SCORER_VERSION on ANY weight change."""
 from bisect import bisect_right
 
+from src.services.industry_sources.registry import weights as _registry_weights
+
 SCORER_VERSION = "1.0.0"
 SCORED_CLASSES = {"pharma_biotech", "device_dx", "other"}
 CLASS_FACTOR = {"pharma_biotech": 1.0, "device_dx": 1.0, "other": 0.25}
-WEIGHTS = {  # kind: (per distinct company, cap)
-    "coauthor_company": (3.0, 30.0),
-    "company_funder": (4.0, 20.0),
-    "coi_relationship": (5.0, 25.0),
-    "patent_filed": (4.0, 12.0),
-    "patent_assigned": (10.0, 30.0),
-    "trial_industry_collab": (3.0, 9.0),
-    "sbir_sttr": (6.0, 12.0),
-}
+WEIGHTS = _registry_weights()  # kind: (per distinct company, cap) — built from the source registry
 _ROLE_FACTOR = {"first": 1.5, "last": 1.5, "corresponding": 1.5, "inventor": 1.0, "overall_official": 1.0}
 
 

@@ -26,12 +26,13 @@ import logging
 import signal
 import uuid
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.engine.headlines import build_finalize_announcer
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.main import _run_simulation
 from src.config import get_settings
+from src.database import make_engine
 from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
 from src.services.simulation_control import (
     claim_pending,
@@ -130,7 +131,7 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
     database_url = database_url or get_settings().database_url
     own_engine = None
     if session_factory is None:
-        own_engine = create_async_engine(database_url, pool_pre_ping=True)
+        own_engine = make_engine("supervisor", database_url)
         session_factory = async_sessionmaker(own_engine, expire_on_commit=False)
     loop = asyncio.get_running_loop()
     try:

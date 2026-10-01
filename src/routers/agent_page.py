@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
@@ -41,10 +40,11 @@ from src.services.runs import latest_run_id
 from src.services.slack_tokens import get_any_bot_token
 from src.services.slack_web import get_user_info, lookup_user_by_email_async
 from src.services.validators import is_valid_email
+from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = make_templates()
 
 SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
