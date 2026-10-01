@@ -42,7 +42,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   be 100-400x slower; check the mount before suspecting a hang.
 - The suite and the images resolve different `anthropic` versions (`pyproject.toml`
   pins only `>=0.26.0`; measured 2026-09-29: 1.9.0 in all three images, 0.120.2 in
-  `.venv-test`). Do not tighten the pin. `_acreate`'s
+  `.venv-test`). Do not tighten the pin. `acreate`'s
   `NonStreamingMaxTokensError` in `src/services/llm.py` is the only enforcement of the
   non-streaming `max_tokens` ceiling (`NONSTREAMING_MAX_TOKENS`): the SDK skips its own
   check because the client sets a custom timeout. Do not remove it.

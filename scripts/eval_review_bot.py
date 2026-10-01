@@ -2,7 +2,7 @@
 
 Runs the exact payload the worker would build (same helpers from
 ``src.services.review_bot``) for each case in a JSON file, calls the model
-through ``src.services.llm._acreate`` (the same choke point production uses,
+through ``src.services.llm.acreate`` (the same choke point production uses,
 so the thinking default, timeout and non-streaming ceiling all apply), grades
 the output, and writes one JSON report. It never writes to the database — every
 transaction is opened READ ONLY at the wire level (`_readonly_engine`) — and
@@ -184,7 +184,7 @@ async def _build(db: AsyncSession, case: dict) -> dict:
 async def _call(model: str, system_prompt: str, user_message: str) -> dict:
     client = llm.get_anthropic_client()
     t0 = time.monotonic()
-    message = await llm._acreate(
+    message = await llm.acreate(
         client, model=model, max_tokens=MAX_TOKENS, system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     )
@@ -197,7 +197,7 @@ async def _call(model: str, system_prompt: str, user_message: str) -> dict:
         cache_read=cache_read, cache_creation=cache_write,
     )
     return {
-        "raw": llm._all_text(message),
+        "raw": llm.all_text(message),
         "stop_reason": message.stop_reason,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,

@@ -87,7 +87,6 @@ from src.agent.engine.sidecar import (  # re-exported
     _VALID_GATING_STATES as _VALID_GATING_STATES,
     _bounded_str as _bounded_str,
     _extract_assessment_json as _extract_assessment_json,
-    _extract_json as _extract_json,
     _extract_slack_message as _extract_slack_message,
     _normalize_gating as _normalize_gating,
     _reply_closes_thread as _reply_closes_thread,

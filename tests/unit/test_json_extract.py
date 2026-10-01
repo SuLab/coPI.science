@@ -1,4 +1,4 @@
-"""The tolerant JSON extractor, and the drift alarm between its two callers.
+"""The tolerant JSON extractor (the only one; see test_single_json_extractor).
 
 `src/services/json_extract.py` exists because two modules need the same
 algorithm and one of them may not import the other: `src/agent/specialists.py`
@@ -9,7 +9,7 @@ carried since profile synthesis was written.
 The measured reason it was extracted at all: run 8b64a0e0 laundered 6 of 168
 specialist consults into `caution`/`low`/no-concerns, one of them inverting a
 `blocking`/`high` opinion that was then published to the PI's own thread as
-`⚠️ caution`. Running `llm.py::_extract_json` verbatim over those six recovers
+`⚠️ caution`. Running the extractor verbatim over those six recovers
 all 3 `end_turn` cases and none of the 3 `refusal` cases — a clean split along
 "complete object plus trailing prose" vs "object cut mid-array". See
 docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H5.
@@ -21,8 +21,7 @@ import pytest
 from src.services.json_extract import extract_json
 
 # The three shapes measured in the run, plus the two the profile-synthesis
-# caller has always relied on. Kept as one table because the last test in this
-# file replays it against llm.py's own copy.
+# caller has always relied on. Kept as one table so every test below shares it.
 _CORPUS = (
     # A bare object, the happy path.
     '{"verdict_signal": "clear", "confidence": "high"}',
@@ -87,22 +86,15 @@ def test_the_error_names_what_it_could_not_parse():
         extract_json("unmistakable-marker and no object at all")
 
 
-@pytest.mark.parametrize("raw", _CORPUS)
-def test_the_shared_extractor_agrees_with_llms_own_copy(raw):
-    """The drift alarm.
+def test_llm_uses_the_shared_extractor():
+    """The drift alarm's job is done: llm.py's copy is deleted and its callers use
+    extract_json (LC-04). tests/unit/test_single_json_extractor.py keeps it so."""
+    import src.services.llm as llm
+    assert llm.extract_json is extract_json
 
-    `llm.py::_extract_json` is the original and still has its own callers.
-    Until it is reduced to a thin delegator (it belongs to a different
-    workstream's files), the duplication is real, and a divergence would mean
-    a specialist opinion and a synthesized profile disagree about what the same
-    bytes say. This test is what makes that impossible to ship quietly — and it
-    keeps passing, unchanged, once that module delegates here.
-    """
-    from src.services.llm import _extract_json
 
-    assert extract_json(raw) == _extract_json(raw)
-    # And json.loads is NOT a substitute for either: 4 of the 5 shapes above
-    # are exactly the ones it rejects.
-    if raw != _CORPUS[0]:
-        with pytest.raises(ValueError):
-            json.loads(raw)
+@pytest.mark.parametrize("raw", _CORPUS[1:])
+def test_json_loads_is_not_a_substitute(raw):
+    """4 of the 5 shapes above are exactly the ones a bare json.loads rejects."""
+    with pytest.raises(ValueError):
+        json.loads(raw)

@@ -556,9 +556,9 @@ async def issue(client: Any, budget: Budget, *, beta: bool, kwargs: dict[str, An
 
 
 def _text(message: Any) -> str:
-    from src.services.llm import _all_text
+    from src.services.llm import all_text
 
-    return _all_text(message) if message is not None else ""
+    return all_text(message) if message is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -593,17 +593,40 @@ async def _run_stamps(db: Any) -> dict[str, str]:
     return stamps
 
 
+def sampling_statement(run_ids: list[uuid.UUID], model: str):
+    """Metadata only (SC-20): what `sample` sorts and filters on, plus a boolean for
+    the sidecar test, so sampling never loads prompt/response bodies. The picked
+    rows are loaded by id afterwards (`_hydrate`)."""
+    from sqlalchemy import select
+
+    from src.models import LlmCallLog
+    return (
+        select(LlmCallLog.id, LlmCallLog.simulation_run_id, LlmCallLog.created_at,
+               LlmCallLog.thread_ts, LlmCallLog.agent_id, LlmCallLog.message_ordinal,
+               LlmCallLog.thread_phase, LlmCallLog.phase,
+               LlmCallLog.response_text.contains("<assessment_json>").label("has_sidecar"))
+        .where(LlmCallLog.simulation_run_id.in_(run_ids), LlmCallLog.model == model)
+        .order_by(LlmCallLog.created_at)
+    )
+
+
+async def _hydrate(db: Any, picked: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    """Replace the picked metadata rows with full `LlmCallLog` rows, loaded by id in
+    one query; order within each group is preserved."""
+    from sqlalchemy import select
+
+    from src.models import LlmCallLog
+    ids = {r.id for k, rows in picked.items() if k != "roles" for r in rows}
+    full = {r.id: r for r in (await db.execute(select(LlmCallLog).where(LlmCallLog.id.in_(ids)))).scalars()}
+    return {k: (rows if k == "roles" else [full[r.id] for r in rows]) for k, rows in picked.items()}
+
+
 async def sample(db: Any) -> dict[str, list[Any]]:
     from sqlalchemy import select
 
     from src.models import AgentRegistry, LlmCallLog
 
-    base = (
-        select(LlmCallLog)
-        .where(LlmCallLog.simulation_run_id.in_([uuid.UUID(r) for r in RUNS]),
-               LlmCallLog.model == OLD)
-        .order_by(LlmCallLog.created_at)
-    )
+    base = sampling_statement([uuid.UUID(r) for r in RUNS], OLD)
     roles = {
         a.agent_id: a.role
         for a in (await db.execute(select(AgentRegistry))).scalars()
@@ -614,7 +637,7 @@ async def sample(db: Any) -> dict[str, list[Any]]:
     per_persona_a: dict[str, list[Any]] = {}
     consult_b: list[Any] = []
     for persona in PERSONAS:
-        rows = list((await db.execute(base.where(LlmCallLog.phase == f"consult_{persona}"))).scalars())
+        rows = list((await db.execute(base.where(LlmCallLog.phase == f"consult_{persona}"))).all())
         # The run on HEAD's prompts first (plan Task 0 Step 3), then the older one.
         rows.sort(key=lambda r: (r.simulation_run_id != latest, r.created_at))
         by_thread: dict[str, list[Any]] = defaultdict(list)
@@ -630,13 +653,13 @@ async def sample(db: Any) -> dict[str, list[Any]]:
     out["consult_a"] = _round_robin(per_persona_a, sum(len(v) for v in per_persona_a.values()))
     out["consult_b"] = consult_b
 
-    new_posts = list((await db.execute(base.where(LlmCallLog.phase == "new_post"))).scalars())
+    new_posts = list((await db.execute(base.where(LlmCallLog.phase == "new_post"))).all())
     new_posts.sort(key=lambda r: (r.simulation_run_id != latest, r.created_at))
     out["new_post"] = new_posts[: SAMPLE_PLAN["new_post"]]
 
-    thread_rows = list((await db.execute(base.where(LlmCallLog.phase == "thread_reply"))).scalars())
+    thread_rows = list((await db.execute(base.where(LlmCallLog.phase == "thread_reply"))).all())
     sidecar = [r for r in thread_rows if roles.get(r.agent_id) == "scout_hub"
-               and "<assessment_json>" in (r.response_text or "")]
+               and r.has_sidecar]
     sidecar.sort(key=lambda r: r.created_at, reverse=True)
     out["hub_final"] = sidecar[: SAMPLE_PLAN["hub_final"]]
     out["forced_final"] = sidecar[SAMPLE_PLAN["hub_final"]: SAMPLE_PLAN["hub_final"] + SAMPLE_PLAN["forced_final"]]
@@ -651,12 +674,12 @@ async def sample(db: Any) -> dict[str, list[Any]]:
     thread_rows.sort(key=lambda r: (r.simulation_run_id != latest, r.created_at))
     hub_first = [r for r in thread_rows if roles.get(r.agent_id) == "scout_hub"
                  and (r.thread_ts, r.message_ordinal) not in used_turns
-                 and "<assessment_json>" not in (r.response_text or "")]
+                 and not r.has_sidecar]
     lab_first = [r for r in thread_rows if roles.get(r.agent_id) == "pi_lab"]
     out["first_hub"] = _round_robin(by_phase(hub_first), SAMPLE_PLAN["first_hub"])
     out["first_lab"] = _round_robin(by_phase(lab_first), SAMPLE_PLAN["first_lab"])
     out["roles"] = [roles]
-    return out
+    return await _hydrate(db, out)
 
 
 async def sample_profiles(db: Any) -> list[dict[str, Any]]:
@@ -838,11 +861,11 @@ def _post_parse(_message: Any, text: str) -> dict[str, Any]:
 
 
 def _profile_parse(_message: Any, text: str) -> dict[str, Any]:
-    from src.services.llm import _extract_json
+    from src.services.json_extract import extract_json
     from src.services.profile_pipeline import _validate_profile
 
     try:
-        return {"parse_ok": bool(_validate_profile(_extract_json(text)))}
+        return {"parse_ok": bool(_validate_profile(extract_json(text)))}
     except ValueError:
         return {"parse_ok": False}
 

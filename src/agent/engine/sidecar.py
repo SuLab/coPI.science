@@ -4,7 +4,8 @@ too, so the leaves never import each other."""
 import json
 import logging
 import re
-from typing import Any
+
+from src.services.verdict_fields import VERDICT_FIELD
 
 logger = logging.getLogger("src.agent.simulation")
 
@@ -217,13 +218,13 @@ _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 #: 6-7. SOFT: exceeding one logs a WARNING and stores the value as emitted.
 #: Enforcing them by dropping would trade a long headline for a lost verdict,
 #: and the row is the archive.
-_HEADLINE_SOFT_LIMIT = 110
+_HEADLINE_SOFT_LIMIT = VERDICT_FIELD["headline"].soft_bound
 #: `company_or_project` is the SHORT label, and it is the only project field the
 #: public #assessments-summary headline renders — where it is clipped to
 #: PROJECT_DISPLAY_CHARS (120, src/services/assessment_headline.py). A label
 #: over this bound is stored in full and warned about; one over 120 loses its
 #: tail in Slack.
-_PROJECT_SOFT_LIMIT = 70
+_PROJECT_SOFT_LIMIT = VERDICT_FIELD["company_or_project"].soft_bound
 #: The pitch's own soft bound, raised from 900 CHARACTERS to 250 WORDS on
 #: 2026-09-28 at the operator's request (scout_hub 1.9.0), counted as
 #: `len(text.split())`. Measured before the change: the five verdicts written
@@ -236,7 +237,7 @@ _PROJECT_SOFT_LIMIT = 70
 #: A longer pitch makes that harder, not easier, which is why the
 #: citation-loss alarm in `_persist_assessment` is now the load-bearing check
 #: rather than this one.
-_PITCH_WORD_LIMIT = 250
+_PITCH_WORD_LIMIT = VERDICT_FIELD["elevator_pitch"].soft_bound
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
 # scout_hub >= 1.9.0: the exact bullet count each current group carries
@@ -275,7 +276,7 @@ _PITCH_CITATION_RE = re.compile(
 #: whole field, and only for a genuine shape violation).
 _HUB_BULLETS_MIN = 2
 _HUB_BULLETS_MAX = 4
-_HUB_BULLET_CHARS = 200
+_HUB_BULLET_CHARS = VERDICT_FIELD["strengths"].soft_bound
 #: Sidecar item 2's companion (scout_hub >= 1.9.0, migration 0052): one
 #: sentence per dimension. Warnings only, like every other shape check here.
 _DIMENSION_RATIONALE_CHARS = 200
@@ -410,47 +411,13 @@ def _strip_llm_preamble(text: str) -> str:
     return text
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    """Extract JSON from LLM response text."""
-    text = text.strip()
-    if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-    if "```json" in text:
-        start = text.find("```json") + 7
-        end = text.find("```", start)
-        if end > start:
-            try:
-                return json.loads(text[start:end].strip())
-            except json.JSONDecodeError:
-                pass
-    if "```" in text:
-        start = text.find("```") + 3
-        end = text.find("```", start)
-        if end > start:
-            try:
-                return json.loads(text[start:end].strip())
-            except json.JSONDecodeError:
-                pass
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            pass
-    raise ValueError(f"Could not extract JSON from response: {text[:200]}")
-
-
 __all__ = [
     "_ASSESSMENT_ORPHAN_TAG_RE", "_ASSESSMENT_RE", "_ASSESSMENT_UNCLOSED_RE",
     "_DIMENSION_RATIONALE_CHARS", "_HEADLINE_SOFT_LIMIT", "_HUB_BULLETS_MAX",
     "_HUB_BULLETS_MIN", "_HUB_BULLET_CHARS", "_KEY_POINTS_MAX", "_KEY_POINTS_MIN",
     "_KEY_POINT_BULLET_CHARS", "_KEY_POINT_GROUP_BULLETS", "_PITCH_CITATION_RE",
     "_PITCH_WORD_LIMIT", "_PROJECT_SOFT_LIMIT", "_SIDECAR_FENCE_RE", "_VALID_GATING_STATES",
-    "_bounded_str", "_extract_assessment_json", "_extract_json", "_extract_slack_message",
+    "_bounded_str", "_extract_assessment_json", "_extract_slack_message",
     "_normalize_gating", "_reply_closes_thread", "_reply_opens_with_pause",
     "_sidecar_has_valid_json_block", "_str_or_none", "_strip_assessment_sidecar",
     "_strip_llm_preamble", "_unfence_sidecar",

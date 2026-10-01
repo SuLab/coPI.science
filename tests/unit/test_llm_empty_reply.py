@@ -19,7 +19,7 @@ def test_all_text_joins_every_text_block():
     # exactly how a verdict goes missing while Slack looks normal.
     message = multi_text_response("<slack_message>verdict</slack_message>",
                                   "<assessment_json>{}</assessment_json>")
-    assert llm._all_text(message) == (
+    assert llm.all_text(message) == (
         "<slack_message>verdict</slack_message>\n"
         "<assessment_json>{}</assessment_json>"
     )
@@ -27,7 +27,7 @@ def test_all_text_joins_every_text_block():
 
 def test_all_text_returns_empty_string_when_there_is_no_text_block():
     message = multi_text_response()
-    assert llm._all_text(message) == ""
+    assert llm.all_text(message) == ""
 
 
 def test_empty_reply_logs_an_error_naming_the_stop_reason(caplog):
@@ -120,7 +120,7 @@ async def test_a_truncated_reply_survives_a_retry_that_returns_nothing(
 async def test_a_whitespace_only_retry_keeps_the_first_pass_text(
     monkeypatch, caplog, whitespace
 ):
-    """`_all_text(retry_msg) or response_text` only defends against "".
+    """`all_text(retry_msg) or response_text` only defends against "".
 
     A retry that comes back as a newline, a space, or an indent is TRUTHY, so it
     won the `or` and replaced a truncated-but-usable first pass with blankness —
