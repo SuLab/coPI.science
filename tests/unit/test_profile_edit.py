@@ -21,14 +21,17 @@ async def test_applies_edits_and_creates_a_profile_row_if_none_existed(db_sessio
         db_session,
         target_user=pi,
         changed_by_user_id=pi.id,
-        name="New Name", email="new@example.edu",
-        institution="New U", department="New Dept",
-        research_summary="Studies new things.",
-        techniques="crispr, sequencing",
-        experimental_models="mouse",
-        disease_areas="cancer",
-        key_targets="TP53",
-        keywords="oncology",
+        form=dict(
+            name="New Name", email="new@example.edu",
+            institution="New U", department="New Dept",
+            research_summary="Studies new things.",
+            techniques="crispr, sequencing",
+            experimental_models="mouse",
+            disease_areas="cancer",
+            key_targets="TP53",
+            keywords="oncology",
+        ),
+        expected_version=None,
     )
 
     assert error is None
@@ -50,24 +53,27 @@ async def test_a_manager_editing_a_pi_attributes_the_revision_to_the_manager(db_
     await factories.make_agent(db_session, user=pi, status="active")
 
     # Mock export_profile_to_markdown to return a temporary path to avoid
-    # filesystem permission issues in the test environment. The import is
-    # inside the function, so patch it where it's imported from.
+    # filesystem permission issues in the test environment. Patch it where
+    # export_and_record looks it up.
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir) / "test_profile.md"
         tmppath.write_text("# Test Profile")
 
-        with patch("src.services.profile_export.export_profile_to_markdown") as mock_export:
+        with patch("src.services.profile_publish.export_profile_to_markdown") as mock_export:
             mock_export.return_value = tmppath
 
             error = await apply_profile_edits(
                 db_session,
                 target_user=pi,
                 changed_by_user_id=manager.id,
-                name=pi.name, email=pi.email or "",
-                institution="", department="",
-                research_summary="Edited by a manager.",
-                techniques="", experimental_models="",
-                disease_areas="", key_targets="", keywords="",
+                form=dict(
+                    name=pi.name, email=pi.email or "",
+                    institution="", department="",
+                    research_summary="Edited by a manager.",
+                    techniques="", experimental_models="",
+                    disease_areas="", key_targets="", keywords="",
+                ),
+                expected_version=None,
             )
 
     assert error is None
@@ -85,10 +91,13 @@ async def test_rejects_an_email_already_used_by_someone_else(db_session):
 
     error = await apply_profile_edits(
         db_session, target_user=pi, changed_by_user_id=pi.id,
-        name=pi.name, email="taken@example.edu",
-        institution="", department="", research_summary="",
-        techniques="", experimental_models="", disease_areas="",
-        key_targets="", keywords="",
+        form=dict(
+            name=pi.name, email="taken@example.edu",
+            institution="", department="", research_summary="",
+            techniques="", experimental_models="", disease_areas="",
+            key_targets="", keywords="",
+        ),
+        expected_version=None,
     )
 
     assert error == "email_taken"

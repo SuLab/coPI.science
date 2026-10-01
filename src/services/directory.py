@@ -37,6 +37,7 @@ from src.models import (
     User,
 )
 from src.services.assessment_detail import (
+    build_dimension_rows,
     has_review_filter,
     panel_state,
     unvetted_panel_filter,
@@ -49,6 +50,7 @@ from src.services.blackbird_rubric import (
     load_rubric,
 )
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
+from src.services.runs import runs_ordered
 from src.services.tenure_scope import scoped_counts, scoped_publications_for
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
@@ -313,9 +315,8 @@ def _assessment_dimension_rows(
     per-card disclosure — the SAME shape (and, for a stamped row, the same
     revision) that ``build_assessment_detail`` produces for its own
     ``dimensions``, so the two surfaces cannot disagree about a dimension's
-    title or bar length. Mirrors that function's ``_score_value``/``_pct``
-    and its normalize-then-fall-back-to-untitled treatment of an off-rubric
-    key precisely, rather than inventing a variant.
+    title or bar length. It delegates to ``build_dimension_rows``, which owns the
+    normalize-then-fall-back-to-untitled treatment of an off-rubric key.
 
     A row with no (dict) ``scores`` at all is NOT short-circuited: it falls
     through to the named-dimension loop and yields the revision's own
@@ -326,126 +327,19 @@ def _assessment_dimension_rows(
     with two answers, which is the drift this mirroring exists to prevent.
     ``([], None)`` now happens only when there is nothing to say on EITHER
     surface: no scores AND no resolvable revision.
+
+    The rows are the detail builder's (AP-10), so they also carry ``rationale``,
+    which the directory template does not read.
     """
-    scores = row.scores if isinstance(row.scores, dict) else {}
-    normalized_scores = {
-        key.strip().lower(): value
-        for key, value in scores.items()
-        if isinstance(key, str)
-    }
     revision, _provenance = resolve_revision(row.rubric_version, row.rubric_content_hash)
-
-    def _score_value(raw: object) -> float | None:
-        return (
-            float(raw)
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool)
-            else None
-        )
-
-    def _pct(value: float | None) -> float | None:
-        if revision is None:
-            return None
-        if value is None:
-            return 0.0
-        return min(100.0, max(0.0, value / revision.scale_max * 100.0))
-
-    rows: list[dict[str, Any]] = []
-    named_keys: set[str] = set()
-    if revision is not None:
-        for dim in revision.dimensions:
-            value = _score_value(normalized_scores.get(dim.key))
-            named_keys.add(dim.key)
-            rows.append({
-                "key": dim.key,
-                "title": dim.title,
-                "score": value,
-                "weight": dim.weight,
-                "weight_note": dim.weight_note,
-                "pct": _pct(value),
-            })
-    for key in sorted(normalized_scores):
-        if key in named_keys:
-            continue
-        value = _score_value(normalized_scores[key])
-        if value is None:
-            continue
-        rows.append({
-            "key": key,
-            "title": key.replace("_", " "),
-            "score": value,
-            "weight": None,
-            "weight_note": None,
-            "pct": _pct(value),
-        })
-    return rows, revision
+    return build_dimension_rows(row, revision), revision
 
 
-async def list_assessments(
-    db: AsyncSession,
-    run_id: str | None,
-    *,
-    sort: str | None = None,
-    lab: str | None = None,
-    review: str | None = None,
-) -> dict[str, Any]:
-    """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
-
-    Ordered by weighted score descending (NULLs last), then most-recent-first,
-    so the advance/conditional candidates are what a human sees on arrival —
-    this page is a triage queue, not a log. ``sort`` picks a different order
-    (see ``ASSESSMENT_SORT_OPTIONS``) and ``lab`` narrows to one
-    ``subject_agent_id``.
-
-    Both are UNVALIDATED user input off a query string, and both fall back to
-    the default SILENTLY rather than raising: a stale bookmark or a hand-typed
-    parameter must render the triage queue, not a 400 or an empty page. That
-    goes for a ``lab`` naming a subject with no rows in this run too — it is
-    dropped, so the reader gets the unfiltered queue instead of a blank table
-    with no explanation.
-
-    Defaults to the CURRENT simulation run (the most recently started
-    ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
-    dropdown reaches everything else; nothing is ever deleted from this view,
-    only filtered (one operator-run, backed-up purge on record: 2026-08-27,
-    rubric v3). This is deliberate, not incidental: before the 2026-08-22 fix,
-    ``--fresh`` (``src/agent/main.py``) ran three UNFILTERED deletes —
-    ``agent_messages``, ``agent_channels`` and ``pi_dm_messages`` — with no
-    ``simulation_run_id`` predicate, so every historical run's Slack messages
-    went with it while ``opportunity_assessments`` (never touched by any
-    ``--fresh``, before or after) survived pointing at threads that no longer
-    existed. Today's ``--fresh`` deletes nothing at all — it only mints a new
-    ``simulation_run_id``, and that new id is the isolation — but the old
-    runs already orphaned that way are still on record, so after a fresh
-    restart, old assessments whose Slack messages no longer exist would
-    otherwise sit on this page with nothing to distinguish them from current
-    ones. Scoping to the latest run excludes those by construction (their
-    ``simulation_run_id`` is a run whose messages are gone), while the "All
-    Runs" escape hatch and the per-run dropdown keep every row reachable.
-    Mirrors the run-selector pattern already used by ``admin_discussions``.
-
-    ``review`` splits the queue into the reviewed and unreviewed sub-tabs and
-    narrows ``total_count``, the rendered rows and everything derived from them.
-    It deliberately does NOT narrow ``incomplete_panel_count``, the drop counts,
-    ``lab_options`` or ``assessment_counts_by_run`` — the first two are warnings
-    and the failure mode of a warning is under-warning, and the last two are the
-    controls' own option sets, which are computed pre-filter so a reader always
-    has a way back. Like ``sort`` and ``lab`` it is unvalidated query-string
-    input and falls back to ``ASSESSMENT_REVIEW_DEFAULT`` silently.
-    """
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
-    )
-    runs = runs_result.scalars().all()
-
-    # Stored rows per run — the dropdown's honesty device: an old run showing
-    # "0 stored" is distinguishable from a populated one, and (post-purge) from
-    # a run whose rows exist only in the offline backup.
-    counts_result = await db.execute(
-        select(OpportunityAssessment.simulation_run_id, func.count())
-        .group_by(OpportunityAssessment.simulation_run_id)
-    )
-    assessment_counts_by_run = dict(counts_result.all())
-
+def _resolve_run_selection(
+    runs: list[SimulationRun], run_id: str | None
+) -> tuple[bool, uuid.UUID | str | None]:
+    """``(show_all_runs, selected_run_id)``: ``run_id == "all"`` selects every run;
+    an unparseable or absent id falls back to the newest run (``runs[0]``)."""
     show_all_runs = run_id == "all"
     selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
     if not show_all_runs and run_id:
@@ -455,12 +349,19 @@ async def list_assessments(
             pass
     if not selected_run_id and runs:
         selected_run_id = runs[0].id
+    return show_all_runs, selected_run_id
 
-    sort_key = sort if sort in ASSESSMENT_SORTS else ASSESSMENT_SORT_DEFAULT
-    review_key = (
-        review if review in ASSESSMENT_REVIEW_FILTERS else ASSESSMENT_REVIEW_DEFAULT
-    )
 
+async def _filtered_assessment_query(
+    db: AsyncSession,
+    selected_run_id: uuid.UUID | str | None,
+    show_all_runs: bool,
+    lab: str | None,
+    review_key: str,
+) -> tuple[Any, Any, list[str], str | None]:
+    """``(query, scope_query, lab_options, lab_filter)``: the assessment query
+    narrowed by run, lab and review tab, plus the run+lab scope the tab counts
+    are taken from and the lab dropdown's options."""
     query = select(OpportunityAssessment)
     if not show_all_runs and selected_run_id:
         query = query.where(OpportunityAssessment.simulation_run_id == selected_run_id)
@@ -496,13 +397,10 @@ async def list_assessments(
         query = query.where(has_review_filter())
     elif review_key == "unreviewed":
         query = query.where(~has_review_filter())
+    return query, scope_query, lab_options, lab_filter
 
-    # Counts the current filter — run AND lab AND the review tab — so the
-    # "top N of TOTAL" note describes the table the reader is looking at.
-    total_count = (
-        await db.execute(select(func.count()).select_from(query.subquery()))
-    ).scalar() or 0
 
+async def _review_counts(db: AsyncSession, scope_query: Any) -> dict[str, int]:
     # Both tabs' sizes in one place, so the strip never has to derive "All" by
     # addition and cannot disagree with the rows below it. Scoped by run+lab —
     # the same scope as `total_count` — but deliberately NOT by the tab itself.
@@ -514,12 +412,16 @@ async def list_assessments(
     all_count = (await db.execute(
         select(func.count()).select_from(scope_query.subquery())
     )).scalar() or 0
-    review_counts = {
+    return {
         "reviewed": reviewed_count,
         "unreviewed": all_count - reviewed_count,
         "all": all_count,
     }
 
+
+async def _incomplete_panel_count(
+    db: AsyncSession, selected_run_id: uuid.UUID | str | None, show_all_runs: bool
+) -> int:
     # Surfaced because Task 3 of docs/plans/2026-08-18-specialist-panel-remediation.md
     # stops the floor discarding a gapped verdict.
     # Storing it is only safe if the page distinguishes it from a vetted one.
@@ -565,16 +467,14 @@ async def list_assessments(
         incomplete_query = incomplete_query.where(
             OpportunityAssessment.simulation_run_id == selected_run_id
         )
-    incomplete_panel_count = (await db.execute(incomplete_query)).scalar_one()
+    return (await db.execute(incomplete_query)).scalar_one()
 
-    # Ordering (see _assessment_order_by, which documents the NULLS LAST
-    # discipline) is applied AFTER total_count: a count over an ordered
-    # subquery is the same number and more work.
-    query = query.order_by(*_assessment_order_by(sort_key)).limit(ASSESSMENTS_LIMIT)
 
-    result = await db.execute(query)
-    assessments = result.scalars().all()
-
+async def _annotate_rows(
+    db: AsyncSession, assessments: list[OpportunityAssessment]
+) -> dict[str, str]:
+    """Attach ``panel_state``, ``review_cols`` and the dimension rows to each row
+    and return the ``agent_id -> user_id`` map of the rows' subject labs."""
     # The five-state panel finding, per row, computed by the ONE definition the
     # detail page uses. Attached to each row rather than returned as a separate
     # context key on purpose: `_assessments_body.html` is included by an admin
@@ -637,7 +537,11 @@ async def list_assessments(
     # weights shown here always match the revision that actually scored it.
     for _row in assessments:
         _row.dimension_rows, _row.revision_view = _assessment_dimension_rows(_row)
+    return pi_user_ids
 
+
+def _dimension_stats(assessments: list[OpportunityAssessment]) -> list[dict[str, Any]]:
+    """Per-dimension score distribution over the displayed rows."""
     # Per-dimension distribution. Four dimensions (external_signals, ip_fto,
     # exit_thesis, chemistry_dc_path) never exceeded 2 across the 18
     # assessments of run 1787010946 — 23 of 100 weight points pinned near
@@ -692,6 +596,128 @@ async def list_assessments(
             "min": min(values) if values else None,
             "max": max(values) if values else None,
         })
+    return dimension_stats
+
+
+async def _drop_counts(
+    db: AsyncSession, selected_run_id: uuid.UUID | str | None, show_all_runs: bool
+) -> list[Any]:
+    # Verdicts that were lost — generated and discarded, or never produced at
+    # all — scoped exactly like the rows above. Without this an empty page is
+    # ambiguous: "nothing screened yet" and "everything screened and every
+    # verdict discarded" look identical, and the latter is only visible as a
+    # WARNING in a container log. Grouped by reason so the banner can say WHICH
+    # failure is happening — they have different fixes (panel never convened /
+    # sidecar truncated / no sidecar emitted / interview abandoned with no
+    # reply at all).
+    drops_result = await db.execute(
+        select(AssessmentDrop.reason, func.count())
+        .where(
+            AssessmentDrop.simulation_run_id == selected_run_id
+            if not show_all_runs and selected_run_id
+            else sa_true()
+        )
+        .group_by(AssessmentDrop.reason)
+        .order_by(func.count().desc())
+    )
+    return list(drops_result.all())
+
+
+async def list_assessments(
+    db: AsyncSession,
+    run_id: str | None,
+    *,
+    sort: str | None = None,
+    lab: str | None = None,
+    review: str | None = None,
+) -> dict[str, Any]:
+    """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
+
+    Ordered by weighted score descending (NULLs last), then most-recent-first,
+    so the advance/conditional candidates are what a human sees on arrival —
+    this page is a triage queue, not a log. ``sort`` picks a different order
+    (see ``ASSESSMENT_SORT_OPTIONS``) and ``lab`` narrows to one
+    ``subject_agent_id``.
+
+    Both are UNVALIDATED user input off a query string, and both fall back to
+    the default SILENTLY rather than raising: a stale bookmark or a hand-typed
+    parameter must render the triage queue, not a 400 or an empty page. That
+    goes for a ``lab`` naming a subject with no rows in this run too — it is
+    dropped, so the reader gets the unfiltered queue instead of a blank table
+    with no explanation.
+
+    Defaults to the CURRENT simulation run (the most recently started
+    ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
+    dropdown reaches everything else; nothing is ever deleted from this view,
+    only filtered (one operator-run, backed-up purge on record: 2026-08-27,
+    rubric v3). This is deliberate, not incidental: before the 2026-08-22 fix,
+    ``--fresh`` (``src/agent/main.py``) ran three UNFILTERED deletes —
+    ``agent_messages``, ``agent_channels`` and ``pi_dm_messages`` — with no
+    ``simulation_run_id`` predicate, so every historical run's Slack messages
+    went with it while ``opportunity_assessments`` (never touched by any
+    ``--fresh``, before or after) survived pointing at threads that no longer
+    existed. Today's ``--fresh`` deletes nothing at all — it only mints a new
+    ``simulation_run_id``, and that new id is the isolation — but the old
+    runs already orphaned that way are still on record, so after a fresh
+    restart, old assessments whose Slack messages no longer exist would
+    otherwise sit on this page with nothing to distinguish them from current
+    ones. Scoping to the latest run excludes those by construction (their
+    ``simulation_run_id`` is a run whose messages are gone), while the "All
+    Runs" escape hatch and the per-run dropdown keep every row reachable.
+    Mirrors the run-selector pattern already used by ``admin_discussions``.
+
+    ``review`` splits the queue into the reviewed and unreviewed sub-tabs and
+    narrows ``total_count``, the rendered rows and everything derived from them.
+    It deliberately does NOT narrow ``incomplete_panel_count``, the drop counts,
+    ``lab_options`` or ``assessment_counts_by_run`` — the first two are warnings
+    and the failure mode of a warning is under-warning, and the last two are the
+    controls' own option sets, which are computed pre-filter so a reader always
+    has a way back. Like ``sort`` and ``lab`` it is unvalidated query-string
+    input and falls back to ``ASSESSMENT_REVIEW_DEFAULT`` silently.
+    """
+    runs = await runs_ordered(db)
+
+    # Stored rows per run — the dropdown's honesty device: an old run showing
+    # "0 stored" is distinguishable from a populated one, and (post-purge) from
+    # a run whose rows exist only in the offline backup.
+    counts_result = await db.execute(
+        select(OpportunityAssessment.simulation_run_id, func.count())
+        .group_by(OpportunityAssessment.simulation_run_id)
+    )
+    assessment_counts_by_run = dict(counts_result.all())
+
+    show_all_runs, selected_run_id = _resolve_run_selection(runs, run_id)
+
+    sort_key = sort if sort in ASSESSMENT_SORTS else ASSESSMENT_SORT_DEFAULT
+    review_key = (
+        review if review in ASSESSMENT_REVIEW_FILTERS else ASSESSMENT_REVIEW_DEFAULT
+    )
+
+    query, scope_query, lab_options, lab_filter = await _filtered_assessment_query(
+        db, selected_run_id, show_all_runs, lab, review_key
+    )
+
+    # Counts the current filter — run AND lab AND the review tab — so the
+    # "top N of TOTAL" note describes the table the reader is looking at.
+    total_count = (
+        await db.execute(select(func.count()).select_from(query.subquery()))
+    ).scalar() or 0
+
+    review_counts = await _review_counts(db, scope_query)
+
+    incomplete_panel_count = await _incomplete_panel_count(db, selected_run_id, show_all_runs)
+
+    # Ordering (see _assessment_order_by, which documents the NULLS LAST
+    # discipline) is applied AFTER total_count: a count over an ordered
+    # subquery is the same number and more work.
+    query = query.order_by(*_assessment_order_by(sort_key)).limit(ASSESSMENTS_LIMIT)
+
+    result = await db.execute(query)
+    assessments = result.scalars().all()
+
+    pi_user_ids = await _annotate_rows(db, assessments)
+
+    dimension_stats = _dimension_stats(assessments)
 
     band_counts = sorted(Counter(
         row.band for row in assessments if row.band
@@ -716,25 +742,7 @@ async def list_assessments(
         )
     )
 
-    # Verdicts that were lost — generated and discarded, or never produced at
-    # all — scoped exactly like the rows above. Without this an empty page is
-    # ambiguous: "nothing screened yet" and "everything screened and every
-    # verdict discarded" look identical, and the latter is only visible as a
-    # WARNING in a container log. Grouped by reason so the banner can say WHICH
-    # failure is happening — they have different fixes (panel never convened /
-    # sidecar truncated / no sidecar emitted / interview abandoned with no
-    # reply at all).
-    drops_result = await db.execute(
-        select(AssessmentDrop.reason, func.count())
-        .where(
-            AssessmentDrop.simulation_run_id == selected_run_id
-            if not show_all_runs and selected_run_id
-            else sa_true()
-        )
-        .group_by(AssessmentDrop.reason)
-        .order_by(func.count().desc())
-    )
-    drop_counts = list(drops_result.all())
+    drop_counts = await _drop_counts(db, selected_run_id, show_all_runs)
     drops_total = sum(n for _, n in drop_counts)
 
     return {
@@ -812,10 +820,7 @@ async def build_discussions_view(
     rely on their presence rather than on Jinja2's lenient ``Undefined``.
     """
     # Pick which simulation run to show
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
-    )
-    runs = runs_result.scalars().all()
+    runs = await runs_ordered(db)
 
     show_all_runs = run_id == "all"
     selected_run_id = "all" if show_all_runs else None
@@ -1008,10 +1013,7 @@ async def build_discussions_view(
 
 async def list_runs_overview(db: AsyncSession) -> dict[str, Any]:
     """Agent activity overview."""
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
-    )
-    runs = runs_result.scalars().all()
+    runs = await runs_ordered(db)
 
     # Summary stats
     total_messages_result = await db.execute(

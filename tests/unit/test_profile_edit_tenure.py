@@ -41,10 +41,13 @@ async def _pi_with_full_career_store(db_session):
 def _edit_kwargs(user, **overrides):
     kwargs = dict(
         target_user=user, changed_by_user_id=user.id,
-        name=user.name, email="", institution="", department="",
-        research_summary="Summary.", techniques="t1, t2",
-        experimental_models="m", disease_areas="d", key_targets="k",
-        keywords="w",
+        form=dict(
+            name=user.name, email="", institution="", department="",
+            research_summary="Summary.", techniques="t1, t2",
+            experimental_models="m", disease_areas="d", key_targets="k",
+            keywords="w",
+        ),
+        expected_version=None,
     )
     kwargs.update(overrides)
     return kwargs

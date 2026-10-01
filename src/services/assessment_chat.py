@@ -59,6 +59,7 @@ from src.services.assessment_chat_stream import (
 )
 from src.services.llm import CLIENT_READ_TIMEOUT_SECONDS
 from src.services.llm_pricing import PRICES, cost_for_tokens
+from src.services.runs import latest_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -410,9 +411,7 @@ async def verdict_may_change(db: AsyncSession, assessment: Any) -> bool:
     )
     if status == "running":
         return True
-    latest_id = await db.scalar(
-        select(SimulationRun.id).order_by(SimulationRun.started_at.desc()).limit(1)
-    )
+    latest_id = await latest_run_id(db)
     return latest_id == assessment.simulation_run_id
 
 

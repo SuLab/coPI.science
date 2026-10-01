@@ -24,3 +24,19 @@ async def latest_run_id(db: AsyncSession) -> uuid.UUID | None:
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def runs_ordered(db: AsyncSession) -> list[SimulationRun]:
+    """Every run, newest first; ties on started_at broken by id, the same order
+    ``latest_run_id`` picks from."""
+    return list(
+        (
+            await db.execute(
+                select(SimulationRun).order_by(
+                    SimulationRun.started_at.desc(), SimulationRun.id.desc()
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )

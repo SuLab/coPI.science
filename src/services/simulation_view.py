@@ -20,6 +20,7 @@ from src.models import (
 )
 from src.services import display_format as fmt
 from src.services.build_info import API_CALL_UNITS_NOTE
+from src.services.runs import runs_ordered
 from src.services.simulation_control import HEARTBEAT_STALE_SECONDS
 from src.services.simulation_stats import (
     CALL_STATS_ROW_LIMIT,
@@ -140,9 +141,7 @@ async def _resolve_selected_run(
     """`?run=<uuid>`, defaulting to the latest run by `started_at`. An absent,
     malformed, or unknown `run` param all fall back to the default rather than
     erroring — the selector is a convenience, not a hard filter that can 404."""
-    runs = (
-        await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()))
-    ).scalars().all()
+    runs = await runs_ordered(db)
     selected = None
     run_param = request.query_params.get("run")
     if run_param:

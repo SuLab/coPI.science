@@ -158,11 +158,14 @@ async def profile_save(
     """
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
-        name=name, email=email, institution=institution, department=department,
-        research_summary=research_summary, techniques=techniques,
-        experimental_models=experimental_models, disease_areas=disease_areas,
-        key_targets=key_targets, keywords=keywords,
-        expected_profile_version=parse_expected_version(profile_version),
+        form={
+            "name": name, "email": email, "institution": institution,
+            "department": department, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)

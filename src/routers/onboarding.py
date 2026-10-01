@@ -10,12 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
-from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.models import Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
-from src.services.profile_edit import parse_expected_version, write_profile_text_fields
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.profile_jobs import enqueue_profile_job_if_absent
-from src.services.user_email import assign_user_email
-from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -152,76 +150,22 @@ async def save_profile(
     bot of its own (D7).
     """
 
-    # Email is required at onboarding. Validate before persisting anything so a
-    # bad value rejects the whole submission (mirrors profile_save on /profile).
-    email_clean = (email or "").strip().lower()
-    if not email_clean:
-        return RedirectResponse(url="/onboarding?error=email_required", status_code=302)
-    if not is_valid_email(email_clean):
-        return RedirectResponse(url="/onboarding?error=invalid_email", status_code=302)
-    if email_clean != (current_user.email or ""):
-        if not await assign_user_email(db, current_user, email_clean):
-            return RedirectResponse(url="/onboarding?error=email_taken", status_code=302)
-
-    def parse_list(val: str) -> list[str]:
-        return [s.strip() for s in val.split(",") if s.strip()]
-
-    result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
+    # Email is required at onboarding. apply_profile_edits validates it before
+    # persisting anything, so a bad value rejects the whole submission.
+    error = await apply_profile_edits(
+        db, target_user=current_user, changed_by_user_id=current_user.id,
+        form={
+            "email": email, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
+        email_required=True,
+        change_summary="Profile saved during onboarding",
     )
-    profile = result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=current_user.id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's VALUES,
-        # which cannot reference its own target table ("invalid reference to
-        # FROM-clause entry for table researcher_profiles").
-        await db.flush()
-
-    written = await write_profile_text_fields(db, profile, {
-        "research_summary": research_summary,
-        "techniques": parse_list(techniques),
-        "experimental_models": parse_list(experimental_models),
-        "disease_areas": parse_list(disease_areas),
-        "key_targets": parse_list(key_targets),
-        "keywords": parse_list(keywords),
-    }, parse_expected_version(profile_version))
-    if not written:
-        await db.rollback()
-        return RedirectResponse(url="/onboarding?error=profile_changed", status_code=302)
-    await db.commit()
-
-    # Look up agent_id (gates file export and revision)
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id_for_export = agent_reg.agent_id if agent_reg else None
-
-    # Export to markdown for agent consumption (tenure-scoped publications)
-    from src.services.profile_export import export_profile_to_markdown
-    from src.services.tenure_scope import scoped_publications_for_export
-    user_pubs = await scoped_publications_for_export(
-        db, current_user.id, agent_id_for_export
-    )
-    exported_path = export_profile_to_markdown(
-        current_user, profile, agent_id_for_export, publications=user_pubs
-    )
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    if agent_reg and exported_path:
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="public",
-            content=exported_path.read_text(encoding="utf-8"),
-            changed_by_user_id=current_user.id,
-            mechanism="web",
-            change_summary="Profile saved during onboarding",
-        )
-        await db.commit()
+    if error:
+        return RedirectResponse(url=f"/onboarding?error={error}", status_code=302)
 
     # This is now the terminal step of onboarding (the private-profile step
     # that used to own completion — onboarding_complete flip, welcome email,

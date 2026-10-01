@@ -84,7 +84,7 @@ from src.services.pi_onboarding import (
     find_or_create_pi_by_orcid,
 )
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
-from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.prose_citations import (
     markdown_with_citation_links,
@@ -346,12 +346,15 @@ async def manager_edit_pi_profile(
 
     error = await apply_profile_edits(
         db, target_user=detail["user"], changed_by_user_id=current_user.id,
-        name=name, email=email, institution=institution, department=department,
-        research_summary=research_summary, techniques=techniques,
-        experimental_models=experimental_models, disease_areas=disease_areas,
-        key_targets=key_targets, keywords=keywords,
+        form={
+            "name": name, "email": email, "institution": institution,
+            "department": department, "research_summary": research_summary,
+            "techniques": techniques, "experimental_models": experimental_models,
+            "disease_areas": disease_areas, "key_targets": key_targets,
+            "keywords": keywords,
+        },
         jhu_tenure_start=jhu_tenure_start,
-        expected_profile_version=parse_expected_version(profile_version),
+        expected_version=parse_expected_version(profile_version),
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
@@ -423,7 +426,10 @@ async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid
         if user is None or profile is None:
             return
         publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
-        export_profile_to_markdown(user, profile, agent.agent_id, publications=publications)
+        await export_and_record(
+            db, user=user, profile=profile, agent=agent, publications=publications,
+            mechanism=None,
+        )
     except Exception:
         logger.exception("Failed to re-export profile markdown for user %s after veto", user_id)
 

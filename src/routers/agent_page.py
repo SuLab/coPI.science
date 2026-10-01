@@ -22,8 +22,7 @@ from src.models import (
     User,
 )
 from src.services.agent_identity import derive_agent_identity
-from src.services.profile_edit import parse_expected_version, write_profile_text_fields
-from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -524,10 +523,6 @@ async def agent_thread_replies(
 # --------------------------------------------------------------------------
 
 
-def _parse_list(val: str) -> list[str]:
-    return [s.strip() for s in val.split(",") if s.strip()]
-
-
 @router.get("/{agent_id}/public-profile", response_class=HTMLResponse)
 async def view_public_profile(
     agent_id: str,
@@ -629,56 +624,21 @@ async def save_public_profile(
             detail="This lab is no longer linked to a PI account",
         )
 
-    # Update the PI's profile
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
+    pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
+    error = await apply_profile_edits(
+        db, target_user=pi_user, changed_by_user_id=current_user.id,
+        form={
+            "research_summary": research_summary, "techniques": techniques,
+            "experimental_models": experimental_models, "disease_areas": disease_areas,
+            "key_targets": key_targets, "keywords": keywords,
+        },
+        expected_version=parse_expected_version(profile_version),
+        export_agent=agent,
     )
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=agent.user_id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's VALUES,
-        # which cannot reference its own target table ("invalid reference to
-        # FROM-clause entry for table researcher_profiles").
-        await db.flush()
-
-    written = await write_profile_text_fields(db, profile, {
-        "research_summary": research_summary,
-        "techniques": _parse_list(techniques),
-        "experimental_models": _parse_list(experimental_models),
-        "disease_areas": _parse_list(disease_areas),
-        "key_targets": _parse_list(key_targets),
-        "keywords": _parse_list(keywords),
-    }, parse_expected_version(profile_version))
-    if not written:
-        await db.rollback()
+    if error:
         return RedirectResponse(
-            url=f"/agent/{agent_id}/public-profile/edit?error=profile_changed", status_code=302,
+            url=f"/agent/{agent_id}/public-profile/edit?error={error}", status_code=302,
         )
-    await db.commit()
-
-    # Export to markdown for agent consumption (tenure-scoped publications)
-    pi_result = await db.execute(select(User).where(User.id == agent.user_id))
-    pi_user = pi_result.scalar_one()
-    from src.services.tenure_scope import scoped_publications_for_export
-    user_pubs = await scoped_publications_for_export(db, agent.user_id, agent.agent_id)
-    exported_path = export_profile_to_markdown(
-        pi_user, profile, agent.agent_id, publications=user_pubs
-    )
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    content = exported_path.read_text(encoding="utf-8") if exported_path else ""
-    await create_revision(
-        db,
-        agent_registry_id=agent.id,
-        profile_type="public",
-        content=content,
-        changed_by_user_id=current_user.id,
-        mechanism="web",
-    )
-    await db.commit()
 
     logger.info(
         "Public profile for agent %s updated by %s",

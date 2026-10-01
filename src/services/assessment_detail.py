@@ -62,6 +62,7 @@ from src.services.interview_transcript import load_interview_thread
 from src.services.rubric_revisions import (
     PROVENANCE_LIVE,
     PROVENANCE_UNKNOWN,
+    RubricRevisionView,
     resolve_revision,
 )
 
@@ -924,6 +925,215 @@ def _latest_consult_per_domain(consults: list[dict[str, Any]]) -> list[tuple[dic
     return [(latest[d], counts[d]) for d in order]
 
 
+def _add_item(
+    bucket: list[dict[str, Any]],
+    source: str,
+    label: object,
+    detail: object,
+    body: list[str] | None = None,
+    note: str | None = None,
+    preview: str | None = None,
+    rationale: str | None = None,
+) -> None:
+    """Append one entry, in the shape ``derive_strengths_and_risks`` documents."""
+    bucket.append({
+        "source": source,
+        "label": str(label) if label else source.replace("_", " "),
+        "detail": str(detail),
+        "body": list(body) if body else [],
+        # One collapsed line of the quoted text (consults only); None
+        # when the entry has nothing to preview or the body is static
+        # rubric metadata that belongs behind the click.
+        "preview": preview,
+        # A non-quote annotation rendered as a badge, never as a bullet:
+        # "latest of N consults" — so it is not mistaken for text a
+        # specialist wrote.
+        "note": note,
+        # The hub's own per-dimension reason (0052); None off dimensions.
+        "rationale": rationale,
+    })
+
+
+def _classify_dimensions(
+    dimensions: list[dict[str, Any]] | None,
+    revision: Any,
+    rationales: dict[str, str],
+    strengths: list[dict[str, Any]],
+    risks: list[dict[str, Any]],
+    unestablished: list[dict[str, Any]],
+    mid_scale: list[dict[str, Any]],
+) -> tuple[dict[str, float | None], int, int]:
+    """The dimension block of ``derive_strengths_and_risks``: files each scored
+    dimension into ``strengths`` / ``risks`` / ``mid_scale`` by the ROW's revision
+    scale, and each unscored one into ``unestablished``. Returns
+    ``(thresholds, mid_scale_count, scored_dimension_count)``; with no revision
+    nothing is filed and the thresholds stay None."""
+    thresholds: dict[str, float | None] = {
+        "strength": None, "risk": None, "scale_max": None,
+    }
+    mid_scale_count = 0
+    scored_dimension_count = 0
+    # Dimensions. Skipped wholesale when the row's revision is unknown: with no
+    # scale there is no threshold, and guessing one is the re-derivation point 2
+    # rules out.
+    # "not scored, counted as zero in the weighted score" is only true when a
+    # weighted score EXISTS. `_persist_assessment` writes `scores or None`
+    # alongside a NULL `weighted_score`/`band` for a verdict that carried no
+    # dimension scores at all, so for that row the claim would be made six
+    # times about a number that was never computed. The detail page still
+    # renders all six of the revision's dimensions for such a row, which is
+    # why this has to be decided here rather than by the absence of rows.
+    any_scored = any(
+        isinstance(dim, dict) and _usable_score(dim.get("score")) is not None
+        for dim in dimensions or ()
+    )
+    not_scored_detail = (
+        _NOT_SCORED_DETAIL if any_scored else _NO_SCORES_AT_ALL_DETAIL
+    )
+    if revision is None:
+        return thresholds, mid_scale_count, scored_dimension_count
+    scale_max = _usable_score(getattr(revision, "scale_max", None))
+    strength_threshold = risk_threshold = None
+    if scale_max is not None:
+        strength_threshold = STRENGTH_THRESHOLD_FRACTION * scale_max
+        risk_threshold = RISK_THRESHOLD_FRACTION * scale_max
+        thresholds = {
+            "strength": strength_threshold,
+            "risk": risk_threshold,
+            "scale_max": scale_max,
+        }
+    for dim in dimensions or ():
+        if not isinstance(dim, dict):
+            continue
+        label = dim.get("title") or dim.get("key")
+        rationale = _rationale_for(rationales, dim.get("key"))
+        weight_body = (
+            [f"weight: {dim.get('weight_note')}"] if dim.get("weight") is not None else []
+        )
+        score = _usable_score(dim.get("score"))
+        if score is None:
+            _add_item(unestablished, "dimension", label, not_scored_detail,
+                      rationale=rationale)
+            continue
+        scored_dimension_count += 1
+        if scale_max is None:
+            continue
+        detail = _format_score(score, scale_max)
+        if score >= strength_threshold:
+            _add_item(strengths, "dimension", label, detail, body=weight_body,
+                      rationale=rationale)
+        elif score <= risk_threshold:
+            _add_item(risks, "dimension", label, detail, body=weight_body,
+                      rationale=rationale)
+        else:
+            # A mid-scale score is a real, neutral answer: listed in its
+            # own bucket so every scored dimension appears on the page,
+            # but never as a strength or a risk.
+            mid_scale_count += 1
+            _add_item(mid_scale, "dimension", label, detail, body=weight_body,
+                      rationale=rationale)
+
+    return thresholds, mid_scale_count, scored_dimension_count
+
+
+def _gating_items(
+    assessment: OpportunityAssessment,
+    revision_provenance: str | None,
+    strengths: list[dict[str, Any]],
+    risks: list[dict[str, Any]],
+    unestablished: list[dict[str, Any]],
+) -> None:
+    """The gating block of ``derive_strengths_and_risks``."""
+    # Gating. The tri-state strings, plus a fourth branch for anything else —
+    # `gating` is JSONB with no CHECK constraint behind it.
+    gating = getattr(assessment, "gating", None)
+    # Gate title/description come from the LIVE rubric document and are shown
+    # only when this row was scored against it (`PROVENANCE_LIVE`) — an older
+    # row's gating key may not even exist in the live document, and rendering
+    # today's title/description against yesterday's decision would mislabel
+    # it the same way a hardcoded score threshold would.
+    live_gating = load_rubric().gating if revision_provenance == PROVENANCE_LIVE else {}
+    if isinstance(gating, dict):
+        for key, value in gating.items():
+            label = str(key).replace("_", " ")
+            gate_meta = live_gating.get(key) if isinstance(key, str) else None
+            if value == "met":
+                if gate_meta is not None:
+                    _add_item(strengths, "gating", gate_meta["title"], "met", body=[gate_meta["description"]])
+                else:
+                    _add_item(strengths, "gating", label, "met")
+            elif value == "not_met":
+                if gate_meta is not None:
+                    _add_item(risks, "gating", gate_meta["title"], "not met", body=[gate_meta["description"]])
+                else:
+                    _add_item(risks, "gating", label, "not met")
+            elif value == "unconfirmed":
+                _add_item(unestablished, "gating", label, "never asked")
+            else:
+                _add_item(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL)
+
+
+def _red_flag_items(assessment: OpportunityAssessment, risks: list[dict[str, Any]]) -> None:
+    """The red-flag block of ``derive_strengths_and_risks``."""
+    # Red flags, full text. A non-string entry is skipped rather than coerced:
+    # a rendered `None` or `{}` would read as a flag the hub never wrote.
+    # Stored flags average ~535 characters (2026-09-14), so the summary line is
+    # the first sentence and the full text sits behind the click — but ONLY
+    # when the clip actually shortened it: a short flag renders as a plain,
+    # uncollapsed bullet, which is what the red-flag card's own
+    # never-collapsed rule expects of a disqualifier a reviewer must see.
+    red_flags = getattr(assessment, "red_flags", None)
+    if isinstance(red_flags, list):
+        for flag in red_flags:
+            if isinstance(flag, str) and flag.strip():
+                full = flag.strip()
+                short = _preview(full) or full
+                _add_item(risks, "red_flag", "Red flag", short, body=[full] if short != full else [])
+
+
+def _consult_items(
+    consults: list[dict[str, Any]] | None,
+    strengths: list[dict[str, Any]],
+    risks: list[dict[str, Any]],
+    unestablished: list[dict[str, Any]],
+) -> None:
+    """The consult block of ``derive_strengths_and_risks``: one entry per domain."""
+    for consult, n_in_domain in _latest_consult_per_domain(list(consults or ())):
+        label = consult.get("domain") or "consult"
+        note = f"latest of {n_in_domain} consults" if n_in_domain > 1 else None
+        if consult.get("reply_truncated"):
+            _add_item(unestablished, "consult", label, _TRUNCATED_CONSULT_DETAIL, note=note)
+            continue
+        # `read_state` (migration 0038) has THREE values, and two of them mean
+        # the stored `verdict_signal` is not something a specialist said:
+        # `truncated` (the reply was cut off) and `defaulted` (the reply
+        # arrived complete but `parse_opinion` could not read a signal out of
+        # it, so `_DEFAULT_SIGNAL` — `gap` — was substituted). The truncated
+        # case is caught above by `reply_truncated`; the DEFAULTED case has
+        # `truncated=False` and would otherwise land in `_RISK_SIGNALS` and
+        # render under a red glyph as a specialist finding nobody made, which
+        # is exactly what point 1 of this function's contract forbids and what
+        # `parse_opinion`'s own docstring calls "the laundering that branch
+        # exists to prevent". `read_state is None` is a pre-0038 row: the
+        # question was never recorded, so it is NOT treated as defaulted and
+        # stays on the signal path below, which is the only answer available
+        # for it.
+        if consult.get("read_state") == "defaulted":
+            _add_item(unestablished, "consult", label, _DEFAULTED_CONSULT_DETAIL, note=note)
+            continue
+        signal = consult.get("verdict_signal")
+        if isinstance(signal, str) and signal in _STRENGTH_SIGNALS:
+            body = _capped_body(consult.get("established"))
+            _add_item(strengths, "consult", label, signal, body=body, note=note,
+                 preview=_preview(body[0]) if body else None)
+        elif isinstance(signal, str) and signal in _RISK_SIGNALS:
+            body = _capped_body(consult.get("concerns"))
+            _add_item(risks, "consult", label, signal, body=body, note=note,
+                 preview=_preview(body[0]) if body else None)
+        else:
+            _add_item(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL, note=note)
+
+
 def derive_strengths_and_risks(
     assessment: OpportunityAssessment,
     *,
@@ -1041,177 +1251,14 @@ def derive_strengths_and_risks(
     risks: list[dict[str, Any]] = []
     unestablished: list[dict[str, Any]] = []
     mid_scale: list[dict[str, Any]] = []
-    rationales = _dimension_rationale_map(assessment)
     scale_known = revision is not None
-    thresholds: dict[str, float | None] = {
-        "strength": None, "risk": None, "scale_max": None,
-    }
-    mid_scale_count = 0
-    scored_dimension_count = 0
-
-    def _add(
-        bucket: list[dict[str, Any]],
-        source: str,
-        label: object,
-        detail: object,
-        body: list[str] | None = None,
-        note: str | None = None,
-        preview: str | None = None,
-        rationale: str | None = None,
-    ) -> None:
-        bucket.append({
-            "source": source,
-            "label": str(label) if label else source.replace("_", " "),
-            "detail": str(detail),
-            "body": list(body) if body else [],
-            # One collapsed line of the quoted text (consults only); None
-            # when the entry has nothing to preview or the body is static
-            # rubric metadata that belongs behind the click.
-            "preview": preview,
-            # A non-quote annotation rendered as a badge, never as a bullet:
-            # "latest of N consults" — so it is not mistaken for text a
-            # specialist wrote.
-            "note": note,
-            # The hub's own per-dimension reason (0052); None off dimensions.
-            "rationale": rationale,
-        })
-
-    # Dimensions. Skipped wholesale when the row's revision is unknown: with no
-    # scale there is no threshold, and guessing one is the re-derivation point 2
-    # rules out.
-    # "not scored, counted as zero in the weighted score" is only true when a
-    # weighted score EXISTS. `_persist_assessment` writes `scores or None`
-    # alongside a NULL `weighted_score`/`band` for a verdict that carried no
-    # dimension scores at all, so for that row the claim would be made six
-    # times about a number that was never computed. The detail page still
-    # renders all six of the revision's dimensions for such a row, which is
-    # why this has to be decided here rather than by the absence of rows.
-    any_scored = any(
-        isinstance(dim, dict) and _usable_score(dim.get("score")) is not None
-        for dim in dimensions or ()
+    thresholds, mid_scale_count, scored_dimension_count = _classify_dimensions(
+        dimensions, revision, _dimension_rationale_map(assessment),
+        strengths, risks, unestablished, mid_scale,
     )
-    not_scored_detail = (
-        _NOT_SCORED_DETAIL if any_scored else _NO_SCORES_AT_ALL_DETAIL
-    )
-    if scale_known:
-        scale_max = _usable_score(getattr(revision, "scale_max", None))
-        strength_threshold = risk_threshold = None
-        if scale_max is not None:
-            strength_threshold = STRENGTH_THRESHOLD_FRACTION * scale_max
-            risk_threshold = RISK_THRESHOLD_FRACTION * scale_max
-            thresholds = {
-                "strength": strength_threshold,
-                "risk": risk_threshold,
-                "scale_max": scale_max,
-            }
-        for dim in dimensions or ():
-            if not isinstance(dim, dict):
-                continue
-            label = dim.get("title") or dim.get("key")
-            rationale = _rationale_for(rationales, dim.get("key"))
-            weight_body = (
-                [f"weight: {dim.get('weight_note')}"] if dim.get("weight") is not None else []
-            )
-            score = _usable_score(dim.get("score"))
-            if score is None:
-                _add(unestablished, "dimension", label, not_scored_detail,
-                     rationale=rationale)
-                continue
-            scored_dimension_count += 1
-            if scale_max is None:
-                continue
-            detail = _format_score(score, scale_max)
-            if score >= strength_threshold:
-                _add(strengths, "dimension", label, detail, body=weight_body,
-                     rationale=rationale)
-            elif score <= risk_threshold:
-                _add(risks, "dimension", label, detail, body=weight_body,
-                     rationale=rationale)
-            else:
-                # A mid-scale score is a real, neutral answer: listed in its
-                # own bucket so every scored dimension appears on the page,
-                # but never as a strength or a risk.
-                mid_scale_count += 1
-                _add(mid_scale, "dimension", label, detail, body=weight_body,
-                     rationale=rationale)
-
-    # Gating. The tri-state strings, plus a fourth branch for anything else —
-    # `gating` is JSONB with no CHECK constraint behind it.
-    gating = getattr(assessment, "gating", None)
-    # Gate title/description come from the LIVE rubric document and are shown
-    # only when this row was scored against it (`PROVENANCE_LIVE`) — an older
-    # row's gating key may not even exist in the live document, and rendering
-    # today's title/description against yesterday's decision would mislabel
-    # it the same way a hardcoded score threshold would.
-    live_gating = load_rubric().gating if revision_provenance == PROVENANCE_LIVE else {}
-    if isinstance(gating, dict):
-        for key, value in gating.items():
-            label = str(key).replace("_", " ")
-            gate_meta = live_gating.get(key) if isinstance(key, str) else None
-            if value == "met":
-                if gate_meta is not None:
-                    _add(strengths, "gating", gate_meta["title"], "met", body=[gate_meta["description"]])
-                else:
-                    _add(strengths, "gating", label, "met")
-            elif value == "not_met":
-                if gate_meta is not None:
-                    _add(risks, "gating", gate_meta["title"], "not met", body=[gate_meta["description"]])
-                else:
-                    _add(risks, "gating", label, "not met")
-            elif value == "unconfirmed":
-                _add(unestablished, "gating", label, "never asked")
-            else:
-                _add(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL)
-
-    # Red flags, full text. A non-string entry is skipped rather than coerced:
-    # a rendered `None` or `{}` would read as a flag the hub never wrote.
-    # Stored flags average ~535 characters (2026-09-14), so the summary line is
-    # the first sentence and the full text sits behind the click — but ONLY
-    # when the clip actually shortened it: a short flag renders as a plain,
-    # uncollapsed bullet, which is what the red-flag card's own
-    # never-collapsed rule expects of a disqualifier a reviewer must see.
-    red_flags = getattr(assessment, "red_flags", None)
-    if isinstance(red_flags, list):
-        for flag in red_flags:
-            if isinstance(flag, str) and flag.strip():
-                full = flag.strip()
-                short = _preview(full) or full
-                _add(risks, "red_flag", "Red flag", short, body=[full] if short != full else [])
-
-    for consult, n_in_domain in _latest_consult_per_domain(list(consults or ())):
-        label = consult.get("domain") or "consult"
-        note = f"latest of {n_in_domain} consults" if n_in_domain > 1 else None
-        if consult.get("reply_truncated"):
-            _add(unestablished, "consult", label, _TRUNCATED_CONSULT_DETAIL, note=note)
-            continue
-        # `read_state` (migration 0038) has THREE values, and two of them mean
-        # the stored `verdict_signal` is not something a specialist said:
-        # `truncated` (the reply was cut off) and `defaulted` (the reply
-        # arrived complete but `parse_opinion` could not read a signal out of
-        # it, so `_DEFAULT_SIGNAL` — `gap` — was substituted). The truncated
-        # case is caught above by `reply_truncated`; the DEFAULTED case has
-        # `truncated=False` and would otherwise land in `_RISK_SIGNALS` and
-        # render under a red glyph as a specialist finding nobody made, which
-        # is exactly what point 1 of this function's contract forbids and what
-        # `parse_opinion`'s own docstring calls "the laundering that branch
-        # exists to prevent". `read_state is None` is a pre-0038 row: the
-        # question was never recorded, so it is NOT treated as defaulted and
-        # stays on the signal path below, which is the only answer available
-        # for it.
-        if consult.get("read_state") == "defaulted":
-            _add(unestablished, "consult", label, _DEFAULTED_CONSULT_DETAIL, note=note)
-            continue
-        signal = consult.get("verdict_signal")
-        if isinstance(signal, str) and signal in _STRENGTH_SIGNALS:
-            body = _capped_body(consult.get("established"))
-            _add(strengths, "consult", label, signal, body=body, note=note,
-                 preview=_preview(body[0]) if body else None)
-        elif isinstance(signal, str) and signal in _RISK_SIGNALS:
-            body = _capped_body(consult.get("concerns"))
-            _add(risks, "consult", label, signal, body=body, note=note,
-                 preview=_preview(body[0]) if body else None)
-        else:
-            _add(unestablished, "consult", label, _UNRECOGNISED_SIGNAL_DETAIL, note=note)
+    _gating_items(assessment, revision_provenance, strengths, risks, unestablished)
+    _red_flag_items(assessment, risks)
+    _consult_items(consults, strengths, risks, unestablished)
 
     return {
         "strengths": strengths,
@@ -1280,66 +1327,35 @@ def summarize_panel_domains(consults: list[dict[str, Any]]) -> list[dict[str, An
     return out
 
 
-async def build_assessment_detail(
-    db: AsyncSession,
-    assessment_id: uuid.UUID,
-    *,
-    admin_view: bool,
-    viewer_is_staff: bool = False,
-) -> dict[str, Any] | None:
-    """One assessment, its dimension breakdown, and its interview timeline.
-
-    Returns None when there is no such assessment (the router owns the 404 —
-    this module stays HTTP-free, like src/services/directory.py).
-
-    ``admin_view=False`` omits every admin-only value from the returned
-    context: no ``raw_opinion``, no tool activity. See the module docstring.
-
-    ``viewer_is_staff`` gates ``review_capable_users`` (the assignee roster
-    for the Human-review card's assign form): it is queried ONLY when True,
-    so a reviewer's render never enumerates the staff/reviewer roster — the
-    same rule ``src/routers/manager.py``'s own PI-add form applies, and it
-    saves a query on every non-staff render.
-    """
-    assessment = (
-        await db.execute(
-            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
-        )
-    ).scalar_one_or_none()
-    if assessment is None:
-        return None
-
-    # Resolves to a live AgentRegistry row's user_id, so the template can
-    # link to that PI's profile. Left None for a null subject_agent_id, a
-    # stale/decommissioned slug with no AgentRegistry row, or an unlinked
-    # agent whose AgentRegistry.user_id is itself NULL — all three are
-    # "no link", not an error.
-    pi_user_id: str | None = None
-    if assessment.subject_agent_id:
-        from src.models import AgentRegistry
-        row = (await db.execute(
-            select(AgentRegistry.user_id)
-            .where(AgentRegistry.agent_id == assessment.subject_agent_id)
-        )).scalar_one_or_none()
-        if row is not None:
-            pi_user_id = str(row)
-
-    revision, revision_provenance = resolve_revision(
-        assessment.rubric_version, assessment.rubric_content_hash
-    )
-    scores = assessment.scores if isinstance(assessment.scores, dict) else {}
-    normalized_scores = {
+def _normalized_scores(assessment: object) -> dict[str, Any]:
+    """The stored ``scores`` map with its keys stripped and lower-cased; {} for a
+    non-dict. Dimension rows, the review form's ``bot_score`` and the rationale
+    lookup all match on these keys."""
+    scores = getattr(assessment, "scores", None)
+    scores = scores if isinstance(scores, dict) else {}
+    return {
         key.strip().lower(): value
         for key, value in scores.items()
         if isinstance(key, str)
     }
 
-    def _score_value(raw: object) -> float | None:
-        return (
-            float(raw)
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool)
-            else None
-        )
+
+def _score_value(raw: object) -> float | None:
+    return (
+        float(raw)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool)
+        else None
+    )
+
+
+def build_dimension_rows(
+    assessment: object, revision: RubricRevisionView | None
+) -> list[dict[str, Any]]:
+    """One row per rubric dimension of ``revision``, then one per stored score key
+    the revision does not name (a stored row shows its data, never blanks). Shared
+    by the detail page, the chat record (through ``build_assessment_detail``) and
+    the directory rows (AP-10)."""
+    normalized_scores = _normalized_scores(assessment)
 
     def _pct(value: float | None) -> float | None:
         # Bar width as a percentage of the revision's scale, clamped — a
@@ -1389,11 +1405,32 @@ async def build_assessment_detail(
             "pct": _pct(value),
             "rationale": _rationale_for(rationales, key),
         })
+    return dimensions
 
-    thread_id, messages = await load_interview_thread(db, assessment)
-    consults = await _load_consults(db, assessment, thread_id, admin_view=admin_view)
 
-    message_views = [
+async def _resolve_pi_user_id(db: AsyncSession, assessment: OpportunityAssessment) -> str | None:
+    # Resolves to a live AgentRegistry row's user_id, so the template can
+    # link to that PI's profile. Left None for a null subject_agent_id, a
+    # stale/decommissioned slug with no AgentRegistry row, or an unlinked
+    # agent whose AgentRegistry.user_id is itself NULL — all three are
+    # "no link", not an error.
+    pi_user_id: str | None = None
+    if assessment.subject_agent_id:
+        from src.models import AgentRegistry
+        row = (await db.execute(
+            select(AgentRegistry.user_id)
+            .where(AgentRegistry.agent_id == assessment.subject_agent_id)
+        )).scalar_one_or_none()
+        if row is not None:
+            pi_user_id = str(row)
+    return pi_user_id
+
+
+def _message_views(
+    messages: list[Any], assessment: OpportunityAssessment
+) -> list[dict[str, Any]]:
+    """The interview thread's messages as template/timeline dicts."""
+    return [
         {
             "key": str(message.id),
             "agent_id": message.agent_id,
@@ -1412,16 +1449,13 @@ async def build_assessment_detail(
         for message in messages
     ]
 
-    turns: list[dict[str, Any]] = []
-    unplaced: list[dict[str, Any]] = []
-    matched: dict[str, list[dict[str, Any]]] = {}
-    logs_scanned = 0
-    if admin_view and message_views:
-        turns, logs_scanned = await _load_tool_turns(
-            db, assessment, message_views, thread_id=thread_id,
-        )
-        matched, unplaced = correlate_turns_to_messages(turns, message_views)
 
+def _build_timeline(
+    message_views: list[dict[str, Any]],
+    consults: list[dict[str, Any]],
+    matched: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Messages (with their placed tool turns) and consults on one clock."""
     timeline: list[dict[str, Any]] = []
     for view in message_views:
         timeline.append({
@@ -1440,7 +1474,10 @@ async def build_assessment_detail(
     # reply it informed landing on the same timestamp read message-then-consult
     # rather than in an arbitrary order.
     timeline.sort(key=lambda entry: entry["at"])
+    return timeline
 
+
+def _retro_consult_count(matched: dict[str, list[dict[str, Any]]]) -> int:
     # Counted over PLACED turns only, not over every scanned turn.
     # `_load_tool_turns` excludes rows stamped with another thread's
     # `llm_call_logs.thread_ts`, but rows logged before 0042 carry a NULL
@@ -1453,7 +1490,7 @@ async def build_assessment_detail(
     # the difference being its 4 unplaced turns exactly. Unplaced turns are
     # still SHOWN, under their own heading — they are evidence of what the hub
     # did — they are just not counted as this interview's panel.
-    retro_consult_count = sum(
+    return sum(
         1
         for placed in matched.values()
         for turn in placed
@@ -1461,13 +1498,21 @@ async def build_assessment_detail(
         if chip["is_consult"]
     )
 
+
+async def _load_review_context(
+    db: AsyncSession, assessment: OpportunityAssessment, viewer_is_staff: bool
+) -> tuple[list[Any], list[Any], list[Any], list[User]]:
+    """Feedback, status history, assignments and (staff only) the assignee roster."""
     review_feedback = await _load_review_feedback(db, assessment.id)
     review_status_history = await _load_review_status_history(db, assessment.id)
     review_assignments = await _load_review_assignments(db, assessment.id)
     review_capable_users = (
         await _load_review_capable_users(db) if viewer_is_staff else []
     )
+    return review_feedback, review_status_history, review_assignments, review_capable_users
 
+
+def _review_rubric(normalized_scores: dict[str, Any]) -> dict[str, Any]:
     # The scoring form's own source of truth: the LIVE document, because that
     # is what the reviewer is about to score against and what
     # `submit_feedback` will stamp on the row. Deliberately NOT the revision
@@ -1476,7 +1521,7 @@ async def build_assessment_detail(
     # `bot_score` rides along per dimension (A9): disagreement has to be
     # visible where the human is choosing, and it is labelled as the bot's.
     live_rubric = load_rubric()
-    review_rubric = {
+    return {
         "version": live_rubric.version,
         "scale_min": live_rubric.scale_min,
         "scale_max": live_rubric.scale_max,
@@ -1491,6 +1536,67 @@ async def build_assessment_detail(
             for d in live_rubric.dimensions
         ],
     }
+
+
+async def build_assessment_detail(
+    db: AsyncSession,
+    assessment_id: uuid.UUID,
+    *,
+    admin_view: bool,
+    viewer_is_staff: bool = False,
+) -> dict[str, Any] | None:
+    """One assessment, its dimension breakdown, and its interview timeline.
+
+    Returns None when there is no such assessment (the router owns the 404 —
+    this module stays HTTP-free, like src/services/directory.py).
+
+    ``admin_view=False`` omits every admin-only value from the returned
+    context: no ``raw_opinion``, no tool activity. See the module docstring.
+
+    ``viewer_is_staff`` gates ``review_capable_users`` (the assignee roster
+    for the Human-review card's assign form): it is queried ONLY when True,
+    so a reviewer's render never enumerates the staff/reviewer roster — the
+    same rule ``src/routers/manager.py``'s own PI-add form applies, and it
+    saves a query on every non-staff render.
+    """
+    assessment = (
+        await db.execute(
+            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
+        )
+    ).scalar_one_or_none()
+    if assessment is None:
+        return None
+
+    pi_user_id = await _resolve_pi_user_id(db, assessment)
+
+    revision, revision_provenance = resolve_revision(
+        assessment.rubric_version, assessment.rubric_content_hash
+    )
+    normalized_scores = _normalized_scores(assessment)
+    dimensions = build_dimension_rows(assessment, revision)
+
+    thread_id, messages = await load_interview_thread(db, assessment)
+    consults = await _load_consults(db, assessment, thread_id, admin_view=admin_view)
+
+    message_views = _message_views(messages, assessment)
+
+    turns: list[dict[str, Any]] = []
+    unplaced: list[dict[str, Any]] = []
+    matched: dict[str, list[dict[str, Any]]] = {}
+    logs_scanned = 0
+    if admin_view and message_views:
+        turns, logs_scanned = await _load_tool_turns(
+            db, assessment, message_views, thread_id=thread_id,
+        )
+        matched, unplaced = correlate_turns_to_messages(turns, message_views)
+
+    timeline = _build_timeline(message_views, consults, matched)
+    retro_consult_count = _retro_consult_count(matched)
+
+    (
+        review_feedback, review_status_history, review_assignments, review_capable_users,
+    ) = await _load_review_context(db, assessment, viewer_is_staff)
+    review_rubric = _review_rubric(normalized_scores)
 
     return {
         "assessment": assessment,

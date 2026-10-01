@@ -1,19 +1,31 @@
-"""Shared profile-field mutation, used by both the PI's own /profile/save
-and the manager's PI-edit route (design decision D8). target_user is whose
+"""The one profile writer (RB-09): /profile/save, the manager's PI-edit route
+(design decision D8), /onboarding/save-profile and
+/agent/{id}/public-profile/save all call apply_profile_edits. target_user is whose
 profile changes; changed_by_user_id is who made the change — they differ
 exactly when a manager edits a PI's profile, and create_revision's existing
 changed_by_user_id parameter already supports that attribution without any
 schema change."""
 import re
 import uuid
+from collections.abc import Mapping
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import ResearcherProfile, User
+from src.models import AgentRegistry, ResearcherProfile, User
 from src.services.jhu_rules import set_tenure_start
+from src.services.profile_publish import export_and_record
+from src.services.tenure_scope import scoped_publications_for_export
 from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
+
+#: Text/list fields of ResearcherProfile that the profile forms edit.
+PROFILE_FIELDS = (
+    "research_summary", "techniques", "experimental_models",
+    "disease_areas", "key_targets", "keywords",
+)
+#: List-valued profile fields (comma-separated in the forms).
+_LIST_FIELDS = frozenset(PROFILE_FIELDS) - {"research_summary"}
 
 
 def _parse_list(val: str) -> list[str]:
@@ -67,12 +79,22 @@ async def write_profile_text_fields(
 
 async def apply_profile_edits(
     db: AsyncSession, *, target_user: User, changed_by_user_id: uuid.UUID,
-    name: str, email: str, institution: str, department: str,
-    research_summary: str, techniques: str, experimental_models: str,
-    disease_areas: str, key_targets: str, keywords: str,
-    jhu_tenure_start: str | None = None,
-    expected_profile_version: int | None = None,
+    form: Mapping[str, str | None], expected_version: int | None,
+    jhu_tenure_start: str | None = None, email_required: bool = False,
+    change_summary: str | None = None, export_agent: AgentRegistry | None = None,
 ) -> str | None:
+    """The one writer behind /profile/save, /agent/{id}/public-profile/save,
+    /onboarding/save-profile and /manager/pis/{id}/profile (RB-09).
+
+    A key the form does not carry (absent or None) leaves that field unchanged:
+    the public-profile and onboarding forms have no institution field, and
+    blanking it would drop the export's header lines (FA3-V5). A key carried as
+    "" clears a user field (``or None``) exactly as the full forms always did.
+    ``expected_version`` is the profile-version check (``write_profile_text_fields``);
+    None saves without it. ``export_agent`` skips the agent lookup when the caller
+    already holds the agent. Returns an error code, or None after committing and
+    exporting.
+    """
     # Optional JHU tenure-start correction (manager form only; the PI's own
     # /profile/save never sends the field). Blank = leave unchanged.
     tenure_field = (jhu_tenure_start or "").strip()
@@ -83,24 +105,25 @@ async def apply_profile_edits(
             target_user.id, int(tenure_field), "manual", db=db
         )
 
-    email_clean = (email or "").strip().lower()
-    if email_clean != (target_user.email or ""):
-        if email_clean and not is_valid_email(email_clean):
+    if form.get("email") is not None:
+        email_clean = (form["email"] or "").strip().lower()
+        if email_required and not email_clean:
+            return "email_required"
+        changed = email_clean != (target_user.email or "")
+        if email_clean and (changed or email_required) and not is_valid_email(email_clean):
             return "invalid_email"
-        if not await assign_user_email(db, target_user, email_clean or None):
+        if changed and not await assign_user_email(db, target_user, email_clean or None):
             return "email_taken"
 
-    if name:
-        target_user.name = name
-    if institution is not None:
-        target_user.institution = institution or None
-    if department is not None:
-        target_user.department = department or None
+    if form.get("name"):
+        target_user.name = form["name"]
+    for field in ("institution", "department"):
+        if form.get(field) is not None:
+            setattr(target_user, field, form[field] or None)
 
-    profile_result = await db.execute(
+    profile = (await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == target_user.id)
-    )
-    profile = profile_result.scalar_one_or_none()
+    )).scalar_one_or_none()
     if not profile:
         profile = ResearcherProfile(user_id=target_user.id)
         db.add(profile)
@@ -109,50 +132,31 @@ async def apply_profile_edits(
         # VALUES, which cannot reference its own target table.
         await db.flush()
 
-    written = await write_profile_text_fields(db, profile, {
-        "research_summary": research_summary,
-        "techniques": _parse_list(techniques),
-        "experimental_models": _parse_list(experimental_models),
-        "disease_areas": _parse_list(disease_areas),
-        "key_targets": _parse_list(key_targets),
-        "keywords": _parse_list(keywords),
-    }, expected_profile_version)
-    if not written:
+    values = {
+        f: (_parse_list(form[f]) if f in _LIST_FIELDS else form[f])
+        for f in PROFILE_FIELDS if form.get(f) is not None
+    }
+    if not await write_profile_text_fields(db, profile, values, expected_version):
         # A regeneration or another edit saved first: keep theirs.
         await db.rollback()
         return "profile_changed"
 
     await db.commit()
 
-    from src.models import AgentRegistry
-    agent_result = await db.execute(
+    agent = export_agent or (await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == target_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id_for_export = agent_reg.agent_id if agent_reg else None
-
-    from src.services.profile_export import export_profile_to_markdown
-    from src.services.tenure_scope import scoped_publications_for_export
+    )).scalar_one_or_none()
     # JHU R2's export rule, applied at THIS export site too (audit H3):
     # storage is full-career, and an unfiltered top-20 is exactly how
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14.
     user_pubs = await scoped_publications_for_export(
-        db, target_user.id, agent_id_for_export
+        db, target_user.id, agent.agent_id if agent else None
     )
-    exported_path = export_profile_to_markdown(
-        target_user, profile, agent_id_for_export, publications=user_pubs
+    path = await export_and_record(
+        db, user=target_user, profile=profile, agent=agent, publications=user_pubs,
+        mechanism="web", changed_by_user_id=changed_by_user_id,
+        change_summary=change_summary,
     )
-
-    from src.services.profile_versioning import create_revision
-    if agent_reg and exported_path:
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="public",
-            content=exported_path.read_text(encoding="utf-8"),
-            changed_by_user_id=changed_by_user_id,
-            mechanism="web",
-        )
+    if path is not None and agent is not None:
         await db.commit()
-
     return None
