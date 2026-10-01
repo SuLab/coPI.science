@@ -8,6 +8,7 @@ tests never see each other's writes and the dev DB is untouched.
 """
 
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -94,6 +95,56 @@ async def db_session(engine):
             await session.close()
             if trans.is_active:
                 await trans.rollback()
+
+
+class _NullProgressSession:
+    """Stands in for a session when a test records job progress without a
+    database: `job_progress.record` executes and commits, both no-ops here."""
+
+    async def execute(self, *_a, **_k):
+        return None
+
+    async def commit(self):
+        return None
+
+
+@contextlib.asynccontextmanager
+async def _null_progress_factory():
+    yield _NullProgressSession()
+
+
+@pytest.fixture(autouse=True)
+def _job_progress_off_the_real_database():
+    """`job_progress.record` commits on its own session. By default that session is
+    the application's (built from .env), which no test may reach; route it to a
+    no-op. Tests that read progress use `progress_on_test_connection`."""
+    from src.services import job_progress
+
+    job_progress.configure(_null_progress_factory)
+    yield
+    job_progress.configure(None)
+
+
+@pytest_asyncio.fixture
+async def progress_on_test_connection(db_session):
+    """Route job_progress.record through a second session on the test's own
+    connection, so its savepoint 'commit' sees the rows db_session flushed and
+    rolls back with the test. Tests read progress after `await db_session.refresh(job)`."""
+    from src.services import job_progress
+
+    conn = await db_session.connection()
+
+    @contextlib.asynccontextmanager
+    async def _factory():
+        s = AsyncSession(bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint")
+        try:
+            yield s
+        finally:
+            await s.close()
+
+    job_progress.configure(_factory)
+    yield
+    job_progress.configure(_null_progress_factory)
 
 
 @pytest_asyncio.fixture

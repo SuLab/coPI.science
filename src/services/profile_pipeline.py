@@ -23,7 +23,9 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, Publication, ResearcherProfile, User
+from src.models.job import BULK_PRIORITY
+from src.services import job_progress
 from src.services.corpus import (
     DEFAULT_CAP,
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
@@ -38,7 +40,6 @@ from src.services.jhu_rules import (
     set_tenure_start,
     tenure_filter,
 )
-from src.services.job_progress import append_job_progress
 from src.services.llm import synthesize_profile
 from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile
 from src.services.pubmed import (
@@ -79,7 +80,7 @@ class PipelineRun:
 
     user_id: uuid.UUID
     db: AsyncSession
-    job: Job | None
+    job_id: uuid.UUID | None
     user: User
     orcid_id: str
     orcid_profile: dict = field(default_factory=dict)
@@ -98,23 +99,24 @@ class PipelineRun:
     synthesized: dict = field(default_factory=dict)
     validated: bool = False
 
-    def progress(self, step: str, detail: str = "") -> None:
-        """Record a progress entry on the job, if there is one, and log it."""
-        if self.job:
-            append_job_progress(self.job, step, detail)
+    async def progress(self, step: str, detail: str = "") -> None:
+        """Record a progress entry on the job, if there is one, and log it. The
+        entry commits in its own transaction (`job_progress.record`)."""
+        if self.job_id is not None:
+            await job_progress.record(self.job_id, step, detail)
             logger.info("[pipeline] %s %s", step, detail)
 
 
 async def run_profile_pipeline(
     user_id: uuid.UUID,
     db: AsyncSession,
-    job: Job | None = None,
+    job_id: uuid.UUID | None = None,
 ) -> ResearcherProfile:
     """
-    Full profile generation pipeline. Updates job progress if job is provided.
+    Full profile generation pipeline. Records job progress if job_id is provided.
     Returns the updated/created ResearcherProfile.
     """
-    run = await _start(user_id, db, job)
+    run = await _start(user_id, db, job_id)
     await _step1_orcid_profile(run)
     await _step2_grants(run)
     await _steps3_4_resolve_corpus(run)
@@ -131,7 +133,7 @@ async def run_profile_pipeline(
 
 
 async def _start(
-    user_id: uuid.UUID, db: AsyncSession, job: Job | None
+    user_id: uuid.UUID, db: AsyncSession, job_id: uuid.UUID | None
 ) -> PipelineRun:
     # Load user
     result = await db.execute(select(User).where(User.id == user_id))
@@ -141,9 +143,9 @@ async def _start(
 
     orcid_id = user.orcid
     run = PipelineRun(
-        user_id=user_id, db=db, job=job, user=user, orcid_id=orcid_id
+        user_id=user_id, db=db, job_id=job_id, user=user, orcid_id=orcid_id
     )
-    run.progress("start", f"Starting pipeline for {user.name} ({orcid_id})")
+    await run.progress("start", f"Starting pipeline for {user.name} ({orcid_id})")
     return run
 
 
@@ -151,7 +153,7 @@ async def _step1_orcid_profile(run: PipelineRun) -> None:
     user = run.user
     orcid_id = run.orcid_id
     # Step 1: Fetch ORCID profile
-    run.progress("step1", "Fetching ORCID profile...")
+    await run.progress("step1", "Fetching ORCID profile...")
     try:
         orcid_profile = await fetch_orcid_profile(orcid_id)
         # Update user record with fresh data
@@ -175,7 +177,7 @@ async def _step2_grants(run: PipelineRun) -> None:
     db = run.db
     user = run.user
     # Step 2: Fetch ORCID grants
-    run.progress("step2", "Fetching grant information...")
+    await run.progress("step2", "Fetching grant information...")
     try:
         run.grant_titles = await fetch_orcid_grants(run.orcid_id)
     except Exception as exc:
@@ -196,7 +198,7 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
     # {orcid}[auid], S4 name+affiliation, identity-gated, ranked year-DESC,
     # capped LAST (coverage design §4.1). A stage failure RAISES so the job
     # retries rather than storing a thin ORCID-only corpus (defect D1/D2).
-    run.progress(
+    await run.progress(
         "step3",
         "Resolving publication corpus (ORCID + OpenAlex + PubMed)...",
     )
@@ -204,7 +206,7 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
         run.orcid_id, user.name, user.institution, cap=CORPUS_CAP
     )
     corpus_result = run.corpus_result
-    run.progress(
+    await run.progress(
         "step4",
         f"Corpus resolved: kept {len(corpus_result.kept)} "
         f"(stages {corpus_result.stage_counts}, dropped {corpus_result.dropped})",
@@ -213,13 +215,13 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
         sample = ", ".join(
             str(f.get("pmid")) for f in corpus_result.flagged[:10]
         )
-        run.progress(
+        await run.progress(
             "corpus_flagged",
             f"{len(corpus_result.flagged)} records withheld for review "
             f"({_flag_reason_summary(corpus_result.flagged)}): {sample}",
         )
     if len(corpus_result.kept) < 5:
-        run.progress(
+        await run.progress(
             "sparse_corpus",
             f"Only {len(corpus_result.kept)} publications resolved across "
             "ORCID, OpenAlex and PubMed.",
@@ -259,7 +261,7 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
             await set_tenure_start(
                 user_id, tenure_start, "orcid_employment", db=db
             )
-            run.progress(
+            await run.progress(
                 "tenure_derived",
                 f"JHU tenure start {tenure_start} (ORCID employment).",
             )
@@ -282,7 +284,7 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
                 "run and kept provisionally for later exports, not recorded",
                 tenure_start, orcid_id, unrecorded_because,
             )
-            run.progress(
+            await run.progress(
                 "tenure_derived",
                 f"JHU tenure start {tenure_start} used for this run and kept "
                 f"provisionally ({unrecorded_because}; not recorded).",
@@ -293,7 +295,7 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
             await set_tenure_start(
                 user_id, tenure_start, "earliest_hopkins_paper", db=db
             )
-            run.progress(
+            await run.progress(
                 "tenure_derived",
                 f"JHU tenure start {tenure_start} "
                 "(earliest Hopkins-affiliated paper).",
@@ -303,7 +305,7 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
         # healthy run exports exactly as before.
         await clear_provisional_tenure_start(db, user_id)
     if tenure_start is None:
-        run.progress(
+        await run.progress(
             "tenure_unknown",
             "No JHU tenure start could be derived (no current Hopkins ORCID "
             "employment, no Hopkins-affiliated paper in the corpus); the "
@@ -390,19 +392,19 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
         for rec in to_store:
             _store(rec)
         if to_store:
-            run.progress(
+            await run.progress(
                 "corpus_additions",
                 f"Added {len(to_store)} ORCID-anchored publications: "
                 + ", ".join(str(r.get("pmid")) for r in to_store[:10]),
             )
         if over_cap:
-            run.progress(
+            await run.progress(
                 "corpus_cap_reached",
                 f"{len(over_cap)} newly found publications NOT stored: the "
                 f"corpus is at the {CORPUS_CAP}-publication cap.",
             )
         if review_only:
-            run.progress(
+            await run.progress(
                 "corpus_addition_review",
                 f"{len(review_only)} candidates without an ORCID anchor "
                 "(found by OpenAlex or name+affiliation search only) were NOT "
@@ -446,7 +448,7 @@ async def _step5_methods(run: PipelineRun) -> None:
     user_id = run.user_id
     pubs_for_synthesis = run.pubs_for_synthesis
     # Step 5: Deep mining — PMC methods sections
-    run.progress("step5", "Fetching methods sections from PMC...")
+    await run.progress("step5", "Fetching methods sections from PMC...")
     # Get PMCIDs for the synthesis papers that don't already have them
     pmids_needing_conversion = [
         r["pmid"]
@@ -497,7 +499,7 @@ async def _step6_profile_record(run: PipelineRun) -> None:
     db = run.db
     user_id = run.user_id
     # Step 6: Load or create profile record
-    run.progress("step6", "Preparing profile record...")
+    await run.progress("step6", "Preparing profile record...")
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
     )
@@ -515,7 +517,7 @@ async def _step6_profile_record(run: PipelineRun) -> None:
 async def _steps7_8_synthesize(run: PipelineRun) -> None:
     user = run.user
     # Step 7: LLM Synthesis
-    run.progress("step7", "Synthesizing profile with AI...")
+    await run.progress("step7", "Synthesizing profile with AI...")
     run.context_text = _build_synthesis_context(
         orcid_profile=run.orcid_profile,
         grant_titles=run.grant_titles,
@@ -532,10 +534,10 @@ async def _steps7_8_synthesize(run: PipelineRun) -> None:
         run.synthesized = await synthesize_profile(run.context_text, user.name)
     except Exception as exc:
         logger.error("LLM synthesis failed for %s: %s", user.name, exc)
-        run.progress("synthesis_failed", str(exc))
+        await run.progress("synthesis_failed", str(exc))
 
     # Step 8: Validation
-    run.progress("step8", "Validating synthesized profile...")
+    await run.progress("step8", "Validating synthesized profile...")
     run.validated = _validate_profile(run.synthesized)
 
     if not run.validated and run.synthesized:
@@ -594,7 +596,7 @@ async def _step9_store(run: PipelineRun) -> None:
     # What it will NOT do is let a worse synthesis overwrite a better stored one.
     # A monthly refresh that fails validation, or one that runs while PubMed is
     # down, keeps the profile that is already there.
-    run.progress("step9", "Saving profile to database...")
+    await run.progress("step9", "Saving profile to database...")
     profile.grant_titles = run.grant_titles or profile.grant_titles
     # Records this run's INPUT (change detection), so it is written even when the
     # synthesized fields below are not. The evidence counts are the ones that
@@ -630,7 +632,7 @@ async def _step9_store(run: PipelineRun) -> None:
                 "Discarding synthesized profile for %s (%s); keeping stored version %d",
                 user.name, reason, profile.profile_version,
             )
-            run.progress(
+            await run.progress(
                 "validation_rejected",
                 f"Kept the existing profile (version {profile.profile_version}): "
                 f"the new synthesis {reason}.",
@@ -674,7 +676,7 @@ async def _step9_store(run: PipelineRun) -> None:
                     "(version %d at step 6, %d now); stored publications and grants only",
                     user.name, loaded_version, profile.profile_version,
                 )
-                run.progress(
+                await run.progress(
                     "concurrent_edit_kept",
                     f"Kept the profile edit saved while this ran (version "
                     f"{profile.profile_version}); publications and grants were updated.",
@@ -688,7 +690,7 @@ async def _step9_store(run: PipelineRun) -> None:
                         "synthesis_validated=False for regeneration.",
                         user.name, profile.profile_version,
                     )
-                    run.progress(
+                    await run.progress(
                         "unvalidated",
                         "The generated profile did not meet the quality checks "
                         "(150-250 word summary, 3+ techniques, 1+ disease area). "
@@ -711,7 +713,7 @@ async def _step9_store(run: PipelineRun) -> None:
                         "evidence_state=%s)",
                         user.name, found, profile.evidence_state,
                     )
-                    run.progress(
+                    await run.progress(
                         "ungrounded",
                         f"No publication abstracts reached the profile synthesis "
                         f"({found} publication IDs were found): "
@@ -723,8 +725,8 @@ async def _step9_store(run: PipelineRun) -> None:
 
 async def _enqueue_enrichment(run: PipelineRun) -> None:
     from src.services.grant_enrichment import enqueue_enrichment_jobs
-    await enqueue_enrichment_jobs(run.db, run.user.id, run.orcid_id)
-    run.progress("step10", "Enqueued grant + industry enrichment jobs")
+    await enqueue_enrichment_jobs(run.db, run.user.id, run.orcid_id, priority=BULK_PRIORITY)
+    await run.progress("step10", "Enqueued grant + industry enrichment jobs")
 
 
 async def _export_profile(run: PipelineRun) -> None:
@@ -781,7 +783,7 @@ async def _export_profile(run: PipelineRun) -> None:
         )
         await db.flush()
 
-    run.progress("complete", "Profile generation complete.")
+    await run.progress("complete", "Profile generation complete.")
 
 
 def _build_synthesis_context(

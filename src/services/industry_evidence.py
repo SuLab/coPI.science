@@ -1,19 +1,22 @@
 """Worker handler for the ``industry_evidence`` job + rescoring helper."""
+from __future__ import annotations
+
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import (
     AgentRegistry,
-    Job,
     PiIndustryEvidence,
     PiIndustryScore,
     Publication,
     ResearcherProfile,
     User,
 )
+from src.services import job_progress
 from src.services.industry_score import SCORER_VERSION, normalise, score_evidence
 from src.services.industry_sources.ctgov import evidence_from_study, fetch_jhu_industry_trials
 from src.services.industry_sources.openalex_industry import (
@@ -27,8 +30,10 @@ from src.services.industry_sources.uspto_inventor import (
     fetch_jhu_applications,
 )
 from src.services.jhu_rules import get_tenure_start
-from src.services.job_progress import append_job_progress
 from src.services.pubmed import fetch_pubmed_records
+
+if TYPE_CHECKING:
+    from src.worker.main import JobContext
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +128,15 @@ async def rescore_user(db: AsyncSession, user_id: uuid.UUID, tenure_start: int |
     return score
 
 
-async def execute_industry_evidence(job: Job, db: AsyncSession) -> None:
-    user_id = uuid.UUID(job.payload["user_id"])
+async def execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
+    user_id = uuid.UUID(ctx.payload["user_id"])
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
     agent = (await db.execute(select(AgentRegistry).where(AgentRegistry.user_id == user_id))).scalar_one_or_none()
     tenure_start = await get_tenure_start(db, user_id, agent_id=agent.agent_id if agent else None)
     if tenure_start is None:
         db.add(PiIndustryScore(user_id=user_id, score=None, reason="no_tenure_start", components={}, scorer_version=SCORER_VERSION))
         await db.flush()
-        append_job_progress(job, "industry_done", "unscored: no JHU tenure start")
+        await job_progress.record(ctx.id, "industry_done", "unscored: no JHU tenure start")
         return
 
     profile = (await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))).scalar_one_or_none()
@@ -149,7 +154,7 @@ async def execute_industry_evidence(job: Job, db: AsyncSession) -> None:
     for w in works:
         primary_field = primary_field or ((w.get("primary_topic") or {}).get("field") or {}).get("display_name")
         items += evidence_from_work(w, user.orcid, tenure_start, company_funder_ids=cfids)
-    append_job_progress(job, "industry1", f"openalex works={len(works)} items={len(items)}")
+    await job_progress.record(ctx.id, "industry1", f"openalex works={len(works)} items={len(items)}")
 
     for rec in await fetch_pubmed_records(pmids):
         y = rec.get("year") or year_by_pmid.get(str(rec.get("pmid")))
@@ -171,4 +176,4 @@ async def execute_industry_evidence(job: Job, db: AsyncSession) -> None:
         db.add(PiIndustryEvidence(user_id=user_id, **it.__dict__))
     await db.flush()
     s = await rescore_user(db, user_id, tenure_start, primary_field)
-    append_job_progress(job, "industry_done", f"evidence={s.evidence_count} raw={s.raw_sum} score={s.score} v{SCORER_VERSION}")
+    await job_progress.record(ctx.id, "industry_done", f"evidence={s.evidence_count} raw={s.raw_sum} score={s.score} v{SCORER_VERSION}")

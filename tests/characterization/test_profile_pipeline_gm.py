@@ -27,7 +27,7 @@ from src.services.corpus import CorpusStageError
 from tests import factories
 from tests.fakes import FakeAnthropic
 
-pytestmark = pytest.mark.characterization
+pytestmark = [pytest.mark.characterization, pytest.mark.usefixtures("progress_on_test_connection")]
 
 
 # A public-profile JSON that passes _validate_profile (summary 100-350 words,
@@ -426,12 +426,13 @@ async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
 # ===========================================================================
 
 
-def _progress_steps(job: Job) -> list[str]:
+async def _progress_steps(db_session, job: Job) -> list[str]:
+    await db_session.refresh(job)
     return [p["step"] for p in (job.payload or {}).get("progress", [])]
 
 
 async def _make_job(db_session, user) -> Job:
-    """A real generate_profile Job, so update_progress writes where the worker and
+    """A real generate_profile Job, so PipelineRun.progress writes where the worker and
     the /onboarding page read it from (job.payload['progress'])."""
     job = Job(
         type="generate_profile",
@@ -523,7 +524,7 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0102",
     )
     job = await _make_job(db_session, user)
-    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job_id=job.id)
 
     result = {
         "research_summary": profile.research_summary,
@@ -537,7 +538,7 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
         "evidence_pmid_count": profile.evidence_pmid_count,
         "evidence_pub_count": profile.evidence_pub_count,
         "evidence_state": profile.evidence_state,
-        "unvalidated_in_progress": "unvalidated" in _progress_steps(job),
+        "unvalidated_in_progress": "unvalidated" in await _progress_steps(db_session, job),
         "llm_calls_total": len(fake_llm.calls),
     }
     assert result == snapshot
@@ -550,7 +551,7 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
         "record the decision at all — either way step 9's gate is gone and a "
         "below-standard profile is again indistinguishable from a good one"
     )
-    assert "unvalidated" in _progress_steps(job)
+    assert "unvalidated" in await _progress_steps(db_session, job)
     assert len(fake_llm.calls) == 2
 
 
@@ -583,7 +584,7 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
     first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
     first_version = first.profile_version
     job = await _make_job(db_session, user)
-    second = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
+    second = await profile_pipeline.run_profile_pipeline(user.id, db_session, job_id=job.id)
 
     rows = (
         await db_session.execute(
@@ -604,7 +605,7 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
         ),
         "synthesis_validated": second.synthesis_validated,
         "evidence_pub_count": second.evidence_pub_count,
-        "rejected_in_progress": "validation_rejected" in _progress_steps(job),
+        "rejected_in_progress": "validation_rejected" in await _progress_steps(db_session, job),
         "llm_calls_total": len(fake_llm.calls),
     }
     assert result == snapshot
@@ -692,7 +693,7 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
         db_session, name="Josiah Carberry", orcid="0000-0002-1825-0105",
     )
     job = await _make_job(db_session, user)
-    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job_id=job.id)
 
     result = {
         "profile_version": profile.profile_version,
@@ -701,7 +702,7 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
         "evidence_pmid_count": profile.evidence_pmid_count,
         "evidence_pub_count": profile.evidence_pub_count,
         "evidence_state": profile.evidence_state,
-        "ungrounded_in_progress": "ungrounded" in _progress_steps(job),
+        "ungrounded_in_progress": "ungrounded" in await _progress_steps(db_session, job),
     }
     assert result == snapshot
     assert profile.profile_version == 1, (

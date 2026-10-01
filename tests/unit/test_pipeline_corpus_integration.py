@@ -34,7 +34,7 @@ from src.services.jhu_rules import TENURE_KEY_PREFIX, get_tenure_start, set_tenu
 from src.services.profile_pipeline import run_profile_pipeline
 from tests import factories
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("progress_on_test_connection")]
 
 _SUMMARY = " ".join(["word"] * 180)
 _SYNTH = {
@@ -151,7 +151,7 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
         flagged=[],
     )
 
-    profile = await run_profile_pipeline(user.id, db_session, job)
+    profile = await run_profile_pipeline(user.id, db_session, job.id)
 
     stored = (
         (await db_session.execute(
@@ -189,7 +189,7 @@ async def test_paper_tier_dates_tenure_when_orcid_has_no_hopkins_employment(
         _rec(3, 2021, "Later Hopkins paper", hopkins_pi=True),
     ])
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) == 2015
     context = wired.contexts[0]
@@ -211,7 +211,7 @@ async def test_paper_tier_reads_the_uncapped_list_not_the_capped_one(
     assert ranked[-1]["year"] == 1965
     wired.corpus = CorpusResult(kept=ranked[:50], flagged=[], ranked=ranked)
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) == 1965
 
@@ -222,9 +222,10 @@ async def test_no_derivable_tenure_flags_loudly_and_stays_full_career(
     user, agent, job = await _make_pi(db_session)
     wired.corpus = _uncapped([_rec(1, 2005, "Old paper"), _rec(2, 2020, "New paper")])
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) is None
+    await db_session.refresh(job)
     steps = [p["step"] for p in job.payload.get("progress", [])]
     assert "tenure_unknown" in steps
     context = wired.contexts[0]
@@ -242,7 +243,7 @@ async def test_a_corpus_stage_failure_raises_and_persists_no_tenure_entry(
     wired.corpus = CorpusStageError("corpus stage s3_pubmed_auid failed")
 
     with pytest.raises(CorpusStageError):
-        await run_profile_pipeline(user.id, db_session, job)
+        await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) is None
 
@@ -265,7 +266,7 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
         _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
     ])
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) is None
     context = wired.contexts[0]
@@ -273,6 +274,7 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
     assert "Elsewhere paper" not in context, (
         "the paper-derived year must still scope this run's synthesis"
     )
+    await db_session.refresh(job)
     details = [p["detail"] for p in job.payload.get("progress", [])]
     assert any(
         "JHU tenure start 2015 used for this run and kept provisionally" in d
@@ -297,7 +299,7 @@ async def test_an_incomplete_corpus_persists_no_paper_derived_tenure_start(
     result.permanently_dropped = ["1"]
     wired.corpus = result
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) is None
     row = (
@@ -308,6 +310,7 @@ async def test_an_incomplete_corpus_persists_no_paper_derived_tenure_start(
         )
     ).scalar_one_or_none()
     assert row is None, "no app_settings row may be written from an incomplete corpus"
+    await db_session.refresh(job)
     details = [p["detail"] for p in job.payload.get("progress", [])]
     assert any(
         "JHU tenure start 2015 used for this run and kept provisionally" in d
@@ -333,7 +336,7 @@ async def test_an_incomplete_corpus_still_records_an_orcid_employment_start(
     result.permanently_dropped = ["1"]
     wired.corpus = result
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     assert await get_tenure_start(db_session, user.id) == 2012
 
@@ -351,8 +354,9 @@ async def test_flag_progress_names_the_actual_reasons(db_session, wired):
         ],
     )
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
+    await db_session.refresh(job)
     [detail] = [
         p["detail"] for p in job.payload.get("progress", [])
         if p["step"] == "corpus_flagged"
@@ -391,7 +395,7 @@ async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
         flagged=[],
     )
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     stored = sorted(
         p.pmid for p in (await db_session.execute(
@@ -401,6 +405,7 @@ async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
     assert stored == ["10", "11", "12"], (
         "never delete; add ORCID-anchored only; S4-only goes to review"
     )
+    await db_session.refresh(job)
     steps = {p["step"] for p in job.payload.get("progress", [])}
     assert "corpus_addition_review" in steps
 
@@ -430,11 +435,12 @@ async def test_the_cap_is_respected_for_an_existing_pi(db_session, wired, monkey
         flagged=[],
     )
 
-    await run_profile_pipeline(user.id, db_session, job)
+    await run_profile_pipeline(user.id, db_session, job.id)
 
     stored = (await db_session.execute(
         select(Publication).where(Publication.user_id == user.id)
     )).scalars().all()
     assert sorted(p.pmid for p in stored) == ["10", "11"]
+    await db_session.refresh(job)
     steps = {p["step"] for p in job.payload.get("progress", [])}
     assert "corpus_cap_reached" in steps

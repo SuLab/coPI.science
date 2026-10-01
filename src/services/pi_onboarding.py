@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import USER_ROLE_PI, AgentRegistry, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
 from src.services.jhu_rules import derive_employment_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
@@ -76,7 +77,7 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
             "Tenure start %d (orcid_employment) recorded for %s", tenure_year, orcid
         )
 
-    await enqueue_profile_job_if_absent(db, user)
+    await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
     return user
 
 

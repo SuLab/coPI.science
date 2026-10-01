@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
 from src.services.profile_edit import parse_expected_version, write_profile_text_fields
 from src.services.profile_jobs import enqueue_profile_job_if_absent
@@ -107,7 +108,7 @@ async def onboarding_start(
         and not current_user.is_manager
         and not current_user.is_reviewer
     ):
-        job = await enqueue_profile_job_if_absent(db, current_user)
+        job = await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
         await db.commit()
         logger.info("Auto-enqueued generate_profile for user %s on /onboarding", current_user.id)
 
@@ -266,6 +267,6 @@ async def retry_pipeline(
     for a manager (F8). Narrowing only the GET left the pipeline one form
     POST away.
     """
-    await enqueue_profile_job_if_absent(db, current_user)
+    await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
     await db.commit()
     return RedirectResponse(url="/onboarding", status_code=302)

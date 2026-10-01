@@ -1,7 +1,8 @@
 """Job queue worker process.
 
-Polls the jobs table and executes generate_profile, monthly_refresh,
-review_feedback_analysis, enrich_grants and industry_evidence jobs.
+Polls the jobs table and executes the handlers in `JOB_HANDLERS`
+(generate_profile, review_feedback_analysis, enrich_grants, industry_evidence).
+`monthly_refresh` is retired and fails loudly.
 """
 
 import asyncio
@@ -9,13 +10,21 @@ import logging
 import signal
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from src.config import get_settings
 from src.models import Job, User
+from src.services import job_progress
 from src.services.profile_pipeline import run_profile_pipeline
 from src.services.review_bot import execute_review_analysis
 
@@ -44,7 +53,8 @@ async def claim_job(db: AsyncSession) -> Job | None:
             # A job re-queued after a failure waits out its backoff.
             or_(Job.not_before.is_(None), Job.not_before <= func.now()),
         )
-        .order_by(Job.enqueued_at)
+        # Interactive work (priority 10) before NULL/0 before bulk (-10); age breaks ties.
+        .order_by(func.coalesce(Job.priority, 0).desc(), Job.enqueued_at)
         .limit(1)
         .with_for_update(skip_locked=True)
     )
@@ -132,10 +142,22 @@ async def requeue_stale_processing_jobs(
     return n_dead + n_pending
 
 
-async def execute_generate_profile(job: Job, db: AsyncSession) -> None:
+@dataclass(frozen=True)
+class JobContext:
+    """What a handler needs from its jobs row, detached from any session: the
+    handler's transaction must never modify that row (DP-09)."""
+
+    id: uuid.UUID
+    type: str
+    user_id: uuid.UUID | None
+    payload: dict
+    attempts: int
+    max_attempts: int
+
+
+async def execute_generate_profile(ctx: JobContext, db: AsyncSession) -> None:
     """Execute a generate_profile job."""
-    payload = job.payload or {}
-    user_id_str = payload.get("user_id") or str(job.user_id)
+    user_id_str = ctx.payload.get("user_id") or (str(ctx.user_id) if ctx.user_id else None)
     if not user_id_str:
         raise ValueError("Job missing user_id in payload")
 
@@ -148,17 +170,96 @@ async def execute_generate_profile(job: Job, db: AsyncSession) -> None:
         raise ValueError(f"User {user_id} not found")
 
     logger.info("Running profile pipeline for user %s (%s)", user_id, user.name)
-    await run_profile_pipeline(user_id=user_id, db=db, job=job)
+    await run_profile_pipeline(user_id=user_id, db=db, job_id=ctx.id)
     logger.info("Profile pipeline complete for user %s", user_id)
 
 
-async def execute_monthly_refresh(job: Job, db: AsyncSession) -> None:
-    """Execute a monthly_refresh job — same as generate_profile for now."""
-    await execute_generate_profile(job, db)
+class RetiredJobType(ValueError):
+    """A job type whose enum value stays (C2: Postgres cannot drop enum values)
+    but which no code path enqueues any more. Dispatching one fails the job
+    through the normal failure bookkeeping instead of silently regenerating."""
+
+
+async def execute_monthly_refresh(ctx, db) -> None:
+    """Retired (spec §9.2, DP-16). Nothing has enqueued `monthly_refresh` since the
+    retry-and-refresh paths moved to `generate_profile`; a legacy row fails loudly."""
+    raise RetiredJobType("retired job type: monthly_refresh")
+
+
+async def _execute_review_analysis(ctx: JobContext, db: AsyncSession) -> None:
+    await execute_review_analysis(ctx, db)
+
+
+async def _execute_enrich_grants(ctx: JobContext, db: AsyncSession) -> None:
+    from src.services.grant_enrichment import execute_enrich_grants
+    await execute_enrich_grants(ctx, db)
+
+
+async def _execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
+    from src.services.industry_evidence import execute_industry_evidence
+    await execute_industry_evidence(ctx, db)
+
+
+#: job type -> handler. Every live `job_type_enum` value except the retired
+#: `monthly_refresh` (tests/unit/test_job_handlers.py pins the coverage).
+JOB_HANDLERS = {
+    "generate_profile": execute_generate_profile,
+    "review_feedback_analysis": _execute_review_analysis,
+    "enrich_grants": _execute_enrich_grants,
+    "industry_evidence": _execute_industry_evidence,
+}
+
+
+async def _mark_completed(session_factory: async_sessionmaker, job_id: uuid.UUID) -> None:
+    async with session_factory() as db:
+        await db.execute(
+            update(Job).where(Job.id == job_id)
+            .values(status="completed", completed_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+
+
+async def _mark_failed(
+    session_factory: async_sessionmaker, job_id: uuid.UUID, exc: BaseException
+) -> None:
+    """Failure bookkeeping in its own transaction: dead at max attempts, else
+    pending behind the retry backoff. The row can already be gone (account
+    deletion cascades it), which is tolerated."""
+    async with session_factory() as db:
+        job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
+        if job is None:
+            logger.info(
+                "Job %s row is gone (user deleted mid-run); "
+                "dropping the result", job_id,
+            )
+            return
+        job.last_error = str(exc)[:2000]
+
+        if job.attempts >= job.max_attempts:
+            job.status = "dead"
+            logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
+        else:
+            job.status = "pending"  # Will be retried after the backoff
+            job.not_before = func.now() + retry_delay(job.attempts)
+            logger.info(
+                "Job %s will be retried after %s (attempt %d of %d failed)",
+                job_id, retry_delay(job.attempts), job.attempts, job.max_attempts,
+            )
+
+        job.completed_at = datetime.now(timezone.utc)
+        try:
+            await db.commit()
+        except Exception:
+            # Lost a second race on the same delete; nothing left to save.
+            await db.rollback()
+            logger.info("Job %s vanished during failure bookkeeping", job_id)
 
 
 async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_max_attempts: int, session_factory: async_sessionmaker) -> None:
-    """Process a single job. Handles errors and updates job status.
+    """Run one job. The handler's transaction holds only the handler's writes: the
+    jobs row is read once (detached into a JobContext) and its status is written in
+    a separate transaction AFTER the handler commits. A crash between the two
+    leaves the row 'processing', which the stale sweep re-queues.
 
     The jobs row can vanish at any await: jobs.user_id is ON DELETE CASCADE,
     so an account deletion mid-run takes the row with it (deletion audit F10).
@@ -166,71 +267,59 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
     account is gone, so there is no state anyone still needs updated.
     """
     async with session_factory() as db:
-        # Re-fetch the job in this session so SQLAlchemy tracks changes
-        result = await db.execute(select(Job).where(Job.id == job_id))
-        job = result.scalar_one_or_none()
-        if job is None:
+        row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
+        if row is None:
             logger.info(
                 "Job %s no longer exists (user deleted between claim and "
                 "processing); skipping", job_id,
             )
             return
+        ctx = JobContext(
+            id=row.id, type=row.type, user_id=row.user_id, payload=dict(row.payload or {}),
+            attempts=row.attempts, max_attempts=row.max_attempts,
+        )
+        await db.commit()
 
         try:
-            if job.type == "generate_profile":
-                await execute_generate_profile(job, db)
-            elif job.type == "monthly_refresh":
-                await execute_monthly_refresh(job, db)
-            elif job.type == "review_feedback_analysis":
-                await execute_review_analysis(job, db)
-            elif job.type == "enrich_grants":
-                from src.services.grant_enrichment import execute_enrich_grants
-                await execute_enrich_grants(job, db)
-            elif job.type == "industry_evidence":
-                from src.services.industry_evidence import execute_industry_evidence
-                await execute_industry_evidence(job, db)
-            else:
-                raise ValueError(f"Unknown job type: {job.type}")
-
-            job.status = "completed"
-            job.completed_at = datetime.now(timezone.utc)
+            if ctx.type == "monthly_refresh":
+                await execute_monthly_refresh(ctx, db)
+            handler = JOB_HANDLERS.get(ctx.type)
+            if handler is None:
+                raise ValueError(f"Unknown job type: {ctx.type}")
+            await handler(ctx, db)
             await db.commit()
-            logger.info("Job %s completed", job.id)
-
         except Exception as exc:
             logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
             # The pipeline may have left the transaction aborted (e.g. an FK
             # violation after a concurrent user delete) — clear it before the
-            # bookkeeping writes, then re-check the row still exists.
+            # bookkeeping writes.
             await db.rollback()
-            result = await db.execute(select(Job).where(Job.id == job_id))
-            job = result.scalar_one_or_none()
-            if job is None:
-                logger.info(
-                    "Job %s row is gone (user deleted mid-run); "
-                    "dropping the result", job_id,
-                )
-                return
-            job.last_error = str(exc)[:2000]
+            await _mark_failed(session_factory, job_id, exc)
+            return
+    await _mark_completed(session_factory, job_id)
+    logger.info("Job %s completed", job_id)
 
-            if job.attempts >= job.max_attempts:
-                job.status = "dead"
-                logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
-            else:
-                job.status = "pending"  # Will be retried after the backoff
-                job.not_before = func.now() + retry_delay(job.attempts)
-                logger.info(
-                    "Job %s will be retried after %s (attempt %d of %d failed)",
-                    job_id, retry_delay(job.attempts), job.attempts, job.max_attempts,
-                )
 
-            job.completed_at = datetime.now(timezone.utc)
-            try:
-                await db.commit()
-            except Exception:
-                # Lost a second race on the same delete; nothing left to save.
-                await db.rollback()
-                logger.info("Job %s vanished during failure bookkeeping", job_id)
+class WorkerAlreadyRunning(RuntimeError):
+    """Another worker holds WORKER_LOCK_KEY; this process exits before touching
+    the queue (its boot sweep would re-queue the live worker's 'processing' row)."""
+
+
+async def acquire_worker_lock(engine: AsyncEngine) -> AsyncConnection | None:
+    """Take the worker advisory lock on a dedicated AUTOCOMMIT connection that stays
+    open for the process lifetime (outside any transaction, so
+    idle_in_transaction_session_timeout cannot drop it). None if another holds it."""
+    from src.services.advisory_locks import WORKER_LOCK_KEY
+
+    conn = await engine.connect()
+    await conn.execution_options(isolation_level="AUTOCOMMIT")
+    got = (await conn.execute(
+        text("SELECT pg_try_advisory_lock(CAST(:k AS bigint))"), {"k": WORKER_LOCK_KEY}
+    )).scalar_one()
+    if not got:
+        await conn.close()
+        return None
+    return conn
 
 
 async def run_worker():
@@ -241,10 +330,18 @@ async def run_worker():
     engine = create_async_engine(settings.database_url, echo=False)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+    lock_conn = await acquire_worker_lock(engine)
+    if lock_conn is None:
+        logger.error("Another worker holds the worker lock; exiting before the stale sweep")
+        await engine.dispose()
+        raise WorkerAlreadyRunning("worker lock held by another process")
+    job_progress.configure(session_factory)
+
     logger.info("Worker started, polling every %ds", settings.worker_poll_interval)
 
-    # Boot: this is the only worker instance, so every 'processing' row is a
-    # zombie from a previous process — take them all, whatever their age.
+    # Boot: the worker lock guarantees this is the only worker instance, so every
+    # 'processing' row is a zombie from a previous process — take them all,
+    # whatever their age.
     async with session_factory() as db:
         await requeue_stale_processing_jobs(db, older_than_seconds=0)
     last_stale_check = asyncio.get_event_loop().time()
@@ -274,6 +371,7 @@ async def run_worker():
             await asyncio.sleep(settings.worker_poll_interval)
 
     logger.info("Worker shutting down")
+    await lock_conn.close()
     await engine.dispose()
 
 

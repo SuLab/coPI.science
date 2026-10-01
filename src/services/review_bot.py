@@ -32,6 +32,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +49,9 @@ from src.models import (
 from src.services.interview_transcript import load_interview_thread
 from src.services.json_extract import extract_json
 from src.services.llm import generate_agent_response
+
+if TYPE_CHECKING:
+    from src.worker.main import JobContext
 
 logger = logging.getLogger(__name__)
 
@@ -587,7 +591,7 @@ def consumed_at_predicates(snap: dict) -> tuple:
     )
 
 
-async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
+async def execute_review_analysis(ctx: JobContext, db: AsyncSession) -> None:
     """Distill unconsumed 'learn' feedback on one assessment into suggestions.
 
     One Opus call, and one ``PromptChangeSuggestion`` row per proposal in its
@@ -595,9 +599,8 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     ``additional_proposals``) — all in the same commit as the ``consumed_at``
     stamps.
 
-    Commits its own writes and returns; the worker then sets
-    ``job.status = "completed"`` and commits again — a safe double-commit
-    because the worker's session factory is ``expire_on_commit=False``.
+    Commits its own writes and returns; the worker then writes
+    ``status = "completed"`` in a separate transaction of its own.
 
     Any exception raised before the final commit (most notably from the LLM
     call) propagates unchanged, so the worker's normal retry/dead-lettering
@@ -607,17 +610,17 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     """
     settings = get_settings()
 
-    payload = job.payload or {}
+    payload = ctx.payload or {}
     assessment_id_raw = payload.get("assessment_id")
     if not assessment_id_raw:
-        logger.warning("review bot: job %s has no assessment_id in its payload", job.id)
+        logger.warning("review bot: job %s has no assessment_id in its payload", ctx.id)
         return
     try:
         assessment_id = uuid.UUID(str(assessment_id_raw))
     except (ValueError, AttributeError, TypeError):
         logger.warning(
             "review bot: job %s has an unparseable assessment_id %r",
-            job.id, assessment_id_raw,
+            ctx.id, assessment_id_raw,
         )
         return
 
@@ -633,11 +636,13 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
         # deletion cascades it), in which case the refresh raises and the
         # original miss stands.
         try:
-            await db.refresh(job, attribute_names=["payload"])
+            refreshed_payload = (
+                await db.execute(select(Job.payload).where(Job.id == ctx.id))
+            ).scalar_one()
         except Exception:  # noqa: BLE001 — a vanished row is the documented case
-            logger.info("review bot: job %s could not be re-read after an assessment miss", job.id)
+            logger.info("review bot: job %s could not be re-read after an assessment miss", ctx.id)
         else:
-            refreshed_raw = (job.payload or {}).get("assessment_id")
+            refreshed_raw = (refreshed_payload or {}).get("assessment_id")
             try:
                 refreshed_id = uuid.UUID(str(refreshed_raw)) if refreshed_raw else None
             except (ValueError, AttributeError, TypeError):
@@ -646,7 +651,7 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
                 logger.info(
                     "review bot: job %s was re-pointed from assessment %s to %s while "
                     "in flight; retrying the lookup",
-                    job.id, assessment_id, refreshed_id,
+                    ctx.id, assessment_id, refreshed_id,
                 )
                 assessment_id = refreshed_id
                 assessment = await _load_assessment(db, assessment_id)
@@ -655,7 +660,7 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
         # provisional verdict minutes after a review was left on it.
         logger.info(
             "review bot: assessment %s no longer exists (job %s); skipping",
-            assessment_id, job.id,
+            assessment_id, ctx.id,
         )
         return
 
@@ -675,7 +680,7 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
     if not reviews:
         logger.info(
             "review bot: no unconsumed 'learn' feedback for assessment %s (job %s); skipping",
-            assessment.id, job.id,
+            assessment.id, ctx.id,
         )
         return
 
@@ -766,7 +771,7 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
             "review bot: stamped %d of %d feedback rows consumed for assessment %s "
             "(job %s); the rest were edited or deleted while the model call was in "
             "flight and stay unconsumed until the next manual generate",
-            stamped, len(reviews), assessment.id, job.id,
+            stamped, len(reviews), assessment.id, ctx.id,
         )
 
     # One commit covering both the new suggestion row and every consumed_at —

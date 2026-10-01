@@ -1,46 +1,29 @@
-"""Job progress entries appended AFTER a flush must still reach the database.
-
-``Job.payload`` is a plain JSON column with no mutation tracking, and the old
-pipeline closure reassigned the payload only on its FIRST call — every later
-in-place append after a ``db.flush()`` (the first sits at the Publication
-persistence step) never marked the attribute dirty and was silently dropped at
-commit. Flags that only make sense late in the run (``tenure_unknown``,
-coverage notes) were exactly the ones lost.
-"""
-
+"""job_progress.record appends in its own short transaction; entries survive a
+later rollback of the caller's transaction (they no longer ride on it)."""
 import pytest
-from sqlalchemy import select
 
 from src.models import Job
-from src.services.job_progress import append_job_progress
+from src.services import job_progress
 from tests import factories
 
 pytestmark = pytest.mark.integration
 
 
-async def test_progress_appended_after_a_flush_survives_commit(db_session):
+@pytest.mark.usefixtures("progress_on_test_connection")
+async def test_entries_append_in_order(db_session):
     user = await factories.make_user(db_session, orcid="0000-0009-1111-2222")
-    job = Job(
-        type="generate_profile",
-        user_id=user.id,
-        payload={"user_id": str(user.id)},
-    )
+    job = Job(type="generate_profile", user_id=user.id, payload={"user_id": str(user.id)})
     db_session.add(job)
     await db_session.flush()
+    await job_progress.record(job.id, "step1", "first")
+    await job_progress.record(job.id, "step2", "second")
+    await db_session.refresh(job)
+    assert job.payload["progress"] == [
+        {"step": "step1", "detail": "first"},
+        {"step": "step2", "detail": "second"},
+    ]
+    assert job.payload["user_id"] == str(user.id)
 
-    job_id = job.id
 
-    append_job_progress(job, "step1", "first")
-    await db_session.flush()
-    append_job_progress(job, "step2", "second")
-    await db_session.commit()
-    db_session.expire_all()
-
-    row = (
-        await db_session.execute(select(Job).where(Job.id == job_id))
-    ).scalar_one()
-    steps = [p["step"] for p in row.payload.get("progress", [])]
-    assert steps == ["step1", "step2"], (
-        "an append after a flush must be written at commit, not lost to "
-        "JSON mutation-tracking"
-    )
+async def test_record_without_a_job_is_a_no_op():
+    await job_progress.record(None, "x", "y")

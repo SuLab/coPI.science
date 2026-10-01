@@ -2,7 +2,7 @@
 
 `src/worker/main.py` had zero coverage and it is what actually runs profile
 generation in production: `claim_job`, `process_job`, `execute_generate_profile`,
-`execute_monthly_refresh`, `run_worker`.
+`execute_monthly_refresh` (retired), `run_worker`.
 
 Three things about the shape of this module:
 
@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
 
 from src.models import Job, OpportunityAssessment, ResearcherProfile, SimulationRun, User
+from src.services import job_progress
 from src.worker import main as worker_main
 
 pytestmark = pytest.mark.integration
@@ -324,7 +325,7 @@ def _profile_writer(expected_users: dict[uuid.UUID, str]):
     real ORCID/PubMed/Anthropic calls).
     """
 
-    async def fake(user_id, db, job=None):
+    async def fake(user_id, db, job_id=None):
         if user_id not in expected_users:
             raise RuntimeError(f"T5: refusing to run the pipeline for unknown user {user_id}")
         profile = ResearcherProfile(
@@ -470,7 +471,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
 
     seen_attempts = []
 
-    async def always_fails(user_id, db, job=None):
+    async def always_fails(user_id, db, job_id=None):
         seen_attempts.append(job.attempts)
         raise RuntimeError("pipeline exploded (T5.2)")
 
@@ -500,11 +501,11 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     write = _profile_writer({uid2: "recovered on the second attempt"})
     calls = {"n": 0}
 
-    async def fails_once(user_id, db, job=None):
+    async def fails_once(user_id, db, job_id=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("transient (T5.2 control)")
-        return await write(user_id, db, job)
+        return await write(user_id, db, job_id)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", fails_once)
     rounds2 = await _drain(wk.factory, limit=10)
@@ -578,10 +579,10 @@ async def test_process_job_swallows_the_failure_so_the_next_job_still_runs(wk, m
 
     write = _profile_writer({uid_good: "survivor profile"})
 
-    async def crash_for_bad(user_id, db, job=None):
+    async def crash_for_bad(user_id, db, job_id=None):
         if user_id == uid_bad:
             raise RuntimeError("kaboom (T5.3)")
-        return await write(user_id, db, job)
+        return await write(user_id, db, job_id)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", crash_for_bad)
 
@@ -627,10 +628,10 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
 
     write = _profile_writer({uid_good: "loop survivor profile"})
 
-    async def crash_for_bad(user_id, db, job=None):
+    async def crash_for_bad(user_id, db, job_id=None):
         if user_id == uid_bad:
             raise RuntimeError("kaboom in the loop (T5.3)")
-        return await write(user_id, db, job)
+        return await write(user_id, db, job_id)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", crash_for_bad)
     monkeypatch.setattr(worker_main, "get_settings", lambda: SimpleNamespace(
@@ -708,9 +709,9 @@ async def test_execute_generate_profile_calls_the_pipeline_with_the_claimed_job(
     """T5.4 (wiring half) — the worker hands the pipeline the right user and job.
 
     `execute_generate_profile` resolves the user from `payload['user_id']`, verifies the
-    user exists, and passes the *job* through so the pipeline can record progress. The
-    fake writes progress exactly the way `run_profile_pipeline.update_progress` does; if
-    the job were not the session's live instance those writes would vanish, and
+    user exists, and passes the job's *id* through so the pipeline can record progress. The
+    fake writes progress through `job_progress.record` the way `PipelineRun.progress`
+    does; if the id named another job those writes would land elsewhere, and
     /onboarding — which renders `job.payload['progress']` — would show nothing forever.
 
     Control: the same worker run for a payload whose user does not exist must fail
@@ -721,21 +722,21 @@ async def test_execute_generate_profile_calls_the_pipeline_with_the_claimed_job(
     jid = await wk.enqueue(uid)
     seen = {}
 
-    async def record(user_id, db, job=None):
+    async def record(user_id, db, job_id=None):
         seen["user_id"] = user_id
-        seen["job_id"] = job.id if job is not None else None
-        job.payload = dict(job.payload)
-        job.payload["progress"] = [{"step": "t5", "detail": "probe"}]
-        return await _profile_writer({uid: "wired"})(user_id, db, job)
+        seen["job_id"] = job_id
+        await job_progress.record(job_id, "t5", "probe")
+        return await _profile_writer({uid: "wired"})(user_id, db, job_id)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", record)
+    job_progress.configure(wk.factory)
     assert await _drain(wk.factory) == 1
 
     assert seen["user_id"] == uid
     assert seen["job_id"] == jid, "the pipeline was handed a different job than the claimed one"
     assert (await wk.job(jid)).payload.get("progress") == [{"step": "t5", "detail": "probe"}], (
-        "the job the pipeline was given is not the worker session's live instance, so "
-        "its progress writes were discarded"
+        "the id the pipeline was given does not name the claimed job, so its "
+        "progress writes were lost"
     )
     assert (await wk.job_state(jid)).status == "completed"
     assert await wk.profile_count(uid) == 1
@@ -762,11 +763,11 @@ async def test_the_job_is_marked_completed_only_after_the_profile_row_exists(wk,
     orderings finish with a completed job and a profile row. So the fake pipeline
     observes the world *mid-execution*, from two vantage points:
 
-      * the worker's own session (`job.status` on the tracked ORM object), and
-      * a second connection reading committed state.
+      * a second connection reading committed state (twice, around the work), and
+      * the same read again after `process_job` returns, as the non-vacuity control.
 
-    Catches: hoisting the `job.status = "completed"` / `db.commit()` block above the
-    dispatch, or committing the completion in a separate earlier transaction.
+    Catches: writing the completion before the handler's work and commit, i.e. hoisting
+    `_mark_completed` above the dispatch.
 
     The probes are proved non-vacuous by re-running the identical committed read after
     `process_job` returns and seeing 'completed' there.
@@ -775,9 +776,9 @@ async def test_the_job_is_marked_completed_only_after_the_profile_row_exists(wk,
     jid = await wk.enqueue(uid)
     seen = {}
 
-    async def observe_then_work(user_id, db, job=None):
-        seen["in_session_status"] = job.status
+    async def observe_then_work(user_id, db, job_id=None):
         seen["committed_before"] = await wk.job_state(jid)
+        seen["in_session_status"] = seen["committed_before"].status
         seen["profiles_before"] = await wk.profile_count(uid)
         profile = ResearcherProfile(user_id=user_id, research_summary="ordering probe")
         db.add(profile)
@@ -826,7 +827,7 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     uid = await wk.new_user("T5 partial")
     jid = await wk.enqueue(uid)
 
-    async def half_then_crash(user_id, db, job=None):
+    async def half_then_crash(user_id, db, job_id=None):
         db.add(ResearcherProfile(user_id=user_id, research_summary="half written"))
         await db.flush()
         raise RuntimeError("crashed after the profile row (T5.4)")
@@ -882,7 +883,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monk
         await db.commit()
     jid = await wk.enqueue(uid)
 
-    async def duplicate_profile(user_id, db, job=None):
+    async def duplicate_profile(user_id, db, job_id=None):
         db.add(ResearcherProfile(user_id=user_id, research_summary="a second row"))
         await db.flush()  # unique violation on researcher_profiles.user_id
 
@@ -913,7 +914,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monk
     uid2 = await wk.new_user("T5 db error control")
     jid2 = await wk.enqueue(uid2)
 
-    async def plain_error(user_id, db, job=None):
+    async def plain_error(user_id, db, job_id=None):
         raise RuntimeError("a plain error (T5 control)")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", plain_error)
@@ -929,96 +930,38 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monk
 # ---------------------------------------------------------------------------
 
 
-async def test_monthly_refresh_reruns_the_pipeline_without_duplicating_the_profile(
-    wk, monkeypatch
-):
-    """T5.5 — what `execute_monthly_refresh` actually does today.
+async def test_a_legacy_monthly_refresh_row_fails_loudly_and_runs_nothing(wk, monkeypatch):
+    """T5.5 — `monthly_refresh` is retired (spec §9.2 DP-16). Nothing enqueues it, but
+    the enum value stays (C2), so a legacy row must fail through the normal failure
+    bookkeeping: pending behind the retry backoff with `last_error` starting
+    `retired job type`, the pipeline never called, no profile written and no
+    follow-on job created.
 
-    It delegates to `execute_generate_profile`, i.e. re-runs the pipeline for the same
-    user. So the properties worth pinning are: it is dispatched at all (a
-    `monthly_refresh` job must not fall through to the unknown-type branch), it targets
-    the same user, and re-running does not create a second `ResearcherProfile`.
-
-    It creates no follow-on job, and nothing anywhere in `src/` enqueues a
-    `monthly_refresh` — asserted here so that when scheduling is added, this test says
-    so rather than silently continuing to pass.
-
-    Control for that absence assertion: the refresh job itself is present and was
-    processed, so "no new jobs" is not being satisfied by an empty table.
-    """
-    uid = await wk.new_user("T5 refresh")
-    first = await wk.enqueue(uid, job_type="generate_profile")
-    monkeypatch.setattr(worker_main, "run_profile_pipeline", _profile_writer({uid: "v1"}))
-    assert await _drain(wk.factory) == 1
-    assert (await wk.job_state(first)).status == "completed"
-    assert await wk.profile_count(uid) == 1
-
-    calls = []
-
-    async def refresh(user_id, db, job=None):
-        calls.append((user_id, job.type))
-        existing = (await db.execute(
-            select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
-        )).scalar_one()
-        existing.research_summary = "v2 from the monthly refresh"
-        existing.profile_version = (existing.profile_version or 0) + 1
-        await db.flush()
-        return existing
-
-    monkeypatch.setattr(worker_main, "run_profile_pipeline", refresh)
-    refresh_job = await wk.enqueue(uid, job_type="monthly_refresh")
-    assert await _drain(wk.factory) == 1
-
-    assert calls == [(uid, "monthly_refresh")], (
-        f"monthly_refresh did not reach the pipeline: {calls!r}"
-    )
-    assert (await wk.job_state(refresh_job)).status == "completed"
-    assert await wk.profile_count(uid) == 1, (
-        "the refresh created a second ResearcherProfile row instead of updating the "
-        "existing one"
-    )
-    async with wk.factory() as db:
-        profile = (await db.execute(
-            select(ResearcherProfile).where(ResearcherProfile.user_id == uid)
-        )).scalar_one()
-    assert profile.research_summary == "v2 from the monthly refresh"
-    assert profile.profile_version == 1
-
-    async with wk.factory() as db:
-        jobs = (await db.execute(select(Job).where(Job.user_id == uid))).scalars().all()
-    assert {j.id for j in jobs} == {first, refresh_job}, (
-        "the worker created follow-on job(s) — monthly_refresh now schedules work and "
-        "this test needs to describe it"
-    )
-
-
-async def test_monthly_refresh_for_a_missing_user_fails_loudly(wk, monkeypatch):
-    """T5.5 — the refresh path shares `execute_generate_profile`'s user check.
-
-    Control in the same test: a refresh for a real user completes, so "did not complete"
-    is a property of the missing user and not of the refresh type being unsupported.
+    Control in the same test: a `generate_profile` job for the same user completes,
+    so "did not complete" is a property of the retired type and not of the harness.
     """
     called = []
 
-    async def should_not_run(user_id, db, job=None):
+    async def should_not_run(user_id, db, job_id=None):
         called.append(user_id)
-        raise AssertionError("the pipeline ran for a user that does not exist")
+        raise AssertionError("the pipeline ran for a retired job type")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", should_not_run)
 
-    ghost = uuid.uuid4()
-    jid = await wk.enqueue_for_missing_user(ghost, job_type="monthly_refresh")
-
+    uid = await wk.new_user("T5 refresh")
+    legacy = await wk.enqueue(uid, job_type="monthly_refresh")
     claimed = await _one_round(wk.factory)
-    assert claimed is not None and claimed.id == jid
+    assert claimed is not None and claimed.id == legacy
     assert called == []
-    state = await wk.job_state(jid)
-    assert state.status == "pending"
-    assert f"User {ghost} not found" in ((await wk.job(jid)).last_error or "")
+    assert (await wk.job_state(legacy)).status == "pending"
+    assert ((await wk.job(legacy)).last_error or "").startswith("retired job type")
+    assert await wk.profile_count(uid) == 0
+    async with wk.factory() as db:
+        jobs = (await db.execute(select(Job).where(Job.user_id == uid))).scalars().all()
+    assert {j.id for j in jobs} == {legacy}, "a retired job type created follow-on work"
 
     # CONTROL
-    uid = await wk.new_user("T5 refresh control")
-    ok = await wk.enqueue(uid, job_type="monthly_refresh")
+    ok = await wk.enqueue(uid, job_type="generate_profile")
     monkeypatch.setattr(worker_main, "run_profile_pipeline", _profile_writer({uid: "ok"}))
     assert await _drain(wk.factory, limit=10) >= 1
     assert (await wk.job_state(ok)).status == "completed"
@@ -1028,15 +971,14 @@ async def test_a_job_with_no_user_at_all_fails_loudly(wk, monkeypatch):
     """T5.5/T5.4 edge — `payload['user_id']` absent and `job.user_id` NULL.
 
     `execute_generate_profile` guards this with
-    `user_id_str = payload.get("user_id") or str(job.user_id)`, which for a NULL
-    user_id yields the string "None" — truthy — so the intended
-    `ValueError("Job missing user_id in payload")` is unreachable and the failure
-    arrives from `uuid.UUID("None")` instead. Reported, not fixed. The property that
+    `ctx.payload.get("user_id") or (str(ctx.user_id) if ctx.user_id else None)`, so a
+    NULL user_id reaches its `ValueError("Job missing user_id in payload")` (before
+    the JobContext rewrite `str(None)` made that guard unreachable). The property that
     matters is asserted first: the job does not complete.
     """
     called = []
 
-    async def should_not_run(user_id, db, job=None):
+    async def should_not_run(user_id, db, job_id=None):
         called.append(user_id)
         return None
 
@@ -1050,10 +992,8 @@ async def test_a_job_with_no_user_at_all_fails_loudly(wk, monkeypatch):
     assert state.status != "completed"
     last_error = (await wk.job(jid)).last_error or ""
     assert last_error, "the job failed without recording why"
-    # Characterizes the unreachable guard described above.
-    assert "badly formed hexadecimal UUID string" in last_error, (
-        f"the failure message changed to {last_error!r}; if the missing-user_id guard "
-        "is now reachable, this test should assert the intended message instead"
+    assert "Job missing user_id in payload" in last_error, (
+        f"the failure message changed to {last_error!r}"
     )
 
 
@@ -1134,9 +1074,9 @@ async def test_an_unknown_job_type_is_rejected_loudly_by_the_dispatcher(wk, monk
     jid = await wk.enqueue(uid)
     ran = []
 
-    async def pipeline(user_id, db, job=None):
+    async def pipeline(user_id, db, job_id=None):
         ran.append(user_id)
-        return await _profile_writer({uid: "should not happen"})(user_id, db, job)
+        return await _profile_writer({uid: "should not happen"})(user_id, db, job_id)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", pipeline)
 
@@ -1198,9 +1138,9 @@ async def test_worker_dispatches_review_feedback_analysis(wk, monkeypatch):
 
     seen = {}
 
-    async def fake_execute(job, db):
-        seen["job_id"] = job.id
-        seen["payload"] = dict(job.payload)
+    async def fake_execute(ctx, db):
+        seen["job_id"] = ctx.id
+        seen["payload"] = dict(ctx.payload)
 
     monkeypatch.setattr(worker_main, "execute_review_analysis", fake_execute)
 
@@ -1223,7 +1163,7 @@ async def test_a_failed_job_backs_off_4_then_16_minutes_then_dies(wk, monkeypatc
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=3)
 
-    async def always_fails(user_id, db, job=None):
+    async def always_fails(user_id, db, job_id=None):
         raise RuntimeError("upstream 503")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)

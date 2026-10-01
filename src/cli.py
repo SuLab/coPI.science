@@ -251,6 +251,7 @@ def regenerate_profiles():
         from sqlalchemy import select
 
         from src.models import User
+        from src.models.job import BULK_PRIORITY
         from src.services.profile_jobs import enqueue_profile_job_if_absent
         engine, factory = await _get_db()
         async with factory() as db:
@@ -258,7 +259,7 @@ def regenerate_profiles():
             users = result.scalars().all()
             count = 0
             for user in users:
-                job = await enqueue_profile_job_if_absent(db, user)
+                job = await enqueue_profile_job_if_absent(db, user, priority=BULK_PRIORITY)
                 if job is None:
                     console.print(f"[yellow]Skipped {user.name} ({user.orcid}): no research profile[/yellow]")
                     continue
