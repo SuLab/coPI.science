@@ -41,7 +41,6 @@ from src.services.pubmed import (
     fetch_pubmed_records,
     ncbi_session,
     search_pmids,
-    session_verified_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -688,26 +687,21 @@ async def resolve_corpus(
                 mapping, doi_pool, orcid_doi_only, orcid_dois, _add
             )
 
-        # PMIDs DOI resolution already fetched to verify are not fetched again.
-        verified = session_verified_records()
-        to_fetch = [p for p in stages if p not in verified]
-        fetched = (
+        # Every PMID is fetched here, including those DOI verification already
+        # fetched: EFetch's own order and its records under another PMID decide
+        # ``records``, hence ``flagged`` and the dedupe, and only the same requests
+        # reproduce them (Freeze B24; tests/unit/test_doi_resolution_batching.py).
+        records = (
             await _stage(
                 "efetch",
                 fetch_pubmed_records(
-                    to_fetch, strict=True,
+                    list(stages), strict=True,
                     permanently_dropped=permanently_dropped,
                 ),
             )
-            if to_fetch
+            if stages
             else []
         )
-        # Back to the order one EFetch over `stages` would have returned: stage
-        # order, then anything EFetch returned under a PMID we never asked for.
-        by_pmid = {str(r.get("pmid")): r for r in fetched}
-        by_pmid.update({p: r for p, r in verified.items() if p in stages})
-        records = [by_pmid.pop(p) for p in stages if p in by_pmid]
-        records.extend(by_pmid.values())
 
     # A DOI whose lookup failed per-item is not missing if its paper arrived
     # anyway, through another stage's PMID: EFetch returned a record carrying
