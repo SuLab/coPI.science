@@ -1,0 +1,333 @@
+{
+ "took": 501,
+ "timed_out": false,
+ "_shards": {
+  "total": 50,
+  "successful": 50,
+  "skipped": 0,
+  "failed": 0
+ },
+ "hits": {
+  "total": {
+   "value": 5,
+   "relation": "eq"
+  },
+  "max_score": 24.752346,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0001567619-19-017584:primary_doc.xml",
+    "_score": 24.752346,
+    "_source": {
+     "ciks": [
+      "0001783735"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-347453"
+     ],
+     "display_names": [
+      "Delfi Diagnostics, Inc.  (CIK 0001783735)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2019-08-27",
+     "biz_states": [
+      "MD"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0001567619-19-017584",
+     "film_num": [
+      "191056387"
+     ],
+     "biz_locations": [
+      "Baltimore, MD"
+     ],
+     "file_type": "D",
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001567619-19-016457:primary_doc.xml",
+    "_score": 24.670362,
+    "_source": {
+     "ciks": [
+      "0001783735"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-346410"
+     ],
+     "display_names": [
+      "Delfi Diagnostics, Inc.  (CIK 0001783735)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2019-08-13",
+     "biz_states": [
+      "MD"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0001567619-19-016457",
+     "film_num": [
+      "191019128"
+     ],
+     "biz_locations": [
+      "Baltimore, MD"
+     ],
+     "file_type": "D",
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001567619-21-001585:primary_doc.xml",
+    "_score": 24.657028,
+    "_source": {
+     "ciks": [
+      "0001783735"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-387477"
+     ],
+     "display_names": [
+      "Delfi Diagnostics, Inc.  (CIK 0001783735)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2021-01-27",
+     "biz_states": [
+      "MD"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0001567619-21-001585",
+     "film_num": [
+      "21557530"
+     ],
+     "biz_locations": [
+      "Baltimore, MD"
+     ],
+     "file_type": "D",
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001783735-22-000002:primary_doc.xml",
+    "_score": 24.581335,
+    "_source": {
+     "ciks": [
+      "0001783735"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-453567"
+     ],
+     "display_names": [
+      "Delfi Diagnostics, Inc.  (CIK 0001783735)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2022-07-25",
+     "biz_states": [
+      "MD"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0001783735-22-000002",
+     "film_num": [
+      "221102782"
+     ],
+     "biz_locations": [
+      "Baltimore, MD"
+     ],
+     "file_type": "D",
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0000905148-25-004422:primary_doc.xml",
+    "_score": 24.219955,
+    "_source": {
+     "ciks": [
+      "0001783735"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-567314"
+     ],
+     "display_names": [
+      "Delfi Diagnostics, Inc.  (CIK 0001783735)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2025-12-18",
+     "biz_states": [
+      "MD"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0000905148-25-004422",
+     "film_num": [
+      "251582236"
+     ],
+     "biz_locations": [
+      "Baltimore, MD"
+     ],
+     "file_type": "D",
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B"
+     ]
+    }
+   }
+  ]
+ },
+ "aggregations": {
+  "entity_filter": {
+   "doc_count_error_upper_bound": 0,
+   "sum_other_doc_count": 0,
+   "buckets": [
+    {
+     "key": "Delfi Diagnostics, Inc.  (CIK 0001783735)",
+     "doc_count": 5
+    }
+   ]
+  },
+  "sic_filter": {
+   "doc_count_error_upper_bound": 0,
+   "sum_other_doc_count": 0,
+   "buckets": []
+  },
+  "biz_states_filter": {
+   "doc_count_error_upper_bound": 0,
+   "sum_other_doc_count": 0,
+   "buckets": [
+    {
+     "key": "MD",
+     "doc_count": 5
+    }
+   ]
+  },
+  "form_filter": {
+   "doc_count_error_upper_bound": 0,
+   "sum_other_doc_count": 0,
+   "buckets": [
+    {
+     "key": "D",
+     "doc_count": 5
+    }
+   ]
+  }
+ },
+ "query": {
+  "_source": {
+   "exclude": [
+    "doc_text"
+   ]
+  },
+  "query": {
+   "bool": {
+    "must": [
+     {
+      "match_phrase": {
+       "doc_text": "DELFI Diagnostics"
+      }
+     }
+    ],
+    "must_not": [],
+    "should": [],
+    "filter": [
+     {
+      "terms": {
+       "root_forms": [
+        "D"
+       ]
+      }
+     }
+    ]
+   }
+  },
+  "from": 0,
+  "size": 100,
+  "aggregations": {
+   "form_filter": {
+    "terms": {
+     "field": "root_forms",
+     "size": 30
+    }
+   },
+   "entity_filter": {
+    "terms": {
+     "field": "display_names.raw",
+     "size": 30
+    }
+   },
+   "sic_filter": {
+    "terms": {
+     "field": "sics",
+     "size": 30
+    }
+   },
+   "biz_states_filter": {
+    "terms": {
+     "field": "biz_states",
+     "size": 30
+    }
+   }
+  }
+ }
+}

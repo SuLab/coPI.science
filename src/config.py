@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     # Sent as `email=` on every E-utilities request. NCBI requires it (with `tool=`)
     # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
     ncbi_contact_email: str = ""
+    # SEC EDGAR, for company discovery (spec §7.6). Sent verbatim as the User-Agent of
+    # every SEC request; SEC's fair-access rules require "<Company Name> <admin email>".
+    # Its contact address is also the contact in the Wikidata User-Agent. Empty = no SEC
+    # and no Wikidata lookups: suggestions carry "funding lookup unavailable". The
+    # operator supplies the address; nothing defaults to a personal one. Read by the
+    # worker: a change needs `$DC up -d --force-recreate worker`.
+    sec_user_agent: str = ""
 
     # USPTO prior-art search — hub-only tool. Name contains "key" so it is
     # auto-redacted in repr(settings). US filings only.

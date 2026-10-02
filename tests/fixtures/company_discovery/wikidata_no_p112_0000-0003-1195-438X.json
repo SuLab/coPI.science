@@ -1,0 +1,13 @@
+{
+  "head" : {
+    "vars" : [ "pi", "company", "companyLabel" ]
+  },
+  "results" : {
+    "bindings" : [ {
+      "pi" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q7926425"
+      }
+    } ]
+  }
+}

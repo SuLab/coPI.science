@@ -1,7 +1,8 @@
 """Job queue worker process.
 
 Polls the jobs table and executes the handlers in `JOB_HANDLERS`
-(generate_profile, review_feedback_analysis, enrich_grants, industry_evidence).
+(generate_profile, review_feedback_analysis, enrich_grants, industry_evidence,
+company_discovery).
 `monthly_refresh` is retired and fails loudly.
 """
 
@@ -200,6 +201,11 @@ async def _execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
     await execute_industry_evidence(ctx, db)
 
 
+async def _execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
+    from src.services.company_discovery import execute_company_discovery
+    await execute_company_discovery(ctx, db)
+
+
 #: job type -> handler. Every live `job_type_enum` value except the retired
 #: `monthly_refresh` (tests/unit/test_job_handlers.py pins the coverage).
 JOB_HANDLERS = {
@@ -207,6 +213,7 @@ JOB_HANDLERS = {
     "review_feedback_analysis": _execute_review_analysis,
     "enrich_grants": _execute_enrich_grants,
     "industry_evidence": _execute_industry_evidence,
+    "company_discovery": _execute_company_discovery,
 }
 
 

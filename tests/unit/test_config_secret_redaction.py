@@ -140,6 +140,9 @@ NON_SECRET_STR_FIELDS = {
     "orcid_redirect_uri",
     "database_url",          # a plain sentinel has no userinfo -> nothing to mask
     "ncbi_contact_email",
+    # "<Company Name> <admin email>" sent to SEC/Wikidata as the User-Agent: a
+    # contact address like ncbi_contact_email, not a credential.
+    "sec_user_agent",
     "base_url",
     "aws_region",
     "ses_sender_email",
