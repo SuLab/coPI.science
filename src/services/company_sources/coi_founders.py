@@ -4,7 +4,9 @@ A statement counts for the PI only when a clause's SUBJECT names the PI, unlike
 `industry_sources/pubmed_coi.py` (spec F13), which credits a whole statement to the PI
 and so filed co-authors' ties ("T.M. is a cofounder and holds equity in IMVAQ
 Therapeutics", PMID 34290408) under Bert Vogelstein. The claims become manager-confirmed
-suggestions, so every ambiguous reading yields no claim. Steps, per record:
+suggestions, so precision comes first: a missed claim is acceptable, a co-author's
+company credited to the PI is not, and when a clause's subject is not clearly the PI
+no one is credited. Steps, per record:
 
 1. Locate the PI in the author list: folded surname equal (`company_sources.surname_keys`),
    the first initial equal, and the spelled-out given names agreeing.
@@ -14,20 +16,41 @@ suggestions, so every ambiguous reading yields no claim. Steps, per record:
    record when the PI matches twice or any other author reduces to one of the same
    strings (PMID 37552989: Blair C and Bettegowda C are both "CB", which is why that
    statement spells out "C. Bettegowda"). When another author shares the PI's surname,
-   only the initials forms name the PI ("X.J. Wang" is not Jing Wang).
+   only the initials forms name the PI ("X.J. Wang" is not Jing Wang). A full-name form
+   needs a word boundary before the surname ("Jing Zhu" is not Jing Hu).
 3. Split the statement into sentences with the protected-abbreviation split (re-implemented
    from `pubmed_coi._sentences`, not imported), and each sentence into segments at ",",
-   ";", ":", ".", "and", "while", "whereas" and "but", never inside an initials run.
-   A clause starts at a segment whose text before its relationship phrase (a lower-case
-   verb, or an eLife-style capitalised head such as "Founder of") is a person; the
-   subject is that person plus the person-only segments joined to it by ",", "and" or
-   ", and" ("A.L., S.C., and V.E.V. are"). A person is an initials form, "C. Bettegowda",
-   a full name, or Dr./Prof./Professor and a surname. Text with no person subject
-   ("Co-founder of OrisDx" opening an eLife continuation sentence) is credited to no one.
-4. Extract the companies after "founder(s) of", "co-founder(s) of", "cofounder(s) of",
-   "co-founded" or "founded" (not "founded by"/"co-founded by") within the clause, up to
-   the next clause boundary. A negated phrase, a "respectively" clause and a title conjunct
-   ("... and CEO of Beta") yield nothing.
+   ";", ":", ".", "and", "while", "whereas" and "but", never inside an initials run. A
+   protected period after a lower-case word ("hepatitis B.") still splits when a person
+   form and a verb follow it. Each segment then does one of three things:
+   - starts a clause: an eLife entry (the segment opens with 2-4 capitals and a
+     capitalised word: "SS Co-Founder of", "KK Scientific co-founder of"), or a person
+     right before its first usable relationship verb. The subject is that person plus
+     the person-only segments joined to it by ",", "and" or ", and" ("A.L., S.C., and
+     V.E.V. are"); a list that continues an earlier object list ("royalties from Merck,
+     Pfizer, A.L., and B.V. is") keeps only its last person. A segment that opens with
+     its verb takes as subject the person segment before it, past degree segments
+     ("Chetan Bettegowda, MD, is"). A person is an initials form, "C. Bettegowda", a full
+     name of at most three words, or Dr./Prof./Professor and a surname.
+   - ends the open clause without starting one: text that is not a person stands before
+     its verb ("and his wife is", ", who is", "Luis A. Diaz Jr. is"). What follows is
+     credited to no one.
+   - continues the open clause: no verb, or a verb with nothing before it.
+   Text before a subject is allowed only in a sentence's first segment and only as a
+   declaration header (Declaration of interests, Competing interests, Conflict(s) of
+   interest, Disclosure(s), "The authors declare ...", never ending in a preposition), or
+   after "... report(s)/declare(s)/state(s) that" ("The spouse of V.E.V. is" and "With
+   the exception of V.E.V., A.L. ... are" name no V.E.V. subject).
+4. Extract the companies after "founder(s) of", "co-founder(s) of", "cofounder(s) of", a
+   founder noun coordinated with a title ("co-founder, director and shareholder of",
+   "founder & CEO of"), or the verb "co-founded"/"founded" (not "... by", and only right
+   after the subject or "has"/"and": "the newly founded Acme Bio" is no claim), up to the
+   next clause boundary. A negated phrase (not, never, neither, nor, no, without; "no
+   longer" is former, not negated), a "respectively" clause, an alternative ("founders of
+   or consultants to") and a title conjunct ("... and CEO of Beta") yield nothing. Each
+   name is cut at its first lower-case word that is not a connector ("Delfi Diagnostics
+   outside the submitted work" -> "Delfi Diagnostics"), and the list stops at a name that
+   is a dotted initials form or an author's name ("DELFI Diagnostics and A.L.").
 """
 from __future__ import annotations
 
@@ -84,11 +107,23 @@ class _Segment:
     delim_start: int
 
 
+def _new_subject_after(sentence: str, i: int) -> bool:
+    """Whether the protected period at `i` still ends a clause: it closes a single capital
+    after a lower-case word ("hepatitis B.") and a person form and a verb follow it."""
+    return bool(
+        _LOWER_WORD_INITIAL.search(sentence[:i]) and _PERSON_THEN_VERB.match(sentence, i + 1)
+    )
+
+
 def _segments(sentence: str) -> list[_Segment]:
     out: list[_Segment] = []
     pos, delim, delim_start = 0, "", 0
     for m in _DELIM.finditer(sentence):
-        if m.group().startswith(".") and _protected_period(sentence, m.start()):
+        if (
+            m.group().startswith(".")
+            and _protected_period(sentence, m.start())
+            and not _new_subject_after(sentence, m.start())
+        ):
             continue
         out.append(_Segment(pos, m.start(), delim, delim_start))
         pos, delim, delim_start = m.end(), " ".join(m.group().split()), m.start()
@@ -119,10 +154,21 @@ _SURNAME = rf"(?:{_PARTICLE}\s+)*{_NAME_WORD}"
 # Spaced ("V. E. V."), dotted ("V.E.V.", "B.V.", "K.L", "E.H.-C.H.") or compact ("VEV").
 _INITIALS = r"(?:[A-Z]\.(?: [A-Z]\.){1,5}|(?:[A-Z]\.-?){1,5}[A-Z]\.?|[A-Z]{2,6})"
 _INITIAL_SURNAME = rf"(?:[A-Z]\.\s?-?){{1,4}}\s?{_SURNAME}"
-_FULL_NAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD})?(?:\s+[A-Z]\.)*\s+{_SURNAME}"
+# At most two given names and middle initials with or without a period ("Victor E
+# Velculescu"); a four-word name is not a person, so it ends a clause unattributed.
+_FULL_NAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD})?(?:\s+[A-Z]\.?)*\s+{_SURNAME}"
 _HONORIFIC_NAME = rf"(?:Dr|Prof|Professor|Mr|Mrs|Ms)\.?\s+(?:{_FULL_NAME}|{_INITIAL_SURNAME}|{_SURNAME})"
 _PERSON = re.compile(rf"{_HONORIFIC_NAME}|{_INITIAL_SURNAME}|{_FULL_NAME}|{_INITIALS}")
 _INITIALS_FORM = re.compile(_INITIALS)
+# For `_new_subject_after`: "hepatitis B." (not "Victor E." and not "and B.").
+_LOWER_WORD_INITIAL = re.compile(r"(?:^|\s)(?!(?:and|or)\s)[a-z][a-z\-]*\s+[A-Z]$")
+_PERSON_THEN_VERB = re.compile(rf"\s+(?:{_PERSON.pattern})\s+(?:also\s+)?{_REL_VERB}")
+# An eLife entry: initials, then whatever capitalised word opens the entry.
+_ELIFE_ENTRY = re.compile(r"\s*([A-Z]{2,4})\s+(?=[A-Z])")
+# Degree segments between a name and its verb ("Chetan Bettegowda, MD, is").
+_DEGREE = re.compile(
+    r"(?:M\.?D|Ph\.?\s?D|D\.?Phil|MBBS|MBChB|MPH|MSc|DVM|DDS|PharmD|FRCPC?|FACS|Jr|Sr)\.?"
+)
 # Tokens that make a person-shaped string a company, an institution or boilerplate.
 _NOT_NAME = frozenset({
     "the", "inc", "llc", "ltd", "corp", "plc", "gmbh", "company", "companies", "bio",
@@ -141,6 +187,24 @@ _INTRO = re.compile(
 _ADVERB_TAIL = re.compile(r"(?:\s+(?:also|currently|additionally))+\s*$")
 _HONORIFIC_PREFIX = r"(?:dr|prof|professor)\.?"
 _NAME_START = r"(?<![\w.'\-])"  # a name pattern never starts inside "x.j." or "xiao-jing"
+# The only verbless text allowed before a subject: a declaration header.
+_HEADER = re.compile(
+    r"(?:declarations?\s+of\s+(?:competing\s+)?interests?|"
+    r"competing\s+(?:financial\s+)?interests?(?:\s+statement)?|"
+    r"conflicts?\s+of\s+interests?(?:\s+statement)?|"
+    r"(?:financial\s+)?disclosures?(?:\s+statement)?|"
+    r"the\s+authors?\s+(?:declare|report|disclose)s?\b.*)",
+    re.IGNORECASE,
+)
+_ENDS_IN_PREPOSITION = re.compile(
+    r"\b(?:of|to|for|with|from|by|in|on|at|than|except|besides|including|between|among|"
+    r"about|like)$",
+    re.IGNORECASE,
+)
+_REPORTS_THAT = re.compile(
+    r"\b(?:reports?|reported|declares?|declared|states?|stated|discloses?|disclosed|"
+    r"notes?|noted|confirms?|confirmed)\s+that$"
+)
 
 
 def _is_person(text: str) -> bool:
@@ -151,25 +215,36 @@ def _is_person(text: str) -> bool:
 
 
 def _prefix_ok(prefix: str, first_segment: bool, any_prefix: bool) -> bool:
-    """Text allowed before a subject person in its segment: "... that" ("The authors
-    report that V.E.V. is"), or a verbless sentence opener ("Declaration of interests
-    B.V., ...")."""
-    if re.search(r"\bthat$", prefix):
+    """Text allowed before a subject person in its segment: "... report(s) that" ("The
+    authors report that V.E.V. is"), or a declaration header opening the sentence
+    ("Declaration of interests B.V., ..."). A prefix ending in a preposition ("The spouse
+    of", "With the exception of") puts the name in object position."""
+    if _REPORTS_THAT.search(prefix):
         return True
-    return any_prefix and first_segment and not _ANCHOR.search(prefix)
+    if not (any_prefix and first_segment) or _ENDS_IN_PREPOSITION.search(prefix):
+        return False
+    return bool(_HEADER.fullmatch(prefix))
+
+
+def _bare_lead(text: str) -> tuple[int, str]:
+    """(offset, text) of `text` without surrounding space, an opening discourse adverb
+    ("Additionally,") or a closing "also"/"currently"."""
+    body = _ADVERB_TAIL.sub("", text.rstrip())
+    stripped = body.lstrip()
+    offset = len(body) - len(stripped)
+    intro = _INTRO.match(stripped)
+    if intro:
+        offset += intro.end()
+        stripped = stripped[intro.end():]
+    return offset, stripped
 
 
 def _person_at_end(
     sentence: str, start: int, end: int, *, first_segment: bool, any_prefix: bool
 ) -> tuple[int, int, bool] | None:
     """The person form ending sentence[start:end]: (start, end, has_prefix), or None."""
-    body = _ADVERB_TAIL.sub("", sentence[start:end].rstrip())
-    stripped = body.lstrip()
-    offset = start + len(body) - len(stripped)
-    intro = _INTRO.match(stripped)
-    if intro:
-        offset += intro.end()
-        stripped = stripped[intro.end():]
+    offset, stripped = _bare_lead(sentence[start:end])
+    offset += start
     for tok in re.finditer(r"\S+", stripped):
         if not _is_person(stripped[tok.start():]):
             continue
@@ -181,12 +256,19 @@ def _person_at_end(
 
 
 def _list_start_ok(sentence: str, segs: list[_Segment], k: int) -> bool:
-    """A list reached by "," or a bare "and" after a clause with a verb is that clause's
-    object ("funding from Merck and V.E.V., and A.L. is"), not the start of a subject."""
-    if k == 0 or segs[k].delim not in (",", "and"):
+    """Whether a person list whose first member is segment k can be a subject. A list
+    reached by "," or a bare "and" continues whatever list stands before it; when that
+    earlier list belongs to a clause with a verb, the persons are that clause's object
+    ("royalties from Merck, Pfizer, A.L., and B.V. is")."""
+    if segs[k].delim not in (",", "and"):
         return True
-    prev = segs[k - 1]
-    return _ANCHOR.search(sentence, prev.start, prev.end) is None
+    while k > 0:
+        k -= 1
+        if _ANCHOR.search(sentence, segs[k].start, segs[k].end):
+            return False
+        if segs[k].delim not in _LIST_DELIMS:
+            return True
+    return True
 
 
 @dataclass(frozen=True)
@@ -197,10 +279,26 @@ class _Clause:
     predicate: str
 
 
+@dataclass(frozen=True)
+class _Hit:
+    """Where a segment starts a clause (`members` set) or only ends the open one
+    (`members` empty). `start` is where the previous predicate stops."""
+
+    start: int
+    lead_start: int
+    anchor: int
+    members: tuple[str, ...]
+
+
+def _break(seg: _Segment) -> _Hit:
+    return _Hit(seg.delim_start, seg.start, seg.start, ())
+
+
 def _subject_list(
     sentence: str, segs: list[_Segment], j: int, head: tuple[int, int, bool]
-) -> tuple[int, int, tuple[str, ...]]:
-    """(clause start, lead start, members) for the list ending in segment j's head."""
+) -> tuple[int, int, tuple[str, ...], bool]:
+    """(clause start, lead start, members, whole list kept) for the list ending in
+    segment j's head. When the list cannot start a subject only the head is kept."""
     members = [head]
     k = j
     while not members[0][2] and k > 0 and segs[k].delim in _LIST_DELIMS:
@@ -210,63 +308,108 @@ def _subject_list(
             break
         members.insert(0, hit)
         k -= 1
-    if k < j and not members[0][2] and not _list_start_ok(sentence, segs, k):
+    ok = members[0][2] or _list_start_ok(sentence, segs, k)
+    if not ok:
         members, k = members[-1:], j
     first = members[0]
     start = first[0] if (first[2] or k == 0) else segs[k].delim_start
-    return start, segs[k].start, tuple(sentence[s:e] for s, e, _ in members)
+    return start, segs[k].start, tuple(sentence[s:e] for s, e, _ in members), ok
 
 
-def _segment_subject(
-    sentence: str, segs: list[_Segment], j: int
-) -> tuple[tuple[int, int, tuple[str, ...]], int] | None:
+def _clause_hit(
+    sentence: str, segs: list[_Segment], j: int, head: tuple[int, int, bool], anchor: int
+) -> _Hit:
+    start, lead_start, members, _ = _subject_list(sentence, segs, j, head)
+    return _Hit(start, lead_start, anchor, members)
+
+
+def _is_degree(sentence: str, seg: _Segment) -> bool:
+    return bool(_DEGREE.fullmatch(sentence[seg.start:seg.end].strip()))
+
+
+def _verb_first_hit(sentence: str, segs: list[_Segment], j: int, anchor: int) -> _Hit | None:
+    """A segment that opens with its verb: the person segment before it (past degree
+    segments, all joined by ",") is its subject; with no person there it continues the
+    open clause. A person joined any other way, or one inside an object list, makes the
+    subject unclear, so the segment only ends the open clause."""
+    k = j - 1
+    while k >= 0 and segs[k + 1].delim == "," and _is_degree(sentence, segs[k]):
+        k -= 1
+    if k < 0:
+        return None
+    prev = segs[k]
+    head = _person_at_end(sentence, prev.start, prev.end, first_segment=k == 0, any_prefix=True)
+    if head is None:
+        return None
+    if segs[k + 1].delim != ",":
+        return _break(segs[j])
+    start, lead_start, members, ok = _subject_list(sentence, segs, k, head)
+    return _Hit(start, lead_start, anchor, members) if ok else _break(segs[j])
+
+
+def _segment_hit(sentence: str, segs: list[_Segment], j: int) -> _Hit | None:
     seg = segs[j]
-    for n, anchor in enumerate(_ANCHOR.finditer(sentence, seg.start, seg.end)):
+    entry = _ELIFE_ENTRY.match(sentence, seg.start, seg.end)
+    if entry:
+        return _clause_hit(sentence, segs, j, (entry.start(1), entry.end(1), False), entry.end())
+    anchors = list(_ANCHOR.finditer(sentence, seg.start, seg.end))
+    if not anchors:
+        return None
+    if not _bare_lead(sentence[seg.start:anchors[0].start()])[1]:
+        return _verb_first_hit(sentence, segs, j, anchors[0].start())
+    for n, anchor in enumerate(anchors):
         head = _person_at_end(sentence, seg.start, anchor.start(), first_segment=j == 0, any_prefix=n == 0)
         if head is not None:
-            return _subject_list(sentence, segs, j, head), anchor.start()
-    return None
+            return _clause_hit(sentence, segs, j, head, anchor.start())
+    return _break(seg) if j else None
 
 
 def _parse(sentence: str) -> list[_Clause]:
+    """Clauses in order. A predicate runs from its anchor to the next segment that starts
+    or ends a clause; text before the first subject is dropped."""
     segs = _segments(sentence)
-    found = [hit for j in range(len(segs)) if (hit := _segment_subject(sentence, segs, j))]
+    hits = [hit for j in range(len(segs)) if (hit := _segment_hit(sentence, segs, j))]
     out: list[_Clause] = []
-    for i, ((start, lead_start, members), anchor) in enumerate(found):
-        end = found[i + 1][0][0] if i + 1 < len(found) else len(sentence)
-        end = max(end, anchor)
+    for i, hit in enumerate(hits):
+        if not hit.members:
+            continue
+        end = hits[i + 1].start if i + 1 < len(hits) else len(sentence)
+        end = max(end, hit.anchor)
         out.append(_Clause(
-            subject=sentence[start:anchor], members=members,
-            lead=sentence[lead_start:anchor], predicate=sentence[anchor:end],
+            subject=sentence[hit.start:hit.anchor], members=hit.members,
+            lead=sentence[hit.lead_start:hit.anchor], predicate=sentence[hit.anchor:end],
         ))
     return out
 
 
-def clauses(sentence: str) -> list[tuple[str, str]]:
-    """(subject, predicate) pairs. A clause starts where a person list stands right before
-    a relationship phrase; the subject text keeps its leading delimiter (", and R.B.S.")
-    and the predicate runs to the next clause's subject. Text before the first subject is
-    dropped."""
-    return [(c.subject, c.predicate) for c in _parse(sentence)]
-
-
 # --- extraction ---
 _TITLE = (
-    r"(?:a\s+|an\s+|the\s+)?(?:director|ceo|cso|cto|cmo|coo|cfo|president|chair\w*|chief|"
+    r"(?:a\s+|an\s+|the\s+)?(?:(?:executive|non-executive|scientific|managing)\s+)?"
+    r"(?:director|ceo|cso|cto|cmo|coo|cfo|president|chair\w*|chief|"
     r"head|board\s+member|member|advisor|adviser|consultant|officer)\b"
 )
-# The noun form needs "of" or a coordinated title ("co-founder and director of X");
-# "T.M. is a cofounder and holds equity in IMVAQ" names no object of "founder".
+# The noun form needs "of" or a coordinated title ("co-founder and director of X",
+# "co-founder, director and shareholder of X", "founder & CEO of X"); "T.M. is a
+# cofounder and holds equity in IMVAQ" names no object of "founder", and "founder or CEO
+# of X" says neither.
 _FOUNDER = re.compile(
-    rf"\b(?:(?P<co>co-?\s?founders?)|founders?)(?:\s+of\b|(?=\s+(?:and|or)\s+{_TITLE}))"
-    r"|\b(?P<co2>co-?founded)\b(?!\s+by\b)|\bfounded\b(?!\s+by\b)",
+    rf"\b(?:(?P<co>co-?\s?founders?)|founders?)(?:\s+of\b|(?=(?:\s*[,&]\s*|\s+and\s+){_TITLE}))"
+    r"|\b(?P<co2>co-?founded)\b(?!\s+by\b)|\b(?P<verb>founded)\b(?!\s+by\b)",
     re.IGNORECASE,
 )
+# The verb "founded"/"co-founded" counts only right after the subject, "has" or "and":
+# "the newly founded Acme Bio" is an adjective.
+_VERB_POSITION = re.compile(r"(?:^|\band\s+)(?:(?:has|have|had)\s+)?(?:also\s+)?$")
+# "founders of or consultants to", "founder of, or advisor to", "and/or": an alternative,
+# which says nothing about the founder role. An "or" inside a later conjunct ("founders
+# of, hold or may hold equity in, and serve ... to manaT Bio", PMID 34290408) is not.
+_DISJUNCT_START = re.compile(r"\s*,?\s*(?:and/)?or\b")
+_DISJUNCT = re.compile(r",\s*(?:and/)?or\b|\band/or\b")
 # "founders of and own equity in ManaT Bio" / "founders of, hold ... equity in, and serve
 # as consultants to manaT Bio" / "co-founded and serves on the board of DELFI": when the
 # phrase is followed by a coordination, the object is the first name (a token with a
 # capital or a digit) after a following "in", "to" or "of".
-_COORDINATED = re.compile(r"^(?:,|and\b|or\b)")
+_COORDINATED = re.compile(r"^(?:,|&|and\b)")
 _OBJECT_AFTER = re.compile(r"\b(?:in|to|of)\b[\s,]+")
 _WORD = re.compile(r"[A-Za-z][\w'’\-]*")
 _TITLE_WORDS = frozenset({
@@ -282,7 +425,10 @@ _HARD_BOUNDARY = re.compile(
     r"[;:()\[\]]|\.(?=\s|$)|\s+(?:which|that|who|whose|where|with|since|until|from|as)\b"
     rf"|\s+in\s+(?:\d{{4}}|{_MONTHS})\b"
 )
-_NEGATION = re.compile(r"\b(?:not|never|neither|nor)\b|n['’]t\b", re.IGNORECASE)
+# "no longer" is former wording (`_FORMER`), not a negation.
+_NEGATION = re.compile(
+    r"\b(?:not|never|neither|nor|without)\b|\bno\b(?!\s+longer\b)|n['’]t\b", re.IGNORECASE
+)
 _RESPECTIVELY = re.compile(r"\brespectively\b", re.IGNORECASE)
 _FORMER = re.compile(r"\b(?:former(?:ly)?|previously|divested|sold|no longer)\b", re.IGNORECASE)
 
@@ -293,6 +439,50 @@ def _plausible_name(part: str) -> bool:
         return False
     head = tokens[0]
     return bool(re.search(r"[A-Z]", head) or (re.search(r"\d", head) and re.search(r"[A-Za-z]", head)))
+
+
+# Lower-case words a company name may contain; any other lower-case word ends it.
+_CONNECTORS = frozenset({"of", "&", "and", "for", "the"}) | PARTICLES
+
+
+@dataclass(frozen=True)
+class _People:
+    """Every author's initials strings and surname keys: a company name that is one of
+    them is a person standing in an object list, and ends it."""
+
+    letters: frozenset[str]
+    surnames: frozenset[str]
+
+
+def _record_people(authors: list[dict]) -> _People:
+    letters: set[str] = set()
+    surnames: set[str] = set()
+    for author in authors:
+        letters |= _author_letter_forms(author)
+        surnames |= _author_surname_keys(author)
+    return _People(frozenset(letters), frozenset(surnames))
+
+
+def _names_a_person(name: str, people: _People) -> bool:
+    plain = strip_accents(name)
+    if _INITIALS_FORM.fullmatch(plain):
+        return "." in plain or _letters(plain) in people.letters
+    tokens = name.split()
+    return any(name_key(" ".join(tokens[i:])) in people.surnames for i in range(len(tokens)))
+
+
+def _trim_name(name: str) -> str:
+    """The name up to its first token with no capital or digit that is not a connector
+    ("Delfi Diagnostics outside the submitted work" -> "Delfi Diagnostics")."""
+    tokens = name.split()
+    keep = tokens[:1]
+    for tok in tokens[1:]:
+        if not (re.search(r"[A-Z0-9]", tok) or fold(tok) in _CONNECTORS):
+            break
+        keep.append(tok)
+    while len(keep) > 1 and fold(keep[-1]) in _CONNECTORS:
+        keep.pop()
+    return " ".join(keep)
 
 
 def _clean(part: str) -> str:
@@ -332,7 +522,7 @@ def _serial_tail(pieces: list[str]) -> list[str]:
     return []
 
 
-def _object_names(rest: str) -> list[str]:
+def _object_names(rest: str, people: _People) -> list[str]:
     span = _HARD_BOUNDARY.split(rest, maxsplit=1)[0]
     pieces = span.split(",")
     names: list[str] = []
@@ -340,6 +530,9 @@ def _object_names(rest: str) -> list[str]:
         for raw in re.split(r"\s+and\s+", item):
             name = _clean(raw)
             if _is_title(name):  # "Acme Bio and CEO of Beta Inc"
+                return names
+            name = _trim_name(name)
+            if _names_a_person(name, people):  # "DELFI Diagnostics and A.L., S.C. and R.B.S. are"
                 return names
             if _plausible_name(name) and name_key(name) not in _CORPORATE_SUFFIX:
                 names.append(name)
@@ -363,19 +556,32 @@ def _coordinated_object(rest: str) -> int | None:
     return None
 
 
-def _companies_after(lead: str, predicate: str) -> list[tuple[str, str]]:
+def _founder_object(predicate: str, m: re.Match[str]) -> str | None:
+    """The text after a founder phrase where its object starts, or None when the phrase
+    is an adjective, an alternative, or coordinated with no reachable object."""
+    if (m.group("co2") or m.group("verb")) and not _VERB_POSITION.search(predicate, 0, m.start()):
+        return None
+    rest = predicate[m.end():]
+    if _DISJUNCT_START.match(rest):
+        return None
+    if not _COORDINATED.match(rest.lstrip()):
+        return rest
+    obj = _coordinated_object(rest)
+    if obj is None or _DISJUNCT.search(rest, 0, obj):
+        return None
+    return rest[obj:]
+
+
+def _companies_after(lead: str, predicate: str, people: _People) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for m in _FOUNDER.finditer(predicate):
         if _NEGATION.search(lead + predicate[:m.start()]):
             continue
+        rest = _founder_object(predicate, m)
+        if rest is None:
+            continue
         role = "co_founder" if (m.group("co") or m.group("co2")) else "founder"
-        rest = predicate[m.end():]
-        if _COORDINATED.match(rest.lstrip()):
-            obj = _coordinated_object(rest)
-            if obj is None:
-                continue
-            rest = rest[obj:]
-        out.extend((name, role) for name in _object_names(rest))
+        out.extend((name, role) for name in _object_names(rest, people))
     return out
 
 
@@ -513,7 +719,9 @@ def _surname_regex(surname: str) -> str:
 def _member_names_pi(member: str, forms: PiForms) -> bool:
     """Whether one subject-list member is the PI: an initials form whose letters are the
     PI's, or (unless another author shares the surname) the full name, the initial and
-    surname, or Dr./Professor and surname, each ending the member."""
+    surname, or Dr./Professor and surname, each ending the member. Middle initials are
+    whole tokens and the surname starts a word, so "Jing Zhu", "J. Zhu" and "John Cross"
+    do not end in "Hu" or "Ross"."""
     member = member.strip()
     if _INITIALS_FORM.fullmatch(strip_accents(member)):
         return _letters(member) in forms.letters
@@ -523,19 +731,12 @@ def _member_names_pi(member: str, forms: PiForms) -> bool:
     if not sur:
         return False
     text = fold(member)
-    middle = r"(?:[a-z]\.?\s*){0,2}"
+    middle = r"(?:[a-z]\.\s*|[a-z]\s+){0,2}"
+    sur = rf"(?<![a-z0-9]){sur}"
     patterns = [rf"{_NAME_START}{re.escape(f)}\s+{middle}{sur}\Z" for f in forms.first_names]
     patterns.append(rf"{_NAME_START}{re.escape(forms.first_initial)}\.\s*{middle}{sur}\Z")
     patterns.append(rf"{_NAME_START}{_HONORIFIC_PREFIX}\s+{sur}\Z")
     return any(re.search(p, text) for p in patterns)
-
-
-def subject_names_pi(subject: str, forms: PiForms) -> bool:
-    """Whether a clause subject (a person list joined by ",", "and" or ", and") names
-    the PI as one of its members."""
-    text = re.sub(r"^(?:and|while|whereas|but)\s+", "", subject.strip(" ,;:"))
-    members = re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", text)
-    return any(_member_names_pi(m, forms) for m in members if m.strip())
 
 
 def founder_claims(record: dict, pi: PiName) -> list[FounderClaim]:
@@ -546,6 +747,7 @@ def founder_claims(record: dict, pi: PiName) -> list[FounderClaim]:
     forms = locate_pi(record, pi)
     if forms is None:
         return []
+    people = _record_people([a for a in (record.get("authors") or []) if isinstance(a, dict)])
     pmid = str(record.get("pmid") or "")
     year = record.get("year") if isinstance(record.get("year"), int) else None
     claims: list[FounderClaim] = []
@@ -557,7 +759,7 @@ def founder_claims(record: dict, pi: PiName) -> list[FounderClaim]:
                 continue
             if _RESPECTIVELY.search(clause.subject + clause.predicate):
                 continue
-            for name, role in _companies_after(clause.lead, clause.predicate):
+            for name, role in _companies_after(clause.lead, clause.predicate, people):
                 key = name_key(name)
                 if key in seen:
                     continue
