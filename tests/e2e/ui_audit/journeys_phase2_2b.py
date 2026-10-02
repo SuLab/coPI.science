@@ -1,5 +1,5 @@
-"""Web UI remediation Phase 2, Part 2B journeys (B-16, B-17, B-20; later tasks add
-X-04, R-01/R-02 and the enforced CSP). Run through journeys_phase2.JOURNEYS by
+"""Web UI remediation Phase 2, Part 2B journeys (B-16, B-17, B-20, X-03/X-04,
+R-01/FN-03/R-02; Task 2B-15 adds the enforced CSP). Run through journeys_phase2.JOURNEYS by
 `python -m tests.e2e.ui_audit.run journeys --phase 2`."""
 
 from __future__ import annotations
@@ -69,6 +69,98 @@ async def _modality(page) -> dict:
                    return {role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'),
                            inert: document.querySelectorAll('[inert]').length}; }"""
     )
+
+
+def _routes(ids: dict) -> dict[str, list[str]]:
+    """The crawl set per seeded role (the PI's /agent is expanded to its agent pages
+    after its redirect is followed)."""
+    run, first = ids["run"], ids["assessments"][0]
+    return {
+        "anon": ["/login"],
+        "admin": [
+            "/admin/users", f"/admin/users/{ids['pi']}", f"/admin/users/{BAD_UUID}", "/admin/jobs",
+            "/admin/activity", f"/admin/activity/{run}", f"/admin/activity/{run}/llm-calls",
+            "/admin/discussions", "/admin/agents", "/admin/assessments",
+            *[f"/admin/assessments/{a}" for a in ids["assessments"]],
+            "/admin/cohorts", "/admin/cohorts/topology", "/admin/access-requests",
+            "/admin/simulation", "/manager/prompt-suggestions",
+        ],
+        "manager": [
+            "/manager/pis", f"/manager/pis/{ids['pi']}", "/manager/assessments",
+            f"/manager/assessments/{first}", "/manager/discussions", "/manager/activity",
+            f"/manager/activity/{run}", "/manager/slack-bots", "/manager/prompt-suggestions",
+        ],
+        "reviewer": ["/manager/pis", "/manager/assessments", f"/manager/assessments/{first}"],
+        "pi": ["/profile", "/profile/edit", "/settings", "/agent"],
+    }
+
+
+async def _visit_all(h, width: int, on_page, *, bypass_csp: bool = False) -> list[dict]:
+    """Load every crawl route at `width`, calling `await on_page(page, role, url, response)`
+    for each, and return the list of its non-None results. Journeys that inject axe-core
+    pass `bypass_csp=True`: Playwright injects it as an inline script, which the enforced
+    script-src (Task 2B-15) blocks; the CSP journey itself never bypasses."""
+    results = []
+    for role, paths in _routes(h.ids).items():
+        context, page, _log = await h.page(role, width=width, bypass_csp=bypass_csp)
+        try:
+            queue = list(paths)
+            while queue:
+                path = queue.pop(0)
+                response = await page.goto(h.base_url + path, wait_until="networkidle")
+                if path == "/agent" and page.url.endswith("/dashboard"):
+                    queue += [page.url.replace(h.base_url, "").replace("/dashboard", tail)
+                              for tail in ("/conversations", "/public-profile")]
+                result = await on_page(page, role, page.url.replace(h.base_url, ""), response)
+                if result is not None:
+                    results.append(result)
+        finally:
+            await context.close()
+    return results
+
+
+_X04_RULES = ["region", "landmark-unique", "landmark-one-main", "page-has-heading-one",
+              "heading-order", "empty-table-header", "link-in-text-block"]
+
+
+async def journey_landmarks_headings_and_link_underlines(h) -> dict:
+    """X-04 and X-03 via axe-core at 1280 px: zero violations of the landmark, heading,
+    empty-header and link-in-text-block rules on every crawled page."""
+    async def on_page(page, role, url, response):
+        if "html" not in (response.headers.get("content-type", "") if response else ""):
+            return None
+        await page.add_script_tag(path=str(_AXE))
+        violations = await page.evaluate(
+            """async (rules) => (await axe.run(document, {runOnly: {type: 'rule', values: rules}}))
+                 .violations.map(v => ({id: v.id, n: v.nodes.length,
+                                        sample: v.nodes.slice(0, 2).map(n => n.target.join(' '))}))""",
+            _X04_RULES,
+        )
+        return {"role": role, "url": url, "violations": violations} if violations else None
+
+    failing = await _visit_all(h, WIDE, on_page, bypass_csp=True)
+    return {"ok": not failing, "failing_pages": failing}
+
+
+async def journey_narrow_crawl_has_no_overflow(h) -> dict:
+    """R-01/FN-03/R-02 (spec §9): at 375 px no crawled page overflows the viewport
+    horizontally on the seeded realistic data (long names, 300-character URLs)."""
+    async def on_page(page, role, url, response):
+        if "html" not in (response.headers.get("content-type", "") if response else ""):
+            return None
+        overflow = await page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+        if overflow <= 0:
+            return None
+        widest = await page.evaluate(
+            """() => [...document.querySelectorAll('body *')]
+                 .filter(e => e.getBoundingClientRect().right > window.innerWidth + 1
+                              && getComputedStyle(e).position !== 'fixed')
+                 .slice(0, 4).map(e => e.tagName + '.' + String(e.className).slice(0, 60))"""
+        )
+        return {"role": role, "url": url, "overflow_px": overflow, "widest": widest}
+
+    failing = await _visit_all(h, NARROW, on_page)
+    return {"ok": not failing, "failing_pages": failing}
 
 
 async def journey_drawer_modality_follows_resize(h) -> dict:
@@ -150,4 +242,6 @@ JOURNEYS = [
     journey_drawer_modality_follows_resize,
     journey_poll_rerender_keeps_scroll_and_focus,
     journey_show_in_page_clears_the_drawer,
+    journey_landmarks_headings_and_link_underlines,
+    journey_narrow_crawl_has_no_overflow,
 ]

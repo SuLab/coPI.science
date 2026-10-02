@@ -4,7 +4,7 @@
 {% block content %}
 <h1 class="text-2xl font-bold text-gray-900 mb-6">Access Requests</h1>
 
-<div class="grid grid-cols-3 gap-4 mb-8">
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-amber-700">{{ pending | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Pending</div>
@@ -20,7 +20,7 @@
 </div>
 
 <!-- Pending -->
-<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-x-auto mb-8">
     <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
         <h2 class="font-semibold text-amber-800">Pending</h2>
     </div>
@@ -64,7 +64,7 @@
 </div>
 
 <!-- Allowlist -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-8">
     <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
         <h2 class="font-semibold text-gray-800">ORCID Allowlist</h2>
         <span class="text-xs text-gray-500">Pre-approved ORCIDs bypass the access gate</span>
@@ -83,7 +83,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Note</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Added</th>
-                <th class="px-4 py-3"></th>
+                <th class="px-4 py-3"><span class="sr-only">Actions</span></th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
@@ -108,7 +108,7 @@
 
 {% if denied %}
 <!-- Denied -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-8">
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Denied</h2>
     </div>
@@ -118,7 +118,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
-                <th class="px-4 py-3"></th>
+                <th class="px-4 py-3"><span class="sr-only">Actions</span></th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">

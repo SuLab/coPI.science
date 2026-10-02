@@ -177,7 +177,8 @@ async def _ui_abort(route) -> None:
 
 async def journey_ui_behaviours(h) -> dict:
     """Each ui.js behaviour, driven in a real browser: a row click, a click on a link
-    inside a row, a filter change, a show/hide toggle, a submit-on-change select."""
+    inside a row, a filter applied with its button, a show/hide toggle, a sort select
+    applied with its button (FN-04 removed submit-on-change)."""
     context, page, _log = await h.page("admin")
     errors: list = []
     page.on("pageerror", lambda e: errors.append(e))
@@ -201,8 +202,9 @@ async def journey_ui_behaviours(h) -> dict:
         out["inner_link_kept_list"] = page.url == f"{base}/admin/users"
 
         await page.select_option("#status-filter", "complete")
-        await page.wait_for_url(f"{base}/admin/users?status_filter=complete")
-        out["filter_nav"] = page.url == f"{base}/admin/users?status_filter=complete"
+        await page.locator("form:has(#status-filter) button[type=submit]").click()
+        await page.wait_for_url("**status_filter=complete**")
+        out["filter_nav"] = "status_filter=complete" in page.url
 
         await page.goto(f"{base}/admin/cohorts", wait_until="networkidle")
         button = page.locator('[data-toggle-target="new-cohort-form"]')
@@ -219,6 +221,7 @@ async def journey_ui_behaviours(h) -> dict:
         values = await sort.locator("option").evaluate_all("(os) => os.map((o) => o.value)")
         other = next(v for v in values if v != current)
         await sort.select_option(other)
+        await page.locator("form:has(#assessments-sort-select) button[type=submit]").click()
         await page.wait_for_url(f"**sort={other}**")
         out["autosubmit"] = f"sort={other}" in page.url
     finally:

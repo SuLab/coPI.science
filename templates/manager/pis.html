@@ -40,11 +40,10 @@
 {% endif %}
 
 <!-- Filters -->
-<div data-filter-nav="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
+<form method="get" action="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap items-end gap-4">
     <div>
         <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
-        <select data-filter-param="status_filter" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="status-filter" name="status_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
             <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
@@ -54,17 +53,17 @@
     </div>
     <div>
         <label for="claimed-filter" class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
-        <select data-filter-param="claimed_filter" id="claimed-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="claimed-filter" name="claimed_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
             <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
         </select>
     </div>
-</div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
 
 <!-- PIs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>

@@ -2,18 +2,19 @@
 {% block title %}Manager — Prompt Suggestions — CoPI{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-2 gap-4">
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Prompt Suggestions</h1>
-    <div class="flex items-center gap-4">
-        <form method="GET" action="/manager/prompt-suggestions" class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center gap-4">
+        <form method="GET" action="/manager/prompt-suggestions" class="flex flex-wrap items-center gap-2">
             <label for="prompt-suggestions-status" class="text-sm text-gray-500">Status:</label>
-            <select id="prompt-suggestions-status" name="status" data-autosubmit
+            <select id="prompt-suggestions-status" name="status"
                     class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
                 <option value="" {% if not status_filter %}selected{% endif %}>All</option>
                 <option value="open" {% if status_filter == 'open' %}selected{% endif %}>Open</option>
                 <option value="dismissed" {% if status_filter == 'dismissed' %}selected{% endif %}>Dismissed</option>
                 <option value="implemented" {% if status_filter == 'implemented' %}selected{% endif %}>Implemented</option>
             </select>
+            <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
         </form>
         {% if effective_user.is_staff and not impersonation_banner %}
         <form method="post" action="/reviews/suggestions/generate" class="flex flex-col items-end">
@@ -69,7 +70,7 @@
     {% endif %}
 </p>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>

@@ -38,7 +38,7 @@
 
 <!-- Members -->
 <h2 class="text-lg font-semibold text-gray-900 mb-3">Members ({{ cohort.memberships | length }})</h2>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-8">
     {% if cohort.memberships %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
@@ -107,7 +107,7 @@
 <!-- Read-only agent → cohort map -->
 <h2 class="text-lg font-semibold text-gray-900 mb-3">Agent Cohort Map</h2>
 <p class="text-sm text-gray-500 mb-3">All agents and the cohorts they currently belong to (read-only; manage membership from each cohort's page).</p>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
@@ -135,7 +135,7 @@
     Every change to this cohort, newest first. Append-only, and it outlives the
     cohort row itself — deleting a cohort does not erase its history.
 </p>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     {% if audit_events %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">

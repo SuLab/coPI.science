@@ -5,10 +5,6 @@
 //
 //   data-row-href="/path"    a click on the element navigates there, unless it
 //                            landed on (or inside) a control of its own
-//   data-autosubmit          a change on this control submits its form through
-//                            requestSubmit(), so submit listeners (confirm.js) run
-//   data-filter-nav="/path"  a change on a [data-filter-param] control inside it
-//                            navigates to /path?<param>=<value>…, empty values omitted
 //   data-toggle-target="id"  a click toggles `hidden` on #id, and aria-expanded on
 //                            the clicked element when it carries one
 //   button[data-toggles="id"]  a disclosure button (X-05): a click shows or hides
@@ -80,28 +76,6 @@
     if (!row || ownControl(target, row)) return;
     const rowButton = row.querySelector("button[data-toggles]");
     if (rowButton) rowButton.click();
-  });
-
-  document.addEventListener("change", function (event) {
-    const control = event.target;
-    if (!(control instanceof Element)) return;
-
-    if (control.hasAttribute("data-autosubmit") && control.form) {
-      control.form.requestSubmit();
-      return;
-    }
-
-    const nav = control.closest("[data-filter-nav]");
-    if (nav && control.hasAttribute("data-filter-param")) {
-      const base = nav.getAttribute("data-filter-nav");
-      if (!localPath(base)) return;
-      const params = new URLSearchParams();
-      nav.querySelectorAll("[data-filter-param]").forEach(function (field) {
-        if (field.value) params.set(field.getAttribute("data-filter-param"), field.value);
-      });
-      const query = params.toString();
-      window.location.assign(query ? base + "?" + query : base);
-    }
   });
 })();
 

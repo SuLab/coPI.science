@@ -336,7 +336,7 @@
 
 <section id="sec-history">
 <!-- Commands -->
-<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-x-auto mb-6">
     <div class="px-5 py-3 border-b border-gray-200">
         <h2 class="text-lg font-semibold text-gray-900">Commands</h2>
     </div>
@@ -367,7 +367,7 @@
 </div>
 
 <!-- Recent admin actions -->
-<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-x-auto mb-6">
     <div class="px-5 py-3 border-b border-gray-200">
         <h2 class="text-lg font-semibold text-gray-900">Recent admin actions</h2>
     </div>
@@ -401,7 +401,7 @@
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
     <form method="get" action="/admin/simulation" class="flex items-center gap-3">
-        <select name="run" aria-label="Simulation run" data-autosubmit
+        <select name="run" aria-label="Simulation run"
                 class="border border-gray-300 rounded px-2 py-1 text-base">
             {% for opt in run_options %}
             <option value="{{ opt.id }}" {% if opt.is_selected %}selected{% endif %}>
@@ -412,7 +412,7 @@
             <option disabled>No simulation runs recorded yet.</option>
             {% endfor %}
         </select>
-        <noscript><button type="submit" class="px-3 py-1 rounded bg-gray-200 text-base">Switch</button></noscript>
+        <button type="submit" class="px-3 py-1 rounded bg-gray-200 text-base">Apply</button>
     </form>
 </div>
 
@@ -542,6 +542,7 @@
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Drops by reason</h2>
         <p class="sc-caption">Sidecar verdicts the engine refused or lost, by reason. A run with none is healthy.</p>
+        <div class="overflow-x-auto">
         <table class="min-w-full text-base">
             <thead><tr>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Reason</th>
@@ -562,6 +563,7 @@
             {% endfor %}
             </tbody>
         </table>
+        </div>
         {% if 'unwritable_row' in drops_rows | map(attribute=0) | list %}
         <p class="sc-meta mt-2">⚠ unwritable_row: the database refused a concluded verdict; this drop is its only trace.</p>
         {% endif %}
@@ -608,6 +610,7 @@
         {% if latency_capped %}
         <p class="text-sm text-yellow-700 mb-2">Only the newest 20,000 logged turns are read — this run has more.</p>
         {% endif %}
+        <div class="overflow-x-auto">
         <table class="min-w-full text-base">
             <thead><tr>
                 <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Phase</th>
@@ -630,13 +633,14 @@
             {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
 </div>
 </section>
 
 <!-- Per-agent table -->
 <section id="sec-agents">
-<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-x-auto mb-6">
     <div class="px-5 py-3 border-b border-gray-200">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Per-agent activity</h2>
         <p class="sc-caption">One row per agent that posted a message or logged a call this run. Live columns come from the engine heartbeat and read "—" once it is older than {{ heartbeat_stale_seconds }} seconds.</p>
@@ -685,10 +689,12 @@
     <p class="sc-caption">Each interview thread from its first reply to its last message, in UTC. Bars start at the first reply, not the opening post. Colour shows whether the headline was announced.</p>
     {% if gantt_html %}
     {{ gantt_html | safe }}
+    <div class="overflow-x-auto">
     <table class="min-w-full text-base mt-3">
         <thead><tr>
             <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Interview</th>
             <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Outcome</th>
+            <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Announced</th>
             <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Cost</th>
             <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600 sc-num">Span</th>
             <th class="px-4 py-2 text-left text-sm font-semibold text-gray-600">Link</th>
@@ -698,6 +704,7 @@
         <tr>
             <td class="px-4 py-1">{{ link.label }}</td>
             <td class="px-4 py-1">{{ link.outcome }}</td>
+            <td class="px-4 py-1">{{ 'yes' if link.announced else 'no' }}</td>
             <td class="px-4 py-1 sc-num">{{ link.cost }}</td>
             <td class="px-4 py-1 sc-num">{{ link.span }}</td>
             <td class="px-4 py-1"><a class="text-indigo-700 hover:underline" href="/admin/assessments/{{ link.assessment_id }}">detail &rarr;</a></td>
@@ -705,6 +712,7 @@
         {% endfor %}
         </tbody>
     </table>
+    </div>
     {% if unattributed_note %}<p class="sc-meta mt-2">* {{ unattributed_note }}</p>{% endif %}
     {% else %}<p class="text-base text-gray-700">No interview threads recorded for this run.</p>{% endif %}
 </div>

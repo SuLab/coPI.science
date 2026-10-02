@@ -213,6 +213,7 @@
     {% if jobs %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h2 class="font-semibold text-gray-800 mb-4">Jobs</h2>
+        <div class="overflow-x-auto">
         <table class="min-w-full text-sm">
             <thead>
                 <tr class="text-xs text-gray-500 uppercase">
@@ -246,6 +247,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
     {% endif %}
 </div>

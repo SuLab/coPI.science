@@ -83,6 +83,7 @@
         Distilled From ({{ suggestion.feedback_snapshot | length }} feedback row{{ '' if suggestion.feedback_snapshot | length == 1 else 's' }})
     </h2>
     {% if suggestion.feedback_snapshot %}
+    <div class="overflow-x-auto">
     <table class="min-w-full text-sm">
         <thead>
             <tr class="text-left text-xs text-gray-500 uppercase">
@@ -105,6 +106,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p class="text-sm text-gray-600">No feedback recorded.</p>
     {% endif %}

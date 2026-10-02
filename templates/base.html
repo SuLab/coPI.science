@@ -22,9 +22,10 @@
 <a href="#main-content"
    class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:bg-white focus:px-3 focus:py-2 focus:rounded focus:shadow">Skip to main content</a>
 
+<header>
 {% if impersonation_banner %}
 <!-- Impersonation Banner -->
-<div class="bg-amber-400 text-amber-900 px-4 py-2 text-sm flex items-center justify-between">
+<div role="region" aria-label="Impersonation" class="bg-amber-400 text-amber-900 px-4 py-2 text-sm flex flex-wrap items-center justify-between gap-2">
     <span>
         <strong>Admin:</strong> Viewing as {{ impersonation_banner.name }}
         (ORCID: {{ impersonation_banner.orcid }})
@@ -40,7 +41,7 @@
 {% set effective_user = impersonation_banner or current_user %}
 
 <!-- Navigation -->
-<nav class="bg-white shadow-sm border-b border-gray-200">
+<nav aria-label="Main" class="bg-white shadow-sm border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap justify-between min-h-16">
             <div class="flex items-center">
@@ -119,7 +120,7 @@
 
 <!-- Admin sub-navigation -->
 {% if active_page == 'admin' and current_user and current_user.is_admin %}
-<div class="bg-gray-50 border-b border-gray-200">
+<nav aria-label="Admin sections" class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
             <a href="/admin/users" class="{% if active_admin == 'users' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Users</a>
@@ -134,12 +135,12 @@
             <a href="/manager/prompt-suggestions" class="text-gray-500 hover:text-gray-700">Prompt Suggestions</a>
         </div>
     </div>
-</div>
+</nav>
 {% endif %}
 
 {% if active_page == 'manager' and effective_user and (effective_user.is_staff or effective_user.is_reviewer) %}
 <!-- Manager sub-navigation -->
-<div class="bg-gray-50 border-b border-gray-200">
+<nav aria-label="Manager sections" class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
             <a href="/manager/pis" class="{% if active_manager == 'pis' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">PIs</a>
@@ -152,25 +153,27 @@
             {% endif %}
         </div>
     </div>
-</div>
+</nav>
 {% endif %}
-
-<!-- Flash messages (src/web/flash.py): shown once, then gone from the session. -->
-{% set flashes = get_flashes() if get_flashes is defined else [] %}
-{% if flashes %}
-<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4 space-y-2" data-flash-region>
-    {% for f in flashes %}
-    <div class="rounded-md p-4 border
-        {% if f.kind == 'error' %}bg-red-50 border-red-200 text-red-800
-        {% elif f.kind == 'success' %}bg-green-50 border-green-200 text-green-800
-        {% else %}bg-blue-50 border-blue-200 text-blue-800{% endif %}"
-         role="{{ 'alert' if f.kind == 'error' else 'status' }}" data-flash-kind="{{ f.kind }}">{{ f.text }}</div>
-    {% endfor %}
-</div>
-{% endif %}
+</header>
 
 <!-- Main content -->
 <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Flash messages (src/web/flash.py): shown once, then gone from the session.
+         Inside <main>, so they sit in a landmark (X-04); <main> supplies the width
+         and side padding. -->
+    {% set flashes = get_flashes() if get_flashes is defined else [] %}
+    {% if flashes %}
+    <div class="mb-6 space-y-2" data-flash-region>
+        {% for f in flashes %}
+        <div class="rounded-md p-4 border
+            {% if f.kind == 'error' %}bg-red-50 border-red-200 text-red-800
+            {% elif f.kind == 'success' %}bg-green-50 border-green-200 text-green-800
+            {% else %}bg-blue-50 border-blue-200 text-blue-800{% endif %}"
+             role="{{ 'alert' if f.kind == 'error' else 'status' }}" data-flash-kind="{{ f.kind }}">{{ f.text }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
 </main>
 

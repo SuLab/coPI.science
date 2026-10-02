@@ -46,3 +46,40 @@
 .tag-input::placeholder {
     color: #4b5563;
 }
+
+/* X-03 (web UI remediation Phase 2): a link inside running text is underlined, so
+   it is not distinguished by colour alone. Button-styled links (a bg-* class) are
+   left alone. */
+main p a:not([class*="bg-"]),
+main dd a:not([class*="bg-"]),
+main li a:not([class*="bg-"]) {
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
+
+/* R-02 (web UI remediation Phase 2): a long unbroken string (a URL, an id) wraps
+   instead of widening the page. `anywhere`, not the break-words utility's
+   `break-word`, because only `anywhere` lowers min-content width, which a flex item
+   or grid cell (tag pills, dd values, chat bubbles) needs. Tables keep `break-word`
+   so their columns are not squeezed; they scroll in their overflow-x-auto wrappers. */
+main {
+  overflow-wrap: anywhere;
+}
+main table {
+  overflow-wrap: break-word;
+}
+[data-markdown] pre,
+[data-markdown] table,
+.md-content pre,
+.md-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.tag-pill {
+  max-width: 100%;
+}
+/* R-01: a select is never wider than its row (long run labels). */
+select {
+  max-width: 100%;
+}

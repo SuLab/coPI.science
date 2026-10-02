@@ -90,7 +90,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-2 gap-4">
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
     {% if runs %}
     {# The manager surface's own copy of the run/sort/lab form — same reason the
@@ -100,7 +100,7 @@
        controls. #}
     <form method="GET" action="/manager/assessments" class="flex flex-wrap items-center gap-2 justify-end">
         <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
-        <select id="assessments-run-select" name="run_id" data-autosubmit
+        <select id="assessments-run-select" name="run_id"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for run in runs %}
             <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
@@ -110,7 +110,7 @@
             <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
         </select>
         <label for="assessments-sort-select" class="text-sm text-gray-500">Sort:</label>
-        <select id="assessments-sort-select" name="sort" data-autosubmit
+        <select id="assessments-sort-select" name="sort"
                 class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for value, label in sort_options %}
             <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
@@ -118,7 +118,7 @@
         </select>
         {% if lab_options %}
         <label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label>
-        <select id="assessments-lab-select" name="lab" data-autosubmit
+        <select id="assessments-lab-select" name="lab"
                 class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="">All labs</option>
             {% for option in lab_options %}
@@ -130,6 +130,7 @@
            without this hidden input every select would drop it and silently
            return the reader to the default tab. #}
         <input type="hidden" name="review" value="{{ review }}">
+        <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
     </form>
     {% endif %}
 </div>

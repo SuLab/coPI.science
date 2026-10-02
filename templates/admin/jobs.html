@@ -27,11 +27,10 @@
 </div>
 
 <!-- Filters -->
-<div data-filter-nav="/admin/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex gap-4">
+<form method="get" action="/admin/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex flex-wrap items-end gap-4">
     <div>
         <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Status</label>
-        <select data-filter-param="status_filter" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="status-filter" name="status_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             {% for s in job_statuses %}
             <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s | capitalize }}</option>
@@ -40,18 +39,18 @@
     </div>
     <div>
         <label for="type-filter" class="text-xs font-medium text-gray-600 block mb-1">Type</label>
-        <select data-filter-param="type_filter" id="type-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="type-filter" name="type_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             {% for t in job_types %}
             <option value="{{ t }}" {% if type_filter == t %}selected{% endif %}>{{ t | replace('_', ' ') | title }}</option>
             {% endfor %}
         </select>
     </div>
-</div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
 
 <!-- Jobs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
