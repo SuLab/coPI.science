@@ -39,7 +39,6 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -89,6 +88,7 @@ from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.slack_tokens import token_for_agent_row
 from src.services.thread_panel import panel_cards_by_thread
+from src.web.flash import flash
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -193,11 +193,6 @@ async def manager_pis(
             user_data=user_data,
             status_filter=status_filter,
             claimed_filter=claimed_filter,
-            # The Slack callback's manager-surface error redirects land here
-            # (`/manager/pis?slack_error=…`), not on the PI detail page — an
-            # unknown state or a refused initiator has no PI to return to.
-            # Without this the message is dropped and the refusal is silent.
-            slack_error=request.query_params.get("slack_error"),
         ),
     )
 
@@ -242,7 +237,6 @@ async def manager_pi_detail(
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
             slack_ok=request.query_params.get("slack_ok"),
-            slack_error=request.query_params.get("slack_error"),
             activation_blocked=blocked,
             activated=request.query_params.get("activated"),
             blockers=blockers,
@@ -571,10 +565,8 @@ async def manager_provision_slack(
     try:
         url = await start_provisioning(db, agent, initiated_by=current_user)
     except ProvisioningError as exc:
-        return RedirectResponse(
-            url=f"/manager/pis/{user_id}?slack_error={quote(str(exc)[:200])}",
-            status_code=302,
-        )
+        flash(request, f"Slack provisioning failed: {exc}", "error")
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -595,10 +587,8 @@ async def manager_activate_agent(
     """
     agent = await _pending_pi_agent(db, user_id)
     if not agent.slack_bot_token:
-        return RedirectResponse(
-            url=f"/manager/pis/{user_id}?slack_error={quote('Install the Slack bot first.')}",
-            status_code=302,
-        )
+        flash(request, "Slack provisioning failed: Install the Slack bot first.", "error")
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     blockers = await activate_agent(db, agent, actor=current_user, override=False)
     if blockers:
         return RedirectResponse(
@@ -651,7 +641,6 @@ async def manager_slack_bots(
             active_manager="slack-bots",
             bots=bots,
             counts=counts,
-            slack_error=request.query_params.get("slack_error"),
             slack_ok=request.query_params.get("slack_ok"),
         ),
     )

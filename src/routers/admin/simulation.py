@@ -30,6 +30,7 @@ from src.services.simulation_control import (
 )
 from src.services.simulation_control import panel_state as read_panel_state
 from src.services.simulation_view import live_tab_context
+from src.web.flash import flash
 
 # ---------------------------------------------------------------------------
 # /admin/simulation — the control-plane panel (Task 7 of
@@ -90,7 +91,6 @@ async def _simulation_context(
     current_user: User,
     *,
     msg: str | None = None,
-    error: str | None = None,
     template_error: str | None = None,
     template_value_override: str | None = None,
 ) -> dict:
@@ -172,13 +172,18 @@ async def _simulation_context(
         template_value=template_value,
         audit_events=audit_events,
         msg=msg,
-        error=error,
         template_error=template_error,
         tick_at_display=tick_at_display,
         web_rubric_hash=RUBRIC_CONTENT_HASH,
         **live_tab,
     )
 
+
+
+def _refuse_to(request: Request, url: str, message: str) -> RedirectResponse:
+    """Flash ``message`` as an error and redirect to ``url`` (A-14: never in the query)."""
+    flash(request, message, "error")
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.get("/simulation", response_class=HTMLResponse)
@@ -196,7 +201,6 @@ async def admin_simulation(
         request,
         current_user,
         msg=request.query_params.get("msg"),
-        error=request.query_params.get("error"),
     )
     return templates.TemplateResponse(request, "admin/simulation.html", ctx)
 
@@ -234,9 +238,8 @@ async def admin_simulation_start(
         )
     ).scalar_one_or_none()
     if alive or pending_start is not None:
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
-            status_code=302,
+        return _refuse_to(
+            request, "/admin/simulation", "A run is already starting or in progress."
         )
     pending_stop = (
         await db.execute(
@@ -248,9 +251,8 @@ async def admin_simulation_start(
     ).scalar_one_or_none()
     if pending_stop is not None and is_finalize_stop(pending_stop):
         # The finalize would stamp the run a start is about to resume or replace.
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A Finalize run is pending; start after it finishes.')}",
-            status_code=302,
+        return _refuse_to(
+            request, "/admin/simulation", "A Finalize run is pending; start after it finishes."
         )
     latest_id = await latest_run_id(db)
     latest = await db.get(SimulationRun, latest_id) if latest_id is not None else None
@@ -265,10 +267,7 @@ async def admin_simulation_start(
         )
     except IntegrityError:
         await db.rollback()
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A start is already pending.')}",
-            status_code=302,
-        )
+        return _refuse_to(request, "/admin/simulation", "A start is already pending.")
     await record_audit(
         db, action="simulation_start_requested", actor_user_id=current_user.id, payload=payload
     )
@@ -293,9 +292,7 @@ async def admin_simulation_finalize_run(
     start is pending; a live engine would only fail it. With no engine alive the
     supervisor claims it and runs the finalize routine under the engine lock."""
     def _refuse(message: str):
-        return RedirectResponse(
-            url=f"/admin/activity/{run_id}?error={quote(message)}", status_code=302,
-        )
+        return _refuse_to(request, f"/admin/activity/{run_id}", message)
 
     if await engine_alive(db):
         return _refuse("An engine is running — Finalize run applies to a stopped run.")
@@ -350,9 +347,7 @@ async def admin_simulation_stop(
     double-click/race guard as the start route.
     """
     if not await engine_alive(db):
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('Nothing is running.')}", status_code=302
-        )
+        return _refuse_to(request, "/admin/simulation", "Nothing is running.")
     payload = {"hold_open": True} if hold_open == "1" else None
     try:
         await enqueue_command(
@@ -360,10 +355,7 @@ async def admin_simulation_stop(
         )
     except IntegrityError:
         await db.rollback()
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A stop is already pending.')}",
-            status_code=302,
-        )
+        return _refuse_to(request, "/admin/simulation", "A stop is already pending.")
     await record_audit(
         db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=payload
     )
@@ -410,9 +402,8 @@ async def admin_simulation_announce_settings(
         names = parse_announce_channels(channels)
         bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
         if bad:
-            return RedirectResponse(
-                url=f"/admin/simulation?error={quote('Invalid channel name(s): ' + ', '.join(bad))}",
-                status_code=302,
+            return _refuse_to(
+                request, "/admin/simulation", "Invalid channel name(s): " + ", ".join(bad)
             )
         new_value = ",".join(names) or None
         if new_value is None:

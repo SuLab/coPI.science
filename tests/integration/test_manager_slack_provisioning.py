@@ -19,6 +19,7 @@ from src.models import (
     SlackAppProvision,
 )
 from tests import factories
+from tests.flash_support import session_cookie_header, session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -77,9 +78,11 @@ async def test_provisioning_failure_returns_to_the_manager_page(
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    loc = r.headers["location"]
-    assert loc.startswith(f"/manager/pis/{pi.id}?slack_error=")
-    assert " " not in loc, "the message must be percent-encoded into the Location"
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert session_flashes(r) == [{
+        "text": "Slack provisioning failed: Could not create the Slack app: boom",
+        "kind": "error",
+    }]
 
 
 async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
@@ -130,7 +133,8 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
         f"/manager/pis/{pi.id}/activate", headers=headers, follow_redirects=False,
     )
     assert r.status_code == 302
-    assert "Install" in r.headers["location"]
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert "Install" in session_flashes(r)[0]["text"]
 
 
 async def test_callback_completes_for_the_initiating_manager(
@@ -203,7 +207,8 @@ async def test_callback_refuses_a_different_user(client, db_session, monkeypatch
         headers=auth_headers(other.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"].startswith("/manager/pis?slack_error=")
+    assert r.headers["location"] == "/manager/pis"
+    assert session_flashes(r)[0]["text"].startswith("Slack provisioning failed: ")
     await db_session.refresh(agent)
     assert agent.slack_bot_token is None
 
@@ -260,7 +265,10 @@ async def test_activate_without_a_slack_token_is_refused(client, db_session):
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert "slack_error" in r.headers["location"]
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert session_flashes(r) == [
+        {"text": "Slack provisioning failed: Install the Slack bot first.", "kind": "error"}
+    ]
     await db_session.refresh(agent)
     assert agent.status == "pending"
 
@@ -365,7 +373,8 @@ async def test_callback_refuses_a_null_initiator_row_for_a_non_admin(
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"].startswith("/manager/pis?slack_error=")
+    assert r.headers["location"] == "/manager/pis"
+    assert session_flashes(r)[0]["text"].startswith("Slack provisioning failed: ")
     await db_session.refresh(agent)
     assert agent.slack_bot_token is None
     # The bridge row survives, so the admin the link was minted for can finish.
@@ -404,19 +413,22 @@ async def test_callback_completes_a_null_initiator_row_for_an_admin(
     assert agent.slack_bot_token == "xoxb-bulk"
 
 
-async def test_the_pi_directory_renders_a_slack_error_banner(client, db_session):
-    """The callback's manager-surface error redirects land on /manager/pis
-    with ``?slack_error=…``. Without a banner there the message is dropped
-    silently and a refused install looks like nothing happened at all.
-    """
+async def test_the_pi_directory_renders_the_callbacks_flashed_error(client, db_session):
+    """The callback's manager-surface errors land on /manager/pis as a flash; a
+    ?slack_error= query string no longer puts any text on the page (A-14)."""
     manager = await _manager(db_session)
     r = await client.get(
-        "/manager/pis?slack_error=This+install+was+started+by+a+different+account.",
-        headers=auth_headers(manager.id),
+        "/admin/agents/slack/callback?error=access_denied",
+        headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.status_code == 200
-    assert "Slack provisioning failed" in r.text
-    assert "This install was started by a different account." in r.text
+    assert r.status_code == 302 and r.headers["location"] == "/manager/pis"
+    page = await client.get("/manager/pis", headers=session_cookie_header(r))
+    assert "Slack provisioning failed: Slack returned: access_denied" in page.text
+
+    forged = await client.get(
+        "/manager/pis?slack_error=Forged+text", headers=auth_headers(manager.id)
+    )
+    assert "Forged text" not in forged.text
 
 
 async def test_a_reviewer_cannot_render_a_fake_success_banner(client, db_session):

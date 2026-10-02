@@ -35,6 +35,7 @@ from src.services.email import build_delegate_invitation, send_transactional_ema
 from src.services.profile_edit import apply_profile_edits, parse_expected_version
 from src.services.runs import latest_run_id
 from src.services.validators import is_valid_email
+from src.web.flash import flash
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -236,7 +237,6 @@ async def agent_dashboard(
             slack_invite_url=SLACK_INVITE_URL,
             web_delegates=web_delegates,
             pending_invitations=pending_invitations,
-            delegate_error=request.query_params.get("delegate_error"),
         ),
     )
 
@@ -739,12 +739,8 @@ async def invite_delegate(
             build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
         )
 
-    error_msg = "; ".join(errors) if errors else ""
-    if error_msg:
-        return RedirectResponse(
-            url=f"/agent/{agent_id}/dashboard?delegate_error={error_msg}",
-            status_code=302,
-        )
+    if errors:
+        flash(request, "; ".join(errors), "error")
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 

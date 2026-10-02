@@ -2,7 +2,6 @@
 
 import re
 import uuid
-from urllib.parse import quote
 
 from fastapi import Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -26,6 +25,7 @@ from src.routers.admin._common import (
 from src.services.agent_activation import activate_agent, activation_blockers
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
+from src.web.flash import flash
 
 #: The slug names profile files (profiles/public/<slug>.md) and must pass
 #: user_deletion's _SAFE_AGENT_ID: a slug outside it could escape the profiles
@@ -165,7 +165,6 @@ async def admin_agent_detail(
             activation_blocked=request.query_params.get("activation_blocked"),
             valid_statuses=VALID_AGENT_STATUSES,
             available_roles=available_roles(),
-            slack_error=request.query_params.get("slack_error"),
             form_error=request.query_params.get("error"),
             form_version=agent_form_version(agent),
             slack_ok=request.query_params.get("slack_ok"),
@@ -373,10 +372,8 @@ async def admin_provision_slack(
     try:
         oauth_url = await start_provisioning(db, agent, initiated_by=current_user)
     except ProvisioningError as exc:
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?slack_error={quote(str(exc)[:200])}",
-            status_code=302,
-        )
+        flash(request, f"Slack provisioning failed: {exc}", "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     return RedirectResponse(url=oauth_url, status_code=302)
 
 
@@ -413,9 +410,9 @@ async def admin_provision_slack_callback(
     is_admin = bool(current_user.is_admin)
 
     def surface_error(msg: str) -> RedirectResponse:
-        base = "/admin/agents" if is_admin else "/manager/pis"
+        flash(request, f"Slack provisioning failed: {msg}", "error")
         return RedirectResponse(
-            url=f"{base}?slack_error={quote(msg[:200])}", status_code=302
+            url="/admin/agents" if is_admin else "/manager/pis", status_code=302
         )
 
     if error:

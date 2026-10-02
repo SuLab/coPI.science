@@ -141,10 +141,6 @@
             </div>
             {% endif %}
 
-            {% if delegate_error %}
-            <p class="text-sm text-red-600 mb-2">{{ delegate_error }}</p>
-            {% endif %}
-
             <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/invite">
                 <textarea name="emails" rows="2" placeholder="Enter email addresses (comma or newline separated)"
                           class="w-full text-sm border border-gray-300 rounded-md px-3 py-2 mb-2"></textarea>

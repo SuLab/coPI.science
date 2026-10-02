@@ -219,7 +219,7 @@ def test_create_app_retries_only_on_rate_limit(monkeypatch):
 
 def test_exchange_code_never_echoes_the_token(monkeypatch):
     """SEC-9. This error string reaches the server log and a user-facing
-    ?slack_error= redirect, so any fragment of the value is a leak."""
+    flash message, so any fragment of the value is a leak."""
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(
         {"ok": True, "access_token": "xoxp-WRONGTYPE-abcdefghijklmnop"}))
     with pytest.raises(RuntimeError) as ei:

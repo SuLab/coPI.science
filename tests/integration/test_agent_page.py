@@ -25,7 +25,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import pytest
 from itsdangerous import TimestampSigner
@@ -39,6 +38,7 @@ from src.models import (
     ResearcherProfile,
 )
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
@@ -231,7 +231,7 @@ async def _invite(client, world, email):
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302, r.text
-    assert "delegate_error" not in r.headers["location"], r.headers["location"]
+    assert session_flashes(r) == [], session_flashes(r)
     return r
 
 
@@ -396,8 +396,8 @@ async def test_inviting_a_delegate_creates_a_pending_invitation_and_one_email(
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302
-    assert "delegate_error" in r.headers["location"]
-    assert "not-an-email" in unquote(r.headers["location"])
+    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
+    assert session_flashes(r) == [{"text": "Invalid email: not-an-email", "kind": "error"}]
 
     rows = (await db_session.execute(
         select(DelegateInvitation).where(
@@ -424,7 +424,8 @@ async def test_a_duplicate_pending_invitation_is_refused(client, db_session, wor
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302
-    assert "Invitation+already+pending" in r.headers["location"].replace("%20", "+")
+    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
+    assert any("Invitation already pending" in f["text"] for f in session_flashes(r))
     rows = (await db_session.execute(
         select(DelegateInvitation).where(DelegateInvitation.email == "dee@example.org")
     )).scalars().all()
@@ -760,7 +761,7 @@ async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
     path = _path(ep, world, delegated, ts=thread_root)
 
     denied = await client.request(ep.method, path, data=ep.data,
-                                  headers=_auth(world.stranger.id))
+                                  headers={**_auth(world.stranger.id), "Accept": "application/json"})
     assert denied.status_code == 403, (
         f"{ep.id} let a stranger through with {denied.status_code}"
     )
@@ -784,7 +785,7 @@ async def test_delegate_write_access_matches_the_spec(
     reject, and every other endpoint must accept.
     """
     r = await client.request(ep.method, _path(ep, world, delegated, ts=thread_root),
-                             data=ep.data, headers=_auth(delegated.user.id))
+                             data=ep.data, headers={**_auth(delegated.user.id), "Accept": "application/json"})
     if ep.owner_only:
         assert r.status_code == 403, f"{ep.id} should be PI-only, got {r.status_code}"
         assert "Only the PI" in r.json()["detail"]

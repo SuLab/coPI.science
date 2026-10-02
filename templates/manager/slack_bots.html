@@ -21,11 +21,6 @@
     ✅ Slack bot installed — the token is saved on the agent. Click <b>Activate</b> to bring it live.
 </div>
 {% endif %}
-{% if slack_error %}
-<div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-    ⚠️ Slack provisioning failed: {{ slack_error }}
-</div>
-{% endif %}
 
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">

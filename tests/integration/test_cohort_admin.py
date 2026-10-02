@@ -23,6 +23,7 @@ from src.models import (
     CohortMembership,
 )
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
@@ -200,7 +201,10 @@ async def test_create_rejects_a_bad_name(client, db_session, admin):
     r = await client.post(
         "/admin/cohorts/create", data={"name": "Not A Slug!"}, headers=_auth(admin.id)
     )
-    assert r.status_code == 302 and "error=Invalid+name" in r.headers["location"]
+    assert r.status_code == 302 and r.headers["location"] == "/admin/cohorts"
+    assert session_flashes(r) == [{
+        "text": "Invalid name (lowercase letters, numbers, hyphens; max 48)", "kind": "error",
+    }]
     assert (await db_session.execute(select(Cohort))).scalars().all() == []
 
 
@@ -209,7 +213,7 @@ async def test_create_rejects_a_duplicate_name(client, db_session, admin):
     r = await client.post(
         "/admin/cohorts/create", data={"name": "dupe"}, headers=_auth(admin.id)
     )
-    assert "error=A+cohort+with+that+name" in r.headers["location"]
+    assert session_flashes(r) == [{"text": "A cohort with that name already exists", "kind": "error"}]
 
 
 # --- membership ------------------------------------------------------------
@@ -248,7 +252,7 @@ async def test_add_unknown_agent_is_refused(client, db_session, admin):
         f"/admin/cohorts/{c.id}/add-agent", data={"agent_id": "nobody"},
         headers=_auth(admin.id),
     )
-    assert "error=Unknown+agent" in r.headers["location"]
+    assert session_flashes(r) == [{"text": "Unknown agent", "kind": "error"}]
     assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
 
 
@@ -257,7 +261,15 @@ async def test_add_duplicate_member_is_refused(client, db_session, admin, roster
     r = await client.post(
         f"/admin/cohorts/{c.id}/add-agent", data={"agent_id": "su"}, headers=_auth(admin.id)
     )
-    assert "already+a+member" in r.headers["location"]
+    assert r.headers["location"] == f"/admin/cohorts/{c.id}"
+    assert session_flashes(r) == [{"text": "Agent is already a member", "kind": "error"}]
+
+
+async def test_a_query_string_error_is_no_longer_rendered(client, db_session, admin):
+    """A-14: a link carrying ?error= cannot put words on the page any more."""
+    r = await client.get("/admin/cohorts?error=Forged+message", headers=_auth(admin.id))
+    assert r.status_code == 200
+    assert "Forged message" not in r.text
 
 
 # --- delete guard ----------------------------------------------------------
@@ -267,7 +279,10 @@ async def test_delete_is_refused_while_members_exist(client, db_session, admin, 
     c = await _cohort(db_session, "populated", admin, members=["su", "wiseman"])
     r = await client.post(f"/admin/cohorts/{c.id}/delete", headers=_auth(admin.id))
     assert r.status_code == 302
-    assert "Remove+all+2+members" in r.headers["location"]
+    assert r.headers["location"] == f"/admin/cohorts/{c.id}"
+    assert session_flashes(r) == [{
+        "text": "Remove all 2 members before deleting this cohort", "kind": "error",
+    }]
     assert (await db_session.execute(
         select(Cohort).where(Cohort.id == c.id)
     )).scalar_one_or_none() is not None, "populated cohort must survive"
@@ -503,7 +518,8 @@ async def test_topology_save_only_touches_rendered_cells(
 async def test_topology_save_rejects_an_empty_submission(client, db_session, admin, roster):
     await _cohort(db_session, "alpha", admin, members=["su"])
     r = await client.post("/admin/cohorts/topology", data={}, headers=_auth(admin.id))
-    assert "error=Nothing+to+save" in r.headers["location"]
+    assert r.headers["location"] == "/admin/cohorts/topology"
+    assert session_flashes(r) == [{"text": "Nothing to save", "kind": "error"}]
     assert len((await db_session.execute(select(CohortMembership))).scalars().all()) == 1
 
 
@@ -520,7 +536,7 @@ async def test_topology_save_rejects_a_tick_outside_the_rendered_set(
         },
         headers=_auth(admin.id),
     )
-    assert "error=Malformed+submission" in r.headers["location"]
+    assert session_flashes(r) == [{"text": "Malformed submission", "kind": "error"}]
     assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
 
 
@@ -1089,6 +1105,7 @@ async def test_a_payload_of_unknown_marker_ids_does_not_blow_up_or_delete_anythi
         f"an all-unknown payload must be a harmless no-op, not an error: "
         f"{r.headers['location']}"
     )
+    assert session_flashes(r) == [], session_flashes(r)
 
     rows = {
         (str(m.cohort_id), m.agent_id)
@@ -1105,7 +1122,7 @@ async def test_every_cohort_route_answers_a_missing_cohort_the_same_way(
     list, remove-agent redirected to a detail page that 404s. They now all match
     the GET detail page, which is the convention the rest of this module uses for a
     missing path-addressed row (see ``admin_delete_user``, ``admin_approve_agent``,
-    ``admin_approve_access`` and friends). ``?error=`` redirects stay reserved for
+    ``admin_approve_access`` and friends). Error flashes stay reserved for
     bad form input against a cohort that really exists.
     """
     ghost = uuid.uuid4()

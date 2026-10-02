@@ -13,6 +13,7 @@ from src.models import (
 )
 from src.services.headline_claims import held_headline_counts
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -90,7 +91,10 @@ async def test_finalize_is_refused_while_an_engine_is_alive(client, db_session, 
     run = await _stopped_run(db_session)
     resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id)},
                              headers=auth_headers(admin.id), follow_redirects=False)
-    assert resp.status_code == 302 and "error=" in resp.headers["location"]
+    assert resp.status_code == 302 and resp.headers["location"] == f"/admin/activity/{run.id}"
+    assert session_flashes(resp) == [{
+        "text": "An engine is running — Finalize run applies to a stopped run.", "kind": "error",
+    }]
     assert (await db_session.execute(select(SimulationCommand))).scalars().all() == []
 
 
@@ -112,8 +116,6 @@ async def test_start_is_forced_fresh_when_the_latest_run_is_finalized(client, db
 
 
 async def test_start_is_refused_while_a_finalize_stop_is_pending(client, db_session, monkeypatch):
-    from urllib.parse import unquote
-
     import src.routers.admin.simulation as sim_routes
 
     async def _dead(db):
@@ -126,7 +128,9 @@ async def test_start_is_refused_while_a_finalize_stop_is_pending(client, db_sess
     await db_session.commit()
     resp = await client.post("/admin/simulation/start", data={"max_runtime": "0", "max_proposals": "0"},
                              headers=auth_headers(admin.id), follow_redirects=False)
-    assert resp.status_code == 302 and "error=" in resp.headers["location"]
-    assert "Finalize run is pending" in unquote(resp.headers["location"])
+    assert resp.status_code == 302
+    assert session_flashes(resp) == [
+        {"text": "A Finalize run is pending; start after it finishes.", "kind": "error"}
+    ]
     assert (await db_session.execute(select(SimulationCommand).where(
         SimulationCommand.command == "start"))).scalars().all() == []

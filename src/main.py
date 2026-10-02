@@ -27,6 +27,7 @@ from src.routers import (
 )
 from src.routers import settings as settings_router
 from src.services.assessment_chat import drain_live_tasks
+from src.web.errors import install_error_handlers
 from src.web.security_headers import CSP_REPORT_PATH, SecurityHeadersMiddleware
 
 logging.basicConfig(
@@ -336,6 +337,8 @@ def create_app() -> FastAPI:
     )
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
+    # HTML error pages for browser navigation; JSON stays for scripts (src/web/errors.py).
+    install_error_handlers(application)
 
     @application.get("/api/health")
     async def health():

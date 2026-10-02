@@ -968,11 +968,12 @@ def test_static_link_resolution_coverage_is_reported():
     # without the matcher changing (the Phase 0b retirements took it from 80.4% to
     # 79.9% with the same 43 unresolvable values). Phase 3's run-detail pager (RA-08)
     # added two query-only links (`?page=…`): the partial serves both the admin and
-    # the manager run pages, so it cannot name either path.
+    # the manager run pages, so it cannot name either path. The error page (M-01)
+    # added its back link, `{{ back_href }}`: the referring page, or the role's home.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 45, (
+    assert unresolvable <= 46, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 45) — the matcher probably regressed, or a new "
+        "checkable local path (was 46) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

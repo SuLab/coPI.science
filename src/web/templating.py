@@ -22,7 +22,11 @@ def make_templates() -> Jinja2Templates:
         plain_with_citation_links,
     )
 
-    templates = Jinja2Templates(directory="templates")
+    from src.web.flash import flash_context
+
+    # `get_flashes()` for base.html's flash block (src/web/flash.py). A context
+    # processor, not a global, because it closes over the request.
+    templates = Jinja2Templates(directory="templates", context_processors=[flash_context])
     # `{{ dt | ts }}`: one UTC datetime rendering (display_format.timestamp), a filter
     # so a template can never print a raw `datetime.__str__`.
     templates.env.filters["ts"] = fmt.timestamp

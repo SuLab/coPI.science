@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from src.models import USER_ROLE_ADMIN, SimulationCommand, SimulationProcessStatus
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -43,7 +44,8 @@ async def test_stop_refused_when_no_engine_holds_the_lock(client, db_session, mo
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=datetime.now(UTC)))
     await db_session.commit()
     resp = await client.post("/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False)
-    assert "error=" in resp.headers["location"]
+    assert resp.headers["location"] == "/admin/simulation"
+    assert session_flashes(resp) == [{"text": "Nothing is running.", "kind": "error"}]
     assert (await db_session.execute(select(SimulationCommand))).scalars().all() == []
 
 
@@ -52,7 +54,9 @@ async def test_start_refused_while_alive(client, db_session, monkeypatch):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="live-c@example.org")
     resp = await client.post("/admin/simulation/start", data={"fresh": "true"},
                              headers=auth_headers(admin.id), follow_redirects=False)
-    assert "error=" in resp.headers["location"]
+    assert session_flashes(resp) == [
+        {"text": "A run is already starting or in progress.", "kind": "error"}
+    ]
 
 
 async def test_circuit_open_is_shown(client, db_session, monkeypatch):
