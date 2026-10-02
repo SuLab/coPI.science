@@ -9,11 +9,15 @@ Wikimedia's User-Agent policy wants `<client>/<version> (<contact>) <library>/<v
 the contact is the one the operator put in `SEC_USER_AGENT` (spec §7.6), and with no
 contact the lookup is not made. The query service answers 429 with `Retry-After` when
 a client exceeds its limits: one paced retry after that delay, then the source is
-unavailable for this run.
+unavailable for this run. A delay over `RETRY_AFTER_CAP_SECONDS` makes the source
+unavailable at once rather than retrying early. Redirects are not followed, so a 3xx is
+a failure like any non-200 answer, and an answer over `MAX_RESPONSE_BYTES` is abandoned
+without being read to the end.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +44,8 @@ _QUERY = (
     "}}"
 )
 RETRY_AFTER_CAP_SECONDS = 60.0
+#: Largest answer read; a bigger body makes the source unavailable.
+MAX_RESPONSE_BYTES = 2_000_000
 RETRY_AFTER_DEFAULT_SECONDS = 5.0
 
 # Module-level alias so tests can patch the Retry-After sleep without patching asyncio.
@@ -87,37 +93,68 @@ def item_url(qid: str) -> str:
 
 def _make_client() -> httpx.AsyncClient:
     """Client factory — a seam for tests."""
-    return httpx.AsyncClient(timeout=30)
+    return httpx.AsyncClient(timeout=30, follow_redirects=False)
 
 
 def _retry_after_seconds(value: str | None) -> float:
+    """The `Retry-After` delay in seconds, uncapped (the caller refuses one over
+    `RETRY_AFTER_CAP_SECONDS`); the default when absent or unreadable, 0 when past."""
     if not value:
         return RETRY_AFTER_DEFAULT_SECONDS
     value = value.strip()
     if value.isdigit():
-        return min(float(value), RETRY_AFTER_CAP_SECONDS)
+        return float(value)
     try:
         when = parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return RETRY_AFTER_DEFAULT_SECONDS
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
-    return max(0.0, min((when - datetime.now(UTC)).total_seconds(), RETRY_AFTER_CAP_SECONDS))
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
 
 
-async def _query(client: httpx.AsyncClient, params: dict, headers: dict) -> httpx.Response:
+async def _read_capped(resp: httpx.Response, cap: int) -> bytes:
+    """The streamed body, or `SourceUnavailable` as soon as it exceeds `cap` bytes
+    (declared Content-Length or bytes received), without reading the rest."""
+    declared = (resp.headers.get("Content-Length") or "").strip()
+    if declared.isdigit() and int(declared) > cap:
+        raise SourceUnavailable("response too large")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in resp.aiter_bytes():
+        size += len(chunk)
+        if size > cap:
+            raise SourceUnavailable("response too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _attempt(
+    client: httpx.AsyncClient, params: dict, headers: dict,
+) -> tuple[int, str | None, bytes | None]:
+    """One paced GET: (status, Retry-After header, body when the status is 200)."""
+    await _PACER.wait()
+    try:
+        async with client.stream("GET", SPARQL_URL, params=params, headers=headers) as resp:
+            if resp.status_code != 200:
+                return resp.status_code, resp.headers.get("Retry-After"), None
+            return 200, None, await _read_capped(resp, MAX_RESPONSE_BYTES)
+    except httpx.HTTPError as exc:
+        raise SourceUnavailable(type(exc).__name__) from exc
+
+
+async def _query(client: httpx.AsyncClient, params: dict, headers: dict) -> bytes:
     for attempt in range(2):
-        await _PACER.wait()
-        try:
-            resp = await client.get(SPARQL_URL, params=params, headers=headers)
-        except httpx.HTTPError as exc:
-            raise SourceUnavailable(type(exc).__name__) from exc
-        if resp.status_code == 429 and attempt == 0:
-            await _sleep(_retry_after_seconds(resp.headers.get("Retry-After")))
+        status, retry_after, body = await _attempt(client, params, headers)
+        if status == 429 and attempt == 0:
+            delay = _retry_after_seconds(retry_after)
+            if delay > RETRY_AFTER_CAP_SECONDS:
+                raise SourceUnavailable(f"HTTP 429 (Retry-After {delay:.0f}s)")
+            await _sleep(delay)
             continue
-        if resp.status_code != 200:
-            raise SourceUnavailable(f"HTTP {resp.status_code}")
-        return resp
+        if status != 200 or body is None:
+            raise SourceUnavailable(f"HTTP {status}")
+        return body
     raise SourceUnavailable("HTTP 429")
 
 
@@ -147,8 +184,8 @@ def parse_bindings(data: object) -> WikidataResult:
 
 async def founded_by_orcid(orcid: str, *, contact: str | None) -> WikidataResult:
     """Companies whose P112 is the PI's item. Raises `SourceUnavailable` on a missing
-    contact or ORCID, a transport error, a non-200 answer (429 after one retry), or an
-    unreadable body."""
+    contact or ORCID, a transport error, a non-200 answer (429 after one retry, or at
+    once when its Retry-After exceeds the cap), or an oversize or unreadable body."""
     if not contact:
         raise SourceUnavailable("no contact for the User-Agent (SEC_USER_AGENT unset)")
     if not _ORCID.match(orcid or ""):
@@ -156,9 +193,9 @@ async def founded_by_orcid(orcid: str, *, contact: str | None) -> WikidataResult
     params = {"query": _QUERY.format(orcid=orcid), "format": "json"}
     headers = {"User-Agent": user_agent(contact), "Accept": "application/sparql-results+json"}
     async with _make_client() as client:
-        resp = await _query(client, params, headers)
+        body = await _query(client, params, headers)
     try:
-        data = resp.json()
+        data = json.loads(body)
     except ValueError as exc:
         raise SourceUnavailable("unreadable response") from exc
     return parse_bindings(data)

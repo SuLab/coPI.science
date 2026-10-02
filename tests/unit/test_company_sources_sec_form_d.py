@@ -1,11 +1,10 @@
 """SEC Form D funding (spec §7.5 Step 2, O12, O13, §8, Review Focus #1 and #2).
 
-Fixtures, read from SEC EDGAR on 2026-10-02: DELFI Diagnostics' 2022 Form D
-0001783735-22-000002, and C2N Diagnostics' Form D 0002021597-24-000001, its amendment
-D/A 0002021597-24-000002 and a later, separate offering 0002021597-25-000002, with the
-EDGAR full-text search answers that list them. To check the bytes against EDGAR,
-re-record them with curl and the operator's SEC_USER_AGENT; the tests do not depend on
-whitespace.
+Fixtures, recorded raw from SEC EDGAR with curl on 2026-10-02: DELFI Diagnostics' 2022
+Form D 0001783735-22-000002, and C2N Diagnostics' Form D 0002021597-24-000001, its
+amendment D/A 0002021597-24-000002 and a later, separate offering 0002021597-25-000002,
+with the EDGAR full-text search answers that list them. Variants (another issuer, a
+blank amount, an oversize body) are derived from them in-test.
 """
 import json
 import re
@@ -53,12 +52,17 @@ def _delfi_routes(respx_mock, doc_text: str | None = None):
     return search, doc
 
 
-def _c2n_routes(respx_mock):
+def _c2n_routes(respx_mock, edits: dict[str, tuple[str, str]] | None = None):
+    """C2N's three filings; `edits` maps an accession to one (old, new) text replacement."""
     respx_mock.get(sec_form_d.EFTS_URL).mock(
         return_value=httpx.Response(200, json=_search("efts_c2n_diagnostics.json")))
     for accession, url in C2N_DOCS.items():
-        respx_mock.get(url).mock(return_value=httpx.Response(
-            200, text=_text(f"form_d_c2n_{accession.replace('-', '')}.xml")))
+        text = _text(f"form_d_c2n_{accession.replace('-', '')}.xml")
+        if edits and accession in edits:
+            old, new = edits[accession]
+            assert old in text
+            text = text.replace(old, new)
+        respx_mock.get(url).mock(return_value=httpx.Response(200, text=text))
 
 
 async def _delfi(pi: str = "Victor Velculescu") -> sec_form_d.FundingResult:
@@ -104,18 +108,43 @@ async def test_an_amended_offering_is_counted_once(respx_mock):
     assert all(f.pi_listed and f.pi_relationships == ["Director"] for f in result.filings)
 
 
+def _filing(acc, filed, sold, previous=None):
+    return sec_form_d.FormDFiling(
+        accession=acc, filing_date=filed, form="D/A" if previous else "D", cik="1",
+        file_num=None, issuer_name="X", is_amendment=previous is not None,
+        previous_accession=previous, total_offering_amount=None, total_offering_amount_raw=None,
+        total_amount_sold=sold, total_amount_sold_raw=None if sold is None else str(sold),
+        amount_note=None if sold is not None else "totalAmountSold blank; not counted",
+        pi_listed=False, pi_relationships=[], url="u")
+
+
 def test_amendment_chain_without_a_file_number_still_groups():
-    def filing(acc, filed, sold, previous=None):
-        return sec_form_d.FormDFiling(
-            accession=acc, filing_date=filed, form="D/A" if previous else "D", cik="1",
-            file_num=None, issuer_name="X", is_amendment=previous is not None,
-            previous_accession=previous, total_offering_amount=None, total_offering_amount_raw=None,
-            total_amount_sold=sold, total_amount_sold_raw=str(sold), amount_note=None,
-            pi_listed=False, pi_relationships=[], url="u")
-    filings = [filing("0000000001-20-000001", "2020-01-01", 100),
-               filing("0000000001-20-000002", "2020-06-01", 300, previous="0000000001-20-000001"),
-               filing("0000000001-21-000001", "2021-01-01", 50)]
+    filings = [_filing("0000000001-20-000001", "2020-01-01", 100),
+               _filing("0000000001-20-000002", "2020-06-01", 300, previous="0000000001-20-000001"),
+               _filing("0000000001-21-000001", "2021-01-01", 50)]
     assert sec_form_d.floor_total(filings) == (350, date(2021, 1, 1))
+
+
+def test_a_latest_amendment_without_an_amount_never_falls_back_to_the_original():
+    original = _filing("0000000001-20-000001", "2020-01-01", 100)
+    amendment = _filing("0000000001-20-000002", "2020-06-01", None, previous="0000000001-20-000001")
+    assert sec_form_d.floor_total([original, amendment]) == (None, None)
+    assert original.counted is False and amendment.counted is False
+    assert amendment.amount_note == (
+        "totalAmountSold blank; not counted; latest filing of its offering, so the offering is not counted")
+
+
+async def test_an_offering_whose_latest_amendment_is_blank_contributes_nothing(respx_mock):
+    _c2n_routes(respx_mock, {"0002021597-24-000002": (
+        "<totalAmountSold>24999618</totalAmountSold>", "<totalAmountSold></totalAmountSold>")})
+    result = await sec_form_d.lookup_funding(
+        "C2N Diagnostics", normalize_company_name("C2N Diagnostics"), pi_name("Randall Bateman"),
+        user_agent=UA)
+    by_acc = {f.accession: f for f in result.filings}
+    assert [a for a, f in sorted(by_acc.items()) if f.counted] == ["0002021597-25-000002"]
+    assert result.status == "ok" and result.funding_usd == 9_999_891  # not + 7,500,000 from the D
+    assert by_acc["0002021597-24-000002"].amount_note == (
+        "totalAmountSold blank; not counted; latest filing of its offering, so the offering is not counted")
 
 
 @pytest.mark.parametrize(("old", "new", "note"), [
@@ -178,6 +207,94 @@ async def test_a_particle_surname_in_the_real_filing_matches(respx_mock):
     _delfi_routes(respx_mock)
     (filing,) = (await _delfi("Jacob Van Naarden")).filings
     assert filing.pi_listed is True and filing.pi_relationships == ["Director"]
+
+
+_ACME = {"0001783735-22-000002": ("0001783735", "Acme Bio, Inc.", "<totalAmountSold>224999876</totalAmountSold>"),
+         "0001999999-23-000001": ("0001999999", "Acme Bio LLC", "<totalAmountSold>5000000</totalAmountSold>")}
+
+
+def _acme_routes(respx_mock, pi_listed_at: tuple[str, ...]):
+    """Two issuers named "Acme Bio" under different CIKs, built from the DELFI filing;
+    Victor Velculescu stays a related person only in the filings of `pi_listed_at`."""
+    template = _search("efts_delfi_diagnostics.json", only="0001783735-22-000002")["hits"]["hits"][0]
+    hits = []
+    for n, (accession, (cik, issuer, sold)) in enumerate(_ACME.items()):
+        hits.append({**template, "_id": f"{accession}:primary_doc.xml",
+                     "_source": {**template["_source"], "adsh": accession, "ciks": [cik],
+                                 "file_date": f"202{2 + n}-07-25", "file_num": [f"021-90{n}"]}})
+        doc = _text("form_d_delfi_000178373522000002.xml").replace(
+            "<entityName>Delfi Diagnostics, Inc.</entityName>", f"<entityName>{issuer}</entityName>").replace(
+            "<totalAmountSold>224999876</totalAmountSold>", sold)
+        if cik not in pi_listed_at:
+            doc = doc.replace("<lastName>Velculescu</lastName>", "<lastName>Someone</lastName>")
+        url = sec_form_d.ARCHIVE_DOC_URL.format(
+            cik=int(cik), accession=accession.replace("-", ""), filename="primary_doc.xml")
+        respx_mock.get(url).mock(return_value=httpx.Response(200, text=doc))
+    respx_mock.get(sec_form_d.EFTS_URL).mock(return_value=httpx.Response(200, json={"hits": {"hits": hits}}))
+
+
+async def _acme() -> sec_form_d.FundingResult:
+    return await sec_form_d.lookup_funding(
+        "Acme Bio", normalize_company_name("Acme Bio"), pi_name("Victor Velculescu"), user_agent=UA)
+
+
+@pytest.mark.parametrize("pi_listed_at", [(), ("0001783735", "0001999999")])
+async def test_several_issuers_under_one_name_are_not_summed(respx_mock, pi_listed_at):
+    _acme_routes(respx_mock, pi_listed_at)
+    result = await _acme()
+    assert result.status == "ambiguous" and result.funding_usd is None and result.funding_as_of is None
+    assert result.funding_source_url is None and not any(f.counted for f in result.filings)
+    evidence = result.evidence()
+    assert evidence["note"] == sec_form_d.AMBIGUOUS_ISSUER
+    assert evidence["ciks"] == ["0001783735", "0001999999"] and evidence["issuer_cik"] is None
+    assert len(evidence["filings"]) == 2
+
+
+async def test_the_issuer_listing_the_pi_is_the_one_counted(respx_mock):
+    _acme_routes(respx_mock, ("0001999999",))
+    result = await _acme()
+    assert result.status == "ok" and result.funding_usd == 5_000_000
+    assert result.funding_as_of == date(2023, 7, 25)
+    assert result.funding_source_url == sec_form_d.filings_page_url("0001999999")
+    assert [f.cik for f in result.filings if f.counted] == ["0001999999"]
+    evidence = result.evidence()
+    assert evidence["issuer_cik"] == "0001999999" and evidence["ciks"] == ["0001783735", "0001999999"]
+    assert "note" not in evidence
+
+
+@pytest.mark.parametrize("which", ["search", "document"])
+async def test_a_redirect_is_unavailable_and_not_followed(respx_mock, which):
+    search_route, doc_route = _delfi_routes(respx_mock)
+    route = search_route if which == "search" else doc_route
+    route.mock(return_value=httpx.Response(302, headers={"Location": "https://example.org/elsewhere"}))
+    result = await _delfi()
+    assert result.status == "unavailable" and result.reason == "HTTP 302"
+    assert len(respx_mock.calls) == (1 if which == "search" else 2)
+    assert all(call.request.url.host in ("efts.sec.gov", "www.sec.gov") for call in respx_mock.calls)
+
+
+async def test_an_oversize_search_answer_is_unavailable(respx_mock):
+    search_route, doc_route = _delfi_routes(respx_mock)
+    search_route.mock(return_value=httpx.Response(200, content=b" " * (sec_form_d.MAX_RESPONSE_BYTES + 1)))
+    result = await _delfi()
+    assert result.status == "unavailable" and result.reason == "response too large"
+    assert doc_route.call_count == 0
+
+
+async def test_an_oversize_document_without_a_declared_length_is_unavailable(respx_mock, monkeypatch):
+    monkeypatch.setattr(sec_form_d, "MAX_RESPONSE_BYTES", 4096)
+    _search_route, doc_route = _delfi_routes(respx_mock)
+    oversize = httpx.Response(200, text=_text("form_d_delfi_000178373522000002.xml"))
+    del oversize.headers["Content-Length"]  # only the bytes received can trip the cap
+    doc_route.mock(return_value=oversize)
+    result = await _delfi()
+    assert result.status == "unavailable" and result.reason == "response too large"
+    assert result.evidence()["note"] == "funding lookup unavailable"
+
+
+async def test_the_client_does_not_follow_redirects():
+    async with sec_form_d._make_client() as client:
+        assert client.follow_redirects is False
 
 
 async def test_unset_user_agent_sends_nothing(respx_mock):

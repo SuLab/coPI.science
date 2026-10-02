@@ -68,13 +68,47 @@ async def test_a_429_is_retried_once_after_retry_after(respx_mock, _no_waiting):
 
 
 async def test_a_second_429_makes_the_source_unavailable(respx_mock, _no_waiting):
-    respx_mock.get(wikidata.SPARQL_URL).mock(side_effect=[
-        httpx.Response(429, headers={"Retry-After": "120"}),
-        httpx.Response(429, headers={"Retry-After": "120"}),
+    route = respx_mock.get(wikidata.SPARQL_URL).mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "2"}),
+        httpx.Response(429, headers={"Retry-After": "2"}),
     ])
     with pytest.raises(SourceUnavailable, match="HTTP 429"):
         await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
-    assert _no_waiting == [wikidata.RETRY_AFTER_CAP_SECONDS]
+    assert _no_waiting == [2.0] and route.call_count == 2
+
+
+async def test_a_retry_after_over_the_cap_is_not_retried_early(respx_mock, _no_waiting):
+    route = respx_mock.get(wikidata.SPARQL_URL).mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "120"}),
+        httpx.Response(200, content=_fixture("wikidata_p112_0000-0002-7086-765X.json"), headers=SPARQL_JSON),
+    ])
+    with pytest.raises(SourceUnavailable, match="HTTP 429"):
+        await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
+    assert _no_waiting == [] and route.call_count == 1
+
+
+async def test_a_redirect_is_unavailable_and_not_followed(respx_mock):
+    route = respx_mock.get(wikidata.SPARQL_URL).mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.org/elsewhere"}))
+    with pytest.raises(SourceUnavailable, match="HTTP 302"):
+        await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
+    assert route.call_count == 1 and len(respx_mock.calls) == 1
+
+
+async def test_an_oversize_answer_is_unavailable(respx_mock):
+    respx_mock.get(wikidata.SPARQL_URL).mock(return_value=httpx.Response(
+        200, content=b" " * (wikidata.MAX_RESPONSE_BYTES + 1), headers=SPARQL_JSON))
+    with pytest.raises(SourceUnavailable, match="response too large"):
+        await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
+
+
+async def test_an_oversize_answer_without_a_declared_length_is_unavailable(respx_mock, monkeypatch):
+    monkeypatch.setattr(wikidata, "MAX_RESPONSE_BYTES", 100)
+    oversize = httpx.Response(200, content=_fixture("wikidata_p112_0000-0002-7086-765X.json"), headers=SPARQL_JSON)
+    del oversize.headers["Content-Length"]  # only the bytes received can trip the cap
+    respx_mock.get(wikidata.SPARQL_URL).mock(return_value=oversize)
+    with pytest.raises(SourceUnavailable, match="response too large"):
+        await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
 
 
 @pytest.mark.parametrize("failure", [httpx.Response(500), httpx.ConnectError("reset"),
@@ -122,7 +156,7 @@ def test_contact_from_sec_user_agent(value, contact):
 
 
 @pytest.mark.parametrize(("header", "seconds"), [
-    ("3", 3.0), ("600", wikidata.RETRY_AFTER_CAP_SECONDS), (None, wikidata.RETRY_AFTER_DEFAULT_SECONDS),
+    ("3", 3.0), ("600", 600.0), (None, wikidata.RETRY_AFTER_DEFAULT_SECONDS),
     ("soon", wikidata.RETRY_AFTER_DEFAULT_SECONDS), ("Wed, 21 Oct 2015 07:28:00 GMT", 0.0),
 ])
 def test_retry_after_parsing(header, seconds):

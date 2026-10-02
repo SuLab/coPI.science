@@ -25,16 +25,28 @@ Read from live responses on 2026-10-02:
   relatedPersonRelationshipList/relationship}`. Filers put honorifics in firstName
   ("Dr. Randall").
 * SEC fair access: at most 10 requests/second (this client: 1/second) and a declared
-  `User-Agent: <Company Name> <admin email>`, which is `SEC_USER_AGENT` verbatim.
+  `User-Agent: <Company Name> <admin email>`, which is `SEC_USER_AGENT` verbatim. Every
+  request goes through `_PACER`. Redirects are not followed (a redirect would be an
+  unpaced extra request carrying the operator's User-Agent, possibly to another host):
+  any non-200 answer, a 3xx included, makes the candidate unavailable, and so does a
+  body over `MAX_RESPONSE_BYTES`, which is abandoned without being read to the end.
+
+One issuer per candidate: filings whose issuer name matches but which come from
+different CIKs are not summed. The CIK whose filings list the PI as a related person is
+used when exactly one does; otherwise, with more than one CIK, no figure is recorded
+(status "ambiguous", `AMBIGUOUS_ISSUER` as the note, the CIKs listed).
 
 The floor total (O13) sums, over distinct offerings, the amount sold in the latest filing
-of each offering that states a number. Filings are one offering when an amendment names
-the other as `previousAccessionNumber` or the search reports the same Form D file number.
-A filing whose amount sold is "Indefinite", blank or missing stays in the evidence with
-the reason and is not counted (Review Focus #1).
+of each offering. Filings are one offering when an amendment names the other as
+`previousAccessionNumber` or the search reports the same Form D file number. A filing
+whose amount sold is "Indefinite", blank or missing stays in the evidence with the
+reason and is not counted (Review Focus #1); when it is the latest filing of its
+offering, the offering contributes nothing, and an older filing's amount is never used
+in its place.
 """
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
@@ -59,6 +71,9 @@ FILINGS_PAGE_URL = (
     "&type=D&dateb=&owner=include&count=40"
 )
 FUNDING_UNAVAILABLE = "funding lookup unavailable"
+AMBIGUOUS_ISSUER = "funding not attributed: several SEC issuers share this name"
+#: Largest search answer or document read; a bigger body makes the candidate unavailable.
+MAX_RESPONSE_BYTES = 2_000_000
 #: Documents fetched per candidate, newest first; the rest are listed as not fetched.
 MAX_DOCUMENTS = 20
 
@@ -99,13 +114,18 @@ class FormDFiling:
 
 @dataclass
 class FundingResult:
-    status: str  # "ok" | "no_amount" | "no_filings" | "unavailable"
+    status: str  # "ok" | "no_amount" | "no_filings" | "ambiguous" | "unavailable"
     funding_usd: int | None = None
     funding_as_of: date | None = None
     funding_source_url: str | None = None
     filings: list[FormDFiling] = field(default_factory=list)
     reason: str | None = None
     not_fetched: int = 0
+    #: The CIK whose filings were counted (10 digits); None unless one issuer was chosen.
+    issuer_cik: str | None = None
+    #: Every CIK (10 digits, sorted) with a filing under the candidate's name.
+    ciks: list[str] = field(default_factory=list)
+    note: str | None = None
 
     @classmethod
     def unavailable(cls, reason: str) -> FundingResult:
@@ -119,7 +139,11 @@ class FundingResult:
             "filings_page": self.funding_source_url,
             "filings": [asdict(f) for f in self.filings],
             "not_fetched": self.not_fetched,
+            "issuer_cik": self.issuer_cik,
+            "ciks": list(self.ciks),
         }
+        if self.note:
+            out["note"] = self.note
         if self.status == "unavailable":
             out["note"] = FUNDING_UNAVAILABLE
             out["reason"] = self.reason
@@ -128,7 +152,7 @@ class FundingResult:
 
 def _make_client() -> httpx.AsyncClient:
     """Client factory — a seam for tests."""
-    return httpx.AsyncClient(timeout=30, follow_redirects=True)
+    return httpx.AsyncClient(timeout=30, follow_redirects=False)
 
 
 def filings_page_url(cik: str) -> str:
@@ -218,10 +242,21 @@ def parse_form_d(
     )
 
 
+_OFFERING_NOT_COUNTED = "latest filing of its offering, so the offering is not counted"
+
+
+def _mark_offering_not_counted(latest: FormDFiling) -> None:
+    note = latest.amount_note or ""
+    if _OFFERING_NOT_COUNTED not in note:
+        latest.amount_note = f"{note}; {_OFFERING_NOT_COUNTED}" if note else _OFFERING_NOT_COUNTED
+
+
 def floor_total(filings: list[FormDFiling]) -> tuple[int | None, date | None]:
-    """O13: per distinct offering, the latest filing that states an amount sold; summed.
-    Marks the counted filings. Returns (total, newest counted filing date); a total of
-    0 is returned as None (nothing to show as "raised")."""
+    """O13: per distinct offering, the amount sold in its latest filing; summed. An
+    offering whose latest filing states no amount sold contributes nothing (an older
+    filing's amount is not used) and that filing's `amount_note` says so. Marks the
+    counted filings. Returns (total, newest counted filing date); a total of 0 is
+    returned as None (nothing to show as "raised")."""
     parent = {f.accession: f.accession for f in filings}
 
     def find(a: str) -> str:
@@ -251,8 +286,10 @@ def floor_total(filings: list[FormDFiling]) -> tuple[int | None, date | None]:
     total, newest = 0, None
     for members in groups.values():
         members.sort(key=lambda f: (f.filing_date, f.accession), reverse=True)
-        chosen = next((m for m in members if m.total_amount_sold is not None), None)
-        if chosen is None:
+        chosen = members[0]
+        if chosen.total_amount_sold is None:
+            if len(members) > 1:
+                _mark_offering_not_counted(chosen)
             continue
         chosen.counted = True
         total += chosen.total_amount_sold or 0
@@ -263,15 +300,36 @@ def floor_total(filings: list[FormDFiling]) -> tuple[int | None, date | None]:
     return (total or None), newest
 
 
-async def _get(client: httpx.AsyncClient, url: str, *, headers: dict, params: dict | None = None) -> httpx.Response:
+async def _read_capped(resp: httpx.Response, cap: int) -> bytes:
+    """The streamed body, or `SourceUnavailable` as soon as it exceeds `cap` bytes
+    (declared Content-Length or bytes received), without reading the rest."""
+    declared = (resp.headers.get("Content-Length") or "").strip()
+    if declared.isdigit() and int(declared) > cap:
+        raise SourceUnavailable("response too large")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in resp.aiter_bytes():
+        size += len(chunk)
+        if size > cap:
+            raise SourceUnavailable("response too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _get(
+    client: httpx.AsyncClient, url: str, *, headers: dict, params: dict | None = None,
+) -> tuple[bytes, str]:
+    """One paced GET: (body, text encoding). Any non-200 answer (redirects are not
+    followed), a transport error or an oversize body raises `SourceUnavailable`."""
     await _PACER.wait()
     try:
-        resp = await client.get(url, params=params, headers=headers)
+        async with client.stream("GET", url, params=params, headers=headers) as resp:
+            if resp.status_code != 200:
+                raise SourceUnavailable(f"HTTP {resp.status_code}")
+            body = await _read_capped(resp, MAX_RESPONSE_BYTES)
+            return body, resp.encoding or "utf-8"
     except httpx.HTTPError as exc:
         raise SourceUnavailable(type(exc).__name__) from exc
-    if resp.status_code != 200:
-        raise SourceUnavailable(f"HTTP {resp.status_code}")
-    return resp
 
 
 def _hits(data: object) -> list[dict]:
@@ -308,44 +366,74 @@ def _hits(data: object) -> list[dict]:
     return out
 
 
+def choose_issuer(filings: list[FormDFiling]) -> tuple[str | None, list[str]]:
+    """(the CIK to count, every CIK seen), CIKs zero-padded to 10 digits. One CIK is
+    used as is; among several, the one whose filings list the PI, when exactly one
+    does; otherwise None (several issuers share the name: no figure is attributed)."""
+    by_cik: dict[str, list[FormDFiling]] = {}
+    for f in filings:
+        by_cik.setdefault(f.cik.zfill(10), []).append(f)
+    ciks = sorted(by_cik)
+    if len(ciks) == 1:
+        return ciks[0], ciks
+    listed = [c for c in ciks if any(f.pi_listed for f in by_cik[c])]
+    return (listed[0] if len(listed) == 1 else None), ciks
+
+
+async def _fetch_filings(
+    client: httpx.AsyncClient, company_name: str, normalized_name: str, pi: PiName | None,
+    headers: dict,
+) -> tuple[list[FormDFiling], int]:
+    """(filings whose issuer name matches, hits not fetched). Raises `SourceUnavailable`."""
+    body, _encoding = await _get(
+        client, EFTS_URL, headers=headers, params={"q": f'"{company_name}"', "forms": "D"},
+    )
+    try:
+        hits = _hits(json.loads(body))
+    except ValueError as exc:
+        raise SourceUnavailable("unreadable search response") from exc
+    filings: list[FormDFiling] = []
+    for hit in hits[:MAX_DOCUMENTS]:
+        doc, encoding = await _get(client, hit["url"], headers=headers)
+        filing = parse_form_d(
+            doc.decode(encoding, errors="replace"), accession=hit["accession"],
+            filing_date=hit["filing_date"], form=hit["form"], cik=hit["cik"],
+            file_num=hit["file_num"], url=hit["url"], pi=pi,
+        )
+        if normalize_company_name(filing.issuer_name) == normalized_name:
+            filings.append(filing)
+    return filings, max(0, len(hits) - MAX_DOCUMENTS)
+
+
 async def lookup_funding(
     company_name: str, normalized_name: str, pi: PiName | None, *, user_agent: str,
 ) -> FundingResult:
     """Form D funding for one candidate. Never raises for an upstream problem: an unset
-    `SEC_USER_AGENT`, a transport or status failure, or an unreadable document makes
-    the whole candidate `unavailable` ("funding lookup unavailable")."""
+    `SEC_USER_AGENT`, a transport or status failure (a redirect included), an oversize
+    body or an unreadable document makes the whole candidate `unavailable` ("funding
+    lookup unavailable"). Several issuers under the name, none singled out by the PI,
+    give `ambiguous` with no figure."""
     agent = (user_agent or "").strip()
     if not agent:
         return FundingResult.unavailable("SEC_USER_AGENT unset")
-    headers = {"User-Agent": agent}
     try:
         async with _make_client() as client:
-            search = await _get(
-                client, EFTS_URL, headers=headers,
-                params={"q": f'"{company_name}"', "forms": "D"},
-            )
-            try:
-                hits = _hits(search.json())
-            except ValueError as exc:
-                raise SourceUnavailable("unreadable search response") from exc
-            filings: list[FormDFiling] = []
-            for hit in hits[:MAX_DOCUMENTS]:
-                doc = await _get(client, hit["url"], headers=headers)
-                filing = parse_form_d(
-                    doc.text, accession=hit["accession"], filing_date=hit["filing_date"],
-                    form=hit["form"], cik=hit["cik"], file_num=hit["file_num"], url=hit["url"], pi=pi,
-                )
-                if normalize_company_name(filing.issuer_name) == normalized_name:
-                    filings.append(filing)
+            filings, not_fetched = await _fetch_filings(
+                client, company_name, normalized_name, pi, {"User-Agent": agent})
     except SourceUnavailable as exc:
         return FundingResult.unavailable(str(exc))
-    not_fetched = max(0, len(hits) - MAX_DOCUMENTS)
     if not filings:
         return FundingResult(status="no_filings", not_fetched=not_fetched)
-    total, as_of = floor_total(filings)
-    newest_cik = max(filings, key=lambda f: (f.filing_date, f.accession)).cik
+    issuer, ciks = choose_issuer(filings)
+    if issuer is None:
+        return FundingResult(
+            status="ambiguous", filings=filings, not_fetched=not_fetched, ciks=ciks,
+            note=AMBIGUOUS_ISSUER,
+        )
+    total, as_of = floor_total([f for f in filings if f.cik.zfill(10) == issuer])
     return FundingResult(
         status="ok" if total is not None else "no_amount",
         funding_usd=total, funding_as_of=as_of if total is not None else None,
-        funding_source_url=filings_page_url(newest_cik), filings=filings, not_fetched=not_fetched,
+        funding_source_url=filings_page_url(issuer), filings=filings, not_fetched=not_fetched,
+        issuer_cik=issuer, ciks=ciks,
     )
