@@ -1409,7 +1409,7 @@
    framework: the two buttons in the jump nav above set or clear `open` on
    every <details> in the page body. Scoped to <main> when there is one so
    the site chrome's own disclosures, if any are ever added, are left alone. #}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 document.addEventListener('DOMContentLoaded', function () {
     var root = document.querySelector('main') || document;
     document.querySelectorAll('[data-details-toggle]').forEach(function (btn) {

@@ -222,3 +222,86 @@ async def journey_ui_behaviours(h) -> dict:
 
 
 JOURNEYS += [journey_ui_behaviours]
+
+
+# --- §6.3 / §9: CSP report-only violations over a crawl --------------------------
+
+CSP_PAGES: tuple[tuple[str, str], ...] = (
+    ("admin", "/admin/users"),
+    ("admin", "/admin/users/{pi}"),
+    ("admin", "/admin/jobs"),
+    ("admin", "/admin/activity"),
+    ("admin", "/admin/activity/{run}"),
+    ("admin", "/admin/discussions"),
+    ("admin", "/admin/agents"),
+    ("admin", "/admin/assessments"),
+    ("admin", "/admin/assessments/{a0}"),
+    ("admin", "/admin/cohorts"),
+    ("admin", "/admin/cohorts/topology"),
+    ("admin", "/admin/access-requests"),
+    ("admin", "/admin/simulation"),
+    ("admin", "/admin/simulation?run={run}"),
+    ("admin", "/manager/prompt-suggestions"),
+    ("manager", "/manager/pis"),
+    ("manager", "/manager/pis/{pi}"),
+    ("manager", "/manager/assessments"),
+    ("manager", "/manager/assessments/{a0}"),
+    ("manager", "/manager/discussions"),
+    ("manager", "/manager/activity"),
+    ("manager", "/manager/activity/{run}"),
+    ("reviewer", "/manager/assessments/{a0}"),
+    ("pi", "/profile"),
+    ("pi", "/profile/edit"),
+    ("pi", "/settings"),
+)
+
+_CSP_COLLECTOR_JS = (
+    "window.__cspViolations = [];\n"
+    "document.addEventListener('securitypolicyviolation', (e) => {\n"
+    "  window.__cspViolations.push({directive: e.effectiveDirective, blocked: e.blockedURI,\n"
+    "    source: e.sourceFile, line: e.lineNumber, sample: e.sample, disposition: e.disposition});\n"
+    "});\n"
+)
+
+
+async def _csp_agent_paths(page, base_url: str) -> list[str]:
+    """/agent and up to five /agent/... pages it links (the PI's own agent pages)."""
+    await page.goto(base_url + "/agent", wait_until="networkidle")
+    hrefs = await page.evaluate(
+        "() => [...document.querySelectorAll('a[href^=\"/agent/\"]')].map((a) => a.getAttribute('href'))"
+    )
+    return ["/agent", *list(dict.fromkeys(hrefs))[:5]]
+
+
+async def journey_csp_report_only(h) -> dict:
+    """Every page with an inline script or a moved handler, per role, collecting each
+    report-only violation the browser raises. Phase 1 expects none; any entry is what
+    Phase 2's enforced policy would block, and is reviewed before deploy."""
+    violations: list[dict] = []
+    errors: list = []
+    visited: list[str] = []
+    for role in ("admin", "manager", "reviewer", "pi"):
+        context, page, _log = await h.page(role)
+        await context.add_init_script(_CSP_COLLECTOR_JS)
+        page.on("pageerror", lambda e: errors.append(e))
+        try:
+            paths = [_seed_path(p, h.ids) for r, p in CSP_PAGES if r == role]
+            if role == "pi":
+                paths += await _csp_agent_paths(page, h.base_url)
+            for path in paths:
+                await page.goto(h.base_url + path, wait_until="networkidle")
+                await page.wait_for_timeout(300)
+                visited.append(f"{role} {path}")
+                for v in await page.evaluate("() => window.__cspViolations || []"):
+                    violations.append({"role": role, "path": path, **v})
+        finally:
+            await context.close()
+    return {
+        "ok": not violations and not errors,
+        "visited": visited,
+        "violations": violations,
+        "page_errors": [str(e)[:300] for e in errors],
+    }
+
+
+JOURNEYS += [journey_csp_report_only]

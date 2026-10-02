@@ -47,7 +47,7 @@
     {% endif %}
 </div>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // Threads load on demand: the page ships roots plus a gated reply count, and the
 // replies fragment is fetched once per thread and cached in the DOM thereafter.
 // Server-rendered HTML, so there is no client-side templating to keep in sync.

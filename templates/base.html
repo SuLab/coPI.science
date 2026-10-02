@@ -181,7 +181,7 @@
 </footer>
 
 {% block scripts %}{% endblock %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // Convert all elements with data-utc attribute to local time
 document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('[data-utc]').forEach(function(el) {

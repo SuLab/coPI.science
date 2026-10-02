@@ -44,7 +44,7 @@
         {% endif %}
         <p class="text-sm text-gray-400 mt-4">This page will refresh automatically...</p>
     </div>
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
         setTimeout(function() { location.reload(); }, 5000);
     </script>
 
@@ -236,7 +236,7 @@
     }
 </style>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('[data-tag-field]').forEach(function(wrapper) {
         var hiddenInput = wrapper.querySelector('input[type="hidden"]');

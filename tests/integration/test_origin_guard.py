@@ -19,6 +19,7 @@ is rate-limited by nothing. Every refusal below asserts that observable, not onl
 the status code: a 403 on a request that was inert anyway would prove nothing.
 """
 
+import json
 from http.cookies import SimpleCookie
 from urllib.parse import urlsplit
 
@@ -83,7 +84,7 @@ async def test_a_post_without_an_origin_is_refused(client_without_origin, db_ses
     # ORDER. It carries no ordering signal at all — a refused request does not
     # modify the session wherever the guard sits in the stack, so this passes
     # with the guard innermost too (measured). Ordering is pinned separately by
-    # test_the_guard_is_the_outermost_middleware.
+    # test_the_guard_is_the_outermost_refusing_middleware.
     assert not _session_cookies(r), "the POST was refused but the logout ran anyway"
 
 
@@ -170,42 +171,64 @@ async def test_a_get_needs_no_origin(client_without_origin):
         assert r.status_code != 403, f"GET {path} was refused ({r.status_code})"
 
 
-async def test_no_path_is_exempt_from_the_origin_check(client_without_origin):
-    """A cookie-less POST with no Origin is refused on every path, including the
-    one that used to carry the one-click-unsubscribe exemption."""
-    r = await client_without_origin.post("/settings/unsubscribe/some-token")
+async def test_only_the_csp_report_path_is_exempt_from_the_origin_check(client_without_origin):
+    """One exemption, POST /api/csp-report exactly: a browser's violation report
+    carries no Origin of ours. Every neighbouring shape stays guarded, including the
+    path that used to carry the one-click-unsubscribe exemption."""
+    body = json.dumps({"csp-report": {"effective-directive": "script-src", "blocked-uri": "inline"}})
+    ctype = {"Content-Type": "application/csp-report"}
+
+    for origin in (None, "https://evil.example", "null"):
+        headers = ctype if origin is None else {**ctype, "Origin": origin}
+        r = await client_without_origin.post("/api/csp-report", content=body, headers=headers)
+        assert r.status_code == 204, (origin, r.status_code)
+
+    for path in (
+        "/settings/unsubscribe/some-token",
+        "/api/csp-report/",
+        "/API/csp-report",
+        "/api/csp-report-x",
+        "/api/csp-reportx",
+        "/api/csp",
+        "/logout",
+    ):
+        r = await client_without_origin.post(path, content=body, headers=ctype)
+        assert r.status_code == 403, (path, r.status_code)
+        assert r.text == "Cross-site request refused."
+
+    r = await client_without_origin.put("/api/csp-report", content=body, headers=ctype)
     assert r.status_code == 403
 
 
-def test_the_guard_is_the_outermost_middleware():
+def test_the_guard_is_the_outermost_refusing_middleware():
     """Structural, because no request-level assertion in this file can see it.
 
     The obvious behavioural proxy — "a refused request set no session cookie",
     asserted in ``test_a_post_without_an_origin_is_refused`` — carries ZERO
-    ordering signal, and the first version of this file wrongly claimed it did.
-    Starlette's ``SessionMiddleware.send_wrapper`` emits ``Set-Cookie`` only
-    ``if session.modified and session``, and a request the guard refuses never
-    touches the session at all. Demote the guard to innermost and that
-    assertion still passes; measured, 12/12 green with
-    ``add_middleware(OriginGuardMiddleware)`` moved to the first call in
-    ``create_app()``. So the invariant needs a direct look at the stack.
+    ordering signal. Starlette's ``SessionMiddleware.send_wrapper`` emits
+    ``Set-Cookie`` only ``if session.modified and session``, and a request the
+    guard refuses never touches the session at all. So the invariant needs a
+    direct look at the stack.
 
-    Why outermost is the requirement and not a preference: everything the guard
-    is in front of costs something on a request it is going to refuse — the
-    session cookie is decoded and a route handler may open a database session.
-    Refusing on headers alone, before any of that is constructed, is the point.
+    Why outside the session is the requirement: everything the guard is in front
+    of costs something on a request it is going to refuse — the session cookie is
+    decoded and a route handler may open a database session.
+
+    The one layer outside it is SecurityHeadersMiddleware (spec §6.3), so the
+    guard's own 403 carries the security headers. That layer refuses nothing and
+    reads no session or body.
 
     ``user_middleware`` is in outermost-to-innermost order (Starlette's
     ``build_middleware_stack`` wraps in reverse), and ``add_middleware``
-    PREPENDS — so "outermost" means "added last in create_app()", which reads
-    backwards and is exactly the kind of thing a later edit gets wrong.
+    PREPENDS — so "outermost" means "added last in create_app()".
     """
     from src.main import create_app
 
     order = [m.cls.__name__ for m in create_app().user_middleware]
-    assert order[0] == "OriginGuardMiddleware", (
-        f"the CSRF guard is not outermost; stack is {order}"
+    assert order[:2] == ["SecurityHeadersMiddleware", "OriginGuardMiddleware"], (
+        f"the CSRF guard is not directly inside the headers layer; stack is {order}"
     )
+    assert order.index("OriginGuardMiddleware") < order.index("SessionMiddleware")
 
 
 # ---------------------------------------------------------------------------

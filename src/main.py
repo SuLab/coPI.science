@@ -17,6 +17,7 @@ from src.routers import (
     agent_page,
     assessment_chat,
     auth,
+    csp_report,
     invite,
     manager,
     onboarding,
@@ -26,6 +27,7 @@ from src.routers import (
 )
 from src.routers import settings as settings_router
 from src.services.assessment_chat import drain_live_tasks
+from src.web.security_headers import CSP_REPORT_PATH, SecurityHeadersMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,10 +126,14 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
 
     Anything else is a 403.
 
-    Added LAST in create_app(), because Starlette's ``add_middleware``
-    *prepends*: last added is outermost. Outermost is both correct and cheaper
-    here — this reads headers only and needs no session, so it refuses before
-    the session is decoded or any route runs.
+    Added after SessionMiddleware in create_app(), because Starlette's
+    ``add_middleware`` *prepends*: later added is further out. Only
+    SecurityHeadersMiddleware sits outside it, and that layer refuses nothing.
+    Outside the session is both correct and cheaper here — this reads headers
+    only, so it refuses before the session is decoded or any route runs.
+
+    One exemption, by exact path: ``POST CSP_REPORT_PATH`` (the CSP report sink),
+    pinned by test_origin_guard.py::test_only_the_csp_report_path_is_exempt_from_the_origin_check.
 
     Not affected, verified rather than assumed: the ORCID callback is a GET;
     there is no inbound Slack POST route, and there is no CORSMiddleware.
@@ -138,6 +144,13 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
+
+        if path == CSP_REPORT_PATH and request.method.upper() == "POST":
+            # The CSP report sink (src/routers/csp_report.py): a browser's violation
+            # report is not a form post from one of our pages and may carry no Origin
+            # or an opaque one. Exact path and POST only; that route reads no session
+            # and writes nothing but a bounded log line.
+            return await call_next(request)
 
         expected = normalized_origin(get_settings().base_url)
         origin_raw = request.headers.get("origin")
@@ -259,16 +272,24 @@ def create_app() -> FastAPI:
         same_site="lax",
     )
 
-    # CSRF guard. Added LAST, so it is the OUTERMOST middleware: Starlette's
-    # add_middleware prepends. It reads headers only and needs no session, so
-    # running it outside SessionMiddleware is both correct and cheaper — a
-    # forged POST is refused before the session middleware decodes a cookie.
+    # CSRF guard: the outermost middleware that can REFUSE a request (Starlette's
+    # add_middleware prepends, so later calls wrap earlier ones). It reads headers
+    # only and needs no session, so running it outside SessionMiddleware is both
+    # correct and cheaper — a forged POST is refused before the session middleware
+    # decodes a cookie.
     #
-    # Outermost is a REQUIREMENT, not a preference, and no request-level
+    # Outside the session is a REQUIREMENT, not a preference, and no request-level
     # assertion can see it (a refused request never modifies the session, so
-    # SessionMiddleware emits no Set-Cookie either way). It is pinned
-    # structurally by test_origin_guard.py::test_the_guard_is_the_outermost_middleware.
+    # SessionMiddleware emits no Set-Cookie either way). Pinned structurally by
+    # test_origin_guard.py::test_the_guard_is_the_outermost_refusing_middleware.
     application.add_middleware(OriginGuardMiddleware)
+
+    # Security headers and the per-request CSP nonce (spec §6.3). Added after the
+    # guard, so it is the one layer OUTSIDE it: the guard's own 403 carries the
+    # headers too, and every template sees request.state.csp_nonce. It refuses
+    # nothing and reads no session or body, so the guard still refuses before any
+    # session is decoded.
+    application.add_middleware(SecurityHeadersMiddleware)
 
     # Static files. Served with `Cache-Control: no-cache` so a browser revalidates
     # against the ETag on every load and picks up a redeployed asset immediately.
@@ -292,6 +313,7 @@ def create_app() -> FastAPI:
     # Include routers
     application.include_router(public.router, tags=["public"])
     application.include_router(auth.router, tags=["auth"])
+    application.include_router(csp_report.router, tags=["csp"])
     application.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])

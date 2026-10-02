@@ -733,7 +733,7 @@
 </label>
 <p id="sim-refresh-notice" role="status" hidden
    class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900"></p>
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 (function () {
   // Spec 2026-10-01 §5.3. Units are the jump nav and each top-level <section id>;
   // a unit that holds focus or an edited form is never replaced or removed (C-01,

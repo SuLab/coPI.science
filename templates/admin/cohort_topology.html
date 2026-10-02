@@ -121,7 +121,7 @@
     </div>
 </form>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // Column toggle: tick/untick a whole cohort at once. Purely a convenience over the
 // checkboxes — the form still posts one cell per ticked box, so the server-side diff is
 // unchanged.

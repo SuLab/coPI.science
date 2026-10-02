@@ -107,12 +107,16 @@ authoritative.)
 
 ## The Origin guard (every non-GET request, added 2026-08-22)
 
-`OriginGuardMiddleware` (`src/main.py:101`) refuses any request whose method is
-not GET/HEAD/OPTIONS unless it proves it came from our own origin. It is added
-LAST in `create_app` and is therefore the OUTERMOST middleware — a forged POST
-is refused before the session is even opened — and that position is pinned
-structurally by
-`tests/integration/test_origin_guard.py::test_the_guard_is_the_outermost_middleware`.
+`OriginGuardMiddleware` (`src/main.py:103`) refuses any request whose method is
+not GET/HEAD/OPTIONS unless it proves it came from our own origin. It is the
+outermost middleware that can refuse a request — a forged POST is refused before
+the session is even opened; only `SecurityHeadersMiddleware`, which refuses
+nothing and adds the response headers, sits outside it — and that position is
+pinned structurally by
+`tests/integration/test_origin_guard.py::test_the_guard_is_the_outermost_refusing_middleware`.
+Exactly one path is exempt: `POST /api/csp-report` (browsers send CSP reports
+without a usable `Origin`); the route admits only report content types, caps the
+body, and rate-limits its log lines (`src/routers/csp_report.py`).
 It exists because `same_site="lax"` was the only defence and is void here: one
 nginx serves `blackbird.copi.science`, `copi.science` and `devel.copi.science`,
 SameSite is computed on the registrable domain, so a page on either sibling

@@ -79,7 +79,7 @@
         <p class="text-sm text-gray-600">Saved for you; administrators with database access can read it.</p>
     </div>
 </aside>
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
   window.ASSESSMENT_CHAT = {
     historyUrl: "/assessment-chat/{{ a.id }}",
     askUrl: "/assessment-chat/{{ a.id }}/messages",

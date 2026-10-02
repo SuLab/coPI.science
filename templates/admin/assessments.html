@@ -65,7 +65,7 @@
     .assessment-prose { max-width: none; }
   }
 </style>
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
   // CSS cannot open a <details>, and a collapsed section prints as its summary
   // alone. Open every one for the print, then put back exactly what the reader
   // had open.

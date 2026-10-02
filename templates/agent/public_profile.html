@@ -248,7 +248,7 @@
 </style>
 
 {% if editing %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('[data-tag-field]').forEach(function(wrapper) {
         var hiddenInput = wrapper.querySelector('input[type="hidden"]');
