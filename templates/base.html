@@ -75,8 +75,11 @@
                     {% endif %}
                     {# Managers-only (2026-08-27), deliberately narrower than the
                        is_staff ACCESS gate on /manager/*: an admin still reaches
-                       those pages by URL (and the sub-nav below still renders
-                       there), but their top-bar entry point is the Admin panel.
+                       those pages by URL (and the manager sub-nav below renders
+                       there, except on the two prompt-suggestion pages, which the
+                       admin sub-nav links and which keep it for an admin who is not
+                       impersonating: admin_surface in src/routers/manager.py, spec
+                       2026-10-02 §4), but their top-bar entry point is the Admin panel.
                        Gated on the EFFECTIVE user, so an admin impersonating a
                        manager keeps the link — see
                        test_admin_impersonating_a_manager_sees_the_manager_nav_link. #}
@@ -132,7 +135,7 @@
             <a href="/admin/cohorts" class="{% if active_admin == 'cohorts' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Cohorts</a>
             <a href="/admin/access-requests" class="{% if active_admin == 'access' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Access</a>
             <a href="/admin/simulation" class="{% if active_admin == 'simulation' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Simulation</a>
-            <a href="/manager/prompt-suggestions" class="text-gray-500 hover:text-gray-700">Prompt Suggestions</a>
+            <a href="/manager/prompt-suggestions" class="{% if active_admin == 'prompt-suggestions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Prompt Suggestions</a>
         </div>
     </div>
 </nav>

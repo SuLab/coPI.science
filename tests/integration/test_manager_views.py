@@ -1,6 +1,7 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of eight write routes (design
-D1, amended 2026-09-10 by F2 and 2026-09-11 by the two enrichment vetoes)."""
+an explicit, mechanically-enumerated allowlist of fourteen write routes (design
+D1, amended 2026-09-10 by F2, 2026-09-11 by the two enrichment vetoes,
+2026-10-01 by email verification and 2026-10-02 by the five Companies routes)."""
 
 import re
 import uuid
@@ -54,8 +55,8 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these nine, named exactly. A future
-    accidental tenth write route still fails this test loudly. The two
+    have non-GET routes now, but only these fourteen, named exactly. A future
+    accidental fifteenth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
@@ -65,6 +66,9 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     one industry-evidence row as "not this PI / not industry". The email
     verification joined 2026-10-01 (web UI remediation spec §6.6): a manager
     may vouch for a PI's address, which delegate-invitation acceptance requires.
+    The five Companies routes joined 2026-10-02 (hub 1.10.0 spec §7.2): a
+    manager may add, delete, confirm and reject a PI's company ties and queue
+    company discovery.
     """
     allowed_post_paths = {
         "/pis",
@@ -76,6 +80,11 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/grants/{grant_id}/veto",
         "/pis/{user_id}/industry/{evidence_id}/veto",
         "/pis/{user_id}/verify-email",
+        "/pis/{user_id}/companies",
+        "/pis/{user_id}/companies/discover",
+        "/pis/{user_id}/companies/{company_id}/delete",
+        "/pis/{user_id}/companies/{company_id}/confirm",
+        "/pis/{user_id}/companies/{company_id}/reject",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
