@@ -1,5 +1,6 @@
 """Public sources for company discovery (spec §7.5): founder claims from a PI's own
-PubMed competing-interest statements (`coi_founders`), Wikidata "founded by" claims
+PubMed competing-interest statements (gated by `coi_founders`, extracted by Claude in
+`coi_llm`, spec O14), Wikidata "founded by" claims
 by ORCID (`wikidata`), and SEC Form D funding (`sec_form_d`).
 
 Nothing here imports the industry-evidence modules (tests/unit/test_enrichment_isolation.py)

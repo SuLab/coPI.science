@@ -1,40 +1,27 @@
-"""COI founder attribution (spec §7.5 Step 1, §8, F13, Review Focus #2).
+"""The COI gate helpers (spec §7.5 Step 1, O14): locating the PI, the initials-collision
+skip and the "found" gate. Attribution itself is Claude's (`coi_llm`); the regex
+suite's (statement, authors, PI, expected) cases moved to the live eval case set
+`tests/fixtures/company_discovery/coi_eval_cases.json`.
 
 The `pubmed_*.xml` fixtures are real PubMed records from E-utilities efetch, fetched
 2026-10-02, cut down to PMID, PubDate, ArticleTitle, AuthorList and CoiStatement (copied
 byte for byte; PMID 39433569 keeps its full AuthorList, the others drop AffiliationInfo
-and Identifier from each Author). The F13
-"OrisDx and Belay Diagnostics" sentences are Chetan Bettegowda's (C.B.), not Bert
-Vogelstein's: attribution must give them to Bettegowda and never to Vogelstein.
+and Identifier from each Author).
 """
 from pathlib import Path
 
 import pytest
 
 from src.services.company_sources import pi_name
-from src.services.company_sources.coi_founders import (
-    founder_claims,
-    locate_pi,
-    sentences,
-)
+from src.services.company_sources.coi_founders import locate_pi, mentions_founding
 from src.services.pubmed import _parse_pubmed_xml
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "company_discovery"
-ALL_PMIDS = ("39433569", "34290408", "37552989", "41115959", "39960487")
-COAUTHOR_TIES = {"OrisDx", "Belay Diagnostics", "IMVAQ Therapeutics", "Egret Therapeutics"}
 
 VELCULESCU = {"last": "Velculescu", "fore": "Victor E", "initials": "VE", "collective": None}
 LEAL = {"last": "Leal", "fore": "Alessandro", "initials": "A", "collective": None}
 VOGELSTEIN = {"last": "Vogelstein", "fore": "Bert", "initials": "B", "collective": None}
-BETTEGOWDA = {"last": "Bettegowda", "fore": "Chetan", "initials": "C", "collective": None}
-PAPADOPOULOS = {"last": "Papadopoulos", "fore": "Nickolas", "initials": "N", "collective": None}
-KINZLER = {"last": "Kinzler", "fore": "Kenneth W", "initials": "KW", "collective": None}
-DIAZ = {"last": "Diaz", "fore": "Luis A", "initials": "LA", "collective": None}
-GARCIA_LOPEZ = {"last": "Garcia Lopez", "fore": "Anna Maria", "initials": "AM", "collective": None}
-HU = {"last": "Hu", "fore": "Jing", "initials": "J", "collective": None}
-ZHU = {"last": "Zhu", "fore": "Jian", "initials": "J", "collective": None}
-ROSS = {"last": "Ross", "fore": "John", "initials": "J", "collective": None}
-CROSS = {"last": "Cross", "fore": "John", "initials": "J", "collective": None}
+JING_WANG = {"last": "Wang", "fore": "Jing", "initials": "J", "collective": None}
 
 
 def _record(pmid: str) -> dict:
@@ -42,157 +29,49 @@ def _record(pmid: str) -> dict:
     return rec
 
 
-def _claims(rec: dict, who: str) -> list[tuple[str, str]]:
-    return [(c.company_name, c.pi_role) for c in founder_claims(rec, pi_name(who))]
-
-
-def _synthetic(coi: str, authors=(VELCULESCU, LEAL)) -> dict:
+def _synthetic(authors=(VELCULESCU, LEAL), coi: str = "V.E.V. is a founder of Acme Bio.") -> dict:
     return {"pmid": "1", "year": 2020, "authors": list(authors), "coi_statement": coi}
 
 
-# --- real records ------------------------------------------------------------
+# --- locate_pi on real records --------------------------------------------------
 
 
-def test_velculescu_2024_yields_exactly_delfi_as_founder():
-    claims = founder_claims(_record("39433569"), pi_name("Victor Velculescu"))
-    assert [(c.company_name, c.pi_role) for c in claims] == [("DELFI Diagnostics", "founder")]
-    (claim,) = claims
-    assert claim.pmid == "39433569" and claim.year == 2024 and claim.former is False
-    assert claim.sentence.startswith("V.E.V. is a founder of DELFI Diagnostics, serves on the Board")
+def test_velculescu_is_located_with_his_initials_forms():
+    forms = locate_pi(_record("39433569"), pi_name("Victor Velculescu"))
+    assert forms is not None
+    assert {"VEV", "VV"} <= forms.letters
+    assert forms.surname == "Velculescu" and forms.first_initial == "v"
+    assert not forms.surname_shared
+    authors = [a for a in _record("39433569")["authors"] if isinstance(a, dict)]
+    assert authors[forms.position - 1]["last"] == "Velculescu"
 
 
 def test_a_middle_initial_in_the_users_name_changes_nothing():
-    assert _claims(_record("39433569"), "Victor E. Velculescu") == [("DELFI Diagnostics", "founder")]
-
-
-def test_coauthors_in_a_subject_list_get_their_own_tie_not_the_pis():
     rec = _record("39433569")
-    assert _claims(rec, "Robert Scharpf") == [("DELFI Diagnostics", "founder")]
-    assert _claims(rec, "Alessandro Leal") == [("DELFI Diagnostics", "founder")]
+    assert locate_pi(rec, pi_name("Victor E. Velculescu")) == locate_pi(rec, pi_name("Victor Velculescu"))
 
 
-def test_a_first_author_with_a_particle_is_located_but_has_no_tie():
-    rec = _record("39433569")
-    forms = locate_pi(rec, pi_name("Iris van 't Erve"))
-    assert forms is not None and "IV" in forms.letters
-    assert _claims(rec, "Iris van 't Erve") == []
-
-
-def test_velculescu_2021_names_delfi_and_pgdx():
-    assert _claims(_record("34290408"), "Victor Velculescu") == [
-        ("Delfi Diagnostics", "founder"),
-        ("Personal Genome Diagnostics", "founder"),
-    ]
-
-
-def test_the_cb_sentences_yield_orisdx_and_belay_for_bettegowda():
-    assert _claims(_record("41115959"), "Chetan Bettegowda") == [
-        ("OrisDx", "co_founder"),
-        ("Belay Diagnostics", "co_founder"),
-    ]
-
-
-def test_vogelstein_gets_only_his_own_ties():
-    assert _claims(_record("41115959"), "Bert Vogelstein") == [
-        ("Exact Sciences", "founder"),
-        ("Clasp Therapeutics", "founder"),
-        ("Haystack Oncology", "founder"),
-    ]
-    assert _claims(_record("34290408"), "Bert Vogelstein") == [
-        ("Thrive Earlier Detection", "founder"),
-        ("manaT Bio", "founder"),
-        ("Personal Genome Diagnostics", "founder"),
-    ]
-    assert _claims(_record("37552989"), "Bert Vogelstein") == [
-        ("Thrive Earlier Detection", "founder"),
-        ("ManaT Bio", "founder"),
-    ]
-
-
-@pytest.mark.parametrize("pmid", ALL_PMIDS)
-def test_coauthor_ties_never_reach_vogelstein(pmid):
-    names = {name for name, _ in _claims(_record(pmid), "Bert Vogelstein")}
-    assert not names & COAUTHOR_TIES
-
-
-def test_the_f13_elife_sentence_is_attributed_to_nobody():
-    """39960487 is where F13's "Co-founder of OrisDx and Belay Diagnostics" comes from:
-    an eLife block ("CB Consultant to ... Co-founder of OrisDx ...") whose continuation
-    sentence has no subject, so it names no one. The block's opening entry "BV Founder of
-    Thrive Earlier Detection" does name its owner."""
-    rec = _record("39960487")
-    assert "Co-founder of OrisDx and Belay Diagnostics" in rec["coi_statement"]
-    assert _claims(rec, "Bert Vogelstein") == [("Thrive Earlier Detection", "founder")]
-    assert _claims(rec, "Chetan Bettegowda") == []
-
-
-def test_tm_and_cj_sentences_yield_nothing():
-    rec_tm = _record("34290408")
-    assert "T.M. is a cofounder and holds equity in IMVAQ Therapeutics" in rec_tm["coi_statement"]
-    assert _claims(rec_tm, "Taha Merghoub") == []
-    rec_cj = _record("37552989")
-    assert "C.J. is a co-founder with equity interest in Egret Therapeutics" in rec_cj["coi_statement"]
-    assert _claims(rec_cj, "Christopher Jackson") == []
+def test_a_first_author_with_a_particle_is_located():
+    forms = locate_pi(_record("39433569"), pi_name("Iris van 't Erve"))
+    assert forms is not None and "IV" in forms.letters and forms.position == 1
 
 
 def test_an_initials_collision_skips_the_record():
-    """Blair C and Bettegowda C both reduce to "CB" on 37552989."""
-    rec = _record("37552989")
-    assert locate_pi(rec, pi_name("Chetan Bettegowda")) is None
-    assert _claims(rec, "Chetan Bettegowda") == []
-    assert _claims(rec, "Christopher Douville") == [("Belay Diagnostics", "co_founder")]
+    """Blair C and Bettegowda C both reduce to "CB" on 37552989; on 41115959 there is no
+    other "CB", so Bettegowda is located there."""
+    assert locate_pi(_record("37552989"), pi_name("Chetan Bettegowda")) is None
+    assert locate_pi(_record("37552989"), pi_name("Cherie Blair")) is None
+    assert locate_pi(_record("41115959"), pi_name("Chetan Bettegowda")) is not None
+    assert locate_pi(_record("37552989"), pi_name("Christopher Douville")) is not None
 
 
-# --- synthetic statements ----------------------------------------------------
+def test_a_collective_author_is_never_the_pi():
+    rec = _record("41115959")
+    assert any(a.get("collective") for a in rec["authors"])
+    assert locate_pi(rec, pi_name("Peter Gibbs")) is not None
 
 
-@pytest.mark.parametrize("statement", [
-    "V.E.V. is a founder of Acme Bio.",
-    "V. E. V. is a founder of Acme Bio.",
-    "VEV is a founder of Acme Bio.",
-    "VV is a founder of Acme Bio.",
-    "V.V. is a founder of Acme Bio.",
-    "A.L., S.C., and V.E.V. are founders of Acme Bio.",
-    "Victor Velculescu is a founder of Acme Bio.",
-    "Victor E. Velculescu is a founder of Acme Bio.",
-    "Victor E Velculescu is a founder of Acme Bio.",
-    "V. E. Velculescu is a founder of Acme Bio.",
-    "V. Velculescu is a founder of Acme Bio.",
-    "Dr. Velculescu is a founder of Acme Bio.",
-    "Professor Velculescu is a founder of Acme Bio.",
-])
-def test_every_pi_form_in_the_subject_counts(statement):
-    assert _claims(_synthetic(statement), "Victor Velculescu") == [("Acme Bio", "founder")]
-
-
-@pytest.mark.parametrize(("statement", "expected"), [
-    ("V.E.V. is a co-founder of Acme Bio.", [("Acme Bio", "co_founder")]),
-    ("V.E.V. is a cofounder of Acme Bio.", [("Acme Bio", "co_founder")]),
-    ("V.E.V. co-founded Acme Bio in 2015.", [("Acme Bio", "co_founder")]),
-    ("V.E.V. founded Acme Bio and Beta Therapeutics in 2012.",
-     [("Acme Bio", "founder"), ("Beta Therapeutics", "founder")]),
-    ("V.E.V. is a founder of and owns equity in DELFI Diagnostics, Inc.",
-     [("DELFI Diagnostics", "founder")]),
-    ("V.E.V. is a founder of 23andMe and of the company.", [("23andMe", "founder")]),
-    ("V.E.V. is an advisor to Viron Therapeutics, and A.L. is a founder of Acme Bio.", []),
-    ("Acme Bio, a company founded by V.E.V., licensed the technology.", []),
-    ("The authors declare no competing interests.", []),
-])
-def test_extraction(statement, expected):
-    assert _claims(_synthetic(statement), "Victor Velculescu") == expected
-
-
-@pytest.mark.parametrize("statement", [
-    "V.E.V. was a co-founder of Personal Genome Diagnostics, and divested his equity in "
-    "Personal Genome Diagnostics (PGDx) to LabCorp in February 2022.",
-    "V.E.V. is a former founder of Personal Genome Diagnostics.",
-    "V.E.V. was previously a founder of Personal Genome Diagnostics.",
-    "V.E.V. is no longer a founder of Personal Genome Diagnostics.",
-    "V.E.V. co-founded Personal Genome Diagnostics and sold his shares.",
-])
-def test_former_wording_sets_the_flag_and_keeps_the_claim(statement):
-    (claim,) = founder_claims(_synthetic(statement), pi_name("Victor Velculescu"))
-    assert claim.company_name == "Personal Genome Diagnostics" and claim.former is True
+# --- locate_pi on synthetic author lists ------------------------------------------
 
 
 @pytest.mark.parametrize("other", [
@@ -201,261 +80,72 @@ def test_former_wording_sets_the_flag_and_keeps_the_claim(statement):
     {"last": "Velculescu", "fore": "Victor", "initials": "V", "collective": None},  # twice
 ])
 def test_a_synthetic_collision_skips_the_record(other):
-    rec = _synthetic("V.E.V. is a founder of DELFI Diagnostics.", authors=(VELCULESCU, LEAL, other))
-    assert _claims(rec, "Victor Velculescu") == []
+    assert locate_pi(_synthetic((VELCULESCU, LEAL, other)), pi_name("Victor Velculescu")) is None
 
 
 def test_a_different_given_name_is_not_the_pi():
     vlad = {"last": "Velculescu", "fore": "Vlad", "initials": "V", "collective": None}
-    rec = _synthetic("V.V. is a founder of DELFI Diagnostics.", authors=(vlad, LEAL))
-    assert _claims(rec, "Victor Velculescu") == []
+    assert locate_pi(_synthetic((vlad, LEAL)), pi_name("Victor Velculescu")) is None
 
 
-def test_no_matching_author_or_no_statement_yields_nothing():
-    assert _claims(_synthetic("V.E.V. is a founder of Acme Bio.", authors=(LEAL,)), "Victor Velculescu") == []
-    assert _claims(_synthetic(""), "Victor Velculescu") == []
+def test_no_matching_author_is_not_located():
+    assert locate_pi(_synthetic((LEAL,)), pi_name("Victor Velculescu")) is None
 
 
-@pytest.mark.parametrize(("who", "author", "statement", "expected"), [
-    ("Hans Mueller", {"last": "Müller", "fore": "Hans", "initials": "H"},
-     "H.M. is a founder of Acme Bio.", [("Acme Bio", "founder")]),
-    ("Hans Muller", {"last": "Müller", "fore": "Hans", "initials": "H"},
-     "H.M. is a founder of Acme Bio.", [("Acme Bio", "founder")]),
-    ("Heinz Müller", {"last": "Müller", "fore": "Hans", "initials": "H"},
-     "H.M. is a founder of Acme Bio.", []),
-    ("Anne Hamacher-Brady", {"last": "Hamacher-Brady", "fore": "Anne", "initials": "A"},
-     "A.H.-B. is a co-founder of Acme Bio.", [("Acme Bio", "co_founder")]),
-    ("Anne Hamacher Brady", {"last": "Hamacher-Brady", "fore": "Anne", "initials": "A"},
-     "A.H.-B. is a co-founder of Acme Bio.", [("Acme Bio", "co_founder")]),
-    ("Iris van 't Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"},
-     "Iris van 't Erve is a founder of Acme Bio.", [("Acme Bio", "founder")]),
-    ("Iris van 't Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"},
-     "Dr. van 't Erve is a founder of Acme Bio.", [("Acme Bio", "founder")]),
-    ("Iris van 't Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"},
-     "I.V. is a founder of Acme Bio.", [("Acme Bio", "founder")]),
-    ("Iris Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"},
-     "I.E. is a founder of Acme Bio.", []),
+@pytest.mark.parametrize(("who", "author", "letters"), [
+    ("Hans Mueller", {"last": "Müller", "fore": "Hans", "initials": "H"}, "HM"),
+    ("Hans Muller", {"last": "Müller", "fore": "Hans", "initials": "H"}, "HM"),
+    ("Anne Hamacher-Brady", {"last": "Hamacher-Brady", "fore": "Anne", "initials": "A"}, "AHB"),
+    ("Anne Hamacher Brady", {"last": "Hamacher-Brady", "fore": "Anne", "initials": "A"}, "AHB"),
+    ("Iris van 't Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"}, "IV"),
+    ("Iris van 't Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"}, "IVTE"),
 ])
-def test_diacritics_hyphens_and_particles(who, author, statement, expected):
-    rec = _synthetic(statement, authors=({**author, "collective": None}, LEAL))
-    assert _claims(rec, who) == expected
+def test_diacritics_hyphens_and_particles_are_located(who, author, letters):
+    forms = locate_pi(_synthetic(({**author, "collective": None}, LEAL)), pi_name(who))
+    assert forms is not None and letters in forms.letters
 
 
-# --- audit findings: subject, clauses, lexical leaks ------------------------
-
-
-ELIFE_FIRST_ENTRY = ("AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, "
-                     "SS Co-founder of Acme Therapeutics.")
-
-
-@pytest.mark.parametrize(("who", "expected"), [
-    ("Laura Dobbyn", []),
-    ("Surojit Sur", [("Acme Therapeutics", "co_founder")]),
+@pytest.mark.parametrize(("who", "author"), [
+    ("Heinz Müller", {"last": "Müller", "fore": "Hans", "initials": "H"}),
+    ("Iris Erve", {"last": "van 't Erve", "fore": "Iris", "initials": "I"}),
 ])
-def test_an_elife_entry_credits_only_the_initials_that_open_it(who, expected):
-    rec = {**_record("39960487"), "coi_statement": ELIFE_FIRST_ENTRY}
-    assert _claims(rec, who) == expected
+def test_a_different_given_name_or_surname_is_not_located(who, author):
+    assert locate_pi(_synthetic(({**author, "collective": None}, LEAL)), pi_name(who)) is None
 
 
-@pytest.mark.parametrize(("authors", "who", "statement", "expected"), [
-    # the subject is the person list right before the phrase, not all text before it
-    ((VELCULESCU, LEAL), "Alessandro Leal",
-     "A.L. advises Viron Therapeutics, and V.E.V. is a founder of Acme Bio.", []),
-    # a new clause starts at every person list after a delimiter, for every verb
-    ((VOGELSTEIN, BETTEGOWDA), "Bert Vogelstein",
-     "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx.",
-     [("Thrive Earlier Detection", "founder")]),
-    ((VOGELSTEIN, BETTEGOWDA), "Chetan Bettegowda",
-     "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx.",
-     [("OrisDx", "co_founder")]),
-    ((VOGELSTEIN, PAPADOPOULOS), "Bert Vogelstein",
-     "Bert Vogelstein is a consultant to Sysmex, and Nickolas Papadopoulos is a founder of "
-     "Thrive Earlier Detection.", []),
-    ((VOGELSTEIN, KINZLER), "Bert Vogelstein",
-     "B.V. is a consultant to Sysmex and K.W. Kinzler is a founder of Thrive Earlier Detection.", []),
-    ((VOGELSTEIN, PAPADOPOULOS), "Bert Vogelstein",
-     "B.V. is a consultant to Sysmex and N.P. co-founded Thrive Earlier Detection.", []),
-    ((VELCULESCU, LEAL), "Alessandro Leal",
-     "A.L. is a consultant to Viron Therapeutics, and V.E.V. co-founded Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is an advisor to Viron Therapeutics, while A.L. is a founder of Acme Bio.", []),
-    # a declaration preamble ends at ":" or "that"
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "The authors declare the following competing interests: V.E.V. is a founder of Delfi Diagnostics.",
-     [("Delfi Diagnostics", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "The authors report that V.E.V. is a founder of Delfi Diagnostics.",
-     [("Delfi Diagnostics", "founder")]),
-    # a coordinated founder phrase never jumps to another company
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. co-founded and serves on the board of DELFI Diagnostics, and owns equity in Exact Sciences.",
-     [("DELFI Diagnostics", "co_founder")]),
-    # negation, passive, "respectively" and title conjuncts
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. is not a founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. has never been a founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Alessandro Leal", "Neither V.E.V. nor A.L. is a founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is an advisor to Viron Therapeutics, which was co-founded by Johns Hopkins University "
-     "and Acme Ventures.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is an advisor to Viron Therapeutics, which was cofounded by Acme Ventures.", []),
-    ((VELCULESCU, VOGELSTEIN), "Victor Velculescu",
-     "B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively.", []),
-    ((VELCULESCU, VOGELSTEIN), "Bert Vogelstein",
-     "B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a co-founder of Acme Bio and CEO of Beta Inc.", [("Acme Bio", "co_founder")]),
-    # serial lists and a coordinated title
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio.",
-     [("DELFI Diagnostics", "founder"), ("Personal Genome Diagnostics", "founder"), ("Acme Bio", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio.",
-     [("DELFI Diagnostics", "founder"), ("Personal Genome Diagnostics", "founder"), ("Acme Bio", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a co-founder and director of Acme Bio.", [("Acme Bio", "co_founder")]),
+def test_a_particle_stranded_in_the_forename_is_spliced_back():
+    author = {"last": "Neal", "fore": "Anya J O'", "initials": "AJ", "collective": None}
+    forms = locate_pi(_synthetic((author, LEAL)), pi_name("Anya O'Neal"))
+    assert forms is not None and forms.surname == "O'Neal"
+
+
+@pytest.mark.parametrize(("other", "shared"), [
+    ({"last": "Wang", "fore": "Xiao J", "initials": "XJ", "collective": None}, True),
+    ({"last": "Wong", "fore": "Xiao J", "initials": "XJ", "collective": None}, False),
 ])
-def test_audit_attribution_cases(authors, who, statement, expected):
-    assert _claims(_synthetic(statement, authors=authors), who) == expected
+def test_a_shared_surname_is_flagged(other, shared):
+    forms = locate_pi(_synthetic((JING_WANG, other, LEAL)), pi_name("Jing Wang"))
+    assert forms is not None and forms.surname_shared is shared
 
 
-ELIFE_AUTHORS_WITHOUT_TIES = (
-    "Ashley Cook", "Laura Dobbyn", "Evangeline Watson", "Blair Ptak", "Bum Lee",
-    "Suman Paul", "Emily Hsiue", "Maria Popoli", "Kathy Gabrielson", "Nicolas Wyhs",
-)
-ELIFE_HEADS = ("Co-founder", "Co-Founder", "Scientific co-founder", "Is a co-founder")
+# --- the "found" gate -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("head", ELIFE_HEADS)
-@pytest.mark.parametrize("who", ELIFE_AUTHORS_WITHOUT_TIES)
-def test_an_elife_entry_ends_the_previous_entry_whatever_its_head(head, who):
-    """39960487 AuthorList: "SS" is Surojit Sur; AC ... NW are the authors listed as
-    having no competing interests, and none of them gets SS's company."""
-    coi = f"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS {head} of Acme Therapeutics."
-    rec = {**_record("39960487"), "coi_statement": coi}
-    assert _claims(rec, who) == []
-
-
-@pytest.mark.parametrize("head", ELIFE_HEADS)
-def test_an_elife_entry_credits_its_own_initials_whatever_its_head(head):
-    coi = f"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS {head} of Acme Therapeutics."
-    rec = {**_record("39960487"), "coi_statement": coi}
-    assert _claims(rec, "Surojit Sur") == [("Acme Therapeutics", "co_founder")]
-
-
-@pytest.mark.parametrize(("authors", "who", "statement", "expected"), [
-    # H1: an unrecognised subject ends the previous predicate
-    ((VOGELSTEIN, KINZLER), "Bert Vogelstein",
-     "BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio.",
-     [("Thrive Earlier Detection", "founder")]),
-    ((VOGELSTEIN, KINZLER), "Kenneth Kinzler",
-     "BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio.",
-     [("Acme Bio", "co_founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a consultant to Genentech, and his wife is a co-founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a consultant to Genentech, and A.L.'s spouse is a co-founder of Acme Bio.", []),
-    ((VOGELSTEIN, BETTEGOWDA), "Bert Vogelstein",
-     "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx.",
-     [("Thrive Earlier Detection", "founder")]),
-    ((VOGELSTEIN, BETTEGOWDA), "Chetan Bettegowda",
-     "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx.",
-     [("OrisDx", "co_founder")]),
-    ((VOGELSTEIN, DIAZ), "Bert Vogelstein",
-     "B.V. is a founder of Thrive Earlier Detection, and Luis A. Diaz Jr. is a founder of Acme Bio.",
-     [("Thrive Earlier Detection", "founder")]),
-    ((VOGELSTEIN, KINZLER), "Bert Vogelstein",
-     "B.V. is a consultant to Sysmex, and K.W.K., who is an advisor to Exact Sciences, is a founder "
-     "of Acme Bio.", []),
-    ((VOGELSTEIN, GARCIA_LOPEZ), "Bert Vogelstein",
-     "B.V. is a consultant to Sysmex, and Anna Maria Garcia Lopez is a founder of Acme Bio.", []),
-    # H2: the surname starts a word and middle initials are whole tokens
-    ((HU, ZHU, LEAL), "Jing Hu", "J. Zhu is a co-founder of Acme Bio.", []),
-    ((HU, ZHU, LEAL), "Jing Hu", "Jing Zhu is a co-founder of Acme Bio.", []),
-    ((ROSS, CROSS), "John Ross", "John Cross is a founder of Acme Bio.", []),
-    # M1: a verbless prefix is only a declaration header
-    ((VELCULESCU, LEAL), "Victor Velculescu", "The spouse of V.E.V. is a co-founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "With the exception of V.E.V., A.L., S.C. and R.B.S. are founders of DELFI Diagnostics.", []),
-    # M2: "founders of or ..." is an alternative
-    ((VOGELSTEIN, KINZLER, PAPADOPOULOS), "Bert Vogelstein",
-     "B.V., K.W.K., and N.P. are founders of or consultants to and own equity in ManaT Bio, Haystack "
-     "Oncology, Neophore, CAGE Pharma and Personal Genome Diagnostics.", []),
-    # M3: a company name ends at a lower-case word and never is a person
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "Dr Velculescu reported being a founder of Delfi Diagnostics outside the submitted work.",
-     [("Delfi Diagnostics", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a founder of DELFI Diagnostics and A.L., S.C. and R.B.S. are founders of Acme Bio.",
-     [("DELFI Diagnostics", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. co-founded Acme Bio together with A.L.",
-     [("Acme Bio", "co_founder")]),
-    # L1: persons in an object list never join the next subject
-    ((VELCULESCU, LEAL, VOGELSTEIN), "Alessandro Leal",
-     "V.E.V. receives royalties from Merck, Pfizer, A.L., and B.V. is a founder of Acme Bio.", []),
-    # L2: "hepatitis B." followed by a person and a verb ends the clause
-    ((KINZLER, VELCULESCU), "Kenneth Kinzler",
-     "K.W.K. receives research funding from Gilead for hepatitis B. V.E.V. is a founder of Acme Bio.", []),
-    # L3, L4: "no"/"without" negate; adjectival "founded" is no claim
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. has no role as a founder of Acme Bio.", []),
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. is an advisor to the newly founded Acme Bio.", []),
-    # recall: a founder noun coordinated with titles
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a co-founder, director and shareholder of Acme Bio.", [("Acme Bio", "co_founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu", "V.E.V. is founder & CEO of Acme Bio.",
-     [("Acme Bio", "founder")]),
-    ((VELCULESCU, LEAL), "Victor Velculescu",
-     "V.E.V. is a co-founder and Executive Chairman of Acme Bio.", [("Acme Bio", "co_founder")]),
+@pytest.mark.parametrize(("statement", "expected"), [
+    ("V.E.V. is a founder of Acme Bio.", True),
+    ("V.E.V. CO-FOUNDED Acme Bio.", True),
+    ("BV Founder of Thrive Earlier Detection", True),
+    ("V.E.V. is a cofounder of Acme Bio.", True),
+    ("The authors found no conflicts.", True),  # over-inclusive by design
+    ("V.E.V. is an advisor to Acme Bio.", False),
+    ("The authors declare no competing interests.", False),
+    ("", False),
 ])
-def test_round_two_attribution_cases(authors, who, statement, expected):
-    assert _claims(_synthetic(statement, authors=authors), who) == expected
+def test_mentions_founding(statement, expected):
+    assert mentions_founding(statement) is expected
 
 
-JING_WANG = {"last": "Wang", "fore": "Jing", "initials": "J", "collective": None}
-
-
-@pytest.mark.parametrize(("other", "statement", "expected"), [
-    ({"last": "Wang", "fore": "Xiao J", "initials": "XJ", "collective": None},
-     "X.J. Wang is a co-founder of Acme Bio.", []),
-    ({"last": "Wang", "fore": "Xiao-Jing", "initials": "XJ", "collective": None},
-     "Xiao-Jing Wang is a co-founder of Acme Bio.", []),
-    ({"last": "Wang", "fore": "Xiao J", "initials": "XJ", "collective": None},
-     "J.W. is a co-founder of Acme Bio.", [("Acme Bio", "co_founder")]),
-])
-def test_a_shared_surname_leaves_only_the_initials_forms(other, statement, expected):
-    rec = _synthetic(statement, authors=(JING_WANG, other, LEAL))
-    assert _claims(rec, "Jing Wang") == expected
-
-
-def test_a_shared_surname_drops_the_honorific_form():
-    j_vogelstein = {"last": "Vogelstein", "fore": "Joshua", "initials": "J", "collective": None}
-    rec = _synthetic("Dr. Vogelstein is a founder of Thrive Earlier Detection.",
-                     authors=(VOGELSTEIN, j_vogelstein))
-    assert _claims(rec, "Bert Vogelstein") == []
-
-
-# --- helpers -----------------------------------------------------------------
-
-
-def test_sentences_keep_initials_and_corporate_abbreviations_whole():
-    text = ("A.L., S.C., R.B.S., and V.E.V. are inventors. K.L, L.K.M. own stock; in addition, "
-            "R.J.A.F. has patents. The rest declare none. Paratek Pharmaceuticals, Inc. All good.")
-    assert sentences(text) == [
-        "A.L., S.C., R.B.S., and V.E.V. are inventors.",
-        "K.L, L.K.M. own stock;",
-        "in addition, R.J.A.F. has patents.",
-        "The rest declare none.",
-        "Paratek Pharmaceuticals, Inc. All good.",
-    ]
-
-
-@pytest.mark.parametrize(("who", "expected"), [
-    ("Victor Velculescu", [("DELFI Diagnostics", "founder")]),
-    ("Alessandro Leal", [("DELFI Diagnostics", "founder"), ("Acme Bio", "founder")]),
-])
-def test_a_clause_ends_where_a_new_person_subject_starts(who, expected):
-    rec = _synthetic("A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio.")
-    assert _claims(rec, who) == expected
+# --- pi_name -------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("full", "first", "surname"), [

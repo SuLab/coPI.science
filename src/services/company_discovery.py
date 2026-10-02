@@ -1,8 +1,9 @@
 """The `company_discovery` worker job (spec §7.5, O9-O13).
 
 Suggests the companies a PI founded, from the PI's own disclosures only (O11): a
-competing-interest sentence whose subject is the PI (`company_sources.coi_founders`), or
-Wikidata's "founded by" (P112) on the PI's ORCID item (`company_sources.wikidata`).
+competing-interest sentence whose subject is the PI, as Claude extracts it from each
+gated record (`company_sources.coi_llm`, O14), or Wikidata's "founded by" (P112) on the
+PI's ORCID item (`company_sources.wikidata`).
 SEC Form D only attaches funding and corroborates (`company_sources.sec_form_d`).
 
 Every row written here is `status="suggested"`, `origin="discovered"`, with no creator:
@@ -16,7 +17,8 @@ the other sources found: `industry_evidence` lost whole runs to one upstream 429
 Only a database error fails the job.
 
 The worker holds one transaction for the whole job (`src.worker.main.process_job`), so
-every network lookup (PubMed, Wikidata, then SEC Form D for each new candidate) runs
+every network lookup (PubMed, the COI extraction calls, Wikidata, then SEC Form D for
+each new candidate) runs
 before the first insert: an uncommitted `pi_companies` row would otherwise hold its
 `(user_id, normalized_name)` key through minutes of SEC requests and block a manager's
 manual add of the same name until the job commits.
@@ -42,7 +44,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import get_settings
 from src.models import Job, PiCompany, Publication, User
 from src.services import job_progress, pubmed
-from src.services.company_sources import PiName, coi_founders, pi_name, sec_form_d, wikidata
+from src.services.company_sources import (
+    PiName,
+    coi_founders,
+    coi_llm,
+    pi_name,
+    sec_form_d,
+    wikidata,
+)
 from src.services.job_queue import insert_job_if_absent
 from src.services.pi_companies import (
     _MAX_FUNDING_USD,
@@ -177,17 +186,47 @@ async def _coi_claims(
         return []
     year_by_pmid = {str(pmid): year for pmid, year in rows}
     records = await _fetch_coi_records(user_id, list(year_by_pmid), notes)
+    return await _extract_claims(user_id, records, name, year_by_pmid, notes)
+
+
+async def _extract_claims(
+    user_id: uuid.UUID, records: list[dict], name: PiName,
+    year_by_pmid: dict[str, int | None], notes: list[str],
+) -> list[coi_founders.FounderClaim]:
+    """One `coi_llm.extract_founder_claims` per record, newest first. A "skipped"
+    record (the gate refused it; no API call) costs nothing; at most
+    `coi_llm.MAX_COI_CALLS_PER_PI` records are sent, and the rest are not called
+    ("coi: capped at N disclosures"). An "unavailable" outcome, or a raise, costs that
+    record alone ("coi: N of M disclosures unavailable", M = records sent)."""
+    def newest(record: dict) -> tuple[int, int]:
+        pmid = str(record.get("pmid") or "")
+        year = year_by_pmid.get(pmid) or record.get("year") or 0
+        return (year, int(pmid) if pmid.isdigit() else 0)
+
+    cap = coi_llm.MAX_COI_CALLS_PER_PI
     claims: list[coi_founders.FounderClaim] = []
-    for record in records:
+    sent = unavailable = 0
+    for record in sorted(records, key=newest, reverse=True):
+        if sent >= cap:
+            notes.append(f"coi: capped at {cap} disclosures")
+            break
         try:
-            found = coi_founders.founder_claims(record, name)
+            outcome = await coi_llm.extract_founder_claims(record, name)
         except Exception:  # one odd record never costs the others
-            logger.exception("company_discovery %s: COI parse failed for PMID %s", user_id, record.get("pmid"))
+            logger.exception("company_discovery %s: COI extraction failed for PMID %s", user_id, record.get("pmid"))
+            outcome = coi_llm.CoiOutcome("unavailable", [], reason="error")
+        if outcome.status == "skipped":
             continue
-        for claim in found:
+        sent += 1
+        if outcome.status != "ok":
+            unavailable += 1
+            continue
+        for claim in outcome.claims:
             if claim.year is None:
                 claim = dataclasses.replace(claim, year=year_by_pmid.get(claim.pmid))
             claims.append(claim)
+    if unavailable:
+        notes.append(f"coi: {unavailable} of {sent} disclosures unavailable")
     return claims
 
 

@@ -1,5 +1,7 @@
 """The company_discovery job end to end (spec §7.5, §8): every request is mocked with
-respx and answered from the recorded fixtures in tests/fixtures/company_discovery/.
+respx and answered from the recorded fixtures in tests/fixtures/company_discovery/, and
+the Claude COI extraction (`coi_llm.extract_founder_claims`) is replaced by scripted
+outcomes per PMID (`_coi` fixture), so no test calls the Anthropic API.
 Each source can fail alone and the job still completes with a per-source note; a re-run
 never re-suggests a name the PI already has in any status; nothing is ever confirmed."""
 import asyncio
@@ -17,7 +19,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.models import Job, PiCompany, Publication, User
 from src.services import company_discovery as cd
 from src.services import pubmed
-from src.services.company_sources import sec_form_d, wikidata
+from src.services.company_sources import coi_llm, sec_form_d, wikidata
+from src.services.company_sources.coi_founders import FounderClaim
 from src.services.pi_companies import normalize_company_name
 from src.worker.main import JobContext
 
@@ -43,6 +46,48 @@ def _no_waiting(monkeypatch):
         return None
 
     monkeypatch.setattr(wikidata, "_sleep", _no_sleep)
+
+
+DELFI_2024 = (
+    "V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns DELFI "
+    "Diagnostics stock, which is subject to certain restrictions under university policy.")
+BOTH_2021 = (
+    "V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the Board of "
+    "Directors and as a consultant for both organizations, and owns Delfi Diagnostics and Personal "
+    "Genome Diagnostics stock, which are subject to certain restrictions under university policy.")
+
+
+def _ok(pmid: str, year: int, sentence: str, *companies: tuple[str, bool]) -> coi_llm.CoiOutcome:
+    return coi_llm.CoiOutcome("ok", [FounderClaim(c, "founder", pmid, year, sentence, former)
+                                     for c, former in companies])
+
+
+def _velculescu_script() -> dict:
+    """What the extraction is scripted to return for the two recorded Velculescu
+    statements (the regex parser's old yield, with PGDx flagged former)."""
+    return {
+        "39433569": _ok("39433569", 2024, DELFI_2024, ("DELFI Diagnostics", False)),
+        "34290408": _ok("34290408", 2021, BOTH_2021,
+                        ("Delfi Diagnostics", False), ("Personal Genome Diagnostics", True)),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _coi(monkeypatch):
+    """Scripted `extract_founder_claims`: `script[pmid]` is a CoiOutcome or an exception
+    to raise; an unscripted PMID is "skipped". `calls` lists every PMID asked."""
+    state = SimpleNamespace(script=_velculescu_script(), calls=[])
+
+    async def fake(record, pi, *, client=None):
+        pmid = str(record.get("pmid"))
+        state.calls.append(pmid)
+        answer = state.script.get(pmid, coi_llm.CoiOutcome("skipped", [], reason="gate"))
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", fake)
+    return state
 
 
 def _settings(monkeypatch, sec_user_agent: str = UA) -> None:
@@ -113,7 +158,7 @@ async def _rows(db_session, user_id) -> dict[str, PiCompany]:
     return {r.company_name: r for r in rows}
 
 
-async def test_velculescu_happy_path(db_session, monkeypatch, respx_mock):
+async def test_velculescu_happy_path(db_session, monkeypatch, respx_mock, _coi):
     _settings(monkeypatch)
     routes = _routes(respx_mock)
     user, job = await _velculescu(db_session)
@@ -143,7 +188,10 @@ async def test_velculescu_happy_path(db_session, monkeypatch, respx_mock):
     assert pgdx.source_url == "https://pubmed.ncbi.nlm.nih.gov/34290408/"
     assert pgdx.funding_usd is None and pgdx.funding_as_of is None and pgdx.funding_source_url is None
     assert pgdx.evidence["form_d"]["status"] == "no_filings"
+    assert pgdx.evidence["former"] is True and pgdx.evidence["coi"][0]["former"] is True
+    assert set(pgdx.evidence["coi"][0]) == {"pmid", "year", "sentence", "former", "pi_role", "company_name", "url"}
 
+    assert _coi.calls == ["39433569", "34290408"]  # newest first
     assert routes.efetch.call_count == 1 and routes.sparql.call_count == 1
     assert routes.efts.call_count == 2 and routes.doc.call_count == 1
     assert routes.efts.calls[0].request.headers["User-Agent"] == UA
@@ -424,3 +472,60 @@ async def test_one_failed_pubmed_batch_keeps_the_others(db_session, monkeypatch,
     assert set(rows) == {"DELFI Diagnostics"}
     assert [e["pmid"] for e in rows["DELFI Diagnostics"].evidence["coi"]] == ["39433569"]
     assert routes.efetch.call_count == 4  # the OK batch, then three tries of the 503
+
+
+async def test_a_skipped_record_costs_no_call(db_session, monkeypatch, respx_mock, _coi):
+    """With a cap of one, the newest record being skipped by the gate still leaves the
+    one call for the next record: a skip is not counted."""
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    monkeypatch.setattr(coi_llm, "MAX_COI_CALLS_PER_PI", 1)
+    del _coi.script["39433569"]
+    user, job = await _velculescu(db_session)
+    assert await _run(db_session, job) == "2 suggested"
+    assert _coi.calls == ["39433569", "34290408"]
+    rows = await _rows(db_session, user.id)
+    assert set(rows) == {"Delfi Diagnostics", "Personal Genome Diagnostics"}
+
+
+async def test_extraction_is_capped_at_60_disclosures(db_session, monkeypatch, respx_mock, _coi):
+    """80 records, every seventh skipped: the 60 newest non-skipped are sent, the rest
+    are never called, and the outcome says so."""
+    _settings(monkeypatch)
+    routes = _routes(respx_mock)
+    assert coi_llm.MAX_COI_CALLS_PER_PI == 60
+    user = User(orcid=VELCULESCU_ORCID, name="Victor Velculescu", user_role="pi")
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(Publication(user_id=user.id, pmid="80", title="t", year=2020))
+    job = Job(type="company_discovery", user_id=user.id, payload={"user_id": str(user.id), "orcid": user.orcid})
+    db_session.add(job)
+    await db_session.flush()
+
+    async def records(*_args):
+        return [{"pmid": str(n), "year": 2020} for n in range(1, 81)]
+
+    monkeypatch.setattr(cd, "_fetch_coi_records", records)
+    _coi.script = {str(n): coi_llm.CoiOutcome("ok", []) for n in range(1, 81) if n % 7}
+    _coi.script["80"] = _ok("80", 2020, "V.E.V. is a founder of Acme Bio.", ("Acme Bio", False))
+    _coi.script["1"] = _ok("1", 2020, "V.E.V. is a founder of Never Bio.", ("Never Bio", False))
+
+    assert await _run(db_session, job) == "1 suggested; coi: capped at 60 disclosures"
+    sent = [p for p in _coi.calls if int(p) % 7]
+    assert len(sent) == 60 and _coi.calls == [str(n) for n in range(80, 80 - len(_coi.calls), -1)]
+    assert "1" not in _coi.calls
+    assert set(await _rows(db_session, user.id)) == {"Acme Bio"}
+    assert routes.efetch.call_count == 0
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "raise"])
+async def test_unavailable_disclosures_are_a_note(db_session, monkeypatch, respx_mock, _coi, failure):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    _coi.script["34290408"] = (coi_llm.CoiOutcome("unavailable", [], reason="refusal")
+                               if failure == "unavailable" else RuntimeError("boom"))
+    user, job = await _velculescu(db_session)
+    assert await _run(db_session, job) == "1 suggested; coi: 1 of 2 disclosures unavailable"
+    rows = await _rows(db_session, user.id)
+    assert set(rows) == {"DELFI Diagnostics"}
+    assert rows["DELFI Diagnostics"].status == "suggested"

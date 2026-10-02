@@ -325,6 +325,14 @@ class Settings(BaseSettings):
     # priced in src/services/llm_pricing.py: an unpriced model would make the daily
     # dollar ceilings blind, so the ask route refuses it (503 model_unpriced).
     llm_assessment_chat_model: str = "claude-opus-5-5"
+
+    # Company discovery's COI founder extraction (spec
+    # docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md, O14): one
+    # call per gated competing-interest statement, through `llm.abeta_create`
+    # with the server-side refusal fallback. Must be priced in
+    # src/services/llm_pricing.py (claude-opus-5-5 is). Opus 5.5 cannot disable
+    # thinking, so the caller passes `thinking` explicitly.
+    llm_coi_model: str = "claude-opus-5-5"
     # Kill switch. `.env` is read when a container is CREATED, so changing it needs
     # `$DC up -d --force-recreate blackbird-app`, not a restart.
     assessment_chat_enabled: bool = True

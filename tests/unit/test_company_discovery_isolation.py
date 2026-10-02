@@ -29,7 +29,7 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_discovery_modules_import_nothing_forbidden():
-    assert len(MODULES) == 5, MODULES
+    assert len(MODULES) == 6, MODULES
     for rel in MODULES:
         hit = {m for m in _imports(ROOT / rel) if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)}
         assert not hit, f"{rel} imports {hit}"
