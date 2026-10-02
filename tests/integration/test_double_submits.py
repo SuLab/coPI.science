@@ -19,7 +19,8 @@ async def _committed(engine, *, bot_token=None):
     f = async_sessionmaker(engine, expire_on_commit=False)
     async with f() as s:
         pi = await factories.make_user(s, name="Inv Pi", email=f"pi{uuid.uuid4().hex[:6]}@x.edu")
-        d = await factories.make_user(s, name="Del", email=f"d{uuid.uuid4().hex[:6]}@x.edu")
+        d = await factories.make_user(s, name="Del", email=f"d{uuid.uuid4().hex[:6]}@x.edu",
+                                      email_verified_at=datetime.now(UTC))
         agent = await factories.make_agent(s, user=pi, agent_id=f"inv{uuid.uuid4().hex[:6]}", status="active",
                                            slack_bot_token=bot_token)
         inv = DelegateInvitation(agent_registry_id=agent.id, invited_by_user_id=pi.id, email=d.email,

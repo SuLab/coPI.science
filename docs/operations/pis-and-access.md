@@ -242,7 +242,11 @@ allowlist, so a role added later is excluded from the PI surfaces until listed,
 and for every role in `VALID_USER_ROLES` it equals the old
 `not (is_manager or is_reviewer)`. Each excluded role keeps its own landing page.
 
-**Impersonation.** `refuse_impersonation`, `recorded_by` and `impersonation_note`
+**Impersonation.** It is held in the signed session (`session["impersonate_user_id"]`,
+with `impersonate_expires_at` 24 h after the start; `start_impersonation` /
+`end_impersonation` in `src/dependencies.py`) and honoured only while the session holder
+is an admin; the old unsigned `copi-impersonate` cookie is neither read nor written.
+`refuse_impersonation`, `recorded_by` and `impersonation_note`
 live in `src/dependencies.py`. Role changes (`POST /admin/users/{id}/role`) are
 refused under impersonation (403), as are account deletions. Writes on the agent
 page (`/agent/*`) made while impersonating are attributed to the impersonated
@@ -295,6 +299,17 @@ another account holds in any case (a login whose ORCID address is taken proceeds
 an email instead of failing), and `tests/unit/test_email_writer_tripwire.py` fails on any
 other writer.
 
+**Email verification** (migration `0057`, web UI remediation spec §6.6).
+`users.email_verified_at` is set only by an admin (`POST /admin/users/{id}/verify-email`,
+any user) or a manager (`POST /manager/pis/{id}/verify-email`, PIs only), both refused
+under impersonation and each recorded as an `admin_audit_events` row with action
+`verify_email`; there is no verification email. `assign_user_email` clears it whenever
+the address changes (compared case-insensitively) or is cleared. Delegate-invitation
+acceptance requires a PI-surface account (`may_use_pi_surfaces`) whose verified address
+equals the invited one; otherwise the page says "An administrator must verify your email
+address before you can accept this invitation." Every account that had an email when
+`0057` was applied was marked verified (owner decision D8).
+
 **Profile edit forms refuse a stale save.** The four edit forms carry the
 `profile_version` they were rendered with; a save after a regeneration or another edit
 writes nothing and asks the user to reload. A regeneration keeps a human edit saved while
@@ -302,8 +317,8 @@ it ran.
 
 **Revoking access now ends the session immediately** (`src/dependencies.py:104`,
 fixed 2026-08-22 as E1.2). Sessions are unkeyed signed cookies with a 30-day
-`max_age` and no server-side store, so `users.access_status` is the only
-revocation signal there is — and nothing read it after login, so
+`max_age` and no server-side store, so before `0057` `users.access_status` was the only
+revocation signal there was — and nothing read it after login, so
 `admin_deny_access` set the column and changed nothing the user could observe: a
 denied user's `GET /profile` returned 200 for up to thirty more days. The check
 now pops `user_id`, repopulates `pending_access` in the shape `auth.py` writes at
@@ -313,6 +328,16 @@ with no way out; and the check runs on the **session holder**, deliberately
 before the impersonation block, so **an admin can still impersonate a denied
 account** — that is a support path, not an oversight, and it is commented at the
 check.
+
+**Sessions** (web UI remediation spec §6.7). The cookie is `__Host-copi-session` when
+`ALLOW_HTTP_SESSIONS=false` (production) and `copi-session` otherwise
+(`src/main.py::session_cookie_name`). Login clears the pre-login session, keeping only the
+vetted `next` and a pending invite token, and stores `users.session_epoch` (NULL as 0) as
+`session["epoch"]`; `get_current_user` refuses a session whose epoch differs, after the
+access check above. `POST /logout` bumps the epoch, signing the account out on every
+device, reading `session["user_id"]` directly and still with no auth dependency; access
+denial and a role change (`/admin/users/{id}/role`, `admin:grant`, `admin:revoke`,
+`role:set`) bump it too (`src/services/session_epoch.py`).
 
 ## Deleting a PI
 

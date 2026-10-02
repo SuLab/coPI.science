@@ -17,6 +17,25 @@
             <div>
                 <dt class="text-gray-500">Email</dt>
                 <dd class="font-medium">{{ target_user.email or '—' }}</dd>
+                {% if target_user.email %}
+                <dd class="text-xs mt-1">
+                    {% if target_user.email_verified_at %}
+                    <span class="text-green-700">Verified {{ target_user.email_verified_at.strftime('%b %d, %Y') }}</span>
+                    {% else %}
+                    <span class="text-amber-700">Unverified</span>
+                    {% if not impersonation_banner %}
+                    <form method="POST" action="/admin/users/{{ target_user.id }}/verify-email" class="inline ml-2">
+                        <button type="submit" class="text-indigo-600 hover:underline">Mark verified</button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
+                </dd>
+                {% endif %}
+                {% if request.query_params.get('email_verified') %}
+                <dd class="text-xs text-green-700 mt-1">Email address marked verified.</dd>
+                {% elif request.query_params.get('error') == 'no_email' %}
+                <dd class="text-xs text-red-700 mt-1">This account has no email address to verify.</dd>
+                {% endif %}
             </div>
             <div>
                 <dt class="text-gray-500">ORCID</dt>

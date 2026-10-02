@@ -23,6 +23,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from urllib.parse import unquote
 
@@ -252,7 +253,8 @@ async def delegated(client, db_session, world):
     the fixture itself proves the add path works before anything asserts on it.
     """
     delegate = await factories.make_user(
-        db_session, name="Dee Legate", email="dee@example.org"
+        db_session, name="Dee Legate", email="dee@example.org",
+        email_verified_at=datetime.now(UTC),
     )
     await _invite(client, world, "dee@example.org")
     token = await _token_for(db_session, world.agent, "dee@example.org")
@@ -479,8 +481,10 @@ async def test_removing_a_delegate_revokes_their_access(
 
 
 async def test_revoking_an_invitation_kills_that_token_only(client, db_session, world):
-    doomed = await factories.make_user(db_session, name="Dana Doomed", email="doomed@example.org")
-    keeper = await factories.make_user(db_session, name="Kim Keeper", email="keeper@example.org")
+    doomed = await factories.make_user(db_session, name="Dana Doomed", email="doomed@example.org",
+                                       email_verified_at=datetime.now(UTC))
+    keeper = await factories.make_user(db_session, name="Kim Keeper", email="keeper@example.org",
+                                       email_verified_at=datetime.now(UTC))
     await db_session.flush()
     await _invite(client, world, "doomed@example.org")
     await _invite(client, world, "keeper@example.org")

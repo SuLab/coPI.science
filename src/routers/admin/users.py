@@ -11,9 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_admin_user, refuse_impersonation
 from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
-from src.routers.admin._common import _template_context, router, templates
+from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.directory import list_pi_directory, load_user_detail
+from src.services.email_verification import mark_email_verified
 from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
 
@@ -184,3 +185,25 @@ async def admin_set_user_role(
         current_user.name, user.name, user_id, previous, user_role,
     )
     return RedirectResponse(url=f"/admin/users/{user_id}", status_code=302)
+
+
+@router.post("/users/{user_id}/verify-email")
+async def admin_verify_user_email(
+    user_id: uuid.UUID,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Mark a user's email address verified (spec 2026-10-01 §6.6; any user).
+
+    Refused under impersonation: the audit event must name the admin who vouched
+    for the address, and under impersonation ``current_user`` is someone else.
+    """
+    refuse_impersonation(current_user, "Email verification is disabled while impersonating.")
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    error = await mark_email_verified(db, target=user, actor=current_user)
+    if error:
+        return RedirectResponse(url=f"/admin/users/{user_id}?error={error}", status_code=302)
+    logger.info("Admin %s verified the email address of user %s", current_user.id, user_id)
+    return RedirectResponse(url=f"/admin/users/{user_id}?email_verified=1", status_code=302)

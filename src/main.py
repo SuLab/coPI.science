@@ -45,7 +45,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 SESSION_COOKIE_HTTP = "copi-session"
 #: Its name when the cookie is Secure. The ``__Host-`` prefix makes a browser refuse
 #: the cookie unless it is Secure, has ``Path=/`` and carries no ``Domain``, so a
-#: sibling host on the shared registrable domain cannot set or shadow it (A-05).
+#: sibling host on the shared registrable domain cannot set or overwrite it (A-05).
 #: SessionMiddleware's defaults (path "/", no domain) satisfy all three.
 SESSION_COOKIE_HTTPS = "__Host-copi-session"
 

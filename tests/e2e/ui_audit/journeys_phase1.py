@@ -13,6 +13,8 @@ import re
 import tempfile
 from pathlib import Path
 
+from tests.e2e.ui_audit.journeys_phase1_1b import JOURNEYS_1B
+
 REPO = Path(__file__).resolve().parents[3]
 
 JOURNEYS: list = []
@@ -449,3 +451,7 @@ async def journey_css_parity(h) -> dict:
 
 
 JOURNEYS += [journey_css_parity]
+
+# --- Part 1B: sessions, impersonation, invites (journeys_phase1_1b.py) ---------
+
+JOURNEYS += [*JOURNEYS_1B]

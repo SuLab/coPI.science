@@ -104,6 +104,7 @@
         <p class="text-red-800 text-sm">
             {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
             {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
+            {% elif request.query_params.get('error') == 'no_email' %}This account has no email address to verify.
             {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
             {% elif request.query_params.get('error') == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
@@ -121,6 +122,23 @@
             <div>
                 <dt class="text-gray-500">Email</dt>
                 <dd class="font-medium">{{ target_user.email or '—' }}</dd>
+                {% if target_user.email %}
+                <dd class="text-xs mt-1">
+                    {% if target_user.email_verified_at %}
+                    <span class="text-green-700">Verified {{ target_user.email_verified_at.strftime('%b %d, %Y') }}</span>
+                    {% else %}
+                    <span class="text-amber-700">Unverified</span>
+                    {% if effective_user.is_staff and not impersonation_banner %}
+                    <form method="post" action="/manager/pis/{{ target_user.id }}/verify-email" class="inline ml-2">
+                        <button type="submit" class="text-indigo-600 hover:underline">Mark verified</button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
+                </dd>
+                {% endif %}
+                {% if request.query_params.get('email_verified') %}
+                <dd class="text-xs text-green-700 mt-1">Email address marked verified.</dd>
+                {% endif %}
             </div>
             <div>
                 <dt class="text-gray-500">ORCID</dt>

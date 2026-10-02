@@ -49,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import requires_linked_user, roles_requiring_user
 from src.database import get_db
-from src.dependencies import get_review_user, get_staff_user
+from src.dependencies import get_review_user, get_staff_user, refuse_impersonation
 from src.models import (
     USER_ROLE_PI,
     AgentRegistry,
@@ -76,6 +76,7 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
+from src.services.email_verification import mark_email_verified
 from src.services.grant_resolution import GrantRecord, derive_grant_titles
 from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
@@ -134,8 +135,8 @@ def _template_context(
     mute buttons and Edit Profile form, pis.html's Add-PI form and
     slack_bots.html's per-row actions are all gated on
     `effective_user.is_staff` in the template, never on `current_user` —
-    because an admin CAN impersonate a reviewer (the impersonate cookie
-    carries no role restriction), and under impersonation this dict's
+    because an admin CAN impersonate a reviewer (impersonation carries no
+    role restriction), and under impersonation this dict's
     `current_user` is swapped back to the real admin. A `current_user.is_staff`
     gate would therefore render write forms for an admin impersonating a
     reviewer that then 403 on submission. `effective_user` (base.html's
@@ -385,6 +386,28 @@ async def manager_unmute_pi(
     user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
     return await _manager_set_mute(user_id, db, current_user, muted=False)
+
+
+@router.post("/pis/{user_id}/verify-email")
+async def manager_verify_pi_email(
+    user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Mark a PI's email address verified (spec 2026-10-01 §6.6).
+
+    PI targets only: staff and reviewer addresses are verified by an admin on
+    /admin/users/{id}. Refused under impersonation, so the audit event names the
+    staff member who actually vouched for the address — one of the few manager
+    controls hidden while impersonating.
+    """
+    refuse_impersonation(current_user, "Email verification is disabled while impersonating.")
+    target = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if target is None or target.user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+    error = await mark_email_verified(db, target=target, actor=current_user)
+    if error:
+        return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
+    logger.info("Staff user %s verified the email address of PI %s", current_user.id, user_id)
+    return RedirectResponse(url=f"/manager/pis/{user_id}?email_verified=1", status_code=302)
 
 
 async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid.UUID) -> None:
