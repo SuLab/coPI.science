@@ -41,7 +41,7 @@
                 <dt class="text-gray-500">ORCID</dt>
                 <dd>
                     <a href="https://orcid.org/{{ target_user.orcid }}" target="_blank"
-                       class="text-green-600 hover:underline font-medium">{{ target_user.orcid }}</a>
+                       class="text-green-700 hover:underline font-medium">{{ target_user.orcid }}</a>
                 </dd>
             </div>
             <div>
@@ -84,7 +84,7 @@
         </p>
         {% if target_user.id != current_user.id %}
         <form method="POST" action="/admin/users/{{ target_user.id }}/role" class="flex gap-2 items-center">
-            <select name="user_role" class="border border-gray-300 rounded px-3 py-2 text-sm">
+            <select name="user_role" aria-label="Role for {{ target_user.name }}" class="border border-gray-300 rounded px-3 py-2 text-sm">
                 {% for role in valid_user_roles %}
                 <option value="{{ role }}" {% if target_user.user_role == role %}selected{% endif %}>{{ role }}</option>
                 {% endfor %}
@@ -95,7 +95,7 @@
             </button>
         </form>
         {% else %}
-        <p class="text-sm text-gray-400">You cannot change your own role.</p>
+        <p class="text-sm text-gray-600">You cannot change your own role.</p>
         {% endif %}
     </div>
 
@@ -104,7 +104,7 @@
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div class="flex items-center justify-between mb-4">
             <h2 class="font-semibold text-gray-800">Research Profile</h2>
-            <span class="text-xs text-gray-400">Version {{ profile.profile_version }}</span>
+            <span class="text-xs text-gray-600">Version {{ profile.profile_version }}</span>
         </div>
         {% if profile.research_summary %}
         <p class="text-sm text-gray-700 mb-4">{{ profile.research_summary }}</p>
@@ -150,10 +150,10 @@
         </h2>
         {% if pub_scope and pub_scope.scoped %}
         <p class="text-xs text-gray-500 mb-4">
-            {% if pub_scope.undated_excluded %}<span class="text-amber-600" title="Rows with no recorded year cannot be proven in-tenure, so they are excluded rather than counted either way">{{ pub_scope.undated_excluded }} undated (excluded)</span>{% endif %}
+            {% if pub_scope.undated_excluded %}<span class="text-amber-700" title="Rows with no recorded year cannot be proven in-tenure, so they are excluded rather than counted either way">{{ pub_scope.undated_excluded }} undated (excluded)</span>{% endif %}
         </p>
         {% elif pub_scope %}
-        <p class="text-xs text-amber-600 mb-4">
+        <p class="text-xs text-amber-700 mb-4">
             No JHU tenure start recorded — showing the full career.
             <a href="/manager/pis/{{ target_user.id }}" class="underline">Set it in Edit Profile</a>.
         </p>
@@ -173,9 +173,9 @@
                 <div class="flex gap-2 mt-1">
                     {% if pub.pmid %}
                     <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
-                       class="text-xs text-blue-500 hover:underline">PubMed</a>
+                       class="text-xs text-blue-600 hover:underline">PubMed</a>
                     {% endif %}
-                    {% if pub.pmcid %}<span class="text-xs text-gray-400">PMC: {{ pub.pmcid }}</span>{% endif %}
+                    {% if pub.pmcid %}<span class="text-xs text-gray-600">PMC: {{ pub.pmcid }}</span>{% endif %}
                 </div>
             </div>
             {% endfor %}
@@ -225,8 +225,8 @@
                 <tr>
                     <td class="py-2 text-gray-700">{{ job.type | replace('_', ' ') | title }}</td>
                     <td class="py-2">
-                        {% set sc = {'pending': 'text-yellow-600', 'processing': 'text-blue-600',
-                            'completed': 'text-green-600', 'failed': 'text-red-600', 'dead': 'text-gray-400'} %}
+                        {% set sc = {'pending': 'text-yellow-700', 'processing': 'text-blue-600',
+                            'completed': 'text-green-700', 'failed': 'text-red-600', 'dead': 'text-gray-600'} %}
                         <span class="{{ sc.get(job.status, '') }} font-medium">{{ job.status | capitalize }}</span>
                     </td>
                     <td class="py-2 text-gray-500">{{ job.attempts }}/{{ job.max_attempts }}</td>

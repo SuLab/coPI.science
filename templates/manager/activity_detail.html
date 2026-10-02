@@ -10,7 +10,7 @@
         </div>
         <div class="text-right">
             <p class="text-sm text-gray-500"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d, %Y %H:%M') }}</span></p>
-            {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-600', 'stopped': 'text-gray-500'} %}
+            {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-700', 'stopped': 'text-gray-500'} %}
             <span class="text-sm font-medium {{ sc.get(run.status, '') }}">{{ run.status | capitalize }}</span>
         </div>
     </div>

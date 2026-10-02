@@ -727,7 +727,7 @@ async def test_the_page_uses_the_readability_scale_throughout(client, db_session
     await db_session.commit()
     html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     # Bounded to the #sim-body content itself: base.html's site-wide footer
-    # (outside this div) legitimately carries text-gray-400 and is not part
+    # (outside this div) carries its own muted text class and is not part
     # of the chart panel's readability contract.
     page = html[html.index('id="sim-body"'):html.index("<!-- #sim-body -->")]
     for banned in ("text-gray-400", "text-gray-500", "bg-gray-400", "uppercase"):

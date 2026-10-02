@@ -44,7 +44,7 @@
         {% if job and job_status == 'pending' and job.attempts > 0 %}
         <p class="text-sm text-amber-700 mt-4">This is retrying after a temporary error (attempt {{ job.attempts + 1 }} of {{ job.max_attempts }}).</p>
         {% endif %}
-        <p class="text-sm text-gray-400 mt-4">This page will refresh automatically...</p>
+        <p class="text-sm text-gray-600 mt-4">This page will refresh automatically...</p>
     </div>
     <script nonce="{{ request.state.csp_nonce }}">
         setTimeout(function() { location.reload(); }, 5000);
@@ -53,7 +53,7 @@
     {% elif job_status == 'failed' or job_status == 'dead' %}
     <!-- Pipeline failed, or dead after its last retry -->
     <div class="bg-white rounded-xl shadow-sm border border-red-200 p-8 text-center">
-        <div class="text-red-500 text-4xl mb-4">⚠️</div>
+        <div class="text-red-600 text-4xl mb-4">⚠️</div>
         <h2 class="text-xl font-semibold text-gray-800 mb-2">Profile Generation Failed</h2>
         <p class="text-gray-600 mb-4">We encountered an error generating your profile. Please try again.</p>
         <form action="/onboarding/retry" method="post" class="inline">
@@ -69,7 +69,7 @@
         <div class="flex items-center justify-between mb-4">
             <h2 class="text-lg font-semibold text-gray-800">Your Generated Profile</h2>
             {% if profile.profile_generated_at %}
-            <span class="text-xs text-gray-400">Generated {{ profile.profile_generated_at.strftime('%b %d, %Y') }}</span>
+            <span class="text-xs text-gray-600">Generated {{ profile.profile_generated_at.strftime('%b %d, %Y') }}</span>
             {% endif %}
         </div>
         <p class="text-sm text-gray-500 mb-6">
@@ -82,20 +82,20 @@
         <input type="hidden" name="profile_version" value="{{ profile.profile_version if profile else '' }}">
             <!-- Email (required) -->
             <div class="mb-6">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Email <span class="text-red-500">*</span></label>
-                <input type="email" name="email" required value="{{ current_user.email or '' }}"
+                <label for="onboarding-email" class="block text-sm font-medium text-gray-700 mb-2">Email <span class="text-red-600">*</span></label>
+                <input type="email" name="email" id="onboarding-email" required value="{{ current_user.email or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                        placeholder="you@institution.edu">
-                <p class="text-xs text-gray-400 mt-1">Required. Where CoPI sends collaboration proposals and notifications.</p>
+                <p class="text-xs text-gray-600 mt-1">Required. Where CoPI sends collaboration proposals and notifications.</p>
             </div>
 
             <!-- Research Summary -->
             <div class="mb-6">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Research Summary</label>
-                <textarea name="research_summary" rows="6"
+                <label for="onboarding-summary" class="block text-sm font-medium text-gray-700 mb-2">Research Summary</label>
+                <textarea name="research_summary" id="onboarding-summary" rows="6"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                           placeholder="150-250 word narrative of your research">{{ profile.research_summary or '' }}</textarea>
-                <p class="text-xs text-gray-400 mt-1">150-250 words. Connects your research themes in narrative form.</p>
+                <p class="text-xs text-gray-600 mt-1">150-250 words. Connects your research themes in narrative form.</p>
             </div>
 
             {{ profile_tag_fields(profile, "mb-6") }}
@@ -109,12 +109,12 @@
                     <div class="py-1 border-b border-gray-100 last:border-0">{{ title }}</div>
                     {% endfor %}
                 </div>
-                <p class="text-xs text-gray-400 mt-1">From your ORCID profile. Update at <a href="https://orcid.org" target="_blank" class="text-indigo-500">orcid.org</a>.</p>
+                <p class="text-xs text-gray-600 mt-1">From your ORCID profile. Update at <a href="https://orcid.org" target="_blank" class="text-indigo-600">orcid.org</a>.</p>
             </div>
             {% endif %}
 
             {% if profile.profile_version and profile.profile_version > 0 %}
-            <p class="text-xs text-gray-400 mb-4">Profile version {{ profile.profile_version }}</p>
+            <p class="text-xs text-gray-600 mb-4">Profile version {{ profile.profile_version }}</p>
             {% endif %}
 
             <div class="flex gap-3">

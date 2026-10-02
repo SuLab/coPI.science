@@ -214,13 +214,13 @@
             </label>
             {% endif %}
             <div>
-                <label class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
-                <input type="number" name="max_runtime" value="0" min="0"
+                <label for="start-max-runtime" class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
+                <input type="number" name="max_runtime" id="start-max-runtime" value="0" min="0"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
-                <input type="number" name="max_proposals" value="0" min="0"
+                <label for="start-max-proposals" class="block text-sm font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
+                <input type="number" name="max_proposals" id="start-max-proposals" value="0" min="0"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
             <button type="submit"
@@ -287,8 +287,8 @@
     <form action="/admin/simulation/announce-settings" method="post" class="space-y-3">
         <div class="flex items-end gap-3">
             <div class="flex-1">
-                <label class="block text-sm font-medium text-gray-600 mb-1">Channels</label>
-                <input type="text" name="channels" value="{{ channels_value }}"
+                <label for="announce-channels" class="block text-sm font-medium text-gray-600 mb-1">Channels</label>
+                <input type="text" name="channels" id="announce-channels" value="{{ channels_value }}"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-full">
             </div>
             <button type="submit"
@@ -318,7 +318,7 @@
         {{ '{pi_prompts_hash}' }}, {{ '{rubric_version}' }}, {{ '{rubric_hash}' }}.
     </p>
     <form action="/admin/simulation/announce-template" method="post" class="space-y-3"{% if template_error %} data-sim-keep{% endif %}>
-        <textarea name="body" rows="10"
+        <textarea name="body" aria-label="Run-start announcement template" rows="10"
                   class="border border-gray-300 rounded px-3 py-2 text-base w-full font-mono">{{ template_value }}</textarea>
         <input type="hidden" name="reset" value="false">
         <button type="submit"
@@ -405,7 +405,7 @@
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
     <form method="get" action="/admin/simulation" class="flex items-center gap-3">
-        <select name="run" data-autosubmit
+        <select name="run" aria-label="Simulation run" data-autosubmit
                 class="border border-gray-300 rounded px-2 py-1 text-base">
             {% for opt in run_options %}
             <option value="{{ opt.id }}" {% if opt.is_selected %}selected{% endif %}>

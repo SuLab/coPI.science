@@ -89,7 +89,7 @@
                        reason the Slack note does: it means "meets the bar for
                        THIS STAGE", not "no concerns". #}
                     {% set panel_glyph = {'blocking': '&#9940;', 'gap': '&#9888;', 'adequate': '&#9745;', 'caution': '&#9888;', 'clear': '&#10003;'} %}
-                    {% set panel_color = {'blocking': 'text-red-600', 'gap': 'text-amber-600', 'adequate': 'text-green-600', 'caution': 'text-amber-600', 'clear': 'text-green-600'} %}
+                    {% set panel_color = {'blocking': 'text-red-600', 'gap': 'text-amber-700', 'adequate': 'text-green-700', 'caution': 'text-amber-700', 'clear': 'text-green-700'} %}
                     <div class="thread-panel text-xs text-gray-500 mt-0.5 whitespace-nowrap"
                          title="{{ panel | length }} specialist consult{{ '' if panel | length == 1 else 's' }} recorded for this thread">
                         panel:
@@ -100,10 +100,10 @@
                            not borrow the amber `gap` glyph. Its own glyph and
                            its own colour, so a row of domains never overstates
                            what the panel said. #}
-                        <span class="panel-cut-off text-gray-400"
+                        <span class="panel-cut-off text-gray-600"
                               title="{{ entry.domain }}: the specialist's reply was cut off before it finished, so it has no signal and does not count toward the specialist floor.">{{ entry.domain }}&hellip;</span>{{ "" if loop.last else " " }}
                         {%- else %}
-                        <span class="{{ panel_color.get(entry.verdict_signal, 'text-gray-400') }}">{{ entry.domain }}{{ panel_glyph.get(entry.verdict_signal, '&bull;') | safe }}</span>{{ "" if loop.last else " " }}
+                        <span class="{{ panel_color.get(entry.verdict_signal, 'text-gray-600') }}">{{ entry.domain }}{{ panel_glyph.get(entry.verdict_signal, '&bull;') | safe }}</span>{{ "" if loop.last else " " }}
                         {%- endif %}
                         {%- endfor %}
                     </div>
@@ -127,7 +127,7 @@
                 <td class="px-4 py-3 text-sm text-gray-500">
                     {% if t.decision %}
                         {{ t.decision.outcome | replace('_', ' ') | capitalize }}
-                        <span class="text-xs text-gray-400"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
+                        <span class="text-xs text-gray-600"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
                     {% else %}
                         —
                     {% endif %}
@@ -185,12 +185,12 @@
                                    "no concerns" — every `clear` opinion ever
                                    emitted carried 4-9 of them — so the label
                                    read alone overstates itself. #}
-                                <span class="panel-concern-count text-xs text-gray-400"
+                                <span class="panel-concern-count text-xs text-gray-600"
                                       title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
                                     {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
                                 </span>
                                 {% if c.confidence %}
-                                <span class="text-xs text-gray-400">confidence: {{ c.confidence }}</span>
+                                <span class="text-xs text-gray-600">confidence: {{ c.confidence }}</span>
                                 {% endif %}
                                 {% if c.read_state and c.read_state != 'parsed' %}
                                 {# `read_state` is recorded from 0038 on; NULL
@@ -204,7 +204,7 @@
                                 {% endif %}
                                 {% endif %}
                                 {% if c.created_at %}
-                                <span class="text-xs text-gray-400 ml-auto"><span data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="time">{{ c.created_at.strftime('%H:%M') }}</span></span>
+                                <span class="text-xs text-gray-600 ml-auto"><span data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="time">{{ c.created_at.strftime('%H:%M') }}</span></span>
                                 {% endif %}
                             </div>
                             {% if c.reply_truncated %}
@@ -243,7 +243,7 @@
                                    detail page" pointed at a page that does not
                                    exist for them. #}
                                 {% if c.raw_opinion_truncated %}
-                                <p class="text-xs text-gray-400">Clipped for display here; the reply is stored in full on the consult record (<span class="font-mono">specialist_consults.raw_opinion</span>).</p>
+                                <p class="text-xs text-gray-600">Clipped for display here; the reply is stored in full on the consult record (<span class="font-mono">specialist_consults.raw_opinion</span>).</p>
                                 {% endif %}
                             </details>
                             {% endif %}
@@ -256,14 +256,14 @@
             {% endif %}
             {% else %}
             <tr>
-                <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No discussions found</td>
+                <td colspan="7" class="px-4 py-8 text-center text-gray-600 text-sm">No discussions found</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<div class="mt-4 text-sm text-gray-400">
+<div class="mt-4 text-sm text-gray-600">
     Showing {{ threads | length }} thread{{ 's' if threads | length != 1 }}
     {% if channel_filter or status_filter or agent_filter %}(filtered){% endif %}
     &bull; Total threads: {{ counts.values() | sum }}

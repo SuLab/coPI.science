@@ -19,10 +19,10 @@
         <form method="post" action="/reviews/suggestions/generate" class="flex flex-col items-end">
             <button type="submit" {% if eligible_count == 0 %}disabled{% endif %}
                     class="text-sm px-3 py-1.5 rounded-md font-medium
-                        {% if eligible_count == 0 %}bg-gray-100 text-gray-400 cursor-not-allowed{% else %}bg-indigo-600 text-white hover:bg-indigo-700{% endif %}">
+                        {% if eligible_count == 0 %}bg-gray-100 text-gray-600 cursor-not-allowed{% else %}bg-indigo-600 text-white hover:bg-indigo-700{% endif %}">
                 Generate suggestions from current reviews
             </button>
-            <span class="text-xs text-gray-400 mt-1">
+            <span class="text-xs text-gray-600 mt-1">
                 {% if eligible_count == 0 %}
                     Nothing to analyse
                 {% else %}
@@ -59,7 +59,7 @@
     suggestion. Nothing here is ever applied to a prompt file automatically —
     the status below is staff-set attribution only.
 </p>
-<p class="text-xs text-gray-400 mb-4">
+<p class="text-xs text-gray-600 mb-4">
     {% if total_count > suggestions_limit %}
         Displaying the top {{ suggestions_limit }} of {{ total_count }} matching
         suggestions, newest first; the rest sit further down that order. Narrow by
@@ -94,7 +94,7 @@
                     <a class="underline text-indigo-600 hover:text-indigo-800"
                        href="/manager/prompt-suggestions/{{ s.id }}">{{ s.subject_label or '—' }}</a>
                     {% if not s.assessment_id %}
-                    <span class="text-gray-400 italic">(assessment no longer available)</span>
+                    <span class="text-gray-600 italic">(assessment no longer available)</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 font-mono text-xs">{{ s.target }}</td>
@@ -107,7 +107,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="4" class="px-4 py-8 text-center text-gray-400 text-sm">No suggestions found</td>
+                <td colspan="4" class="px-4 py-8 text-center text-gray-600 text-sm">No suggestions found</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -24,7 +24,7 @@
         <h1 class="text-2xl font-bold text-gray-900">
             {{ suggestion.subject_label or '—' }}
             {% if not suggestion.assessment_id %}
-            <span class="text-base font-normal text-gray-400 italic">(assessment no longer available)</span>
+            <span class="text-base font-normal text-gray-600 italic">(assessment no longer available)</span>
             {% endif %}
         </h1>
         <p class="text-xs text-gray-500 mt-1">
@@ -32,8 +32,8 @@
             &middot; Model: {{ suggestion.model or '—' }}
             &middot; Created <span data-utc="{{ suggestion.created_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
             {% if suggestion.rubric_version %}&middot; Rubric {{ suggestion.rubric_version }}{% endif %}
-            {% if not suggestion.transcript_available %}&middot; <span class="text-amber-600">no interview transcript</span>{% endif %}
-            {% if suggestion.input_truncated %}&middot; <span class="text-amber-600">input truncated</span>{% endif %}
+            {% if not suggestion.transcript_available %}&middot; <span class="text-amber-700">no interview transcript</span>{% endif %}
+            {% if suggestion.input_truncated %}&middot; <span class="text-amber-700">input truncated</span>{% endif %}
         </p>
     </div>
     {% set status_colors = {
@@ -49,9 +49,9 @@
 
 <!-- Status action -->
 <form method="post" action="/reviews/suggestions/{{ suggestion.id }}/status" class="mb-6 flex items-center gap-2">
-    <button type="submit" name="action" value="open" class="text-xs font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Reopen</button>
+    <button type="submit" name="action" value="open" class="text-xs font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Reopen</button>
     <button type="submit" name="action" value="dismissed" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Dismiss</button>
-    <button type="submit" name="action" value="implemented" class="text-xs font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Mark Implemented</button>
+    <button type="submit" name="action" value="implemented" class="text-xs font-medium bg-green-700 text-white px-2 py-1 rounded hover:bg-green-800">Mark Implemented</button>
     {% if suggestion.status_set_by_name %}
     <span class="text-xs text-gray-500">
         last set to "{{ suggestion.status }}" by {{ suggestion.status_set_by_name }}
@@ -68,7 +68,7 @@
     <div class="text-sm text-gray-700 proposal-md" data-markdown="{{ suggestion.suggestion | e }}"></div>
 
     <details class="mt-4">
-        <summary class="cursor-pointer text-xs text-gray-400">Raw model response</summary>
+        <summary class="cursor-pointer text-xs text-gray-600">Raw model response</summary>
         <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ suggestion.raw_response }}</pre>
     </details>
 </div>
@@ -102,7 +102,7 @@
         </tbody>
     </table>
     {% else %}
-    <p class="text-sm text-gray-400">No feedback recorded.</p>
+    <p class="text-sm text-gray-600">No feedback recorded.</p>
     {% endif %}
 </div>
 
@@ -125,7 +125,7 @@
         {% endfor %}
     </ul>
     {% else %}
-    <p class="text-sm text-gray-400">No prompt files recorded.</p>
+    <p class="text-sm text-gray-600">No prompt files recorded.</p>
     {% endif %}
 </div>
 {% endblock %}

@@ -42,7 +42,7 @@
 <!-- Filters -->
 <div data-filter-nav="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
+        <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
         <select data-filter-param="status_filter" id="status-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
@@ -53,7 +53,7 @@
         </select>
     </div>
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
+        <label for="claimed-filter" class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
         <select data-filter-param="claimed_filter" id="claimed-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
@@ -97,7 +97,7 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
-                       class="text-xs text-green-600 hover:underline">{{ item.user.orcid }}</a>
+                       class="text-xs text-green-700 hover:underline">{{ item.user.orcid }}</a>
                 </td>
                 <td class="px-4 py-3">
                     {% set status_colors = {
@@ -113,13 +113,13 @@
                 </td>
                 <td class="px-4 py-3 hidden md:table-cell">
                     {% set agent_colors = {
-                        'not_requested': 'bg-gray-100 text-gray-500',
+                        'not_requested': 'bg-gray-100 text-gray-600',
                         'awaiting_token': 'bg-amber-100 text-amber-700',
                         'active': 'bg-green-100 text-green-700',
                         'suspended': 'bg-red-100 text-red-700'
                     } %}
                     <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-500') }}">
+                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-600') }}">
                         {{ item.agent_status | replace('_', ' ') | title }}
                     </span>
                 </td>
@@ -127,11 +127,11 @@
                     {% if item.pub_scope and item.pub_scope.scoped %}
                         {{ item.pub_scope.in_tenure }}
                         {% if item.pub_scope.undated_excluded %}
-                        <span class="text-xs text-amber-600" title="Undated rows excluded from the tenure count">·{{ item.pub_scope.undated_excluded }} undated</span>
+                        <span class="text-xs text-amber-700" title="Undated rows excluded from the tenure count">·{{ item.pub_scope.undated_excluded }} undated</span>
                         {% endif %}
                     {% else %}
                         {{ item.pub_count }}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500" title="No JHU tenure start recorded — showing full career">full career</span>
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600" title="No JHU tenure start recorded — showing full career">full career</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
@@ -142,9 +142,9 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     {% if item.user.claimed_at %}
-                    <span class="text-xs text-green-600">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
+                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
                     {% else %}
-                    <span class="text-xs text-gray-400">No</span>
+                    <span class="text-xs text-gray-600">No</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
@@ -154,13 +154,13 @@
                     {% if item.user.last_login_at %}
                         {{ item.user.last_login_at.strftime('%b %d, %Y') }}
                     {% else %}
-                        <span class="text-gray-400">—</span>
+                        <span class="text-gray-600">—</span>
                     {% endif %}
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="11" class="px-4 py-8 text-center text-gray-400 text-sm">No PIs found</td>
+                <td colspan="11" class="px-4 py-8 text-center text-gray-600 text-sm">No PIs found</td>
             </tr>
             {% endfor %}
         </tbody>

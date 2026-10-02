@@ -13,17 +13,17 @@
         {% if target_user.agent and target_user.agent.status == 'inactive' %}
             <div class="text-right">
                 <form method="post" action="/manager/pis/{{ target_user.id }}/unmute" class="inline">
-                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-700 text-white hover:opacity-90">
                         Unmute
                     </button>
                 </form>
                 {% if target_user.agent.muted_at %}
-                    <p class="text-xs text-gray-400 mt-1">Muted {{ target_user.agent.muted_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
+                    <p class="text-xs text-gray-600 mt-1">Muted {{ target_user.agent.muted_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
                 {% endif %}
             </div>
         {% elif target_user.agent and target_user.agent.status == 'active' %}
             <form method="post" action="/manager/pis/{{ target_user.id }}/mute" class="inline">
-                <button type="submit" class="text-sm px-3 py-1 rounded bg-yellow-600 text-white hover:opacity-90">
+                <button type="submit" class="text-sm px-3 py-1 rounded bg-yellow-700 text-white hover:opacity-90">
                     Mute
                 </button>
             </form>
@@ -53,12 +53,12 @@
                 </form>
                 {% else %}
                 <form method="post" action="/manager/pis/{{ target_user.id }}/activate" class="mt-1">
-                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">Activate agent</button>
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-700 text-white hover:opacity-90">Activate agent</button>
                 </form>
                 {% endif %}
             </div>
         {% elif target_user.agent %}
-            <span class="text-xs text-gray-400">
+            <span class="text-xs text-gray-600">
                 Agent is {{ target_user.agent.status }} — mute is only available for an active or already-muted agent.
             </span>
         {% endif %}
@@ -141,7 +141,7 @@
                 <dt class="text-gray-500">ORCID</dt>
                 <dd>
                     <a href="https://orcid.org/{{ target_user.orcid }}" target="_blank"
-                       class="text-green-600 hover:underline font-medium">{{ target_user.orcid }}</a>
+                       class="text-green-700 hover:underline font-medium">{{ target_user.orcid }}</a>
                 </dd>
             </div>
             <div>
@@ -174,37 +174,37 @@
         <h2 class="text-lg font-semibold text-gray-800 mb-4">Edit Profile</h2>
         <div class="grid grid-cols-1 gap-4 mb-5">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                <input type="text" name="name" value="{{ target_user.name }}"
+                <label for="pi-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                <input type="text" name="name" id="pi-name" value="{{ target_user.name }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input type="email" name="email" value="{{ target_user.email or '' }}"
+                <label for="pi-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input type="email" name="email" id="pi-email" value="{{ target_user.email or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
-                <input type="text" name="institution" value="{{ target_user.institution or '' }}"
+                <label for="pi-institution" class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
+                <input type="text" name="institution" id="pi-institution" value="{{ target_user.institution or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Department</label>
-                <input type="text" name="department" value="{{ target_user.department or '' }}"
+                <label for="pi-department" class="block text-sm font-medium text-gray-700 mb-1">Department</label>
+                <input type="text" name="department" id="pi-department" value="{{ target_user.department or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Research Summary</label>
-                <textarea name="research_summary" rows="5"
+                <label for="pi-summary" class="block text-sm font-medium text-gray-700 mb-1">Research Summary</label>
+                <textarea name="research_summary" id="pi-summary" rows="5"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">{{ profile.research_summary if profile else '' }}</textarea>
             </div>
             {{ profile_tag_fields(profile, "") }}
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1" id="jhu_tenure_start_field">JHU tenure start (year)</label>
-                <input type="text" name="jhu_tenure_start" value="{{ tenure_start or '' }}"
+                <label for="pi-tenure" class="block text-sm font-medium text-gray-700 mb-1" id="jhu_tenure_start_field">JHU tenure start (year)</label>
+                <input type="text" name="jhu_tenure_start" id="pi-tenure" value="{{ tenure_start or '' }}"
                        placeholder="e.g. 2016"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                <p class="text-xs text-gray-400 mt-1">
+                <p class="text-xs text-gray-600 mt-1">
                     Publications from this year onward ground the profile and the agent's
                     exported publication list (JHU scope). Auto-derived from ORCID employment
                     or the earliest Hopkins-affiliated paper; correct it here if wrong.
@@ -244,7 +244,7 @@
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div class="flex items-center justify-between mb-4">
             <h2 class="font-semibold text-gray-800">Research Profile</h2>
-            <span class="text-xs text-gray-400">Version {{ profile.profile_version }}</span>
+            <span class="text-xs text-gray-600">Version {{ profile.profile_version }}</span>
         </div>
         {% if profile.research_summary %}
         <p class="text-sm text-gray-700 mb-4">{{ profile.research_summary }}</p>
@@ -297,7 +297,7 @@
           </div>
           {% if not g.vetoed_at and effective_user.is_staff %}
           <form method="post" action="/manager/pis/{{ target_user.id }}/grants/{{ g.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI</button></form>
-          {% elif g.vetoed_at %}<span class="text-xs text-gray-400">vetoed</span>{% endif %}
+          {% elif g.vetoed_at %}<span class="text-xs text-gray-600">vetoed</span>{% endif %}
         </li>
       {% endfor %}
       </ul>
@@ -322,7 +322,7 @@
             <div><span class="font-medium">{{ e.company_name or '—' }}</span> <span class="text-xs text-gray-500">{{ e.kind.replace('_',' ') }} · {{ e.company_class }} · {{ e.year }} · PI role {{ e.pi_role or '—' }} · {{ e.source }}</span>
               {% if e.evidence.span %}<div class="text-xs text-gray-600 italic">"{{ e.evidence.span }}"</div>{% endif %}
               {% if e.evidence.title %}<div class="text-xs text-gray-600">{{ e.evidence.title }}</div>{% endif %}</div>
-            {% if not e.vetoed_at and effective_user.is_staff %}<form method="post" action="/manager/pis/{{ target_user.id }}/industry/{{ e.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI / not industry</button></form>{% elif e.vetoed_at %}<span class="text-xs text-gray-400">vetoed</span>{% endif %}
+            {% if not e.vetoed_at and effective_user.is_staff %}<form method="post" action="/manager/pis/{{ target_user.id }}/industry/{{ e.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI / not industry</button></form>{% elif e.vetoed_at %}<span class="text-xs text-gray-600">vetoed</span>{% endif %}
           </li>
         {% endfor %}
         </ul></details>
@@ -340,10 +340,10 @@
         </h2>
         {% if pub_scope and pub_scope.scoped %}
         <p class="text-xs text-gray-500 mb-4">
-            {% if pub_scope.undated_excluded %}<span class="text-amber-600" title="Rows with no recorded year cannot be proven in-tenure, so they are excluded rather than counted either way">{{ pub_scope.undated_excluded }} undated (excluded)</span>{% endif %}
+            {% if pub_scope.undated_excluded %}<span class="text-amber-700" title="Rows with no recorded year cannot be proven in-tenure, so they are excluded rather than counted either way">{{ pub_scope.undated_excluded }} undated (excluded)</span>{% endif %}
         </p>
         {% elif pub_scope %}
-        <p class="text-xs text-amber-600 mb-4">
+        <p class="text-xs text-amber-700 mb-4">
             No JHU tenure start recorded — showing the full career.
             <a href="#jhu_tenure_start_field" class="underline">Set it in Edit Profile</a>.
         </p>
@@ -363,9 +363,9 @@
                 <div class="flex gap-2 mt-1">
                     {% if pub.pmid %}
                     <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
-                       class="text-xs text-blue-500 hover:underline">PubMed</a>
+                       class="text-xs text-blue-600 hover:underline">PubMed</a>
                     {% endif %}
-                    {% if pub.pmcid %}<span class="text-xs text-gray-400">PMC: {{ pub.pmcid }}</span>{% endif %}
+                    {% if pub.pmcid %}<span class="text-xs text-gray-600">PMC: {{ pub.pmcid }}</span>{% endif %}
                 </div>
             </div>
             {% endfor %}
@@ -392,8 +392,8 @@
                 <tr>
                     <td class="py-2 text-gray-700">{{ job.type | replace('_', ' ') | title }}</td>
                     <td class="py-2">
-                        {% set sc = {'pending': 'text-yellow-600', 'processing': 'text-blue-600',
-                            'completed': 'text-green-600', 'failed': 'text-red-600', 'dead': 'text-gray-400'} %}
+                        {% set sc = {'pending': 'text-yellow-700', 'processing': 'text-blue-600',
+                            'completed': 'text-green-700', 'failed': 'text-red-600', 'dead': 'text-gray-600'} %}
                         <span class="{{ sc.get(job.status, '') }} font-medium">{{ job.status | capitalize }}</span>
                     </td>
                     <td class="py-2 text-gray-500">{{ job.attempts }}/{{ job.max_attempts }}</td>

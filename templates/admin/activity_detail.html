@@ -10,7 +10,7 @@
         </div>
         <div class="text-right">
             <p class="text-sm text-gray-500"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d, %Y %H:%M') }}</span></p>
-            {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-600', 'stopped': 'text-gray-500'} %}
+            {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-700', 'stopped': 'text-gray-500'} %}
             <span class="text-sm font-medium {{ sc.get(run.status, '') }}">{{ run.status | capitalize }}</span>
         </div>
     </div>
@@ -30,7 +30,7 @@
             <label for="confirm-run" class="text-sm text-gray-700">Type <code>{{ short_id }}</code> to confirm</label>
             <input type="text" id="confirm-run" name="confirm_run" required autocomplete="off" size="10"
                    class="border border-gray-300 rounded px-2 py-1 text-sm font-mono">
-            <button type="submit" class="inline-flex items-center px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
+            <button type="submit" class="inline-flex items-center px-4 py-2 bg-amber-700 text-white text-sm font-medium rounded-lg hover:bg-amber-800">
                 Finalize run
             </button>
         </form>

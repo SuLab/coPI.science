@@ -14,7 +14,7 @@
             Your request to create <strong>{{ agent.bot_name }}</strong> has been submitted.
             An admin will review and provision your agent shortly.
         </p>
-        <p class="text-sm text-gray-400">Requested {{ agent.requested_at.strftime('%b %d, %Y at %H:%M') }}</p>
+        <p class="text-sm text-gray-600">Requested {{ agent.requested_at.strftime('%b %d, %Y at %H:%M') }}</p>
     </div>
 
     {% else %}
@@ -35,7 +35,7 @@
             </button>
         </form>
         {% else %}
-        <p class="text-amber-600 text-sm mb-4">
+        <p class="text-amber-700 text-sm mb-4">
             You need a complete research profile before requesting an agent.
         </p>
         <a href="/profile"

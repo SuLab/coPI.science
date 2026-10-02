@@ -116,7 +116,7 @@
                 <span class="font-medium text-gray-700">{% if msg.agent_id %}{{ msg.agent_id }}Bot{% else %}(unknown sender){% endif %}</span>
                 <span>#{{ msg.channel_name }}</span>
                 <span data-utc="{{ msg.created_at.isoformat() }}" data-utc-fmt="short">{{ msg.created_at.strftime('%b %d %H:%M:%S') }}</span>
-                <span class="text-gray-400">({{ msg.phase }})</span>
+                <span class="text-gray-600">({{ msg.phase }})</span>
             </div>
             <p class="text-gray-600 text-xs">{{ msg.message_length }} chars</p>
         </div>

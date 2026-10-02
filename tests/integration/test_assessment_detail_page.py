@@ -1773,7 +1773,7 @@ async def test_the_detail_body_uses_readable_type_sizes(client, db_session, mana
     ).text
     # Scoped to `<main>...</main>`: base.html's footer ("Blackbird
     # Laboratories") is site-wide chrome this task does not own and
-    # legitimately carries its own `text-gray-400`.
+    # carries its own muted text class.
     body = html.split("Assessment detail", 1)[1].split("</main>", 1)[0]
     # Measured after the sweep: 11 `text-xs` remain, all inside `rounded-full`
     # chip spans (the reserved exception). +2 slack.

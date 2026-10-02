@@ -6,15 +6,15 @@
 
 <div class="grid grid-cols-3 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-amber-600">{{ pending | length }}</div>
+        <div class="text-3xl font-bold text-amber-700">{{ pending | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Pending</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">{{ recent_allowed | length }}</div>
+        <div class="text-3xl font-bold text-green-700">{{ recent_allowed | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Recently allowed</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-gray-400">{{ denied | length }}</div>
+        <div class="text-3xl font-bold text-gray-600">{{ denied | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Denied</div>
     </div>
 </div>
@@ -48,7 +48,7 @@
                 <td class="px-4 py-3 text-sm text-gray-500" data-utc="{{ u.created_at.isoformat() }}" data-utc-fmt="short">{{ u.created_at.strftime('%b %d') }}</td>
                 <td class="px-4 py-3 whitespace-nowrap">
                     <form method="POST" action="/admin/access-requests/{{ u.id }}/approve" class="inline">
-                        <button type="submit" class="text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded">Approve</button>
+                        <button type="submit" class="text-sm bg-green-700 hover:bg-green-800 text-white px-3 py-1 rounded">Approve</button>
                     </form>
                     <form method="POST" action="/admin/access-requests/{{ u.id }}/deny" class="inline">
                         <button type="submit" class="text-sm bg-gray-300 hover:bg-gray-400 text-gray-800 px-3 py-1 rounded">Deny</button>
@@ -71,8 +71,8 @@
     </div>
     <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
         <form method="POST" action="/admin/access-allowlist/add" class="flex gap-2">
-            <input type="text" name="orcid" required placeholder="0000-0000-0000-0000" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-48">
-            <input type="text" name="note" placeholder="note (optional)" class="px-3 py-2 border border-gray-300 rounded-md text-sm flex-grow">
+            <input type="text" name="orcid" required placeholder="0000-0000-0000-0000" aria-label="ORCID iD to allow" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-48">
+            <input type="text" name="note" placeholder="note (optional)" aria-label="Note (optional)" class="px-3 py-2 border border-gray-300 rounded-md text-sm flex-grow">
             <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded">Add</button>
         </form>
     </div>

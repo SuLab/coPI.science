@@ -52,10 +52,10 @@
    operator request 2026-09-14) rather than on the card face. Saying so is the
    point of the reworded sentence: a legend for symbols a reader cannot see is
    worse than no legend. #}
-<p class="text-xs text-gray-400 mb-6">
-    Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
+<p class="text-xs text-gray-600 mb-6">
+    Gating: <span class="text-green-700 font-medium">&#9989; met</span> &middot;
     <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
-    <span class="text-blue-500 font-medium">&#10067; unconfirmed</span>
+    <span class="text-blue-600 font-medium">&#10067; unconfirmed</span>
     (the rubric question was never answered — distinct from a gate that failed).
     These glyphs are inside each card's &ldquo;Rubric scores &amp; gating&rdquo;
     disclosure, one click down, alongside that row's per-dimension scores.
@@ -68,7 +68,7 @@
 {% if drops_total %}
 <div class="rounded-xl border border-amber-300 bg-amber-50 p-4 mb-6">
     <div class="flex items-start gap-3">
-        <span class="text-amber-600 text-xl leading-none">&#9888;</span>
+        <span class="text-amber-700 text-xl leading-none">&#9888;</span>
         <div class="text-sm text-amber-900">
             <div class="font-semibold mb-1">
                 {{ drops_total }} verdict{{ '' if drops_total == 1 else 's' }}
@@ -180,13 +180,13 @@
         <div class="text-sm text-gray-500 mt-1">Total</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">
+        <div class="text-3xl font-bold text-green-700">
             {{ assessments | selectattr("recommendation", "equalto", "advance") | list | length }}
         </div>
         <div class="text-sm text-gray-500 mt-1">Advance</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-amber-600">
+        <div class="text-3xl font-bold text-amber-700">
             {{ assessments | selectattr("recommendation", "equalto", "conditional") | list | length }}
         </div>
         <div class="text-sm text-gray-500 mt-1">Conditional</div>
@@ -198,7 +198,7 @@
         <div class="text-sm text-gray-500 mt-1">Route-to-incubation</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-gray-400">
+        <div class="text-3xl font-bold text-gray-600">
             {{ assessments | selectattr("recommendation", "equalto", "pass") | list | length }}
         </div>
         <div class="text-sm text-gray-500 mt-1">Decline</div>
@@ -219,10 +219,10 @@
            and the band line silently drops it, which looks like a data
            change rather than a filter. #}
         {% if review != 'all' %}
-        <span class="ml-1 font-normal text-gray-400">({{ review }} only)</span>
+        <span class="ml-1 font-normal text-gray-600">({{ review }} only)</span>
         {% endif %}
         {% if band_counts %}
-        <span class="ml-2 font-normal text-gray-400">
+        <span class="ml-2 font-normal text-gray-600">
             bands: {% for b, n in band_counts %}{{ b }}&times;{{ n }}{{ ", " if not loop.last }}{% endfor %}
         </span>
         {% endif %}
@@ -237,7 +237,7 @@
     </p>
     {% endif %}
     <table class="mt-3 w-full text-xs">
-        <thead class="text-gray-400 text-left">
+        <thead class="text-gray-600 text-left">
             <tr><th>Dimension</th><th>Weight</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
         </thead>
         <tbody>
@@ -308,7 +308,7 @@
                            re-wrapping: the prompt shows the label bracketed in
                            the Slack body but bare in the sidecar, and
                            "[[High]]" is nobody's label. #}
-                        <span class="text-xs font-normal text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
+                        <span class="text-xs font-normal text-gray-600">[{{ a.confidence.strip("[]") }}]</span>
                     {% endif %}
                 </div>
                 {% if a.headline and a.company_or_project %}
@@ -347,8 +347,8 @@
                         'route-to-incubation': 'bg-teal-100 text-teal-700',
                         'pass': 'bg-gray-100 text-gray-600',
                     } %}
-                    <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
-                {% else %}<span class="text-xs text-gray-400">no recommendation</span>{% endif %}
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-600') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
+                {% else %}<span class="text-xs text-gray-600">no recommendation</span>{% endif %}
             </div>
         </div>
 
@@ -464,9 +464,9 @@
                 (pass ON the deal), and unlabelled it reads as the opposite of
                 what it means. Always visible text, never colour alone. #}
             {%- if a.weighted_score is not none %}
-            <div class="mt-2"><span class="text-xl font-bold {{ band_class(a.band, 600, 400) }}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {{ band_class(a.band, 600, 400) }}">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
+            <div class="mt-2"><span class="text-xl font-bold {{ band_class(a.band, 700, 600) }}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {{ band_class(a.band, 700, 600) }}">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
             {%- else %}
-            <div class="mt-2"><span class="text-xl font-bold text-gray-400">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-400">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
+            <div class="mt-2"><span class="text-xl font-bold text-gray-600">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-600">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
             {%- endif %}
             {%- if a.score_rationale %}
             <div class="assessment-prose max-w-none mt-2">
@@ -490,7 +490,7 @@
                the foot of the pitch box (D7). #}
             {% if a.red_flags %}
                 <span class="text-amber-700 font-medium whitespace-nowrap">{{ a.red_flags | length }} flag{{ '' if a.red_flags | length == 1 else 's' }}</span>
-            {% else %}<span class="text-gray-400">no flags</span>{% endif %}
+            {% else %}<span class="text-gray-600">no flags</span>{% endif %}
 
             {# The panel finding, in the same five states the detail page uses.
                BEING UNBADGED IS A CLAIM, so `verified` and `not_owed` are
@@ -579,7 +579,7 @@
             {%- if a.gating %}
             <span class="mt-2 flex items-center gap-2 flex-wrap text-xs">
                 {%- for key, gate_state in a.gating.items() %}
-                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-gray-600">{% if gate_state == 'met' %}<span class="text-green-600" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ key.replace("_", " ") }}</span>
+                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-gray-600">{% if gate_state == 'met' %}<span class="text-green-700" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-600" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ key.replace("_", " ") }}</span>
                 {%- endfor %}
             </span>
             {%- endif %}

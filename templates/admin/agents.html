@@ -7,19 +7,19 @@
 <!-- Summary cards -->
 <div class="grid grid-cols-4 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-amber-600">{{ pending | length }}</div>
+        <div class="text-3xl font-bold text-amber-700">{{ pending | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Pending</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">{{ active | length }}</div>
+        <div class="text-3xl font-bold text-green-700">{{ active | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Active</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-blue-500">{{ inactive | length }}</div>
+        <div class="text-3xl font-bold text-blue-600">{{ inactive | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Inactive (parked)</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-gray-400">{{ suspended | length }}</div>
+        <div class="text-3xl font-bold text-gray-600">{{ suspended | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Suspended</div>
     </div>
 </div>
@@ -83,7 +83,7 @@
                         </a>
                     {% else %}
                         <form method="POST" action="/admin/agents/{{ a.id }}/link" class="flex gap-1">
-                            <select name="user_id" class="text-xs border-gray-300 rounded-md py-1">
+                            <select name="user_id" aria-label="Link {{ a.bot_name }} to a user" class="text-xs border-gray-300 rounded-md py-1">
                                 <option value="">-- Link user --</option>
                                 {% for u in all_users %}
                                 <option value="{{ u.id }}">{{ u.name }}</option>
@@ -95,11 +95,11 @@
                 </td>
                 <td class="px-4 py-3 text-sm">
                     {% if a.slack_bot_token %}
-                        <span class="text-green-500 text-xs">DB token</span>
+                        <span class="text-green-700 text-xs">DB token</span>
                     {% elif a.agent_id in env_token_agents %}
-                        <span class="text-green-500 text-xs">.env token</span>
+                        <span class="text-green-700 text-xs">.env token</span>
                     {% else %}
-                        <span class="text-gray-400 text-xs">No tokens</span>
+                        <span class="text-gray-600 text-xs">No tokens</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3">
@@ -109,7 +109,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="5" class="px-4 py-8 text-center text-gray-400 text-sm">No active agents</td>
+                <td colspan="5" class="px-4 py-8 text-center text-gray-600 text-sm">No active agents</td>
             </tr>
             {% endfor %}
         </tbody>

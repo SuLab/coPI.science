@@ -13,7 +13,7 @@ BUILD = (ROOT / "scripts" / "build_css.sh").read_text(encoding="utf-8")
 CSS_PATH = ROOT / "static" / "css" / "app.css"
 
 #: The (strong, muted) shapes band_class is called with in templates (R5).
-BAND_CALLS = {(600, 400), (700, 600)}
+BAND_CALLS = {(700, 600)}
 
 #: Template sites that splice a value into a utility name (R1-R4). A new site must
 #: add its classes to tailwind.config.js's safelist and its entry here.
@@ -97,12 +97,12 @@ def test_discussion_status_colours_are_safelisted():
     )
     wanted = set()
     for c in colours:
-        wanted |= {f"hover:border-{c}-300", f"ring-{c}-400", f"text-{c}-600", f"bg-{c}-100", f"text-{c}-700"}
+        wanted |= {f"hover:border-{c}-300", f"ring-{c}-400", f"bg-{c}-100", f"text-{c}-700"}
     assert wanted <= _safelist(), sorted(wanted - _safelist())
 
 
 def test_job_status_colours_are_safelisted():
-    wanted = {f"text-{c}-600" for c in _job_colours()}
+    wanted = {f"text-{c}-700" for c in _job_colours()}
     assert wanted
     assert wanted <= _safelist(), sorted(wanted - _safelist())
 

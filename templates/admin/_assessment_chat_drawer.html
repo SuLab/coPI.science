@@ -18,7 +18,7 @@
    Open/closed is the `hidden`/`flex` class pair, not the `hidden` attribute:
    Tailwind's `flex` utility would override the attribute. Type sizes follow the
    page's readability rule (test_the_detail_body_uses_readable_type_sizes): no
-   `text-xs` outside chips and no `text-gray-400`/`text-gray-500` anywhere in <main>. #}
+   `text-xs` outside chips and no `text-gray-600`/`text-gray-500` anywhere in <main>. #}
 {# The one opener for the drawer (2026-09-28). It lives HERE, not in the page
    body, because this partial is included only under `chat_available` — so the
    kill switch and the impersonation refusal gate the control for free, and one
@@ -28,7 +28,7 @@
      open panel.
    * The accessible name is the sentence the old nav button carried, so nothing
      a screen reader hears changed when the visible label went away.
-   * No `text-xs`, no `text-gray-400/500`: this renders inside <main> and
+   * No `text-xs`, no `text-gray-600/500`: this renders inside <main> and
      test_the_detail_body_uses_readable_type_sizes counts both. #}
 <button type="button" data-chat-open data-chat-bubble
         aria-controls="assessment-chat" aria-expanded="false"

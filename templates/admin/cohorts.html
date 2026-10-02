@@ -34,7 +34,7 @@
     </span>
     <form method="POST" action="/admin/cohorts/ensure-star-spokes">
         <button type="submit"
-                class="text-sm bg-amber-600 hover:bg-amber-700 text-white font-medium px-4 py-2 rounded whitespace-nowrap">
+                class="text-sm bg-amber-700 hover:bg-amber-800 text-white font-medium px-4 py-2 rounded whitespace-nowrap">
             Wire star spokes
         </button>
     </form>
@@ -48,15 +48,15 @@
 <form id="new-cohort-form" method="POST" action="/admin/cohorts/create"
       class="hidden bg-white rounded-xl border border-gray-200 p-4 mb-8 space-y-3">
     <div>
-        <label class="block text-sm font-medium text-gray-700">Name</label>
-        <input type="text" name="name" required pattern="[a-z0-9-]{1,48}"
+        <label for="cohort-name" class="block text-sm font-medium text-gray-700">Name</label>
+        <input type="text" name="name" id="cohort-name" required pattern="[a-z0-9-]{1,48}"
                placeholder="pilot-wave-1"
                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
-        <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, hyphens. Max 48 chars.</p>
+        <p class="text-xs text-gray-600 mt-1">Lowercase letters, numbers, hyphens. Max 48 chars.</p>
     </div>
     <div>
-        <label class="block text-sm font-medium text-gray-700">Description (optional)</label>
-        <textarea name="description" rows="2"
+        <label for="cohort-description" class="block text-sm font-medium text-gray-700">Description (optional)</label>
+        <textarea name="description" id="cohort-description" rows="2"
                   class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"></textarea>
     </div>
     <button type="submit" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
@@ -98,7 +98,7 @@
                     {# Server refuses this too (v2 §12) — deleting a populated cohort
                        would cascade memberships away and silently reshape a running
                        simulation's topology. #}
-                    <span class="text-gray-400 cursor-not-allowed"
+                    <span class="text-gray-600 cursor-not-allowed"
                           title="Remove all {{ c.memberships | length }} members first">Delete</span>
                     {% else %}
                     <form method="POST" action="/admin/cohorts/{{ c.id }}/delete"
