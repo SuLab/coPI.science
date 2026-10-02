@@ -105,7 +105,7 @@
                           title="Remove all {{ c.memberships | length }} members first">Delete</span>
                     {% else %}
                     <form method="POST" action="/admin/cohorts/{{ c.id }}/delete"
-                          onsubmit="return confirm('Delete empty cohort “{{ c.name }}”?');">
+                          data-confirm="Delete empty cohort “{{ c.name }}”?">
                         <button type="submit" class="text-red-600 hover:underline">Delete</button>
                     </form>
                     {% endif %}
