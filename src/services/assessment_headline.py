@@ -67,7 +67,7 @@ RECOMMENDATION_DISPLAY_CHARS = 30
 # PROJECT_DISPLAY_CHARS above: `elevator_pitch` is an unbounded Text column and
 # a headline is not the place for a wall of model prose. The prose contract
 # bounds the pitch at 250 words (scout_hub 1.9.0) — far longer than this
-# window — and requires sentences 1-4 to END within ~550 characters, so the
+# window — and requires elements 1-4 to END within ~550 characters, so the
 # citation sentence completes inside this window; see _clip_at_sentence below,
 # which publishes only COMPLETE sentences.
 PITCH_DISPLAY_CHARS = 600
@@ -106,7 +106,7 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
       least half the budget, and
       append `" …"`. The marker is unconditional on a real truncation: the
       chosen boundary is the HIGHEST qualifying one, and the pitch contract
-      requires a citation sentence (sentence four under scout_hub >= 1.7.0),
+      requires a citation sentence (element four of item 8, scout_hub >= 1.7.0),
       so that boundary can be an abbreviation ("et al. ", "e.g. ", "vs. ")
       rather than a sentence end. An
       abbreviation blocklist would be a guess; "there is more" is a fact. The
@@ -164,8 +164,8 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
         # ellipsis"). The draft assumed the chosen boundary is always a true
         # sentence end; it is not. `max(candidates)` takes the HIGHEST qualifying
         # index,
-        # and the pitch contract now requires a citation sentence (sentence
-        # four under scout_hub >= 1.7.0, "DOI or PubMed link"), which is
+        # and the pitch contract now requires a citation sentence (element
+        # four of item 8, scout_hub >= 1.7.0, "DOI or PubMed link"), which is
         # precisely where "et al. ", "e.g. ", "i.e. " and "vs. " live — so
         # the last candidate can be an
         # abbreviation, and a reader would have no way to tell the published

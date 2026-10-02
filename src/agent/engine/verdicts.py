@@ -41,11 +41,15 @@ from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.models import AssessmentDrop, OpportunityAssessment
 from src.services.assessment_detail import (
     KEY_POINT_ACCEPTED_KEYS,
+    KEY_POINT_COMPANIES,
+    KEY_POINT_RISK,
     LEGACY_KEY_POINT_GROUPS,
     RETIRED_KEY_POINT_GROUPS,
+    classify_key_point,
     key_point_shape,
     normalize_bullets,
     normalize_dimension_rationales,
+    normalize_gating_rationales,
     normalize_key_points,
 )
 from src.services.assessment_headline import (
@@ -54,7 +58,7 @@ from src.services.assessment_headline import (
     _clip_at_sentence,
 )
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
-from src.services.verdict_fields import sidecar_column_kwargs
+from src.services.verdict_fields import VERDICT_FIELD, sidecar_column_kwargs
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -89,6 +93,58 @@ _UPSERT_NOT_COPIED = frozenset({
     "id", "simulation_run_id", "thread_id", "summary_posted_at", "summary_claimed_at",
     "verdict_revision", "verdict_write_id", "verdict_ordinal",
 })
+#: Sidecar item 1's companion (scout_hub >= 1.10.0, migration 0058): one
+#: sentence per gate, warned about past this many characters, never clipped.
+_GATING_RATIONALE_CHARS = VERDICT_FIELD["gating_rationales"].soft_bound
+#: The one key-point group that may carry a `Companies:` bullet (scout_hub >=
+#: 1.10.0, prompt item 7).
+_KEY_POINT_COMPANIES_GROUP = "lab_background"
+
+
+def _warn_key_point_group(
+    agent_id: str, group_key: str, group: list, expected: int,
+) -> None:
+    """Warn (never drop) when one current key-point group misses the scout_hub
+    1.10.0 shape: ``expected`` main bullets, at most one ``Risk:`` bullet, and at
+    most one ``Companies:`` bullet, in ``lab_background`` only (prompt item 7).
+    Bullets are told apart by ``classify_key_point``, the classifier the
+    assessment pages render with, so a label the page shows as a label (any
+    case, spacing or bold around it) is never warned as an unlabelled extra."""
+    labels = [classify_key_point(b)[0] for b in group if isinstance(b, str)]
+    main = labels.count(None)
+    if main < expected:
+        logger.warning(
+            "[%s] Assessment key_points.%s carries %d main bullet(s) (contract "
+            "asks for %d; a Risk: or Companies: bullet does not count as one)",
+            agent_id, group_key, main, expected,
+        )
+    elif main > expected:
+        logger.warning(
+            "[%s] Assessment key_points.%s carries %d unlabelled extra bullet(s) "
+            "(contract asks for %d main bullet; an extra bullet must begin Risk:, "
+            "or Companies: in %s)",
+            agent_id, group_key, main - expected, expected, _KEY_POINT_COMPANIES_GROUP,
+        )
+    for label, shown in ((KEY_POINT_RISK, "Risk:"), (KEY_POINT_COMPANIES, "Companies:")):
+        if labels.count(label) > 1:
+            logger.warning(
+                "[%s] Assessment key_points.%s repeats the %s label on %d bullets "
+                "(contract allows one)",
+                agent_id, group_key, shown, labels.count(label),
+            )
+    if KEY_POINT_COMPANIES in labels and group_key != _KEY_POINT_COMPANIES_GROUP:
+        logger.warning(
+            "[%s] Assessment key_points.%s carries a Companies: bullet (contract "
+            "allows one only in %s)",
+            agent_id, group_key, _KEY_POINT_COMPANIES_GROUP,
+        )
+    for bullet in group:
+        if isinstance(bullet, str) and len(bullet) > _KEY_POINT_BULLET_CHARS:
+            logger.warning(
+                "[%s] Assessment key_points.%s has a %d-char bullet (contract "
+                "asks for at most %d)",
+                agent_id, group_key, len(bullet), _KEY_POINT_BULLET_CHARS,
+            )
 
 
 class Verdicts:
@@ -624,7 +680,7 @@ class Verdicts:
         5. A lower incoming ordinal is stale when the landed row is one THIS
            process wrote: keep the newer verdict and record the incoming one as a
            ``duplicate_thread_verdict`` drop (C23), once. A row an earlier process
-           landed is always superseded (ordinals restart on a resume; B25).
+           landed is always superseded (ordinals restart on a resume).
         6. Otherwise record the current verdict as a drop (unless
            ``_prune_queued_for_thread`` already recorded that write id: one drop
            per raw verdict), then UPDATE every
@@ -810,6 +866,7 @@ class Verdicts:
         normalized_key_points = self._normalized_key_points(agent_id, key_points)
         self._warn_bullet_fields_shape(agent_id, verdict)
         _rationales = self._normalized_dimension_rationales(agent_id, verdict, scores)
+        gating_rationales = self._normalized_gating_rationales(agent_id, verdict, gating)
         return self._assessment_kwargs(
             agent_id=agent_id, channel=channel, verdict=verdict, slack_ts=slack_ts,
             thread=thread, subject_agent_id=subject_agent_id,
@@ -817,6 +874,7 @@ class Verdicts:
             computed_band=computed_band, gating=gating, scores=scores,
             red_flags=red_flags, milestones=milestones,
             normalized_key_points=normalized_key_points, _rationales=_rationales,
+            gating_rationales=gating_rationales,
             gap=gap, floor_verifiable=floor_verifiable, panel_owed=panel_owed,
         )
 
@@ -904,10 +962,11 @@ class Verdicts:
                 agent_id, len(verdict["elevator_pitch"].split()), _PITCH_WORD_LIMIT,
             )
         # The scout_hub 1.7.0 citation budget's ONLY runtime alarm. Item 8 moved
-        # the provenance citation from sentence two to sentence four and asks
-        # that sentences 1-4 END within ~550 chars, so the citation completes
+        # the provenance citation from sentence two to sentence four (element 4
+        # since 1.10.0, whose element 1 may be two sentences) and asks that
+        # elements 1-4 END within ~550 chars, so the citation completes
         # inside the 600 that `#assessments-summary` publishes. Nothing else
-        # checks that: a within-bound pitch whose sentence four ends at 640 stores
+        # checks that: a within-bound pitch whose element 4 ends at 640 stores
         # clean, warns nothing, and publishes a citation-free excerpt to a
         # channel the post cannot be retracted from. Compare `_HEADLINE_SOFT_LIMIT`
         # — the same class of write-path drift alarm, for the same reason.
@@ -917,7 +976,7 @@ class Verdicts:
         if isinstance(_pitch, str) and _pitch:
             # Compare citation SETS, not "is there any citation left". A pitch
             # whose element 1 carries a trial registry URL that survives the
-            # cut would otherwise mask the sentence-four DOI that did not —
+            # cut would otherwise mask the element-4 DOI that did not —
             # which is the only case this alarm exists for.
             _cited = set(_PITCH_CITATION_RE.findall(_pitch))
             if _cited:
@@ -927,7 +986,7 @@ class Verdicts:
                     logger.warning(
                         "[%s] Assessment elevator_pitch cites %d source(s) the "
                         "#assessments-summary excerpt (first %d chars, cut at a "
-                        "sentence boundary) does not carry: %s. Sentences 1-4 "
+                        "sentence boundary) does not carry: %s. Elements 1-4 "
                         "must END within ~550 chars; the published pitch will "
                         "be missing this provenance.",
                         agent_id, len(_lost), PITCH_DISPLAY_CHARS,
@@ -995,7 +1054,7 @@ class Verdicts:
                 logger.warning(
                     "[%s] Assessment key_points uses pre-1.8.0 group name(s) %s; "
                     "stored and rendered under the legacy labels. Is "
-                    "prompts/roles/scout_hub at 1.9.0 on this host?",
+                    "prompts/roles/scout_hub at 1.10.0 on this host?",
                     agent_id, legacy_only,
                 )
             if shape in ("current", "mixed"):
@@ -1017,21 +1076,8 @@ class Verdicts:
                     )
                 for group_key, expected in _KEY_POINT_GROUP_BULLETS.items():
                     group = checked_key_points.get(group_key)
-                    if isinstance(group, list) and len(group) != expected:
-                        logger.warning(
-                            "[%s] Assessment key_points.%s carries %d bullets "
-                            "(contract asks for %d)",
-                            agent_id, group_key, len(group), expected,
-                        )
                     if isinstance(group, list):
-                        for bullet in group:
-                            if isinstance(bullet, str) and len(bullet) > _KEY_POINT_BULLET_CHARS:
-                                logger.warning(
-                                    "[%s] Assessment key_points.%s has a %d-char "
-                                    "bullet (contract asks for at most %d)",
-                                    agent_id, group_key, len(bullet),
-                                    _KEY_POINT_BULLET_CHARS,
-                                )
+                        _warn_key_point_group(agent_id, group_key, group, expected)
                 # An ABSENT group is `None` and fails the isinstance above, so
                 # the count check cannot see it; a partial object still stores
                 # (normalize accepts a subset), so name the omission here.
@@ -1154,11 +1200,68 @@ class Verdicts:
             )
         return _rationales
 
+    def _normalized_gating_rationales(
+        self, agent_id: str, verdict: dict, gating: dict | None,
+    ) -> dict | None:
+        """Normalize ``gating_rationales`` and warn on what is wrong with them,
+        as ``_normalized_dimension_rationales`` does for the dimensions.
+
+        ``gating`` is the already-normalized gate map (``_normalize_gating``):
+        a gate whose state survived but has no reason is the row the Evidence
+        summary shows with only the rubric definition beside it, so it is named.
+        Warnings only (A4): ``raw_verdict`` keeps the original either way."""
+        _raw = verdict.get("gating_rationales")
+        _reasons = normalize_gating_rationales(_raw)
+        # A map whose every value is blank (the skeleton left unfilled) holds
+        # no reasons rather than a malformed one: it stores NULL, and the
+        # per-gate warning below names every gap instead of a DROPPED line.
+        _all_blank = isinstance(_raw, dict) and bool(_raw) and all(
+            v is None or (isinstance(v, str) and not v.strip()) for v in _raw.values()
+        )
+        if _raw is not None and _reasons is None and not _all_blank:
+            logger.warning(
+                "[%s] Assessment gating_rationales was DROPPED (stored NULL; the "
+                "value survives only in raw_verdict): not a non-empty map of gate "
+                "key to non-blank sentence",
+                agent_id,
+            )
+        if _reasons and isinstance(_raw, dict):
+            _slugs = [
+                k.strip().lower() for k, v in _raw.items()
+                if isinstance(k, str) and isinstance(v, str) and v.strip()
+            ]
+            _collided = sorted({s for s in _slugs if _slugs.count(s) > 1})
+            if _collided:
+                logger.warning(
+                    "[%s] Assessment gating_rationales has keys that collide after "
+                    "lower-casing (%s); only the last reason for each is stored",
+                    agent_id, ", ".join(_collided),
+                )
+        for _key, _text in (_reasons or {}).items():
+            if len(_text) > _GATING_RATIONALE_CHARS:
+                logger.warning(
+                    "[%s] Assessment gating_rationales.%s is %d chars "
+                    "(contract asks for <=%d)",
+                    agent_id, _key, len(_text), _GATING_RATIONALE_CHARS,
+                )
+        # Compared after the same `.strip().lower()` the normalizer applies, so
+        # a differently-cased gate key is not reported when its reason renders.
+        _unexplained = sorted(
+            k for k in (gating or {})
+            if isinstance(k, str) and k.strip().lower() not in (_reasons or {})
+        )
+        if _unexplained:
+            logger.warning(
+                "[%s] Assessment has %d gate(s) with no reason: %s",
+                agent_id, len(_unexplained), ", ".join(_unexplained),
+            )
+        return _reasons
+
     def _assessment_kwargs(
         self, *, agent_id, channel, verdict, slack_ts, thread, subject_agent_id,
         sidecar_columns, computed_score, computed_band,
         gating, scores, red_flags, milestones, normalized_key_points, _rationales,
-        gap, floor_verifiable, panel_owed,
+        gating_rationales, gap, floor_verifiable, panel_owed,
     ) -> dict:
         """The column values of the assessment row. Split out of
         ``_persist_assessment`` (spec §7.7)."""
@@ -1197,6 +1300,10 @@ class Verdicts:
             # Degrades to None on a wrong shape like its narrative siblings;
             # raw_verdict keeps the original either way.
             dimension_rationales=_rationales,
+            # Sidecar item 1's companion (0058): the per-gate reasons, stored and
+            # degraded exactly like `dimension_rationales` above. The in-place
+            # update in `_upsert_in` copies it like every other built column.
+            gating_rationales=gating_rationales,
             weighted_score=computed_score,
             band=computed_band,
             gating=gating,

@@ -109,6 +109,23 @@ def test_engine_constants_read_the_registry():
     assert sidecar._HUB_BULLET_CHARS == VERDICT_FIELD["strengths"].soft_bound
 
 
+def test_gating_rationales_is_a_reviewer_visible_engine_field():
+    """Spec 2026-10-02 §5.1 (migration 0058): one sentence per gate, not
+    staff-only, bounded at 200, built by the engine rather than by
+    `sidecar_column_kwargs`, and unlabelled, so the chat record's
+    labelled-field loop renders exactly what it did before."""
+    from src.agent.engine import verdicts
+
+    f = VERDICT_FIELD["gating_rationales"]
+    assert (f.column, f.sidecar_key, f.label, f.staff_only, f.anchor, f.soft_bound,
+            f.treatment) == ("gating_rationales", "gating_rationales", None, False,
+                             "gating", 200, "engine")
+    assert "gating_rationales" not in sidecar_column_kwargs(
+        {"gating_rationales": {"credible_science": "Two cohorts."}}
+    )
+    assert verdicts._GATING_RATIONALE_CHARS == f.soft_bound
+
+
 def test_staff_only_order_is_todays():
     assert tuple(f.key for f in VERDICT_FIELDS if f.staff_only) == (
         "strengths", "risks", "competitive_landscape", "evidence_maturity")
