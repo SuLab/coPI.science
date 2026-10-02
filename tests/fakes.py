@@ -369,6 +369,9 @@ class FakeSlackClient:
         self.agent_id = agent_id
         self.bot_token = bot_token
         self._bot_user_id = f"U_{agent_id}"
+        # The real client learns both ids from auth.test; the poller trusts only
+        # messages carrying one of them (A-02b).
+        self._bot_id = f"B_{agent_id}"
         self.posted: list[dict] = []
         # channel (name or id, as passed by the caller) -> list of texts
         # posted to it, in order. A second, channel-keyed view onto the same
@@ -393,6 +396,14 @@ class FakeSlackClient:
     @property
     def is_connected(self) -> bool:
         return True
+
+    @property
+    def bot_id(self) -> str | None:
+        return self._bot_id
+
+    @property
+    def bot_user_id(self) -> str | None:
+        return self._bot_user_id
 
     def _next_ts(self) -> str:
         self._ts += 1

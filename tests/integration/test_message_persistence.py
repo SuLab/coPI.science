@@ -327,7 +327,11 @@ async def test_rebuild_never_infers_a_slack_ts_from_the_channel_id(db_session):
 
 
 class _HistoryClient:
-    """Connected transport that returns one canned bot message from history."""
+    """Connected transport that returns one canned bot message from history.
+
+    Its bot id is the message's, so the message counts as one of our agents'
+    posts made by another process (the poller mirrors nothing else, A-02b).
+    """
 
     def __init__(self, messages):
         self.agent_id = "su"
@@ -336,6 +340,14 @@ class _HistoryClient:
     @property
     def is_connected(self):
         return True
+
+    @property
+    def bot_id(self):
+        return "B0DIGEST"
+
+    @property
+    def bot_user_id(self):
+        return "U0SU"
 
     def is_bot_user(self, user_id):
         return False

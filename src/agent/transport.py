@@ -36,6 +36,13 @@ class Transport(Protocol):
     def connect(self) -> bool: ...
     @property
     def is_connected(self) -> bool: ...
+    # This token's own Slack identity, learned from ``auth.test`` at connect; None
+    # before a successful connect. The poller trusts a message only when one of these
+    # matches a connected client (A-02b).
+    @property
+    def bot_id(self) -> str | None: ...
+    @property
+    def bot_user_id(self) -> str | None: ...
     def is_bot_user(self, user_id: str) -> bool: ...
 
     # Outbound
@@ -106,6 +113,14 @@ class NullTransport:
     @property
     def is_connected(self) -> bool:
         return False
+
+    @property
+    def bot_id(self) -> str | None:
+        return None
+
+    @property
+    def bot_user_id(self) -> str | None:
+        return None
 
     def is_bot_user(self, user_id: str) -> bool:
         return False

@@ -98,6 +98,42 @@ class SlackIO:
         self._poll_client_cursor += 1
         return client
 
+    def _bot_identity_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """``({bot_id: agent_id}, {bot_user_id: agent_id})`` over the connected clients.
+
+        Each client learns its own ids from ``auth.test`` at connect
+        (``AgentSlackClient.connect``). Rebuilt on every poll, so a live roster change
+        (``_sync_roster_from_db`` adds and drops clients) applies on the next tick. A
+        client whose ``auth.test`` reported no ``bot_id`` contributes only its user id.
+        """
+        by_bot_id: dict[str, str] = {}
+        by_user_id: dict[str, str] = {}
+        for agent_id, client in self.slack_clients.items():
+            if not (client and client.is_connected):
+                continue
+            if client.bot_id:
+                by_bot_id[client.bot_id] = agent_id
+            if client.bot_user_id:
+                by_user_id[client.bot_user_id] = agent_id
+        return by_bot_id, by_user_id
+
+    def _known_sender(
+        self, msg: dict, by_bot_id: dict[str, str], by_user_id: dict[str, str],
+    ) -> tuple[str, str] | None:
+        """``(agent_id, bot_name)`` when ``msg`` carries one of our agents' Slack
+        identities, else None.
+
+        The sender comes from the identity Slack stamps on the message (``bot_id``,
+        ``user``), never from ``username``, which the posting app chooses (A-02b). The
+        name is the registry's ``bot_name``, with ``_post_message``'s fallback for an
+        agent that has a client but no loaded ``Agent``.
+        """
+        agent_id = by_bot_id.get(msg.get("bot_id") or "") or by_user_id.get(msg.get("user") or "")
+        if agent_id is None:
+            return None
+        agent = self.agents.get(agent_id)
+        return agent_id, (agent.bot_name if agent else f"{agent_id}Bot")
+
     async def _poll_slack_for_bot_messages(self) -> None:
         """Poll all channels for new bot-authored messages; mirror them into the log.
 
@@ -110,7 +146,9 @@ class SlackIO:
         exactly what the name says: mirror another bot's Slack-native post (a
         message this process did not itself write) into the shared
         ``MessageLog``, recording the Slack-mirror mapping so a reply to it
-        can still be threaded. See the removal cycle's PI-interaction audit
+        can still be threaded. Only our own agents' bot identities count
+        (``_known_sender``, A-02b): any other bot's post is dropped the way a
+        human one is. See the removal cycle's PI-interaction audit
         map and ``MessageLog``'s GATED-method inventory (human rows are
         filtered there too, independent of this poller).
         """
@@ -125,6 +163,7 @@ class SlackIO:
         default_client = self._next_poll_client()
         if not default_client:
             return
+        by_bot_id, by_user_id = self._bot_identity_maps()
 
         # Poll seeded channels plus any collab_private channels tracked in
         # _channel_visibility. Skipping non-seeded public channels avoids
@@ -178,11 +217,19 @@ class SlackIO:
                             self._poll_cursors[ch_id] = ts
                         continue
 
-                    bot_name = msg.get("username", "bot")
-                    # Resolve agent_id from bot name
-                    bot_agent_id = self.message_log._bot_name_to_id.get(
-                        bot_name.lower()
-                    )
+                    # Only our own agents' bot identities are mirrored (A-02b). An
+                    # unknown bot is dropped like a human message: cursor advanced,
+                    # nothing appended, one INFO line that carries no content.
+                    sender = self._known_sender(msg, by_bot_id, by_user_id)
+                    if sender is None:
+                        logger.info(
+                            "Dropped a bot message from an unknown Slack identity in #%s (ts %s)",
+                            ch_name, ts,
+                        )
+                        if ts:
+                            self._poll_cursors[ch_id] = ts
+                        continue
+                    bot_agent_id, bot_name = sender
                     entry = LogEntry(
                         ts=ts,
                         channel=ch_name,

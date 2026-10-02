@@ -28,8 +28,9 @@ def _engine(monkeypatch, tmp_path):
     eng = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
     eng._channel_id_map["general"] = "C-GENERAL"
     client.channel_history["C-GENERAL"] = [
+        # One of our agents' bot posts (the poller mirrors nothing else, A-02b).
         {"ts": NORMAL_TS, "text": "an ordinary bot post",
-         "bot_id": "B1", "user": "U1", "username": "OtherBot"},
+         "bot_id": "B_blackbird", "user": "U_blackbird", "username": "BlackbirdBot"},
         {"ts": MARKER_TS,
          "text": f"{RUN_START_MARKER_PREFIX}\nRun: x", "bot_id": "B1",
          "user": "U_blackbird", "username": "BlackbirdBot"},
