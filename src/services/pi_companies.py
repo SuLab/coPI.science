@@ -609,18 +609,40 @@ async def export_companies_file(db: AsyncSession, user_id: uuid.UUID) -> Path | 
             "writes; the next write repairs the file", agent_id, _EXPORT_PASSES,
         )
         return None
+    current = (
+        await db.execute(select(AgentRegistry.agent_id).where(AgentRegistry.user_id == user_id))
+    ).scalar_one_or_none()
+    if current != agent_id:
+        # The agent was renamed while this export ran: what was just written sits under
+        # the old id, where a later agent given that id would inherit it. Remove it; the
+        # rename's own move_companies_file writes the file under the new id.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("Companies file %s left by a concurrent rename not removed: %s", path, exc)
+        return None
     return path if rows else None
 
 
 async def move_companies_file(
     db: AsyncSession, *, user_id: uuid.UUID, old_agent_id: str
 ) -> Path | None:
-    """After a committed agent rename: remove ``COMPANIES_DIR/<old_agent_id>.md`` and
-    export under the PI's current agent id. Best effort, like the export: a filesystem
-    error is logged, never raised, and an unsafe old id is left alone."""
-    if _SAFE_AGENT_ID.fullmatch(old_agent_id or ""):
+    """After a committed agent rename: export under the PI's current agent id, then
+    remove ``COMPANIES_DIR/<old_agent_id>.md``. The old file is removed only once the new
+    one is in place (or there is nothing to export), so a failed export never leaves the
+    hub with neither. Best effort, like the export: a filesystem error is logged, never
+    raised, and an unsafe old id is left alone."""
+    written = await export_companies_file(db, user_id)
+    if written is None and await _export_rows(db, user_id):
+        # The new file was not written (a filesystem error, or rows still changing):
+        # keep the old one rather than leave the hub with no record at all.
+        logger.error("Companies file of renamed agent %s kept: re-export failed", old_agent_id)
+        return None
+    if _SAFE_AGENT_ID.fullmatch(old_agent_id or "") and not (
+        written is not None and written.name == f"{old_agent_id}.md"
+    ):
         try:
             (COMPANIES_DIR / f"{old_agent_id}.md").unlink(missing_ok=True)
         except OSError as exc:
             logger.error("Companies file of renamed agent %s not removed: %s", old_agent_id, exc)
-    return await export_companies_file(db, user_id)
+    return written

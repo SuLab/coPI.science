@@ -161,3 +161,11 @@ def test_contact_from_sec_user_agent(value, contact):
 ])
 def test_retry_after_parsing(header, seconds):
     assert wikidata._retry_after_seconds(header) == seconds
+
+
+async def test_wikidata_requests_ask_for_an_uncompressed_body(respx_mock):
+    """Re-review: the response cap counts decoded bytes, so no compression is accepted."""
+    route = respx_mock.get(wikidata.SPARQL_URL).mock(return_value=httpx.Response(
+        200, content=_fixture("wikidata_p112_0000-0002-7086-765X.json"), headers=SPARQL_JSON))
+    await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
+    assert route.calls.last.request.headers["Accept-Encoding"] == "identity"

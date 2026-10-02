@@ -191,7 +191,9 @@ async def founded_by_orcid(orcid: str, *, contact: str | None) -> WikidataResult
     if not _ORCID.match(orcid or ""):
         raise SourceUnavailable("no valid ORCID")
     params = {"query": _QUERY.format(orcid=orcid), "format": "json"}
-    headers = {"User-Agent": user_agent(contact), "Accept": "application/sparql-results+json"}
+    # identity: the response cap counts decoded bytes (see sec_form_d).
+    headers = {"User-Agent": user_agent(contact), "Accept": "application/sparql-results+json",
+               "Accept-Encoding": "identity"}
     async with _make_client() as client:
         body = await _query(client, params, headers)
     try:

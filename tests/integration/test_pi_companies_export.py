@@ -236,3 +236,40 @@ async def test_an_unchanged_list_is_written_once(db_session, monkeypatch, _compa
                         lambda path, text: (writes.append(text), real_write(path, text))[1])
     await export_companies_file(db_session, pi.id)
     assert len(writes) == 1
+
+
+async def test_a_failed_re_export_on_rename_keeps_the_old_file(db_session, monkeypatch, _companies_dir):
+    """Re-review: the old id's file is removed only once the new one is written, so a
+    filesystem failure never leaves the hub with no record at all."""
+    pi, agent, _manager = await _pi_agent_manager(db_session, agent_id="oldslug")
+    await seed_company(db_session, pi, status="confirmed")
+    await export_companies_file(db_session, pi.id)
+    assert (_companies_dir / "oldslug.md").exists()
+    agent.agent_id = "newslug"
+    await db_session.flush()
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pi_companies, "atomic_write_text", fail)
+    assert await pi_companies.move_companies_file(db_session, user_id=pi.id, old_agent_id="oldslug") is None
+    assert (_companies_dir / "oldslug.md").exists()
+    assert not (_companies_dir / "newslug.md").exists()
+
+
+async def test_an_export_overtaken_by_a_rename_removes_what_it_wrote(db_session, monkeypatch, _companies_dir):
+    """Re-review: an export that read the old id before a rename committed must not
+    leave its file under that id, where a later agent given the id would inherit it."""
+    pi, agent, _manager = await _pi_agent_manager(db_session, agent_id="oldslug")
+    await seed_company(db_session, pi, status="confirmed")
+    real_rows = pi_companies._export_rows
+
+    async def rows_then_rename(db, user_id):
+        rows = await real_rows(db, user_id)
+        agent.agent_id = "newslug"
+        await db.flush()
+        return rows
+
+    monkeypatch.setattr(pi_companies, "_export_rows", rows_then_rename)
+    assert await export_companies_file(db_session, pi.id) is None
+    assert not (_companies_dir / "oldslug.md").exists()

@@ -72,6 +72,11 @@ FILINGS_PAGE_URL = (
 )
 FUNDING_UNAVAILABLE = "funding lookup unavailable"
 AMBIGUOUS_ISSUER = "funding not attributed: several SEC issuers share this name"
+#: One issuer among the filings read, but more hits than were read and none read lists
+#: the PI: an unread hit may belong to another issuer, so no figure is attributed.
+UNLISTED_TRUNCATED = (
+    "funding not attributed: more filings than were read, and none read lists the PI"
+)
 #: Largest search answer or document read; a bigger body makes the candidate unavailable.
 MAX_RESPONSE_BYTES = 2_000_000
 #: Documents fetched per candidate, newest first; the rest are listed as not fetched.
@@ -79,6 +84,7 @@ MAX_DOCUMENTS = 20
 
 _ACCESSION = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _CIK = re.compile(r"^\d{1,10}$")
+_FILE_NUM = re.compile(r"^\d{3}-\d{1,10}$")
 _FILENAME = re.compile(r"^[A-Za-z0-9_.\-]+\.xml$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -357,24 +363,32 @@ def _hits(data: object) -> list[dict]:
         if not _FILENAME.match(filename):
             filename = "primary_doc.xml"
         file_nums = src.get("file_num") or []
+        file_num = str(file_nums[0]) if isinstance(file_nums, list) and file_nums else ""
         out.append({
             "accession": accession, "cik": cik, "filing_date": filed, "form": src["form"],
-            "file_num": str(file_nums[0]) if isinstance(file_nums, list) and file_nums else None,
+            # Upstream text, validated like every other hit field: anything else
+            # (a NUL included, which Postgres JSONB refuses) is dropped, not stored.
+            "file_num": file_num if _FILE_NUM.match(file_num) else None,
             "url": ARCHIVE_DOC_URL.format(cik=int(cik), accession=accession.replace("-", ""), filename=filename),
         })
     out.sort(key=lambda h: (h["filing_date"], h["accession"]), reverse=True)
     return out
 
 
-def choose_issuer(filings: list[FormDFiling]) -> tuple[str | None, list[str]]:
+def choose_issuer(
+    filings: list[FormDFiling], *, truncated: bool = False
+) -> tuple[str | None, list[str]]:
     """(the CIK to count, every CIK seen), CIKs zero-padded to 10 digits. One CIK is
-    used as is; among several, the one whose filings list the PI, when exactly one
-    does; otherwise None (several issuers share the name: no figure is attributed)."""
+    used as is, unless the search had more hits than were read (``truncated``) and no
+    filing read lists the PI: an unread hit may be another issuer's. Among several, the
+    one whose filings list the PI, when exactly one does; otherwise None (no figure)."""
     by_cik: dict[str, list[FormDFiling]] = {}
     for f in filings:
         by_cik.setdefault(f.cik.zfill(10), []).append(f)
     ciks = sorted(by_cik)
     if len(ciks) == 1:
+        if truncated and not any(f.pi_listed for f in filings):
+            return None, ciks
         return ciks[0], ciks
     listed = [c for c in ciks if any(f.pi_listed for f in by_cik[c])]
     return (listed[0] if len(listed) == 1 else None), ciks
@@ -419,16 +433,19 @@ async def lookup_funding(
     try:
         async with _make_client() as client:
             filings, not_fetched = await _fetch_filings(
-                client, company_name, normalized_name, pi, {"User-Agent": agent})
+                client, company_name, normalized_name, pi,
+                # identity: the 2 MB cap counts decoded bytes, and a compressed chunk
+                # would be inflated in memory before the cap could see it.
+                {"User-Agent": agent, "Accept-Encoding": "identity"})
     except SourceUnavailable as exc:
         return FundingResult.unavailable(str(exc))
     if not filings:
         return FundingResult(status="no_filings", not_fetched=not_fetched)
-    issuer, ciks = choose_issuer(filings)
+    issuer, ciks = choose_issuer(filings, truncated=not_fetched > 0)
     if issuer is None:
         return FundingResult(
             status="ambiguous", filings=filings, not_fetched=not_fetched, ciks=ciks,
-            note=AMBIGUOUS_ISSUER,
+            note=AMBIGUOUS_ISSUER if len(ciks) > 1 else UNLISTED_TRUNCATED,
         )
     total, as_of = floor_total([f for f in filings if f.cik.zfill(10) == issuer])
     return FundingResult(

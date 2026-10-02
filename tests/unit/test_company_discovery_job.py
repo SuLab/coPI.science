@@ -402,6 +402,9 @@ async def test_funding_beyond_bigint_is_dropped_and_the_suggestion_kept(db_sessi
         assert row.funding_usd is None and row.funding_as_of is None and row.funding_source_url is None
         assert row.evidence["form_d"]["status"] == "no_amount"
         assert row.evidence["form_d"]["funding_usd"] is None
+        # Re-review: the card explains why, and no filing claims to be counted.
+        assert row.evidence["form_d"]["note"] == "funding figure out of range; not recorded"
+        assert not any(f["counted"] for f in row.evidence["form_d"]["filings"])
 
 
 async def test_one_failed_pubmed_batch_keeps_the_others(db_session, monkeypatch, respx_mock):

@@ -353,3 +353,51 @@ async def test_documents_are_capped_newest_first(respx_mock):
 ])
 def test_parse_amount(raw, value, note):
     assert sec_form_d.parse_amount(raw, "x") == (value, note)
+
+
+def _listed(filing, listed):
+    return sec_form_d.FormDFiling(**{**filing.__dict__, "pi_listed": listed})
+
+
+def test_a_truncated_search_with_one_unlisted_issuer_attributes_nothing():
+    """Re-review: with more hits than were read, one CIK among the filings read is not
+    enough; an unread hit may be another issuer's. Only a filing listing the PI is."""
+    filings = [_filing("0000000001-20-000001", "2020-01-01", 100)]
+    assert sec_form_d.choose_issuer(filings) == ("0000000001", ["0000000001"])
+    assert sec_form_d.choose_issuer(filings, truncated=True) == (None, ["0000000001"])
+    listed = [_listed(filings[0], True)]
+    assert sec_form_d.choose_issuer(listed, truncated=True) == ("0000000001", ["0000000001"])
+
+
+async def test_a_truncated_unlisted_issuer_is_ambiguous_with_its_own_note(respx_mock, monkeypatch):
+    _delfi_routes(respx_mock)
+    monkeypatch.setattr(sec_form_d, "MAX_DOCUMENTS", 1)
+    search = json.loads(json.dumps(_search("efts_delfi_diagnostics.json", only="0001783735-22-000002")))
+    extra = json.loads(json.dumps(search["hits"]["hits"][0]))
+    extra["_source"]["adsh"] = "0001783735-19-000001"
+    extra["_source"]["file_date"] = "2019-01-01"
+    search["hits"]["hits"].append(extra)
+    respx_mock.get(sec_form_d.EFTS_URL).mock(return_value=httpx.Response(200, json=search))
+    result = await _delfi(pi="Someone Else")
+    assert result.status == "ambiguous" and result.funding_usd is None
+    assert result.not_fetched == 1
+    assert result.evidence()["note"] == sec_form_d.UNLISTED_TRUNCATED
+
+
+def test_an_unusable_file_number_is_dropped_not_stored():
+    """Re-review: file_num is upstream text; a NUL would fail the JSONB insert."""
+    hit = {"_id": "0001783735-22-000002:primary_doc.xml", "_source": {
+        "form": "D", "adsh": "0001783735-22-000002", "ciks": ["0001783735"],
+        "file_date": "2022-07-25", "file_num": ["021-4\u000012"]}}
+    good = json.loads(json.dumps(hit))
+    good["_source"]["file_num"] = ["021-449512"]
+    hits = sec_form_d._hits({"hits": {"hits": [hit]}})
+    assert hits[0]["file_num"] is None
+    assert sec_form_d._hits({"hits": {"hits": [good]}})[0]["file_num"] == "021-449512"
+
+
+async def test_sec_requests_ask_for_an_uncompressed_body(respx_mock):
+    search, doc = _delfi_routes(respx_mock)
+    await _delfi()
+    for route in (search, doc):
+        assert route.calls.last.request.headers["Accept-Encoding"] == "identity"

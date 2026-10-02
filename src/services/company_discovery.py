@@ -274,7 +274,11 @@ def bounded_funding(
     if usd is None or 0 <= usd <= _MAX_FUNDING_USD:
         return funding
     notes.append(f"sec: funding figure out of range for {cand.company_name}")
-    return dataclasses.replace(funding, status="no_amount", funding_usd=None, funding_as_of=None)
+    return dataclasses.replace(
+        funding, status="no_amount", funding_usd=None, funding_as_of=None,
+        funding_source_url=None, note="funding figure out of range; not recorded",
+        filings=[dataclasses.replace(f, counted=False) for f in funding.filings],
+    )
 
 
 # --- write -------------------------------------------------------------------
