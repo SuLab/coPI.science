@@ -29,3 +29,14 @@ def test_every_inline_script_carries_the_request_nonce():
     # later tasks move inline scripts into files (1C-10 tag_widget.js, 2B-2), so a fixed
     # floor would break without any regression (assembly audit PX-08a).
     assert checked >= 1
+
+
+def test_no_script_is_loaded_from_another_origin():
+    """With Tailwind compiled (§6.1) and marked/DOMPurify vendored (§6.2), every
+    external script is ours, as script-src 'self' requires."""
+    offenders = []
+    for path in sorted(TEMPLATES.rglob("*.html")):
+        for m in re.finditer(r"<script\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)", path.read_text(encoding="utf-8")):
+            if not m.group(1).startswith("/static/"):
+                offenders.append(f"{path.relative_to(TEMPLATES)}: {m.group(1)}")
+    assert offenders == []

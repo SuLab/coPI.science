@@ -5,7 +5,10 @@ every session needs. Dated statements hold as of the date they give; re-measure 
 count or a line number before relying on it.
 
 Run `./scripts/ci.sh` before committing — alembic sanity (single head, no
-duplicate revision ids), an upgrade→downgrade→upgrade round trip against a
+duplicate revision ids), the compiled-CSS drift check (`scripts/build_css.sh --check`:
+`static/css/app.css` must equal a fresh build by the pinned Tailwind CLI; rebuild and
+commit it with any change that adds or drops a utility class), an
+upgrade→downgrade→upgrade round trip against a
 throwaway Postgres it creates and destroys itself, `ruff check` on the test
 suite (zero findings) plus a ratcheted ceiling on `src/`, a separate **C901 zero
 gate** over `src/` (`ruff --select C901` at max-complexity 20: any finding is new, so

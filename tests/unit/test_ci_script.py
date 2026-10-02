@@ -17,3 +17,10 @@ def test_two_runs_pick_distinct_names_and_ports():
     b = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, check=True).stdout.split()
     assert a[0] != b[0]
     assert a[1].isdigit() and b[1].isdigit()
+
+
+def test_the_css_drift_check_runs_before_the_lint_and_test_steps():
+    text = CI.read_text()
+    step = 'bash "$REPO_ROOT/scripts/build_css.sh" --check'
+    assert step in text
+    assert text.index(step) < text.index('echo "==> ruff (test-suite lint)"')

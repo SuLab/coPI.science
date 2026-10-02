@@ -8,7 +8,7 @@ CoPI is a Python web application deployed via Docker Compose. PostgreSQL for str
 
 - **Framework:** FastAPI with Python 3.11+
 - **Templates:** Jinja2 (server-rendered HTML)
-- **Styling:** Tailwind CSS (via CDN)
+- **Styling:** Tailwind CSS v3.4.19, compiled to `static/css/app.css` by `scripts/build_css.sh`
 - **Key pages:**
   - Login (ORCID OAuth redirect)
   - Onboarding (profile review and edit)

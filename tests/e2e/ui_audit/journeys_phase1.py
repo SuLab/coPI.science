@@ -7,7 +7,10 @@ object and returns ``{"ok": bool, ...evidence}``.
 
 from __future__ import annotations
 
+import base64
+import json
 import re
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -305,3 +308,144 @@ async def journey_csp_report_only(h) -> dict:
 
 
 JOURNEYS += [journey_csp_report_only]
+
+
+# --- §6.1: compiled CSS against the Play CDN, pixel by pixel -----------------------
+
+PARITY_PAGES: tuple[tuple[str, str], ...] = (
+    ("admin", "/admin/users"),
+    ("admin", "/admin/jobs"),
+    ("admin", "/admin/activity"),
+    ("admin", "/admin/discussions"),
+    ("admin", "/admin/agents"),
+    ("admin", "/admin/assessments"),
+    ("admin", "/admin/assessments/{a0}"),
+    ("admin", "/admin/cohorts"),
+    ("admin", "/admin/cohorts/topology"),
+    ("manager", "/manager/pis"),
+    ("manager", "/manager/assessments/{a0}"),
+    ("pi", "/profile"),
+    ("pi", "/settings"),
+)
+PARITY_DIR = Path(tempfile.gettempdir()) / "ui_audit_parity"
+#: Reviewed pixel differences (spec §6.1: "every pixel difference is reviewed before
+#: merge"): committed JSON, slug -> {"diff_pixels": int | None, "size": list[int],
+#: "reason": str}. Absent = none.
+PARITY_REVIEWED = Path(__file__).with_name("css_parity_reviewed.json")
+
+_PARITY_LINK = '<link rel="stylesheet" href="/static/css/app.css">'
+#: What base.html loaded before §6.1: the Play CDN as a parser-blocking head script.
+#: Injecting it later (an init script, after DOMContentLoaded) leaves the page unstyled.
+_PARITY_CDN_TAG = '<script src="https://cdn.tailwindcss.com"></script>'
+
+_PARITY_DIFF_JS = """async ([a, b]) => {
+  const load = (data) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.addEventListener("load", () => resolve(img));
+    img.addEventListener("error", reject);
+    img.src = "data:image/png;base64," + data;
+  });
+  const [ia, ib] = await Promise.all([load(a), load(b)]);
+  if (ia.width !== ib.width || ia.height !== ib.height) {
+    return {size: [ia.width, ia.height, ib.width, ib.height], diff: null};
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = ia.width;
+  canvas.height = ia.height;
+  const g = canvas.getContext("2d");
+  g.drawImage(ia, 0, 0);
+  const da = g.getImageData(0, 0, canvas.width, canvas.height).data;
+  g.clearRect(0, 0, canvas.width, canvas.height);
+  g.drawImage(ib, 0, 0);
+  const db = g.getImageData(0, 0, canvas.width, canvas.height).data;
+  let diff = 0;
+  for (let i = 0; i < da.length; i += 4) {
+    if (da[i] !== db[i] || da[i + 1] !== db[i + 1] || da[i + 2] !== db[i + 2] || da[i + 3] !== db[i + 3]) diff += 1;
+  }
+  return {size: [ia.width, ia.height], diff: diff};
+}"""
+
+
+async def _parity_cdn_document(route) -> None:
+    """Serve each HTML document with the compiled stylesheet link swapped for the CDN
+    script tag; every other request passes through."""
+    if route.request.resource_type != "document":
+        await route.continue_()
+        return
+    response = await route.fetch()
+    body = await response.text()
+    if _PARITY_LINK not in body:
+        raise AssertionError(f"no compiled stylesheet link in {route.request.url}")
+    await route.fulfill(response=response, body=body.replace(_PARITY_LINK, _PARITY_CDN_TAG))
+
+
+async def _parity_shot(h, role: str, url: str, *, cdn: bool) -> bytes:
+    """A full-page screenshot with the compiled stylesheet, or with its link replaced
+    by the Play CDN script (what production served before §6.1). CSP is
+    bypassed for BOTH shots: the comparison is about CSS, and the injected CDN script
+    must load after Phase 2 enforces script-src."""
+    context, page, _log = await h.page(role, bypass_csp=True)
+    try:
+        if cdn:
+            await context.route("**/*", _parity_cdn_document)
+        await page.goto(url, wait_until="networkidle")
+        if cdn:
+            await page.wait_for_function("() => window.tailwind !== undefined", timeout=15000)
+        await page.wait_for_timeout(500)
+        return await page.screenshot(full_page=True, animations="disabled")
+    finally:
+        await context.close()
+
+
+async def journey_css_parity(h) -> dict:
+    """§6.1: the compiled CSS against the CDN on a fixed page set. Every page with a
+    non-zero diff (or a size change) is reviewed from its PNG pair before merge:
+    fix the config or safelist, or record why the difference is acceptable in
+    PARITY_REVIEWED (slug -> {"diff_pixels": n, "size": [...], "reason": "..."}). The
+    journey passes when every page either matches or has a reviewed entry with the same
+    diff count and sizes."""
+    PARITY_DIR.mkdir(parents=True, exist_ok=True)
+    pages = []
+    diff_ctx, diff_page, _log = await h.page("admin")
+    try:
+        await diff_page.goto("about:blank")
+        for role, template in PARITY_PAGES:
+            path = _seed_path(template, h.ids)
+            url = h.base_url + path
+            compiled = await _parity_shot(h, role, url, cdn=False)
+            cdn = await _parity_shot(h, role, url, cdn=True)
+            slug = re.sub(r"[^a-z0-9]+", "_", f"{role}{path}".lower()).strip("_")
+            compiled_png = PARITY_DIR / f"{slug}.compiled.png"
+            cdn_png = PARITY_DIR / f"{slug}.cdn.png"
+            compiled_png.write_bytes(compiled)
+            cdn_png.write_bytes(cdn)
+            result = await diff_page.evaluate(
+                _PARITY_DIFF_JS,
+                [base64.b64encode(compiled).decode(), base64.b64encode(cdn).decode()],
+            )
+            pages.append({
+                "role": role,
+                "path": path,
+                "size": result["size"],
+                "diff_pixels": result["diff"],
+                "compiled_png": str(compiled_png),
+                "cdn_png": str(cdn_png),
+            })
+    finally:
+        await diff_ctx.close()
+    reviewed = json.loads(PARITY_REVIEWED.read_text()) if PARITY_REVIEWED.exists() else {}
+    unreviewed = []
+    for p in pages:
+        slug = Path(p["compiled_png"]).name.removesuffix(".compiled.png")
+        entry = reviewed.get(slug)
+        if p["diff_pixels"] == 0:
+            continue
+        # diff_pixels is None when the two shots differ in size: that is a change too.
+        if not (entry and entry.get("diff_pixels") == p["diff_pixels"]
+                and entry.get("size") == p["size"] and entry.get("reason")):
+            unreviewed.append(slug)
+    return {"ok": not unreviewed, "unreviewed": unreviewed, "dir": str(PARITY_DIR),
+            "pages": pages}
+
+
+JOURNEYS += [journey_css_parity]
