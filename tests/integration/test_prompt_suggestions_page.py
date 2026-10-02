@@ -9,6 +9,7 @@ other review write in this app.
 """
 
 import hashlib
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,8 +123,8 @@ async def test_detail_renders_suggestion_as_sanitized_markdown(client, db_sessio
     ).text
 
     assert 'data-markdown="**bold** &lt;script&gt;x&lt;/script&gt;"' in body
-    assert '<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"' in body
-    assert '<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"' in body
+    assert '<script src="/static/vendor/marked-12.0.2.min.js"></script>' in body
+    assert re.search(r'<script src="/static/vendor/purify-3\.4\.\d+\.min\.js"></script>', body)
     assert '<script src="/static/js/markdown.js">' in body
     assert "<script>x</script>" not in body
 

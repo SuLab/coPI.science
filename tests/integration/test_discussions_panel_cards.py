@@ -251,7 +251,7 @@ async def test_a_thread_with_no_consults_gets_no_panel_section(
     assert 'class="panel-card' not in html
     assert "Specialist panel" not in html
     # No decision and no panel means nothing to expand — and therefore no
-    # onclick pointing at an element that does not exist.
+    # row toggle pointing at an element that does not exist.
     assert 'id="detail-1"' not in html
 
 

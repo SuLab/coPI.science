@@ -308,8 +308,8 @@ async def test_timeline_messages_render_via_data_markdown_on_both_surfaces(
         html = resp.text
         assert 'data-markdown="A **bold** claim' in html
         assert "/static/js/markdown.js" in html
-        assert "marked@12.0.2/marked.min.js" in html
-        assert "dompurify@3.1.6/dist/purify.min.js" in html
+        assert "/static/vendor/marked-12.0.2.min.js" in html
+        assert re.search(r"/static/vendor/purify-3\.4\.\d+\.min\.js", html)
 
 
 async def test_sidecar_prose_stays_plain_text(client, db_session, admin, manager):

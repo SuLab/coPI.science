@@ -20,10 +20,10 @@
 </div>
 
 <!-- Filters -->
-<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
+<div data-filter-nav="/admin/users" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
-        <select onchange="applyFilter()" id="status-filter"
+        <select data-filter-param="status_filter" id="status-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
@@ -34,7 +34,7 @@
     </div>
     <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
-        <select onchange="applyFilter()" id="claimed-filter"
+        <select data-filter-param="claimed_filter" id="claimed-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
@@ -64,7 +64,7 @@
         <tbody class="divide-y divide-gray-100">
             {% for item in user_data %}
             <tr class="hover:bg-gray-50 cursor-pointer"
-                onclick="location.href='/admin/users/{{ item.user.id }}'">
+                data-row-href="/admin/users/{{ item.user.id }}">
                 <td class="px-4 py-3">
                     <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>
                     {% if item.user.department %}
@@ -76,7 +76,6 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
-                       onclick="event.stopPropagation()"
                        class="text-xs text-green-600 hover:underline">{{ item.user.orcid }}</a>
                 </td>
                 <td class="px-4 py-3">
@@ -144,14 +143,4 @@
     </table>
 </div>
 
-<script>
-function applyFilter() {
-    const status = document.getElementById('status-filter').value;
-    const claimed = document.getElementById('claimed-filter').value;
-    const params = new URLSearchParams();
-    if (status) params.set('status_filter', status);
-    if (claimed) params.set('claimed_filter', claimed);
-    location.href = '/admin/users?' + params.toString();
-}
-</script>
 {% endblock %}

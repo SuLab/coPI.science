@@ -20,7 +20,7 @@
     {% if runs %}
     <form method="GET" action="/manager/discussions" class="flex items-center gap-2">
         <label class="text-sm text-gray-500">Run:</label>
-        <select name="run_id" onchange="this.form.submit()"
+        <select name="run_id" data-autosubmit
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="all" {% if selected_run_id == 'all' %}selected{% endif %}>All Runs</option>
             {% for run in runs %}

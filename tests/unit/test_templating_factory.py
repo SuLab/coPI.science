@@ -32,7 +32,7 @@ def test_each_call_returns_a_new_instance():
 
 
 def test_head_assets_are_included_not_repeated():
-    marked = 'src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"'
+    marked = 'src="/static/vendor/marked-12.0.2.min.js"'
     skip = {"_head_assets.html"}
     offenders = [str(p.relative_to(REPO)) for p in (REPO / "templates").rglob("*.html")
                  if marked in p.read_text(encoding="utf-8") and p.name not in skip]

@@ -71,7 +71,7 @@
             {% set has_decision_detail = t.decision and t.decision.summary_text %}
             {% set has_detail = has_decision_detail or panel %}
             <tr class="hover:bg-gray-50 {% if has_detail %}cursor-pointer{% endif %}"
-                {% if has_detail %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
+                {% if has_detail %}data-toggle-target="detail-{{ loop.index }}"{% endif %}>
                 <td class="px-4 py-3">
                     <span class="px-2 py-0.5 rounded-full text-xs bg-{{ meta.color }}-100 text-{{ meta.color }}-700">
                         {{ meta.label }}
