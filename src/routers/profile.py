@@ -25,6 +25,7 @@ from src.services.profile_edit import (
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
+from src.web.flash import flash
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,8 @@ async def profile_save(
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)
-    return RedirectResponse(url="/profile?saved=1", status_code=302)
+    flash(request, "Profile saved.", "success")
+    return RedirectResponse(url="/profile", status_code=302)
 
 
 @router.post("/refresh")

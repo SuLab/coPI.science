@@ -64,7 +64,7 @@ async def test_a_comma_inside_a_tag_survives_the_save(client, db_session):
         },
         headers=auth_headers(user.id), follow_redirects=False,
     )
-    assert r.headers["location"] == "/profile?saved=1"
+    assert r.headers["location"] == "/profile"
     profile = await _profile(db_session, user.id)
     await db_session.refresh(profile)
     assert profile.techniques == ["1,2-dichloroethane", "cryo-EM"]
@@ -96,7 +96,7 @@ async def test_the_manager_form_saves_tags_whole(client, db_session):
               "tag_fields": ["key_targets"], "key_targets": ["PD-1, PD-L1 axis"]},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?saved=1"
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
     profile = await _profile(db_session, pi.id)
     await db_session.refresh(profile)
     assert profile.key_targets == ["PD-1, PD-L1 axis"]

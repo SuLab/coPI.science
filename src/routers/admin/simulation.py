@@ -271,7 +271,26 @@ async def admin_simulation_start(
     refusals ARE the confirmation step — no JS confirm dialog — and the
     sharp CLI-only flags (`--all-agents`/`--reset-cursors`) are deliberately
     not exposed here; the page links no substitute.
+
+    Takes ``SELECT … FOR NO KEY UPDATE`` on the run row(s) before its checks (C-24):
+    it serializes start and finalize against each other without conflicting with
+    the FOR KEY SHARE locks the engine's inserts take on the referenced run row
+    (plan audit Q2-06).
     """
+    # C-24: lock the latest run row before any check. Finalize takes the same
+    # lock first (admin_simulation_finalize_run), so a start that would resume
+    # this run and a finalize of it serialize: the second waits for the first's
+    # commit, then sees its pending command and refuses.
+    latest_id = await latest_run_id(db)
+    latest = None
+    if latest_id is not None:
+        latest = (
+            await db.execute(
+                select(SimulationRun)
+                .where(SimulationRun.id == latest_id)
+                .with_for_update(key_share=True)
+            )
+        ).scalar_one_or_none()
     alive = await engine_alive(db)
     pending_start = (
         await db.execute(
@@ -298,8 +317,6 @@ async def admin_simulation_start(
         return _refuse_to(
             request, "/admin/simulation", "A Finalize run is pending; start after it finishes."
         )
-    latest_id = await latest_run_id(db)
-    latest = await db.get(SimulationRun, latest_id) if latest_id is not None else None
     if latest is not None and latest.finalized_at is not None:
         # A finalized run refuses a resume (RunFinalized); the form forces Fresh
         # and so does the route, so the operator never queues a doomed start.
@@ -339,7 +356,12 @@ async def admin_simulation_finalize_run(
     supervisor claims it and runs the finalize routine under the engine lock.
 
     The form must also carry ``confirm_run`` equal to the run id's
-    first 8 characters (case and surrounding spaces ignored)."""
+    first 8 characters (case and surrounding spaces ignored).
+
+    Takes ``SELECT … FOR NO KEY UPDATE`` on the run row(s) before its checks (C-24):
+    it serializes start and finalize against each other without conflicting with
+    the FOR KEY SHARE locks the engine's inserts take on the referenced run row
+    (plan audit Q2-06)."""
     def _refuse(message: str):
         return _refuse_to(request, f"/admin/activity/{run_id}", message)
 
@@ -349,6 +371,22 @@ async def admin_simulation_finalize_run(
         # in the browser's dialog.
         return _refuse(f"Type the run's short id ({short_id}) to confirm Finalize run.")
 
+    # C-24: the same latest-run lock admin_simulation_start takes, then this run's
+    # row. Always in that order, so the two routes cannot deadlock.
+    latest_id = await latest_run_id(db)
+    if latest_id is not None and latest_id != run_id:
+        await db.execute(
+            select(SimulationRun.id)
+            .where(SimulationRun.id == latest_id)
+            .with_for_update(key_share=True)
+        )
+    run = (
+        await db.execute(
+            select(SimulationRun)
+            .where(SimulationRun.id == run_id)
+            .with_for_update(key_share=True)
+        )
+    ).scalar_one_or_none()
     if await engine_alive(db):
         return _refuse("An engine is running — Finalize run applies to a stopped run.")
     pending_start = (
@@ -360,7 +398,6 @@ async def admin_simulation_finalize_run(
     ).scalar_one_or_none()
     if pending_start is not None:
         return _refuse("A start is pending — wait for it before finalizing.")
-    run = await db.get(SimulationRun, run_id)
     if run is None or run.status != "stopped" or run.finalized_at is not None:
         return _refuse("Only a stopped run that is not already finalized can be finalized.")
     payload = {"finalize": True, "run_id": str(run_id)}

@@ -707,7 +707,7 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
             "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
         },
     )
-    assert r.status_code == 302 and r.headers["location"] == "/profile?saved=1"
+    assert r.status_code == 302 and r.headers["location"] == "/profile"
 
     user = await _user_row(db_session, u.id)
     assert user["name"] == "After Name"
@@ -758,7 +758,7 @@ async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(
         headers=h,
         data={"name": "Renamed", "email": "keep@example.org", "research_summary": "written"},
     )
-    assert r.headers["location"] == "/profile?saved=1"
+    assert r.headers["location"] == "/profile"
     assert (await _user_row(db_session, u.id))["name"] == "Renamed"
 
 

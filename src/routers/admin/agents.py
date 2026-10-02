@@ -174,7 +174,6 @@ async def admin_agent_detail(
             available_roles=available_roles(),
             form_error=request.query_params.get("error"),
             form_version=agent_form_version(agent),
-            slack_ok=request.query_params.get("slack_ok"),
             role_error=request.query_params.get("role_error"),
             spoke_state=spoke_state,
             requires_linked_user=requires_linked_user(agent.role),
@@ -354,7 +353,8 @@ async def admin_reject_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Reject an agent request."""
+    """Reject a pending agent request. Any other status is refused (C-29): an
+    approved agent is parked or suspended from its edit form, not by "Reject"."""
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
     )
@@ -362,6 +362,14 @@ async def admin_reject_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    if agent.status != "pending":
+        flash(
+            request,
+            "Only a pending request can be rejected; change an approved agent's status "
+            "on its edit page.",
+            "error",
+        )
+        return RedirectResponse(url="/admin/agents", status_code=302)
     agent.status = "suspended"
     await db.commit()
 
@@ -431,7 +439,7 @@ async def admin_provision_slack_callback(
     is_admin = bool(current_user.is_admin)
 
     def surface_error(msg: str) -> RedirectResponse:
-        flash(request, f"Slack provisioning failed: {msg}", "error")
+        flash(request, f"Slack provisioning failed: {msg[:200]}", "error")
         return RedirectResponse(
             url="/admin/agents" if is_admin else "/manager/pis", status_code=302
         )
@@ -457,14 +465,21 @@ async def admin_provision_slack_callback(
     )
 
     if is_admin:
-        return RedirectResponse(
-            url=f"/admin/agents/{agent.id}?slack_ok=1", status_code=302
+        flash(
+            request,
+            "Slack bot provisioned — the token is saved on the agent (it is not shown).",
+            "success",
         )
-    if agent.user_id is None:
-        return RedirectResponse(url="/manager/pis?slack_ok=1", status_code=302)
-    return RedirectResponse(
-        url=f"/manager/pis/{agent.user_id}?slack_ok=1", status_code=302
+        return RedirectResponse(url=f"/admin/agents/{agent.id}", status_code=302)
+    flash(
+        request,
+        "Slack bot installed — the token is saved on this PI's agent. "
+        "Activate the agent to bring it live.",
+        "success",
     )
+    if agent.user_id is None:
+        return RedirectResponse(url="/manager/pis", status_code=302)
+    return RedirectResponse(url=f"/manager/pis/{agent.user_id}", status_code=302)
 
 
 
@@ -472,11 +487,16 @@ async def admin_provision_slack_callback(
 async def admin_link_agent(
     agent_id: uuid.UUID,
     request: Request,
-    user_id: str = Form(...),
+    user_id: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Link an agent to a user account."""
+    """Link an agent to a user account (C-06).
+
+    Refused with a flash and nothing written unless ``user_id`` names an existing
+    account whose role may own a lab and that no other agent is linked to; see
+    ``_link_target``. A malformed or unknown id used to surface as a 500.
+    """
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
     )
@@ -484,10 +504,47 @@ async def admin_link_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    agent.user_id = uuid.UUID(user_id) if user_id else None
-    await db.commit()
-
+    refusal, user = await _link_target(db, agent, user_id)
+    if refusal is not None:
+        flash(request, refusal, "error")
+        return RedirectResponse(url="/admin/agents", status_code=302)
+    agent.user_id = user.id
+    try:
+        await db.commit()
+    except IntegrityError:
+        # agents.user_id is unique: a concurrent link of the same user won.
+        await db.rollback()
+        flash(request, "That user is already linked to another agent.", "error")
     return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+async def _link_target(
+    db: AsyncSession, agent: AgentRegistry, raw_user_id: str
+) -> tuple[str | None, User | None]:
+    """``(refusal, user)`` for the link form; exactly one is None. The role rule is
+    ``User.may_use_pi_surfaces`` (PI or admin): a manager or reviewer has no lab (D7)."""
+    raw = raw_user_id.strip()
+    if not raw:
+        return "Choose a user to link.", None
+    try:
+        target_id = uuid.UUID(raw)
+    except ValueError:
+        return "That user id is not valid.", None
+    user = (
+        await db.execute(select(User).where(User.id == target_id))
+    ).scalar_one_or_none()
+    if user is None:
+        return "No such user.", None
+    if not user.may_use_pi_surfaces:
+        return "That account's role cannot own a lab.", None
+    linked_elsewhere = await db.scalar(
+        select(AgentRegistry.id).where(
+            AgentRegistry.user_id == user.id, AgentRegistry.id != agent.id
+        )
+    )
+    if linked_elsewhere is not None:
+        return "That user is already linked to another agent.", None
+    return None, user
 
 
 

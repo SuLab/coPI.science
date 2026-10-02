@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry, User
 from src.services.agent_activation import activate_agent
+from src.services.slack_tokens import token_for_agent_row
 
 _MUTABLE_STATUSES = ("active", "inactive")
 
@@ -31,7 +32,7 @@ async def set_agent_mute_state(
             .values(status="inactive", muted_at=datetime.now(UTC), muted_by=actor.id)
         )
     else:
-        if not agent.slack_bot_token:
+        if not token_for_agent_row(agent):
             return "no_token"
         with db.no_autoflush:
             blockers = await activate_agent(db, agent, actor=actor, override=False)

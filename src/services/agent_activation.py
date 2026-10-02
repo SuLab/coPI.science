@@ -138,10 +138,11 @@ async def activate_agent(
     transition, which is what the pre-refactor ``admin_approve_agent`` did.
     They record who first vouched for this agent; re-activating from
     ``inactive`` (a manager unmute) or ``suspended`` must not overwrite that
-    provenance with whoever happened to flip the switch back on. The single
-    call site for
-    both branches of ``admin_approve_agent``, and for the manager surface's
-    ``manager_activate_agent``, which needs the same gate-then-activate sequence.
+    provenance with whoever happened to flip the switch back on. The call site
+    for both branches of ``admin_approve_agent`` and for the manager unmute
+    (``src/services/agent_mute.py``). ``manager_activate_agent`` runs
+    ``ensure_activation_allowed`` itself and flips the status with a conditional
+    UPDATE, so a concurrent change is never overwritten (D-07).
     """
     if override:
         # The override waives the profile blockers only; log what it waived, with

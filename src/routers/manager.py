@@ -42,7 +42,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,7 +64,7 @@ from src.models import (
     User,
 )
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
-from src.services.agent_activation import activate_agent, activation_blockers
+from src.services.agent_activation import activation_blockers, ensure_activation_allowed
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import build_assessment_detail
 from src.services.assessment_reviews import (
@@ -244,7 +244,7 @@ async def manager_pi_detail(
             industry_score=detail["industry_score"],
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
-            slack_ok=request.query_params.get("slack_ok"),
+            has_bot_token=bool(agent is not None and token_for_agent_row(agent)),
             activation_blocked=blocked,
             activated=request.query_params.get("activated"),
             blockers=blockers,
@@ -293,11 +293,15 @@ async def manager_create_pi(
             url=f"/manager/pis?error={_create_pi_error_code(exc)}",
             status_code=302,
         )
-    except IntegrityError:
+    except IntegrityError as exc:
         # Two managers adding same-surname PIs can race the identity
         # derivation's SELECT-then-INSERT; the loser rolls the WHOLE creation
         # back (User + Job + agent together — the atomicity is the feature).
         await db.rollback()
+        if "users_orcid_key" in str(exc.orig):
+            # Two adds of the SAME ORCID raced past the existence check (D-17):
+            # that is "already exists", not an agent-identity clash.
+            return RedirectResponse(url="/manager/pis?error=exists", status_code=302)
         logger.warning(
             "Add-PI race on agent identity for ORCID %r; rolled back",
             orcid.strip()[:40],
@@ -344,7 +348,8 @@ async def manager_edit_pi_profile(
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
-    return RedirectResponse(url=f"/manager/pis/{user_id}?saved=1", status_code=302)
+    flash(request, "Profile saved.", "success")
+    return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 
 
 async def _manager_set_mute(
@@ -597,17 +602,42 @@ async def manager_activate_agent(
     checkbox is a logged, admin-only escape hatch, and offering it on the
     manager surface would make the gate advisory for the role most likely to
     be working through a bulk onboarding list.
+
+    The status write is ``UPDATE … WHERE status = 'pending'`` (D-07). The token
+    check is ``token_for_agent_row`` (D-11), the predicate /manager/slack-bots shows.
     """
     agent = await _pending_pi_agent(db, user_id)
-    if not agent.slack_bot_token:
+    if not token_for_agent_row(agent):
         flash(request, "Slack provisioning failed: Install the Slack bot first.", "error")
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
-    blockers = await activate_agent(db, agent, actor=current_user, override=False)
+    blockers = await ensure_activation_allowed(
+        db, agent, new_role=agent.role, new_status="active"
+    )
     if blockers:
+        # Kept from Phase 1 Task 1C-6: the hub limit and profile checks name themselves.
         flash(request, "Activation refused: " + "; ".join(blockers), "error")
         return RedirectResponse(
             url=f"/manager/pis/{user_id}?activation_blocked=1", status_code=302
         )
+    # D-07: the write is conditional on the row still being pending, so a suspend
+    # (or any status change) committed after _pending_pi_agent read it is never
+    # overwritten. approved_at/approved_by are stamped here because this is the
+    # pending -> active transition (see activate_agent's docstring).
+    activated = await db.execute(
+        update(AgentRegistry)
+        .where(AgentRegistry.id == agent.id, AgentRegistry.status == "pending")
+        .values(status="active", approved_at=datetime.now(UTC), approved_by=current_user.id)
+        .execution_options(synchronize_session=False)
+    )
+    if activated.rowcount != 1:
+        await db.rollback()
+        flash(
+            request,
+            "This agent changed while you were activating it (someone else acted first). "
+            "Reload the page and check its status.",
+            "error",
+        )
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     await db.commit()
     return RedirectResponse(
         url=f"/manager/pis/{user_id}?activated=1", status_code=302
@@ -655,7 +685,6 @@ async def manager_slack_bots(
             active_manager="slack-bots",
             bots=bots,
             counts=counts,
-            slack_ok=request.query_params.get("slack_ok"),
         ),
     )
 

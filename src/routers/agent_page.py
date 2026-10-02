@@ -551,7 +551,6 @@ async def view_public_profile(
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
             profile=profile, pi_user=pi_user, editing=False,
-            saved=request.query_params.get("saved"),
         ),
     )
 
@@ -591,6 +590,14 @@ async def edit_public_profile(
     )
 
 
+def _has_content(value) -> bool:
+    """True for a non-blank string, or a list holding one (the tag fields post
+    one hidden input per tag since Phase 1, D-16)."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    return any(isinstance(v, str) and v.strip() for v in (value or []))
+
+
 @router.post("/{agent_id}/public-profile/save")
 async def save_public_profile(
     agent_id: str,
@@ -614,14 +621,25 @@ async def save_public_profile(
             detail="This lab is no longer linked to a PI account",
         )
 
+    fields = {
+        "research_summary": research_summary,
+        **list_fields_from_form(await request.form()),
+    }
+    profile_exists = await db.scalar(
+        select(ResearcherProfile.id).where(ResearcherProfile.user_id == agent.user_id)
+    )
+    if profile_exists is None and not any(_has_content(v) for v in fields.values()):
+        # D-15: an all-blank first save would mint an empty ResearcherProfile; the
+        # profile job, or a save with content, creates it instead.
+        flash(request, "There is nothing to save yet — fill in at least one field.", "error")
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/public-profile/edit", status_code=302
+        )
     note = impersonation_note(current_user)
     pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
-        form={
-            "research_summary": research_summary,
-            **list_fields_from_form(await request.form()),
-        },
+        form=fields,
         expected_version=parse_expected_version(profile_version),
         export_agent=agent,
         change_summary=note,
@@ -637,9 +655,8 @@ async def save_public_profile(
         agent.agent_id, current_user.name, note or "direct",
     )
 
-    return RedirectResponse(
-        url=f"/agent/{agent_id}/public-profile?saved=1", status_code=302
-    )
+    flash(request, "Public profile saved and exported.", "success")
+    return RedirectResponse(url=f"/agent/{agent_id}/public-profile", status_code=302)
 
 
 # --------------------------------------------------------------------------

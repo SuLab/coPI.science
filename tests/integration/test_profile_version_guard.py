@@ -80,7 +80,7 @@ async def test_a_current_form_saves_and_bumps_the_version(client, db_session, ex
     user, agent = await _pi(db_session, "current")
     path, data, actor = _routes(user, agent)["profile_save"]
     resp = await client.post(path, data={**data, "profile_version": "3"}, headers=auth_headers(actor))
-    assert resp.headers["location"] == "/profile?saved=1"
+    assert resp.headers["location"] == "/profile"
     profile = await _profile(db_session, user.id)
     assert (profile.research_summary, profile.profile_version) == ("Edited summary.", 4)
 

@@ -146,7 +146,7 @@ async def test_every_address_form_clears_the_verification(client, db_session):
 
     r = await client.post("/profile/save", data={**form, "email": "a2@example.edu"},
                           headers=auth_headers(pi.id))
-    assert r.headers["location"] == "/profile?saved=1"
+    assert r.headers["location"] == "/profile"
     await db_session.refresh(pi)
     assert (pi.email, pi.email_verified_at) == ("a2@example.edu", None)
 
@@ -154,7 +154,7 @@ async def test_every_address_form_clears_the_verification(client, db_session):
     await db_session.flush()
     r = await client.post(f"/manager/pis/{pi.id}/profile", data={**form, "email": "a3@example.edu"},
                           headers=auth_headers(mgr.id))
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?saved=1"
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
     await db_session.refresh(pi)
     assert (pi.email, pi.email_verified_at) == ("a3@example.edu", None)
 

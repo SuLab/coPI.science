@@ -201,7 +201,7 @@ FLOWS: dict[str, dict] = {
              "POST .../slack/provision -> apps.manifest.create -> 302 to Slack"),
             ("human", "Allow, on Slack's install screen",
              "the automation browser has no Slack session"),
-            ("land", "/admin/agents/{id}?slack_ok=1",
+            ("land", "/admin/agents/{id}",
              "Slack redirects to BASE_URL/admin/agents/slack/callback"),
             ("verify", "auth.test on the resulting xoxb- token",
              "read back from Slack, never from our own column"),

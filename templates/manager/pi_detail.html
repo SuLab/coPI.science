@@ -47,7 +47,7 @@
                    Gated by the enclosing `effective_user.is_staff`, never on
                    `current_user` — an admin impersonating a reviewer must not
                    be shown a control that 403s on submit. #}
-                {% if not target_user.agent.slack_bot_token %}
+                {% if not has_bot_token %}
                 <form method="post" action="/manager/pis/{{ target_user.id }}/slack/provision" class="mt-1">
                     <button type="submit" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90">Install Slack bot</button>
                 </form>
@@ -65,20 +65,14 @@
         {% endif %}
     </div>
 
-    {# The four status banners are STAFF-ONLY, and gated on the same
+    {# The status banners below are STAFF-ONLY, and gated on the same
        `effective_user.is_staff` the controls
        above use. Every one of them is driven purely by a query parameter the
        caller supplies, so ungated a reviewer — who may load this page
-       read-only — could summon "Slack bot installed" or "Agent activated"
+       read-only — could summon "Agent activated"
        out of a URL and produce a screenshot of something that never
        happened. #}
     {% if effective_user.is_staff %}
-    {% if slack_ok %}
-    <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
-        ✅ Slack bot installed — the token is saved on this PI's agent. Click
-        <b>Activate agent</b> above to bring it live.
-    </div>
-    {% endif %}
     {% if activated %}
     <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
         ✅ Agent activated — the running simulation picks it up on its next roster sync (~30s).
@@ -109,6 +103,7 @@
             {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
             {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
             {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
+            {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
