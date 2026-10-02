@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -35,6 +35,14 @@ class User(Base):
     #: type any address), so it is shown to admins on /admin/access-requests and
     #: never copied to `email`, which delegate-invitation acceptance trusts.
     contact_email_unverified: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: When an administrator (any user) or a manager (PIs) verified `email`
+    #: (migration 0057, spec 2026-10-01 §6.6). Cleared by
+    #: src/services/user_email.py whenever the address changes; delegate-invitation
+    #: acceptance requires it. Users with an email at migration time were stamped
+    #: by owner decision D8.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     institution: Mapped[str | None] = mapped_column(String(255), nullable=True)
     department: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -55,6 +63,11 @@ class User(Base):
     access_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
     )  # allowed, pending, denied
+    #: Server-side session revocation (migration 0057, spec 2026-10-01 §6.7). Login
+    #: copies it into session["epoch"]; get_current_user refuses a session whose
+    #: epoch differs. Bumped by logout, access denial and a role change
+    #: (src/services/session_epoch.py). NULL counts as 0.
+    session_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

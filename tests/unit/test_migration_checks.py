@@ -277,9 +277,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
-        "0049", "0050", "0051", "0052", "0053", "0054", "0055",
+        "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056",
     )
-    assert pf.DEFAULT_TARGET == "0056"
+    assert pf.DEFAULT_TARGET == "0057"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1833,3 +1833,13 @@ async def test_sizing_reports_every_altered_table(monkeypatch):
     assert sorted(data["sized_tables"]) == pf.tables_sized_between("0055", "0056")
     assert data["sized_tables"]["jobs"] == {"rows": 10, "heap_bytes": 50_000_000, "total_bytes": 50_000_000}
     assert "jobs: 10 rows" in detail
+
+
+# --------------------------------------------------------------------------- #
+# 0057: two nullable users columns
+# --------------------------------------------------------------------------- #
+
+
+def test_0057_sizes_only_users_and_takes_no_agent_messages_lock():
+    assert pf.tables_sized_between("0056", "0057") == ["users"]
+    assert pf.agent_messages_ddl_pending("0056", "0057") is False
