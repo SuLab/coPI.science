@@ -301,7 +301,7 @@ MUTANTS=(
 "vac_c2~~src/agent/tools.py~~            on_retry=on_api_call,~~            on_retry=None,~~M17 C2/R3 a consult's own max_tokens retry is not booked as an API call"
 'vac_i21~~prompts/roles/scout_hub/phase4-thread-reply.md~~Only your inline verdict also appears in `<slack_message>`~~None of it may appear anywhere in `<slack_message>`~~M18 I21/E7 the phase-4 prompt forbids the inline verdict again (the pre-df4d975 sentence)'
 'vac_i28~~src/models/delegate.py~~String(20), nullable=False, default="pending"~~String(20), nullable=False, default="accepted"~~M19 I28/E14 a new delegate invitation defaults to accepted'
-"vac_i24b~~src/services/directory.py~~    root_posts = (await db.execute(roots_query.order_by(AgentMessage.created_at))).all()~~    root_posts = []~~M21 I24b/R1 the discussions view lists no threads"
+"vac_i24b~~src/services/directory.py~~    rows = (await db.execute(query)).all()~~    rows = []~~M21 I24b/R1 the discussions view lists no threads"
 )
 
 # (copy_is_safe and the guards live in scripts/lib/mutation_harness.sh.)
