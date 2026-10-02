@@ -173,7 +173,7 @@ async def journey_ui_behaviours(h) -> dict:
     inside a row, a filter change, a show/hide toggle, a submit-on-change select."""
     context, page, _log = await h.page("admin")
     errors: list = []
-    page.on("pageerror", errors.append)
+    page.on("pageerror", lambda e: errors.append(e))
     await context.route("https://orcid.org/**", _ui_abort)
     base = h.base_url
     out: dict = {}
