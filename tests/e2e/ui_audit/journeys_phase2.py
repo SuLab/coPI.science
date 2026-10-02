@@ -57,7 +57,9 @@ async def journey_review_double_click_stores_one(h) -> dict:
         await page.goto(
             f"{h.base_url}/manager/assessments/{assessment_id}", wait_until="networkidle"
         )
-        stored = await page.get_by_text(comment, exact=True).count()
+        # One stored review renders its comment twice for its author (the text and the
+        # edit form's textarea); count the rendered review text only.
+        stored = await page.locator("p.review-comment").filter(has_text=comment).count()
         return {"ok": stored == 1, "stored": stored, "log": log}
     finally:
         await ctx.close()
