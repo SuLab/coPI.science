@@ -1,54 +1,69 @@
-// Shared sanitizing markdown renderer (SEC-2).
+// Shared sanitizing markdown renderer (SEC-2; spec 2026-10-01 §5.2).
 //
-// Renders every element carrying a `data-markdown` attribute as GitHub-flavored
-// markdown, passed through DOMPurify BEFORE it is assigned to innerHTML. The
-// source text is LLM/agent-generated proposal and summary content — untrusted —
-// so it must never reach innerHTML unsanitized. Load this AFTER marked and
-// DOMPurify. Exposes window.copiRenderMarkdown(md) for ad-hoc use.
+// Renders every element carrying a `data-markdown` attribute as markdown. The source
+// is LLM/agent-generated text — untrusted — so raw HTML in it is shown as TEXT, and the
+// output passes an explicit DOMPurify allowlist before it reaches innerHTML. A lone
+// <br> is the one raw tag kept (the only raw HTML in production data, 2026-10-01).
+// Load this AFTER marked and DOMPurify. Exposes window.copiRenderMarkdown(md).
 (function () {
-  // Disable GFM strikethrough: the corpus uses single tildes for
-  // "approximately" (e.g. "~30-37%"), which marked otherwise pairs into a
-  // <del> span. No content uses intentional ~~strikethrough~~. Returning
-  // undefined from the del tokenizer makes marked treat every tilde as
-  // literal text. Guarded because marked may be absent (fail-closed path).
+  // Disable GFM strikethrough: the corpus uses single tildes for "approximately"
+  // (e.g. "~30-37%"), which marked otherwise pairs into a <del> span.
   if (window.marked && typeof marked.use === "function") {
     marked.use({ tokenizer: { del() { return undefined; } } });
   }
 
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/["]/g, "&quot;")
+      .replace(/[']/g, "&#39;");
+  }
+
+  var LONE_BR = /^<br\s*\/?>$/i;
+
+  // marked's own `tag` tokenizer enters a raw-block state after <code>, <pre>, <kbd>
+  // or <script> in which later text is emitted UNESCAPED (RSEC-1); raw HTML is
+  // rendered as text by the profiles below, so that state is never wanted.
+  function rawTagTokenizer(src) {
+    const cap = this.rules.inline.tag.exec(src);
+    if (cap) {
+      return { type: "html", raw: cap[0], inLink: false, inRawBlock: false, block: false, text: cap[0] };
+    }
+    return undefined;
+  }
+
   // One factory for every sanitizing renderer (LC-02): the detail pages ("page"),
   // the assessment chat ("chat") and the collaboration graph ("graph"). Each call
-  // returns a PRIVATE marked instance, so no profile's options leak into another
-  // or into the page-global marked. Every profile treats "~" as literal text.
+  // returns a PRIVATE marked instance. Every profile treats "~" as literal text.
   function createSanitizingMarked(profile) {
     if (!window.marked || !window.marked.Marked) return null;
     const instance = new window.marked.Marked();
     const tokenizer = { del() { return undefined; } };
     const ext = { tokenizer: tokenizer };
     if (profile === "chat") {
-      // marked's own `tag` tokenizer enters a raw-block state after <code>, <pre>,
-      // <kbd> or <script> in which later text is emitted UNESCAPED (RSEC-1); raw
-      // HTML is rendered as text below, so that state is never wanted.
-      tokenizer.tag = function (src) {
-        const cap = this.rules.inline.tag.exec(src);
-        if (cap) {
-          return { type: "html", raw: cap[0], inLink: false, inRawBlock: false, block: false, text: cap[0] };
-        }
-        return undefined;
+      tokenizer.tag = rawTagTokenizer;
+      ext.renderer = {
+        html: function (html) { return escapeHtml(html); }
       };
+    } else if (profile === "page") {
+      tokenizer.tag = rawTagTokenizer;
       ext.renderer = {
         html: function (html) {
-          return String(html)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/["]/g, "&quot;")
-            .replace(/[']/g, "&#39;");
+          var s = String(html);
+          return LONE_BR.test(s.trim()) ? "<br>" : escapeHtml(s);
+        },
+        // marked 12 passes `text` (the alt text) already escaped (outputLink).
+        image: function (href, title, text) {
+          if (!href) return text || "";
+          return '<a href="' + escapeHtml(href) + '">' + (text || escapeHtml(href)) + "</a>";
         }
       };
     } else if (profile === "graph") {
       ext.gfm = true;
       ext.breaks = true;
-    } else if (profile !== "page") {
+    } else {
       throw new Error("unknown markdown profile: " + profile);
     }
     instance.use(ext);
@@ -56,16 +71,33 @@
   }
   window.createSanitizingMarked = createSanitizingMarked;
 
+  // Exactly what markdown produces; no form controls, media, styles or ids. `title`
+  // carries md_citations' cited URL (src/services/prose_citations.py); `start` keeps an
+  // ordered list's numbering and `align` a table column's alignment (both inert, both
+  // emitted by marked). DOMPurify keeps data-* and aria-* by default even with an
+  // explicit ALLOWED_ATTR, so both are switched off: the site's document-level
+  // behaviours key on data-* attributes.
+  var PAGE_PURIFY = {
+    ALLOWED_TAGS: ["p", "br", "strong", "em", "code", "pre", "blockquote", "ul", "ol", "li",
+                   "a", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+                   "table", "thead", "tbody", "tr", "th", "td"],
+    ALLOWED_ATTR: ["href", "title", "start", "align"],
+    ALLOW_DATA_ATTR: false,
+    ALLOW_ARIA_ATTR: false,
+    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#)/i
+  };
+  window.COPI_PAGE_PURIFY = PAGE_PURIFY;
+
+  var pageMarked = null;
+
   function renderMarkdown(md) {
     if (!md) return "";
-    if (!window.marked || !window.DOMPurify) {
+    if (!pageMarked) pageMarked = createSanitizingMarked("page");
+    if (!pageMarked || !window.DOMPurify) {
       // Fail closed: never inject unsanitized HTML if a dependency is missing.
-      // Fall back to plain text via textContent round-trip.
-      var div = document.createElement("div");
-      div.textContent = md;
-      return div.innerHTML;
+      return escapeHtml(md);
     }
-    return DOMPurify.sanitize(marked.parse(md));
+    return DOMPurify.sanitize(pageMarked.parse(md), PAGE_PURIFY);
   }
 
   function renderAll() {

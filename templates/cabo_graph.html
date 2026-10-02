@@ -635,7 +635,9 @@
       // Graceful fallback if a CDN failed to load.
       return `<div style="white-space:pre-wrap">${escapeHtml(text)}</div>`;
     }
-    return DOMPurify.sanitize(graphMarked.parse(text));
+    // Spec 2026-10-01 §5.2: same allowlist as the page renderer (forms, media,
+    // styles and ids are dropped). This page is deleted in Phase 1.
+    return DOMPurify.sanitize(graphMarked.parse(text), window.COPI_PAGE_PURIFY);
   }
 
   const modal = d3.select("#proposal-modal");

@@ -23,3 +23,40 @@ def test_no_template_builds_a_confirm_in_an_inline_handler():
         if re.search(r"on(submit|click)=\"[^\"]*confirm\(", p.read_text())
     ]
     assert offenders == []
+
+
+MARKDOWN = ROOT / "static" / "js" / "markdown.js"
+
+
+def _page_profile(js: str) -> str:
+    start = js.index('profile === "page"')
+    # "} else" (not "} else if"): Phase 1 Task 1A-2 deletes the graph branch, after
+    # which the page branch is followed by the final "} else {".
+    return js[start: js.index("} else", start + 1)]
+
+
+def test_page_profile_escapes_raw_html_except_a_lone_br():
+    js = MARKDOWN.read_text()
+    page = _page_profile(js)
+    assert "tokenizer.tag = rawTagTokenizer" in page
+    assert "LONE_BR.test" in page and "escapeHtml(" in page
+    assert r"var LONE_BR = /^<br\s*\/?>$/i;" in js
+
+
+def test_page_profile_renders_images_as_links():
+    page = _page_profile(MARKDOWN.read_text())
+    assert "image: function (href, title, text)" in page
+    assert "<img" not in page
+
+
+def test_render_markdown_uses_the_explicit_page_allowlist():
+    js = MARKDOWN.read_text()
+    assert "DOMPurify.sanitize(pageMarked.parse(md), PAGE_PURIFY)" in js
+    assert "DOMPurify.sanitize(marked.parse(md))" not in js
+    block = js[js.index("var PAGE_PURIFY"): js.index("};", js.index("var PAGE_PURIFY"))]
+    for forbidden in ('"form"', '"input"', '"button"', '"img"', '"style"', '"iframe"',
+                      '"select"', '"textarea"'):
+        assert forbidden not in block
+    assert 'ALLOWED_ATTR: ["href", "title", "start", "align"]' in block
+    assert "ALLOW_DATA_ATTR: false" in block and "ALLOW_ARIA_ATTR: false" in block
+    assert r"ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#)/i" in block
