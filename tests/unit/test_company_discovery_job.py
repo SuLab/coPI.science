@@ -321,3 +321,103 @@ async def test_merge_joins_spellings_and_keeps_the_newest_statement_first():
 ])
 async def test_outcome_line(args, line):
     assert cd.outcome_line(*args) == line
+
+
+async def test_no_insert_until_every_lookup_is_done(db_session, monkeypatch, respx_mock):
+    """The job's one transaction holds no uncommitted pi_companies row while SEC runs."""
+    _settings(monkeypatch)
+    routes = _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    real_write = cd._write_suggestion
+    seen: list[tuple[int, int, int, int]] = []
+
+    async def spy(*args, **kwargs):
+        seen.append((routes.efetch.call_count, routes.sparql.call_count,
+                     routes.efts.call_count, routes.doc.call_count))
+        return await real_write(*args, **kwargs)
+
+    monkeypatch.setattr(cd, "_write_suggestion", spy)
+    assert await _run(db_session, job) == "2 suggested"
+    assert seen == [(1, 1, 2, 1), (1, 1, 2, 1)]
+
+
+def _instant_ncbi_retries(monkeypatch) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _instant(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(pubmed.asyncio, "sleep", _instant)
+
+
+async def test_refused_upstream_names_are_skipped_with_a_note(db_session, monkeypatch, respx_mock):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    long_name = "ﷺ" * 15  # 15 characters whose NFKC form is 270
+    assert len(long_name) <= 200 < len(normalize_company_name(long_name))
+
+    async def companies(*_args):
+        return [
+            wikidata.WikidataCompany("Evil\x00Corp", "Q1", "https://www.wikidata.org/wiki/Q1"),
+            wikidata.WikidataCompany(long_name, "Q2", "https://www.wikidata.org/wiki/Q2"),
+            wikidata.WikidataCompany("Celera Corporation", "Q643341", "https://www.wikidata.org/wiki/Q643341"),
+        ]
+
+    monkeypatch.setattr(cd, "_wikidata_companies", companies)
+    assert await _run(db_session, job) == (
+        "3 suggested; skipped name 'Evil\\x00Corp': The company name must be one line of text.; "
+        f"skipped name {long_name!r}: Company names are limited to 200 characters.")
+    rows = await _rows(db_session, user.id)
+    assert set(rows) == {"DELFI Diagnostics", "Personal Genome Diagnostics", "Celera Corporation"}
+
+
+async def test_valid_names_skips_a_refused_coi_name_and_cleans_the_rest():
+    def claim(name):
+        return cd.coi_founders.FounderClaim(name, "founder", "1", 2024, "s", False)
+
+    notes: list[str] = []
+    kept = cd.valid_names([claim("Bad\x00Name"), claim("  Good Bio  "), claim("..."), claim("Bad\x00Name")], notes)
+    assert [c.company_name for c in kept] == ["Good Bio"]
+    assert notes == ["skipped name 'Bad\\x00Name': The company name must be one line of text."]
+
+
+async def test_funding_beyond_bigint_is_dropped_and_the_suggestion_kept(db_session, monkeypatch, respx_mock):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+
+    async def huge(*_args, **_kwargs):
+        return sec_form_d.FundingResult(
+            status="ok", funding_usd=9223372036854775808, funding_as_of=date(2022, 7, 25),
+            funding_source_url="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=1")
+
+    monkeypatch.setattr(sec_form_d, "lookup_funding", huge)
+    assert await _run(db_session, job) == (
+        "2 suggested; sec: funding figure out of range for DELFI Diagnostics; "
+        "sec: funding figure out of range for Personal Genome Diagnostics")
+    rows = await _rows(db_session, user.id)
+    assert len(rows) == 2
+    for row in rows.values():
+        assert row.funding_usd is None and row.funding_as_of is None and row.funding_source_url is None
+        assert row.evidence["form_d"]["status"] == "no_amount"
+        assert row.evidence["form_d"]["funding_usd"] is None
+
+
+async def test_one_failed_pubmed_batch_keeps_the_others(db_session, monkeypatch, respx_mock):
+    _instant_ncbi_retries(monkeypatch)
+    _settings(monkeypatch)
+    monkeypatch.setattr(cd, "PUBMED_BATCH", 1)
+
+    def efetch(request):
+        if request.url.params["id"] == "34290408":
+            return httpx.Response(503)
+        return _efetch(request)
+
+    routes = _routes(respx_mock, efetch=efetch)
+    user, job = await _velculescu(db_session)
+    assert await _run(db_session, job) == "1 suggested; pubmed: partial (1 of 2 records)"
+    rows = await _rows(db_session, user.id)
+    assert set(rows) == {"DELFI Diagnostics"}
+    assert [e["pmid"] for e in rows["DELFI Diagnostics"].evidence["coi"]] == ["39433569"]
+    assert routes.efetch.call_count == 4  # the OK batch, then three tries of the 503

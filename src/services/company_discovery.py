@@ -15,6 +15,15 @@ job's final progress entry (`DISCOVERY_DONE_STEP`) and the job completes with wh
 the other sources found: `industry_evidence` lost whole runs to one upstream 429 (F13).
 Only a database error fails the job.
 
+The worker holds one transaction for the whole job (`src.worker.main.process_job`), so
+every network lookup (PubMed, Wikidata, then SEC Form D for each new candidate) runs
+before the first insert: an uncommitted `pi_companies` row would otherwise hold its
+`(user_id, normalized_name)` key through minutes of SEC requests and block a manager's
+manual add of the same name until the job commits.
+
+Upstream text is untrusted: every candidate name passes the same cleaner a manual entry
+does (`pi_companies._clean_name`), and a refused one is skipped with a note.
+
 Must not import the modules tests/unit/test_enrichment_isolation.py forbids, nor
 `industry_sources/pubmed_coi.py` (tests/unit/test_company_discovery_isolation.py).
 """
@@ -35,7 +44,12 @@ from src.models import Job, PiCompany, Publication, User
 from src.services import job_progress, pubmed
 from src.services.company_sources import PiName, coi_founders, pi_name, sec_form_d, wikidata
 from src.services.job_queue import insert_job_if_absent
-from src.services.pi_companies import normalize_company_name
+from src.services.pi_companies import (
+    _MAX_FUNDING_USD,
+    CompanyValidationError,
+    _clean_name,
+    normalize_company_name,
+)
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -50,6 +64,10 @@ PUBMED_URL = "https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 #: Evidence bounds per suggestion: the newest attributed sentences, each clipped.
 MAX_COI_EVIDENCE = 10
 MAX_SENTENCE_CHARS = 1000
+#: PMIDs per EFetch request; each batch fails alone (`_fetch_coi_records`).
+PUBMED_BATCH = 100
+#: How much of a refused upstream name a skip note quotes.
+_SHOWN_NAME_CHARS = 40
 
 
 # --- enqueue -----------------------------------------------------------------
@@ -158,12 +176,7 @@ async def _coi_claims(
         notes.append("pubmed: no usable PI name")
         return []
     year_by_pmid = {str(pmid): year for pmid, year in rows}
-    try:
-        records = await pubmed.fetch_pubmed_records(list(year_by_pmid), strict=True)
-    except Exception as exc:  # an NCBI failure is a note, not a job failure
-        logger.warning("company_discovery %s: PubMed lookup failed: %r", user_id, exc)
-        notes.append("pubmed: lookup unavailable")
-        return []
+    records = await _fetch_coi_records(user_id, list(year_by_pmid), notes)
     claims: list[coi_founders.FounderClaim] = []
     for record in records:
         try:
@@ -176,6 +189,27 @@ async def _coi_claims(
                 claim = dataclasses.replace(claim, year=year_by_pmid.get(claim.pmid))
             claims.append(claim)
     return claims
+
+
+async def _fetch_coi_records(user_id: uuid.UUID, pmids: list[str], notes: list[str]) -> list[dict]:
+    """The PubMed records of `pmids`, fetched `PUBMED_BATCH` at a time with each batch
+    strict (`pubmed.fetch_pubmed_records`) but failing alone: a transient failure of
+    one batch costs that batch, not every record. Notes "pubmed: partial (N of M
+    records)" when some batch failed and "pubmed: lookup unavailable" when every one did."""
+    records: list[dict] = []
+    failed = 0
+    batches = [pmids[i:i + PUBMED_BATCH] for i in range(0, len(pmids), PUBMED_BATCH)]
+    for batch in batches:
+        try:
+            records.extend(await pubmed.fetch_pubmed_records(batch, strict=True))
+        except Exception as exc:  # an NCBI failure is a note, not a job failure
+            logger.warning("company_discovery %s: PubMed batch %s... failed: %r", user_id, batch[:3], exc)
+            failed += 1
+    if failed == len(batches):
+        notes.append("pubmed: lookup unavailable")
+    elif failed:
+        notes.append(f"pubmed: partial ({len(records)} of {len(pmids)} records)")
+    return records
 
 
 async def _wikidata_companies(
@@ -198,6 +232,49 @@ async def _funding(cand: Candidate, name: PiName | None, sec_user_agent: str) ->
     except Exception as exc:  # lookup_funding maps upstream failures itself
         logger.exception("company_discovery: Form D lookup for %r failed", cand.company_name)
         return sec_form_d.FundingResult.unavailable(type(exc).__name__)
+
+
+# --- untrusted input -----------------------------------------------------------
+
+
+def _shown(name: str) -> str:
+    """A refused name as a note quotes it: repr (control characters escaped), clipped."""
+    clipped = name[:_SHOWN_NAME_CHARS]
+    return repr(clipped) + ("..." if len(name) > _SHOWN_NAME_CHARS else "")
+
+
+def valid_names(items: list, notes: list[str]) -> list:
+    """`items` (`FounderClaim`s or `WikidataCompany`s) whose `company_name` passes the
+    manual-entry cleaner, each with the cleaned name. A name with nothing alphanumeric
+    is dropped silently, as `merge_candidates` always has; any other refusal (control
+    characters, longer than `MAX_NAME_CHARS` before or after normalization) is dropped
+    with one note per distinct name."""
+    kept, refused = [], set()
+    for item in items:
+        if not normalize_company_name(item.company_name):
+            continue
+        try:
+            name, _normalized = _clean_name(item.company_name)
+        except CompanyValidationError as exc:
+            if item.company_name not in refused:
+                refused.add(item.company_name)
+                notes.append(f"skipped name {_shown(item.company_name)}: {exc}")
+            continue
+        kept.append(dataclasses.replace(item, company_name=name))
+    return kept
+
+
+def bounded_funding(
+    cand: Candidate, funding: sec_form_d.FundingResult, notes: list[str]
+) -> sec_form_d.FundingResult:
+    """`funding`, or, when its figure does not fit the column's Postgres bigint, the same
+    result with the figure and its date dropped (status "no_amount") and a note; the
+    suggestion itself is kept."""
+    usd = funding.funding_usd
+    if usd is None or 0 <= usd <= _MAX_FUNDING_USD:
+        return funding
+    notes.append(f"sec: funding figure out of range for {cand.company_name}")
+    return dataclasses.replace(funding, status="no_amount", funding_usd=None, funding_as_of=None)
 
 
 # --- write -------------------------------------------------------------------
@@ -266,8 +343,8 @@ async def execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
     sec_user_agent = get_settings().sec_user_agent
     notes: list[str] = []
 
-    claims = await _coi_claims(db, user_id, name, notes)
-    companies = await _wikidata_companies(user_id, user.orcid, sec_user_agent, notes)
+    claims = valid_names(await _coi_claims(db, user_id, name, notes), notes)
+    companies = valid_names(await _wikidata_companies(user_id, user.orcid, sec_user_agent, notes), notes)
     candidates = merge_candidates(claims, companies)
 
     existing = set((await db.execute(
@@ -275,10 +352,12 @@ async def execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
     )).scalars())
     new = [cand for key, cand in candidates.items() if key not in existing]
 
-    suggested, sec_down = 0, False
-    for cand in new:
-        funding = await _funding(cand, name, sec_user_agent)
-        sec_down = sec_down or funding.status == "unavailable"
+    # Every lookup first, then one short write phase (module docstring).
+    fundings = [await _funding(cand, name, sec_user_agent) for cand in new]
+    sec_down = any(f.status == "unavailable" for f in fundings)
+    fundings = [bounded_funding(cand, f, notes) for cand, f in zip(new, fundings, strict=True)]
+    suggested = 0
+    for cand, funding in zip(new, fundings, strict=True):
         if await _write_suggestion(db, user_id, cand, funding):
             suggested += 1
     await db.flush()
