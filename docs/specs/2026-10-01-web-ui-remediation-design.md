@@ -70,7 +70,7 @@ Each fact below was checked on 2026-10-01; re-check any that a task depends on.
   `frame-ancestors 'none'; base-uri 'self'; object-src 'none'`, `X-Frame-Options: DENY`,
   and a report-only policy whose `report-uri /api/csp-report` is proxied to this app.
   It has no `/ingest` location for blackbird.
-- Templates hold 23 inline `<script>` blocks and 26 inline `on…=` handlers in 14 files;
+- Templates hold 23 inline `<script>` blocks and 27 inline `on…=` handlers in 15 files (A2);
   16 inline `<style>` blocks, none using `@apply`, `@layer`, `theme()` or
   `text/tailwindcss`; no external `<img>`.
 - Each `SlackClient` learns its own `bot_id` and bot user id from `auth.test` at connect
@@ -93,7 +93,8 @@ Each fact below was checked on 2026-10-01; re-check any that a task depends on.
     container off the new image), then web and worker, then the agent image (A-02b),
     recreated only when `/admin/simulation` shows no live run. Everyone is signed out
     once (cookie rename).
-  - Phase 2: web and worker images.
+  - Phase 2: web, worker and agent images (the engine imports `src/services/assessment_detail.py`,
+    which Phase 2 edits); no migration; agent recreated only with no live run.
 
 ## 5. Phase 0 — hotfix
 
@@ -118,7 +119,7 @@ Each fact below was checked on 2026-10-01; re-check any that a task depends on.
 - `renderMarkdown` uses a private `page` instance and
   `DOMPurify.sanitize(html, PAGE_PURIFY)`:
   `ALLOWED_TAGS = p br strong em code pre blockquote ul ol li a h1 h2 h3 h4 h5 h6 hr
-  table thead tbody tr th td`, `ALLOWED_ATTR = href`,
+  table thead tbody tr th td`, `ALLOWED_ATTR = href title start align` with `ALLOW_DATA_ATTR` and `ALLOW_ARIA_ATTR` off (A1, A13),
   `ALLOWED_URI_REGEXP = /^(?:https?:|mailto:|#)/i`.
 - `templates/cabo_graph.html`'s modal switches to the same sanitize config until the page
   is deleted in Phase 1.
@@ -190,13 +191,15 @@ on 12.x because later majors replace the positional renderer API used in §5.2.
 - Every inline `on…=` handler moves to `static/js/ui.js`, driven by data attributes
   (`data-confirm` from §5.1, `data-row-href`, `data-autosubmit` until Phase 2 removes it,
   and the page-specific ones the inventory finds).
-- Response headers on every response:
+- Response headers on every response (an unhandled-exception 500 gets them from its error
+  handler, A3):
   - Enforced: `Content-Security-Policy: frame-ancestors 'none'; base-uri 'none';
     object-src 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
     `Referrer-Policy: strict-origin-when-cross-origin`.
   - Report-only (Phase 1): `default-src 'self'; script-src 'self' 'nonce-<n>';
     style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
-    connect-src 'self'; form-action 'self'; report-uri /api/csp-report`.
+    connect-src 'self'; form-action 'self' https://slack.com https://*.slack.com; report-uri /api/csp-report`
+    (A4).
 - `POST /api/csp-report`: no auth; exempted from `OriginGuardMiddleware` for that exact
   path; accepts `application/csp-report` and `application/reports+json`; body capped at
   16 KB; logs one structured line per report (directive, blocked URI, document URI);
@@ -241,8 +244,9 @@ advance the cursor, log one INFO line with channel and ts and no content.
   under impersonation, write an `AdminAuditEvent`, and the manager write-allowlist test
   (`tests/integration/test_manager_views.py::test_manager_router_mutations_are_an_explicit_allowlist`)
   is extended.
-- Invite accept (`GET /invite/{token}`, `POST /invite/{token}/accept`) resolves the user
-  through `get_current_user`, requires `may_use_pi_surfaces`, and requires
+- Invite accept (`GET /invite/{token}`, `POST /invite/{token}/accept`) resolves a signed-in
+  user through `get_current_user` (an anonymous visitor keeps today's path: the token is
+  stored and the visitor sent to sign in), refuses while impersonating (A6), requires `may_use_pi_surfaces`, and requires
   `users.email` to equal the invited address case-insensitively with
   `email_verified_at` set. Unverified: "An administrator must verify your email address
   before you can accept this invitation."
@@ -255,7 +259,7 @@ advance the cursor, log one INFO line with channel and ts and no content.
   longer read or written (`src/dependencies.py:118`,
   `src/routers/admin/impersonation.py:48,73`, `src/routers/auth.py:370`,
   `src/routers/profile.py:238`).
-- Login clears the session and keeps only the vetted `next`.
+- Login clears the session and keeps only the vetted `next` and `pending_invite_token` (A5).
 - Login stores `users.session_epoch` (NULL counts as 0) in the session;
   `get_current_user` rejects a session whose epoch differs. Logout bumps the epoch by
   reading `session["user_id"]` directly (it keeps no auth dependency). Deny and role
@@ -273,9 +277,9 @@ advance the cursor, log one INFO line with channel and ts and no content.
 - **C-07:** the topology form posts the cells it rendered checked; the save deletes only
   rendered-checked-now-unchecked memberships and adds only now-checked cells.
 - **C-10, FN-01, FN-06, B-10:** `data-confirm` on Finalize, the announcing Stop
-  ("Posts N owed headlines to Slack, M of them from interviews still open; cannot be
-  undone", from the live run's funnel `headlines_owed` and `provisional` in
-  `src/services/simulation_stats.py`), Reset to file default and review delete.
+  ("Posts K of N owed headlines to Slack (M from interviews still open; at most 25 per
+  stop); cannot be undone", K = min(N, 25), from the funnel of the run the engine's status
+  row names, `headlines_owed` and `provisional` in `src/services/simulation_stats.py`; A7), Reset to file default and review delete.
   Finalize also carries `confirm_run`, which
   `admin_simulation_finalize_run` requires to equal the run id's first 8 characters.
 - **D-01, D-02, D-08:** `apply_profile_edits` validates the email before any write;
@@ -300,13 +304,13 @@ advance the cursor, log one INFO line with channel and ts and no content.
 - `src/web/flash.py`: `flash(request, text, kind)` stores in the session; a context
   processor registered in `make_templates()` pops messages into `base.html`'s flash
   block. Phase 1 moves `delegate_error`, `slack_error` and `error=` text messages onto
-  it.
+  it; the Connect Slack producers of `slack_error` are deleted by §6.4 instead (A8).
 
 ### 6.10 Accessibility, medium items (X-01, X-02, X-05)
 
 - Text classes `text-gray-300`/`text-gray-400` become `text-gray-600` in templates,
   `static/js` class strings and `src/` class strings; white text on `bg-green-600`
-  becomes `bg-green-700`. The harness's axe run must report zero `color-contrast`
+  becomes `bg-green-700`; the further failing pairs measured by axe (A9) are mapped too. The harness's axe run must report zero `color-contrast`
   violations.
 - Every form control gets an accessible name (`label for`/`id`; `aria-label` on matrix
   checkboxes naming agent and cohort, on tag-remove buttons naming the tag, and on the
@@ -369,11 +373,11 @@ advance the cursor, log one INFO line with channel and ts and no content.
 Phase 0: A-01, A-02, B-01, C-01, C-08, C-09, C-27, FN-05.
 
 Phase 1: A-02b, A-03, A-04, A-05, A-06, A-08, A-09, A-11, A-12, A-13, A-14 (text
-messages), B-06, B-10, C-04, C-05, C-07, C-10, D-01, D-02, D-03, D-04, D-05, D-06, D-08,
+messages), B-06, B-10, C-03 (A11), C-04, C-05, C-07, C-10, D-01, D-02, D-03, D-04, D-05, D-06, D-08,
 D-16, FN-01, FN-06, FN-09, M-01, M-03, M-04, M-05, X-01, X-02, X-05.
 
 Phase 2: A-07, A-10, A-14 (remaining flags), A-15, A-16, A-17, B-03, B-04, B-07, B-08,
-B-09, B-11, B-13, B-16, B-17, B-18, B-20, C-02, C-03, C-06, C-14, C-15, C-16, C-18,
+B-09, B-11, B-13, B-16, B-17, B-18, B-20, C-02, C-06, C-14, C-15, C-16, C-18,
 C-19, C-20, C-21, C-22, C-23, C-24, C-29, D-07, D-09, D-10, D-11, D-12, D-14, D-15,
 D-17, D-18, D-19, D-20, D-21, D-26, D-27, D-28, FN-02, FN-03, FN-04, FN-07, FN-08, M-02,
 M-08, R-01, R-02, SN-01, SN-02, X-03, X-04, X-06, and the enforced CSP.
@@ -422,3 +426,26 @@ deploy signs everyone out again (cookie name reverts).
   holder is grandfathered as verified (D8).
 - **Firefox and Safari (B-01):** the fix is defensive; browser coverage beyond Chromium
   depends on the harness obtaining those browsers.
+
+## 12. Amendments made while writing the plans (2026-10-01)
+
+Each was found by a plan writer reading the current code; the plans implement the amended text.
+
+| # | Section | Amendment | Evidence |
+|---|---|---|---|
+| A1 | §5.2 | `ALLOWED_ATTR` keeps `title`: `md_citations` writes `[cited paper](<url> "url")` and the title is the reader's only view of the cited URL; an attribute value is inert. | `src/services/prose_citations.py:196` |
+| A2 | §3 | 27 inline handlers in 15 files, not 26 in 14: `{% if has_detail %}onclick=` has no space before `onclick`. | `templates/admin/_discussions_threads.html:74` |
+| A3 | §6.3, §6.9 | `ServerErrorMiddleware` sits outside every user middleware, so the 500 handler adds the security headers itself (Phase 1 Task 1C-2b). | `fastapi/applications.py` `build_middleware_stack` |
+| A4 | §6.3, §7 | `form-action` admits `https://slack.com https://*.slack.com`: both Slack provisioning forms answer with a 302 to the OAuth URL Slack's API returns, and Chromium applies `form-action` to redirects after a form submission (CSP3 §6.4.1 is silent on redirects; browser behaviour, not the spec text, decides). Before Phase 2 enforces it, one real provisioning under the Phase 1 report-only policy must produce no `form-action` report (Task 2B-15 Step 0). | `src/routers/admin/agents.py:380` |
+| A5 | §6.7 | Login keeps `pending_invite_token`: the invite flow stores it before sign-in and reads it after. | `src/routers/invite.py:85-96`, `src/routers/auth.py:238-241` |
+| A6 | §6.6 | An anonymous visitor cannot go through `get_current_user` (it redirects without storing the token); invite routes refuse impersonation, because `get_current_user` would return the impersonated PI. | `src/dependencies.py:50-53` |
+| A7 | §6.8 | A Stop posts at most 25 owed headlines; the dialog states the cap. The page's funnel is the `?run=` selection, so the counts come from the run the status row names. | `src/agent/engine/constants.py:157`; `src/services/simulation_view.py:139-157` |
+| A8 | §6.9 | Connect Slack's `slack_error` producers and consumer are deleted (§6.4), not moved. | `src/routers/agent_page.py:194,267,725,777` |
+| A9 | §6.10 | The contrast map also covers `text-green-600`, `text-amber-600`, white on `bg-amber-600`/`bg-yellow-600`, and `text-gray-500` on `bg-gray-100`; the `src/` case is the runtime-built `band_class`, and two templates build `text-{{ color }}-600`. | audit axe samples; `src/services/bands.py`; `templates/admin/jobs.html:19`; both `discussions.html:54` |
+| A10 | §7 | A-10: tables with no column for a note (`cohort_audit_events`, `agents`, `jobs`, `access_allowlist`, `delegate_invitations`) get a central log line from `get_current_user`, not a migration; existing `change_summary`, `mechanism`, `payload` and `recorded_by` slots carry the note. | `src/models/cohort.py`, `delegate.py`, `simulation_control.py` |
+| A11 | §8 | C-03 closes in Phase 1 (its `slack_error` moves to flash in §6.9); Phase 2 keeps a regression test. | — |
+| A12 | §7 | C-02 renders summaries with `markdown-it-py` (`MarkdownIt("commonmark", {"html": False})`, images disabled), declared as a direct dependency; it is already installed as `rich`'s dependency. | `rich` metadata `Requires-Dist: markdown-it-py (>=2.2.0)` |
+| A13 | §5.2 | `ALLOWED_ATTR` also keeps `start` (marked's `<ol start="N">`) and `align` (table cells), both inert; `ALLOW_DATA_ATTR` and `ALLOW_ARIA_ATTR` are switched off because DOMPurify keeps `data-*`/`aria-*` by default and the site's document-level behaviours key on `data-*`. | marked 12.0.2 renderer `list`; DOMPurify config defaults |
+| A14 | §5.5, §9 | The harness gets its own empty `profiles/` and never links the repo's: the web app writes `profiles/public/<agent>.md` and deletes `profiles/public` and `profiles/memory` entries relative to its cwd, and the repo's `profiles/` is the live agent's mounted directory. | `src/services/profile_export.py:13`, `src/services/user_deletion.py:58-59` |
+| A15 | §6.3 | `/api/csp-report` also caps logged lines process-wide (60 per minute, a summary line for the rest), so an anonymous flood cannot rotate the logs. | plan audit Q1-10 |
+| A16 | §5.3 | A rejected announce template (re-rendered with its error) is never replaced by the refresh (`data-sim-keep`), and a unit the refresh skips says so. | `src/routers/admin/simulation.py:472-477` |
