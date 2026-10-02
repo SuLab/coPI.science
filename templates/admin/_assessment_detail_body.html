@@ -1428,6 +1428,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     // Timeline messages are clamped to 16rem with a fade; the button lifts
     // the clamp for that one message. Hidden when the message is short.
+    var clampChecks = [];
     root.querySelectorAll('[data-unclamp]').forEach(function (btn) {
         var box = btn.previousElementSibling;
         if (!box) { return; }
@@ -1444,9 +1445,20 @@ document.addEventListener('DOMContentLoaded', function () {
             btn.textContent = lifted ? 'Show less' : 'Show full message';
             check();
         });
+        clampChecks.push({ box: box, check: check });
         // Markdown renders asynchronously after this script; re-check late.
         setTimeout(check, 0); setTimeout(check, 500);
     });
+    // B-01 (spec 2026-10-01 §5.4): a message inside a closed <details> can measure
+    // 0 at load (browsers that give closed content no box), which hid its toggle for
+    // good. Re-measure when any <details> opens — by click, "Expand all", a
+    // data-open-details link or the chat's "Show in page". `toggle` does not bubble,
+    // so this listens in the capture phase.
+    document.addEventListener('toggle', function (event) {
+        var d = event.target;
+        if (!(d instanceof HTMLDetailsElement) || !d.open) { return; }
+        clampChecks.forEach(function (c) { if (d.contains(c.box)) { c.check(); } });
+    }, true);
 });
 </script>
 
