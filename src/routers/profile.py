@@ -12,7 +12,11 @@ from src.dependencies import get_current_user, get_pi_user, refuse_impersonation
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
-from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_edit import (
+    apply_profile_edits,
+    list_fields_from_form,
+    parse_expected_version,
+)
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
@@ -35,10 +39,6 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
     }
     ctx.update(kwargs)
     return ctx
-
-
-def _parse_list(val: str) -> list[str]:
-    return [s.strip() for s in val.split(",") if s.strip()]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -138,11 +138,6 @@ async def profile_save(
     institution: str = Form(""),
     department: str = Form(""),
     research_summary: str = Form(""),
-    techniques: str = Form(""),
-    experimental_models: str = Form(""),
-    disease_areas: str = Form(""),
-    key_targets: str = Form(""),
-    keywords: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),
@@ -162,9 +157,7 @@ async def profile_save(
         form={
             "name": name, "email": email, "institution": institution,
             "department": department, "research_summary": research_summary,
-            "techniques": techniques, "experimental_models": experimental_models,
-            "disease_areas": disease_areas, "key_targets": key_targets,
-            "keywords": keywords,
+            **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
     )

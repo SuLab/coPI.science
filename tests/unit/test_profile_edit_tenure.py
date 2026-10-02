@@ -43,9 +43,9 @@ def _edit_kwargs(user, **overrides):
         target_user=user, changed_by_user_id=user.id,
         form=dict(
             name=user.name, email="", institution="", department="",
-            research_summary="Summary.", techniques="t1, t2",
-            experimental_models="m", disease_areas="d", key_targets="k",
-            keywords="w",
+            research_summary="Summary.", techniques=["t1", "t2"],
+            experimental_models=["m"], disease_areas=["d"], key_targets=["k"],
+            keywords=["w"],
         ),
         expected_version=None,
     )

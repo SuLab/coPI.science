@@ -370,11 +370,12 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
         data={
             "email": "nadia@example.org",
             "research_summary": "Edited by the PI during onboarding.",
-            "techniques": "cryo-EM, mass spec",
-            "experimental_models": "mouse",
-            "disease_areas": "cancer",
-            "key_targets": "KRAS",
-            "keywords": "kinase, structure",
+            "techniques": ["cryo-EM", "mass spec"],
+            "experimental_models": ["mouse"],
+            "disease_areas": ["cancer"],
+            "key_targets": ["KRAS"],
+            "keywords": ["kinase", "structure"],
+            "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
         },
     )
     assert r.status_code == 302
@@ -418,6 +419,12 @@ async def test_skipping_to_a_step_does_not_complete_onboarding(
         r = await client.post(path, headers=h, data=data)
     assert r.status_code in (200, 302)
     assert await _flag(db_session, newcomer.id) is False, f"{method} {path} completed onboarding"
+
+    # The retry leg enqueues a generate_profile job; a real save happens after the worker
+    # ran it, and a save during generation is refused (D-08).
+    for job in (await db_session.execute(select(Job).where(Job.user_id == newcomer.id))).scalars():
+        job.status = "completed"
+    await db_session.flush()
 
     r = await client.post(
         "/onboarding/save-profile",
@@ -692,11 +699,12 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
             "institution": "New Institute",
             "department": "New Dept",
             "research_summary": "new summary",
-            "techniques": "t1, t2",
-            "experimental_models": "m1",
-            "disease_areas": "d1, d2",
-            "key_targets": "k1",
-            "keywords": "kw1, kw2",
+            "techniques": ["t1", "t2"],
+            "experimental_models": ["m1"],
+            "disease_areas": ["d1", "d2"],
+            "key_targets": ["k1"],
+            "keywords": ["kw1", "kw2"],
+            "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
         },
     )
     assert r.status_code == 302 and r.headers["location"] == "/profile?saved=1"
@@ -950,7 +958,8 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
             "name": "Route Pi",
             "email": user.email,
             "research_summary": "EXPORTED-VIA-ROUTE",
-            "techniques": "route-technique",
+            "techniques": ["route-technique"],
+            "tag_fields": ["techniques"],
         },
     )
     assert r.status_code == 302

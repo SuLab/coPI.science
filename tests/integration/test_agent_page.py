@@ -621,8 +621,9 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
         f"/agent/{OWNER_AGENT}/public-profile/save",
         data={
             "research_summary": "Chemical biology of proteostasis.",
-            "techniques": "cryo-EM, mass spec",
-            "keywords": "proteostasis",
+            "techniques": ["cryo-EM", "mass spec"],
+            "keywords": ["proteostasis"],
+            "tag_fields": ["techniques", "keywords"],
         },
         headers=_auth(delegated.user.id),
     )
@@ -670,7 +671,8 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/public-profile", "/agent/{agent}/public-profile"),
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
-       {"research_summary": "s", "techniques": "a,b", "keywords": "k"}),
+       {"research_summary": "s", "techniques": ["a", "b"], "keywords": ["k"],
+        "tag_fields": ["techniques", "keywords"]}),
     Ep("POST", "/agent/{agent_id}/delegates/invite", "/agent/{agent}/delegates/invite",
        {"emails": "fresh@example.org"}, owner_only=True),
     Ep("POST", "/agent/{agent_id}/delegates/{invitation_id}/revoke",

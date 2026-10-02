@@ -11,8 +11,9 @@ from tests.integration.test_manager_access import auth_headers
 pytestmark = pytest.mark.integration
 
 _FIELDS = {
-    "research_summary": "Edited summary.", "techniques": "a, b", "experimental_models": "m",
-    "disease_areas": "d", "key_targets": "k", "keywords": "w",
+    "research_summary": "Edited summary.", "techniques": ["a", "b"], "experimental_models": ["m"],
+    "disease_areas": ["d"], "key_targets": ["k"], "keywords": ["w"],
+    "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
 }
 
 

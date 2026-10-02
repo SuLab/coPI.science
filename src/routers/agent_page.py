@@ -32,7 +32,11 @@ from src.models import (
 from src.services.agent_identity import derive_agent_identity
 from src.services.conversation_feed import own_or_gated, resolve_agent_gate
 from src.services.email import build_delegate_invitation, send_transactional_email
-from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_edit import (
+    apply_profile_edits,
+    list_fields_from_form,
+    parse_expected_version,
+)
 from src.services.runs import latest_run_id
 from src.services.validators import is_valid_email
 from src.web.flash import flash
@@ -585,11 +589,6 @@ async def save_public_profile(
     agent_id: str,
     request: Request,
     research_summary: str = Form(""),
-    techniques: str = Form(""),
-    experimental_models: str = Form(""),
-    disease_areas: str = Form(""),
-    key_targets: str = Form(""),
-    keywords: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -613,9 +612,8 @@ async def save_public_profile(
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
         form={
-            "research_summary": research_summary, "techniques": techniques,
-            "experimental_models": experimental_models, "disease_areas": disease_areas,
-            "key_targets": key_targets, "keywords": keywords,
+            "research_summary": research_summary,
+            **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
         export_agent=agent,

@@ -13,7 +13,11 @@ from src.models import Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
 from src.services.email import build_welcome, send_transactional_email
-from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_edit import (
+    apply_profile_edits,
+    list_fields_from_form,
+    parse_expected_version,
+)
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.web.templating import make_templates
 
@@ -116,11 +120,6 @@ async def save_profile(
     request: Request,
     email: str = Form(""),
     research_summary: str = Form(""),
-    techniques: str = Form(""),
-    experimental_models: str = Form(""),
-    disease_areas: str = Form(""),
-    key_targets: str = Form(""),
-    keywords: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),
@@ -140,9 +139,7 @@ async def save_profile(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         form={
             "email": email, "research_summary": research_summary,
-            "techniques": techniques, "experimental_models": experimental_models,
-            "disease_areas": disease_areas, "key_targets": key_targets,
-            "keywords": keywords,
+            **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
         email_required=True,

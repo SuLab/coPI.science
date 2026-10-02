@@ -83,7 +83,11 @@ from src.services.pi_onboarding import (
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
 )
-from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_edit import (
+    apply_profile_edits,
+    list_fields_from_form,
+    parse_expected_version,
+)
 from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.slack_tokens import token_for_agent_row
@@ -303,16 +307,12 @@ async def manager_create_pi(
 @router.post("/pis/{user_id}/profile")
 async def manager_edit_pi_profile(
     user_id: uuid.UUID,
+    request: Request,
     name: str = Form(""),
     email: str = Form(""),
     institution: str = Form(""),
     department: str = Form(""),
     research_summary: str = Form(""),
-    techniques: str = Form(""),
-    experimental_models: str = Form(""),
-    disease_areas: str = Form(""),
-    key_targets: str = Form(""),
-    keywords: str = Form(""),
     jhu_tenure_start: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = _DB,
@@ -330,9 +330,7 @@ async def manager_edit_pi_profile(
         form={
             "name": name, "email": email, "institution": institution,
             "department": department, "research_summary": research_summary,
-            "techniques": techniques, "experimental_models": experimental_models,
-            "disease_areas": disease_areas, "key_targets": key_targets,
-            "keywords": keywords,
+            **list_fields_from_form(await request.form()),
         },
         jhu_tenure_start=jhu_tenure_start,
         expected_version=parse_expected_version(profile_version),

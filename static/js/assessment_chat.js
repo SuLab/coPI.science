@@ -169,7 +169,21 @@
     state.busy = busy;
     els.send.disabled = busy || hasStreaming();
     els.clear.disabled = busy;
-    els.input.disabled = busy;
+    // readOnly, not disabled (B-06): disabling the focused control drops focus to
+    // <body>. aria-busy tells assistive technology why typing is refused;
+    // refocusInput() hands focus back when the answer settles.
+    els.input.readOnly = busy;
+    if (busy) {
+      els.input.setAttribute("aria-busy", "true");
+    } else {
+      els.input.removeAttribute("aria-busy");
+    }
+  }
+
+  function refocusInput() {
+    if (state.open) {
+      els.input.focus({ preventScroll: true });
+    }
   }
 
   function updateCounter() {
@@ -698,6 +712,7 @@
       setBusy(false);
       render();
       showError(code);
+      refocusInput();
     }
 
     let resp;
@@ -794,6 +809,7 @@
       window.cancelAnimationFrame(frame);
     }
     setBusy(false);
+    refocusInput();
 
     if (finished && els.error.hidden) {
       render();  // `done` carried the canonical turn

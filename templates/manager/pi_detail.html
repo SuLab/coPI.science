@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_tag_field.html" import profile_tag_fields %}
 {% block title %}Manager — {{ target_user.name }} — CoPI{% endblock %}
 
 {% block content %}
@@ -105,6 +106,7 @@
             {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
             {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
             {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
+            {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -196,31 +198,7 @@
                 <textarea name="research_summary" rows="5"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">{{ profile.research_summary if profile else '' }}</textarea>
             </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Techniques &amp; Methods (comma-separated)</label>
-                <input type="text" name="techniques" value="{{ (profile.techniques or []) | join(', ') if profile else '' }}"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Model Systems (comma-separated)</label>
-                <input type="text" name="experimental_models" value="{{ (profile.experimental_models or []) | join(', ') if profile else '' }}"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Disease Areas (comma-separated)</label>
-                <input type="text" name="disease_areas" value="{{ (profile.disease_areas or []) | join(', ') if profile else '' }}"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Key Molecular Targets (comma-separated)</label>
-                <input type="text" name="key_targets" value="{{ (profile.key_targets or []) | join(', ') if profile else '' }}"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Keywords (comma-separated)</label>
-                <input type="text" name="keywords" value="{{ (profile.keywords or []) | join(', ') if profile else '' }}"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
+            {{ profile_tag_fields(profile, "") }}
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1" id="jhu_tenure_start_field">JHU tenure start (year)</label>
                 <input type="text" name="jhu_tenure_start" value="{{ tenure_start or '' }}"
@@ -238,6 +216,7 @@
             Save Changes
         </button>
     </form>
+    <script src="/static/js/tag_widget.js" defer></script>
     {% endif %}
 
     {% if not (effective_user.is_staff) %}
