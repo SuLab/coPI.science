@@ -41,6 +41,8 @@ as part of any deploy.
 | D15 (Q14) | Audit record, spec and plans committed locally on `blackbird`; pushed only after Phase 0 is deployed and exploit detail is scrubbed. |
 | D16 (Q16) | Remove Connect Slack; keep the `delegate_slack_ids` column and its data, unread. |
 | D17 (Q17) | A committed browser harness under `tests/e2e/ui_audit/`, run before each deploy outside `ci.sh`; `ci.sh` keeps deterministic checks. |
+| D18 (2026-10-01) | D-16 (tag fields split on commas) is exempt from the freeze (D2): no prompt-building code changes; the fix stops stored profile data — which the exported lab prompt is built from — from being corrupted on every save. |
+| D19 (2026-10-01) | Nothing is pushed to `origin` until all three phases are deployed; publication is then from a squashed or `git filter-repo`-cleaned branch whose full history carries no reproduction detail, and only once `CLAUDE.md`'s own push preconditions (open-findings C2 and the SSH host-key row) are met. |
 
 ## 3. Verified constraints
 
