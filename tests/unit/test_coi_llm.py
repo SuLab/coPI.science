@@ -2,15 +2,18 @@
 `llm.abeta_create` replaced by a fake: no network, no API key.
 
 Covers the gate (no call without a located PI, on an initials collision, or without
-"found"), the request shape and fencing, the sentence splitter, the verifier, the usage
-counts, the unavailable paths (refusal, API error, truncated or malformed reply, missing
-prompt), and a replay of the recorded live replies against the eval case set when
-`coi_eval_recorded.json` exists (written by `scripts/eval_coi_extraction.py --record`):
+"found"), the request shape and fencing, the sentence splitter, the verifier and its
+founder-clause rule, the usage counts, the eval script's exit status, the unavailable
+paths (refusal, API error, truncated or malformed reply, missing prompt), and a replay
+of the recorded live replies against the eval case set when `coi_eval_recorded.json`
+exists (written by `scripts/eval_coi_extraction.py --record`):
 the recording must match the current prompt and model, cover every case the gate sends,
 and replay through the current verifier with zero false positives.
 """
 import hashlib
+import importlib.util
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -285,13 +288,25 @@ async def test_a_missing_prompt_is_unavailable_with_no_call(calls, monkeypatch, 
 # --- verify_claims ------------------------------------------------------------------
 
 
-def _verify(*claims: dict, statement: str = STATEMENT, forms=VEV_FORMS):
-    return coi_llm.verify_claims(statement, {"claims": list(claims)}, pmid="1", year=None, forms=forms)
+VEV_AUTHORS = (VELCULESCU, LEAL)
 
 
-def _one(text: str, company: str = "Acme Bio", role: str = "founder", forms=VEV_FORMS):
+def _verify(*claims: dict, statement: str = STATEMENT, forms=VEV_FORMS, authors=VEV_AUTHORS):
+    return coi_llm.verify_claims(
+        statement, {"claims": list(claims)}, pmid="1", year=None, forms=forms, authors=authors
+    )
+
+
+def _one(text: str, company: str = "Acme Bio", role: str = "founder", forms=VEV_FORMS, authors=VEV_AUTHORS):
     """Verify one claim whose quote is the whole one-sentence statement `text`."""
-    return _verify(_claim(company, role, text), statement=text, forms=forms)
+    return _verify(_claim(company, role, text), statement=text, forms=forms, authors=authors)
+
+
+def _as(pi: str, *authors: dict):
+    """(forms, authors) for `pi` on a record with these authors."""
+    forms = locate_pi(_record(authors=authors), pi_name(pi))
+    assert forms is not None
+    return {"forms": forms, "authors": authors}
 
 
 def test_an_invented_sentence_is_dropped():
@@ -331,7 +346,7 @@ def test_a_bare_company_quote_is_dropped():
     {"company": "DELFI Diagnostics", "role": "founder", "former": False},
 ])
 def test_a_malformed_item_is_dropped(item):
-    kept, dropped = coi_llm.verify_claims(STATEMENT, {"claims": [item]}, pmid="1", year=None, forms=VEV_FORMS)
+    kept, dropped = _verify(item)
     assert kept == [] and dropped == 1
 
 
@@ -387,9 +402,9 @@ def test_a_longer_initials_run_is_someone_else(other):
     ("X.J.W. is a co-founder of Acme Bio.", 0),
 ])
 def test_a_shared_surname_is_identified_by_initials_only(text, kept):
-    forms = locate_pi(_record(authors=(JING, XIAO, LEAL)), pi_name("Jing Wang"))
-    assert forms.surname_shared
-    assert len(_one(text, role="co_founder", forms=forms)[0]) == kept
+    who = _as("Jing Wang", JING, XIAO, LEAL)
+    assert who["forms"].surname_shared
+    assert len(_one(text, role="co_founder", **who)[0]) == kept
 
 
 @pytest.mark.parametrize(("text", "kept"), [
@@ -400,8 +415,7 @@ def test_a_shared_surname_is_identified_by_initials_only(text, kept):
 ])
 def test_a_short_surname_needs_a_prefix(text, kept):
     he = {"last": "He", "fore": "Jing", "initials": "J", "collective": None}
-    forms = locate_pi(_record(authors=(he, LEAL)), pi_name("Jing He"))
-    assert len(_one(text, role="co_founder", forms=forms)[0]) == kept
+    assert len(_one(text, role="co_founder", **_as("Jing He", he, LEAL))[0]) == kept
 
 
 def test_a_company_inside_a_longer_word_is_dropped():
@@ -411,6 +425,98 @@ def test_a_company_inside_a_longer_word_is_dropped():
 def test_a_company_before_a_possessive_is_kept():
     kept, _ = _one("V.E.V. co-founded Acme Bio's parent company.", role="co_founder")
     assert [c.company_name for c in kept] == ["Acme Bio"]
+
+
+def test_a_company_followed_by_a_hyphenated_word_is_another_company():
+    text = "V.E.V. is a founder of Acme Bio-Sciences."
+    assert _one(text) == ([], 1)
+    assert [c.company_name for c in _one(text, company="Acme Bio-Sciences")[0]] == ["Acme Bio-Sciences"]
+
+
+# --- the founder clause -----------------------------------------------------------
+
+ZHOU = {"last": "Zhou", "fore": "Shibin", "initials": "S", "collective": None}
+BETTEGOWDA = {"last": "Bettegowda", "fore": "Chetan", "initials": "C", "collective": None}
+VOGELSTEIN = {"last": "Vogelstein", "fore": "Bert", "initials": "B", "collective": None}
+
+
+def test_an_elife_block_after_the_founder_clause_does_not_lend_its_author():
+    statement = ("CB Consultant to Galectin Therapeutics. "
+                 "Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences.")
+    quote = "Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences."
+    kept, dropped = _verify(_claim("OrisDx", "co_founder", quote), statement=statement,
+                            **_as("Shibin Zhou", BETTEGOWDA, ZHOU))
+    assert kept == [] and dropped == 1
+
+
+def test_a_semicolon_clause_naming_the_pi_without_founding_is_not_enough():
+    assert _one("A.L. is a founder of Acme; V.E.V. owns stock in Acme.", company="Acme") == ([], 1)
+
+
+def test_the_pi_named_before_the_founder_phrase_in_one_clause_is_kept():
+    text = "V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns stock."
+    assert [c.company_name for c in _one(text, company="DELFI Diagnostics")[0]] == ["DELFI Diagnostics"]
+
+
+@pytest.mark.parametrize(("company", "pi", "kept"), [
+    ("DELFI Diagnostics", "Victor Velculescu", 1),
+    ("Thrive Earlier Detection", "Victor Velculescu", 0),
+    ("Thrive Earlier Detection", "Bert Vogelstein", 1),
+])
+def test_elife_blocks_split_one_sentence_by_author(company, pi, kept):
+    text = ("VEV Founder of DELFI Diagnostics, Board member of DELFI Diagnostics, "
+            "BV Founder of Thrive Earlier Detection.")
+    assert len(_one(text, company=company, **_as(pi, VELCULESCU, VOGELSTEIN))[0]) == kept
+
+
+@pytest.mark.parametrize(("text", "kept"), [
+    ("A.L. is a consultant to Genentech and V.E.V. is a founder of Acme Bio.", 1),
+    ("V.E.V. is a consultant to Genentech and A.L. is a founder of Acme Bio.", 0),
+    ("V.E.V. is an advisor to Acme Bio, which A.L. co-founded.", 0),
+    ("V.E.V. and A.L. are founders of Acme Bio.", 1),
+    ("A.L. and V.E.V. are co-founders of Acme Bio.", 1),
+    ("Acme Bio, a company founded by V.E.V., licensed the technology.", 0),
+    ("V.E.V. reports fees from Genentech; and is a co-founder of Acme Bio.", 1),
+    ("V.E.V. owns stock in Acme Bio, a company he co-founded.", 1),
+    ("V.E.V. owns stock in Acme Bio and is an advisor to Beta Inc, which he founded.", 0),
+])
+def test_the_pi_must_head_the_founder_clause(text, kept):
+    assert len(_one(text)[0]) == kept
+
+
+def test_a_bare_two_letter_form_counts_only_at_a_clause_start():
+    carl = {"last": "Anderson", "fore": "Carl", "initials": "C", "collective": None}
+    who = _as("Carl Anderson", carl, LEAL)
+    assert _one("A.L. is a co-founder of Acme Bio (San Diego, CA).", role="co_founder", **who) == ([], 1)
+    assert len(_one("CA is a co-founder of Acme Bio.", role="co_founder", **who)[0]) == 1
+    assert len(_one("C.A. is a co-founder of Acme Bio.", role="co_founder", **who)[0]) == 1
+
+
+@pytest.mark.parametrize(("text", "kept"), [
+    ("V.E.V. founded Acme Bio at Johns Hopkins University.", 0),
+    ("Johns Hopkins University co-founded Acme Bio.", 0),
+    ("Hopkins co-founded Acme Bio.", 1),
+    ("Dr Hopkins co-founded Acme Bio.", 1),
+    ("Smith Hopkins co-founded Acme Bio.", 1),
+])
+def test_a_surname_inside_a_longer_capitalised_name_is_not_the_pi(text, kept):
+    hopkins = {"last": "Hopkins", "fore": "Smith", "initials": "S", "collective": None}
+    assert len(_one(text, role="co_founder", **_as("Smith Hopkins", hopkins, VELCULESCU))[0]) == kept
+
+
+def test_a_hyphen_joined_surname_is_not_the_pi():
+    myers = {"last": "Myers", "fore": "Jennifer", "initials": "J", "collective": None}
+    who = _as("Jennifer Myers", myers, LEAL)
+    pi = coi_llm._Statement.of("", who["forms"], who["authors"]).pi
+    assert pi.mentions("A.L. is a founder of Acme Bio and advises Bristol-Myers Squibb.") == []
+    assert pi.mentions("Myers-Squibb, Dr Myers and Myers") == [(14, 22), (27, 32)]
+
+
+def test_drs_names_a_list_of_surnames():
+    kinzler = {"last": "Kinzler", "fore": "Kenneth W", "initials": "KW", "collective": None}
+    text = "Drs Vogelstein and Kinzler reported being founders of Thrive Earlier Detection."
+    kept, _ = _one(text, company="Thrive Earlier Detection", **_as("Kenneth Kinzler", VOGELSTEIN, kinzler))
+    assert len(kept) == 1
 
 
 def test_repeats_of_a_company_merge_their_former_flags():
@@ -439,7 +545,9 @@ def test_a_repeated_company_is_kept_once_and_not_counted_as_dropped():
 
 
 def test_a_payload_without_claims_verifies_to_nothing():
-    assert coi_llm.verify_claims(STATEMENT, None, pmid="1", year=None, forms=VEV_FORMS) == ([], 0)
+    assert coi_llm.verify_claims(
+        STATEMENT, None, pmid="1", year=None, forms=VEV_FORMS, authors=VEV_AUTHORS
+    ) == ([], 0)
 
 
 # --- the sentence splitter ------------------------------------------------------------
@@ -452,6 +560,11 @@ def test_a_payload_without_claims_verifies_to_nothing():
     "V. E. V. founded Acme S.A. in 2010.",
     "He founded companies, e.g. Acme Bio, i.e. Beta Inc. and others.",
     "C. Bettegowda reports fees from X; personal fees from Y; and is a co-founder of OrisDx.",
+    "V.E.V. holds patent no. 16/341,862 and is a founder of Acme Bio.",
+    "Patent nos. 1 and 2 are licensed, see Fig. 2 and Vol. 3 for details.",
+    "V.E.V. owns approx. 5% of Acme Bio, founded ca. 2010.",
+    "V.E.V. is a founder of Acme Inc. (Baltimore, MD) and owns stock.",
+    'V.E.V. is a founder of Acme Inc. "Acme" and owns stock.',
 ])
 def test_protected_periods_and_semicolons_do_not_end_a_sentence(text):
     assert coi_llm._sentence_spans(text) == [(0, len(text))]
@@ -464,6 +577,82 @@ def test_a_sentence_ends_at_a_stop_before_a_capital_or_digit():
         "A.L. is an employee of Novo Nordisk A/S.", "V.E.V. is a founder of DELFI.",
         "2 authors own stock!", "Why? none.", "Acme, Inc.", "All authors agree.",
     ]
+
+
+def test_a_corporate_abbreviation_before_a_bracket_looks_past_it():
+    text = "A.L. works at Acme Inc. (Baltimore). V.E.V. is a founder of Beta Bio."
+    assert [text[s:e] for s, e in coi_llm._sentence_spans(text)] == [
+        "A.L. works at Acme Inc. (Baltimore).", "V.E.V. is a founder of Beta Bio.",
+    ]
+    text = "A.L. works at Acme Inc. (Baltimore) The rest follows."
+    assert [text[s:e] for s, e in coi_llm._sentence_spans(text)] == [
+        "A.L. works at Acme Inc.", "(Baltimore) The rest follows.",
+    ]
+
+
+#: Founder sentences of the real PubMed fixtures, each of which must stay one sentence.
+REAL_FOUNDER_SENTENCES = {
+    "34290408": [
+        "B.V. and K.W.K. are founders of Thrive Earlier Detection.",
+        "B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to "
+        "Personal Genome Diagnostics.",
+        "V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the "
+        "Board of Directors and as a consultant for both organizations, and owns Delfi Diagnostics "
+        "and Personal Genome Diagnostics stock, which are subject to certain restrictions under "
+        "university policy.",
+    ],
+    "37552989": [
+        "C. Bettegowda is a co-founder of OrisDx.",
+        "C. Bettegowda and C.D. are co-founders of Belay Diagnostics.",
+        "B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio.",
+    ],
+    "39433569": [
+        "A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a "
+        "consultant for this organization.",
+    ],
+    "39960487": [
+        "Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences.",
+        "Has a research agreement with BioMed Valley Discoveries, Inc, KK Founders of Thrive "
+        "Earlier Detection, an Exact Sciences Company.",
+    ],
+    "41115959": [
+        "B.V. and K.W.K. are founders of Exact Sciences.",
+        "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and "
+        "Haystack Oncology, a Quest Diagnostics company.",
+        "C.B. is also a co-founder of OrisDx and a co-founder of Belay Diagnostics.",
+    ],
+}
+
+
+@pytest.mark.parametrize("pmid", sorted(REAL_FOUNDER_SENTENCES))
+def test_real_founder_sentences_are_not_split(pmid):
+    root = ET.parse(FIXTURES / f"pubmed_{pmid}.xml").getroot()
+    statement = "".join(root.find(".//CoiStatement").itertext())
+    sentences = [statement[s:e] for s, e in coi_llm._sentence_spans(statement)]
+    for sentence in REAL_FOUNDER_SENTENCES[pmid]:
+        assert sentence in sentences
+
+
+# --- the eval script's exit status -------------------------------------------------
+
+
+def _eval_script():
+    spec = importlib.util.spec_from_file_location("eval_coi_extraction", ROOT / "scripts" / "eval_coi_extraction.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("totals", "positive_passes", "status"), [
+    ({"PASS": 40, "FALSE_POSITIVE": 1}, 40, 1),
+    ({"PASS": 40, "FALSE_POSITIVE": 1, "UNAVAILABLE": 30}, 0, 1),
+    ({"PASS": 40, "MISS": 60}, 0, 2),          # every pass expected nothing: trivial
+    ({"PASS": 90, "UNAVAILABLE": 10}, 5, 2),   # 10 of 100 sent unavailable
+    ({"PASS": 95, "UNAVAILABLE": 5, "SKIPPED": 50}, 1, 0),
+    ({"PASS": 1, "MISS": 99}, 1, 0),
+])
+def test_the_eval_exit_status_refuses_a_trivial_pass(totals, positive_passes, status):
+    assert _eval_script()._exit_status(totals, positive_passes) == status
 
 
 # --- replay of the recorded live run ------------------------------------------------
@@ -534,7 +723,10 @@ def test_recorded_replies_replay_with_zero_false_positives():
         forms = _sent_forms(cases[cid])
         if forms is None or raw.get("stop_reason") == "refusal":
             continue
-        kept, _ = coi_llm.verify_claims(cases[cid]["statement"], raw.get("payload"), pmid="0", year=None, forms=forms)
+        kept, _ = coi_llm.verify_claims(
+            cases[cid]["statement"], raw.get("payload"), pmid="0", year=None, forms=forms,
+            authors=cases[cid]["authors"],
+        )
         returned = {_key(c.company_name, c.pi_role) for c in kept}
         expected = {_key(c, r) for c, r in cases[cid]["expected"]}
         if returned - expected:

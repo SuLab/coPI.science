@@ -14,8 +14,10 @@ Companies compare by `pi_companies.normalize_company_name` ("DELFI Diagnostics, 
 equals "DELFI Diagnostics"); roles compare exactly. Exit status:
 
   1  any case is a false positive (the O14 acceptance bar is zero)
-  2  no API key; or no case passed, or more than 5% of the cases sent to the API came
-     back unavailable, so the zero-false-positive bar cannot pass trivially
+  2  no API key; or no case with a non-empty expected list passed, or more than 5% of
+     the cases sent to the API came back unavailable, so the zero-false-positive bar
+     cannot pass trivially (a run that returns no claims at all passes every case whose
+     expected list is empty)
   0  otherwise; misses are reported, not gated
 
 It spends real API calls (one per gated-in case, about 300) on the key in the
@@ -148,15 +150,17 @@ def _meta() -> dict:
     }
 
 
-def _exit_status(totals: dict[str, int]) -> int:
-    """1 on any false positive; 2 when no case passed or too many sent cases were
-    unavailable (the bar would pass trivially); else 0."""
+def _exit_status(totals: dict[str, int], positive_passes: int) -> int:
+    """1 on any false positive; 2 when no case with a non-empty expected list passed
+    (`positive_passes`) or too many sent cases were unavailable (the bar would pass
+    trivially); else 0."""
     if totals.get("FALSE_POSITIVE"):
         return 1
     sent = sum(n for verdict, n in totals.items() if verdict != "SKIPPED")
     unavailable = totals.get("UNAVAILABLE", 0)
-    if not totals.get("PASS"):
-        print("no case passed: the run does not show the zero-false-positive bar", file=sys.stderr)
+    if not positive_passes:
+        print("no case with an expected claim passed: the run does not show the "
+              "zero-false-positive bar", file=sys.stderr)
         return 2
     if unavailable > MAX_UNAVAILABLE_SHARE * sent:
         print(f"{unavailable} of {sent} sent cases unavailable (over {MAX_UNAVAILABLE_SHARE:.0%})",
@@ -186,10 +190,12 @@ async def _main() -> int:
             return 2
     recorder = _Recorder(llm.get_anthropic_client())
     totals: dict[str, int] = {}
+    positive_passes = 0  # PASS verdicts on cases that expect at least one claim
     recorded: dict[str, dict] = {"_meta": _meta()}
     for n, case in enumerate(cases, 1):
         verdict, detail, raw = await _run_case(case, recorder)
         totals[verdict] = totals.get(verdict, 0) + 1
+        positive_passes += verdict == "PASS" and bool(case["expected"])
         print(f"[{n}/{len(cases)}] {verdict:<14} {case['id']}  {detail}", flush=True)
         if raw is not None:
             recorded[case["id"]] = raw
@@ -198,7 +204,7 @@ async def _main() -> int:
         a.record.write_text(json.dumps(recorded, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"recorded {len(recorded) - 1} replies to {a.record}")
     print("totals: " + ", ".join(f"{k}={v}" for k, v in sorted(totals.items())))
-    return _exit_status(totals)
+    return _exit_status(totals, positive_passes)
 
 
 if __name__ == "__main__":

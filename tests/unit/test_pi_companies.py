@@ -292,6 +292,9 @@ def test_the_companies_directory_and_agent_id_check_match_the_deletion_teardown(
     "Ac\u200bme Bio",      # zero-width space
     "\ufeffAcme Bio",      # byte-order mark / zero-width no-break space
     "Acme\u2066 Bio",      # left-to-right isolate
+    "Acme \u200dBio",      # a joiner after a space, not between two letters
+    "Acme Bio\u200c",      # a non-joiner at the end
+    "\u200dAcme Bio",      # a joiner at the start
 ])
 def test_clean_name_refuses_format_characters(name):
     with pytest.raises(CompanyValidationError, match="invisible formatting characters"):
@@ -303,3 +306,14 @@ def test_clean_name_still_refuses_control_characters_and_keeps_plain_names():
         _clean_name("Acme\nBio")
     assert _clean_name("  Müller Therapeutics, Inc. ") == (
         "Müller Therapeutics, Inc.", normalize_company_name("Müller Therapeutics, Inc."))
+
+
+def test_clean_name_drops_soft_hyphens_before_validating():
+    assert _clean_name("Ac\u00adme Bio\u00ad") == ("Acme Bio", normalize_company_name("Acme Bio"))
+    with pytest.raises(CompanyValidationError, match="Enter the company"):
+        _clean_name("\u00ad \u00ad")
+
+
+@pytest.mark.parametrize("name", ["\u0645\u06cc\u200c\u0631\u0648 Bio", "Ac\u200dme Bio"])
+def test_clean_name_accepts_a_joiner_between_two_letters(name):
+    assert _clean_name(name)[0] == name

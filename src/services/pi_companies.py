@@ -158,17 +158,33 @@ def _has_control_chars(text: str) -> bool:
     return any(unicodedata.category(ch) == "Cc" for ch in text)
 
 
+#: U+00AD soft hyphen: an invisible line-break hint that copy-paste from a PDF or a web
+#: page leaves inside a word; `_clean_name` drops it rather than refusing the name.
+_SOFT_HYPHEN = "\u00ad"
+#: Zero-width non-joiner and joiner: they shape a word in Persian, Arabic or Indic
+#: scripts, so they are accepted between two letters (and only there).
+_JOINERS = frozenset({"\u200c", "\u200d"})
+
+
 def _has_format_chars(text: str) -> bool:
     """Unicode format characters (category Cf: U+202E right-to-left override, U+200B
-    zero-width space, ...), which make a name read differently from what it is."""
-    return any(unicodedata.category(ch) == "Cf" for ch in text)
+    zero-width space, U+FEFF, U+2066 isolates, ...), which make a name read differently
+    from what it is. A joiner (`_JOINERS`) with a letter on each side does not count."""
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) != "Cf":
+            continue
+        between_letters = 0 < i < len(text) - 1 and text[i - 1].isalpha() and text[i + 1].isalpha()
+        if not (ch in _JOINERS and between_letters):
+            return True
+    return False
 
 
 def _clean_name(company_name: str) -> tuple[str, str]:
-    """(name as stored, its normalized form), or CompanyValidationError. Refuses control
-    and format characters, and a name over `MAX_NAME_CHARS` before or after
-    normalization or with no letter or digit."""
-    name = (company_name or "").strip()
+    """(name as stored, its normalized form), or CompanyValidationError. Soft hyphens
+    (U+00AD) are removed first. Refuses control characters, format characters other than
+    a joiner between two letters (`_has_format_chars`), and a name over `MAX_NAME_CHARS`
+    before or after normalization or with no letter or digit."""
+    name = (company_name or "").replace(_SOFT_HYPHEN, "").strip()
     if not name:
         raise CompanyValidationError("Enter the company's name.")
     if _has_control_chars(name):
