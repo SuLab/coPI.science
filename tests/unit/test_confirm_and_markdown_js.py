@@ -59,4 +59,11 @@ def test_render_markdown_uses_the_explicit_page_allowlist():
         assert forbidden not in block
     assert 'ALLOWED_ATTR: ["href", "title", "start", "align"]' in block
     assert "ALLOW_DATA_ATTR: false" in block and "ALLOW_ARIA_ATTR: false" in block
+    assert 'ADD_URI_SAFE_ATTR: ["start", "align"]' in block
     assert r"ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#)/i" in block
+
+
+def test_page_profile_keeps_task_list_state_and_text_after_a_leading_br():
+    page = _page_profile(MARKDOWN.read_text())
+    assert 'checkbox: function (checked) { return checked ? "[x]" : "[ ]"; }' in page
+    assert "pageMarked.parse(lead[1])" in page

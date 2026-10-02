@@ -863,6 +863,8 @@
       })
       .then(h => {
         if (h === null) return;
+        // Paused while this fetch was in flight: drop the result.
+        if (document.getElementById('sim-refresh-pause')?.checked) return;
         const next = new DOMParser().parseFromString(h, 'text/html').getElementById('sim-body');
         if (!next) { stop('Auto-refresh stopped — reload the page.'); return; }
         reconcile(next);

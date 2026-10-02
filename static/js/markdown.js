@@ -52,8 +52,16 @@
       ext.renderer = {
         html: function (html) {
           var s = String(html);
-          return LONE_BR.test(s.trim()) ? "<br>" : escapeHtml(s);
+          if (LONE_BR.test(s.trim())) return "<br>";
+          // A block that only OPENS with a lone <br> (text right after it) must not
+          // take the following markdown down with it into escaped text.
+          var lead = /^\s*<br\s*\/?>[ \t]*\n([\s\S]*)$/i.exec(s);
+          if (lead && pageMarked) return "<br>" + pageMarked.parse(lead[1]);
+          return escapeHtml(s);
         },
+        // GFM task lists: marked emits an <input type=checkbox>, which the allowlist
+        // drops; keep the state as text.
+        checkbox: function (checked) { return checked ? "[x]" : "[ ]"; },
         // marked 12 passes `text` (the alt text) already escaped (outputLink).
         image: function (href, title, text) {
           if (!href) return text || "";
@@ -82,6 +90,9 @@
                    "a", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
                    "table", "thead", "tbody", "tr", "th", "td"],
     ALLOWED_ATTR: ["href", "title", "start", "align"],
+    // DOMPurify checks every non-URI-safe attribute's value against
+    // ALLOWED_URI_REGEXP; "2" and "center" are not URIs, so both are declared safe.
+    ADD_URI_SAFE_ATTR: ["start", "align"],
     ALLOW_DATA_ATTR: false,
     ALLOW_ARIA_ATTR: false,
     ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#)/i

@@ -30,3 +30,5 @@ async def test_delete_user_confirm_is_an_escaped_data_attribute(client, db_sessi
     assert "'" not in form.split('data-confirm="', 1)[1].split('"', 1)[0]
     assert "</script>" not in form
     assert '<script src="/static/js/confirm.js"></script>' in html
+    # Armed before the body renders: no window where a click submits unconfirmed.
+    assert html.index('<script src="/static/js/confirm.js"></script>') < html.index("</head>")

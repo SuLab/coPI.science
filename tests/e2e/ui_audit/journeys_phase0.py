@@ -100,11 +100,47 @@ async def journey_raw_html_shapes(h) -> dict:
                     div: box.querySelectorAll('div').length, br: box.querySelectorAll('br').length,
                     img: box.querySelectorAll('img').length, a: box.querySelectorAll('a').length};
         }""")
+        shapes = await page.evaluate("""() => {
+            const md = window.copiRenderMarkdown(
+              '1. a\\n\\nx\\n\\n2. b\\n\\n|a|b|\\n|:-:|-:|\\n|1|2|\\n\\n- [x] done\\n- [ ] todo\\n\\n'
+              + '<br>\\n**after** text\\n\\n[j](javascript:alert(1))');
+            const box = document.createElement('div'); box.innerHTML = md;
+            return {start: !!box.querySelector('ol[start="2"]'),
+                    center: !!box.querySelector('[align="center"]'),
+                    right: !!box.querySelector('[align="right"]'),
+                    tasks: box.textContent.includes('[x] done') && box.textContent.includes('[ ] todo'),
+                    after_br: !!box.querySelector('strong'),
+                    js_href: [...box.querySelectorAll('a')].some(a => (a.getAttribute('href') || '').startsWith('javascript'))};
+        }""")
         ok = probe["bold"] == 0 and probe["div"] == 0 and probe["br"] == 1 \
-            and probe["img"] == 0 and probe["a"] == 1
-        return {"ok": ok, "probe": probe}
+            and probe["img"] == 0 and probe["a"] == 1 \
+            and shapes["start"] and shapes["center"] and shapes["right"] and shapes["tasks"] \
+            and shapes["after_br"] and not shapes["js_href"]
+        return {"ok": ok, "probe": probe, "shapes": shapes}
     finally:
         await ctx.close()
+
+
+async def _refreshed(page) -> bool:
+    """A refresh tick completed (not merely stopped): "last updated" is set and the
+    stop notice is hidden."""
+    return await page.evaluate("""() => {
+        const u = document.getElementById('sim-refresh-updated');
+        const n = document.getElementById('sim-refresh-notice');
+        return !!(u && u.textContent.trim()) && !!(n && n.hidden);
+    }""")
+
+
+async def _wait_refreshed(page, timeout_s: float = 70.0) -> bool:
+    """Poll until a refresh tick has completed (the timer is 30 s; a busy machine can
+    skip a tick while one is in flight), up to ``timeout_s``."""
+    waited = 0.0
+    while waited < timeout_s:
+        if await _refreshed(page):
+            return True
+        await page.wait_for_timeout(2000)
+        waited += 2.0
+    return False
 
 
 async def _sim_values(page) -> list[str]:
@@ -121,8 +157,10 @@ async def journey_sim_start_form_survives_refresh(h) -> dict:
         await page.fill("input[name='max_proposals']", "20")
         await page.mouse.click(5, 300)
         await page.wait_for_timeout(63000)  # two refresh ticks
+        refreshed = await _wait_refreshed(page)
         values = await _sim_values(page)
-        return {"ok": values == ["60", "20"], "values": values, "log": log}
+        return {"ok": values == ["60", "20"] and refreshed, "values": values,
+                "refreshed": refreshed, "log": log}
     finally:
         await ctx.close()
 
@@ -136,7 +174,9 @@ async def journey_sim_focus_kept(h) -> dict:
         await page.wait_for_timeout(33000)
         focused = await page.evaluate(
             "document.activeElement && document.activeElement.getAttribute('href')")
-        return {"ok": focused == "#sec-status", "focused": focused}
+        refreshed = await _wait_refreshed(page)
+        return {"ok": focused == "#sec-status" and refreshed, "focused": focused,
+                "refreshed": refreshed}
     finally:
         await ctx.close()
 
@@ -206,17 +246,31 @@ async def journey_sim_template_error_kept(h) -> dict:
         await page.wait_for_load_state("networkidle")
         before = await area.input_value()
         await page.wait_for_timeout(33000)
+        refreshed = await _wait_refreshed(page)
         after = await area.input_value()
         error_kept = await page.locator("#sec-announce").inner_text()
-        return {"ok": before == after == "Bad {nope} template" and "KeyError" in error_kept,
-                "before": before, "after": after}
+        status = await page.evaluate("""() => [
+            (document.getElementById('sim-refresh-updated') || {}).textContent,
+            (document.getElementById('sim-refresh-notice') || {}).textContent,
+            location.pathname]""")
+        return {"ok": before == after == "Bad {nope} template" and "KeyError" in error_kept
+                and refreshed, "before": before, "after": after, "refreshed": refreshed,
+                "status": status, "console": log["console"][-3:]}
     finally:
         await ctx.close()
 
 
 async def journey_timeline_toggle_after_open(h) -> dict:
-    """B-01 and review focus 5: open the timeline with "Expand all"."""
+    """B-01 and review focus 5: open the timeline with "Expand all". Chromium can
+    measure content inside a closed <details>, so the journey emulates engines that
+    cannot (no box for closed content) with a style added before any page script
+    runs; without the toggle listener the long message's button stays hidden."""
     ctx, page, log = await h.page("admin")
+    await page.add_init_script("""document.addEventListener('DOMContentLoaded', () => {
+        const s = document.createElement('style');
+        s.textContent = 'details:not([open]) > :not(summary) { display: none !important; }';
+        document.head.appendChild(s);
+    }, {once: true});""")
     try:
         await page.goto(f"{h.base_url}/admin/assessments/{h.ids['assessments'][1]}",
                         wait_until="networkidle")

@@ -23,6 +23,9 @@ class ThrowawayPostgres:
     def __init__(self) -> None:
         self.name = f"uiaudit-pg-{os.getpid()}"
         self.port = free_port()
+        #: True only once THIS object's `docker run` succeeded; stop() never touches a
+        #: same-named container another run owns.
+        self.started = False
 
     @property
     def url(self) -> str:
@@ -39,10 +42,14 @@ class ThrowawayPostgres:
              "postgres:15"],
             check=True, capture_output=True,
         )
+        self.started = True
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             ready = subprocess.run(
-                ["docker", "exec", self.name, "pg_isready", "-U", "copi", "-d", DB_NAME],
+                # Over TCP: the image's temporary init server answers the Unix
+                # socket before the real server listens on 5432.
+                ["docker", "exec", self.name, "pg_isready", "-h", "127.0.0.1", "-U", "copi",
+                 "-d", DB_NAME],
                 capture_output=True,
             )
             if ready.returncode == 0:
@@ -51,4 +58,6 @@ class ThrowawayPostgres:
         raise RuntimeError(f"{self.name} did not become ready")
 
     def stop(self) -> None:
-        subprocess.run(["docker", "stop", self.name], capture_output=True)
+        if self.started:
+            subprocess.run(["docker", "stop", self.name], capture_output=True)
+            self.started = False

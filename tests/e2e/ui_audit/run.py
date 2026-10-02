@@ -15,6 +15,8 @@ import asyncio
 import importlib
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -87,10 +89,16 @@ class Stack:
         _wait_http(self.base_url + "/api/health", proc=self.server)
 
     def down(self) -> None:
-        if self.server:
-            self.server.terminate()
-            self.server.wait(timeout=20)
-        self.pg.stop()
+        try:
+            if self.server and self.server.poll() is None:
+                self.server.terminate()
+                try:
+                    self.server.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    self.server.kill()
+        finally:
+            self.pg.stop()
+            shutil.rmtree(self.work, ignore_errors=True)
 
 
 async def _run(stack: Stack, args) -> dict:
@@ -116,7 +124,9 @@ async def _run(stack: Stack, args) -> dict:
         if args.command in ("journeys", "all"):
             module = importlib.import_module(f"tests.e2e.ui_audit.journeys_phase{args.phase}")
             report["journeys"] = {}
-            for journey in module.JOURNEYS:
+            selected = [j for j in module.JOURNEYS
+                        if not args.only or j.__name__ in args.only]
+            for journey in selected:
                 # A fresh browser per journey: one browser crash must not fail every
                 # journey after it (observed 2026-10-01, headless shell SIGILL).
                 h.browser = await launcher.launch(executable_path=args.executable or None)
@@ -138,10 +148,15 @@ def main() -> None:
     parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
     parser.add_argument("--executable", default="")
+    parser.add_argument("--only", action="append", default=[],
+                        help="run only this journey (repeatable), e.g. journey_raw_html_shapes")
     parser.add_argument("--out", default=str(Path(tempfile.gettempdir())
                                              / f"uiaudit-{int(time.time())}.json"))
     args = parser.parse_args()
     os.chdir(REPO_ROOT)
+    # SIGTERM (a `timeout`, a closed terminal) must still reach the finally below,
+    # so the throwaway container and the app process are always cleaned up.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     stack = Stack()
     try:
         stack.up()
