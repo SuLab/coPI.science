@@ -326,6 +326,171 @@
         </ul></details>
     </section>
 
+    <!-- Companies (spec 2026-10-02 §7.2): the staff-confirmed list BlackbirdBot reads
+         through retrieve_profile and the assessment pages show. Discovery only suggests;
+         a manager confirms or rejects every suggestion. Rejected rows are never listed:
+         they exist so discovery does not offer the same name again. A reviewer sees the
+         confirmed list only. Each entry is a view from _company_view in
+         src/routers/manager.py: its links are http(s) or absent. -->
+    <section id="companies" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+      <h2 class="font-semibold text-gray-800 mb-1">Companies</h2>
+      <p class="text-xs text-gray-500 mb-4">Companies this PI founded or co-founded, advises, or serves as a board member. Confirmed entries reach BlackbirdBot's profile lookup and the assessment pages; a suggestion reaches neither until a manager confirms it.</p>
+
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Confirmed ({{ companies_confirmed | length }})</h3>
+      {% if not companies_confirmed %}<p class="text-sm text-gray-500 mb-4">No confirmed companies.</p>{% endif %}
+      <ul class="divide-y mb-4">
+      {% for v in companies_confirmed %}
+        {% set c = v.row %}
+        <li class="py-2 flex justify-between gap-4 text-sm">
+          <div>
+            <span class="font-medium">{{ c.company_name }}</span>
+            <span class="text-xs text-gray-500">{{ company_role_labels.get(c.pi_role, c.pi_role) }} · {{ 'added by hand' if c.origin == 'manual' else 'discovered' }}{% if c.reviewed_at %}, confirmed {{ c.reviewed_at | ts("date") }}{% endif %}</span>
+            {% if v.funding %}<div class="text-xs text-gray-600">{{ v.funding }}</div>{% endif %}
+            <div class="text-xs">
+              {% if v.source_url %}<a href="{{ v.source_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Source</a>{% endif %}
+              {% if v.funding_source_url %}· <a href="{{ v.funding_source_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Funding source</a>{% endif %}
+            </div>
+          </div>
+          {% if effective_user.is_staff %}
+          <form method="post" action="/manager/pis/{{ target_user.id }}/companies/{{ c.id }}/delete"
+                data-confirm="Remove {{ c.company_name }} from this PI's companies? BlackbirdBot stops seeing it at once.">
+            <button type="submit" class="text-xs text-red-700 underline">Delete</button>
+          </form>
+          {% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+
+      {% if effective_user.is_staff %}
+      <form method="post" action="/manager/pis/{{ target_user.id }}/companies" class="border-t border-gray-100 pt-4 mb-6">
+        <h3 class="text-sm font-semibold text-gray-700 mb-2">Add a company</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label for="company-name" class="block text-sm font-medium text-gray-700 mb-1">Company name</label>
+            <input type="text" name="company_name" id="company-name" maxlength="200" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label for="company-role" class="block text-sm font-medium text-gray-700 mb-1">The PI's role</label>
+            <select name="pi_role" id="company-role" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              {% for role in company_roles %}<option value="{{ role }}">{{ company_role_labels[role] }}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="company-funding" class="block text-sm font-medium text-gray-700 mb-1">Funding raised, US dollars (optional)</label>
+            <input type="number" name="funding_usd" id="company-funding" min="0" step="1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label for="company-funding-as-of" class="block text-sm font-medium text-gray-700 mb-1">Funding as of (required with a figure)</label>
+            <input type="date" name="funding_as_of" id="company-funding-as-of"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div class="md:col-span-2">
+            <label for="company-source" class="block text-sm font-medium text-gray-700 mb-1">Source link (http or https)</label>
+            <input type="url" name="source_url" id="company-source" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+        <button type="submit" class="mt-3 bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium">Add company</button>
+      </form>
+
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Suggested ({{ companies_suggested | length }})</h3>
+      <p class="text-xs text-gray-500 mb-3">Found in the PI's own competing-interest statements and in Wikidata, with funding from SEC Form D filings where a filing matched. Check the evidence before confirming.</p>
+      {% if not companies_suggested %}<p class="text-sm text-gray-500 mb-4">No suggestions waiting.</p>{% endif %}
+      {% for v in companies_suggested %}
+      {% set c = v.row %}
+      {% set ev = v.evidence %}
+      <div class="border border-gray-200 rounded-lg p-4 mb-3 text-sm">
+        <p><span class="font-medium">{{ c.company_name }}</span>
+           <span class="text-xs text-gray-500">{{ company_role_labels.get(c.pi_role, c.pi_role) }}, suggested {{ c.created_at | ts("date") }}</span></p>
+        {% if v.funding %}<p class="text-xs text-gray-600">{{ v.funding }}</p>{% endif %}
+        {% if ev.former %}
+        <p class="text-xs text-amber-700 mt-1">Warning: a statement below says this tie may be former (for example "previously" or "divested"). Confirm only if it still holds.</p>
+        {% endif %}
+        {% for s in ev.statements %}
+        <blockquote class="text-xs text-gray-600 italic mt-1">“{{ s.text }}”{% if s.url %} <a href="{{ s.url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">{% if s.pmid %}PMID {{ s.pmid }}{% else %}Source{% endif %}</a>{% elif s.pmid %} PMID {{ s.pmid }}{% endif %}{% if s.year %} ({{ s.year }}){% endif %}{% if s.former %} · former{% endif %}</blockquote>
+        {% endfor %}
+        {% for w in ev.wikidata %}
+        <p class="text-xs mt-1">Wikidata names the PI as a founder: {% if w.url %}<a href="{{ w.url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">{{ w.label }}</a>{% else %}{{ w.label }}{% endif %}</p>
+        {% endfor %}
+        {% if ev.filings %}
+        <div class="overflow-x-auto mt-2">
+          <table class="min-w-full text-xs">
+            <caption class="text-left text-gray-600 mb-1">SEC Form D filings</caption>
+            <thead>
+              <tr class="text-gray-500">
+                <th class="text-left pb-2">Filed</th>
+                <th class="text-left pb-2">Amount sold</th>
+                <th class="text-left pb-2">PI listed</th>
+                <th class="text-left pb-2">Filing</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+            {% for f in ev.filings %}
+              <tr>
+                <td class="py-1">{{ f.filed or '—' }}{% if f.form %} ({{ f.form }}){% endif %}</td>
+                <td class="py-1">{{ f.sold }}{% if not f.counted %} (not in the total){% endif %}</td>
+                <td class="py-1">{% if f.pi_listed %}Yes{% if f.relationships %} ({{ f.relationships | join(', ') }}){% endif %}{% else %}No{% endif %}</td>
+                <td class="py-1">{% if f.url %}<a href="{{ f.url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">{{ f.accession or 'Filing' }}</a>{% else %}{{ f.accession or '—' }}{% endif %}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+        {% if ev.form_d_status == 'no_filings' %}<p class="text-xs text-gray-600 mt-1">No SEC Form D filing matched this name.</p>
+        {% elif ev.form_d_status == 'no_amount' %}<p class="text-xs text-gray-600 mt-1">Form D filings matched, but no offering&rsquo;s latest filing stated an amount sold (see the filings).</p>{% endif %}
+        {% if ev.funding_note %}<p class="text-xs text-amber-700 mt-1">{{ ev.funding_note }}</p>{% endif %}
+        <form method="post" action="/manager/pis/{{ target_user.id }}/companies/{{ c.id }}/confirm" class="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          <div>
+            <label for="company-role-{{ c.id }}" class="block text-xs font-medium text-gray-700 mb-1">Role</label>
+            <select name="pi_role" id="company-role-{{ c.id }}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              {% for role in company_roles %}<option value="{{ role }}"{% if role == c.pi_role %} selected{% endif %}>{{ company_role_labels[role] }}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="company-funding-{{ c.id }}" class="block text-xs font-medium text-gray-700 mb-1">Funding (USD)</label>
+            <input type="number" name="funding_usd" id="company-funding-{{ c.id }}" min="0" step="1"
+                   value="{{ c.funding_usd if c.funding_usd is not none else '' }}"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label for="company-funding-as-of-{{ c.id }}" class="block text-xs font-medium text-gray-700 mb-1">Funding as of</label>
+            <input type="date" name="funding_as_of" id="company-funding-as-of-{{ c.id }}"
+                   value="{{ c.funding_as_of.isoformat() if c.funding_as_of else '' }}"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            {% if c.funding_usd is not none %}
+            <div class="flex items-center gap-2 mb-2">
+              <input type="checkbox" name="clear_funding" value="1" id="company-clear-funding-{{ c.id }}">
+              <label for="company-clear-funding-{{ c.id }}" class="text-xs text-gray-700">Clear funding (the figure is wrong; confirm with none)</label>
+            </div>
+            {% endif %}
+            <button type="submit" class="text-sm px-3 py-1 rounded bg-green-700 text-white hover:opacity-90">Confirm</button>
+          </div>
+        </form>
+        <form method="post" action="/manager/pis/{{ target_user.id }}/companies/{{ c.id }}/reject" class="mt-2">
+          <button type="submit" class="text-xs text-red-700 underline">Reject (discovery will not suggest it again)</button>
+        </form>
+      </div>
+      {% endfor %}
+
+      <div class="border-t border-gray-100 pt-4">
+        <form method="post" action="/manager/pis/{{ target_user.id }}/companies/discover" class="inline">
+          <button type="submit" id="find-companies" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90 disabled:opacity-50"{% if discovery and discovery.active %} disabled{% endif %}>Find companies</button>
+        </form>
+        <p class="text-xs text-gray-600 mt-1">
+          {% if discovery and discovery.active %}Discovery is {{ 'running' if discovery.status == 'processing' else 'queued' }} (since {{ discovery.at | ts }}); reload this page to see its suggestions.
+          {% elif discovery and discovery.status in ('failed', 'dead') %}Last run {{ discovery.at | ts }}: failed{% if discovery.error %} ({{ discovery.error }}){% endif %}. Press Find companies to try again.
+          {% elif discovery %}Last run {{ discovery.at | ts }}: {{ discovery.outcome or 'finished' }}.
+          {% else %}Discovery has not run for this PI yet.{% endif %}
+        </p>
+      </div>
+      {% endif %}
+    </section>
+
     <!-- Publications (scoped to the JHU tenure window) -->
     {% if publications or (pub_scope and pub_scope.excluded) %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">

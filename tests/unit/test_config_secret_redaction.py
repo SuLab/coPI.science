@@ -140,6 +140,9 @@ NON_SECRET_STR_FIELDS = {
     "orcid_redirect_uri",
     "database_url",          # a plain sentinel has no userinfo -> nothing to mask
     "ncbi_contact_email",
+    # "<Company Name> <admin email>" sent to SEC/Wikidata as the User-Agent: a
+    # contact address like ncbi_contact_email, not a credential.
+    "sec_user_agent",
     "base_url",
     "aws_region",
     "ses_sender_email",
@@ -149,6 +152,8 @@ NON_SECRET_STR_FIELDS = {
     "llm_agent_model_opus",
     "llm_review_model",
     "llm_assessment_chat_model",
+    # COI founder-extraction model id (spec O14): a model id, not a credential.
+    "llm_coi_model",
     # Channel names for the run-start announcement — public channel names,
     # not credentials.
     "run_start_announce_channels",

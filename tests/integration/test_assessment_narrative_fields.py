@@ -425,8 +425,9 @@ async def test_counts_are_warned_on_what_is_stored_after_blank_stripping(
         warnings = "\n".join(
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         )
-        # Three raw bullets, two stored: the count named is the stored one.
-        assert "key_points.lab_background carries 2 bullets (contract asks for 1)" in warnings
+        # Three raw bullets, two stored: the count named is the stored one, one
+        # main bullet and one unlabelled extra (the raw value would show two).
+        assert "key_points.lab_background carries 1 unlabelled extra bullet(s)" in warnings
     finally:
         await _delete_run(factory, run_id)
 
@@ -482,7 +483,7 @@ async def test_a_wrong_count_and_an_overlong_bullet_are_warned_not_dropped(
         warnings = "\n".join(
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         )
-        assert "key_points.path_to_clinic carries 2 bullets (contract asks for 1)" in warnings
+        assert "key_points.path_to_clinic carries 1 unlabelled extra bullet(s)" in warnings
         assert "key_points.proposal has a 301-char bullet" in warnings
     finally:
         await _delete_run(factory, run_id)

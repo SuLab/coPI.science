@@ -232,7 +232,7 @@ _PROJECT_SOFT_LIMIT = VERDICT_FIELD["company_or_project"].soft_bound
 #: 900 characters was in practice a ~150-word bound.
 #: The public excerpt did NOT move with it: PITCH_DISPLAY_CHARS (600,
 #: src/services/assessment_headline.py) still clips what reaches
-#: #assessments-summary, and item 8 still asks that sentences 1-4 END within
+#: #assessments-summary, and item 8 still asks that elements 1-4 END within
 #: ~550 characters so the provenance citation completes inside that window.
 #: A longer pitch makes that harder, not easier, which is why the
 #: citation-loss alarm in `_persist_assessment` is now the load-bearing check
@@ -240,8 +240,12 @@ _PROJECT_SOFT_LIMIT = VERDICT_FIELD["company_or_project"].soft_bound
 _PITCH_WORD_LIMIT = VERDICT_FIELD["elevator_pitch"].soft_bound
 _KEY_POINTS_MIN = 3
 _KEY_POINTS_MAX = 5
-# scout_hub >= 1.9.0: the exact bullet count each current group carries
-# (prompt item 7 — one each since 1.9.0), and the per-bullet bound. Warnings
+# scout_hub >= 1.9.0: the number of MAIN bullets each current group carries
+# (prompt item 7 — one each since 1.9.0), and the per-bullet bound. Since
+# 1.10.0 a group may also carry one bullet labelled `Risk:`, and
+# `lab_background` one labelled `Companies:`; those are told apart by
+# `classify_key_point` (src/services/assessment_detail.py) and are not counted
+# here (`_warn_key_point_group` in verdicts.py checks them). Warnings
 # only (D12 of docs/specs/2026-09-24-reviewer-rubric-and-key-points-design.md)
 # — a shape violation is never a drop. Keys and order are pinned to
 # KEY_POINT_GROUPS by tests/unit/test_rubric_prompt_sync.py. The

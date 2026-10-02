@@ -71,7 +71,7 @@ CLIENT_READ_TIMEOUT_SECONDS = 300.0
 # `_client_for_key` now passes a timeout of its own (CLIENT_READ_TIMEOUT_SECONDS
 # above), so that condition is permanently false. Verified against the installed
 # SDK source of anthropic 1.0.0 and 0.120.2, the two versions this repo ran when
-# this was written. The check in `acreate` is therefore
+# this was written. The check in `acreate` (shared with `abeta_create`) is therefore
 # the ONLY thing standing between a mis-sized call site and a request the API
 # will reject after it has been sent: do not remove it, and do not "simplify" it
 # on the grounds that the SDK checks too. tests/unit/
@@ -187,7 +187,8 @@ def _cacheable_system(system_prompt: str) -> list[dict[str, Any]]:
     position 0 and invalidate every downstream entry.
 
     Returns blocks, never a bare string, so callers do not have to care which
-    shape they got. `acreate` is the only caller.
+    shape they got. `_create_off_loop` (behind `acreate` and `abeta_create`) is
+    the only caller.
     """
     boundary = system_prompt.find(_STABLE_PREFIX_BOUNDARY)
     if boundary <= 0:
@@ -217,7 +218,7 @@ def get_anthropic_client() -> anthropic.Anthropic:
 class NonStreamingMaxTokensError(ValueError):
     """A call site asked for more ``max_tokens`` than non-streaming allows.
 
-    Raised by ``acreate``'s pre-flight check BEFORE any HTTP request is made,
+    Raised by ``acreate``'s (and ``abeta_create``'s) pre-flight check BEFORE any HTTP request is made,
     which is the one property that distinguishes it from every other exception
     in this module: nothing was sent and nothing was billed. That is why the
     failure paths in ``generate_agent_response`` and ``generate_with_tools``
@@ -375,6 +376,40 @@ async def acreate(client: anthropic.Anthropic, **kwargs: Any):
     untouched, because the API rejects an empty text block.
     """
     kwargs.setdefault("thinking", {"type": "disabled"})
+    return await _create_off_loop(client.messages.create, kwargs)
+
+
+async def abeta_create(client: anthropic.Anthropic, **kwargs: Any) -> Any:
+    """``client.beta.messages.create`` awaited OFF the event-loop thread.
+
+    ``acreate``'s sibling for requests that need a beta parameter the GA
+    ``messages.create`` does not take — the server-side refusal fallback
+    (``betas=["server-side-fallback-2026-07-01"]``, ``fallbacks="default"``) is
+    the first. The caller passes ``betas`` and every beta parameter itself.
+
+    Same thread pool, contextvars copy, ``_api_semaphore`` slot,
+    ``NONSTREAMING_MAX_TOKENS`` pre-flight (``NonStreamingMaxTokensError``,
+    nothing sent) and system-prompt cache breakpoint as ``acreate``, through the
+    same ``_create_off_loop``.
+
+    The one difference: ``thinking`` is NEVER defaulted. ``acreate``'s
+    ``{"type": "disabled"}`` default is a 400 on Claude Opus 5.5, which cannot
+    disable thinking, so the caller states ``thinking`` explicitly (omitting it
+    leaves the model's own default in force).
+
+    Like ``acreate``, this writes no ``llm_call_logs`` row: the call log is the
+    caller's to emit (see ``_emit_call_log``), because only the caller knows the
+    turn's metadata.
+    """
+    return await _create_off_loop(client.beta.messages.create, kwargs)
+
+
+async def _create_off_loop(
+    create: Callable[..., Any], kwargs: dict[str, Any]
+) -> Any:
+    """The body ``acreate`` and ``abeta_create`` share: cache the system prompt,
+    enforce the non-streaming ceiling, then run ``create(**kwargs)`` on the API
+    pool under the loop's semaphore. ``thinking`` is the caller's business."""
     system = kwargs.get("system")
     if isinstance(system, str) and system.strip():
         kwargs["system"] = _cacheable_system(system)
@@ -400,7 +435,7 @@ async def acreate(client: anthropic.Anthropic, **kwargs: Any):
     async with _api_semaphore():
         return await loop.run_in_executor(
             _get_api_executor(),
-            partial(ctx.run, client.messages.create, **kwargs),
+            partial(ctx.run, create, **kwargs),
         )
 
 

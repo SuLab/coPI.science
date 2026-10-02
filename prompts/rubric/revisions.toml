@@ -9,7 +9,8 @@
 # MAINTENANCE RULE (the "assessment archive" box in docs/operations/blackbird-hub.md): every time
 # [meta].version is bumped in blackbird-rubric.toml, append the OUTGOING
 # document's entry here in the same commit — version, sha256[:12] of the old
-# file bytes, scale, band lines, and the dimension table.
+# file bytes, scale, band lines, the dimension table, and its [gating.*]
+# tables copied verbatim as [revision.gating.<key>] (title, description).
 #
 # Provenance of the entries below (extracted + hash-verified 2026-08-28):
 #   1.0.0 b3aea2c8d235  <- git d1eae0f
@@ -35,6 +36,16 @@
 #         entry appended 2026-09-25 per the maintenance rule — sha256 12-hex
 #         of the outgoing file bytes, verified with sha256sum. 3.4.0 only
 #         renamed pass_label from 3.3.0.
+#
+# Gate definitions ([revision.gating.<key>], optional): the pages show a gate's
+# rubric title and definition on an archived row only when its entry carries
+# them; an entry without them (3.3.0 and older) keeps bare gate labels. The
+# 3.2.0 and 3.4.0 tables were added 2026-10-02 (hub 1.10.0,
+# docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md §5.3), copied
+# verbatim from the live document's [gating.*] section, which is
+# byte-identical in git 3349263 (3.2.0), 91f34f1 (3.4.0) and the live 3.5.0
+# file (F3 of that spec). The 3.3.0 document (git 46d9a99d) has the same
+# text but is outside that change's scope: no stored row carried its stamp.
 
 [[revision]]
 version = "1.0.0"
@@ -370,6 +381,20 @@ advance_min = 3.4
 conditional_min = 2.8
 pass_label = "pass (decline)"
 
+  # Gate definitions: blackbird-rubric.toml's [gating.*] section, verbatim
+  # (byte-identical in this document and the live one; see the header).
+  [revision.gating.life_sciences_domain]
+  title = "Life-sciences / biomedical"
+  description = "therapeutic, diagnostic, or platform (Blackbird's domain)."
+
+  [revision.gating.credible_science]
+  title = "Credible science"
+  description = "the underlying data can be believed: results are internally consistent, methods are described, and the lab can say how each key claim was established. Institutional prestige is not the test, and IP is not required at this stage."
+
+  [revision.gating.translational_potential]
+  title = "Translational potential"
+  description = "if the science held up, it could plausibly become a therapeutic, diagnostic, or platform program. Freedom-to-operate is diligence, not a gate: it belongs in your assessment rather than in the pass/fail."
+
   [[revision.dimension]]
   key = "differentiation_unmet_need"
   title = "Differentiation & unmet need"
@@ -439,6 +464,20 @@ advance_min = 3.4
 conditional_min = 2.8
 pass_label = "decline"
 banding_note = "No weight, threshold, dimension, gating key, band semantic or red flag changes from 3.3.0 — 3.4.0 only renamed the display label 'pass (decline)' -> 'decline'."
+
+  # Gate definitions: blackbird-rubric.toml's [gating.*] section, verbatim
+  # (byte-identical in this document and the live one; see the header).
+  [revision.gating.life_sciences_domain]
+  title = "Life-sciences / biomedical"
+  description = "therapeutic, diagnostic, or platform (Blackbird's domain)."
+
+  [revision.gating.credible_science]
+  title = "Credible science"
+  description = "the underlying data can be believed: results are internally consistent, methods are described, and the lab can say how each key claim was established. Institutional prestige is not the test, and IP is not required at this stage."
+
+  [revision.gating.translational_potential]
+  title = "Translational potential"
+  description = "if the science held up, it could plausibly become a therapeutic, diagnostic, or platform program. Freedom-to-operate is diligence, not a gate: it belongs in your assessment rather than in the pass/fail."
 
   [[revision.dimension]]
   key = "differentiation_unmet_need"

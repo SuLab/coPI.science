@@ -30,6 +30,7 @@ from src.services.agent_activation import (
 )
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
+from src.services.pi_companies import move_companies_file
 from src.web.flash import flash
 
 logger = logging.getLogger("src.routers.admin")
@@ -255,7 +256,8 @@ async def admin_approve_agent(
     The form is guarded against staleness (RA-02): the row is locked, and a
     ``form_version`` that no longer matches ``agent_form_version`` means another
     writer changed it after the page rendered, so nothing is written. The slug is
-    editable only while the agent is pending (RA-14), and the Slack bot token is
+    editable only while the agent is pending (RA-14; a rename moves the PI's companies
+    file, ``pi_companies.move_companies_file``), and the Slack bot token is
     write-only: a blank ``replace_slack_bot_token`` keeps the stored one (RA-03).
 
     ``agent_status=pending`` is refused for an agent that is no longer pending
@@ -314,6 +316,8 @@ async def admin_approve_agent(
                 status_code=302,
             )
 
+    renamed_from = agent.agent_id if new_slug and new_slug != agent.agent_id else None
+    owner_id = agent.user_id
     if new_slug:
         agent.agent_id = new_slug  # pending only, by the check above
     agent.bot_name = bot_name.strip()
@@ -329,6 +333,11 @@ async def admin_approve_agent(
     except IntegrityError:
         await db.rollback()  # a concurrent rename took the slug
         return RedirectResponse(url=f"/admin/agents/{agent_id}?error=slug_taken", status_code=302)
+
+    if renamed_from is not None and owner_id is not None:
+        # The hub reads profiles/private/companies/<agent_id>.md: move the file to the
+        # new id. Best effort, after the commit, like every companies export.
+        await move_companies_file(db, user_id=owner_id, old_agent_id=renamed_from)
 
     return RedirectResponse(url="/admin/agents", status_code=302)
 

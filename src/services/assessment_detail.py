@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime
+from typing import Any, NamedTuple
 
+from markupsafe import Markup
 from sqlalchemy import JSON, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +60,9 @@ from src.models import (
 from src.services.assessment_headline import _clip_at_sentence
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, load_rubric
 from src.services.interview_transcript import load_interview_thread
+from src.services.prose_citations import _is_linkable
 from src.services.rubric_revisions import (
+    PROVENANCE_ARCHIVED,
     PROVENANCE_LIVE,
     PROVENANCE_UNKNOWN,
     RubricRevisionView,
@@ -110,8 +113,9 @@ _SIDECAR_RE = re.compile(
 _SIDECAR_UNCLOSED_RE = re.compile(r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE)
 _SIDECAR_ORPHAN_TAG_RE = re.compile(r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE)
 
-#: scout_hub >= 1.9.0 (2026-09-28): six groups, ONE bullet each, in the
-#: reviewer's own labels. 1.8.0 (the 2026-09-22 Blackbird review) had the same
+#: scout_hub >= 1.9.0 (2026-09-28): six groups, ONE main bullet each, in the
+#: reviewer's own labels; scout_hub >= 1.10.0 lets any group add one labelled
+#: extra (`classify_key_point` below). 1.8.0 (the 2026-09-22 Blackbird review) had the same
 #: six with `key_questions` where `path_to_clinic` now sits. The (key, label)
 #: order is the render order on both assessment surfaces and in the
 #: assessment-chat record, all of which render through `key_point_sections`
@@ -179,6 +183,106 @@ KEY_POINT_ACCEPTED_KEYS: frozenset[str] = (
     _CURRENT_KEY_POINT_KEYS | _RETIRED_KEY_POINT_KEYS | _LEGACY_KEY_POINT_KEYS
 )
 
+#: The two labels a key-point EXTRA bullet may open with (scout_hub >= 1.10.0,
+#: spec §6.1): any group may add one `Risk:` bullet after its main bullet, and Lab
+#: Background one `Companies:` bullet. These are the kinds `classify_key_point`
+#: returns; the engine's soft checks count the extras with it.
+KEY_POINT_RISK = "risk"
+KEY_POINT_COMPANIES = "companies"
+#: What the page prints, in bold, before an extra's body, and what the chat record
+#: quotes: the contract's own spelling, whatever case or markup the hub used.
+KEY_POINT_LABELS: dict[str, str] = {
+    KEY_POINT_RISK: "Risk:",
+    KEY_POINT_COMPANIES: "Companies:",
+}
+
+#: A label at the very start of a bullet, tolerant of what models emit (Review
+#: Focus #3 of docs/plans/2026-10-02-hub-1-10-summary-risks-gates-plan.md): any
+#: case, spaces around the colon, and markdown emphasis around the word or the
+#: word and its colon (`**Risk:**`, `**Risk**:`, `_Risk_:`). The word must be
+#: exactly `risk` or `companies`: "Risky approach:", "Risks:" and "Company:" are
+#: ordinary text.
+_KEY_POINT_LABEL_RE = re.compile(
+    r"\s*(?P<em>\*\*|__|\*|_)?\s*(?P<label>risk|companies)\s*(?:(?P=em))?"
+    r"\s*:\s*(?:(?P=em))?\s*(?P<body>.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def classify_key_point(text: str) -> tuple[str | None, str]:
+    """``(None, text)`` for a main bullet, or ``(kind, body)`` for a labelled
+    extra: `kind` is `KEY_POINT_RISK` or `KEY_POINT_COMPANIES`, and `body` is the
+    bullet without its label (and without emphasis markers wrapping it), stripped.
+
+    A label followed by nothing is not an extra (there is nothing to show under
+    it), and neither is a non-string; both come back unchanged as
+    ``(None, text)``. Never raises. This decides only how a bullet is DISPLAYED
+    and what the engine's soft checks count; `normalize_key_points` still stores
+    the bullet exactly as the hub wrote it.
+    """
+    if not isinstance(text, str):
+        return None, text
+    match = _KEY_POINT_LABEL_RE.fullmatch(text)
+    if match is None:
+        return None, text
+    body = match.group("body").strip()
+    emphasis = match.group("em")
+    if emphasis and body.endswith(emphasis):
+        # `**Risk: the whole bullet in bold**`: the closing marker wraps the body.
+        body = body[: -len(emphasis)].rstrip()
+    if not body:
+        return None, text
+    return match.group("label").lower(), body
+
+
+class KeyPointExtra(NamedTuple):
+    """One labelled extra bullet of a key-point group, ready to render."""
+
+    kind: str  # KEY_POINT_RISK or KEY_POINT_COMPANIES
+    label: str  # KEY_POINT_LABELS[kind]: "Risk:" or "Companies:"
+    body: str  # the bullet without its label
+
+
+#: The current Lab Background group's label: the brief places the PI's
+#: staff-confirmed companies directly under the section carrying it (spec §7.4).
+_LAB_BACKGROUND_LABEL = dict(KEY_POINT_GROUPS)["lab_background"]
+
+
+class KeyPointSection(NamedTuple):
+    """One renderable key-point group: its display `label` (None for the flat
+    <= 1.2.0 list) and its non-blank `points` in stored order.
+
+    A NamedTuple so every existing ``for label, points in key_point_sections(...)``
+    (the frozen chat-record copy among them) and every ``== (label, [...])``
+    comparison keep working unchanged; label-aware rendering reads `extras`.
+    """
+
+    label: str | None
+    points: list[str]
+
+    @property
+    def extras(self) -> list[KeyPointExtra] | None:
+        """The group's extras, labelled, when EVERY bullet after the first
+        carries a known label (spec §6.1 Rendering); None otherwise — for a
+        single-bullet group, the flat list, and any group with an unlabelled
+        extra (1.8.0 and legacy multi-bullet rows), all of which keep today's
+        rendering. The first bullet is the main one whatever it says."""
+        if self.label is None or len(self.points) < 2:
+            return None
+        extras: list[KeyPointExtra] = []
+        for point in self.points[1:]:
+            kind, body = classify_key_point(point)
+            if kind is None:
+                return None
+            extras.append(KeyPointExtra(kind, KEY_POINT_LABELS[kind], body))
+        return extras
+
+    @property
+    def is_lab_background(self) -> bool:
+        """Whether this is the Lab Background group, under which the brief places
+        the PI's staff-confirmed companies (spec §7.4)."""
+        return self.label == _LAB_BACKGROUND_LABEL
+
 
 def key_point_shape(value: object) -> str | None:
     """``"flat"`` (<= 1.2.0 list), ``"legacy"`` (a legacy-only key and no
@@ -211,10 +315,12 @@ def _clean_bullets(value: object) -> list[str]:
     return [x.strip() for x in value if isinstance(x, str) and x.strip()]
 
 
-def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
+def key_point_sections(value: object) -> list[KeyPointSection]:
     """The renderable key-point sections of a stored value, in display order.
 
-    A grouped value yields ``(label, bullets)`` pairs: a legacy-shaped row uses
+    Each section is a `KeyPointSection` — a ``(label, bullets)`` pair to every
+    caller that unpacks it, plus `extras` for label-aware rendering (scout_hub
+    >= 1.10.0). A grouped value yields one per group: a legacy-shaped row uses
     `LEGACY_KEY_POINT_GROUPS`; every other row uses `_RENDER_GROUPS` — the
     current six with the retired `key_questions` back in its 1.8.0 fifth slot,
     under its 1.8.0 label — followed by any legacy-only group it also carries,
@@ -228,7 +334,7 @@ def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
     shape = key_point_shape(value)
     if shape == "flat":
         bullets = _clean_bullets(value)
-        return [(None, bullets)] if bullets else []
+        return [KeyPointSection(None, bullets)] if bullets else []
     if shape is None:
         return []
     if shape == "legacy":
@@ -238,11 +344,11 @@ def key_point_sections(value: object) -> list[tuple[str | None, list[str]]]:
             (key, label) for key, label in LEGACY_KEY_POINT_GROUPS
             if key in _LEGACY_ONLY_KEY_POINT_KEYS
         )
-    sections: list[tuple[str | None, list[str]]] = []
+    sections: list[KeyPointSection] = []
     for key, label in groups:
         bullets = _clean_bullets(value.get(key))
         if bullets:
-            sections.append((label, bullets))
+            sections.append(KeyPointSection(label, bullets))
     return sections
 
 
@@ -327,23 +433,7 @@ def normalize_dimension_rationales(value: object) -> dict[str, str] | None:
     over-long key, or too many entries. A malformed narrative field never costs
     the verdict (A20), and `raw_verdict` keeps the original either way.
     """
-    if not isinstance(value, dict) or not value:
-        return None
-    if len(value) > _MAX_DIMENSION_RATIONALES:
-        return None
-    out: dict[str, str] = {}
-    for key, text in value.items():
-        if not isinstance(key, str):
-            return None
-        slug = key.strip().lower()
-        if not slug or len(slug) > _MAX_DIMENSION_KEY_CHARS:
-            return None
-        if text is None or (isinstance(text, str) and not text.strip()):
-            continue
-        if not isinstance(text, str):
-            return None
-        out[slug] = text.strip()
-    return out or None
+    return _normalize_reason_map(value, _MAX_DIMENSION_RATIONALES, _MAX_DIMENSION_KEY_CHARS)
 
 
 def _dimension_rationale_map(assessment: object) -> dict[str, str]:
@@ -356,7 +446,43 @@ def _dimension_rationale_map(assessment: object) -> dict[str, str]:
     writer; a NULL or non-dict value is `{}`. Read with `getattr` so a test
     double lacking the attribute degrades to "no reasons" instead of raising.
     """
-    stored = getattr(assessment, "dimension_rationales", None)
+    return _stored_reason_map(getattr(assessment, "dimension_rationales", None))
+
+
+def _rationale_for(rationales: dict[str, str], key: object) -> str | None:
+    """The stored reason for dimension or gate `key`, matched on `.strip().lower()`."""
+    return rationales.get(key.strip().lower()) if isinstance(key, str) else None
+
+
+def _normalize_reason_map(
+    value: object, max_entries: int, max_key_chars: int
+) -> dict[str, str] | None:
+    """The write-time rule `normalize_dimension_rationales` documents, shared with
+    `normalize_gating_rationales`; only the two bounds differ."""
+    if not isinstance(value, dict) or not value:
+        return None
+    if len(value) > max_entries:
+        return None
+    out: dict[str, str] = {}
+    for key, text in value.items():
+        if not isinstance(key, str):
+            return None
+        slug = key.strip().lower()
+        if not slug or len(slug) > max_key_chars:
+            return None
+        if text is None or (isinstance(text, str) and not text.strip()):
+            continue
+        if not isinstance(text, str):
+            return None
+        out[slug] = text.strip()
+    return out or None
+
+
+def _stored_reason_map(stored: object) -> dict[str, str]:
+    """A STORED reason map (JSONB, no CHECK behind it) as a lookup keyed
+    `.strip().lower()`: anything that is not `str -> non-blank str` is skipped and
+    a NULL or non-dict value is `{}` — the read rule `_dimension_rationale_map`
+    documents, shared with `gating_rationale_map`."""
     if not isinstance(stored, dict):
         return {}
     return {
@@ -366,9 +492,89 @@ def _dimension_rationale_map(assessment: object) -> dict[str, str]:
     }
 
 
-def _rationale_for(rationales: dict[str, str], key: object) -> str | None:
-    """The stored reason for dimension `key`, matched on `.strip().lower()`."""
-    return rationales.get(key.strip().lower()) if isinstance(key, str) else None
+#: Bounds on the sidecar's `gating_rationales` (0058). The rubric has three
+#: gates; 10 leaves room for a future revision without letting an unbounded
+#: object into a JSONB column, and 50 is the dimension map's key bound.
+_MAX_GATING_RATIONALES = 10
+_MAX_GATING_KEY_CHARS = 50
+
+
+def normalize_gating_rationales(value: object) -> dict[str, str] | None:
+    """The hub's one-sentence reason per gate (sidecar item 1, scout_hub >= 1.10.0,
+    migration 0058), keyed like `gating`.
+
+    The rule is `normalize_dimension_rationales`' with its own bounds: a non-empty
+    dict of `str -> str`, at most `_MAX_GATING_RATIONALES` entries, keys
+    `.strip().lower()`-normalized and at most `_MAX_GATING_KEY_CHARS` long. A blank
+    or None value is an absent reason and is skipped (the skeleton pre-fills every
+    gate with `""`), and a map left entirely blank is None. Keys are not checked
+    against any rubric's gating keys, for the reason given there. The 200-character
+    sentence bound is a prompt contract the engine only warns about; the text is
+    kept whole. Anything else is None: a malformed narrative field never costs the
+    verdict (A20), and `raw_verdict` keeps the original.
+    """
+    return _normalize_reason_map(value, _MAX_GATING_RATIONALES, _MAX_GATING_KEY_CHARS)
+
+
+def gating_rationale_map(assessment: object) -> dict[str, str]:
+    """The STORED `gating_rationales` (0058) as a lookup keyed `.strip().lower()`,
+    re-normalized on read exactly as `_dimension_rationale_map` re-normalizes its
+    column. Read with `getattr`, so a row or test double without the attribute (the
+    chat record's synthetic contexts, every pre-0058 fixture) simply has no reasons.
+    The detail page and the assessment-chat record (`_gating_section`) both read
+    reasons through this one function."""
+    return _stored_reason_map(getattr(assessment, "gating_rationales", None))
+
+
+def _gating_definitions(
+    revision: Any, revision_provenance: str | None
+) -> dict[str, dict[str, str]]:
+    """The gate definitions (title and description per gate key) a page may show
+    for a row with this revision and provenance (spec §5.3).
+
+    `PROVENANCE_LIVE`: the live document's `[gating.*]`, as before.
+    `PROVENANCE_ARCHIVED`: the registry's `[revision.gating.*]` tables
+    (`RubricRevisionView.gating`) — 3.2.0 and 3.4.0 carry them, 3.3.0 and older do
+    not, so those rows keep bare labels. Anything else — an unstamped row (only
+    DISPLAYED against the live dimensions) or an unknown one — gets nothing:
+    today's definition rendered against a decision of unknown provenance would
+    mislabel it the way a hardcoded score threshold would. An entry that is not a
+    non-empty `title`/`description` pair is skipped, so this cannot raise.
+    `templates/admin/_assessments_body.html` applies the same rule to each row's
+    `revision_view.gating`.
+    """
+    if revision_provenance == PROVENANCE_LIVE:
+        source = load_rubric().gating
+    elif revision_provenance == PROVENANCE_ARCHIVED:
+        source = getattr(revision, "gating", None)
+    else:
+        return {}
+    if not isinstance(source, dict):
+        return {}
+    definitions: dict[str, dict[str, str]] = {}
+    for key, meta in source.items():
+        if not isinstance(key, str) or not isinstance(meta, dict):
+            continue
+        title, description = meta.get("title"), meta.get("description")
+        if isinstance(title, str) and title and isinstance(description, str) and description:
+            definitions[key] = {"title": title, "description": description}
+    return definitions
+
+
+def _gating_reasons(assessment: object) -> dict[str, str]:
+    """The hub's stored reason per gate, keyed by the row's OWN `gating` keys (so
+    a template can look a gate up by the key it is iterating); a gate with no
+    reason, and a reason for a key the row has no gate for, are absent."""
+    gating = getattr(assessment, "gating", None)
+    if not isinstance(gating, dict):
+        return {}
+    reasons = gating_rationale_map(assessment)
+    out: dict[str, str] = {}
+    for key in gating:
+        reason = _rationale_for(reasons, key)
+        if reason:
+            out[key] = reason
+    return out
 
 
 def strip_assessment_sidecar(text: str) -> str:
@@ -949,7 +1155,8 @@ def _add_item(
         # "latest of N consults" — so it is not mistaken for text a
         # specialist wrote.
         "note": note,
-        # The hub's own per-dimension reason (0052); None off dimensions.
+        # The hub's own one-sentence reason: per dimension (0052) or per
+        # gate (0058); None for red flags and consults.
         "rationale": rationale,
     })
 
@@ -1038,39 +1245,42 @@ def _classify_dimensions(
 
 def _gating_items(
     assessment: OpportunityAssessment,
+    revision: Any,
     revision_provenance: str | None,
     strengths: list[dict[str, Any]],
     risks: list[dict[str, Any]],
     unestablished: list[dict[str, Any]],
 ) -> None:
-    """The gating block of ``derive_strengths_and_risks``."""
-    # Gating. The tri-state strings, plus a fourth branch for anything else —
-    # `gating` is JSONB with no CHECK constraint behind it.
+    """The gating block of ``derive_strengths_and_risks``: one entry per stored gate.
+
+    Every state (met, not met, unconfirmed and an unrecognised value alike) gets
+    the rubric's title as its `label` and the rubric's description as its `body`
+    whenever `_gating_definitions` resolves the key for this row's revision, and
+    the hub's stored reason (`gating_rationales`, 0058) as its `rationale`. The
+    template shows the reason when there is one and the definition, prefixed
+    "Rubric definition:", otherwise (spec §5.2).
+    """
+    # The tri-state strings, plus a fourth branch for anything else — `gating`
+    # is JSONB with no CHECK constraint behind it.
     gating = getattr(assessment, "gating", None)
-    # Gate title/description come from the LIVE rubric document and are shown
-    # only when this row was scored against it (`PROVENANCE_LIVE`) — an older
-    # row's gating key may not even exist in the live document, and rendering
-    # today's title/description against yesterday's decision would mislabel
-    # it the same way a hardcoded score threshold would.
-    live_gating = load_rubric().gating if revision_provenance == PROVENANCE_LIVE else {}
-    if isinstance(gating, dict):
-        for key, value in gating.items():
-            label = str(key).replace("_", " ")
-            gate_meta = live_gating.get(key) if isinstance(key, str) else None
-            if value == "met":
-                if gate_meta is not None:
-                    _add_item(strengths, "gating", gate_meta["title"], "met", body=[gate_meta["description"]])
-                else:
-                    _add_item(strengths, "gating", label, "met")
-            elif value == "not_met":
-                if gate_meta is not None:
-                    _add_item(risks, "gating", gate_meta["title"], "not met", body=[gate_meta["description"]])
-                else:
-                    _add_item(risks, "gating", label, "not met")
-            elif value == "unconfirmed":
-                _add_item(unestablished, "gating", label, "never asked")
-            else:
-                _add_item(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL)
+    if not isinstance(gating, dict):
+        return
+    definitions = _gating_definitions(revision, revision_provenance)
+    reasons = gating_rationale_map(assessment)
+    for key, value in gating.items():
+        meta = definitions.get(key) if isinstance(key, str) else None
+        label = meta["title"] if meta is not None else str(key).replace("_", " ")
+        body = [meta["description"]] if meta is not None else []
+        rationale = _rationale_for(reasons, key)
+        if value == "met":
+            bucket, detail = strengths, "met"
+        elif value == "not_met":
+            bucket, detail = risks, "not met"
+        elif value == "unconfirmed":
+            bucket, detail = unestablished, "never asked"
+        else:
+            bucket, detail = unestablished, _UNRECOGNISED_GATING_DETAIL
+        _add_item(bucket, "gating", label, detail, body=body, rationale=rationale)
 
 
 def _red_flag_items(assessment: OpportunityAssessment, risks: list[dict[str, Any]]) -> None:
@@ -1190,9 +1400,10 @@ def derive_strengths_and_risks(
        writes no column and must never be mistaken for a write-time finding.
     4. **It cannot raise.** A malformed `gating` value, a non-string red flag,
        a `scores` dict with a bool in it, a NULL `gating`, a consult dict
-       missing a key, a malformed `dimension_rationales` — each degrades into
-       the not-established bucket, loses its rationale, or is skipped. A brief
-       card must never 500 a page.
+       missing a key, a malformed `dimension_rationales` or `gating_rationales`,
+       a revision with no (or malformed) gate tables — each degrades into the
+       not-established bucket, loses its rationale or definition, or is
+       skipped. A brief card must never 500 a page.
 
     Returns `{"strengths": [...], "risks": [...], "unestablished": [...],
     "mid_scale": [...], "scale_known": bool, "thresholds": {...},
@@ -1202,15 +1413,21 @@ def derive_strengths_and_risks(
     `source` one of `dimension` / `gating` / `red_flag` / `consult`.
     `rationale` is ALWAYS present: the hub's stored one-sentence reason for a
     `dimension` entry (strength, risk, not scored or mid-scale), from
-    `dimension_rationales` (migration 0052) matched on the dimension key, and
-    None for every non-dimension source and for a dimension with no stored
-    reason — a NULL column, or a stored key that matches no dimension, attaches
-    to nothing. `body` is ALWAYS present — an empty list when
+    `dimension_rationales` (migration 0052) matched on the dimension key, or
+    for a `gating` entry (every state), from `gating_rationales` (migration
+    0058, read through `gating_rationale_map`) matched on the gate key; None
+    for red flags and consults, and for a dimension or gate with no stored
+    reason — a NULL or malformed column, or a stored key that matches nothing,
+    attaches to nothing. `body` is ALWAYS present — an empty list when
     there is nothing stored to quote, so the template can test truthiness
-    without `.get`. The template renders an entry with a non-empty `body` as
-    a COLLAPSED `<details>` whose summary is `label — detail`, the `note`
-    badge and the one-line `preview`; an entry with an empty body is a plain
-    bullet. Consults are ONE ENTRY PER DOMAIN, from the domain's latest
+    without `.get`. The template collapses only a consult or red-flag entry
+    with a non-empty `body` into a `<details>` whose summary is `label —
+    detail`, the `note` badge and the one-line `preview`. A dimension's body
+    (its weight) renders inline after its detail; a gate's body (its rubric
+    definition) renders as a visible "Rubric definition: …" second line, and
+    only when the gate has no `rationale`, which takes that line instead; an
+    entry with an empty body is a plain bullet. Consults are ONE ENTRY PER
+    DOMAIN, from the domain's latest
     consult (`_latest_consult_per_domain`), with `note` = "latest of N
     consults" when N > 1:
 
@@ -1221,12 +1438,14 @@ def derive_strengths_and_risks(
     mid-scale                   (dual-scale notes are not parsed), only when
                                 the dimension's `weight` is not None; else `[]`
     dimension not scored        `[]`, unchanged
-    gating met / not_met        `[gating[key]["description"]]` and `label`
-                                becomes `gating[key]["title"]`, but ONLY when
-                                `revision_provenance == PROVENANCE_LIVE` AND
-                                `key` is a live gating key; otherwise `[]` and
-                                the label stays `key.replace("_", " ")`
-    gating unconfirmed/other    `[]`, unchanged
+    gating, every state         `[definition["description"]]`, and `label`
+    (met / not_met /            becomes `definition["title"]`, whenever
+    unconfirmed / other)        `_gating_definitions` resolves the key: the
+                                live document's `[gating.*]` for
+                                `PROVENANCE_LIVE`, the registry's
+                                `[revision.gating.*]` (3.2.0 and 3.4.0) for
+                                `PROVENANCE_ARCHIVED`; otherwise `[]` and the
+                                label stays `key.replace("_", " ")`
     red flag                    `detail` is the flag's first sentence
                                 (`_preview`, 160 chars); `body` = `[full
                                 text]` ONLY when that clip shortened it
@@ -1256,7 +1475,7 @@ def derive_strengths_and_risks(
         dimensions, revision, _dimension_rationale_map(assessment),
         strengths, risks, unestablished, mid_scale,
     )
-    _gating_items(assessment, revision_provenance, strengths, risks, unestablished)
+    _gating_items(assessment, revision, revision_provenance, strengths, risks, unestablished)
     _red_flag_items(assessment, risks)
     _consult_items(consults, strengths, risks, unestablished)
 
@@ -1426,6 +1645,85 @@ async def _resolve_pi_user_id(db: AsyncSession, assessment: OpportunityAssessmen
     return pi_user_id
 
 
+def _company_link(url: object, label: str) -> Markup | None:
+    """``url`` as a link built the way ``prose_citations`` builds a citation link
+    (class ``citation-link``, the URL in ``title``, ``rel="noreferrer"``, no
+    ``target``), or None for anything but an http(s) URL with a host
+    (``_is_linkable``). Built here, not in the template, so the template gains no
+    ``href`` whose value is a bare expression: tests/unit/test_reachability.py pins
+    how many of those exist. ``Markup.format`` escapes both values."""
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not _is_linkable(url):
+        return None
+    return Markup(
+        '<a class="citation-link" href="{}" title="{}" rel="noreferrer">{}</a>'
+    ).format(url, url, label)
+
+
+def _company_date(value: object) -> date | None:
+    """The UTC calendar date of a stored timestamp, or None for a non-datetime."""
+    if not isinstance(value, datetime):
+        return None
+    return (value.astimezone(UTC) if value.tzinfo is not None else value).date()
+
+
+async def _load_confirmed_companies(
+    db: AsyncSession, assessment: OpportunityAssessment
+) -> dict[str, Any] | None:
+    """The subject PI's staff-confirmed companies for the brief (spec §7.4,
+    decision O6), or None when there are none to show.
+
+    `subject_agent_id` -> `AgentRegistry.user_id` -> confirmed `pi_companies` rows,
+    through `pi_companies.confirmed_companies_for_agent`, which answers [] for an
+    unknown agent id and for a registry row with no user (Review Focus #4): the
+    page then simply has no block. Suggested and rejected rows never reach it.
+    This is TODAY's list, not what was known when the verdict was written, which
+    is why the block carries an as-of date: the newest `reviewed_at` (or
+    `created_at`, for a row never reviewed) among the entries. Imported at call
+    time, as `_resolve_pi_user_id` imports AgentRegistry: the engine imports this
+    module for its normalize_* helpers, and the companies service has no place in
+    its import graph. The chat record never reads the key this fills.
+    """
+    if not assessment.subject_agent_id:
+        return None
+    from src.services.pi_companies import (
+        PI_COMPANY_ROLE_LABELS,
+        confirmed_companies_for_agent,
+        format_funding,
+    )
+
+    companies = await confirmed_companies_for_agent(db, assessment.subject_agent_id)
+    if not companies:
+        return None
+    stamps = [
+        stamp
+        for stamp in (_company_date(c.reviewed_at or c.created_at) for c in companies)
+        if stamp is not None
+    ]
+    entries = []
+    for company in companies:
+        role = company.pi_role
+        links = [
+            link
+            for link in (
+                _company_link(company.source_url, "source"),
+                _company_link(company.funding_source_url, "SEC filings"),
+            )
+            if link is not None
+        ]
+        entries.append({
+            "name": company.company_name,
+            "role": PI_COMPANY_ROLE_LABELS.get(role, str(role).replace("_", " ")),
+            "funding": format_funding(
+                company.funding_usd, company.funding_as_of, company.funding_source_url
+            ),
+            "links": links,
+        })
+    return {"as_of": max(stamps).isoformat() if stamps else None, "entries": entries}
+
+
 def _message_views(
     messages: list[Any], assessment: OpportunityAssessment
 ) -> list[dict[str, Any]]:
@@ -1568,6 +1866,7 @@ async def build_assessment_detail(
         return None
 
     pi_user_id = await _resolve_pi_user_id(db, assessment)
+    confirmed_companies = await _load_confirmed_companies(db, assessment)
 
     revision, revision_provenance = resolve_revision(
         assessment.rubric_version, assessment.rubric_content_hash
@@ -1601,6 +1900,9 @@ async def build_assessment_detail(
     return {
         "assessment": assessment,
         "pi_user_id": pi_user_id,
+        # The subject PI's staff-confirmed companies for the brief (spec §7.4),
+        # or None. Page-only: the chat record never reads it.
+        "confirmed_companies": confirmed_companies,
         "dimensions": dimensions,
         "revision": revision,
         "revision_provenance": revision_provenance,
@@ -1627,14 +1929,24 @@ async def build_assessment_detail(
         # cut off gets its own neutral chip, so the "reply cut off" marker is
         # never merged into an opinion tally.
         "panel_domains": summarize_panel_domains(consults),
-        # Live gate descriptions for the gating card (audit L1): the text used
-        # to live only in a `title` tooltip on a non-focusable row. Same
-        # provenance guard as `derive_strengths_and_risks` — an older row
-        # keeps bare labels rather than today's definitions.
+        # Live gate descriptions, LIVE rows only, read by the assessment chat
+        # record (`assessment_chat_record._gating_section`). Deliberately kept to
+        # that meaning when archived rows gained definitions (spec §5.3):
+        # widening it would change the chat model's input for every existing
+        # archived row. The page reads `gating_definitions` below instead.
         "gating_descriptions": (
             {k: v for k, v in load_rubric().gating.items()}
             if revision_provenance == PROVENANCE_LIVE else {}
         ),
+        # PAGE-ONLY (hub 1.10.0, spec §5.2-§5.3); the chat record reads neither.
+        # `gating_definitions`: the title and description the Evidence summary
+        # and the gating card may show for this row's gates — the live
+        # document's for a live row, the registry's [revision.gating.*] for an
+        # archived row that has them (3.2.0, 3.4.0), {} otherwise
+        # (`_gating_definitions`). `gating_reasons`: the hub's stored reason per
+        # gate (0058), keyed by this row's own `gating` keys.
+        "gating_definitions": _gating_definitions(revision, revision_provenance),
+        "gating_reasons": _gating_reasons(assessment),
         # Request 3 / D2: the strengths-risks-not-established brief, DERIVED
         # from the three things already resolved above and stored nowhere.
         "verdict_signals": derive_strengths_and_risks(

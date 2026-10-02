@@ -130,9 +130,10 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >    archive-plan.md, Task 9).
 > 2. **On every `[meta].version` bump** of `blackbird-rubric.toml`, append
 >    the OUTGOING document's entry (version, sha256[:12] of the old bytes,
->    scale, band lines, dimension table) to `prompts/rubric/revisions.toml`
->    in the same commit — otherwise the rows it stamped render as "unknown
->    revision".
+>    scale, band lines, dimension table, and its `[revision.gating.<key>]`
+>    title/description tables) to `prompts/rubric/revisions.toml` in the same
+>    commit — otherwise the rows it stamped render as "unknown revision", and
+>    without the gate tables they lose their gate definitions (scout_hub 1.10.0).
 > 3. **Never DELETE from `simulation_runs`.** Every run-produced table
 >    (`agent_messages`, `opportunity_assessments`, `assessment_drops`,
 >    `llm_call_logs`, `specialist_consults`, `thread_decisions`,
@@ -234,7 +235,10 @@ EXPLORE turn, not the CONCLUDE turn it looks like.
 As of the 2026-08-12 removal cycle (private instructions + reply-only hub), there is no
 runtime "private profile" mechanism — `Agent._compose_system_prompt` injects the rendered
 rubric but no `## Your Private Instructions` header, and nothing reads
-`profiles/private/{agent_id}.md` per-agent. The stale hub copy has now been diffed against
+`profiles/private/{agent_id}.md` per-agent. (The staff company record in
+`profiles/private/companies/`, added with scout_hub 1.10.0, is a different file, read
+only by `retrieve_profile` for the hub; see the scout_hub 1.10.0 section at the end.)
+The stale hub copy has now been diffed against
 the extracted rubric and archived as
 `profiles/private/blackbird.archived-2026-08-20.md` (untracked, git-ignored, unread — no
 longer a per-deploy chore) — the diff is recorded in
@@ -474,3 +478,51 @@ Both reproduce today's values exactly (tests pin them); a label there is model-v
 in the assessment chat record. The engine records each loaded rubric in `rubric_documents`
 at start; nothing reads that table yet (provenance still resolves live rubric →
 `revisions.toml` → unknown). Neither registry changes any prompt.
+
+**scout_hub 1.10.0 (2026-10-02): gate reasons, labelled key-point bullets, the staff
+company record.** Spec: `docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md`.
+The prompt freeze (B22/C27 of the 2026-09-29 audit-remediation spec, D2 of the
+2026-10-01 web-UI spec) was lifted for this one release and for the `retrieve_profile`
+appendix below (owner decisions O1 and O5, recorded there as B25 and D20).
+
+- **`gating_rationales`** (prompt item 1, migration `0058`): one sentence of at most 200
+  characters per gate, keyed like `gating`, saying what established the state. It is not
+  staff-only: reviewers read it, so item 1 binds it to the public-level rule item 2
+  applies to `dimension_rationales`. `_normalized_gating_rationales`
+  (`src/agent/engine/verdicts.py`) stores it beside `dimension_rationales` and only
+  warns: a malformed map stores NULL (`raw_verdict` keeps it), and a gate with no reason
+  or a reason over 200 characters is logged. NULL means the row predates `0058`, came
+  from an older prompt, or carried a malformed value; it is never backfilled. The pages
+  show the reason, or "Rubric definition: …" where none is stored.
+- **Key points** (item 7): each of the six groups keeps exactly one main bullet. Any
+  group may add one bullet beginning `Risk:`, and `lab_background` one beginning
+  `Companies:`, each at most 300 characters, reviewer-visible and at the public level.
+  Every `risks` entry and red flag must appear in the `Risk:` bullet of the heading it
+  bears on; a `Companies:` bullet names only ties that a retrieved paper, a patent
+  filing or the interview establishes and the staff record lacks. The engine tells the
+  bullets apart with `classify_key_point` (`src/services/assessment_detail.py`, the
+  classifier the pages render with) and warns, never drops, on a group without exactly
+  one main bullet, an unlabelled extra, a repeated label, or a `Companies:` bullet
+  outside `lab_background` (`_warn_key_point_group`, `src/agent/engine/verdicts.py`).
+  Whether every risk and red flag reached a `Risk:` bullet is a prompt instruction
+  only; nothing checks it.
+- **Elevator pitch** (item 8): the problem gets one or two sentences of its own, and the
+  population size says whether it counts people with the disease or yearly diagnoses,
+  only as the record states it. The citation budget reads "elements 1-4 end within
+  approximately 550 characters" (element 1 may be two sentences);
+  `PITCH_DISPLAY_CHARS` stays 600.
+- **`score_rationale`** (item 10) is now described to the hub as reviewer-visible and
+  bound by the public-level rule, which is how the pages already treated it; it is
+  still never posted to Slack.
+- **The staff company record.** Managers confirm each PI's companies on the PI page;
+  `src/services/pi_companies.py` exports the confirmed rows to
+  `profiles/private/companies/<agent_id>.md`. `retrieve_profile` appends that file,
+  fenced as `<staff_company_record>`, after its result only when the caller is
+  `scout_hub` and the file is not blank (`_execute_retrieve_profile`,
+  `src/agent/tools.py`). A lab bot, and the hub asking about a PI with no record, get
+  the same bytes as before. Rule 1 of `agent-system.md` names the record as a source,
+  and the assessment page renders the same confirmed list under Lab Background. The
+  `retrieve_profile` tool description (`src/agent/tool_definitions.py`) is unchanged:
+  the lab bots share it, so the hub learns of the record from its own prompts instead.
+- A run after this release starts FRESH (a prompt-set version bump), on a rebuilt agent
+  image (`tools.py` and `engine/` changed).

@@ -21,8 +21,8 @@ from pathlib import Path
 from src.agent.tools import _execute_retrieve_profile
 
 
-def _run(agent_id: str) -> str:
-    return asyncio.run(_execute_retrieve_profile(agent_id))
+def _run(agent_id: str, role: str = "pi_lab") -> str:
+    return asyncio.run(_execute_retrieve_profile(agent_id, role))
 
 
 class TestTraversalIsRefused:
@@ -47,6 +47,12 @@ class TestTraversalIsRefused:
     def test_a_bare_separator_is_refused(self):
         out = _run("private/blackbird")
         assert "Operational Screening Instructions" not in out
+
+    def test_the_hub_role_is_refused_the_same_escapes(self):
+        """The hub-only company-record appendix (scout_hub 1.10.0) reads a
+        second directory; a malformed id must still be refused before either."""
+        for agent_id in ("../private/blackbird", "x/../../private/blackbird", "/etc/passwd"):
+            assert _run(agent_id, "scout_hub") == f"No public profile found for agent '{agent_id}'."
 
 
 class TestLegitimateReadsStillWork:

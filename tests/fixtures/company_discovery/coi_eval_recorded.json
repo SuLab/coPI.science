@@ -1,0 +1,5697 @@
+{
+ "_meta": {
+  "prompt_sha256": "83a9bf7e45c5a4c913b73a1186c50b30a7b27bcbc1283054f47b60ee474ced73",
+  "model": "claude-opus-5-5",
+  "recorded_at": "2026-10-02"
+ },
+ "regex-pi-form-01": {
+  "usage": {
+   "input_tokens": 250,
+   "output_tokens": 57,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-02": {
+  "usage": {
+   "input_tokens": 250,
+   "output_tokens": 57,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V. E. V. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V. E. V. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-03": {
+  "usage": {
+   "input_tokens": 247,
+   "output_tokens": 54,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "VEV is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"VEV is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-04": {
+  "usage": {
+   "input_tokens": 246,
+   "output_tokens": 53,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "VV is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"VV is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-05": {
+  "usage": {
+   "input_tokens": 248,
+   "output_tokens": 55,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.V. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.V. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-06": {
+  "usage": {
+   "input_tokens": 258,
+   "output_tokens": 65,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L., S.C., and V.E.V. are founders of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L., S.C., and V.E.V. are founders of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-07": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 59,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Victor Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Victor Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-08": {
+  "usage": {
+   "input_tokens": 254,
+   "output_tokens": 61,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Victor E. Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Victor E. Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-09": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 60,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Victor E Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Victor E Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-10": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 60,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V. E. Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V. E. Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-11": {
+  "usage": {
+   "input_tokens": 251,
+   "output_tokens": 58,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V. Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V. Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-12": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 60,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr. Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr. Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-pi-form-13": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 127,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Professor Velculescu is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Professor Velculescu is a founder of Acme Bio.\"}]}"
+ },
+ "regex-extraction-01": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 61,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of Acme Bio.\"}]}"
+ },
+ "regex-extraction-02": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 61,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a cofounder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a cofounder of Acme Bio.\"}]}"
+ },
+ "regex-extraction-03": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 62,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. co-founded Acme Bio in 2015."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. co-founded Acme Bio in 2015.\"}]}"
+ },
+ "regex-extraction-04": {
+  "usage": {
+   "input_tokens": 261,
+   "output_tokens": 129,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. founded Acme Bio and Beta Therapeutics in 2012."
+    },
+    {
+     "company": "Beta Therapeutics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. founded Acme Bio and Beta Therapeutics in 2012."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. founded Acme Bio and Beta Therapeutics in 2012.\"},{\"company\":\"Beta Therapeutics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. founded Acme Bio and Beta Therapeutics in 2012.\"}]}"
+ },
+ "regex-extraction-05": {
+  "usage": {
+   "input_tokens": 264,
+   "output_tokens": 80,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics, Inc.",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of and owns equity in DELFI Diagnostics, Inc."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics, Inc.\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of and owns equity in DELFI Diagnostics, Inc.\"}]}"
+ },
+ "regex-extraction-06": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 58,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "23andMe",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of 23andMe and of the company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"23andMe\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of 23andMe and of the company.\"}]}"
+ },
+ "regex-extraction-07": {
+  "usage": {
+   "input_tokens": 271,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-extraction-08": {
+  "usage": {
+   "input_tokens": 257,
+   "output_tokens": 64,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Acme Bio, a company founded by V.E.V., licensed the technology."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Acme Bio, a company founded by V.E.V., licensed the technology.\"}]}"
+ },
+ "regex-former-01": {
+  "usage": {
+   "input_tokens": 295,
+   "output_tokens": 239,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "co_founder",
+     "former": true,
+     "sentence": "V.E.V. was a co-founder of Personal Genome Diagnostics, and divested his equity in Personal Genome Diagnostics (PGDx) to LabCorp in February 2022."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"co_founder\",\"former\":true,\"sentence\":\"V.E.V. was a co-founder of Personal Genome Diagnostics, and divested his equity in Personal Genome Diagnostics (PGDx) to LabCorp in February 2022.\"}]}"
+ },
+ "regex-former-02": {
+  "usage": {
+   "input_tokens": 257,
+   "output_tokens": 70,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": true,
+     "sentence": "V.E.V. is a former founder of Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":true,\"sentence\":\"V.E.V. is a former founder of Personal Genome Diagnostics.\"}]}"
+ },
+ "regex-former-03": {
+  "usage": {
+   "input_tokens": 258,
+   "output_tokens": 71,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": true,
+     "sentence": "V.E.V. was previously a founder of Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":true,\"sentence\":\"V.E.V. was previously a founder of Personal Genome Diagnostics.\"}]}"
+ },
+ "regex-former-04": {
+  "usage": {
+   "input_tokens": 259,
+   "output_tokens": 72,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": true,
+     "sentence": "V.E.V. is no longer a founder of Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":true,\"sentence\":\"V.E.V. is no longer a founder of Personal Genome Diagnostics.\"}]}"
+ },
+ "regex-former-05": {
+  "usage": {
+   "input_tokens": 261,
+   "output_tokens": 231,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "co_founder",
+     "former": true,
+     "sentence": "V.E.V. co-founded Personal Genome Diagnostics and sold his shares."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"co_founder\",\"former\":true,\"sentence\":\"V.E.V. co-founded Personal Genome Diagnostics and sold his shares.\"}]}"
+ },
+ "regex-names-01": {
+  "usage": {
+   "input_tokens": 227,
+   "output_tokens": 55,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "H.M. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"H.M. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-names-02": {
+  "usage": {
+   "input_tokens": 225,
+   "output_tokens": 55,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "H.M. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"H.M. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-names-04": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 202,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "A.H.-B. is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"A.H.-B. is a co-founder of Acme Bio.\"}]}"
+ },
+ "regex-names-05": {
+  "usage": {
+   "input_tokens": 286,
+   "output_tokens": 168,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "A.H.-B. is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"A.H.-B. is a co-founder of Acme Bio.\"}]}"
+ },
+ "regex-names-06": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 60,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Iris van 't Erve is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Iris van 't Erve is a founder of Acme Bio.\"}]}"
+ },
+ "regex-names-07": {
+  "usage": {
+   "input_tokens": 274,
+   "output_tokens": 61,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr. van 't Erve is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr. van 't Erve is a founder of Acme Bio.\"}]}"
+ },
+ "regex-names-08": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 55,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "I.V. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"I.V. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-01": {
+  "usage": {
+   "input_tokens": 245,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-02": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 89,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx.\"}]}"
+ },
+ "regex-attribution-03": {
+  "usage": {
+   "input_tokens": 269,
+   "output_tokens": 85,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "OrisDx",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"OrisDx\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda is a co-founder of OrisDx.\"}]}"
+ },
+ "regex-attribution-04": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-05": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-06": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-07": {
+  "usage": {
+   "input_tokens": 248,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-08": {
+  "usage": {
+   "input_tokens": 271,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-09": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 77,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "The authors declare the following competing interests: V.E.V. is a founder of Delfi Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"The authors declare the following competing interests: V.E.V. is a founder of Delfi Diagnostics.\"}]}"
+ },
+ "regex-attribution-10": {
+  "usage": {
+   "input_tokens": 259,
+   "output_tokens": 70,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "The authors report that V.E.V. is a founder of Delfi Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"The authors report that V.E.V. is a founder of Delfi Diagnostics.\"}]}"
+ },
+ "regex-attribution-11": {
+  "usage": {
+   "input_tokens": 274,
+   "output_tokens": 87,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. co-founded and serves on the board of DELFI Diagnostics, and owns equity in Exact Sciences."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. co-founded and serves on the board of DELFI Diagnostics, and owns equity in Exact Sciences.\"}]}"
+ },
+ "regex-attribution-12": {
+  "usage": {
+   "input_tokens": 251,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-13": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-14": {
+  "usage": {
+   "input_tokens": 237,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-15": {
+  "usage": {
+   "input_tokens": 279,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-16": {
+  "usage": {
+   "input_tokens": 269,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-17": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 142,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively.\"}]}"
+ },
+ "regex-attribution-18": {
+  "usage": {
+   "input_tokens": 264,
+   "output_tokens": 123,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and V.E.V. are founders of Thrive Earlier Detection and DELFI Diagnostics, respectively.\"}]}"
+ },
+ "regex-attribution-19": {
+  "usage": {
+   "input_tokens": 263,
+   "output_tokens": 72,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of Acme Bio and CEO of Beta Inc."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of Acme Bio and CEO of Beta Inc.\"}]}"
+ },
+ "regex-attribution-20": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 236,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio."
+    },
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio.\"},{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics, and Acme Bio.\"}]}"
+ },
+ "regex-attribution-21": {
+  "usage": {
+   "input_tokens": 274,
+   "output_tokens": 233,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio."
+    },
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio.\"},{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Personal Genome Diagnostics and Acme Bio.\"}]}"
+ },
+ "regex-attribution-22": {
+  "usage": {
+   "input_tokens": 254,
+   "output_tokens": 63,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder and director of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder and director of Acme Bio.\"}]}"
+ },
+ "regex-attribution-23": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 80,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-24": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 77,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"BV Founder of Thrive Earlier Detection, KK Scientific co-founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-25": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-26": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-27": {
+  "usage": {
+   "input_tokens": 271,
+   "output_tokens": 93,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx.\"}]}"
+ },
+ "regex-attribution-28": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 89,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "OrisDx",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"OrisDx\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, and Chetan Bettegowda, MD, is a co-founder of OrisDx.\"}]}"
+ },
+ "regex-attribution-29": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 91,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, and Luis A. Diaz Jr. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, and Luis A. Diaz Jr. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-30": {
+  "usage": {
+   "input_tokens": 274,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-31": {
+  "usage": {
+   "input_tokens": 270,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-32": {
+  "usage": {
+   "input_tokens": 245,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-33": {
+  "usage": {
+   "input_tokens": 246,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-34": {
+  "usage": {
+   "input_tokens": 208,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-35": {
+  "usage": {
+   "input_tokens": 257,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-36": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 148,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-37": {
+  "usage": {
+   "input_tokens": 325,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-38": {
+  "usage": {
+   "input_tokens": 265,
+   "output_tokens": 76,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported being a founder of Delfi Diagnostics outside the submitted work."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported being a founder of Delfi Diagnostics outside the submitted work.\"}]}"
+ },
+ "regex-attribution-39": {
+  "usage": {
+   "input_tokens": 280,
+   "output_tokens": 91,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics and A.L., S.C. and R.B.S. are founders of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics and A.L., S.C. and R.B.S. are founders of Acme Bio.\"}]}"
+ },
+ "regex-attribution-40": {
+  "usage": {
+   "input_tokens": 254,
+   "output_tokens": 63,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. co-founded Acme Bio together with A.L."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. co-founded Acme Bio together with A.L.\"}]}"
+ },
+ "regex-attribution-41": {
+  "usage": {
+   "input_tokens": 278,
+   "output_tokens": 205,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-42": {
+  "usage": {
+   "input_tokens": 282,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-43": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-44": {
+  "usage": {
+   "input_tokens": 256,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-45": {
+  "usage": {
+   "input_tokens": 259,
+   "output_tokens": 68,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder, director and shareholder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder, director and shareholder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-46": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 60,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is founder & CEO of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is founder & CEO of Acme Bio.\"}]}"
+ },
+ "regex-attribution-47": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 69,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder and Executive Chairman of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder and Executive Chairman of Acme Bio.\"}]}"
+ },
+ "regex-attribution-48": {
+  "usage": {
+   "input_tokens": 246,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-49": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-50": {
+  "usage": {
+   "input_tokens": 243,
+   "output_tokens": 59,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "J.W. is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"J.W. is a co-founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-51": {
+  "usage": {
+   "input_tokens": 237,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-attribution-52": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 86,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-attribution-53": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 158,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio."
+    },
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio.\"},{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L. and V.E.V. are founders of DELFI Diagnostics, and A.L. is a founder of Acme Bio.\"}]}"
+ },
+ "regex-elife-entry-dobbyn": {
+  "usage": {
+   "input_tokens": 650,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-entry-sur": {
+  "usage": {
+   "input_tokens": 637,
+   "output_tokens": 221,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-founder of Acme Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-founder of Acme Therapeutics.\"}]}"
+ },
+ "regex-elife-head-1-sur": {
+  "usage": {
+   "input_tokens": 637,
+   "output_tokens": 99,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-founder of Acme Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-founder of Acme Therapeutics.\"}]}"
+ },
+ "regex-elife-head-2-sur": {
+  "usage": {
+   "input_tokens": 638,
+   "output_tokens": 219,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-Founder of Acme Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Co-Founder of Acme Therapeutics.\"}]}"
+ },
+ "regex-elife-head-3-sur": {
+  "usage": {
+   "input_tokens": 640,
+   "output_tokens": 241,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Scientific co-founder of Acme Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Scientific co-founder of Acme Therapeutics.\"}]}"
+ },
+ "regex-elife-head-4-sur": {
+  "usage": {
+   "input_tokens": 639,
+   "output_tokens": 264,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Is a co-founder of Acme Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"AC, LD, EW, BP, BL, SP, EH, MP, KG, NW No competing interests declared, SS Is a co-founder of Acme Therapeutics.\"}]}"
+ },
+ "regex-elife-head-1-cook": {
+  "usage": {
+   "input_tokens": 653,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-2-dobbyn": {
+  "usage": {
+   "input_tokens": 651,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-3-watson": {
+  "usage": {
+   "input_tokens": 642,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-4-ptak": {
+  "usage": {
+   "input_tokens": 642,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-1-lee": {
+  "usage": {
+   "input_tokens": 651,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-2-paul": {
+  "usage": {
+   "input_tokens": 636,
+   "output_tokens": 106,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-3-hsiue": {
+  "usage": {
+   "input_tokens": 648,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-4-popoli": {
+  "usage": {
+   "input_tokens": 642,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-1-gabrielson": {
+  "usage": {
+   "input_tokens": 652,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "regex-elife-head-2-wyhs": {
+  "usage": {
+   "input_tokens": 650,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-elife-bd-biosciences": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-elife-md-anderson": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 59,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-elife-md-phd-degree": {
+  "usage": {
+   "input_tokens": 245,
+   "output_tokens": 39,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-degree-ms-as-initials": {
+  "usage": {
+   "input_tokens": 248,
+   "output_tokens": 89,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-fused-sentence-a-s": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-fused-sentence-s-a": {
+  "usage": {
+   "input_tokens": 281,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-fused-sentence-capital-hepatitis-b": {
+  "usage": {
+   "input_tokens": 261,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-gapping-coauthor-tie": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-gapping-dr-as-company": {
+  "usage": {
+   "input_tokens": 271,
+   "output_tokens": 93,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr. Vogelstein is a founder of Thrive Earlier Detection, and Dr. Velculescu of DELFI Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr. Vogelstein is a founder of Thrive Earlier Detection, and Dr. Velculescu of DELFI Diagnostics.\"}]}"
+ },
+ "r3-fp-unlisted-verb-discloses": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-appositive-spouse": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-appositive-senior-author": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-object-married-to": {
+  "usage": {
+   "input_tokens": 254,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-object-advisor-to-founders": {
+  "usage": {
+   "input_tokens": 258,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-jama-family-member": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-object-vc-apposition": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 113,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-pending-cofounder": {
+  "usage": {
+   "input_tokens": 259,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-appositive-describes-pi": {
+  "usage": {
+   "input_tokens": 242,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-and-conjunct-equity": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 88,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection and holds equity in Exact Sciences and Catalio Capital Management."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection and holds equity in Exact Sciences and Catalio Capital Management.\"}]}"
+ },
+ "r3-fp-and-conjunct-consultant": {
+  "usage": {
+   "input_tokens": 269,
+   "output_tokens": 80,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics and is a consultant to Genentech and Roche."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics and is a consultant to Genentech and Roche.\"}]}"
+ },
+ "r3-fp-title-sab-member": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 76,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of Acme Bio and SAB member of Beta Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of Acme Bio and SAB member of Beta Therapeutics.\"}]}"
+ },
+ "r3-fp-possessive-parent-company": {
+  "usage": {
+   "input_tokens": 262,
+   "output_tokens": 146,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Beta Holdings",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of Acme Bio's parent company, Beta Holdings."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Beta Holdings\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of Acme Bio's parent company, Beta Holdings.\"}]}"
+ },
+ "r3-fp-non-company-society": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-em-dash-spouse": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-fp-parenthetical-spouse": {
+  "usage": {
+   "input_tokens": 272,
+   "output_tokens": 84,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics (his spouse is a co-founder of Acme Bio)."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics (his spouse is a co-founder of Acme Bio).\"}]}"
+ },
+ "r3-ok-founding-member-sab": {
+  "usage": {
+   "input_tokens": 260,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-founding-director-center": {
+  "usage": {
+   "input_tokens": 278,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-founder-and-a-shareholder": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 78,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics and a shareholder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics and a shareholder of Acme Bio.\"}]}"
+ },
+ "r3-ok-jama-founder-and-holding-equity": {
+  "usage": {
+   "input_tokens": 283,
+   "output_tokens": 94,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported being a founder of Delfi Diagnostics and holding equity in Personal Genome Diagnostics outside the submitted work."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported being a founder of Delfi Diagnostics and holding equity in Personal Genome Diagnostics outside the submitted work.\"}]}"
+ },
+ "r3-ok-possessive-spouse-in-subject": {
+  "usage": {
+   "input_tokens": 261,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-pi-only-possessive-object": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-coauthor-subject-same-statement": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 84,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "A.L. is a postdoctoral fellow in V.E.V.'s laboratory and is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"A.L. is a postdoctoral fellow in V.E.V.'s laboratory and is a co-founder of Acme Bio.\"}]}"
+ },
+ "r3-ok-named-spouse-appositive": {
+  "usage": {
+   "input_tokens": 279,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-curly-quoted-companies": {
+  "usage": {
+   "input_tokens": 268,
+   "output_tokens": 147,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of “Acme Bio” and ‘Beta Therapeutics’."
+    },
+    {
+     "company": "Beta Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of “Acme Bio” and ‘Beta Therapeutics’."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of “Acme Bio” and ‘Beta Therapeutics’.\"},{\"company\":\"Beta Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of “Acme Bio” and ‘Beta Therapeutics’.\"}]}"
+ },
+ "r3-ok-curly-apostrophe-surname": {
+  "usage": {
+   "input_tokens": 252,
+   "output_tokens": 132,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "Sean O’Brien is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"Sean O’Brien is a co-founder of Acme Bio.\"}]}"
+ },
+ "r3-ok-inc-serial": {
+  "usage": {
+   "input_tokens": 276,
+   "output_tokens": 176,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics, Inc.",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Inc., and Personal Genome Diagnostics, Inc."
+    },
+    {
+     "company": "Personal Genome Diagnostics, Inc.",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, Inc., and Personal Genome Diagnostics, Inc."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics, Inc.\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Inc., and Personal Genome Diagnostics, Inc.\"},{\"company\":\"Personal Genome Diagnostics, Inc.\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, Inc., and Personal Genome Diagnostics, Inc.\"}]}"
+ },
+ "r3-ok-header-spouse-of-one-author": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-possessive-spouse-named": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-inc-sentence-boundary": {
+  "usage": {
+   "input_tokens": 258,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "r3-ok-elife-pi-entry": {
+  "usage": {
+   "input_tokens": 318,
+   "output_tokens": 104,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "AL No competing interests declared, VEV Founder of DELFI Diagnostics, Board member of DELFI Diagnostics, BV Founder of Thrive Earlier Detection."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"AL No competing interests declared, VEV Founder of DELFI Diagnostics, Board member of DELFI Diagnostics, BV Founder of Thrive Earlier Detection.\"}]}"
+ },
+ "r3-ok-consultant-to-bms-and-cofounder": {
+  "usage": {
+   "input_tokens": 262,
+   "output_tokens": 71,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a consultant to BMS and is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a consultant to BMS and is a co-founder of Acme Bio.\"}]}"
+ },
+ "r3-miss-fused-sentence-pi-view": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 65,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics.\"}]}"
+ },
+ "r3-miss-appositive-pi-view": {
+  "usage": {
+   "input_tokens": 275,
+   "output_tokens": 86,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L. is a consultant to Genentech, and V.E.V., the senior author, is a founder of DELFI Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L. is a consultant to Genentech, and V.E.V., the senior author, is a founder of DELFI Diagnostics.\"}]}"
+ },
+ "r3-miss-cage-truncates-serial": {
+  "usage": {
+   "input_tokens": 277,
+   "output_tokens": 353,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics."
+    },
+    {
+     "company": "Haystack Oncology",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics."
+    },
+    {
+     "company": "CAGE Pharma",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics.\"},{\"company\":\"Haystack Oncology\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics.\"},{\"company\":\"CAGE Pharma\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. is a founder of Thrive Earlier Detection, Haystack Oncology, CAGE Pharma, and Personal Genome Diagnostics.\"}]}"
+ },
+ "r3-miss-ngm-after-and": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 147,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of Acme Bio and NGM Biopharmaceuticals."
+    },
+    {
+     "company": "NGM Biopharmaceuticals",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder of Acme Bio and NGM Biopharmaceuticals."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of Acme Bio and NGM Biopharmaceuticals.\"},{\"company\":\"NGM Biopharmaceuticals\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder of Acme Bio and NGM Biopharmaceuticals.\"}]}"
+ },
+ "r3-miss-bms-ends-object-list": {
+  "usage": {
+   "input_tokens": 269,
+   "output_tokens": 78,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. receives research funding from Pfizer and BMS, and is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. receives research funding from Pfizer and BMS, and is a co-founder of Acme Bio.\"}]}"
+ },
+ "r3-miss-aacr-semicolon-and-is": {
+  "usage": {
+   "input_tokens": 322,
+   "output_tokens": 242,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "OrisDx",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C. Bettegowda reports grants and personal fees from Depuy-Synthes; personal fees from Bionaut Labs, Haystack Oncology, and Privo Technologies; and is a co-founder of OrisDx and Belay Diagnostics."
+    },
+    {
+     "company": "Belay Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C. Bettegowda reports grants and personal fees from Depuy-Synthes; personal fees from Bionaut Labs, Haystack Oncology, and Privo Technologies; and is a co-founder of OrisDx and Belay Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"OrisDx\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C. Bettegowda reports grants and personal fees from Depuy-Synthes; personal fees from Bionaut Labs, Haystack Oncology, and Privo Technologies; and is a co-founder of OrisDx and Belay Diagnostics.\"},{\"company\":\"Belay Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C. Bettegowda reports grants and personal fees from Depuy-Synthes; personal fees from Bionaut Labs, Haystack Oncology, and Privo Technologies; and is a co-founder of OrisDx and Belay Diagnostics.\"}]}"
+ },
+ "r3-miss-jama-semicolons": {
+  "usage": {
+   "input_tokens": 295,
+   "output_tokens": 106,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported receiving personal fees from Genentech; being a founder of Delfi Diagnostics; and owning stock in Delfi Diagnostics outside the submitted work."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported receiving personal fees from Genentech; being a founder of Delfi Diagnostics; and owning stock in Delfi Diagnostics outside the submitted work.\"}]}"
+ },
+ "r3-miss-jama-serial-outside-work": {
+  "usage": {
+   "input_tokens": 286,
+   "output_tokens": 269,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work."
+    },
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work.\"},{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Dr Velculescu reported being a founder of Delfi Diagnostics, Personal Genome Diagnostics, and Acme Bio outside the submitted work.\"}]}"
+ },
+ "r3-miss-founded-two-with-years": {
+  "usage": {
+   "input_tokens": 273,
+   "output_tokens": 160,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. founded Personal Genome Diagnostics in 2010 and DELFI Diagnostics in 2014."
+    },
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. founded Personal Genome Diagnostics in 2010 and DELFI Diagnostics in 2014."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. founded Personal Genome Diagnostics in 2010 and DELFI Diagnostics in 2014.\"},{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. founded Personal Genome Diagnostics in 2010 and DELFI Diagnostics in 2014.\"}]}"
+ },
+ "r3-miss-founder-and-was-ceo": {
+  "usage": {
+   "input_tokens": 255,
+   "output_tokens": 62,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder and was CEO of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder and was CEO of Acme Bio.\"}]}"
+ },
+ "r3-miss-cofounder-and-shareholder": {
+  "usage": {
+   "input_tokens": 257,
+   "output_tokens": 66,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-founder and shareholder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-founder and shareholder of Acme Bio.\"}]}"
+ },
+ "r3-miss-drs-plural": {
+  "usage": {
+   "input_tokens": 264,
+   "output_tokens": 84,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Drs Vogelstein and Kinzler reported being founders of Thrive Earlier Detection outside the submitted work."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Drs Vogelstein and Kinzler reported being founders of Thrive Earlier Detection outside the submitted work.\"}]}"
+ },
+ "r3-miss-pronoun-next-sentence": {
+  "usage": {
+   "input_tokens": 265,
+   "output_tokens": 57,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "He is also a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"He is also a co-founder of Acme Bio.\"}]}"
+ },
+ "r3-miss-nejm-company-he-cofounded": {
+  "usage": {
+   "input_tokens": 267,
+   "output_tokens": 80,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "Dr. Velculescu reports owning stock in DELFI Diagnostics, a company he co-founded."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"Dr. Velculescu reports owning stock in DELFI Diagnostics, a company he co-founded.\"}]}"
+ },
+ "r3-miss-licensed-which-he-cofounded": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 75,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co-inventor on patents licensed to Acme Bio, which he co-founded."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co-inventor on patents licensed to Acme Bio, which he co-founded.\"}]}"
+ },
+ "r3-miss-not-a-but-b": {
+  "usage": {
+   "input_tokens": 266,
+   "output_tokens": 76,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Beta Therapeutics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is not a founder of Acme Bio but is a founder of Beta Therapeutics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Beta Therapeutics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is not a founder of Acme Bio but is a founder of Beta Therapeutics.\"}]}"
+ },
+ "r3-miss-pi-and-spouse": {
+  "usage": {
+   "input_tokens": 256,
+   "output_tokens": 65,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. and his spouse are co-founders of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. and his spouse are co-founders of Acme Bio.\"}]}"
+ },
+ "r3-miss-nb-hyphen-role": {
+  "usage": {
+   "input_tokens": 253,
+   "output_tokens": 62,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "V.E.V. is a co‑founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"V.E.V. is a co‑founder of Acme Bio.\"}]}"
+ },
+ "r3-miss-prof-dr": {
+  "usage": {
+   "input_tokens": 259,
+   "output_tokens": 68,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Acme Bio",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "Prof. Dr. Velculescu is a co-founder of Acme Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Acme Bio\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"Prof. Dr. Velculescu is a co-founder of Acme Bio.\"}]}"
+ },
+ "real-39433569-van-t-erve-iris": {
+  "usage": {
+   "input_tokens": 1428,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-alipanahi-bahar": {
+  "usage": {
+   "input_tokens": 1398,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-lumbard-keith": {
+  "usage": {
+   "input_tokens": 1391,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-skidmore-zachary": {
+  "usage": {
+   "input_tokens": 1416,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-rinaldi-lorenzo": {
+  "usage": {
+   "input_tokens": 1402,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-millberg-laurel": {
+  "usage": {
+   "input_tokens": 1404,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-carey-jacob": {
+  "usage": {
+   "input_tokens": 1383,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-chesnick-bryan": {
+  "usage": {
+   "input_tokens": 1393,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-cristiano-stephen": {
+  "usage": {
+   "input_tokens": 1393,
+   "output_tokens": 96,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization.\"}]}"
+ },
+ "real-39433569-wu-tony": {
+  "usage": {
+   "input_tokens": 1381,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-peters-erica": {
+  "usage": {
+   "input_tokens": 1381,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-bolhuis-karen": {
+  "usage": {
+   "input_tokens": 1396,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-tom-jennifer": {
+  "usage": {
+   "input_tokens": 1385,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-bach-peter": {
+  "usage": {
+   "input_tokens": 1397,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-dracopoli-nicholas": {
+  "usage": {
+   "input_tokens": 1416,
+   "output_tokens": 96,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization.\"}]}"
+ },
+ "real-39433569-meijer-gerrit": {
+  "usage": {
+   "input_tokens": 1406,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-scharpf-robert": {
+  "usage": {
+   "input_tokens": 1407,
+   "output_tokens": 96,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization.\"}]}"
+ },
+ "real-39433569-velculescu-victor": {
+  "usage": {
+   "input_tokens": 1407,
+   "output_tokens": 108,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns DELFI Diagnostics stock, which is subject to certain restrictions under university policy."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns DELFI Diagnostics stock, which is subject to certain restrictions under university policy.\"}]}"
+ },
+ "real-39433569-fijneman-remond": {
+  "usage": {
+   "input_tokens": 1412,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39433569-leal-alessandro": {
+  "usage": {
+   "input_tokens": 1385,
+   "output_tokens": 96,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"A.L., S.C., N.C.D., and R.B.S. are founders of DELFI Diagnostics, and R.B.S. is a consultant for this organization.\"}]}"
+ },
+ "real-39433569-velculescu-middle-initial": {
+  "usage": {
+   "input_tokens": 1420,
+   "output_tokens": 108,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "DELFI Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns DELFI Diagnostics stock, which is subject to certain restrictions under university policy."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"DELFI Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of DELFI Diagnostics, serves on the Board of Directors, and owns DELFI Diagnostics stock, which is subject to certain restrictions under university policy.\"}]}"
+ },
+ "real-34290408-zhang-jiajia": {
+  "usage": {
+   "input_tokens": 3999,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-ji-zhicheng": {
+  "usage": {
+   "input_tokens": 3999,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-vaghasia-ajay": {
+  "usage": {
+   "input_tokens": 4012,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-zhang-boyang": {
+  "usage": {
+   "input_tokens": 3998,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-hsiue-emily": {
+  "usage": {
+   "input_tokens": 4021,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-mog-brian": {
+  "usage": {
+   "input_tokens": 4011,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-hou-wenpin": {
+  "usage": {
+   "input_tokens": 3999,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-justesen-sune": {
+  "usage": {
+   "input_tokens": 4001,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-blosser-richard": {
+  "usage": {
+   "input_tokens": 4000,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-tam-ada": {
+  "usage": {
+   "input_tokens": 3995,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-anagnostou-valsamo": {
+  "usage": {
+   "input_tokens": 4014,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-cottrell-tricia": {
+  "usage": {
+   "input_tokens": 4023,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-guo-haidan": {
+  "usage": {
+   "input_tokens": 3997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-chan-hok": {
+  "usage": {
+   "input_tokens": 4013,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-singh-dipika": {
+  "usage": {
+   "input_tokens": 3997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-thapa-sampriti": {
+  "usage": {
+   "input_tokens": 4004,
+   "output_tokens": 73,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-dykema-arbor": {
+  "usage": {
+   "input_tokens": 4018,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-burman-poromendro": {
+  "usage": {
+   "input_tokens": 3999,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-choudhury-begum": {
+  "usage": {
+   "input_tokens": 4005,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-aparicio-luis": {
+  "usage": {
+   "input_tokens": 4005,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-cheung-laurene": {
+  "usage": {
+   "input_tokens": 4018,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-lanis-mara": {
+  "usage": {
+   "input_tokens": 4000,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-belcaid-zineb": {
+  "usage": {
+   "input_tokens": 4011,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-el-asmar-margueritta": {
+  "usage": {
+   "input_tokens": 4036,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-illei-peter": {
+  "usage": {
+   "input_tokens": 4011,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-wang-rulin": {
+  "usage": {
+   "input_tokens": 3997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-meyers-jennifer": {
+  "usage": {
+   "input_tokens": 4004,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-gupta-anuj": {
+  "usage": {
+   "input_tokens": 4002,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-skaist-alyza": {
+  "usage": {
+   "input_tokens": 4002,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-wheelan-sarah": {
+  "usage": {
+   "input_tokens": 4007,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-naidoo-jarushka": {
+  "usage": {
+   "input_tokens": 4009,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-marrone-kristen": {
+  "usage": {
+   "input_tokens": 4018,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-ha-jinny": {
+  "usage": {
+   "input_tokens": 3997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-bush-errol": {
+  "usage": {
+   "input_tokens": 4011,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-park-bernard": {
+  "usage": {
+   "input_tokens": 4008,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-jones-david": {
+  "usage": {
+   "input_tokens": 4009,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-reuss-joshua": {
+  "usage": {
+   "input_tokens": 4017,
+   "output_tokens": 69,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-velculescu-victor": {
+  "usage": {
+   "input_tokens": 4021,
+   "output_tokens": 282,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Delfi Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the Board of Directors and as a consultant for both organizations, and owns Delfi Diagnostics and Personal Genome Diagnostics stock, which are subject to certain restrictions under university policy."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the Board of Directors and as a consultant for both organizations, and owns Delfi Diagnostics and Personal Genome Diagnostics stock, which are subject to certain restrictions under university policy."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Delfi Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the Board of Directors and as a consultant for both organizations, and owns Delfi Diagnostics and Personal Genome Diagnostics stock, which are subject to certain restrictions under university policy.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"V.E.V. is a founder of Delfi Diagnostics and Personal Genome Diagnostics, serves on the Board of Directors and as a consultant for both organizations, and owns Delfi Diagnostics and Personal Genome Diagnostics stock, which are subject to certain restrictions under university policy.\"}]}"
+ },
+ "real-34290408-kinzler-kenneth": {
+  "usage": {
+   "input_tokens": 4025,
+   "output_tokens": 467,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and K.W.K. are founders of Thrive Earlier Detection."
+    },
+    {
+     "company": "manaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and K.W.K. are founders of Thrive Earlier Detection.\"},{\"company\":\"manaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics.\"}]}"
+ },
+ "real-34290408-zhou-shibin": {
+  "usage": {
+   "input_tokens": 4005,
+   "output_tokens": 463,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "manaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"manaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics.\"}]}"
+ },
+ "real-34290408-vogelstein-bert": {
+  "usage": {
+   "input_tokens": 4010,
+   "output_tokens": 255,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and K.W.K. are founders of Thrive Earlier Detection."
+    },
+    {
+     "company": "manaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC."
+    },
+    {
+     "company": "Personal Genome Diagnostics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and K.W.K. are founders of Thrive Earlier Detection.\"},{\"company\":\"manaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and S.Z. are founders of, hold or may hold equity in, and serve or may serve as consultants to manaT Bio, and hold or may hold equity in manaT Holdings, LLC.\"},{\"company\":\"Personal Genome Diagnostics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and S.Z. are founders of, hold equity in, and serve as consultants to Personal Genome Diagnostics.\"}]}"
+ },
+ "real-34290408-taube-janis": {
+  "usage": {
+   "input_tokens": 4011,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-hellmann-matthew": {
+  "usage": {
+   "input_tokens": 4023,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-brahmer-julie": {
+  "usage": {
+   "input_tokens": 4021,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-merghoub-taha": {
+  "usage": {
+   "input_tokens": 4005,
+   "output_tokens": 287,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "IMVAQ Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "T.M. is a cofounder and holds equity in IMVAQ Therapeutics, is a consultant for Immunos Therapeutics, ImmunoGenesis, and Pfizer, receives research funding from Bristol-Myers Squibb, Surface Oncology, Kyn Therapeutics, Infinity Pharmaceuticals, Inc., Peregrine Pharmaceuticals, Inc., Adaptive Biotechnologies, Leap Therapeutics, Inc., and Aprea, and holds patents on applications related to work on oncolytic viral therapy, alpha virus-based vaccines, neoantigen modeling, CD40, GITR, OX40, PD-1, and CTLA-4."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"IMVAQ Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"T.M. is a cofounder and holds equity in IMVAQ Therapeutics, is a consultant for Immunos Therapeutics, ImmunoGenesis, and Pfizer, receives research funding from Bristol-Myers Squibb, Surface Oncology, Kyn Therapeutics, Infinity Pharmaceuticals, Inc., Peregrine Pharmaceuticals, Inc., Adaptive Biotechnologies, Leap Therapeutics, Inc., and Aprea, and holds patents on applications related to work on oncolytic viral therapy, alpha virus-based vaccines, neoantigen modeling, CD40, GITR, OX40, PD-1, and CTLA-4.\"}]}"
+ },
+ "real-34290408-forde-patrick": {
+  "usage": {
+   "input_tokens": 4013,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-yegnasubramanian-srinivasan": {
+  "usage": {
+   "input_tokens": 4033,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-ji-hongkai": {
+  "usage": {
+   "input_tokens": 3995,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-34290408-pardoll-drew": {
+  "usage": {
+   "input_tokens": 4021,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-douville-christopher": {
+  "usage": {
+   "input_tokens": 1987,
+   "output_tokens": 73,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Belay Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C. Bettegowda and C.D. are co-founders of Belay Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Belay Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C. Bettegowda and C.D. are co-founders of Belay Diagnostics.\"}]}"
+ },
+ "real-37552989-curtis-samuel": {
+  "usage": {
+   "input_tokens": 1992,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-summers-mahmoud": {
+  "usage": {
+   "input_tokens": 1991,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-azad-tej": {
+  "usage": {
+   "input_tokens": 2001,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-rincon-torroella-jordina": {
+  "usage": {
+   "input_tokens": 2033,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-wang-yuxuan": {
+  "usage": {
+   "input_tokens": 1994,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-mattox-austin": {
+  "usage": {
+   "input_tokens": 1990,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-avigdor-bracha": {
+  "usage": {
+   "input_tokens": 1997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-dudley-jonathan": {
+  "usage": {
+   "input_tokens": 1994,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-materi-joshua": {
+  "usage": {
+   "input_tokens": 1987,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-raj-divyaansh": {
+  "usage": {
+   "input_tokens": 1991,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-nair-sumil": {
+  "usage": {
+   "input_tokens": 1987,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-bhanja-debarati": {
+  "usage": {
+   "input_tokens": 1997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-tuohy-kyle": {
+  "usage": {
+   "input_tokens": 1997,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-dobbyn-lisa": {
+  "usage": {
+   "input_tokens": 2002,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-popoli-maria": {
+  "usage": {
+   "input_tokens": 1990,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-ptak-janine": {
+  "usage": {
+   "input_tokens": 1990,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-nehme-nadine": {
+  "usage": {
+   "input_tokens": 1992,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-judge-kathy": {
+  "usage": {
+   "input_tokens": 1988,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-gallia-gary": {
+  "usage": {
+   "input_tokens": 2006,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-jackson-christopher": {
+  "usage": {
+   "input_tokens": 2003,
+   "output_tokens": 193,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Egret Therapeutics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C.J. is a co-founder with equity interest in Egret Therapeutics and receives research support from Biohaven."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Egret Therapeutics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C.J. is a co-founder with equity interest in Egret Therapeutics and receives research support from Biohaven.\"}]}"
+ },
+ "real-37552989-jackson-eric": {
+  "usage": {
+   "input_tokens": 2002,
+   "output_tokens": 64,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-laterra-john": {
+  "usage": {
+   "input_tokens": 1986,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-lim-michael": {
+  "usage": {
+   "input_tokens": 1985,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-mukherjee-debraj": {
+  "usage": {
+   "input_tokens": 2002,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-weingart-jon": {
+  "usage": {
+   "input_tokens": 1990,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-naidoo-jarushka": {
+  "usage": {
+   "input_tokens": 1999,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-koschmann-carl": {
+  "usage": {
+   "input_tokens": 1995,
+   "output_tokens": 78,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-schreck-karisa": {
+  "usage": {
+   "input_tokens": 2008,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-pardo-carlos": {
+  "usage": {
+   "input_tokens": 2008,
+   "output_tokens": 77,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\": []}"
+ },
+ "real-37552989-holdhoff-matthias": {
+  "usage": {
+   "input_tokens": 2002,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-37552989-kinzler-kenneth": {
+  "usage": {
+   "input_tokens": 2015,
+   "output_tokens": 155,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company."
+    },
+    {
+     "company": "ManaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company.\"},{\"company\":\"ManaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio.\"}]}"
+ },
+ "real-37552989-papadopoulos-nickolas": {
+  "usage": {
+   "input_tokens": 2009,
+   "output_tokens": 155,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company."
+    },
+    {
+     "company": "ManaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company.\"},{\"company\":\"ManaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio.\"}]}"
+ },
+ "real-37552989-vogelstein-bert": {
+  "usage": {
+   "input_tokens": 2000,
+   "output_tokens": 155,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company."
+    },
+    {
+     "company": "ManaT Bio",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Declaration of interests B.V., K.W.K., and N.P. are founders of Thrive Earlier Detection, an Exact Sciences Company.\"},{\"company\":\"ManaT Bio\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K., and N.P. are founders of and own equity in ManaT Bio.\"}]}"
+ },
+ "real-41115959-tie-jeanne": {
+  "usage": {
+   "input_tokens": 1891,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-wang-yuxuan": {
+  "usage": {
+   "input_tokens": 1896,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-cohen-joshua": {
+  "usage": {
+   "input_tokens": 1910,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-wong-rachel": {
+  "usage": {
+   "input_tokens": 1889,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-price-timothy": {
+  "usage": {
+   "input_tokens": 1884,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-tebbutt-niall": {
+  "usage": {
+   "input_tokens": 1918,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-gebski-val": {
+  "usage": {
+   "input_tokens": 1890,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-espinoza-david": {
+  "usage": {
+   "input_tokens": 1893,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-burge-matthew": {
+  "usage": {
+   "input_tokens": 1889,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-harris-sam": {
+  "usage": {
+   "input_tokens": 1887,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-lee-belinda": {
+  "usage": {
+   "input_tokens": 1885,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-lee-margaret": {
+  "usage": {
+   "input_tokens": 1900,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-breadner-daniel": {
+  "usage": {
+   "input_tokens": 1894,
+   "output_tokens": 76,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-debrincat-marlyse": {
+  "usage": {
+   "input_tokens": 1901,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-foroughi-siavash": {
+  "usage": {
+   "input_tokens": 1899,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-chantrill-lorraine": {
+  "usage": {
+   "input_tokens": 1901,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-lim-stephanie": {
+  "usage": {
+   "input_tokens": 1907,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-gill-sharlene": {
+  "usage": {
+   "input_tokens": 1891,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-ocallaghan-chris": {
+  "usage": {
+   "input_tokens": 1922,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-ptak-janine": {
+  "usage": {
+   "input_tokens": 1892,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-silliman-natalie": {
+  "usage": {
+   "input_tokens": 1894,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-dobbyn-lisa": {
+  "usage": {
+   "input_tokens": 1904,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-popoli-maria": {
+  "usage": {
+   "input_tokens": 1892,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-41115959-bettegowda-chetan": {
+  "usage": {
+   "input_tokens": 1904,
+   "output_tokens": 142,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "OrisDx",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C.B. is also a co-founder of OrisDx and a co-founder of Belay Diagnostics."
+    },
+    {
+     "company": "Belay Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "C.B. is also a co-founder of OrisDx and a co-founder of Belay Diagnostics."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"OrisDx\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C.B. is also a co-founder of OrisDx and a co-founder of Belay Diagnostics.\"},{\"company\":\"Belay Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"C.B. is also a co-founder of OrisDx and a co-founder of Belay Diagnostics.\"}]}"
+ },
+ "real-41115959-papadopoulos-nicholas": {
+  "usage": {
+   "input_tokens": 1911,
+   "output_tokens": 192,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Clasp Therapeutics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    },
+    {
+     "company": "Haystack Oncology",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Clasp Therapeutics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"},{\"company\":\"Haystack Oncology\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"}]}"
+ },
+ "real-41115959-kinzler-kenneth": {
+  "usage": {
+   "input_tokens": 1917,
+   "output_tokens": 245,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Exact Sciences",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and K.W.K. are founders of Exact Sciences."
+    },
+    {
+     "company": "Clasp Therapeutics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    },
+    {
+     "company": "Haystack Oncology",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Exact Sciences\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and K.W.K. are founders of Exact Sciences.\"},{\"company\":\"Clasp Therapeutics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"},{\"company\":\"Haystack Oncology\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"}]}"
+ },
+ "real-41115959-vogelstein-bert": {
+  "usage": {
+   "input_tokens": 1902,
+   "output_tokens": 245,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Exact Sciences",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V. and K.W.K. are founders of Exact Sciences."
+    },
+    {
+     "company": "Clasp Therapeutics",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    },
+    {
+     "company": "Haystack Oncology",
+     "role": "founder",
+     "former": false,
+     "sentence": "B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Exact Sciences\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V. and K.W.K. are founders of Exact Sciences.\"},{\"company\":\"Clasp Therapeutics\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"},{\"company\":\"Haystack Oncology\",\"role\":\"founder\",\"former\":false,\"sentence\":\"B.V., K.W.K. and N.P. are founders of, and hold equity in, Clasp Therapeutics and Haystack Oncology, a Quest Diagnostics company.\"}]}"
+ },
+ "real-41115959-gibbs-peter": {
+  "usage": {
+   "input_tokens": 1897,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-cook-ashley": {
+  "usage": {
+   "input_tokens": 1411,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-sur-surojit": {
+  "usage": {
+   "input_tokens": 1395,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-dobbyn-laura": {
+  "usage": {
+   "input_tokens": 1408,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-watson-evangeline": {
+  "usage": {
+   "input_tokens": 1397,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-cohen-joshua": {
+  "usage": {
+   "input_tokens": 1416,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-ptak-blair": {
+  "usage": {
+   "input_tokens": 1398,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-lee-bum": {
+  "usage": {
+   "input_tokens": 1409,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-paul-suman": {
+  "usage": {
+   "input_tokens": 1393,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-hsiue-emily": {
+  "usage": {
+   "input_tokens": 1403,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-popoli-maria": {
+  "usage": {
+   "input_tokens": 1398,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-vogelstein-bert": {
+  "usage": {
+   "input_tokens": 1408,
+   "output_tokens": 501,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Provisional patent applications on the work described in this paper have been filed by Johns Hopkins University under accession 63/451,738, BV Founder of Thrive Earlier Detection, an Exact Sciences Company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Provisional patent applications on the work described in this paper have been filed by Johns Hopkins University under accession 63/451,738, BV Founder of Thrive Earlier Detection, an Exact Sciences Company.\"}]}"
+ },
+ "real-39960487-papadopoulos-nickolas": {
+  "usage": {
+   "input_tokens": 1417,
+   "output_tokens": 426,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "NP Founder of Thrive Earlier Detection, an Exact Sciences Company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"NP Founder of Thrive Earlier Detection, an Exact Sciences Company.\"}]}"
+ },
+ "real-39960487-bettegowda-chetan": {
+  "usage": {
+   "input_tokens": 1410,
+   "output_tokens": 152,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "OrisDx",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences."
+    },
+    {
+     "company": "Belay Diagnostics",
+     "role": "co_founder",
+     "former": false,
+     "sentence": "Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"OrisDx\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences.\"},{\"company\":\"Belay Diagnostics\",\"role\":\"co_founder\",\"former\":false,\"sentence\":\"Co-founder of OrisDx and Belay Diagnostics, SZ Hold equity in Exact Sciences.\"}]}"
+ },
+ "real-39960487-gabrielson-kathy": {
+  "usage": {
+   "input_tokens": 1410,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-zhou-shibin": {
+  "usage": {
+   "input_tokens": 1403,
+   "output_tokens": 81,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ },
+ "real-39960487-kinzler-kenneth": {
+  "usage": {
+   "input_tokens": 1423,
+   "output_tokens": 458,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": [
+    {
+     "company": "Thrive Earlier Detection",
+     "role": "founder",
+     "former": false,
+     "sentence": "Has a research agreement with BioMed Valley Discoveries, Inc, KK Founders of Thrive Earlier Detection, an Exact Sciences Company."
+    }
+   ]
+  },
+  "text": "{\"claims\":[{\"company\":\"Thrive Earlier Detection\",\"role\":\"founder\",\"former\":false,\"sentence\":\"Has a research agreement with BioMed Valley Discoveries, Inc, KK Founders of Thrive Earlier Detection, an Exact Sciences Company.\"}]}"
+ },
+ "real-39960487-wyhs-nicolas": {
+  "usage": {
+   "input_tokens": 1407,
+   "output_tokens": 10,
+   "cache_read_input_tokens": 1686,
+   "cache_creation_input_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "stop_category": null,
+  "model": "claude-opus-5-5",
+  "payload": {
+   "claims": []
+  },
+  "text": "{\"claims\":[]}"
+ }
+}

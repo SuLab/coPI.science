@@ -56,6 +56,11 @@ RECORD_URL = "https://doi.org/10.1000/parity-url"
 # carries: a hyphenated sentinel splits into words ("reason", "parity") that the
 # page supplies elsewhere, and would let a missing `#scores` line pass unseen.
 DIM_REASONS = ("paritydimreasonfirst", "paritydimreasonsecond")
+# The hub's reason for one gate (0058) and one labelled `Risk:` key-point extra
+# (scout_hub 1.10.0): both reviewer-visible, so both records may quote them, and each
+# is a token the page supplies nowhere else.
+GATE_REASON = "paritygatereasonsentinel"
+KP_RISK = "Risk: PARITYKPRISK"
 # A stamp no revision answers to: the fixture rubric is 9.9.9/feedfacecafe and the
 # registry (prompts/rubric/revisions.toml) holds only real sha256 prefixes, and
 # `resolve_revision` treats the hash as authoritative — an unmatched hash is
@@ -220,7 +225,8 @@ async def _seed(db_session, rubric, *, prose_format, stamp=None):
         company_or_project="PARITY-PROJECT-LABEL",
         headline="PARITY-HEADLINE an isogenic panel",
         elevator_pitch=f"PARITY-PITCH-FIELD first sentence; it cites {RECORD_URL}.",
-        key_points={"significance": ["PARITY-KP-SIGNIFICANCE"], "key_questions": ["PARITY-KP-QUESTIONS"]},
+        key_points={"significance": ["PARITY-KP-SIGNIFICANCE"],
+                    "key_questions": ["PARITY-KP-QUESTIONS", KP_RISK]},
         score_rationale="PARITY-SCORE-RATIONALE",
         strengths=["PARITY-HUB-STRENGTH"],
         risks=["PARITY-HUB-RISK"],
@@ -230,6 +236,7 @@ async def _seed(db_session, rubric, *, prose_format, stamp=None):
         recommendation="conditional", confidence="Moderate", weighted_score=3.2, band="conditional",
         gating={"life_sciences_domain": "met", "credible_science": "not_met",
                 "translational_potential": "unconfirmed"},
+        gating_rationales={"credible_science": GATE_REASON},
         scores={dims[0]: 4, dims[1]: 2},
         dimension_rationales={dims[0]: DIM_REASONS[0], dims[1]: DIM_REASONS[1]},
         red_flags=["PARITY-RED-FLAG"],
@@ -386,6 +393,8 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     assert RECORD_URL in record.url_tokens
     for reason in DIM_REASONS:
         assert reason in record_text, reason
+    assert f"> {GATE_REASON}" in record_text
+    assert f"> {KP_RISK}" in record_text
 
 
 @pytest.mark.parametrize("prose_format", ["markdown", None])

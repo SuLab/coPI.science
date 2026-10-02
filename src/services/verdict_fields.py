@@ -71,6 +71,7 @@ VERDICT_FIELDS: tuple[VerdictField, ...] = (
     VerdictField("dimension_rationales", "dimension_rationales", "dimension_rationales", None, False, "scores", 200, "engine"),
     VerdictField("scores", "scores", "scores", None, False, "scores", None, "engine"),
     VerdictField("gating", "gating", "gating", None, False, "gating", None, "engine"),
+    VerdictField("gating_rationales", "gating_rationales", "gating_rationales", None, False, "gating", 200, "engine"),
     VerdictField("red_flags", "red_flags", "red_flags", None, False, "red-flags", None, "engine"),
     VerdictField("derisking_milestones", "derisking_milestones", "suggested_derisking_milestones", None, False, None, None, "engine"),
     VerdictField("weighted_score", "weighted_score", None, None, False, "verdict", None, "engine"),

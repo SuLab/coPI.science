@@ -971,10 +971,13 @@ def test_static_link_resolution_coverage_is_reported():
     # the manager run pages, so it cannot name either path. The error page (M-01)
     # added its back link, `{{ back_href }}`: the referring page, or the role's home.
     # The conversations pager (D-26) added two more same-page `?page=…` links.
+    # The manager PI page's Companies card (hub 1.10.0, spec 2026-10-02 §7.2) added
+    # five external links: a confirmed row's source and funding source, and a
+    # suggestion's PubMed record, Wikidata item and Form D filing.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 48, (
+    assert unresolvable <= 53, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 48) — the matcher probably regressed, or a new "
+        "checkable local path (was 53) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

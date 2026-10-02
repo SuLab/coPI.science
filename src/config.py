@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     # Sent as `email=` on every E-utilities request. NCBI requires it (with `tool=`)
     # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
     ncbi_contact_email: str = ""
+    # SEC EDGAR, for company discovery (spec §7.6). Sent verbatim as the User-Agent of
+    # every SEC request; SEC's fair-access rules require "<Company Name> <admin email>".
+    # Its contact address is also the contact in the Wikidata User-Agent. Empty = no SEC
+    # and no Wikidata lookups: suggestions carry "funding lookup unavailable". The
+    # operator supplies the address; nothing defaults to a personal one. Read by the
+    # worker: a change needs `$DC up -d --force-recreate worker`.
+    sec_user_agent: str = ""
 
     # USPTO prior-art search — hub-only tool. Name contains "key" so it is
     # auto-redacted in repr(settings). US filings only.
@@ -318,6 +325,14 @@ class Settings(BaseSettings):
     # priced in src/services/llm_pricing.py: an unpriced model would make the daily
     # dollar ceilings blind, so the ask route refuses it (503 model_unpriced).
     llm_assessment_chat_model: str = "claude-opus-5-5"
+
+    # Company discovery's COI founder extraction (spec
+    # docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md, O14): one
+    # call per gated competing-interest statement, through `llm.abeta_create`
+    # with the server-side refusal fallback. Must be priced in
+    # src/services/llm_pricing.py (claude-opus-5-5 is). Opus 5.5 cannot disable
+    # thinking, so the caller passes `thinking` explicitly.
+    llm_coi_model: str = "claude-opus-5-5"
     # Kill switch. `.env` is read when a container is CREATED, so changing it needs
     # `$DC up -d --force-recreate blackbird-app`, not a restart.
     assessment_chat_enabled: bool = True

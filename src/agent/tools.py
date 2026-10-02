@@ -10,6 +10,7 @@ from src.agent.dois import extract_dois as _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.prompt_snapshot import active as active_snapshot
 from src.agent.prompt_snapshot import role_spec
+from src.agent.role_capabilities import hub_role_names
 from src.agent.specialists import (
     DEFAULTED_TALLY_LABEL,
     SPECIALIST_DOMAINS,
@@ -137,7 +138,8 @@ async def execute_tool(
 
     Enforces per-thread rate limits for retrieve_abstract (other lab) and
     retrieve_full_text. Refuses (without raising) any tool not allowed for
-    ``role``.
+    ``role``. ``role`` also decides whether ``retrieve_profile`` appends the
+    PI's staff company record (hub only; see ``_execute_retrieve_profile``).
 
     ``on_consult`` is forwarded to ``consult_specialist`` and is called with
     the domain AND the parsed verdict signal, and fires only on a fully
@@ -166,7 +168,7 @@ async def execute_tool(
     try:
         if tool_name == "retrieve_profile":
             return await _execute_retrieve_profile(
-                _require_arg(tool_input, "agent_id", tool_name)
+                _require_arg(tool_input, "agent_id", tool_name), role
             )
 
         elif tool_name == "retrieve_abstract":
@@ -253,8 +255,53 @@ async def execute_tool(
         return f"Error executing {tool_name}: {exc}"
 
 
-async def _execute_retrieve_profile(agent_id: str) -> str:
-    """Read a public profile from disk.
+def _companies_dir() -> Path:
+    """Where ``export_companies_file`` writes each PI's staff-confirmed company
+    list (``COMPANIES_DIR`` in src/services/pi_companies.py). Derived from
+    ``PROFILES_DIR`` rather than imported, so a test or fixture that repoints
+    ``PROFILES_DIR`` (the prompt-freeze suite does) repoints this too, and this
+    module never imports the service that writes the table."""
+    return PROFILES_DIR / "private" / "companies"
+
+
+#: Applied to the staff company record before it is fenced: `delimit` strips only
+#: whole tags, so a name such as "</staff_co</staff_company_record>mpany_record>"
+#: would reassemble a closing tag after the strip. With no "<" or ">" left the
+#: record can neither close nor forge a fence.
+_RECORD_ESCAPES = str.maketrans({"<": "&lt;", ">": "&gt;"})
+
+
+def _staff_company_record(agent_id: str) -> str | None:
+    """The PI's staff company record, or None when there is none, it is blank,
+    or it cannot be read. ``agent_id`` has already passed ``_SAFE_AGENT_ID``;
+    the containment check is repeated here for the same reason as the
+    profile's."""
+    base = _companies_dir().resolve()
+    path = (base / f"{agent_id}.md").resolve()
+    if not path.is_relative_to(base):
+        logger.warning(
+            "[tools] retrieve_profile refused an out-of-tree company record path for %r",
+            agent_id,
+        )
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        # A record that exists but cannot be read must not cost the hub the
+        # profile it asked for: it gets the profile alone.
+        logger.warning(
+            "[tools] retrieve_profile could not read the company record for %r: %s",
+            agent_id, exc,
+        )
+        return None
+    return text if text.strip() else None
+
+
+async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
+    """Read a public profile from disk; for the hub, append the PI's staff
+    company record when there is one.
 
     ``agent_id`` comes straight from the model, so it is validated before it
     reaches the filesystem. Unvalidated, it escaped ``profiles/public/``
@@ -264,6 +311,15 @@ async def _execute_retrieve_profile(agent_id: str) -> str:
     point is that spokes cannot read each other. Real agent ids are lowercase
     identifiers (``wu``, ``pwu``, ``hamacherbrady``), so anything with a
     separator or a dot is not a lookup, it is an escape attempt.
+
+    ``role`` is the CALLER's role. Only ``scout_hub`` gets the appendix (O5 of
+    docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md): when
+    ``profiles/private/companies/<agent_id>.md`` exists and is not blank, a
+    blank line and that file fenced as ``<staff_company_record>`` follow the
+    result, with every "<" and ">" in the file escaped as ``&lt;``/``&gt;``
+    first (``_RECORD_ESCAPES``). A lab bot, and the hub asking about a PI with no record, get the
+    same bytes as before the record existed. The file is the export of the
+    PI's confirmed company rows; this function never reads the table.
     """
     if not isinstance(agent_id, str) or not _SAFE_AGENT_ID.fullmatch(agent_id):
         logger.warning(
@@ -283,9 +339,19 @@ async def _execute_retrieve_profile(agent_id: str) -> str:
 
     try:
         # Profiles are user-editable text — fence as untrusted data (SEC-14).
-        return delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
+        result = delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
     except FileNotFoundError:
-        return f"No public profile found for agent '{agent_id}'."
+        result = f"No public profile found for agent '{agent_id}'."
+    # The hub role comes from the capability registry, never a role literal (§8.5).
+    if role not in hub_role_names():
+        return result
+    record = _staff_company_record(agent_id)
+    if record is None:
+        return result
+    # Staff-confirmed company data, fenced as data like the profile (SEC-14),
+    # with angle brackets escaped so a company name cannot rebuild a tag.
+    fenced = delimit(record.translate(_RECORD_ESCAPES), "staff_company_record")
+    return f"{result}\n\n{fenced}"
 
 
 def _format_abstract(result: dict) -> str:

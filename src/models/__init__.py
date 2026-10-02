@@ -37,6 +37,7 @@ from src.models.email_notification import (
 from src.models.enrichment import PiGrant, PiIndustryEvidence, PiIndustryScore
 from src.models.job import Job
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
+from src.models.pi_company import PiCompany
 from src.models.profile import ResearcherProfile
 from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
@@ -120,6 +121,7 @@ __all__ = [
     "PiGrant",
     "PiIndustryEvidence",
     "PiIndustryScore",
+    "PiCompany",
     "AssessmentChatTurn",
     "AssessmentChatUsage",
     "RubricDocument",

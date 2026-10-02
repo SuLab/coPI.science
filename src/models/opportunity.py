@@ -130,6 +130,16 @@ class OpportunityAssessment(Base):
     dimension_rationales: Mapped[dict | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    # Sidecar item 1's companion (scout_hub 1.10.0, migration 0058): the hub's own
+    # one-sentence reason for each gate's state, keyed like `gating` (lower-cased by
+    # `normalize_gating_rationales`, src/services/assessment_detail.py). NULL means the
+    # row predates 0058 or the hub emitted a malformed value; `raw_verdict` keeps what
+    # was emitted either way. Reviewer-visible like `dimension_rationales` (spec
+    # 2026-10-02 O2): the prompt holds it to the public level, and the Evidence summary
+    # falls back to the rubric definition where it is NULL.
+    gating_rationales: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     # Sidecar items 11/12 (scout_hub 1.5.0, migration 0049): the hub's own
     # strengths and risks bullets for this verdict. NULL means either the row
     # predates 0049 or the hub emitted a malformed value (`normalize_bullets`

@@ -1,0 +1,50 @@
+{
+  "head" : {
+    "vars" : [ "pi", "company", "companyLabel" ]
+  },
+  "results" : {
+    "bindings" : [ {
+      "pi" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q311003"
+      },
+      "company" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q643341"
+      },
+      "companyLabel" : {
+        "xml:lang" : "en",
+        "type" : "literal",
+        "value" : "Celera Corporation"
+      }
+    }, {
+      "pi" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q311003"
+      },
+      "company" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q1439786"
+      },
+      "companyLabel" : {
+        "xml:lang" : "en",
+        "type" : "literal",
+        "value" : "J. Craig Venter Institute"
+      }
+    }, {
+      "pi" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q311003"
+      },
+      "company" : {
+        "type" : "uri",
+        "value" : "http://www.wikidata.org/entity/Q4050516"
+      },
+      "companyLabel" : {
+        "xml:lang" : "en",
+        "type" : "literal",
+        "value" : "Synthetic Genomics"
+      }
+    } ]
+  }
+}

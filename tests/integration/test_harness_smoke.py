@@ -81,7 +81,9 @@ async def test_container_is_migrated(engine):
         #      interview; prechecks refuse a live run and duplicate groups)
         # 0056 jobs.priority, the one-active-job index, four uniques, two indexes, rubric_documents
         # 0057 users.email_verified_at / users.session_epoch (web UI remediation §6.6-§6.7)
-        assert v == "0057"
+        # 0058 opportunity_assessments.gating_rationales, pi_companies, job type
+        #      company_discovery in a rebuilt one-active-job index (hub 1.10.0)
+        assert v == "0058"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -99,7 +99,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
-- `0056` (head is `0057` since 2026-10-02): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
+- `0056` (head is `0058` since hub 1.10.0): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
   as a dry run first, and apply the publications dedupe only with the owner's go-ahead
   (the "Deploy order for `0056`" box in `docs/operations/migration-deploy-notes.md`).
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
@@ -178,6 +178,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   events and assignments.
 - A rubric regime change stamps and keeps; it never purges. On every `[meta].version`
   bump of `prompts/rubric/blackbird-rubric.toml`, append the OUTGOING document's entry to
-  `prompts/rubric/revisions.toml` in the same commit.
+  `prompts/rubric/revisions.toml` in the same commit, with its `[revision.gating.<key>]`
+  tables (title, description) copied from the outgoing `[gating.*]` section, so archived
+  rows keep their gate definitions.
 - New migrations follow the established shape: additive, nullable, migrate before the
   new code serves. NULL means "never asked" and is not backfilled.

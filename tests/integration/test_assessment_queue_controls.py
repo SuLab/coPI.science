@@ -836,7 +836,9 @@ async def test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face(
     html = (await client.get(
         f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
-    assert "life sciences domain" in html
+    # A 3.4.0 row: its registry entry carries gate tables, so the gate shows its
+    # rubric title rather than the raw key (hub 1.10.0, spec §5.2-§5.3).
+    assert "Life-sciences / biomedical" in html
     assert "2 flags" in html
     assert "3.4.0" in html
     assert "panel not recorded" in html   # panel_owed IS NULL -> 'unrecorded'
@@ -1092,8 +1094,10 @@ async def test_the_card_scores_disclosure_is_closed_by_default_and_holds_the_gat
 
     scores = _details_slice(html, "assessment-card-scores")
     assert "Rubric scores" in html
-    assert "life sciences domain" in scores
-    assert "credible science" in scores
+    # Titles from the row's own 3.4.0 registry entry (hub 1.10.0, spec §5.2-§5.3).
+    assert "Life-sciences / biomedical" in scores
+    assert "Credible science" in scores
+    assert "Rubric definition: therapeutic, diagnostic, or platform (Blackbird&#39;s domain)." in scores
     assert "gating-row gating-met" in scores
     assert "gating-row gating-unconfirmed" in scores
     assert "&#9989;" in scores and "&#10067;" in scores

@@ -52,15 +52,19 @@ from src.services.slack_web import revoke_token_async
 logger = logging.getLogger(__name__)
 
 # Kept in sync by comment-reference, not import: profile_export.PROFILES_DIR
-# (src/services/profile_export.py) writes _PUBLIC_DIR/{agent_id}.md, and the
+# (src/services/profile_export.py) writes _PUBLIC_DIR/{agent_id}.md, the
 # engine's memory writer (src/agent/agent.py, PROFILES_DIR / "memory") owns
-# _MEMORY_DIR. Module-level so tests can monkeypatch them to a tmp_path.
+# _MEMORY_DIR, and pi_companies.COMPANIES_DIR (src/services/pi_companies.py)
+# writes _COMPANIES_DIR/{agent_id}.md, the hub's staff company record
+# (tests/unit/test_pi_companies.py pins that pair equal). Module-level so tests
+# can monkeypatch them to a tmp_path.
 _PUBLIC_DIR = Path("profiles/public")
 _MEMORY_DIR = Path("profiles/memory")
+_COMPANIES_DIR = Path("profiles/private/companies")
 
 # agent_id slugs are minted by our own code (lowercase last names, optional
 # initial prefix / numeric suffix), but this function deletes files, so it
-# refuses anything that could escape the two directories above.
+# refuses anything that could escape the directories above.
 _SAFE_AGENT_ID = re.compile(r"[a-z0-9_-]{1,50}")
 
 
@@ -95,6 +99,7 @@ def _agent_paths(agent_id: str) -> list[Path]:
         raise ValueError(f"refusing file cleanup for unsafe agent_id {agent_id!r}")
     paths = [
         _PUBLIC_DIR / f"{agent_id}.md",
+        _COMPANIES_DIR / f"{agent_id}.md",  # the hub's staff company record (pi_companies)
         _MEMORY_DIR / f"{agent_id}.md",  # legacy pre-partition memory file
         _MEMORY_DIR / agent_id,  # partitioned memory directory
     ]

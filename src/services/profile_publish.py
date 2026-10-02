@@ -8,7 +8,11 @@ export's stable sort and top-20 cut then see the same sequence as before.
 No revision is written when the export returns None (no agent, or the write
 failed). Before this helper the public-profile save wrote an empty-content
 revision on a failed write; that failure path now writes none. Flushes, never
-commits: the caller owns the transaction."""
+commits: the caller owns the transaction.
+
+A publish with an agent also rewrites the PI's staff companies file
+(`export_companies_file`, spec 2026-10-02 §7.2), so company rows confirmed before
+the agent existed reach the hub at its first publish. That step only reads."""
 from __future__ import annotations
 
 import uuid
@@ -17,6 +21,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry, ResearcherProfile, User
+from src.services.pi_companies import export_companies_file
 from src.services.profile_export import export_profile_to_markdown
 from src.services.profile_versioning import create_revision
 from src.services.tenure_scope import TenureScopedPublications
@@ -29,7 +34,9 @@ async def export_and_record(
 ) -> Path | None:
     """Export ``profile`` to ``profiles/public/<agent_id>.md``; when that returns a
     path AND ``agent`` and ``mechanism`` are given, record a ``public`` revision
-    of the exported text. ``mechanism=None`` is export only (the veto re-export)."""
+    of the exported text. ``mechanism=None`` is export only (the veto re-export).
+    With ``agent`` given, the companies file is rewritten too, whatever the
+    profile export returned."""
     path = export_profile_to_markdown(
         user, profile, agent.agent_id if agent else None, publications=publications
     )
@@ -40,4 +47,6 @@ async def export_and_record(
             changed_by_user_id=changed_by_user_id, mechanism=mechanism,
             change_summary=change_summary,
         )
+    if agent is not None:
+        await export_companies_file(db, user.id)
     return path

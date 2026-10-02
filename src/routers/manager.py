@@ -15,7 +15,7 @@ regardless of what the router-level dependency alone would allow through.
 Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
 ``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
 takes no per-handler dependency at all (its only job is a redirect to a
-route that is itself reviewer-reachable). Every other handler — the eight
+route that is itself reviewer-reachable). Every other handler — the fourteen
 POSTs, ``manager_slack_bots``, ``manager_discussions``, ``manager_activity``/
 ``manager_activity_detail`` and the two prompt-suggestion pages — stays on
 ``_STAFF``, so a reviewer reaches none of them. This docstring is not what
@@ -57,12 +57,16 @@ from src.dependencies import (
 from src.models import (
     USER_ROLE_PI,
     AgentRegistry,
+    Job,
+    PiCompany,
     PiGrant,
     PiIndustryEvidence,
     PromptChangeSuggestion,
     ResearcherProfile,
     User,
 )
+from src.models.job import INTERACTIVE_PRIORITY
+from src.models.pi_company import PI_COMPANY_ROLES
 from src.services import directory
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activation_blockers, ensure_activation_allowed
@@ -71,6 +75,11 @@ from src.services.assessment_detail import build_assessment_detail
 from src.services.assessment_reviews import (
     MAX_ANALYSES_PER_PRESS,
     count_pending_analysis_candidates,
+)
+from src.services.company_discovery import (
+    DISCOVERY_DONE_STEP,
+    enqueue_company_discovery,
+    latest_discovery_job,
 )
 from src.services.directory import (
     MAX_PAGE,
@@ -85,6 +94,21 @@ from src.services.directory import (
 from src.services.email_verification import mark_email_verified
 from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
+from src.services.pi_companies import (
+    PI_COMPANY_ROLE_LABELS,
+    CompanyNotFoundError,
+    CompanyValidationError,
+    add_company,
+    confirm_company,
+    delete_company,
+    evidence_for_display,
+    format_funding,
+    http_url,
+    list_companies,
+    parse_funding_as_of,
+    parse_funding_usd,
+    reject_company,
+)
 from src.services.pi_onboarding import (
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
@@ -126,7 +150,8 @@ _SUGGESTION_STATUSES = frozenset({"open", "dismissed", "implemented"})
 
 
 def _template_context(
-    request: Request, current_user: User, active_manager: str = "", **kwargs
+    request: Request, current_user: User, active_manager: str = "",
+    admin_surface: str | None = None, **kwargs
 ) -> dict:
     """Build the template context, surfacing the impersonation banner.
 
@@ -155,6 +180,13 @@ def _template_context(
     is unchanged. Impersonation itself hides NOTHING (operator decision
     2026-09-11): an admin impersonating a manager sees and may use every
     control that manager has, attributed to the impersonated account.
+
+    ``admin_surface`` (spec 2026-10-02 §4) names the admin sub-nav entry of a
+    page the ADMIN sub-nav links; only the two prompt-suggestion pages pass it.
+    For a real admin who is not impersonating, the page then renders as an
+    admin page (``active_page = "admin"``, ``active_admin = admin_surface``),
+    so the admin sub-nav and the top-bar Admin highlight stay put. A manager,
+    and an admin impersonating a manager, keep the manager sub-nav as before.
     """
     impersonated = getattr(current_user, "_is_impersonated", False)
     real_admin = getattr(current_user, "_real_admin", None)
@@ -165,6 +197,9 @@ def _template_context(
         "active_page": "manager",
         "active_manager": active_manager,
     }
+    if admin_surface and not impersonated and current_user.is_admin:
+        ctx["active_page"] = "admin"
+        ctx["active_admin"] = admin_surface
     ctx.update(kwargs)
     return ctx
 
@@ -224,7 +259,11 @@ async def manager_pi_detail(
     current_user: User = _REVIEW,
 ):
     """One PI's record. 404s on a non-PI account so a manager cannot read an
-    admin's row by guessing or harvesting a UUID."""
+    admin's row by guessing or harvesting a UUID.
+
+    The Companies card (spec 2026-10-02 §7.2) gets the confirmed rows for every
+    viewer, and the suggested rows and the discovery state for staff only: a
+    reviewer sees the confirmed list. Rejected rows are never listed."""
     detail = await load_user_detail(db, user_id)
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
@@ -238,6 +277,16 @@ async def manager_pi_detail(
     blocked = request.query_params.get("activation_blocked")
     blockers = (
         await activation_blockers(db, agent) if blocked and agent is not None else []
+    )
+    companies = await list_companies(db, user_id)
+    confirmed = [_company_view(c) for c in companies if c.status == "confirmed"]
+    suggested = (
+        [_company_view(c) for c in companies if c.status == "suggested"]
+        if current_user.is_staff else []
+    )
+    discovery = (
+        _discovery_view(await latest_discovery_job(db, user_id))
+        if current_user.is_staff else None
     )
     return templates.TemplateResponse(
         request,
@@ -259,6 +308,11 @@ async def manager_pi_detail(
             activation_blocked=blocked,
             activated=request.query_params.get("activated"),
             blockers=blockers,
+            companies_confirmed=confirmed,
+            companies_suggested=suggested,
+            company_roles=PI_COMPANY_ROLES,
+            company_role_labels=PI_COMPANY_ROLE_LABELS,
+            discovery=discovery,
         ),
     )
 
@@ -655,6 +709,180 @@ async def manager_activate_agent(
     )
 
 
+def _company_view(row: PiCompany) -> dict:
+    """One Companies-card entry: the row, its funding wording, its two links (http(s) or
+    None) and, for a suggestion, its evidence as the card shows it."""
+    return {
+        "row": row,
+        "funding": format_funding(row.funding_usd, row.funding_as_of, row.funding_source_url),
+        "source_url": http_url(row.source_url),
+        "funding_source_url": http_url(row.funding_source_url),
+        "evidence": evidence_for_display(row.evidence),
+    }
+
+
+def _discovery_view(job: Job | None) -> dict | None:
+    """What the Companies card says about discovery (spec 2026-10-02 §7.2), from the PI's
+    latest company_discovery job: whether it is queued or running (the Find companies
+    button is then disabled), when it last ran (``completed_at``, else ``enqueued_at``),
+    its outcome (the detail of its last DISCOVERY_DONE_STEP progress entry) and, for a
+    failed run, the start of its ``last_error``. None when discovery was never queued."""
+    if job is None:
+        return None
+    progress = (job.payload or {}).get("progress") or []
+    outcome = next(
+        (
+            entry.get("detail")
+            for entry in reversed(progress)
+            if isinstance(entry, dict) and entry.get("step") == DISCOVERY_DONE_STEP
+        ),
+        None,
+    )
+    return {
+        "active": job.status in ("pending", "processing"),
+        "status": job.status,
+        "at": job.completed_at or job.enqueued_at,
+        "outcome": outcome or None,
+        "error": (job.last_error or "")[:200] or None,
+    }
+
+
+def _companies_redirect(user_id: uuid.UUID) -> RedirectResponse:
+    """Back to the PI page's Companies card, as the full literal path."""
+    return RedirectResponse(url=f"/manager/pis/{user_id}#companies", status_code=302)
+
+
+@router.post("/pis/{user_id}/companies")
+async def manager_add_company(
+    user_id: uuid.UUID,
+    request: Request,
+    company_name: str = Form(""),
+    pi_role: str = Form(""),
+    funding_usd: str = Form(""),
+    funding_as_of: str = Form(""),
+    source_url: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Add a company by hand (spec 2026-10-02 §7.2). A manual entry is confirmed at once
+    (O9) and reaches the hub's file straight away. ``created_by_user_id`` is the effective
+    user, so an admin impersonating a manager records the manager, as every manager write
+    does. A refused entry flashes its reason and changes nothing."""
+    await _require_pi(db, user_id)
+    try:
+        row = await add_company(
+            db, user_id=user_id, company_name=company_name, pi_role=pi_role,
+            funding_usd=parse_funding_usd(funding_usd),
+            funding_as_of=parse_funding_as_of(funding_as_of),
+            source_url=source_url, created_by_user_id=current_user.id,
+        )
+    except CompanyValidationError as exc:
+        flash(request, f"Company not added: {exc}", "error")
+        return _companies_redirect(user_id)
+    flash(request, f"Added {row.company_name}.", "success")
+    return _companies_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/companies/discover")
+async def manager_discover_companies(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Find companies: queue company discovery for this PI at interactive priority (spec
+    §7.5). While one is pending or processing a press inserts nothing (the per-user
+    unique index), and a pending bulk job is raised to interactive instead. Discovery
+    reads the PI's own papers and Wikidata by ORCID iD, so a PI without one is told so
+    and nothing is queued."""
+    target = await _require_pi(db, user_id)
+    if not (target.orcid or "").strip():
+        flash(request, "Company discovery needs the PI's ORCID iD; none is recorded.", "error")
+        return _companies_redirect(user_id)
+    job_id = await enqueue_company_discovery(db, user_id, priority=INTERACTIVE_PRIORITY)
+    await db.commit()
+    if job_id is None:
+        flash(request, "Company discovery is already queued or running for this PI.", "info")
+    else:
+        flash(request, "Company discovery queued. Its suggestions appear here when it finishes.",
+              "success")
+    return _companies_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/companies/{company_id}/delete")
+async def manager_delete_company(
+    user_id: uuid.UUID, company_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Remove a confirmed entry; the hub's file is rewritten, or removed with the last
+    entry, at once. The form asks first (``data-confirm``). A suggestion is rejected, never
+    deleted, so discovery does not offer it again."""
+    await _require_pi(db, user_id)
+    try:
+        await delete_company(db, user_id=user_id, company_id=company_id)
+    except CompanyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Company not found") from exc
+    except CompanyValidationError as exc:
+        flash(request, str(exc), "error")
+        return _companies_redirect(user_id)
+    flash(request, "Company removed.", "success")
+    return _companies_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/companies/{company_id}/confirm")
+async def manager_confirm_company(
+    user_id: uuid.UUID,
+    company_id: uuid.UUID,
+    request: Request,
+    pi_role: str = Form(""),
+    funding_usd: str = Form(""),
+    funding_as_of: str = Form(""),
+    clear_funding: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Confirm a discovered suggestion, correcting its role and funding first where the
+    form says so; a blank field keeps the stored value. The "Clear funding" checkbox
+    (any non-blank ``clear_funding``) drops the figure, its date and its source instead,
+    and the funding fields are then not parsed. Recorded as reviewed by the effective
+    user."""
+    await _require_pi(db, user_id)
+    clearing = bool(clear_funding.strip())
+    try:
+        row = await confirm_company(
+            db, user_id=user_id, company_id=company_id, reviewer_id=current_user.id,
+            pi_role=pi_role.strip() or None,
+            funding_usd=None if clearing else parse_funding_usd(funding_usd),
+            funding_as_of=None if clearing else parse_funding_as_of(funding_as_of),
+            clear_funding=clearing,
+        )
+    except CompanyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Company not found") from exc
+    except CompanyValidationError as exc:
+        flash(request, f"Not confirmed: {exc}", "error")
+        return _companies_redirect(user_id)
+    flash(request, f"Confirmed {row.company_name}.", "success")
+    return _companies_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/companies/{company_id}/reject")
+async def manager_reject_company(
+    user_id: uuid.UUID, company_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Reject a discovered suggestion. The row stays, unlisted, so discovery never offers
+    the name again (spec §7.5)."""
+    await _require_pi(db, user_id)
+    try:
+        row = await reject_company(
+            db, user_id=user_id, company_id=company_id, reviewer_id=current_user.id,
+        )
+    except CompanyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Company not found") from exc
+    except CompanyValidationError as exc:
+        flash(request, str(exc), "error")
+        return _companies_redirect(user_id)
+    flash(request, f"Rejected {row.company_name}; discovery will not suggest it again.", "success")
+    return _companies_redirect(user_id)
+
+
 @router.get("/slack-bots", response_class=HTMLResponse)
 async def manager_slack_bots(
     request: Request,
@@ -886,7 +1114,8 @@ async def manager_prompt_suggestions(
     the only writes this surface offers are the status action, which lives on
     ``POST /reviews/suggestions/{id}/status``, and the generate action, which
     lives on ``POST /reviews/suggestions/generate`` (D1-style split — every
-    write stays off this router except the eight-route allowlist)."""
+    write stays off this router except the manager write allowlist that
+    test_manager_views.py pins)."""
     status_filter = status if status in _SUGGESTION_STATUSES else None
     query = select(PromptChangeSuggestion)
     if status_filter:
@@ -904,6 +1133,7 @@ async def manager_prompt_suggestions(
             request,
             current_user,
             active_manager="prompt-suggestions",
+            admin_surface="prompt-suggestions",
             suggestions=suggestions,
             status_filter=status_filter,
             total_count=total_count,
@@ -940,6 +1170,7 @@ async def manager_prompt_suggestion_detail(
             request,
             current_user,
             active_manager="prompt-suggestions",
+            admin_surface="prompt-suggestions",
             suggestion=suggestion,
             file_status=file_status,
         ),
