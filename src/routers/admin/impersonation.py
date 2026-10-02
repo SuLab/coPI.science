@@ -6,8 +6,6 @@ src/dependencies.py, spec 2026-10-01 §6.7). It used to be an unsigned
 could point at any user for an admin's browser (A-05).
 """
 
-import logging
-
 from fastapi import Depends, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
@@ -22,9 +20,7 @@ from src.dependencies import (
 )
 from src.models import User
 from src.routers.admin._common import router
-from src.services.pi_onboarding import find_or_create_pi_by_orcid
-
-logger = logging.getLogger("src.routers.admin")
+from src.services.pi_onboarding import normalize_orcid
 
 
 @router.post("/impersonate")
@@ -35,22 +31,15 @@ async def impersonate_user(
     current_user: User = Depends(get_admin_user),
 ):
     """Start impersonating a user by ORCID."""
-    # Security: this route requires admin
-    orcid = orcid.strip()
-
+    orcid = normalize_orcid(orcid)
     result = await db.execute(select(User).where(User.orcid == orcid))
     target = result.scalar_one_or_none()
-
-    if not target:
-        try:
-            target = await find_or_create_pi_by_orcid(db, orcid)
-            await db.commit()
-        except ValueError as exc:
-            logger.error("Failed to fetch ORCID profile for impersonation: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User with ORCID {orcid} not found",
-            )
+    if target is None:
+        # A-16: impersonation looks an account up; it never creates one. An unknown
+        # ORCID used to mint a pending PI and enqueue a profile job.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No user has that ORCID iD"
+        )
 
     start_impersonation(request, target.id)
     return RedirectResponse(url="/", status_code=302)

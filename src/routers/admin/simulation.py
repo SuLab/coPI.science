@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.run_marker import parse_announce_channels, template_body, validate_template
 from src.config import get_settings
+from src.dependencies import impersonation_note
 from src.models import AdminAuditEvent, AppSetting, SimulationCommand, SimulationRun, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services import display_format as fmt
@@ -66,6 +67,17 @@ def _hash12(text: str | None) -> str | None:
     if text is None:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _audit_payload(payload: dict | None, current_user: User) -> dict | None:
+    """The audit row's payload plus ``impersonation_note`` when an admin made this
+    request while impersonating another admin (A-10). ``actor_user_id`` stays the
+    worn account (operator decision 2026-09-10). Never applied to a command
+    payload: the supervisor reads those."""
+    note = impersonation_note(current_user)
+    if note is None:
+        return payload
+    return {**(payload or {}), "impersonation_note": note}
 
 
 
@@ -301,7 +313,8 @@ async def admin_simulation_start(
         await db.rollback()
         return _refuse_to(request, "/admin/simulation", "A start is already pending.")
     await record_audit(
-        db, action="simulation_start_requested", actor_user_id=current_user.id, payload=payload
+        db, action="simulation_start_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
     return RedirectResponse(
         url=f"/admin/simulation?msg={quote('Start requested.')}", status_code=302
@@ -359,7 +372,8 @@ async def admin_simulation_finalize_run(
         await db.rollback()
         return _refuse("A stop is already pending.")
     await record_audit(
-        db, action="simulation_finalize_requested", actor_user_id=current_user.id, payload=payload,
+        db, action="simulation_finalize_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
     return RedirectResponse(
         url=f"/admin/activity/{run_id}?msg={quote('Finalize run requested.')}", status_code=302,
@@ -399,7 +413,8 @@ async def admin_simulation_stop(
         await db.rollback()
         return _refuse_to(request, "/admin/simulation", "A stop is already pending.")
     await record_audit(
-        db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=payload
+        db, action="simulation_stop_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
     message = "Stop (hold open interviews) requested." if payload else "Stop requested."
     return RedirectResponse(url=f"/admin/simulation?msg={quote(message)}", status_code=302)
@@ -458,7 +473,7 @@ async def admin_simulation_announce_settings(
         db,
         action="simulation_announce_channels_updated",
         actor_user_id=current_user.id,
-        payload={"old": old_value, "new": new_value},
+        payload=_audit_payload({"old": old_value, "new": new_value}, current_user),
     )
     return RedirectResponse(url=f"/admin/simulation?msg={quote(msg)}", status_code=302)
 
@@ -495,7 +510,9 @@ async def admin_simulation_announce_template(
                 db,
                 action="simulation_announce_template_reset",
                 actor_user_id=current_user.id,
-                payload={"old_hash": _hash12(old_value), "new_hash": None},
+                payload=_audit_payload(
+                    {"old_hash": _hash12(old_value), "new_hash": None}, current_user
+                ),
             )
         return RedirectResponse(
             url=f"/admin/simulation?msg={quote('Template reset to file default.')}",
@@ -514,6 +531,8 @@ async def admin_simulation_announce_template(
         db,
         action="simulation_announce_template_updated",
         actor_user_id=current_user.id,
-        payload={"old_hash": _hash12(old_value), "new_hash": _hash12(body)},
+        payload=_audit_payload(
+            {"old_hash": _hash12(old_value), "new_hash": _hash12(body)}, current_user
+        ),
     )
     return RedirectResponse(url=f"/admin/simulation?msg={quote('Template saved.')}", status_code=302)

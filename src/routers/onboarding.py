@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user, get_pi_user
+from src.dependencies import get_current_user, get_pi_user, impersonation_note
 from src.models import Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
@@ -135,6 +135,7 @@ async def save_profile(
 
     # Email is required at onboarding. apply_profile_edits validates it before
     # persisting anything, so a bad value rejects the whole submission.
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         form={
@@ -143,7 +144,8 @@ async def save_profile(
         },
         expected_version=parse_expected_version(profile_version),
         email_required=True,
-        change_summary="Profile saved during onboarding",
+        change_summary="; ".join(filter(None, ["Profile saved during onboarding", note])),
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/onboarding?error={error}", status_code=302)

@@ -48,7 +48,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import requires_linked_user, roles_requiring_user
 from src.database import get_db
-from src.dependencies import get_review_user, get_staff_user, refuse_impersonation
+from src.dependencies import (
+    get_review_user,
+    get_staff_user,
+    impersonation_note,
+    refuse_impersonation,
+)
 from src.models import (
     USER_ROLE_PI,
     AgentRegistry,
@@ -325,6 +330,7 @@ async def manager_edit_pi_profile(
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
 
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=detail["user"], changed_by_user_id=current_user.id,
         form={
@@ -334,6 +340,8 @@ async def manager_edit_pi_profile(
         },
         jhu_tenure_start=jhu_tenure_start,
         expected_version=parse_expected_version(profile_version),
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)

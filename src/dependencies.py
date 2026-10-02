@@ -184,6 +184,16 @@ async def _impersonated_user(
             # Tag so templates can show impersonation banner
             imp_user._is_impersonated = True  # type: ignore[attr-defined]
             imp_user._real_admin = session_user  # type: ignore[attr-defined]
+            if request.method not in ("GET", "HEAD"):
+                # A-10: the one impersonation note every write gets, whatever
+                # table it lands in. Tables with a recorded_by column or a
+                # revision summary also carry it (impersonation_note below);
+                # for the rest (jobs, agents, cohort audit, allowlist,
+                # delegate invitations) this line is the record.
+                logger.warning(
+                    "Write %s %s by admin %s while impersonating %s",
+                    request.method, request.url.path, session_user.id, imp_user.id,
+                )
             return imp_user
     return None
 

@@ -106,6 +106,16 @@ async def admin_delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    # A-07: an admin deleting another admin is a way out of adminhood too. The
+    # invariant lock (ensure_admin_remains) is held until delete_user_account
+    # commits, so two admins deleting each other cannot both succeed.
+    if user.access_status == "allowed":
+        try:
+            await ensure_admin_remains(db, user=user)
+        except LastAdminError:
+            raise HTTPException(
+                status_code=400, detail="Cannot delete the last remaining admin"
+            ) from None
 
     name = user.name
     report = await delete_user_account(

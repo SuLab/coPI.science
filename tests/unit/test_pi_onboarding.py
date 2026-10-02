@@ -1,5 +1,4 @@
-"""find_or_create_pi_by_orcid: the shared ORCID-onboarding logic used by the
-manager Add-PI route and admin's impersonate-if-new path."""
+"""find_or_create_pi_by_orcid: the shared ORCID-onboarding logic used by the manager Add-PI route."""
 from unittest.mock import AsyncMock, patch
 
 import pytest

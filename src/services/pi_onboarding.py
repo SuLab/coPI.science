@@ -1,7 +1,7 @@
-"""ORCID-driven PI onboarding, shared by the manager Add-PI route and admin's
-impersonate-if-new path. Ports the fetch->create->enqueue logic that was
-duplicated inline in src/routers/admin/impersonation.py's impersonate_user — see design
-decision D7. `cli seed-profile` shares `validate_orcid` and
+"""ORCID-driven PI onboarding for the manager Add-PI route. Ports the
+fetch->create->enqueue logic that was once duplicated inline in
+src/routers/admin/impersonation.py's impersonate_user — see design decision D7;
+impersonation now only looks an account up and never creates one (A-16). `cli seed-profile` shares `validate_orcid` and
 `record_employment_tenure` with this module (MD-14) but keeps its own
 reuse-existing-user and stub-on-fetch-failure behaviour, both of which
 `find_or_create_pi_by_orcid` refuses by design (D6)."""
@@ -28,9 +28,26 @@ logger = logging.getLogger(__name__)
 _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 
 
+#: An ``orcid.org/`` prefix as pasted from a profile page, with or without a
+#: scheme or ``www.`` (D-18).
+_ORCID_URL_PREFIX = re.compile(r"^(?:https?://)?(?:www\.)?orcid\.org/", re.IGNORECASE)
+
+
+def normalize_orcid(raw: str) -> str:
+    """The canonical spelling of a typed ORCID iD: trimmed, an ``orcid.org/`` URL
+    prefix removed, a lowercase check digit ``x`` uppercased (D-18). Does not
+    validate the result — ``validate_orcid`` does. Used wherever an ORCID is looked
+    up, so a pasted URL finds the same row as the bare iD."""
+    orcid = _ORCID_URL_PREFIX.sub("", raw.strip())
+    if orcid.endswith("x"):
+        orcid = orcid[:-1] + "X"
+    return orcid
+
+
 def validate_orcid(orcid: str) -> str:
-    """Format-only check shared by Add-PI and `cli seed-profile` (MD-14)."""
-    orcid = orcid.strip()
+    """Format-only check shared by Add-PI and `cli seed-profile` (MD-14), applied
+    after ``normalize_orcid``; returns the normalized iD."""
+    orcid = normalize_orcid(orcid)
     if not _ORCID_RE.match(orcid):
         raise ValueError(f"Invalid ORCID iD format: {orcid[:40]!r}")
     return orcid
@@ -48,8 +65,7 @@ async def record_employment_tenure(db: AsyncSession, user: User, profile_data: d
 async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     """Create a PI User + enqueue its generate_profile job (src/services/profile_jobs.py) for one ORCID iD.
 
-    Unlike admin's impersonate flow (which reuses an existing User of any
-    role silently), this is an explicit creation action (D6): it raises if
+    This is an explicit creation action (D6): it raises if
     the ORCID already belongs to anyone, rather than returning their
     existing row. Raises ValueError on either failure mode; never returns
     None. Does not commit — the caller decides the transaction boundary.

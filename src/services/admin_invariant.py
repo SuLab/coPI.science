@@ -1,7 +1,7 @@
 """At least one admin who can log in must remain (RA-09).
 
-Both doors out of adminhood, a role change and a self-deletion, call this inside
-their transaction. The advisory transaction lock serializes them, so two
+Every door out of adminhood — a role change, a self-deletion, an admin's delete of
+another account and a deny (A-07) — calls this inside their transaction. The advisory transaction lock serializes them, so two
 concurrent demotions can no longer both read "2 admins" and leave none. The count
 rule is unchanged: admins whose access_status is 'allowed' (a denied/pending admin
 cannot log in, so is not a way back)."""

@@ -8,7 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user, get_pi_user, refuse_impersonation
+from src.dependencies import (
+    get_current_user,
+    get_pi_user,
+    impersonation_note,
+    refuse_impersonation,
+)
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
@@ -152,6 +157,7 @@ async def profile_save(
     acceptance binds to (E1.3). Managers keep POST
     /manager/pis/{user_id}/profile, which calls the same service function.
     """
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         form={
@@ -160,6 +166,8 @@ async def profile_save(
             **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)

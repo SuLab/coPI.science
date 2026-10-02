@@ -1,5 +1,6 @@
 """Admin agent registry routes."""
 
+import logging
 import re
 import uuid
 
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.agent.role_capabilities import requires_linked_user, star_role
 from src.agent.roles import available_roles
 from src.database import get_db
-from src.dependencies import get_admin_user, get_staff_user
+from src.dependencies import get_admin_user, get_staff_user, impersonation_note
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.admin._common import (
     _ADMIN,
@@ -30,6 +31,8 @@ from src.services.agent_activation import (
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
 from src.web.flash import flash
+
+logger = logging.getLogger("src.routers.admin")
 
 #: The slug names profile files (profiles/public/<slug>.md) and must pass
 #: user_deletion's _SAFE_AGENT_ID: a slug outside it could escape the profiles
@@ -445,6 +448,13 @@ async def admin_provision_slack_callback(
         )
     except ProvisioningError as exc:
         return surface_error(str(exc))
+
+    # A GET write (A-19) reachable under impersonation: the token row has no note
+    # column, so the note goes on this line (A-10).
+    logger.info(
+        "Slack bot token stored for agent %s by %s (%s)",
+        agent.agent_id, current_user.id, impersonation_note(current_user) or "direct",
+    )
 
     if is_admin:
         return RedirectResponse(
