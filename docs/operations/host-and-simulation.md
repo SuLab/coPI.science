@@ -318,6 +318,8 @@ docker logs blackbird-agent-run > logs/blackbird_run_$(date +%s).log 2>&1
 ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 docker rm blackbird-agent-run
 
+# 2b. Before building a web change, the browser harness must pass
+#     (docs/operations/testing.md, "Browser harness (before every web deploy)").
 # 3. BUILD the web tier AND the agent image (both bake src/ into the image).
 #    BUILD ONLY — do NOT start anything yet. `up -d --build` builds and starts
 #    in one step, which serves the new code against the old schema; every

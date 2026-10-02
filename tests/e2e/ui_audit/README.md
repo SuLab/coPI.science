@@ -15,6 +15,11 @@ throwaway local instance and gates each remediation phase (spec §9).
 .venv-test/bin/python -m tests.e2e.ui_audit.run serve
 ```
 
+Where to run it: the production host lacks Chromium's system libraries (`libatk-1.0`, …)
+and packages are not installed there, so run it from a workstation that mounts the checkout,
+with an environment that has the project and `playwright` installed, passing
+`--executable` to a local `chrome-headless-shell`.
+
 What it touches: one Docker container `uiaudit-pg-<pid>` (postgres:15, 127.0.0.1, removed
 at exit), one local uvicorn on a free port, a temp working directory with its own empty
 `profiles/` (profile exports and deletions never reach the repo's `profiles/`, which is the
