@@ -2,9 +2,10 @@
 
 Stored assessments are stamped (rubric_version, rubric_content_hash) at write
 time. The live document churns; this registry lets the read paths render each
-row against the revision that scored it — dimension names, weights, scale and
-band lines are DISPLAY metadata only, never re-fed into any arithmetic
-(stored weighted_score/band are write-time facts and stay untouched).
+row against the revision that scored it — dimension names, weights, scale,
+band lines and (where an entry records them) gate definitions are DISPLAY
+metadata only, never re-fed into any arithmetic (stored weighted_score/band
+are write-time facts and stay untouched).
 
 The live document is never duplicated here: its view is derived from
 load_rubric() so the two cannot drift. Loaded once at import, fail-fast on an
@@ -13,7 +14,7 @@ invalid document, exactly like blackbird_rubric.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.services.blackbird_rubric import load_rubric
@@ -50,11 +51,47 @@ class RubricRevisionView:
     pass_label: str | None
     banding_note: str | None
     dimensions: tuple[RevisionDimension, ...]
+    #: Gate definitions, ``{key: {"title": str, "description": str}}``: the
+    #: entry's ``[revision.gating.<key>]`` tables, ``{}`` when it records none
+    #: (3.3.0 and older); the live document's ``[gating.*]`` for the live view.
+    #: Which of them a page may SHOW is decided by provenance, in
+    #: ``assessment_detail._gating_definitions``. ``repr=False`` keeps the field
+    #: out of the reprs tests/fixtures/rubric_views_frozen.txt pins, and
+    #: ``compare=False`` out of ``__eq__``/``__hash__``: a dict is unhashable,
+    #: and a view is already identified by its version and content hash.
+    gating: dict[str, dict[str, str]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise RevisionRegistryError(message)
+
+
+def _parse_gating(raw: dict, where: str) -> dict[str, dict[str, str]]:
+    """An entry's optional ``[revision.gating.<key>]`` tables, each a non-empty
+    ``title`` and ``description``. Absent is ``{}`` (the entry records no gate
+    text, so its rows keep bare gate labels); present but empty or malformed
+    fails the deploy, like every other registry defect. Keys are not checked
+    against the live rubric's three: an archived document may have gated on
+    something else, and this is display metadata for that document's rows."""
+    gating_raw = raw.get("gating")
+    if gating_raw is None:
+        return {}
+    _require(
+        isinstance(gating_raw, dict) and bool(gating_raw),
+        f"{where}.gating must hold [revision.gating.<key>] tables",
+    )
+    gating: dict[str, dict[str, str]] = {}
+    for key, entry in gating_raw.items():
+        gwhere = f"{where}.gating.{key}"
+        _require(isinstance(entry, dict), f"{gwhere} must be a table")
+        title, description = entry.get("title"), entry.get("description")
+        _require(isinstance(title, str) and bool(title), f"{gwhere}.title")
+        _require(isinstance(description, str) and bool(description), f"{gwhere}.description")
+        gating[key] = {"title": title, "description": description}
+    return gating
 
 
 def _parse_registry(path: Path) -> tuple[RubricRevisionView, ...]:
@@ -103,6 +140,7 @@ def _parse_registry(path: Path) -> tuple[RubricRevisionView, ...]:
             pass_label=raw.get("pass_label"),
             banding_note=raw.get("banding_note"),
             dimensions=tuple(dims),
+            gating=_parse_gating(raw, where),
         ))
     hashes = [v.content_hash for v in views]
     _require(len(hashes) == len(set(hashes)), "duplicate content_hash entries")
@@ -129,6 +167,9 @@ def live_revision_view() -> RubricRevisionView:
                               weight_note=f"{d.weight}%")
             for d in r.dimensions
         ),
+        # A copy: a caller holding the view must not be able to edit the
+        # cached Rubric's own gating dicts.
+        gating={key: dict(meta) for key, meta in r.gating.items()},
     )
 
 
