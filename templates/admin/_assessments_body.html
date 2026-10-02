@@ -317,7 +317,7 @@
                 {% endif %}
                 <div class="text-xs text-gray-500 mt-1">
                     Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
-                    &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+                    &middot; {{ a.created_at | ts }}
                     &middot;
                     {% if a.rubric_version %}
                         rubric <span class="font-mono"{% if a.rubric_content_hash %} title="content hash {{ a.rubric_content_hash }}"{% endif %}>{{ a.rubric_version }}</span>
@@ -328,7 +328,7 @@
                         {% set src_run = runs_by_id.get(a.simulation_run_id) %}
                         &middot;
                         {% if src_run %}
-                            run {{ src_run.started_at.strftime('%b %d %H:%M') }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
+                            run {{ src_run.started_at | ts }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
                         {% else %}
                             run unknown
                         {% endif %}

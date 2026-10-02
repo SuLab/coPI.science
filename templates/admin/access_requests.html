@@ -45,7 +45,7 @@
                     <a href="https://orcid.org/{{ u.orcid }}" target="_blank" class="text-indigo-600 hover:underline">{{ u.orcid }}</a>
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ u.institution or '—' }}</td>
-                <td class="px-4 py-3 text-sm text-gray-500" data-utc="{{ u.created_at.isoformat() }}" data-utc-fmt="short">{{ u.created_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ u.created_at | ts("date") }}</td>
                 <td class="px-4 py-3 whitespace-nowrap">
                     <form method="POST" action="/admin/access-requests/{{ u.id }}/approve" class="inline">
                         <button type="submit" class="text-sm bg-green-700 hover:bg-green-800 text-white px-3 py-1 rounded">Approve</button>
@@ -93,7 +93,7 @@
                     <a href="https://orcid.org/{{ a.orcid }}" target="_blank" class="text-indigo-600 hover:underline">{{ a.orcid }}</a>
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.note or '—' }}</td>
-                <td class="px-4 py-3 text-sm text-gray-500">{{ a.created_at.strftime('%b %d %Y') }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ a.created_at | ts("date") }}</td>
                 <td class="px-4 py-3 text-right">
                     <form method="POST" action="/admin/access-allowlist/{{ a.id }}/remove" class="inline">
                         <button type="submit" class="text-xs text-red-600 hover:text-red-800">Remove</button>

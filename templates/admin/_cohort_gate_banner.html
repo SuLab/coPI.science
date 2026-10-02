@@ -70,9 +70,8 @@
 <details class="mb-6 bg-white rounded-xl border border-gray-200">
     <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">
         Last topology recorded by a running simulation
-        <span class="text-xs font-normal text-gray-600 ml-2"
-              data-utc="{{ gate.snapshot.created_at.isoformat() }}" data-utc-fmt="short">
-            {{ gate.snapshot.created_at.strftime('%b %d %H:%M') }}
+        <span class="text-xs font-normal text-gray-600 ml-2">
+            {{ gate.snapshot.created_at | ts }}
         </span>
     </summary>
     <div class="px-4 pb-4 text-xs text-gray-600 space-y-2">

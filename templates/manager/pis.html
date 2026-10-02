@@ -4,7 +4,7 @@
 {% block content %}
 <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold text-gray-900">PIs</h1>
-    <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
+    <span class="text-sm text-gray-500">{{ user_total }} PIs</span>
 </div>
 
 <!-- Add PI -->
@@ -142,17 +142,17 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     {% if item.user.claimed_at %}
-                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
+                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at | ts("date") }}</span>
                     {% else %}
                     <span class="text-xs text-gray-600">No</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
-                    {{ item.user.created_at.strftime('%b %d, %Y') }}
+                    {{ item.user.created_at | ts("date") }}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
                     {% if item.user.last_login_at %}
-                        {{ item.user.last_login_at.strftime('%b %d, %Y') }}
+                        {{ item.user.last_login_at | ts("date") }}
                     {% else %}
                         <span class="text-gray-600">—</span>
                     {% endif %}
@@ -166,5 +166,15 @@
         </tbody>
     </table>
 </div>
+{% if page_count > 1 %}
+{% set pager_qs %}{% if status_filter %}status_filter={{ status_filter | urlencode }}&amp;{% endif %}{% if claimed_filter %}claimed_filter={{ claimed_filter | urlencode }}&amp;{% endif %}{% if institution_filter %}institution_filter={{ institution_filter | urlencode }}&amp;{% endif %}{% endset %}
+<nav aria-label="Pages" class="flex flex-wrap items-center justify-between gap-2 mt-4 text-sm text-gray-600">
+    <span>Page {{ page }} of {{ page_count }} ({{ user_total }} PIs)</span>
+    <span class="flex gap-3">
+        {% if page > 1 %}<a href="/manager/pis?{{ pager_qs }}page={{ page - 1 }}" class="text-indigo-700 underline">&larr; Prev</a>{% endif %}
+        {% if page < page_count %}<a href="/manager/pis?{{ pager_qs }}page={{ page + 1 }}" class="text-indigo-700 underline">Next &rarr;</a>{% endif %}
+    </span>
+</nav>
+{% endif %}
 
 {% endblock %}

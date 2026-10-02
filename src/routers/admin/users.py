@@ -3,7 +3,7 @@
 import logging
 import uuid
 
-from fastapi import Depends, Form, HTTPException, Request
+from fastapi import Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,13 +12,21 @@ from src.database import get_db
 from src.dependencies import get_admin_user, refuse_impersonation
 from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
+from src.services import directory
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
-from src.services.directory import list_pi_directory, load_user_detail
+from src.services.directory import (
+    MAX_PAGE,
+    count_pi_directory,
+    list_pi_directory,
+    load_user_detail,
+)
 from src.services.email_verification import mark_email_verified
 from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
 
 logger = logging.getLogger("src.routers.admin")
+
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -28,16 +36,18 @@ async def admin_users(
     status_filter: str | None = None,
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Admin users overview."""
-    user_data = await list_pi_directory(
-        db,
+    """Admin users overview, one page of PI_DIRECTORY_PAGE_SIZE (C-15)."""
+    filters = dict(
         status_filter=status_filter,
         institution_filter=institution_filter,
         claimed_filter=claimed_filter,
     )
+    user_data = await list_pi_directory(db, page=page, **filters)
+    user_total = await count_pi_directory(db, **filters)
 
     return templates.TemplateResponse(
         request,
@@ -50,6 +60,9 @@ async def admin_users(
             status_filter=status_filter,
             institution_filter=institution_filter,
             claimed_filter=claimed_filter,
+            user_total=user_total,
+            page=page,
+            page_count=max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE)),
         ),
     )
 

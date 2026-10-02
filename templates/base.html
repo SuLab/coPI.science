@@ -184,29 +184,5 @@
 </footer>
 
 {% block scripts %}{% endblock %}
-<script nonce="{{ request.state.csp_nonce }}">
-// Convert all elements with data-utc attribute to local time
-document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('[data-utc]').forEach(function(el) {
-        var utc = el.getAttribute('data-utc');
-        if (!utc) return;
-        var d = new Date(utc);
-        if (isNaN(d)) return;
-        var fmt = el.getAttribute('data-utc-fmt') || 'datetime';
-        if (fmt === 'time') {
-            el.textContent = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
-        } else if (fmt === 'short') {
-            el.textContent = d.toLocaleDateString([], {month: 'short', day: 'numeric'}) + ' ' +
-                             d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-        } else if (fmt === 'disc') {
-            el.textContent = d.toLocaleDateString([], {weekday: 'long'}) + ' ' +
-                             d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
-        } else {
-            el.textContent = d.toLocaleDateString([], {month: 'short', day: 'numeric', year: 'numeric'}) + ' ' +
-                             d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-        }
-    });
-});
-</script>
 </body>
 </html>

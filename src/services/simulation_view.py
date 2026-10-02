@@ -1,5 +1,6 @@
 """The /admin/simulation Live tab's view model and SVG composition, for ONE run (spec §7.3; moved from the admin router)."""
 
+import time
 import uuid
 from collections import OrderedDict, defaultdict
 from datetime import datetime
@@ -468,6 +469,83 @@ async def _call_stat_aggregates(db: AsyncSession, run: SimulationRun):
     return cached["taxonomy"], cached["latency"]
 
 
+#: C-14: the Live tab's DB aggregates for a RUNNING run, per process, keyed by
+#: (run id, status, ended_at) so a stop, finalize or resume is a new key, and kept
+#: LIVE_RUN_STATS_TTL_SECONDS, below the panel's 30 s refresh: one open tab still
+#: sees fresh figures on every refresh, and N tabs (or N admins) share one
+#: computation. Per uvicorn process; the web container runs one. Bounded because a
+#: resume or a fresh run adds a key and nothing else removes one.
+LIVE_RUN_STATS_TTL_SECONDS = 25.0
+_LIVE_RUN_STATS: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+_LIVE_RUN_STATS_MAX = 4
+#: Monotonic clock for the TTL; a module attribute so tests can move it.
+_clock = time.monotonic
+
+
+async def _hub_agent_id(db: AsyncSession) -> str | None:
+    """The hub whose lab burn the Live tab charts (C-23): the active hub-role agent,
+    else the first hub-role agent by agent_id — never an unordered pick."""
+    return (
+        await db.execute(
+            select(AgentRegistry.agent_id)
+            .where(AgentRegistry.role.in_(hub_role_names()))
+            .order_by((AgentRegistry.status == "active").desc(), AgentRegistry.agent_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _run_aggregates(db: AsyncSession, run: SimulationRun) -> dict[str, Any]:
+    """Every DB-derived figure the Live tab renders for ONE run. All values are
+    frozen dataclasses, lists of them, or ints, so a cached copy is safe to share."""
+    run_id = run.id
+    taxonomy, latency = await _call_stat_aggregates(db, run)
+    total_call_rows = (
+        await db.execute(
+            select(func.count())
+            .select_from(LlmCallLog)
+            .where(LlmCallLog.simulation_run_id == run_id)
+        )
+    ).scalar_one()
+    hub_agent_id = await _hub_agent_id(db)
+    return {
+        "overview": await run_overview(db, run_id),
+        "cost": await cost_summary(db, run_id),
+        "hours": await hourly_activity(db, run_id),
+        "fun": await funnel(db, run_id),
+        "domains": await specialist_mix(db, run_id),
+        "fanout": await consult_fanout(db, run_id),
+        "agents": await per_agent(db, run_id),
+        "taxonomy": taxonomy,
+        "latency": latency,
+        "timeline": await interview_timeline(db, run_id),
+        "per_interview": await cost_per_interview(db, run_id),
+        "stage_costs": await cost_by_stage(db, run_id),
+        "specialist_costs": await cost_by_specialist(db, run_id),
+        "call_kind_costs": await cost_by_call_kind(db, run_id),
+        "total_call_rows": total_call_rows,
+        "burn_points": await hub_lab_burn(db, run_id, hub_agent_id) if hub_agent_id else [],
+    }
+
+
+async def _cached_run_aggregates(db: AsyncSession, run: SimulationRun) -> dict[str, Any]:
+    """`_run_aggregates`, served from `_LIVE_RUN_STATS` for a running run inside the TTL."""
+    if run.status != "running":
+        return await _run_aggregates(db, run)
+    key = (run.id, run.status, run.ended_at)
+    now = _clock()
+    hit = _LIVE_RUN_STATS.get(key)
+    if hit is not None and now - hit[0] < LIVE_RUN_STATS_TTL_SECONDS:
+        _LIVE_RUN_STATS.move_to_end(key)
+        return hit[1]
+    bundle = await _run_aggregates(db, run)
+    _LIVE_RUN_STATS[key] = (now, bundle)
+    _LIVE_RUN_STATS.move_to_end(key)
+    while len(_LIVE_RUN_STATS) > _LIVE_RUN_STATS_MAX:
+        _LIVE_RUN_STATS.popitem(last=False)
+    return bundle
+
+
 async def live_tab_context(
     db: AsyncSession,
     request: Request,
@@ -475,7 +553,8 @@ async def live_tab_context(
     now: datetime,
 ) -> dict[str, Any]:
     """Every value the Live tab's stats sections render, for ONE run — see the
-    module comment above. `status_row`/`now` are the same heartbeat row and
+    module comment above; a running run's DB aggregates come from a 25 s cache
+    (`_cached_run_aggregates`). `status_row`/`now` are the same heartbeat row and
     clock `_simulation_context` already read for the engine-status badge —
     passed in rather than re-read, and reused here for the per-agent table's
     real `active_threads`/`calls_in_window` columns (see `_agents_detail_map`).
@@ -493,46 +572,17 @@ async def live_tab_context(
             "api_call_units_note": API_CALL_UNITS_NOTE,
         }
 
-    run_id = selected_run.id
-    overview = await run_overview(db, run_id)
-    cost = await cost_summary(db, run_id)
-    hours = await hourly_activity(db, run_id)
-    fun = await funnel(db, run_id)
-    domains = await specialist_mix(db, run_id)
-    fanout = await consult_fanout(db, run_id)
-    agents = await per_agent(db, run_id)
-    taxonomy, latency = await _call_stat_aggregates(db, selected_run)
-    timeline = await interview_timeline(db, run_id)
-    per_interview = await cost_per_interview(db, run_id)
-    stage_costs = await cost_by_stage(db, run_id)
-    specialist_costs = await cost_by_specialist(db, run_id)
-    call_kind_costs = await cost_by_call_kind(db, run_id)
-
-    total_call_rows = (
-        await db.execute(
-            select(func.count())
-            .select_from(LlmCallLog)
-            .where(LlmCallLog.simulation_run_id == run_id)
-        )
-    ).scalar_one()
-    latency_capped = total_call_rows > CALL_STATS_ROW_LIMIT
-
-    hub_agent_id = (
-        await db.execute(
-            select(AgentRegistry.agent_id)
-            .where(AgentRegistry.role.in_(hub_role_names()))
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    burn_points = await hub_lab_burn(db, run_id, hub_agent_id) if hub_agent_id else []
+    stats = await _cached_run_aggregates(db, selected_run)
+    overview, cost, fun = stats["overview"], stats["cost"], stats["fun"]
+    latency_capped = stats["total_call_rows"] > CALL_STATS_ROW_LIMIT
 
     kpi = _kpi_tiles(overview, cost, fun)
-    cost_time = _cost_over_time(hours)
-    breakdowns = _cost_breakdowns(cost, stage_costs, specialist_costs, call_kind_costs)
-    panel = _funnel_panel_and_latency(fun, domains, fanout, taxonomy, latency)
-    per_agent_rows = _per_agent_rows(agents, status_row, now)
-    gantt_parts = _interview_gantt(timeline, per_interview)
-    burn_line_html = _burn_line(burn_points)
+    cost_time = _cost_over_time(stats["hours"])
+    breakdowns = _cost_breakdowns(cost, stats["stage_costs"], stats["specialist_costs"], stats["call_kind_costs"])
+    panel = _funnel_panel_and_latency(fun, stats["domains"], stats["fanout"], stats["taxonomy"], stats["latency"])
+    per_agent_rows = _per_agent_rows(stats["agents"], status_row, now)
+    gantt_parts = _interview_gantt(stats["timeline"], stats["per_interview"])
+    burn_line_html = _burn_line(stats["burn_points"])
 
     run_facts = {"status": overview.status, "started": fmt.timestamp(overview.started_at), "ended": fmt.timestamp(overview.ended_at),
                  "elapsed": fmt.duration(overview.elapsed_seconds), "total_api_calls": fmt.count(overview.total_api_calls),

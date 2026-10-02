@@ -864,7 +864,7 @@
         if (!next) { stop('Auto-refresh stopped — reload the page.'); return; }
         reconcile(next);
         failures = 0;
-        if (updated) updated.textContent = '· last updated ' + new Date().toLocaleTimeString();
+        if (updated) updated.textContent = '· last updated ' + new Date().toISOString().slice(11, 19) + ' UTC';
       })
       .catch(() => {
         failures += 1;

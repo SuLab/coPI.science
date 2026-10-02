@@ -30,7 +30,7 @@
         <p class="text-xs text-gray-500 mt-1">
             Target: <span class="font-mono">{{ suggestion.target }}</span>
             &middot; Model: {{ suggestion.model or '—' }}
-            &middot; Created <span data-utc="{{ suggestion.created_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            &middot; Created {{ suggestion.created_at | ts }}
             {% if suggestion.rubric_version %}&middot; Rubric {{ suggestion.rubric_version }}{% endif %}
             {% if not suggestion.transcript_available %}&middot; <span class="text-amber-700">no interview transcript</span>{% endif %}
             {% if suggestion.input_truncated %}&middot; <span class="text-amber-700">input truncated</span>{% endif %}
@@ -60,7 +60,7 @@
     <span class="text-xs text-gray-500">
         last set to "{{ suggestion.status }}" by {{ suggestion.status_set_by_name }}
         {% if suggestion.status_set_at %}
-        on <span data-utc="{{ suggestion.status_set_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.status_set_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        on {{ suggestion.status_set_at | ts }}
         {% endif %}
     </span>
     {% endif %}

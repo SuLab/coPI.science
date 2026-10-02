@@ -69,7 +69,7 @@
         <div class="flex items-center justify-between mb-4">
             <h2 class="text-lg font-semibold text-gray-800">Your Generated Profile</h2>
             {% if profile.profile_generated_at %}
-            <span class="text-xs text-gray-600">Generated {{ profile.profile_generated_at.strftime('%b %d, %Y') }}</span>
+            <span class="text-xs text-gray-600">Generated {{ profile.profile_generated_at | ts("date") }}</span>
             {% endif %}
         </div>
         <p class="text-sm text-gray-500 mb-6">

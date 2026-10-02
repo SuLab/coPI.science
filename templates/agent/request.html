@@ -14,7 +14,7 @@
             Your request to create <strong>{{ agent.bot_name }}</strong> has been submitted.
             An admin will review and provision your agent shortly.
         </p>
-        <p class="text-sm text-gray-600">Requested {{ agent.requested_at.strftime('%b %d, %Y at %H:%M') }}</p>
+        <p class="text-sm text-gray-600">Requested {{ agent.requested_at | ts }}</p>
     </div>
 
     {% else %}

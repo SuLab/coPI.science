@@ -521,7 +521,7 @@
 {% macro tool_turn(turn, signal_chip) %}
 <div class="mb-2">
     <div class="text-sm text-gray-600 mb-1">
-        tool round &middot; <span data-utc="{{ turn.created_at.isoformat() }}" data-utc-fmt="time">{{ turn.created_at.strftime('%H:%M:%S') }}</span>
+        tool round &middot; {{ turn.created_at | ts("second") }}
         &middot; {{ turn.chips | length }} call{{ '' if turn.chips | length == 1 else 's' }}
     </div>
     <div class="space-y-1.5">
@@ -599,7 +599,7 @@
             <div class="text-sm text-gray-600 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
                 &middot; Screened by {{ a.agent_id }}
-                &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                &middot; {{ a.created_at | ts }}
                 &middot; #{{ a.channel_name }}
             </div>
         </div>
@@ -1046,7 +1046,7 @@
                     {% endif %}
                     by {{ event.actor_name }}
                     &middot;
-                    <span data-utc="{{ event.created_at.isoformat() }}" data-utc-fmt="short">{{ event.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {{ event.created_at | ts }}
                 </li>
                 {% endfor %}
             </ul>
@@ -1082,7 +1082,7 @@
                         </span>
                     {% endif %}
                     {% if review.edited %}<span class="text-gray-600 italic">(edited)</span>{% endif %}
-                    <span data-utc="{{ review.created_at.isoformat() }}" data-utc-fmt="short">{{ review.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {{ review.created_at | ts }}
                 </div>
                 {% if review.comment %}
                 <p class="review-comment mt-1 text-base leading-relaxed text-gray-700 whitespace-pre-line max-w-[68ch]">{{ review.comment }}</p>

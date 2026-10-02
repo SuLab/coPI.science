@@ -183,6 +183,7 @@ async def admin_discussions(
             page=view["page"],
             page_count=view["page_count"],
             thread_total=view["thread_total"],
+            all_runs_refused=view["all_runs_refused"],
             panel_by_thread=panel.by_thread,
             # A capped panel read must not look like an unconsulted page.
             panel_truncated=panel.truncated,

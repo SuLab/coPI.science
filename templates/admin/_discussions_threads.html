@@ -30,6 +30,13 @@
 </div>
 {% endif %}
 
+{# C-15: `run_id=all` above DISCUSSIONS_ALL_RUNS_MAX (src/services/directory.py)
+   lists nothing rather than paging the whole history. #}
+{% if all_runs_refused %}
+<div class="all-runs-refused rounded-lg border border-amber-300 bg-amber-50 p-3 mb-3 text-sm text-amber-900">
+    All runs together hold too many threads, too many to list on one page. Choose a single run above.{% if admin_view %} Export still downloads every thread.{% endif %}
+</div>
+{% endif %}
 <!-- Threads table -->
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
@@ -131,12 +138,12 @@
                 <td class="px-4 py-3 text-sm text-gray-500">
                     {% if t.decision %}
                         {{ t.decision.outcome | replace('_', ' ') | capitalize }}
-                        <span class="text-xs text-gray-600"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
+                        <span class="text-xs text-gray-600">{{ t.decision.decided_at | ts }}</span>
                     {% else %}
                         —
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-500"><span data-utc="{{ t.created_at.isoformat() }}" data-utc-fmt="short">{{ t.created_at.strftime('%b %d %H:%M') }}</span></td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ t.created_at | ts }}</td>
             </tr>
             {% if has_detail %}
             <tr id="detail-{{ loop.index }}" class="hidden">
@@ -208,7 +215,7 @@
                                 {% endif %}
                                 {% endif %}
                                 {% if c.created_at %}
-                                <span class="text-xs text-gray-600 ml-auto"><span data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="time">{{ c.created_at.strftime('%H:%M') }}</span></span>
+                                <span class="text-xs text-gray-600 ml-auto">{{ c.created_at | ts }}</span>
                                 {% endif %}
                             </div>
                             {% if c.reply_truncated %}

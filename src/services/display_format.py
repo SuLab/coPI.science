@@ -68,10 +68,20 @@ def hour_label(dt: datetime) -> str:
     return f"{_MONTHS[u.month - 1]} {u.day} {u.hour:02d}:{u.minute:02d}"
 
 
-def timestamp(dt: datetime | None) -> str:
+_TIMESTAMP_FORMATS = {
+    "minute": "%Y-%m-%d %H:%M UTC",
+    "second": "%Y-%m-%d %H:%M:%S UTC",
+    "date": "%Y-%m-%d UTC",
+}
+
+
+def timestamp(dt: datetime | None, style: str = "minute") -> str:
+    """The one human-facing rendering of a moment (FN-07): converted to UTC and
+    always labelled "UTC", including the date-only style, so no page mixes zones.
+    Templates reach it as the `ts` filter. `style` is "minute", "second" or "date"."""
     if dt is None:
         return "—"
-    return _utc(dt).strftime("%Y-%m-%d %H:%M UTC")
+    return _utc(dt).strftime(_TIMESTAMP_FORMATS[style])
 
 
 def epoch_hm(ts: float) -> str:

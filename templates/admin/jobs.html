@@ -84,9 +84,9 @@
                     {% else %}—{% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ job.attempts }}/{{ job.max_attempts }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ job.enqueued_at.strftime('%b %d %H:%M') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ job.enqueued_at | ts }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
-                    {{ job.completed_at.strftime('%b %d %H:%M') if job.completed_at else '—' }}
+                    {{ job.completed_at | ts }}
                 </td>
                 <td class="px-4 py-3 text-xs text-red-600 hidden lg:table-cell max-w-xs truncate">
                     {{ (job.last_error or '')[:80] }}

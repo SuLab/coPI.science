@@ -44,7 +44,7 @@
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium">{{ a.pi_name }}</td>
                 <td class="px-4 py-3 text-sm">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at.strftime('%b %d %H:%M') }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at | ts }}</td>
                 <td class="px-4 py-3">
                     <a href="/admin/agents/{{ a.id }}"
                        class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">Review</a>

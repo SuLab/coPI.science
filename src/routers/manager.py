@@ -63,6 +63,7 @@ from src.models import (
     ResearcherProfile,
     User,
 )
+from src.services import directory
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activation_blockers, ensure_activation_allowed
 from src.services.agent_mute import set_agent_mute_state
@@ -75,6 +76,7 @@ from src.services.directory import (
     MAX_PAGE,
     build_discussions_view,
     build_run_detail,
+    count_pi_directory,
     list_assessments,
     list_pi_directory,
     list_runs_overview,
@@ -179,18 +181,21 @@ async def manager_pis(
     status_filter: str | None = None,
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    """PI directory. Unclaimed stubs included (D11) so recruitment coverage is
-    visible; staff accounts excluded so the admin roster is not enumerable."""
-    user_data = await list_pi_directory(
-        db,
+    """PI directory, one page of PI_DIRECTORY_PAGE_SIZE (C-15). Unclaimed stubs
+    included (D11) so recruitment coverage is visible; staff accounts excluded so the
+    admin roster is not enumerable."""
+    filters = dict(
         status_filter=status_filter,
         institution_filter=institution_filter,
         claimed_filter=claimed_filter,
         roles=(USER_ROLE_PI,),
     )
+    user_data = await list_pi_directory(db, page=page, **filters)
+    user_total = await count_pi_directory(db, **filters)
     return templates.TemplateResponse(
         request,
         "manager/pis.html",
@@ -201,6 +206,9 @@ async def manager_pis(
             user_data=user_data,
             status_filter=status_filter,
             claimed_filter=claimed_filter,
+            user_total=user_total,
+            page=page,
+            page_count=max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE)),
         ),
     )
 

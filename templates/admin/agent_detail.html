@@ -59,7 +59,7 @@
             {% endif %}
             <div>
                 <span class="text-gray-500">Requested:</span>
-                <span class="ml-2">{{ agent.requested_at.strftime('%b %d, %Y %H:%M') }}</span>
+                <span class="ml-2">{{ agent.requested_at | ts }}</span>
             </div>
         </div>
 

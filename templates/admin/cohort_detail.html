@@ -70,7 +70,7 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ adder_map.get(m.added_by | string, '—') }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ m.added_at.isoformat() }}" data-utc-fmt="short">{{ m.added_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ m.added_at | ts("date") }}</td>
                 <td class="px-4 py-3 text-sm">
                     <form method="POST" action="/admin/cohorts/{{ cohort.id }}/remove-agent">
                         <input type="hidden" name="agent_id" value="{{ m.agent_id }}">
@@ -149,9 +149,8 @@
         <tbody class="divide-y divide-gray-100">
             {% for e in audit_events %}
             <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-xs text-gray-500"
-                    data-utc="{{ e.created_at.isoformat() }}" data-utc-fmt="short">
-                    {{ e.created_at.strftime('%b %d %H:%M') }}
+                <td class="px-4 py-3 text-xs text-gray-500">
+                    {{ e.created_at | ts }}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-700"><code>{{ e.action }}</code></td>
                 <td class="px-4 py-3 text-sm text-gray-600">

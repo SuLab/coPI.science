@@ -7,7 +7,7 @@
         <div>
             <a href="/admin/activity/{{ run.id }}" class="text-sm text-gray-500 hover:text-gray-700">&larr; Simulation Run</a>
             <h1 class="text-2xl font-bold text-gray-900 mt-1">LLM Call Logs</h1>
-            <p class="text-sm text-gray-500"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d, %Y %H:%M') }}</span></p>
+            <p class="text-sm text-gray-500">{{ run.started_at | ts }}</p>
         </div>
     </div>
 
@@ -169,7 +169,7 @@
                 {% endif %}
                 <span class="text-gray-600 text-xs">{{ log.input_tokens }}+{{ log.output_tokens }} tok</span>
                 <span class="text-gray-600 text-xs">{{ "%.0f" | format(log.latency_ms) }}ms</span>
-                <span class="text-gray-600 text-xs ml-auto"><span data-utc="{{ log.created_at.isoformat() }}" data-utc-fmt="short">{{ log.created_at.strftime('%b %d %H:%M:%S') }}</span></span>
+                <span class="text-gray-600 text-xs ml-auto">{{ log.created_at | ts("second") }}</span>
             </summary>
             <div class="px-4 pb-4 space-y-3">
                 <div>

@@ -88,7 +88,7 @@
             {% for s in suggestions %}
             <tr class="prompt-suggestion-row hover:bg-gray-50">
                 <td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
-                    {{ s.created_at.strftime('%Y-%m-%d %H:%M') }}
+                    {{ s.created_at | ts }}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-900">
                     <a class="underline text-indigo-600 hover:text-indigo-800"

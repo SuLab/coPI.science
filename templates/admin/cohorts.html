@@ -88,7 +88,7 @@
                     {% for m in c.memberships | sort(attribute='agent_id') %}<code>{{ gate.bot_names.get(m.agent_id, m.agent_id) }}</code>{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ creator_map.get(c.created_by | string, '—') }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="short">{{ c.created_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ c.created_at | ts("date") }}</td>
                 <td class="px-4 py-3 text-sm">
                     {% if c.memberships %}
                     {# Server refuses this too (v2 §12) — deleting a populated cohort
