@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -44,6 +44,37 @@ def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
     return bool(invited) and bool(account) and invited == account
 
 
+async def _viewer(request: Request, db: AsyncSession) -> User | None:
+    """The signed-in account for the page chrome, or None (FN-08). Never
+    redirects: an invite page must render for a signed-out visitor too.
+
+    A bounce get_current_user raised (denied, pending, stale epoch, deleted
+    account) is kept on ``request.state.viewer_bounce``: get_current_user has
+    already rewritten the session for it, so the acceptance path re-raises that
+    same redirect rather than resolving the visitor a second time (A-09)."""
+    request.state.viewer_bounce = None
+    if not request.session.get("user_id"):
+        return None
+    try:
+        return await get_current_user(request, db)
+    except HTTPException as bounce:
+        request.state.viewer_bounce = bounce
+        return None
+
+
+def _invite_context(request: Request, viewer: User | None, **kwargs) -> dict:
+    """The context every other router builds (current_user, impersonation banner),
+    so base.html shows the account rather than "Sign in" (FN-08)."""
+    impersonated = getattr(viewer, "_is_impersonated", False)
+    ctx = {
+        "request": request,
+        "current_user": getattr(viewer, "_real_admin", None) if impersonated else viewer,
+        "impersonation_banner": viewer if impersonated else None,
+    }
+    ctx.update(kwargs)
+    return ctx
+
+
 def _invite_refusal(invitation: DelegateInvitation, user: User) -> str | None:
     """Why ``user`` may not accept ``invitation``, or None when they may.
 
@@ -69,6 +100,7 @@ async def accept_invite(
     db: AsyncSession = Depends(get_db),
 ):
     """Accept a delegate invitation."""
+    viewer = await _viewer(request, db)
     # Look up invitation
     result = await db.execute(
         select(DelegateInvitation).where(DelegateInvitation.token == token)
@@ -79,7 +111,7 @@ async def accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": "This invitation link is invalid."},
+            _invite_context(request, viewer, error="This invitation link is invalid."),
         )
 
     # Check expiry
@@ -90,7 +122,7 @@ async def accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": "This invitation has expired. Ask the PI to send a new one."},
+            _invite_context(request, viewer, error="This invitation has expired. Ask the PI to send a new one."),
         )
 
     if invitation.status != "pending":
@@ -102,20 +134,23 @@ async def accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": messages.get(invitation.status, "This invitation is no longer valid.")},
+            _invite_context(request, viewer, error=messages.get(invitation.status, "This invitation is no longer valid.")),
         )
+
+    # A signed-in visitor is resolved through get_current_user (A-09, in _viewer),
+    # so a denied, pending, signed-out-elsewhere or deleted account is bounced
+    # exactly as on every other page rather than read from the raw session.
+    if request.state.viewer_bounce is not None:
+        raise request.state.viewer_bounce
 
     # Valid invitation. An anonymous visitor signs in first and is brought back
     # here: the token survives the login's session reset
     # (src/routers/auth.py::_start_fresh_session).
-    if not request.session.get("user_id"):
+    if viewer is None:
         request.session["pending_invite_token"] = token
         return RedirectResponse(url="/login/start", status_code=302)
 
-    # A signed-in visitor is resolved through get_current_user (A-09), so a
-    # denied, pending, signed-out-elsewhere or deleted account is bounced exactly
-    # as on every other page rather than read from the raw session.
-    user = await get_current_user(request, db)
+    user = viewer
     refuse_impersonation(user, _INVITE_IMPERSONATION_DETAIL)
 
     # Bind the invite to the address it was sent to — a forwarded/leaked link
@@ -129,7 +164,7 @@ async def accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": refusal},
+            _invite_context(request, viewer, error=refusal),
         )
 
     # Show confirmation page (no onboarding required for delegates)
@@ -141,13 +176,14 @@ async def accept_invite(
     return templates.TemplateResponse(
         request,
         "invite/accept.html",
-        {
-            "request": request,
-            "pi_name": agent.pi_name,
-            "bot_name": agent.bot_name,
-            "token": token,
-            "invitation_email": invitation.email,
-        },
+        _invite_context(
+            request,
+            viewer,
+            pi_name=agent.pi_name,
+            bot_name=agent.bot_name,
+            token=token,
+            invitation_email=invitation.email,
+        ),
     )
 
 
@@ -158,6 +194,7 @@ async def confirm_accept_invite(
     db: AsyncSession = Depends(get_db),
 ):
     """Process explicit acceptance of a delegate invitation."""
+    viewer = await _viewer(request, db)
     result = await db.execute(
         select(DelegateInvitation).where(DelegateInvitation.token == token)
     )
@@ -167,7 +204,7 @@ async def confirm_accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": "This invitation is no longer valid."},
+            _invite_context(request, viewer, error="This invitation is no longer valid."),
         )
 
     if invitation.expires_at < datetime.now(UTC):
@@ -176,13 +213,15 @@ async def confirm_accept_invite(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": "This invitation has expired. Ask the PI to send a new one."},
+            _invite_context(request, viewer, error="This invitation has expired. Ask the PI to send a new one."),
         )
 
-    if not request.session.get("user_id"):
+    if request.state.viewer_bounce is not None:
+        raise request.state.viewer_bounce
+    if viewer is None:
         return RedirectResponse(url=f"/invite/{token}", status_code=302)
 
-    user = await get_current_user(request, db)
+    user = viewer
     refuse_impersonation(user, _INVITE_IMPERSONATION_DETAIL)
 
     return await _accept_invitation(invitation, user, db, request)
@@ -207,7 +246,7 @@ async def _accept_invitation(
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": refusal},
+            _invite_context(request, user, error=refusal),
         )
 
     # Claim the invitation with a conditional UPDATE: of two racing accepts only one

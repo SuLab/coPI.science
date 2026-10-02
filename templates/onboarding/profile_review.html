@@ -83,7 +83,7 @@
             <!-- Email (required) -->
             <div class="mb-6">
                 <label for="onboarding-email" class="block text-sm font-medium text-gray-700 mb-2">Email <span class="text-red-600">*</span></label>
-                <input type="email" name="email" id="onboarding-email" required value="{{ current_user.email or '' }}"
+                <input type="email" name="email" id="onboarding-email" required value="{{ user.email or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                        placeholder="you@institution.edu">
                 <p class="text-xs text-gray-600 mt-1">Required. Where CoPI sends collaboration proposals and notifications.</p>

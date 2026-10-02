@@ -98,7 +98,7 @@ async def test_an_admin_with_incomplete_onboarding_is_not_locked_out(client, db_
 
 
 async def test_manager_profile_url_bounce_terminates(client, db_session):
-    """manager -> /profile -> /onboarding -> /manager/pis, with no loop."""
+    """manager -> /profile -> /manager/pis in one hop (M-08), with no loop."""
     mgr = await factories.make_user(
         db_session, user_role=USER_ROLE_MANAGER, onboarding_complete=False
     )

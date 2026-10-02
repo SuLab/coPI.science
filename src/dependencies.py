@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -278,6 +279,18 @@ async def get_pi_user(
             detail="Staff accounts have no lab profile or agent (PI accounts only)",
         )
     return current_user
+
+
+def staff_landing_redirect(user: User) -> RedirectResponse | None:
+    """Where a GET of a PI-only page sends an account with no lab (M-08): a
+    manager to /manager/pis, a reviewer to /manager/assessments. None for a PI or
+    an admin (``User.may_use_pi_surfaces``). The PI-only POSTs keep get_pi_user's
+    403; this is the navigation half."""
+    if user.may_use_pi_surfaces:
+        return None
+    return RedirectResponse(
+        url="/manager/pis" if user.is_manager else "/manager/assessments", status_code=302
+    )
 
 
 def refuse_impersonation(

@@ -20,6 +20,7 @@ from src.dependencies import (
     get_current_user,
     get_pi_user,
     impersonation_note,
+    staff_landing_redirect,
 )
 from src.models import (
     AgentDelegate,
@@ -113,6 +114,11 @@ async def agent_landing(
     current_user: User = Depends(get_current_user),
 ):
     """Agent landing page — lists all agents the user has access to."""
+    # M-08: a manager or reviewer has no lab; the request form here would 403.
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
+
     # Own agent
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)

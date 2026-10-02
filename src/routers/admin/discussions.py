@@ -10,6 +10,7 @@ from src.dependencies import get_admin_user
 from src.models import ProposalReview, User
 from src.routers.admin._common import _template_context, router, templates
 from src.services.directory import MAX_PAGE, build_discussions_view
+from src.services.export_markdown import render_export_markdown
 from src.services.thread_panel import panel_cards_by_thread
 
 _PAGE = Query(1, ge=1, le=MAX_PAGE)
@@ -90,6 +91,7 @@ async def admin_discussions(
                 "outcome": d.outcome,
                 "date": d.decided_at.strftime("%Y-%m-%d %H:%M UTC"),
                 "summary": d.summary_text.strip(),
+                "summary_html": render_export_markdown(d.summary_text.strip()),
                 "reviews": [],
             })
 

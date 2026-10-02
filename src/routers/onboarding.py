@@ -27,11 +27,14 @@ templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
+    """``current_user`` is the real admin under impersonation (it drives the nav); ``user`` is the
+    effective account, which every form field must read (FN-02)."""
     impersonated = getattr(user, "_is_impersonated", False)
     real_admin = getattr(user, "_real_admin", None)
     ctx = {
         "request": request,
         "current_user": real_admin if impersonated else user,
+        "user": user,
         "impersonation_banner": user if impersonated else None,
         "active_page": "onboarding",
     }

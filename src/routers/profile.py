@@ -13,6 +13,7 @@ from src.dependencies import (
     get_pi_user,
     impersonation_note,
     refuse_impersonation,
+    staff_landing_redirect,
 )
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
@@ -55,12 +56,12 @@ async def profile_view(
     current_user: User = Depends(get_current_user),
 ):
     """View user's profile page."""
-    # A REVIEWER is neither staff nor PI and has no lab profile to
-    # view — bounce before the onboarding check, which would otherwise send
-    # it to a page it can never complete (get_pi_user gates the only writer
-    # of onboarding_complete).
-    if current_user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+    # A manager or reviewer has no lab profile to view (M-08) — bounce before the
+    # onboarding check, which would otherwise send it to a page it can never
+    # complete (get_pi_user gates the only writer of onboarding_complete).
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
 
     # Redirect to onboarding if not complete
     if not current_user.onboarding_complete:
@@ -116,10 +117,11 @@ async def profile_edit(
     current_user: User = Depends(get_current_user),
 ):
     """Edit profile page."""
-    # Same reviewer bounce as GET /profile: without it a reviewer renders a
+    # Same bounce as GET /profile: without it a manager or reviewer renders a
     # profile-edit form whose POST /profile/save 403s (get_pi_user).
-    if current_user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
 
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
