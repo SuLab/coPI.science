@@ -23,8 +23,13 @@
             View LLM Call Logs
         </a>
         {% if run.status == 'stopped' and run.finalized_at is none %}
-        <form action="/admin/simulation/finalize-run" method="post">
+        {% set short_id = (run.id | string)[:8] %}
+        <form action="/admin/simulation/finalize-run" method="post" class="flex flex-wrap items-center gap-2"
+              data-confirm="Finalize run {{ short_id }}: posts its held headlines to Slack, and the run can never be resumed. This cannot be undone.">
             <input type="hidden" name="run_id" value="{{ run.id }}">
+            <label for="confirm-run" class="text-sm text-gray-700">Type <code>{{ short_id }}</code> to confirm</label>
+            <input type="text" id="confirm-run" name="confirm_run" required autocomplete="off" size="10"
+                   class="border border-gray-300 rounded px-2 py-1 text-sm font-mono">
             <button type="submit" class="inline-flex items-center px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700">
                 Finalize run
             </button>

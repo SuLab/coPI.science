@@ -238,15 +238,18 @@ async def admin_cohort_topology_save(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Apply a whole-matrix edit as a diff against the cells that were rendered.
+    """Apply a whole-matrix edit as a diff against what the form SHOWED (C-07).
 
-    The form posts one ``cell`` value per ticked box (``{cohort_id}:{agent_id}``),
-    one ``present_agent`` per rendered row and one ``present_cohort`` per rendered
-    column; the rendered cell set is their cross product, which is what the
-    template renders (an unconditional nested loop). Sending markers instead of one
-    hidden input per cell keeps the payload at agents+cohorts fields rather than
-    agents*cohorts — 60x56 posted 3,528 fields and hit Starlette's
-    ``max_fields=1000``, which is why the matrix could not be saved at all.
+    The form posts one ``cell`` per box ticked now (``{cohort_id}:{agent_id}``), one
+    ``was_checked`` per box it rendered ticked, one ``present_agent`` per rendered row and one
+    ``present_cohort`` per rendered column; the rendered cell set is the cross product of the
+    markers, which is what the template renders (an unconditional nested loop). A cell is
+    added only when ticked now and not rendered ticked, and removed only when rendered ticked
+    and unticked now. Diffing against the current table instead let a second tab, rendered
+    before another tab's save, delete every membership that save added. A form from before
+    this field existed posts no ``was_checked`` and can therefore only add. Markers instead
+    of one hidden input per cell keep the payload at agents + cohorts + memberships fields:
+    60x56 posted 3,528 fields and hit Starlette's ``max_fields=1000``.
 
     Diffing against ``rendered`` rather than against the whole table means a stale
     or partial form can never delete memberships for a cohort or agent it did not
@@ -261,8 +264,8 @@ async def admin_cohort_topology_save(
     magnitude larger than either list — e.g. 25,000 garbage ids on each side is
     50,000 form fields (under the cap) but a 625-million-entry ``rendered`` set.
     Filtering first bounds the product by the real ``Cohort``/``AgentRegistry`` row
-    counts instead. ``ticked`` is filtered the same way for the same reason, and so
-    that a ticked cell naming an id that no longer exists is silently ignored
+    counts instead. ``ticked`` and ``was_checked`` are filtered the same way for the
+    same reason, and so that a ticked cell naming an id that no longer exists is silently ignored
     (as it always was) rather than tripping the "malformed submission" guard below,
     which is reserved for a cell that names two otherwise-valid ids but was never
     part of the rendered cross product at all.
@@ -271,6 +274,7 @@ async def admin_cohort_topology_save(
     ticked = {v for v in form.getlist("cell") if isinstance(v, str)}
     present_agents = {v for v in form.getlist("present_agent") if isinstance(v, str)}
     present_cohorts = {v for v in form.getlist("present_cohort") if isinstance(v, str)}
+    was_checked = {v for v in form.getlist("was_checked") if isinstance(v, str)}
     # Checked on the raw, unfiltered marker sets: a genuinely empty submission (no
     # rows or no columns rendered at all) is an error, but a submission naming only
     # since-deleted rows/columns is not — that is just every cell turning out inert,
@@ -295,9 +299,10 @@ async def admin_cohort_topology_save(
     present_cohorts &= cohorts_by_id.keys()
     present_agents &= valid_agents
     ticked = {t for t in ticked if _known_cell(t)}
+    was_checked = {t for t in was_checked if _known_cell(t)}
 
     rendered = {f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents}
-    if ticked - rendered:
+    if (ticked | was_checked) - rendered:
         flash(request, "Malformed submission", "error")
         return RedirectResponse(url="/admin/cohorts/topology", status_code=302)
 
@@ -315,8 +320,9 @@ async def admin_cohort_topology_save(
         if not cid or not aid or cid not in cohorts_by_id or aid not in valid_agents:
             continue  # stale form referencing something that no longer exists
         want = cell in ticked
+        was = cell in was_checked
         have = (cid, aid) in existing
-        if want and not have:
+        if want and not was and not have:
             db.add(CohortMembership(
                 cohort_id=uuid.UUID(cid), agent_id=aid, added_by=current_user.id,
             ))
@@ -329,7 +335,7 @@ async def admin_cohort_topology_save(
                 actor=current_user,
             )
             added += 1
-        elif have and not want:
+        elif was and not want and have:
             await db.execute(
                 sa_delete(CohortMembership).where(
                     CohortMembership.id == existing[(cid, aid)]

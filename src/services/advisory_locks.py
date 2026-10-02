@@ -39,6 +39,9 @@ ENGINE_LOCK_KEY: int = fixed_key("engine")
 WORKER_LOCK_KEY: int = fixed_key("worker")
 #: Taken per transaction by the last-admin check (Phase 3, RA-09).
 ADMIN_INVARIANT_LOCK_KEY: int = fixed_key("admin_invariant")
+#: Taken per transaction by every activation of a hub-role agent, so two concurrent
+#: activations cannot both see "no other active hub" (spec §6.8 C-05, D14).
+HUB_ROSTER_LOCK_KEY: int = fixed_key("hub_roster")
 
 
 def entity_key_sql(namespace: str) -> str:

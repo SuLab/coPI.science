@@ -1131,7 +1131,7 @@
                     </details>
                     {% endif %}
                     {% if effective_user.is_admin %}
-                    <form method="post" action="/reviews/feedback/{{ review.id }}/delete" class="mt-1">
+                    <form method="post" action="/reviews/feedback/{{ review.id }}/delete" class="mt-1" data-confirm="Delete this review? This cannot be undone.">
                         <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
                         <button type="submit" class="text-sm text-red-600 hover:text-red-800">Delete</button>
                     </form>

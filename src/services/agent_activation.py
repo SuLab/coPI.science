@@ -11,24 +11,34 @@ from BOTH activation branches of ``admin_approve_agent`` — the pending→activ
 approval and the edit form's status dropdown (the bypass P3 warned about).
 
 ``pi_lab``-scoped: the hub and specialist roles have no PI profile by design.
-The override is an explicit form field and is logged by the caller.
+The override is an explicit form field; ``activate_agent`` logs it with the actor.
+
+``ensure_activation_allowed`` adds the roster rule of D14 (spec §6.8 C-05): no path may
+leave two ``active`` hub-role agents, and a role change on an active agent is checked
+against the NEW role. Inactive agents may hold a hub role. The hub check runs under
+a transaction-scoped advisory lock (``HUB_ROSTER_LOCK_KEY``) taken before the count, so
+two concurrent activations serialize and the second sees the first's committed row.
 """
 
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.role_capabilities import requires_linked_user
+from src.agent.role_capabilities import hub_role_names, requires_linked_user, star_role
 from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.services.advisory_locks import HUB_ROSTER_LOCK_KEY
 
 logger = logging.getLogger(__name__)
 
 
-async def activation_blockers(db: AsyncSession, agent: AgentRegistry) -> list[str]:
-    """Reasons this agent must not be flipped to ``active``; [] when clear."""
-    if not requires_linked_user(agent.role):
+async def activation_blockers(
+    db: AsyncSession, agent: AgentRegistry, *, role: str | None = None
+) -> list[str]:
+    """Reasons this agent must not be flipped to ``active`` as ``role`` (default: its
+    current role); [] when clear."""
+    if not requires_linked_user(role if role is not None else agent.role):
         return []
 
     if agent.user_id is None:
@@ -73,10 +83,52 @@ async def activation_blockers(db: AsyncSession, agent: AgentRegistry) -> list[st
     return blockers
 
 
+#: The hub-limit refusal; ``agent_id`` is the slug of the hub already active.
+HUB_ALREADY_ACTIVE = "another hub-role agent ({agent_id}) is already active; deactivate it first"
+
+
+async def ensure_activation_allowed(
+    db: AsyncSession, agent: AgentRegistry, *, new_role: str, new_status: str,
+    override: bool = False,
+) -> list[str]:
+    """Reasons ``agent`` must not end up ``new_status`` with ``new_role``; [] when allowed.
+
+    Only ``new_status == "active"`` is gated. The profile blockers of
+    ``activation_blockers`` are checked for ``new_role``; ``override`` waives them
+    (``activate_agent`` logs what it waived), never the hub limit. A hub ``new_role`` takes
+    ``HUB_ROSTER_LOCK_KEY`` for the rest of the caller's transaction BEFORE counting other
+    active hubs. Writes nothing; the caller applies the change and commits.
+    """
+    if new_status != "active":
+        return []
+    blockers = [] if override else await activation_blockers(db, agent, role=new_role)
+    if star_role(new_role) == "hub":
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": HUB_ROSTER_LOCK_KEY}
+        )
+        other = await db.scalar(
+            select(AgentRegistry.agent_id)
+            .where(
+                AgentRegistry.status == "active",
+                AgentRegistry.role.in_(hub_role_names()),
+                AgentRegistry.id != agent.id,
+            )
+            .limit(1)
+        )
+        if other is not None:
+            blockers.append(HUB_ALREADY_ACTIVE.format(agent_id=other))
+    if blockers:
+        logger.warning(
+            "Refused activation of agent %s (%s) as %s: %s",
+            agent.agent_id, agent.id, new_role, "; ".join(blockers),
+        )
+    return blockers
+
+
 async def activate_agent(
     db: AsyncSession, agent: AgentRegistry, *, actor: User, override: bool
 ) -> list[str]:
-    """Check the gate and flip ``agent`` to ``active``, or refuse.
+    """Check ``ensure_activation_allowed`` and flip ``agent`` to ``active``, or refuse.
 
     Refusal leaves ``agent`` untouched and returns the blocker list. Success
     sets ``status`` (NOT committed — the caller owns the transaction) and
@@ -91,18 +143,20 @@ async def activate_agent(
     both branches of ``admin_approve_agent``, and for the manager surface's
     ``manager_activate_agent``, which needs the same gate-then-activate sequence.
     """
-    blockers = await activation_blockers(db, agent)
-    if blockers and not override:
-        logger.warning(
-            "Refused activation of agent %s (%s): %s",
-            agent.agent_id, agent.id, "; ".join(blockers),
-        )
-        return blockers
+    if override:
+        # The override waives the profile blockers only; log what it waived, with
+        # the actor, as before. The hub limit is never waived.
+        waived = await activation_blockers(db, agent)
+        if waived:
+            logger.warning(
+                "Activation OVERRIDE by %s for agent %s (%s) despite: %s",
+                actor.id, agent.agent_id, agent.id, "; ".join(waived),
+            )
+    blockers = await ensure_activation_allowed(
+        db, agent, new_role=agent.role, new_status="active", override=override,
+    )
     if blockers:
-        logger.warning(
-            "Activation OVERRIDE by %s for agent %s (%s) despite: %s",
-            actor.id, agent.agent_id, agent.id, "; ".join(blockers),
-        )
+        return blockers
     was_pending = agent.status == "pending"
     agent.status = "active"
     if was_pending:

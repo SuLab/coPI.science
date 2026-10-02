@@ -460,6 +460,7 @@ async def test_topology_save_applies_adds_and_removes_in_one_pass(
             "present_cohort": [str(a.id), str(b.id)],
             "present_agent": ["su", "wiseman", "cravatt"],
             "cell": ticked,
+            "was_checked": [f"{a.id}:su"],
         },
         headers=_auth(admin.id),
     )
@@ -480,6 +481,7 @@ async def test_topology_save_audits_every_change(client, db_session, admin, rost
             "present_cohort": [str(a.id)],
             "present_agent": ["su", "wiseman"],
             "cell": [f"{a.id}:wiseman"],
+            "was_checked": [f"{a.id}:su"],
         },
         headers=_auth(admin.id),
     )
@@ -502,6 +504,7 @@ async def test_topology_save_only_touches_rendered_cells(
         data={
             "present_cohort": [str(a.id)],
             "present_agent": ["su", "wiseman", "cravatt"],
+            "was_checked": [f"{a.id}:su"],
         },
         headers=_auth(admin.id),
     )
@@ -555,6 +558,70 @@ async def test_topology_save_ignores_unknown_ids(client, db_session, admin, rost
     )
     assert r.status_code == 302
     assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
+
+
+async def test_a_stale_tab_does_not_undo_another_tabs_add(client, db_session, admin, roster):
+    """C-07: tab B rendered before tab A ticked su; B never showed su ticked, so its
+    save must not remove it."""
+    a = await _cohort(db_session, "two-tab", admin)
+    await db_session.commit()
+    markers = {"present_cohort": [str(a.id)], "present_agent": ["su", "wiseman"]}
+    first = await client.post(
+        "/admin/cohorts/topology", data={**markers, "cell": [f"{a.id}:su"]},
+        headers=_auth(admin.id),
+    )
+    second = await client.post(
+        "/admin/cohorts/topology", data={**markers, "cell": [f"{a.id}:wiseman"]},
+        headers=_auth(admin.id),
+    )
+    assert first.status_code == second.status_code == 302
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(a.id), "su"), (str(a.id), "wiseman")}
+
+
+async def test_a_cell_shown_checked_and_still_checked_is_left_alone(
+    client, db_session, admin, roster
+):
+    """Another tab removed alpha:su after this form rendered it checked; leaving the box
+    ticked is not a request to re-add it."""
+    a = await _cohort(db_session, "kept-out", admin)
+    await db_session.commit()
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={
+            "present_cohort": [str(a.id)], "present_agent": ["su"],
+            "cell": [f"{a.id}:su"], "was_checked": [f"{a.id}:su"],
+        },
+        headers=_auth(admin.id),
+    )
+    assert "0+added,+0+removed" in r.headers["location"]
+    assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
+
+
+async def test_a_was_checked_marker_outside_the_rendered_set_is_malformed(
+    client, db_session, admin, roster
+):
+    a = await _cohort(db_session, "alpha", admin, members=["wiseman"])
+    await db_session.commit()
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={
+            "present_cohort": [str(a.id)], "present_agent": ["su"],
+            "was_checked": [f"{a.id}:wiseman"],
+        },
+        headers=_auth(admin.id),
+    )
+    assert session_flashes(r) == [{"text": "Malformed submission", "kind": "error"}]
+    assert len((await db_session.execute(select(CohortMembership))).scalars().all()) == 1
+
+
+async def test_the_matrix_marks_each_cell_it_renders_checked(client, db_session, admin, roster):
+    a = await _cohort(db_session, "alpha", admin, members=["su"])
+    r = await client.get("/admin/cohorts/topology", headers=_auth(admin.id))
+    assert _hidden_marker_values(r.text, "was_checked") == {f"{a.id}:su"}
 
 
 # --- gate preview ---------------------------------------------------------
@@ -751,6 +818,7 @@ async def test_matrix_save_never_touches_an_unrendered_cohort(
         data={
             "present_cohort": [str(a.id)],
             "present_agent": ["su", "wiseman", "cravatt"],
+            "was_checked": [f"{a.id}:su"],
         },
         headers=_auth(admin.id),
     )
@@ -978,6 +1046,7 @@ async def test_topology_save_round_trips_with_marker_payload(client, db_session,
             "present_agent": ["ta1", "ta2"],
             "present_cohort": [str(c1.id), str(c2.id)],
             "cell": [f"{c1.id}:ta1"],
+            "was_checked": [f"{c1.id}:ta2"],
         },
         headers=_auth(admin.id),
     )

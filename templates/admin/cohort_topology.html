@@ -11,9 +11,9 @@
 </div>
 <p class="text-sm text-gray-500 mb-6">
     Every agent × cohort pair. Tick to add a membership, untick to remove, then save
-    once — a whole re-shaping in a single audited step. Only the cells shown here are
-    compared, so a filtered or stale view can never delete a membership it did not
-    display.
+    once — a whole re-shaping in a single audited step. Only boxes you change are
+    saved: a box shown ticked and unticked by you is removed, a box you tick is added,
+    so a second tab or a stale view never undoes another save.
 </p>
 
 {% if notice %}
@@ -81,6 +81,7 @@
                     {% for c in cohorts %}
                     {% set cell = c.id | string ~ ':' ~ a.agent_id %}
                     <td class="px-3 py-3 text-center">
+                        {% if cell in membership_set %}<input type="hidden" name="was_checked" value="{{ cell }}">{% endif %}
                         <input type="checkbox" name="cell" value="{{ cell }}"
                                data-col="{{ c.id }}"
                                class="h-4 w-4 rounded border-gray-300 text-indigo-600"

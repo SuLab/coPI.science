@@ -198,8 +198,9 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   `HeadlineAnnouncer.finalize` under the engine lock, any other stop finishes "run already
   stopped" if no engine holds the lock.
 - **Finalize run** is the button on a stopped run's `/admin/activity/<id>` page
-  (`POST /admin/simulation/finalize-run`). It announces the owed headlines of that run,
-  then sets `finalized_at`. A live engine fails the command ("Finalize run applies to a
+  (`POST /admin/simulation/finalize-run`). It asks for the run's short id (the first 8
+  characters, posted as `confirm_run`) and refuses on a mismatch. It announces the owed
+  headlines of that run, then sets `finalized_at`. A live engine fails the command ("Finalize run applies to a
   stopped run"). Start is refused while a Finalize run stop is pending ("A Finalize run is
   pending; start after it finishes."). After a finalized run the Start form forces Fresh.
 - **A lost lock connection** ends the run with the HOLD reason `lock_lost` and the run is

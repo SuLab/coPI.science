@@ -29,6 +29,7 @@ from src.services.simulation_control import (
     record_audit,
 )
 from src.services.simulation_control import panel_state as read_panel_state
+from src.services.simulation_stats import funnel
 from src.services.simulation_view import live_tab_context
 from src.web.flash import flash
 
@@ -83,6 +84,34 @@ async def _kv_upsert(db: AsyncSession, key: str, value: str) -> None:
 async def _kv_delete(db: AsyncSession, key: str) -> None:
     await db.execute(sa_delete(AppSetting).where(AppSetting.key == key))
 
+
+
+#: The engine posts at most this many owed headlines on a Stop
+#: (src/agent/engine/constants.py HEADLINES_MAX_AT_SHUTDOWN). Duplicated, not
+#: imported: that module imports src.agent.agent; the equality is pinned by
+#: tests/unit/test_stop_announce_cap.py.
+STOP_ANNOUNCE_CAP = 25
+
+
+async def _stop_counts(
+    db: AsyncSession, status_row, engine_is_alive: bool
+) -> dict[str, int] | None:
+    """The announcing Stop's dialog numbers, from the LIVE run's funnel (FN-01).
+
+    The page's Live tab shows the ``?run=`` selection, which defaults to the newest run
+    by ``started_at`` and need not be the one the engine is executing; the heartbeat
+    row names the live run. A Stop announces every owed headline of that run, open
+    interviews included: ``owed`` is the terminal ones owed plus the provisional
+    (still open) ones, ``open`` the provisional ones, ``posts`` what one Stop posts
+    (at most ``cap``). None when no engine holds the lock or the heartbeat has not
+    named a run yet; the dialog then words it without numbers.
+    """
+    if not engine_is_alive or status_row is None or status_row.simulation_run_id is None:
+        return None
+    live = await funnel(db, status_row.simulation_run_id)
+    owed = live.headlines_owed + live.provisional
+    return {"owed": owed, "open": live.provisional, "cap": STOP_ANNOUNCE_CAP,
+            "posts": min(owed, STOP_ANNOUNCE_CAP)}
 
 
 async def _simulation_context(
@@ -140,6 +169,7 @@ async def _simulation_context(
     audit_events = audit_result.scalars().all()
 
     live_tab = await live_tab_context(db, request, status_row, now)
+    stop_counts = await _stop_counts(db, status_row, engine_is_alive)
 
     # The heartbeat's `tick_at` is an ISO string with microseconds; every other
     # time on this page is minute-precision UTC. An unparseable value is shown
@@ -162,6 +192,7 @@ async def _simulation_context(
         status_row=status_row,
         latest_run=latest_run,
         held_counts=held_counts,
+        stop_counts=stop_counts,
         latest_finalized=latest_finalized,
         pending_commands=pending_commands,
         pending_start=pending_start,
@@ -283,6 +314,7 @@ _RUN_ID_FORM = Form(...)
 async def admin_simulation_finalize_run(
     request: Request,
     run_id: uuid.UUID = _RUN_ID_FORM,
+    confirm_run: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -290,9 +322,18 @@ async def admin_simulation_finalize_run(
     command carrying `{"finalize": true, "run_id": ...}`, the existing enum
     value, so no enum migration. Refused while an engine holds the lock or a
     start is pending; a live engine would only fail it. With no engine alive the
-    supervisor claims it and runs the finalize routine under the engine lock."""
+    supervisor claims it and runs the finalize routine under the engine lock.
+
+    The form must also carry ``confirm_run`` equal to the run id's
+    first 8 characters (case and surrounding spaces ignored)."""
     def _refuse(message: str):
         return _refuse_to(request, f"/admin/activity/{run_id}", message)
+
+    short_id = str(run_id)[:8]
+    if confirm_run.strip().lower() != short_id:
+        # C-10: the run's short id, typed, is the confirmation; checked here, not only
+        # in the browser's dialog.
+        return _refuse(f"Type the run's short id ({short_id}) to confirm Finalize run.")
 
     if await engine_alive(db):
         return _refuse("An engine is running — Finalize run applies to a stopped run.")

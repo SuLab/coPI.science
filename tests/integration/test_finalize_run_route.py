@@ -72,7 +72,7 @@ async def test_finalize_enqueues_a_stop_with_the_run_id(client, db_session, monk
     monkeypatch.setattr(sim_routes, "engine_alive", _dead)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="fin-b@example.org")
     run = await _stopped_run(db_session)
-    resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id)},
+    resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
                              headers=auth_headers(admin.id), follow_redirects=False)
     assert resp.status_code == 302
     cmd = (await db_session.execute(select(SimulationCommand).where(
@@ -89,7 +89,7 @@ async def test_finalize_is_refused_while_an_engine_is_alive(client, db_session, 
     monkeypatch.setattr(sim_routes, "engine_alive", _alive)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="fin-c@example.org")
     run = await _stopped_run(db_session)
-    resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id)},
+    resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
                              headers=auth_headers(admin.id), follow_redirects=False)
     assert resp.status_code == 302 and resp.headers["location"] == f"/admin/activity/{run.id}"
     assert session_flashes(resp) == [{

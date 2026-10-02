@@ -235,13 +235,14 @@
         <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
         <p class="text-base text-gray-700 max-w-[68ch] mb-3">
             Sends a graceful stop to the live engine. Refused unless an engine is
-            running (including a starting or unresponsive one). <strong>Stop</strong> announces every owed headline, open
-            interviews included, as it always has. <strong>Stop — hold open
+            running (including a starting or unresponsive one). <strong>Stop</strong> announces owed headlines, open
+            interviews included, at most 25 per stop. <strong>Stop — hold open
             interviews</strong> announces only interviews that have ended; the others
             wait for a resume or a finalize.
         </p>
         <div class="flex flex-wrap gap-3">
-            <form action="/admin/simulation/stop" method="post">
+            <form action="/admin/simulation/stop" method="post"
+                  data-confirm="{% if stop_counts %}Posts {{ stop_counts.posts }} of {{ stop_counts.owed }} owed headlines to Slack ({{ stop_counts.open }} from interviews still open; at most {{ stop_counts.cap }} per stop); cannot be undone{% else %}Posts every owed headline to Slack, including interviews still open; cannot be undone{% endif %}">
                 <button type="submit"
                         class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
                         {% if not engine_is_alive %}disabled{% endif %}>
@@ -325,7 +326,8 @@
             Validate &amp; save
         </button>
     </form>
-    <form action="/admin/simulation/announce-template" method="post" class="mt-2">
+    <form action="/admin/simulation/announce-template" method="post" class="mt-2"
+          data-confirm="Reset the run-start announcement to the file default? The saved custom template is deleted; this cannot be undone.">
         <input type="hidden" name="body" value="">
         <input type="hidden" name="reset" value="true">
         <button type="submit"

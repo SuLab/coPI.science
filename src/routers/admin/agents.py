@@ -22,7 +22,11 @@ from src.routers.admin._common import (
     router,
     templates,
 )
-from src.services.agent_activation import activate_agent, activation_blockers
+from src.services.agent_activation import (
+    activate_agent,
+    activation_blockers,
+    ensure_activation_allowed,
+)
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
 from src.web.flash import flash
@@ -263,6 +267,10 @@ async def admin_approve_agent(
     writer changed it after the page rendered, so nothing is written. The slug is
     editable only while the agent is pending (RA-14), and the Slack bot token is
     write-only: a blank ``replace_slack_bot_token`` keeps the stored one (RA-03).
+
+    ``agent_status=pending`` is refused for an agent that is no longer pending
+    (C-04). A hub-role activation is refused while another hub is active, override or not
+    (D14).
     """
     result = await db.execute(
         select(AgentRegistry)
@@ -276,6 +284,11 @@ async def admin_approve_agent(
 
     if form_version != agent_form_version(agent):
         return RedirectResponse(url=f"/admin/agents/{agent_id}?error=stale_form", status_code=302)
+    if agent_status == "pending" and agent.status != "pending":
+        # C-04: `pending` re-opens the slug rename and the auto-activation branch.
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?error=pending_not_allowed", status_code=302
+        )
     new_slug = agent_slug.strip().lower()
     if new_slug and new_slug != agent.agent_id:
         if agent.status != "pending":
@@ -305,6 +318,7 @@ async def admin_approve_agent(
             override=bool(activation_override.strip()),
         )
         if blockers:
+            flash(request, "Activation refused: " + "; ".join(blockers), "error")
             return RedirectResponse(
                 url=f"/admin/agents/{agent_id}?activation_blocked=1",
                 status_code=302,
@@ -474,6 +488,9 @@ async def admin_set_agent_role(
     allow-list (src/agent/roles.py). Validated against the same role set the
     admin's <select> was built from, so a stale or hand-crafted form can never
     write a role the runtime does not know how to resolve.
+
+    On an ACTIVE agent the new role must pass the activation gate,
+    including the one-active-hub limit (D14); an inactive agent may take any valid role.
     """
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
@@ -486,6 +503,14 @@ async def admin_set_agent_role(
         return RedirectResponse(
             url=f"/admin/agents/{agent_id}?role_error=Unknown+role", status_code=302
         )
+
+    if role != agent.role and agent.status == "active":
+        blockers = await ensure_activation_allowed(
+            db, agent, new_role=role, new_status="active"
+        )
+        if blockers:
+            flash(request, "Role not changed: " + "; ".join(blockers), "error")
+            return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
 
     agent.role = role
     await db.commit()

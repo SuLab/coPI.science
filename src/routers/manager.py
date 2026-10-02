@@ -591,6 +591,7 @@ async def manager_activate_agent(
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     blockers = await activate_agent(db, agent, actor=current_user, override=False)
     if blockers:
+        flash(request, "Activation refused: " + "; ".join(blockers), "error")
         return RedirectResponse(
             url=f"/manager/pis/{user_id}?activation_blocked=1", status_code=302
         )
